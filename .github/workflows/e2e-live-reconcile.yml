@@ -19,6 +19,15 @@
 #
 # NEVER gates merges: schedule + workflow_dispatch only (no push/PR trigger) —
 # a red reconcile is an ops signal, not a CI gate (#2189 acceptance).
+#
+# #3907: the auto-file steps file ONE issue per FINDING, not one per run. The
+# pre-fix title embedded `(run {run_id})`, so every weekly run opened a new issue
+# (two such duplicates are open at the time of writing). The title is now the
+# STABLE dedupe key, and .github/scripts/auto-file-issue.sh searches for it
+# before filing: a repeat run records `Recurrence #N` on the open issue instead
+# of opening another. The two states (bleed vs could-not-read) carry DISTINCT
+# keys so they never adopt each other. Forward-looking only: the pre-existing
+# duplicates carry the old run-id titles and are deliberately NOT adopted.
 name: e2e-live-reconcile
 
 on:
@@ -71,10 +80,10 @@ jobs:
           exit "$rc"
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      - name: Auto-file issue on bleed detection (#2189 — #2144 curl pattern)
-        # rc=1 only: counts exist, so the "N orphaned prod rows" title is
-        # factual. rc=2 (could-not-determine) files a DISTINCT issue below —
-        # no counts exist, and a fake "N rows" title would be noise.
+      - name: File or update the bleed issue (#2189 — #2144/#3907 stable key)
+        # rc=1 only: counts exist, so the "orphaned prod rows" title is factual.
+        # rc=2 (could-not-determine) files a DISTINCT issue below — no counts
+        # exist, and a fake "N rows" title would be noise.
         # GitHub Actions implicitly wraps bare `if:` expressions in
         # success() — but this step only runs when the reconcile step
         # FAILED (rc=1/rc=2), so success() is false and the auto-file would
@@ -83,13 +92,27 @@ jobs:
         # overrides the implicit status check; the rc compare still gates.
         # Same pattern as post-merge-validation.yml (#1438).
         if: always() && steps.reconcile.outputs.rc == '1'
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        #
+        # #3907: the TITLE is the dedupe key and must be STABLE across runs —
+        # the pre-fix title embedded `(run {run_id})`, so every weekly run filed
+        # a new issue (two such duplicates are open at the time of writing).
+        # Everything that varies per occurrence lives in the BODY, and
+        # `.github/scripts/auto-file-issue.sh` searches for this exact key
+        # BEFORE filing: a second run COMMENTS `Recurrence #N` on the one open
+        # issue instead of opening another one.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # #2140: --fail-with-body so a failed issue create (403/429/etc.)
-          # fails the step loudly instead of silently skipping the file
-          # (curl -s exits 0 on HTTP errors — the deaf-monitor class). The
-          # payload JSON is built by python from the reconcile doc (counts),
-          # never string-interpolated.
-          PAYLOAD="$(python3 - <<'PY'
+          export GH_TOKEN="$GITHUB_TOKEN"
+          # The body JSON is built by python from the reconcile doc (counts),
+          # never string-interpolated into shell.
+          python3 - > /tmp/e2e_live_bleed_body.md <<'PY'
           import json
           import os
 
@@ -115,7 +138,8 @@ jobs:
               f"Weekly read-only e2e-live reconciliation (#2189) found orphaned prod rows "
               f"left by a live-test path (welcome-e2e-monitor). This job only detects — it "
               f"never deletes.\n\n"
-              f"Run: {run_url}\n\n"
+              f"Latest run: {run_url}\n\n"
+              f"Highest orphan count this run: {d['max']}. "
               f"Counts (project `{d['project_ref']}`, threshold {d['threshold']}):\n"
               f"```\n{summary}\n```\n"
           )
@@ -132,25 +156,32 @@ jobs:
               "cleanup.py (read the runbook guards first). The cleanup script deletes; this "
               "job never does.\n"
           )
-          title = f"e2e-live reconcile: {d['max']} orphaned prod row{'s' if d['max'] != 1 else ''} (run {run_id})"
-          print(json.dumps({"title": title, "body": body, "labels": ["bug"]}))
+          print(body)
           PY
-          )"
-          curl --fail-with-body -sS -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues" \
-            -d "$PAYLOAD"
-      - name: Auto-file issue when the reconcile could not read counts (#2189 — #2140 lesson)
+          # `--fail-with-body`-equivalent: the helper's `gh api` exits non-zero
+          # on an HTTP 4xx/5xx and on a failed dedupe SEARCH, so a broken file
+          # path fails the step loudly instead of silently skipping the file
+          # (the #2140 deaf-monitor class).
+          bash .github/scripts/auto-file-issue.sh file \
+            --title 'e2e-live reconcile: orphaned prod rows detected' \
+            --body-file /tmp/e2e_live_bleed_body.md \
+            --label bug
+      - name: File or update the could-not-read issue (#2189 — #2140 lesson/#3907)
         # rc=2 (guard/transport failure: missing token, HTTP/5xx, network,
         # response-shape drift) must NEVER be a silent red run — #2140's core
         # lesson was a monitor that failed for ~14 days with nobody hearing.
         # This is a distinct "check could not run" issue, NOT an "N orphaned
-        # rows" one (no counts exist on exit 2).
+        # rows" one (no counts exist on exit 2), and it carries its own STABLE
+        # #3907 dedupe key so it never collides with the bleed issue above.
         if: always() && steps.reconcile.outputs.rc == '2'
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable — never interpolated into the `run:` text (a value with `"`
+        # loses its quotes; `$(…)`/backticks would execute).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PAYLOAD="$(python3 - <<'PY'
-          import json
+          export GH_TOKEN="$GITHUB_TOKEN"
+          python3 - > /tmp/e2e_live_couldnotread_body.md <<'PY'
           import os
 
           run_id = os.environ["GITHUB_RUN_ID"]
@@ -158,22 +189,19 @@ jobs:
               f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
               f"/actions/runs/{run_id}"
           )
-          title = f"e2e-live reconcile: check could not read prod counts (run {run_id})"
           body = (
               f"The weekly e2e-live reconciliation (#2189) failed BEFORE it could read counts — "
               f"the check fails closed (exit 2) so a broken/dead check never looks green.\n\n"
-              f"Run: {run_url}\n\n"
+              f"Latest run: {run_url}\n\n"
               f"Expected causes: SUPABASE_ACCESS_TOKEN secret missing/rotated, a Management API "
               f"HTTP/transport error, or an unexpected response shape. Inspect the run log, then "
               f"re-run via workflow_dispatch once resolved.\n"
           )
-          print(json.dumps({"title": title, "body": body, "labels": ["bug"]}))
+          print(body)
           PY
-          )"
-          # #2144: --fail-with-body so a failed issue create fails the step
-          # loudly (never the #2140 deaf-monitor class).
-          curl --fail-with-body -sS -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues" \
-            -d "$PAYLOAD"
+          # #2140: a failed create (403/429/etc.) or a failed dedupe search
+          # fails the step loudly (never the deaf-monitor class).
+          bash .github/scripts/auto-file-issue.sh file \
+            --title 'e2e-live reconcile: check could not read prod counts' \
+            --body-file /tmp/e2e_live_couldnotread_body.md \
+            --label bug

@@ -124,6 +124,85 @@ def test_transient_retry_then_fail_logs_redacted(monkeypatch, caplog):
     assert any("invite email failed" in r.message for r in caplog.records)
 
 
+def _install_alert_store(monkeypatch):
+    """Point the invite-failure sink at a REAL AlertStore over MemoryStorage.
+
+    A real store (not a fake) so the dedup contract under test is the store's
+    own create-once behavior — same approach as tests/test_alert_store.py.
+    Returns (filed_titles, telegram_texts).
+    """
+    from tortoise import hosted_api as ha
+    from tortoise.alert_store import AlertStore
+    from tortoise.hosted_backup import MemoryStorage
+
+    filed: list[str] = []
+    pushed: list[str] = []
+
+    def file_issue(title, body):
+        filed.append(title)
+        return len(filed)
+
+    store = AlertStore(
+        MemoryStorage(),
+        file_issue=file_issue,
+        close_issue=lambda number, comment=None: None,
+        search_open=lambda kind, org_id="": [],
+        push_telegram=pushed.append,
+        repo="daniel-ospina/tortoise",
+    )
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", lambda cfg: store)
+    return filed, pushed
+
+
+def _always_503():
+    """A Resend client whose POST always fails with a transient 503."""
+    class _StubResp:
+        def __init__(self, code):
+            self.status_code = code
+
+    async def fake_post(self, url, **kwargs):
+        raise email_notify.httpx.HTTPStatusError(
+            "503", request=None, response=_StubResp(503))
+
+    return fake_post
+
+
+def test_invite_failure_files_exactly_one_deduped_incident(monkeypatch, caplog):
+    """A swallowed invite-send failure reaches the ops sink — ONCE.
+
+    The invite is the ONLY automated token-delivery path (the dashboard
+    discards the token), so a provider failure previously left the invitee with
+    no way in and nothing filed. Repeated failures must dedup to one issue.
+    """
+    filed, pushed = _install_alert_store(monkeypatch)
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", _always_503())
+    with caplog.at_level(logging.WARNING):
+        _invoke("Acme", "bob@example.com", "member", "t", "inv_1")
+        _invoke("Acme", "bob@example.com", "member", "t", "inv_1")  # again
+
+    assert len(filed) == 1, f"expected one incident, got {filed}"
+    assert email_notify._INVITE_SEND_FAILED_KIND in filed[0]
+    assert len(pushed) == 1, pushed
+    # Original logging is preserved on BOTH failed sends.
+    assert sum("invite email failed" in r.message for r in caplog.records) == 2
+
+
+def test_invite_failure_alert_never_raises(monkeypatch, caplog):
+    """A dead alert channel must not break the invite send path."""
+    from tortoise import hosted_api as ha
+
+    def boom(cfg):
+        raise RuntimeError("r2 down")
+
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", boom)
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", _always_503())
+    with caplog.at_level(logging.WARNING):
+        _invoke("Acme", "bob@example.com", "member", "t", "inv_2")
+    assert any("incident filing failed" in r.message for r in caplog.records)
+
+
 def test_4xx_no_retry(monkeypatch):
     class _StubResp:
         def __init__(self, code):

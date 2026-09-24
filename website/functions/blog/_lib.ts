@@ -9,6 +9,8 @@
 //   SUPABASE_ANON_KEY  public anon key (client-safe — public reads only)
 // Local dev: wrangler pages dev reads .env / .dev.vars
 
+import { RELAXED_CSP } from "../_shared/security-headers.ts";
+
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface BlogPost {
   id: string;
@@ -105,35 +107,67 @@ export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost 
 // strong/em/code, links, images, tables, hr. ALL text content is escaped;
 // only allowlisted tags are emitted; href/src validated https/http.
 
+// CommonMark backslash escapes (#4481). The canonical body is authored in the
+// TipTap editor, whose serializer escapes ASCII punctuation — `\~`, `\*`,
+// `\[`, `\_` … — so text that is not markup cannot re-parse as markup. That is
+// correct markdown (`~` is escaped because `~~` is GFM strikethrough), but the
+// renderer has to undo it: otherwise the escape backslash leaks into the page
+// and a literal "~" (the summary table's partial-capability marker) renders as
+// "\~". A backslash before a non-punctuation character is literal, per spec.
+const MD_ESCAPE_RE = /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g;
+
+/** Undo CommonMark backslash escapes: `\~` → `~`, `\\` → `\`. */
+function unescapeMd(s: string): string {
+  return s.replace(MD_ESCAPE_RE, "$1");
+}
+
+/** True when `text[index]` is preceded by an odd run of backslashes (escaped). */
+function isEscaped(text: string, index: number): boolean {
+  let n = 0;
+  for (let i = index - 1; i >= 0 && text[i] === "\\"; i--) n++;
+  return n % 2 === 1;
+}
+
 function inline(text: string): string {
   // Bounded quantifiers: catastrophic backtracking on attacker input is a CPU
   // DoS on the edge function (verified: 100K "[" → 16.8s before bounding, 100ms
   // after). Link/image content capped at 200 chars, href/src at 300.
+  // Span content is escape-aware — `(?:\.|[^\\*\n])` consumes a backslash pair
+  // OR a char that cannot start one, never both, so each position has exactly
+  // one parse and the bounded repetition stays linear (a class that also
+  // matched `\` would make the alternation ambiguous and the run exponential).
   const re =
-    /(`[^`]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(!\[([^\]\n]{0,200})\]\(([^)\s]{1,300})\))|(\[([^\]\n]{0,200})\]\(([^)\s]{1,300})\))/g;
+    /(`[^`]+`)|(\*\*(?:\\.|[^\\*\n]){1,200}\*\*)|(\*(?:\\.|[^\\*\n]){1,200}\*)|(!\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\))|(\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\))/g;
   let out = "";
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
-    out += escapeHtml(text.slice(last, m.index));
+    // An escaped delimiter is literal text, not markup: leave it to the plain
+    // text path (which unescapes) and resume scanning one char in.
+    if (isEscaped(text, m.index)) {
+      re.lastIndex = m.index + 1;
+      continue;
+    }
+    out += escapeHtml(unescapeMd(text.slice(last, m.index)));
     if (m[1] !== undefined) {
+      // Code spans are verbatim in CommonMark — backslash escapes do NOT apply.
       out += `<code>${escapeHtml(m[1].slice(1, -1))}</code>`;
     } else if (m[2] !== undefined) {
-      out += `<strong>${escapeHtml(m[2].slice(2, -2))}</strong>`;
+      out += `<strong>${escapeHtml(unescapeMd(m[2].slice(2, -2)))}</strong>`;
     } else if (m[3] !== undefined) {
-      out += `<em>${escapeHtml(m[3].slice(1, -1))}</em>`;
+      out += `<em>${escapeHtml(unescapeMd(m[3].slice(1, -1)))}</em>`;
     } else if (m[4] !== undefined) {
       const src = m[6] ?? "";
       const safeSrc = validUrl(src) ? escapeHtml(src) : "";
-      out += `<img src="${safeSrc}" alt="${escapeHtml(m[5] ?? "")}">`;
+      out += `<img src="${safeSrc}" alt="${escapeHtml(unescapeMd(m[5] ?? ""))}">`;
     } else if (m[7] !== undefined) {
       const href = m[9] ?? "";
       const safeHref = validUrl(href) ? escapeHtml(href) : "#";
-      out += `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(m[8] ?? "")}</a>`;
+      out += `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;
     }
     last = re.lastIndex;
   }
-  out += escapeHtml(text.slice(last));
+  out += escapeHtml(unescapeMd(text.slice(last)));
   return out;
 }
 
@@ -409,7 +443,15 @@ export function shareBarHtml(url: string, title: string): string {
 export function ok(html: string, cache: string): Response {
   return new Response(html, {
     status: 200,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": cache, ...HSTS },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": cache,
+      // #3525: `_headers` does not apply to Pages Functions responses, and this
+      // is one. The blog page is a pre-#3501 page (inline style, JSON-LD and
+      // the consent loader), so it takes the project's relaxed policy.
+      "Content-Security-Policy": RELAXED_CSP,
+      ...HSTS,
+    },
   });
 }
 

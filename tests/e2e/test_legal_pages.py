@@ -234,7 +234,7 @@ APP_FOOTER_PAGES = ("/auth", "/signup")
 # the app origin, so crawling it would leave the local server for production.
 CRAWL_PAGES = (
     "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq",
+    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq", "/contact",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────

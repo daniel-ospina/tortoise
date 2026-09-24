@@ -12,9 +12,11 @@ methodology** (design-locked 2026-08-15, issue #1144 axis 2).
 ## Usage
 
 ```bash
-# CI / offline smoke (committed mini fixture, mocked reader+judge, no keys):
+# CI / offline smoke (committed mini fixture, mocked reader+judge, no keys).
+# --skip-preflight WAIVES the dense leg: without it a host with no embedder
+# stops at the pre-flight (#4718) — drop the flag to require the real leg.
 python -m tools.longmem_eval.run --data tests/fixtures/longmemeval_mini.json \
-    --limit 5 --mock --output /tmp/lme_smoke.json
+    --limit 5 --mock --skip-preflight --output /tmp/lme_smoke.json
 
 # Full run (downloads the dataset + real LLM reader/judge):
 python -m tools.longmem_eval.run --split s            # 500 questions, LongMemEval-S
@@ -24,10 +26,12 @@ python -m tools.longmem_eval.run --split s --limit 10 # first 10 (sanity)
 ## Dense-leg setup (R3, #1542)
 
 The vector/dense retrieval leg runs **only when sentence-transformers is
-installed** (the `[embeddings]` extra — `all-MiniLM-L6-v2`, the MemDelta-pinned
-384-dim embedder, #399). The eval env must install it once; the R3 pre-flight
-**refuses to start a real (non-`--mock`) run without a working embedder** — a
-dense-less report is never published silently.
+installed** (the `[embeddings]` extra — `BAAI/bge-small-en-v1.5`, the pinned
+384-dim embedder since the #1349 swap; `all-MiniLM-L6-v2` before it). The eval
+env must install it once; the R3 pre-flight **refuses to start a run without a
+working embedder** — any run, including `--mock` (whose flag selects the
+reader/judge, not the dense leg; #4718). The only waiver is the explicit
+`--skip-preflight` — a dense-less report is never published silently.
 
 ```bash
 # eval env (repo root): dev tooling + the extras the real lanes need.
@@ -38,7 +42,7 @@ uv sync --group dev --extra embeddings --extra parity
 
 # pre-download the ~90MB model (first run downloads it on demand; pre-warm
 # avoids a >30s cold-load during the run's first create_point)
-uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
 
 # verify the embedder is usable (R3 pre-flight gate)
 uv run python -c "from tortoise.embeddings import EmbeddingModel; m = EmbeddingModel.get(load_timeout=600); assert m is not None; print('embedder OK')"
@@ -46,11 +50,26 @@ uv run python -c "from tortoise.embeddings import EmbeddingModel; m = EmbeddingM
 
 Contract: with the embedder present, every `create_point` writes a 384-dim
 `embedding` and the vector strategy runs at query time (`embedding_coverage`
-per question is `1.0`); without it, coverage is a recorded `0.0` and the
-vector leg traces `no_embedder` — observable, never silent. `--mock` runs warn
-and continue offline (CI smoke stays runnable without the extra).
+per question is `1.0`); without it, a run that WAIVED the leg records coverage
+`0.0` and traces `no_embedder` in the vector leg — observable, never silent (a
+run that did NOT waive the leg does not reach this point at all: the pre-flight
+stops it). A run whose dense leg was explicitly **waived**
+(`--skip-preflight`) warns, records `vector_strategy: "unavailable"`, and its
+report is not a measurement; the attribute that decides this is what the run
+*needs*, never `--mock` (#4718).
+The test suite keeps the same guarantee by waiving the leg on every harness
+invocation that does not assert dense-leg behavior — so a local run without
+the `[embeddings]` extra does not need it either (R3 #1542 D6).
 
 ## Configuration (env-driven, never hardcoded)
+
+> ⛔ **Use `tools/run-with-eval-keys.sh` for real runs (#2718 / #4860).** The
+> harness reads provider keys from the process env and never loads the repo
+> `.env`, so an ambient shell key (this fleet sources `~/pi-keys.env`) is what
+> gets billed. The wrapper strips the ambient provider keys, loads the repo
+> `.env` with override, and prints the key `source` + fingerprint to paste into
+> the run record:
+> `tools/run-with-eval-keys.sh .venv/bin/python -m tools.longmem_eval.run ...`
 
 | Var | Purpose | Default |
 |---|---|---|
@@ -504,7 +523,9 @@ the documented post-drain late-fire bound above):
 
 ```bash
 # offline smoke (--mock mocks reader+judge only — the extractor is real,
-# so the post-#2185 smoke report GAINS exactly one top-level key: "usage")
+# so the post-#2185 smoke report GAINS exactly one top-level key: "usage").
+# cmd_smoke passes --skip-preflight itself when --mock is set (#4718): this is
+# a wiring check, not a measurement.
 uv run python -m tools.longmem_eval.run_protocol smoke --mock
 ```
 
@@ -516,8 +537,9 @@ uv run python -m tools.longmem_eval.run_protocol smoke --mock
   `OPENAI_API_KEY`).
 
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
-committed mini fixture + `--mock` exercises the entire pipeline offline in
-CI (`tests/test_longmem_runner.py`).
+committed mini fixture + `--mock --skip-preflight` exercises the entire
+pipeline offline in CI (`tests/test_longmem_runner.py` — `--mock` alone is not
+enough since #4718; the suite's harness invocations carry the waiver).
 
 ## R6 follow-up run (epic #1509 run protocol step 9)
 

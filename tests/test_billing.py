@@ -509,6 +509,257 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         assert captured == ["provision-user@example.com"]  # APIKey.created_by, not 400
 
+    # ── #4504: verified session email fallback ──────────────────────────
+
+    def _strip_org_email_sources(self, billing_client):
+        """Make the registered org email-less: no Team.email, no key
+        created_by — the exact repro shape (OAuth/session org provisioned
+        without an email, keys carrying no creator)."""
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) REMOVE k.created_by",
+            params={"tid": billing_client["org_id"]},
+        )
+
+    def _stub_checkout(self, monkeypatch, captured: list[str], suffix: str):
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, email: captured.append(email) or f"cus_{suffix}")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, cid: [])
+        monkeypatch.setattr(
+            billing.StripeClient, "create_checkout_session",
+            lambda self, tid, pid, cid, su, cu: f"https://checkout.stripe.com/pay/{suffix}")
+
+    def test_checkout_session_user_email_fallback(self, monkeypatch, billing_client):
+        """#4504: a session-authenticated user whose org has no Team.email and
+        whose keys carry no created_by reaches Stripe — the VERIFIED session
+        email is the fallback before the 400, and is persisted as
+        customer_email like the rest of the chain."""
+        from tortoise.hosted_api import app, get_current_org
+
+        self._strip_org_email_sources(billing_client)
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "sess1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_id": "11111111-1111-1111-1111-111111111111",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert r.json()["checkout_url"] == "https://checkout.stripe.com/pay/sess1"
+        assert captured == ["session-user@example.com"]
+        t = billing_client["sdk"].org_get(billing_client["org_id"])
+        assert t["customer_email"] == "session-user@example.com"
+        assert t["stripe_customer_id"] == "cus_sess1"
+
+    def test_checkout_no_email_anywhere_still_400(self, monkeypatch, billing_client):
+        """#4504: the 400 is NOT weakened — with no email on the Team, on any
+        key, and no verified session email, checkout is refused before any
+        Stripe call (anon/registry context)."""
+        from tortoise.hosted_api import app, get_current_org
+
+        self._strip_org_email_sources(billing_client)
+        called: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 400, r.text
+        assert "No customer email" in r.json()["detail"]
+        assert called == []  # never reached Stripe
+
+    def test_checkout_team_email_beats_session_email(self, monkeypatch, billing_client):
+        """#4504 precedence: Team.email resolves first — the session fallback
+        is additive and never outranks the existing chain."""
+        from tortoise.hosted_api import app, get_current_org
+
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "team1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        # fixture registers with Team.email = billing-owner@example.com
+        assert captured == ["billing-owner@example.com"]
+
+    def test_checkout_key_created_by_beats_session_email(self, monkeypatch, billing_client):
+        """#4504 precedence: APIKey.created_by resolves before the session
+        fallback — provision-path orgs keep their existing billing email."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by='provision-user@example.com'",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "key1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert captured == ["provision-user@example.com"]
+
+    def test_checkout_non_email_created_by_falls_through_to_session_email(
+            self, monkeypatch, billing_client):
+        """#4504: ``APIKey.created_by`` is a creator ID, not always an email
+        (a session-minted key stores the user UUID; key-auth stores "api"). A
+        non-email ``created_by`` must fall through to the verified session
+        email rather than being posted to Stripe as the customer address."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) "
+            "SET k.created_by='11111111-1111-1111-1111-111111111111'",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "uuid1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        # the UUID creator id is NOT a customer email — the session email wins
+        assert captured == ["session-user@example.com"]
+        t = billing_client["sdk"].org_get(billing_client["org_id"])
+        assert t["customer_email"] == "session-user@example.com"
+
+    def test_checkout_api_sentinel_created_by_falls_through_to_session_email(
+            self, monkeypatch, billing_client):
+        """#4504: the literal ``"api"`` creator id (key-auth mint) is not an
+        email either — same fall-through."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by='api'",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "api1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert captured == ["session-user@example.com"]
+
+    def test_checkout_padded_created_by_is_returned_stripped(
+            self, monkeypatch, billing_client):
+        """#4504 review: the shape gate trims before validating, so a padded
+        email-shaped ``created_by`` must be handed to Stripe trimmed — never
+        the raw DB string."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by=' provision@example.com '",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "pad1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert captured == ["provision@example.com"]  # trimmed, not padded
+        t = sdk.org_get(billing_client["org_id"])
+        assert t["customer_email"] == "provision@example.com"
+
+    def test_checkout_reuse_keeps_stored_customer_email(self, monkeypatch, billing_client):
+        """#4504 review: when the Stripe customer is reused, a second member's
+        session must not rewrite the org's stored billing contact — the mirror
+        must keep the address that belongs to the reused customer."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_existing', "
+            "t.customer_email='first@example.com'",
+            params={"id": billing_client["org_id"]},
+        )
+        created: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_new")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, cid: [])
+        monkeypatch.setattr(
+            billing.StripeClient, "create_checkout_session",
+            lambda self, tid, pid, cid, su, cu: "https://checkout.stripe.com/pay/reuse1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "second@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert created == []  # reused the stored customer, not recreated
+        t = sdk.org_get(billing_client["org_id"])
+        assert t["customer_email"] == "first@example.com"  # unchanged
+        assert t["stripe_customer_id"] == "cus_existing"
+
     def test_checkout_active_subscription_409(self, monkeypatch, billing_client):
         """Stored mirror active → 409 BEFORE any Stripe call — no customer
         created, no session minted."""
@@ -633,6 +884,227 @@ class TestCheckoutPortal:
     def test_portal_404_no_customer(self, billing_client):
         r = billing_client["client"].post("/v1/billing/portal", headers=billing_client["headers"])
         assert r.status_code == 404, r.text
+
+
+class TestBillingSupabaseStore:
+    """#4640 — Supabase mode: the orgs row is the authority (#669) and the
+    registry graph is DELETED there. The checkout sync-persist and the portal
+    read must both use the row; the pre-fix code wrote and read the registry,
+    so a just-subscribed org's portal-open 404'd with "no Stripe customer".
+
+    The registry-SDK spy is load-bearing: constructing a registry-namespaced
+    SDK here would be the #878 resurrection vector and raises. Non-registry
+    constructions are left to the real factory.
+    """
+
+    ORG_ID = "org_sb_4640"
+
+    @pytest.fixture
+    def sb(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        # PIN the lane: is_supabase_enabled() would otherwise honour an ambient
+        # TORTOISE_CONTROL_PLANE=registry and flip these tests to selfhost.
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+        monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(VALID_CATALOG))
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        fake = FakeControlPlane({"organizations": [{
+            "id": self.ORG_ID, "name": "sb", "tier": "solo",
+            "email": "owner@example.com",
+            "stripe_customer_id": None, "subscription_status": None,
+            "customer_email": None,
+        }], "webhook_events": []})
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        _orig_make_sdk = ha._make_sdk
+
+        def _spy_make_sdk(*a, **kw):
+            if kw.get("namespace") == "registry":
+                raise AssertionError(
+                    "registry SDK constructed in Supabase mode (#878)")
+            return _orig_make_sdk(*a, **kw)
+
+        monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
+
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": "owner@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        try:
+            yield TestClient(ha.app), fake
+        finally:
+            ha.app.dependency_overrides.pop(ha.get_current_org_session, None)
+
+    def test_portal_opens_right_after_a_successful_checkout(self, monkeypatch, sb):
+        """The checkout write lands on the orgs row; the portal reads it back
+        and passes the authoritative customer id to Stripe."""
+        tc, fake = sb
+        seen: dict = {}
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, email: "cus_sb_1")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb1")
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: seen.update(cid=cid) or
+            "https://billing.stripe.com/p/sb1")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_sb_1"
+        assert row["customer_email"] == "owner@example.com"
+
+        r2 = tc.post("/v1/billing/portal")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["portal_url"] == "https://billing.stripe.com/p/sb1"
+        assert seen["cid"] == "cus_sb_1"
+
+    def test_portal_404_when_genuinely_no_customer(self, monkeypatch, sb):
+        """No customer binding on the authoritative row → the 404 still fires,
+        and no Stripe portal call is made."""
+        tc, _fake = sb
+        called: list = []
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: called.append(cid) or "u")
+        r = tc.post("/v1/billing/portal")
+        assert r.status_code == 404, r.text
+        assert "no Stripe customer" in r.json()["detail"]
+        assert called == []
+
+    def test_checkout_400_when_resolved_org_has_no_email(self, monkeypatch, sb):
+        """Supabase mode with no email link: the resolved org dict carries no
+        email and there is no session email → the terminal 400 (the `sdk=None`
+        fall-through), never an AttributeError 500, and no Stripe call."""
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        called: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append("list_subscriptions") or [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: called.append("create_checkout_session") or "u")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 400, r.text
+        assert "No customer email" in r.json()["detail"]
+        assert called == []
+
+    def test_webhook_written_binding_opens_the_portal(self, monkeypatch, sb):
+        """The exact production path: `checkout.session.completed` writes the
+        binding through the webhook's `update_org_billing` seam, and the
+        portal's `org_billing_state` read finds the same column."""
+        tc, fake = sb
+        org_id = self.ORG_ID
+        monkeypatch.setattr(
+            billing.StripeClient, "verify_webhook_signature",
+            lambda self, raw, sig: {
+                "id": "evt_sb_1", "type": "checkout.session.completed",
+                "data": {"object": {
+                    "client_reference_id": org_id,
+                    "customer": "cus_wh_1",
+                    "customer_details": {"email": "owner@example.com"},
+                    "subscription": None}}})
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: f"https://billing.stripe.com/p/{cid}")
+
+        r = tc.post("/webhooks/stripe", content=b"{}",
+                    headers={"stripe-signature": "t=1,v1=x"})
+        assert r.status_code == 200, r.text
+        assert fake.tables["organizations"][0]["stripe_customer_id"] == "cus_wh_1"
+
+        r2 = tc.post("/v1/billing/portal")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["portal_url"] == "https://billing.stripe.com/p/cus_wh_1"
+
+    def test_checkout_reuses_the_stored_customer(self, monkeypatch, sb):
+        """The stored-mirror guard reads the orgs row: a bound customer is
+        reused (never a second Stripe customer) and its email is preserved."""
+        tc, fake = sb
+        fake.tables["organizations"][0]["stripe_customer_id"] = "cus_existing"
+        fake.tables["organizations"][0]["customer_email"] = "stored@example.com"
+        created: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_new")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb2")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == [], "a stored customer must be reused, not re-created"
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_existing"
+        assert row["customer_email"] == "stored@example.com"
+
+    def test_checkout_backfills_a_missing_customer_email(self, monkeypatch, sb):
+        """A row with a bound customer but no stored email is backfilled
+        (the mixed case of the reuse rule)."""
+        tc, fake = sb
+        fake.tables["organizations"][0]["stripe_customer_id"] = "cus_existing"
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: "cus_new")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb3")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_existing"
+        assert row["customer_email"] == "owner@example.com"
+
+    def test_org_email_beats_the_session_email(self, monkeypatch, sb):
+        """#4508 precedence: the authoritative org row's email wins over the
+        clicking member's session email."""
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": "org@example.com",
+               "session_user_email": "member@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        created: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_p")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb4")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == ["org@example.com"]
+
+    def test_checkout_409_when_row_already_active(self, monkeypatch, sb):
+        """The stored-mirror guard reads subscription_status from the row and
+        rejects BEFORE any Stripe call."""
+        tc, fake = sb
+        fake.tables["organizations"][0]["subscription_status"] = "active"
+        called: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append("list_subscriptions") or [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: called.append("create_checkout_session") or "u")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 409, r.text
+        assert called == [], "the active-status guard must reject before any Stripe call"
 
 
 class TestWebhook:

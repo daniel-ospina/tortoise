@@ -437,6 +437,19 @@ def test_the_probe_asserts_the_right_behaviours_in_CODE_not_comments() -> None:
     assert "session_store_unavailable" in code, "no #3616 diagnostic in the probe"
     assert "/auth/start" in code, "not probing the endpoint that checks SESSIONS first"
     assert "302" in code
+    # Hop 1 must pin THIS PROJECT's routing contract. Without these, the probe
+    # only ever asked "is the app origin healthy" and a revert to a 301 — or to
+    # the 404 a stale bookmark used to get — reds nothing (#4346).
+    assert "tortoise.premiselabs.co/auth/start" in code, "hop 1 lost the marketing host"
+    assert "app.premiselabs.co/auth/start" in code, "hop 1 lost the app-origin target"
+    assert 'if [ "$loc" != "$app" ]' in code, (
+        "hop 1 no longer pins WHERE it redirects — a 302 to the wrong place would pass"
+    )
+    assert "start2.hdr" in code, (
+        "the PKCE grep must read the APP origin's header. The marketing-hop 302 is a "
+        "redirect TO the app origin and can never carry a PKCE challenge, so grepping "
+        "hop 1's header is either vacuous or fatal."
+    )
     # The comments must NOT be what satisfies the checks above. Assert the
     # stripper behaves, rather than merely "changed something" — cycle 4 showed
     # the length comparison could pass while stripping nothing useful.
@@ -668,6 +681,14 @@ count_file="$STUB_DIR/calls"
 n=$(cat "$count_file" 2>/dev/null || echo 0)
 n=$((n+1))
 echo "$n" > "$count_file"
+# Which hop is this? A healthy deploy costs TWO calls per attempt: the marketing
+# host first, then the app origin. The stub must answer them DIFFERENTLY or it
+# cannot model the seam at all — a single-response stub makes the hop-1 Location
+# assertion unsatisfiable and the tests would have to be weakened to pass.
+case "$url" in
+  https://tortoise.premiselabs.co/*) hop=marketing;;
+  *) hop=app;;
+esac
 case "$STUB_MODE" in
   rc7|rc7once)
     if [ "$STUB_MODE" = rc7 ] || [ "$n" -lt 3 ]; then
@@ -679,21 +700,33 @@ case "$STUB_MODE" in
     fi
     ;;
 esac
+SUPABASE_LOC="https://x.supabase.co/auth/v1/authorize?provider=email&code_challenge=abc&code_challenge_method=s256"
+APP_LOC="https://app.premiselabs.co/auth/start"
 case "$STUB_MODE" in
   ok|rc7once)
-    code=302
-    loc="https://x.supabase.co/auth/v1/authorize?provider=email&code_challenge=abc&code_challenge_method=s256"
-    body=''
+    if [ "$hop" = marketing ]; then code=302; loc="$APP_LOC"; body=''
+    else code=302; loc="$SUPABASE_LOC"; body=''; fi
+    ;;
+  hop1-301)
+    if [ "$hop" = marketing ]; then code=301; loc="$APP_LOC"; body=''
+    else code=302; loc="$SUPABASE_LOC"; body=''; fi
+    ;;
+  hop1-404)
+    if [ "$hop" = marketing ]; then code=404; loc=''; body='<html>404</html>'
+    else code=302; loc="$SUPABASE_LOC"; body=''; fi
+    ;;
+  hop1-wrongdest)
+    if [ "$hop" = marketing ]; then
+      code=302; loc="https://tortoise.premiselabs.co/auth"; body=''
+    else code=302; loc="$SUPABASE_LOC"; body=''; fi
     ;;
   503)
-    code=503
-    loc=''
-    body='{"error":"session_store_unavailable"}'
+    if [ "$hop" = marketing ]; then code=302; loc="$APP_LOC"; body=''
+    else code=503; loc=''; body='{"error":"session_store_unavailable"}'; fi
     ;;
   nochallenge)
-    code=302
-    loc="https://x.supabase.co/auth/v1/authorize?provider=email"
-    body=''
+    if [ "$hop" = marketing ]; then code=302; loc="$APP_LOC"; body=''
+    else code=302; loc="https://x.supabase.co/auth/v1/authorize?provider=email"; body=''; fi
     ;;
   200)
     code=200
@@ -735,7 +768,7 @@ def _probe_script(tmp_path: Path) -> Path:
     # 3 spurious failures). `"$PROBE_TMP"/start.body` quotes the variable while
     # leaving the literal suffix safe.
     rewritten = (
-        run.replace("/tmp/start.", '"$PROBE_TMP"/start.')
+        run.replace("/tmp/start", '"$PROBE_TMP"/start')
         .replace("$(seq 1 10)", "$(seq 1 3)")
         # The sleep guard's BOUND must be rewritten too, or it stays `-lt 10` and
         # is unreachable with 3 attempts — so the guard would only ever be pinned
@@ -782,6 +815,9 @@ def _run_probe(tmp_path: Path, mode: str) -> tuple[int, str]:
         ("200", 1),          # a landing page is not a sign-in endpoint
         ("rc7", 1),          # transport failure on every attempt
         ("rc7once", 0),      # transient blip, then healthy -> retry must save it
+        ("hop1-301", 1),     # #4346: the browser-persistent regression
+        ("hop1-404", 1),     # #4346: what a stale bookmark used to get
+        ("hop1-wrongdest", 1),  # a 302 to somewhere that is not the app origin
     ],
 )
 def test_the_probe_shell_behaves_correctly(tmp_path, mode: str, want_rc: int) -> None:
@@ -824,7 +860,33 @@ def test_the_probe_retries_a_transient_transport_failure(tmp_path) -> None:
     rc, out = _run_probe(tmp_path, "rc7once")
     assert rc == 0, f"a transient failure must be retried, not fatal\n{out}"
     calls = int((tmp_path / "calls").read_text())
-    assert calls == 3, f"expected 3 attempts (2 failures + 1 success), saw {calls}"
+    # 4, not 3: a healthy deploy now costs TWO calls (marketing host, then app
+    # origin), so 2 transport failures + one success per hop = 4. Pinning the
+    # count is what proves the retry guard wraps BOTH loops — a guard on only
+    # the first would leave hop 2 aborting under `bash -e`.
+    assert calls == 4, f"expected 4 attempts (2 failures + 1 success per hop), saw {calls}"
+
+
+@pytest.mark.parametrize("mode", ["hop1-301", "hop1-404", "hop1-wrongdest"])
+def test_the_probe_rejects_a_broken_marketing_host_hop(tmp_path, mode: str) -> None:
+    """#4346: the marketing host must answer /auth/start with a 302 to the app
+    origin, and the probe must say so.
+
+    The probe this replaces asked for `302 + PKCE` from the marketing host in a
+    single request. Verified by execution against a stub modelling the correct
+    two-hop architecture, that version FAILS — hop 1 redirects to the app origin
+    and carries no PKCE — so it was unsatisfiable, red on `main`, and named the
+    wrong remedy ("expected a 302 to Supabase" from the marketing host). These
+    modes pin the shape it should have asked for. A 301 is worth pinning
+    explicitly because it is worse than the 404 in one respect: it is
+    browser-persistent and cannot be reclaimed by a later deploy, which is why
+    `SCOPE.md` §12/F12 makes a NEW branch 302 only (OVERRIDES marker on
+    #3501/#3521)."""
+    rc, out = _run_probe(tmp_path, mode)
+    assert rc == 1, f"mode={mode} must fail — the probe is not pinning hop 1\n{out}"
+    assert "expected a 302" in out or "redirected to" in out, (
+        f"mode={mode} failed without naming the hop-1 contract: {out}"
+    )
 
 
 def test_the_probe_does_not_treat_a_landing_page_as_sign_in(tmp_path) -> None:
@@ -861,6 +923,15 @@ EXPECTED_CLASSIFICATION = {
         # recommended: cloudflare-purge.ts is best-effort and fail-open by design
         "CF_API_TOKEN": ("recommended", ["production"]),
         "CF_ZONE_ID": ("recommended", ["production"]),
+        # #2409: the public contact form's intake seam. `recommended` NOT
+        # `required`, deliberately — `required` reds the deploy, which would
+        # block the very deploy that ships the form. Absence is a visible 503
+        # from functions/contact/submit.ts with the mailto fallback, not an
+        # outage of the rest of the site. Promote once the endpoint is bound.
+        "CONTACT_INTAKE_URL": ("recommended", ["production"]),
+        # An INBOUND credential only: it can submit an item and nothing else
+        # (no send, no read) — distinct from any send-capable provider key.
+        "CONTACT_INTAKE_SECRET": ("recommended", ["production"]),
     },
     # #4054: the BFF appended a second project. SESSIONS points at the SAME
     # account-level tortoise-sessions database; the env vars are what the moved

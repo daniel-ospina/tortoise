@@ -392,6 +392,31 @@ Public repository that houses:
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
 | Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
 
+### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
+
+You may **not** add or remove a tool from the MCP surface, or a method from the SDK surface,
+without **human approval from Daniel**. This is a mandated rule, not a suggestion, and it is not
+machine-enforced.
+
+- **THE RULE.** The MCP tool surface is `TOOL_REGISTRY` in `tortoise/tool_registry.py`; the SDK
+  surface is the public (non-underscore) methods on `TortoiseSDK` in `tortoise/sdk.py`. Adding,
+  removing, or renaming either is a surface change.
+- **WHY IT EXISTS.** The surface is the contract every agent and customer integration is built
+  on — changing it changes what every agent can see and do, so it materially affects customer
+  outcomes.
+- **WHAT TO DO.** Get Daniel's approval **first**, before you write the change or re-cut the
+  baseline, through the "USER QUESTIONS" / "DECISION RELAY" path above: name the tool or method,
+  say what it does and why it is needed. Then follow `CONTRIBUTING.md` → "The MCP tool surface and
+  public SDK methods cannot grow by accident".
+- **THE GATE IS NOT THE APPROVAL.** `tools/surface-guard.py` and `tools/surface_manifest.py check`
+  are **drift controls**: a change that updates the code and `config/surface-manifest.yml`
+  together **passes both**. They catch an *unrecorded* change and cannot tell an approved addition
+  from an unapproved one. A green run is not consent.
+
+Do **not** propose replacing this with a GitHub ruleset, `CODEOWNERS`, a required second approver,
+or a separate automation identity — the owner **rejected** that direction on #4282 as
+over-engineering.
+
 ### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
 
 Before spawning a workstream, opening a worktree, or dispatching a sub-agent for issue **N**,
@@ -443,6 +468,42 @@ the compliance row above declares the rule, the skills enforce it.
 PRs, a wasted dispatch cycle, and a consolidation decision that should never have been needed
 (#2985 vs PR #3005, #2952 vs PR #3018 — the incident in #3061). A truncated or partial check is
 worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a completeness check.
+
+### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
+
+Never dispatch to a cmux pane with a bare `cmux send`. **Use `tools/cmux_dispatch.py`** — it is the
+only dispatch path that confirms the ARTIFACT rather than the send:
+
+```bash
+python3 tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
+    --label <lane> --file <brief.txt>        # exit 0 ONLY if it became a turn
+```
+
+`cmux send` exits 0 when *bytes were written to the terminal*, which is a different event from *the
+message became a conversation message*. Two live failure modes sit downstream of that syscall and
+are invisible to any exit code (#4292):
+
+1. **Send-during-boot race** — bytes written before pi's TUI takes over stdin sit unsent in the
+   composer (or are discarded).
+2. **The boot-block prompt** — a freshly-booted pi can be blocked on `Press any key to continue...`
+   (`dist/migrations.js::showDeprecationWarnings`, interactive mode, triggered by a non-fd/rg entry
+   under a `tools/` directory). That prompt consumes the bytes as its keypress: the pointer is
+   **eaten**, or its prefix is eaten and the remainder submitted as a **truncated turn**.
+
+The dispatcher waits for the pane to be safe to send (dismissing a boot-block prompt instead of
+feeding it the brief), sends text + a bare Enter, then confirms via
+`cmux list-workspaces --json` → `latest_submitted_message`, recovering automatically (release the
+composer with a bare Enter, or dismiss-and-re-send when the text was eaten). It exits non-zero with
+`sent-but-not-consumed` when the message never became a turn.
+
+**One-line check until every caller is migrated:** after dispatching, confirm the lane shows a
+`Working` spinner (`cmux read-screen --workspace <ws> --lines 6`) before assuming it started. A pane
+showing the pointer text above the status line with `0.0%` and no spinner has NOT started.
+
+**Consequence of skipping:** a silently-dead lane is indistinguishable from a working one until the
+work does not happen — or until a corrupted turn runs on a truncated brief. This cost a full
+dispatch cycle and was invisible to every pre-existing check; it is also the most likely explanation
+for three sends to one pane that were recorded as `OK` and never consumed.
 
 ### Key Directories
 

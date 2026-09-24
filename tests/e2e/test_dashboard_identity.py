@@ -252,6 +252,15 @@ def test_account_menu_identity_block_single_team(page: Page):
     # #2494: tier badge is on the Organization block, NOT the identity block
     expect(page.locator(".account-identity .tier-badge")).to_have_count(0)
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
+    # #4336: the badge renders the DISPLAY label, never the raw tier key.
+    expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
+    # #4336: the header tier badge routes through the same label map
+    # (catches a re-lowercased display name). #4639: the header control is no
+    # longer a marketing <a> — it is an upgrade button, or a plain badge when
+    # the deployment has no checkout price id. Scope to the header's DIRECT
+    # child: the open account menu's org badge is a nested `.tier-badge` too
+    # (`header .tier-badge` matched two elements).
+    expect(page.locator("header > .tier-badge")).to_contain_text("Free tier")
     expect(page.locator(".account-menu").get_by_role("button", name="Profile")).to_be_visible()
     expect(page.locator(".account-menu").get_by_role("button", name="Log out")).to_be_visible()
     expect(page.locator(".account-menu").get_by_text("Switch organization")).to_have_count(0)
@@ -313,7 +322,7 @@ def test_members_heading_and_nav(page: Page):
 
 def test_billing_team_context(page: Page):
     """#1876: Billing names its team; multi-team can switch in-tab AND the
-    plan data re-hydrates (pinned via team_reads + the Pro-plan badge)."""
+    plan data re-hydrates (pinned via team_reads + the Builder-plan badge)."""
     _seed(page)
     teams = [
         {"org_id": "team_a", "org_name": "Alpha", "tier": "free",
@@ -336,7 +345,7 @@ def test_billing_team_context(page: Page):
         select.select_option("team_b")
     assert "team_b" in team_reads
     expect(page.get_by_role("heading", name="Billing — Bravo")).to_be_visible()
-    expect(page.get_by_text("Pro plan")).to_be_visible()
+    expect(page.get_by_text("Builder plan")).to_be_visible()
     expect(page.get_by_text("100", exact=True)).to_be_visible()  # write_ops_used re-hydrated
 
 
@@ -645,7 +654,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
     expect(dialog.get_by_label("Organization name")).to_be_visible()
     expect(dialog.get_by_role("button", name="Continue to checkout")).to_be_visible()
     # paid plan chooser is server-resolved (no hardcoded Stripe ids)
-    expect(dialog.get_by_role("button", name="Pro · $25/mo")).to_be_visible()
+    expect(dialog.get_by_role("button", name="Builder · $25/mo")).to_be_visible()
     expect(dialog.get_by_role("button", name="Solo · $9/mo")).to_be_visible()
 
 
@@ -670,6 +679,14 @@ def test_account_menu_two_sections(page: Page):
     # tier badge NOT in identity block, IS in org section
     expect(page.locator(".account-identity .tier-badge")).to_have_count(0)
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
+    # #4336: the badge renders the DISPLAY label, never the raw tier key.
+    expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
+    # #4336: the header tier badge routes through the same label map
+    # (catches a re-lowercased display name). #4639: see
+    # test_account_menu_identity_block_single_team — the header control is no
+    # longer a marketing <a>, and the selector is scoped to the DIRECT child
+    # (the open account menu carries a nested `.tier-badge`).
+    expect(page.locator("header > .tier-badge")).to_contain_text("Free tier")
 
 
 def test_account_menu_org_block_single_team(page: Page):
