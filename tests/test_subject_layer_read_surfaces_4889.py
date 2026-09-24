@@ -101,6 +101,19 @@ class TestSubjectBindingAvailable:
         subject_binding_available(g)
         assert len(g.calls) == 1
 
+    def test_probe_is_scoped_to_the_sources_the_field_reads(self):
+        """The advertised ``subject`` resolves Point/Event → Subject only. An
+        Object-sourced ``aboutSubject`` edge (the GitHub connector) must not
+        make the probe report "available", or the marker would be withheld on
+        a graph where every Point hit is still silently subject-less."""
+        from tortoise.search_engine import _SUBJECT_SOURCE_SCOPED_PROBE
+        assert ":Point" in _SUBJECT_SOURCE_SCOPED_PROBE
+        assert ":Event" in _SUBJECT_SOURCE_SCOPED_PROBE
+        assert "(:Subject)" in _SUBJECT_SOURCE_SCOPED_PROBE
+        g = _FakeGraph(rows=[[0]])
+        subject_binding_available(g)
+        assert g.calls[0] == _SUBJECT_SOURCE_SCOPED_PROBE
+
 
 # ── SearchResult.to_dict: additive marker ────────────────────────────────
 
@@ -158,6 +171,72 @@ class TestSearchPathFailsLoud:
                 "the marker must self-clear the moment a producer edge exists")
         # The subject itself now resolves.
         assert hits[0]["subject"]["name"] == "B7-cost-research"
+
+    def test_object_sourced_aboutSubject_does_not_clear_the_marker(self, sdk):
+        """The advertised ``subject`` resolves Point/Event → Subject only. An
+        Object-sourced ``aboutSubject`` edge (the GitHub connector's shape,
+        ``(o:Object)-[:aboutSubject]->(s:Subject)``) can never populate the
+        Point field, so it must not silence a marker that is still true for
+        every Point hit — that is why the probe is label-scoped."""
+        sdk.create_point("statement", "object-sourced probe point")
+        sdk.create_subject("W3A lane", "team")
+        sdk.create_object("an indexed repository", "repository")
+        proj = sdk._get_proj()
+        sid = proj.g.query(
+            "MATCH (s:Subject {name:'W3A lane'}) RETURN s.id"
+        ).result_set[0][0]
+        oid = proj.g.query(
+            "MATCH (o:Object {name:'an indexed repository'}) RETURN o.id"
+        ).result_set[0][0]
+        proj.g.query(
+            "MATCH (o:Object {id:$o}), (s:Subject {id:$s}) "
+            "MERGE (o)-[:aboutSubject]->(s)",
+            params={"o": oid, "s": sid})
+        hits = sdk.tortoise_fts_query("object-sourced probe",
+                                      entity_type="point", limit=5)
+        assert hits
+        assert all("subject" not in h for h in hits)
+        assert all(h.get("subject_unavailable") == SUBJECT_BINDING_UNAVAILABLE
+                   for h in hits), (
+            "an Object-sourced aboutSubject edge cannot populate the Point "
+            "field, so it must not suppress the marker")
+
+    def test_degraded_fallback_carries_the_marker(self, sdk, monkeypatch):
+        """The TF-IDF fallback advertises the same promoted-state fields as
+        the primary path, so it owes the same fail-loud contract."""
+        import tortoise.search_engine as se
+        sdk.create_point("statement", "fallback marker probe point")
+        monkeypatch.setattr(se, "degradation_chain", lambda *a, **k: {})
+        hits = sdk.tortoise_fts_query("fallback marker probe",
+                                      entity_type="point", limit=5)
+        assert hits, "the degraded fallback should still serve the point"
+        assert all(h.get("subject_unavailable") == SUBJECT_BINDING_UNAVAILABLE
+                   for h in hits)
+
+    def test_degraded_fallback_does_not_mark_when_a_producer_exists(
+            self, sdk, monkeypatch):
+        import tortoise.search_engine as se
+        sdk.create_point("statement", "fallback producer probe point")
+        sdk.create_subject("W3A lane", "team")
+        proj = sdk._get_proj()
+        sid = proj.g.query(
+            "MATCH (s:Subject {name:'W3A lane'}) RETURN s.id"
+        ).result_set[0][0]
+        pid = proj.g.query(
+            "MATCH (p:Point {content:'fallback producer probe point'}) "
+            "RETURN p.id").result_set[0][0]
+        proj.g.query(
+            "MATCH (p:Point {id:$p}), (s:Subject {id:$s}) "
+            "MERGE (p)-[:aboutSubject]->(s)",
+            params={"p": pid, "s": sid})
+        monkeypatch.setattr(se, "degradation_chain", lambda *a, **k: {})
+        hits = sdk.tortoise_fts_query("fallback producer probe",
+                                      entity_type="point", limit=5)
+        assert hits
+        for h in hits:
+            assert "subject_unavailable" not in h, (
+                "a producer edge must suppress the marker on the fallback path")
+            assert h.get("subject", {}).get("name") == "W3A lane"
 
 
 # ── get_org_structure: roles marked, members NOT marked ──────────────────

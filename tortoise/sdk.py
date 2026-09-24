@@ -2023,11 +2023,23 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     batch fetch (#1353, E5 #1537). Additive, mirroring SearchResult.to_dict:
     keys are set ONLY when the state is non-empty, so a graph with no
     CORRECTS edges renders byte-identically to today. Decoration must never
-    break retrieval — a graph failure returns the hits undecorated."""
+    break retrieval — a graph failure returns the hits undecorated.
+
+    #4889: the degraded fallback is a Point-only surface that advertises the
+    same promoted-state fields as the primary path, so it owes the same
+    ``subject`` decoration AND the same fail-loud contract. Before this, a
+    fallback hit carried no ``subject`` at all even on a graph with a producer,
+    and no ``subject_unavailable`` when the binding was dead — the exact
+    silent-absence shape #4889 removes on the primary path.
+    """
     if not results:
         return results
     try:
-        from tortoise.search_engine import fetch_point_epistemic_state
+        from tortoise.search_engine import (
+            SUBJECT_BINDING_UNAVAILABLE,
+            fetch_point_epistemic_state,
+            subject_binding_available,
+        )
         state = fetch_point_epistemic_state(graph, [r["id"] for r in results])
     except Exception:
         _logger.warning("embedded fallback decoration failed — returning "
@@ -2045,6 +2057,17 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
                 r[key] = st[key]
+        # #4889: same additive subject field as SearchResult.to_dict.
+        if st.get("subject"):
+            r["subject"] = st["subject"]
+    # #4889: the same fail-loud marker as the primary path — only when the
+    # whole batch resolved no subject AND the graph cannot carry one for
+    # Points/Events. Fail-open (the probe returns True on any error), so a
+    # broken probe never fabricates an unavailability claim.
+    if not any(r.get("subject") for r in results) \
+            and not subject_binding_available(graph):
+        for r in results:
+            r["subject_unavailable"] = SUBJECT_BINDING_UNAVAILABLE
     return results
 
 

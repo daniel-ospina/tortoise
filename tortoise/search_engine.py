@@ -2175,28 +2175,43 @@ def get_relationships_bounded(
 #: Tracked producers: #1370, #1509. The marker self-clears as soon as any
 #: ``aboutSubject`` edge exists on the graph.
 SUBJECT_BINDING_UNAVAILABLE = (
-    "aboutSubject has no reachable producer on this graph, so 'subject' is "
-    "structurally empty rather than unknown: the capture entity spine writes "
-    "SUBJECT-kind entities as :Object (#4934), and the document extractor's "
-    "Subject writer is opt-in (#4938). Tracked producers: #1370, #1509."
+    "aboutSubject has no reachable producer for Points or Events on this "
+    "graph, so 'subject' is structurally empty rather than unknown: the "
+    "capture entity spine writes SUBJECT-kind entities as :Object (#4934), "
+    "and the document extractor's Subject writer is opt-in (#4938). "
+    "Tracked producers: #1370, #1509."
 )
+
+
+#: The ``aboutSubject`` shapes ``fetch_point_epistemic_state`` actually reads:
+#: a Point's own edge, or its source Event's edge (the ≤1-hop fallback). The
+#: availability probe must be scoped to these — an ``Object``-sourced
+#: ``aboutSubject`` edge (the GitHub connector writes
+#: ``(o:Object)-[:aboutSubject]->(s:Subject)``) can never resolve the advertised
+#: Point field, so an unscoped count would report "available" on a graph where
+#: every Point hit still carries no subject.
+_SUBJECT_SOURCE_SCOPED_PROBE = (
+    "MATCH (n)-[r:aboutSubject]->(:Subject) "
+    "WHERE n:Point OR n:Event RETURN count(r)")
 
 
 def subject_binding_available(graph) -> bool:
     """True when this graph can carry ``aboutSubject`` edges at all (#4889).
 
-    One exact count over the edge type (FalkorDB resolves it from edge-type
-    metadata — measured ~44 ms against the 37.5k-Point dogfood graph, an
-    order of magnitude below the ``RETURN 1 LIMIT 1`` existence form because
-    the latter must actually locate an edge).
+    One exact count over the Point/Event-sourced edge shape. It is
+    label-scoped (:Point / :Event) to the sources
+    ``fetch_point_epistemic_state`` reads, so an Object-sourced
+    ``aboutSubject`` edge cannot make the marker lie (see
+    ``_SUBJECT_SOURCE_SCOPED_PROBE``). Measured steady-state ~100 ms against
+    the 37.5k-Point dogfood graph (the unscoped edge-type-only form is ~44 ms;
+    the label filter buys correctness for the difference).
 
     **Fail-OPEN**: a probe error returns True. A broken probe must never
     invent an unavailability claim, so the failure direction that withholds
     the marker is the safe one.
     """
     try:
-        rows = graph.query(
-            "MATCH ()-[r:aboutSubject]->() RETURN count(r)").result_set
+        rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE).result_set
         if not rows or not rows[0]:
             # ``RETURN count(r)`` always yields exactly one row; anything
             # else is an anomalous probe, which must not be read as "no
