@@ -1284,6 +1284,7 @@ surfaces:
   - test_reader.py
   - test_reader_prerendered.py  # #3011: pre-rendered-evidence reader seam — byte-identical to the hit-list lane (hermetic)
   - test_reader_abstention_calibration.py
+  - test_reader_4107_advice_shape.py  # #4107: hermetic characterisation drift pin (detector→None, advice-clause tension)
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
@@ -1908,6 +1909,7 @@ durations:
   test_lme_ingest_v2_supersession.py: 1.4
   test_one_free_org_entitlement.py: 1.4
   test_reader_abstention_calibration.py: 1.4
+  test_reader_4107_advice_shape.py: 1.4
   test_subjectadded_journal.py: 1.4
   test_turnstile_signup.py: 1.4
   test_validity_windows.py: 1.4
