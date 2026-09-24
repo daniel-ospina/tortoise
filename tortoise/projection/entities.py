@@ -1962,6 +1962,11 @@ class _EntityHandlers:
         # node; the legacy fallback (no source_url) would otherwise be a
         # degenerate self-loop. The index path always passes the corpus
         # `source_url`, so the index-completeness gate's `edge` clause holds.
+        # The legacy no-`source_url` path (every `tortoise/ingest.py` site)
+        # therefore mints NO `references` hop — the document node IS the
+        # Source — and `get_provenance_chain` serves that path from the
+        # `extractedFrom` target itself (ONTOLOGY §3.4 layering truncated at
+        # its first hop), so the chain still resolves.
         ref = ev.get("source_url")
         if ref and ref != did:
             self.link_source_to_entity(ref, did, "Source")

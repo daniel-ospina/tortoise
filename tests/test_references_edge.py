@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tortoise.api import EventAPI, provenance
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
 
@@ -323,6 +325,52 @@ def test_provenance_chain_returns_data_for_ingested_document():
         result = chain[0]
         assert result["source"]["url"] == corpus_url
         assert result["entity"]["title"] == "Ingested Document"
+        assert "Source" in result["labels"]
+    finally:
+        sdk.close()
+
+
+def test_provenance_chain_returns_document_without_source_url():
+    """#205 + D10: the LEGACY ingest path passes NO ``source_url``.
+
+    ``tortoise/ingest.py`` calls ``api.add_document(...)`` without a
+    ``source_url`` at every site (and both ``add_document`` and
+    ``create_document`` default it to ``None``), so ``_upsert_document``
+    creates ONE ``:Source {url = <doc id>}`` and mints NO ``references``
+    edge — a corpus-Source→document edge would collapse onto that single
+    node as a degenerate self-loop. The reader must still return the
+    document for a Point extracted from it: the ``extractedFrom`` target IS
+    the terminal provenance, so ``get_provenance_chain`` must not require
+    the ``references`` hop to resolve.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        log = EventLog(_tmp("events.jsonl"))
+        api = EventAPI(log, initiated_by="extractor", agent_id="test",
+                       projection=proj)
+
+        # The ACTUAL legacy path: no source_url kwarg (every ingest.py site).
+        api.add_document(doc_id="doc/legacy.md", title="Legacy")
+        prov = provenance("doc/legacy.md", [0, 6], "Legacy",
+                          extracted_by="test@0")
+        pid = api.add_point("legacy claim", prov,
+                            extractedFrom="doc/legacy.md")
+
+        # D10 invariant: the document and its Source are ONE node — the
+        # suppressed self-loop means zero outgoing references edges.
+        r = proj.g.query(
+            "MATCH (s:Source {url:'doc/legacy.md'})-[r:references]->() "
+            "RETURN count(r)"
+        ).result_set
+        assert r[0][0] == 0, "degenerate self-loop references edge minted"
+
+        chain = sdk.get_provenance_chain(pid)
+        assert len(chain) == 1, f"Expected 1 result, got {len(chain)}"
+        result = chain[0]
+        assert result["source"]["url"] == "doc/legacy.md"
+        assert result["entity"]["url"] == "doc/legacy.md"
+        assert result["entity"]["title"] == "Legacy"
         assert "Source" in result["labels"]
     finally:
         sdk.close()
