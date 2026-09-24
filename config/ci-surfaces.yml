@@ -505,6 +505,12 @@ surfaces:
   # change); this `core` entry is the fallback arm, since core is only added when nothing
   # else matched.
   - test_operator_alert.py
+  # #2718: the eval-key launcher's guard — it pins (managed-key-set drift) the
+  # provider registries, and `core` is the docs/default surface this file is
+  # otherwise selected under. The `ep` surface carries the second arm, because
+  # a `tortoise/analyze.py`-only change selects `ep` and would otherwise never
+  # run the drift guard (#2938 convention).
+  - test_run_with_eval_keys.py
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
@@ -1029,6 +1035,14 @@ surfaces:
   # keeps them for engine-wide changes, `ep` runs them on analyze.py edits.
   - test_analyze.py
   - test_analyze_scoped.py
+  # #2718: the eval-key launcher's guard derives its expected managed-key set
+  # from `tortoise/analyze.py::_LLM_PROVIDERS` (an ep-mapped source). A
+  # SOURCE_PATTERNS match REPLACES the `core` fallback, so without this
+  # registration a new provider key added to `_LLM_PROVIDERS` would leave the
+  # new ambient key un-stripped (the #4860 failure mode) with a green suite —
+  # the same hole #2938 fixed for `test_analyze.py`. Dual-registered: `core`
+  # keeps it for engine-wide changes, `ep` runs it on analyze.py edits.
+  - test_run_with_eval_keys.py
   # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes must run
   # the deterministic replay gate. NOTE (posture split, #2098 round 2): the
   # strict-survival dimension is pinned at 0.0 on the m2 lane until the
@@ -1512,6 +1526,12 @@ durations:
   # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
   # (7 tests, DB-free, app-boot-free) on a loaded machine.
   test_backup_watcher_health.py: 2.0
+  # #2718: new file, so no CI junit measurement yet — enter at the flat 2.0s
+  # default per the #3400/#4221 convention (the conservative floor keeps the
+  # durations-coverage floor satisfied) and refresh from the first post-merge
+  # main run that includes it. Measured locally 2026-09-23: ~17s for the file
+  # (25 tests; each spawns the wrapper as a subprocess, DB-free, no network).
+  test_run_with_eval_keys.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   # #3746: the new onboarding truth-surface file. 31 docker-lane cases, junit
