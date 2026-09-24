@@ -2974,18 +2974,21 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
     Every other teardown test stubs `_driver_pid_and_starttime`, so the filter
     that decides what may EVER be signalled — `ppid == os.getpid()` plus the
     driver marker — would otherwise be pinned against the real process table by
-    nothing. This is that ONE live test: it spawns a REAL child whose argv
-    carries the marker, retries the enumeration inside a short bound (it never
-    sleeps and hopes), and requires the whole identity (parent pid AND start
-    time) to re-read identically from `_child_identity` — the pair the
-    watchdog's re-check compares.
+    nothing. This is that ONE live test. It spawns a REAL child whose argv
+    carries the marker, polls the enumeration inside a short DEADLINE (a bounded
+    condition re-check, not a fixed sleep), and requires the whole identity
+    (parent pid AND start time) to re-read identically from `_child_identity` —
+    the pair the watchdog's re-check compares. The real table here holds exactly
+    one marked child, so this test pins the OWN-CHILD half against it; the
+    MARKER half (a marked child winning over an earlier unmarked one) is pinned
+    deterministically at the `ps`-output seam below.
 
     Every OTHER claim — which candidate wins over an earlier unmarked one, the
     parent filter, the non-positive-pid refusal, the untruncated `ps` query — is
     pinned deterministically at the `ps`-OUTPUT seam below, because a venue
     whose `ps` renders the table differently (the CI runner truncates the last
-    column to the terminal width) must not decide whether this instrument is
-    correct. The marker is the LAST argv token on purpose: that is the position
+    column to its non-tty output width) must not decide whether this instrument
+    is correct. The marker is the LAST argv token on purpose: that is the position
     the venue truncation cuts, so this test also exercises the `-ww` fix on a
     real table rather than merely on a fake one."""
     import os
@@ -3090,9 +3093,11 @@ def test_the_enumerator_picks_the_marked_own_child_not_an_earlier_unmarked_one(
     The live-table test can only fail a "returned the first child" mutant when
     the venue's `ps` happens to expose both children in a stable order, so the
     preference is pinned here instead, on a fake table: an unmarked own child is
-    listed FIRST and a marked own child SECOND, and the enumerator must return
-    the MARKED one. A mutant that drops the marker guard — or returns the first
-    parseable child — returns 1111 here and is RED."""
+    listed FIRST, a marked own child SECOND, then an unmarked and a second
+    marked one. The enumerator must return the FIRST MARKED one. A mutant that
+    drops the marker guard — or returns the first parseable child — returns 1111
+    here; one that returns the last candidate (e.g. iterating the table in
+    reverse) returns 4444. Both are RED."""
     import os
 
     import tools.ship_test_onboarding as mod
@@ -3102,6 +3107,9 @@ def test_the_enumerator_picks_the_marked_own_child_not_an_earlier_unmarked_one(
             return _PS(stdout=(
                 f"1111 {os.getpid()} python -c import time; time.sleep(30)\n"
                 f"2222 {os.getpid()} python -c import time; time.sleep(30) "
+                f"run-driver\n"
+                f"3333 {os.getpid()} python -c import time; time.sleep(30)\n"
+                f"4444 {os.getpid()} python -c import time; time.sleep(30) "
                 f"run-driver\n"))
         return _PS(stdout=f"{os.getpid()} Thu Jan  1 00:00:00 2026\n")
 
@@ -3138,11 +3146,40 @@ def test_the_enumerator_ignores_a_marked_process_that_is_not_its_own_child(
     assert (pid, status) == (4343, mod.DRIVER_ENUM_FOUND), (pid, status)
 
 
+def test_the_enumerator_rejects_a_pid_whose_identity_re_read_names_another_parent(
+        monkeypatch) -> None:
+    """The POST-read parent re-verification, pinned at the `ps`-output seam.
+
+    The in-table filter (`ppid != me`) and the identity re-read's `ppid` are two
+    different reads. Between them the real child can exit and its pid be REUSED
+    by a process with a different parent: the enumeration saw `ppid == me`, the
+    identity read names someone else. That second read is the value the
+    watchdog's TOCTOU re-check compares, so such a pid must NOT be signalled —
+    and must not be reported as `no_candidate` either, since a marker-matching
+    child WAS enumerated. A mutant that drops `identity[0] != me` returns
+    4242/`found` here and is RED."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    def _fake_run(argv, **k):
+        if "pid=,ppid=,command=" in argv:
+            return _PS(stdout=(
+                f"4242 {os.getpid()} python playwright run-driver\n"))
+        return _PS(stdout=f"{os.getpid() + 1} Thu Jan  1 00:00:00 2026\n")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    assert mod._driver_pid_and_starttime() == (
+        None, None, mod.DRIVER_ENUM_IDENTITY_UNREADABLE)
+
+
 def test_both_ps_reads_ask_for_an_untruncated_field(monkeypatch) -> None:
     """The CI-only defect of #4956, pinned without a live process table.
 
     `command` is the unbounded `ps` field, and a host truncates its LAST column
-    to the terminal width — the CI runner does, and the hostedtoolcache
+    to its output width — the terminal width when interactive, or a non-tty
+    default (80 columns) when stdout is a pipe, which is how `capture_output`
+    hands it to the readers. The CI runner does, and the hostedtoolcache
     interpreter path alone is ~49 characters, which puts a trailing
     `run-driver` marker past the 80-column cut. The marker then disappears, the
     enumerator finds no candidate, and a healthy run abandons with its Chromium
