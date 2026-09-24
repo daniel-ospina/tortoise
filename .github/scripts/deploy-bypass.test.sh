@@ -318,6 +318,44 @@ rc=0
 bash "$HELPER" expiry --window-days seven >/dev/null 2>&1 || rc=$?
 assert_eq "$rc" "64" "expiry: bad --window-days refused"
 
+# 30b. a value-taking flag given NO value is a usage error, not a spin. `shift 2`
+#      FAILS when only one positional remains and bash leaves the parameters
+#      UNCHANGED, so an ungated parser re-reads the same `$1` forever and the
+#      exit-64 path is never reached. Bounded by a watchdog: a regression must
+#      fail here as a RED, never hang the harness (and `report` is the whole
+#      `run:` body of a deploy step with no `timeout-minutes`).
+run_bounded() { # <cmd...> -> exit status (137 when the watchdog had to kill it)
+  local rc=0 pid wt
+  "$@" >"$WORK/out" 2>&1 &
+  pid=$!
+  ( sleep 5; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  wt=$!
+  wait "$pid" || rc=$?
+  kill "$wt" 2>/dev/null
+  wait "$wt" 2>/dev/null
+  printf '%s' "$rc"
+}
+assert_eq "$(run_bounded bash "$HELPER" report --key)" "64" "report: a flag with no value is refused, not spun"
+assert_contains "$(cat "$WORK/out")" "requires a value" "report: the refusal names the missing value"
+assert_eq "$(run_bounded bash "$HELPER" audit --state)" "64" "audit: a flag with no value is refused, not spun"
+assert_eq "$(run_bounded bash "$HELPER" expiry --today)" "64" "expiry: a flag with no value is refused, not spun"
+
+# 30c. the per-job audit marker write must not be SILENT when it fails. The
+#      audit derives a `wrapper` gate's verdict from that marker, so a dropped
+#      write would make it state NOT bypassed for a gate the report block says
+#      BYPASSED. It must stay non-fatal (failing the step would strand the
+#      incident deploy the bypass exists for) but say so in the LOG and the
+#      SUMMARY.
+: >"$WORK/s-marker"
+rc=0
+GITHUB_STEP_SUMMARY="$WORK/s-marker" DEPLOY_BYPASS_MARKER="$WORK/no-such-dir/m" \
+  bash "$HELPER" report --key SKIP_FLY_MACHINES_GUARD --variable-fired true >"$WORK/out" 2>&1 || rc=$?
+assert_eq "$rc" "0" "marker write failure: report still exits 0 (never strands the incident deploy)"
+assert_contains "$(cat "$WORK/out")" "could not record the audit marker" "marker write failure: LOUD ::warning:: in the step log"
+assert_contains "$(cat "$WORK/s-marker")" "Audit marker NOT written" "marker write failure: the run summary says the audit cannot certify"
+r="$(run_report --key SKIP_PACK_SMOKE --variable-fired true --set-at 2026-09-22)"
+assert_not_contains "${r#*|}" "Audit marker NOT written" "marker write SUCCESS: no false alarm"
+
 echo "── the helper never maps a gate's exit code ───────────────────────"
 # 31. `exit 2` is the could-not-determine class and belongs to the GATES, not to
 #     this reporter. A reporter that learns about exit codes is a reporter that
@@ -331,7 +369,7 @@ assert_eq "$(grep -cE 'check-fly-(machines-guard|secret-drift)\.py|deploy-health
 echo "──────────────────────────────────────────"
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=80
+expected_assertions=88
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

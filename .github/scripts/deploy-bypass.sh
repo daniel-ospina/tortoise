@@ -112,6 +112,16 @@ EOF
 
 die() { printf 'deploy-bypass: %s\n' "$*" >&2; exit 64; }
 
+# The `shift 2 || die …` guards in the three parsers below are load-bearing, not
+# style. With a value-taking flag LAST (`report --key`, `audit --state`,
+# `expiry --window-days`), `shift 2` FAILS: bash returns 1 and leaves the
+# positional parameters UNCHANGED, so (there is no `set -e`) the `while [ $# -gt
+# 0 ]` loop re-reads the same `$1` forever and the documented exit-64 usage path
+# is never reached. Every value-taking arm therefore fails closed. The crash
+# surface is real: `report` is the whole `run:` body of a deploy step and
+# `deploy-hosted.yml` sets no `timeout-minutes`, so a typo would spin the runner
+# for the 360-minute default instead of failing fast.
+
 # Append to the step summary AND echo to the log (so a local run and the step's
 # own log show what the summary will hold). $GITHUB_STEP_SUMMARY is unset
 # outside Actions and in a bare local run — never a hard dependency.
@@ -190,13 +200,13 @@ cmd_report() {
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --key) key="${2:-}"; shift 2 ;;
-      --input-fired) input_fired="${2:-}"; shift 2 ;;
-      --variable-fired) variable_fired="${2:-}"; shift 2 ;;
-      --set-at) set_at="${2:-}"; shift 2 ;;
-      --effect) effect="${2:-}"; shift 2 ;;
-      --window-days) window="${2:-}"; shift 2 ;;
-      --today) today="${2:-}"; shift 2 ;;
+      --key) key="${2:-}"; shift 2 || die "report: --key requires a value" ;;
+      --input-fired) input_fired="${2:-}"; shift 2 || die "report: --input-fired requires a value" ;;
+      --variable-fired) variable_fired="${2:-}"; shift 2 || die "report: --variable-fired requires a value" ;;
+      --set-at) set_at="${2:-}"; shift 2 || die "report: --set-at requires a value" ;;
+      --effect) effect="${2:-}"; shift 2 || die "report: --effect requires a value" ;;
+      --window-days) window="${2:-}"; shift 2 || die "report: --window-days requires a value" ;;
+      --today) today="${2:-}"; shift 2 || die "report: --today requires a value" ;;
       *) die "report: unexpected argument '$1'" ;;
     esac
   done
@@ -261,7 +271,20 @@ cmd_report() {
   fi
 
   if [ -n "${DEPLOY_BYPASS_MARKER:-}" ]; then
-    printf '%s\n' "$key" >>"$DEPLOY_BYPASS_MARKER" 2>/dev/null || true
+    # Fail LOUD, never open. This marker is what THIS job's audit step reads to
+    # tell "a wrapper gate's exit-1 skip was applied" from "the lane was armed
+    # but no exit-1 bypass was applied". A dropped write leaves the marker
+    # absent, which the audit reads as the second — so the audit states NOT
+    # bypassed for a gate the block right above says BYPASSED, the exact
+    # contradiction #4759 exists to remove. It is deliberately NOT fatal:
+    # failing the step would strand the incident deploy the bypass exists for
+    # (the reason `expiry` is a separate workflow). The report block has already
+    # certified the bypass; this line says the audit cannot.
+    if ! printf '%s\n' "$key" >>"$DEPLOY_BYPASS_MARKER" 2>/dev/null; then
+      printf '::warning::deploy-bypass: could not record the audit marker for %s at %s — the audit for this job cannot certify this bypass\n' \
+        "$key" "$DEPLOY_BYPASS_MARKER" >&2
+      emit "- ⚠️ **Audit marker NOT written** (\`${key}\`, marker \`${DEPLOY_BYPASS_MARKER}\`) — the audit line below cannot certify this bypass."
+    fi
   fi
 }
 
@@ -281,9 +304,9 @@ cmd_audit() {
   local -a specs=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --job) job="${2:-}"; shift 2 ;;
-      --state) specs+=("${2:-}"); shift 2 ;;
-      --marker-file) marker_file="${2:-}"; shift 2 ;;
+      --job) job="${2:-}"; shift 2 || die "audit: --job requires a value" ;;
+      --state) specs+=("${2:-}"); shift 2 || die "audit: --state requires a value" ;;
+      --marker-file) marker_file="${2:-}"; shift 2 || die "audit: --marker-file requires a value" ;;
       *) die "audit: unexpected argument '$1'" ;;
     esac
   done
@@ -335,8 +358,8 @@ cmd_expiry() {
   local age state note
   while [ $# -gt 0 ]; do
     case "$1" in
-      --window-days) window="${2:-}"; shift 2 ;;
-      --today) today="${2:-}"; shift 2 ;;
+      --window-days) window="${2:-}"; shift 2 || die "expiry: --window-days requires a value" ;;
+      --today) today="${2:-}"; shift 2 || die "expiry: --today requires a value" ;;
       *) die "expiry: unexpected argument '$1'" ;;
     esac
   done

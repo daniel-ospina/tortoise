@@ -629,6 +629,11 @@ def test_bypass_visibility_is_a_run_summary_write():
     The acceptance is that a bypass is detectable WITHOUT reading a step log, so
     the helper must append to the summary — not merely log. A comment mentioning
     the variable does not count: the append is asserted on a non-comment line.
+
+    Every ``deploy-bypass.sh`` step must also bind the per-job audit marker the
+    helper records a fired bypass into — and every such step in a JOB must bind
+    the SAME path, because the report step writes that marker and the audit step
+    reads it (a divergence makes the audit under-report a live bypass).
     """
     text = _BYPASS_SCRIPT.read_text(encoding="utf-8")
     body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
@@ -642,6 +647,7 @@ def test_bypass_visibility_is_a_run_summary_write():
     # does) so EVERY such step in EVERY job is examined — a name-keyed mapping
     # would drop one of two same-named steps (#4802 review round 1).
     for job_name, steps in _jobs().items():
+        markers = []
         for step in steps:
             run = step.get("run") or ""
             if "deploy-bypass.sh" not in run:
@@ -650,10 +656,24 @@ def test_bypass_visibility_is_a_run_summary_write():
             assert "GITHUB_STEP_SUMMARY" not in run, (
                 f"step {name!r} must leave $GITHUB_STEP_SUMMARY to the helper"
             )
-            assert "DEPLOY_BYPASS_MARKER" in (step.get("env") or {}), (
+            env = step.get("env") or {}
+            assert "DEPLOY_BYPASS_MARKER" in env, (
                 f"step {name!r} in job {job_name!r} must bind "
                 "DEPLOY_BYPASS_MARKER for the per-job audit"
             )
+            markers.append(str(env["DEPLOY_BYPASS_MARKER"]))
+        # The marker path is a WRITE in the report step and a READ in the job's
+        # audit step, so the value must be ONE path per job. Asserting only that
+        # each step BINDS the variable let a divergence survive: with the audit
+        # pointed at another file it reads a marker nobody writes and states NOT
+        # bypassed for a gate the report block says BYPASSED (mutation-verified
+        # at this sha — `runner.temp}/deploy-bypass-audit.txt` left every #4759
+        # case green).
+        assert len(set(markers)) <= 1, (
+            f"job {job_name!r} binds {sorted(set(markers))} for DEPLOY_BYPASS_MARKER — the "
+            "report step writes this marker and the job's audit step reads it, so every "
+            "deploy-bypass.sh step in a job MUST bind the same path"
+        )
 
 
 def test_deploy_jobs_audit_every_bypassable_gate():
