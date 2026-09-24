@@ -196,8 +196,134 @@ def _seq_events(events):
             yield idx, item
 
 
+#: Defensive bound on a journalled vector's length. The writer emits exactly
+#: `EMBEDDING_DIM`; a hand-edited/corrupt record must not make a rebuild
+#: materialise an unbounded list. Far larger than any real width.
+_MAX_JOURNALLED_VECTOR_LEN = 8192
+
+
+def _writable_journalled_vector(value) -> list[float] | None:
+    """#5004: normalise a journal-carried vector, or None if unusable.
+
+    A journal record is a FILE — it can be hand-edited, truncated, or written
+    by an older/newer code path. Mirrors the #19/#4305 recovery-path rule: an
+    unusable value must DEGRADE to "not restored", never raise after the wipe
+    and strand the rebuilt graph.
+
+    ``float`` alone is NOT sufficient, which an earlier version of this helper
+    got wrong (verified): ``float('nan')`` and ``float('inf')`` succeed, and
+    ``json`` round-trips ``NaN``/``Infinity`` by default, so a crafted line
+    reached ``vecf32()`` and raised AFTER the wipe on every retry. A huge JSON
+    integer raises ``OverflowError``, which is not a ``TypeError``; both are
+    handled here. Non-finite and non-numeric values are refused, and an
+    implausibly long list is refused before it is materialised.
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if len(value) > _MAX_JOURNALLED_VECTOR_LEN:
+        return None
+    out: list[float] = []
+    for x in value:
+        try:
+            f = float(x)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(f):
+            return None
+        out.append(f)
+    return out or None
+
+
+def _record_embedding_identity(p: dict, warned: set) -> None:
+    """#5004: record (do not silence) a journalled vector's identity mismatch.
+
+    The decision required by the design is that the journal carries the vector
+    AS WRITTEN — the past cannot be recomputed — so it is restored verbatim,
+    and the divergence from the configured embedder is RECORDED here. A model
+    change therefore becomes explicit: the operator re-embeds deliberately, or
+    not at all. It must never be resolved by silently re-encoding, which is
+    exactly how a changed embedder yielded a different graph from the same
+    journal. (The canonical durability authority is
+    `docs/durability-posture.md` — this docstring deliberately makes no
+    competing source-of-truth claim.)
+
+    ``warned`` is the caller's per-rebuild-pass de-dup set (the `#2958`
+    `_deny_drop_warned` pattern): a swap would otherwise emit one line per
+    Point and bury the signal in O(N) identical warnings. The mismatch is
+    keyed by the identity pair, so every DISTINCT divergence still reports.
+    """
+    from tortoise.embeddings import embedding_identity
+    cur_model, cur_rev = embedding_identity()
+    j_model = p.get("embedding_model")
+    j_rev = p.get("embedding_revision")
+    if j_model is None and j_rev is None:
+        # No identity on the record. That is EXPECTED for a re-emitted snapshot
+        # (`stamp_journal_embedding(creating=False)` deliberately omits it, since
+        # the vector may predate a model change) and for a hand-built/foreign
+        # record. Restore verbatim — the journal is still the truth — and stay
+        # silent: warning here would fire on every routine promote, which is the
+        # false-alarm class the design's "record which" is not asking for. The
+        # creating record, where one exists, owns the attestation and WILL warn
+        # on a genuine mismatch.
+        return
+    if j_model != cur_model or j_rev != cur_rev:
+        key = ("identity", j_model, j_rev)
+        if key not in warned:
+            warned.add(key)
+            logger.warning(
+                "replay: journaled embedding was computed by %s@%s but this "
+                "store's embedder is %s@%s — restoring the JOURNALED vector "
+                "verbatim (the past cannot be recomputed); re-embed "
+                "deliberately to change it (#5004)",
+                j_model, j_rev, cur_model, cur_rev)
+    j_text = p.get("embedding_text_hash")
+    content = p.get("content")
+    if not (isinstance(j_text, str) and isinstance(content, str)):
+        return
+    # #5004 round-3: `_content_hash` is `text.encode("utf-8")`, which RAISES
+    # `UnicodeEncodeError` on a lone surrogate. This runs INSIDE `rebuild_all`,
+    # after the wipe and before the graph write, so an unguarded call would
+    # destroy the graph and strand every retry on one foreign/hand-edited line
+    # — the same after-the-wipe class the NaN/Overflow guard closes for the
+    # vector. `_revise_point` already wraps the same call (#19); a hash that
+    # cannot be computed simply cannot be compared.
+    try:
+        cur_text_hash = _content_hash(content)
+    except Exception:  # noqa: BLE001, RUF100
+        return
+    if j_text != cur_text_hash:
+        key = ("text", j_text, cur_text_hash)
+        if key not in warned:
+            warned.add(key)
+            logger.warning(
+                "replay: a journaled embedding's text-hash does not match "
+                "its content (Point %s: %s != %s) — the vector was computed "
+                "from different text (#5004)",
+                p.get("id"), j_text, cur_text_hash)
+
+
+def _warned_set(handler) -> set:
+    """Per-handler de-dup set for the #5004 replay warnings (the `#2958`
+    `_deny_drop_warned` pattern). Reset by `rebuild_all` alongside it, so each
+    rebuild pass reports every distinct divergence once."""
+    warned = getattr(handler, "_embed_identity_warned", None)
+    if warned is None:
+        warned = handler._embed_identity_warned = set()
+    return warned
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
+
+    # #2958/#5004: the per-rebuild-pass warning de-dup sets. Declared HERE so
+    # mypy does not have to infer them from the runtime
+    # `getattr(...)`/chained-assignment sites below: leaving them undeclared
+    # built a PARTIAL type that never resolved and surfaced as a spurious
+    # `Cannot determine type of "_deny_drop_warned" [has-type]` at its OTHER
+    # assignment (`rebuild_all` in `projection/__init__.py`) — verified by
+    # bisecting the mypy failure to this file.
+    _deny_drop_warned: set
+    _embed_identity_warned: set
 
     # Event dict keys that are never stored as node properties (#228).
     _META_KEYS: frozenset = frozenset({
@@ -296,6 +422,29 @@ class _EntityHandlers:
         "content", "is_operator", "op_type", "pointKind", "status",
         "authoredBy", "confidence", "createdAt", "created_at",
         "validFrom", "validTo", "updatedAt", "embedding",
+        # #5004: the embedding's IDENTITY travels with the vector in the journal
+        # payload (R1: STORE, do not regenerate). `_upsert_point_props` reads it
+        # to tell a faithful verbatim restore from a recorded model change, and
+        # it must NEVER become a node property: the design puts the identity in
+        # the PAYLOAD, and the live writer sets it only on the journal copy, so
+        # persisting it here would make replay diverge from live by three
+        # properties (caught by the #3312 round-trip guard before this entry).
+        "embedding_model", "embedding_revision", "embedding_text_hash",
+        # #5004 round-3: a DECLARED node property (own SET clause below), not
+        # journal-payload metadata. It marks a CALLER-supplied vector stored
+        # verbatim (`$embedding`, not `vecf32` — `create_point`'s recorded
+        # PR #3018 decision), so it must live on the NODE for a later re-emit
+        # (`promote_point` &c., which read the point back through `get_point`)
+        # to carry it; a payload-only flag was lost there and the replay then
+        # narrowed the vector to float32. In `_POINT_HANDLED` because its own
+        # clause owns it — the open-set passthrough must not also write it.
+        "embedding_verbatim",
+        # #5004 round-3: journal-payload metadata (
+        # `_write_capture_turns`): this capture did NOT encode a vector, it
+        # PRESERVED the node's existing one, so the record must not attest the
+        # ACTIVE model as its origin (`stamp_journal_embedding`). Never a node
+        # property — the node's vector identity is not a fact about the node.
+        "embedding_preserved",
         # A10 operator-scoped replay extension
         "direction", "label",
         # structural / edge-carried — never node props via passthrough
@@ -451,11 +600,77 @@ class _EntityHandlers:
             # crash the Falkor path (parity with _apply_one's guard).
             prov = {}
 
-        # Compute embedding for non-operator Points (#7778)
+        # Compute OR RESTORE the embedding for non-operator Points (#7778).
+        # #5004: the journal is PRIMARY for this field. When the payload carries
+        # a vector — the journal recorded it with its model identity — restore
+        # it VERBATIM and do NOT re-encode. R1 (`docs/durability-posture.md`
+        # → *Derived properties that are STORED*; design source
+        # `STORAGE-ARCHITECTURE.md` §3/§14.1
+        # O1): the embedding STORES, it is not regenerated, because a re-embed
+        # is a RE-RUN, not a replay. Re-encoding here was the defect: a replay
+        # under a changed embedder silently produced a different graph from the
+        # same journal.
         embedding = None
+        embedding_clear = False
+        # PRESENCE IS OWNERSHIP (#5004 round-3). A producer that owns this field
+        # ALWAYS writes the key — the vector, or an explicit None when it
+        # genuinely has none (`stamp_journal_embedding` guarantees it). So the
+        # key being present means "the journal has spoken about this field; do
+        # NOT recompute". The absent case is a pre-#5004 strip-era record,
+        # where recomputation is the only behaviour available.
+        owns_embedding = "embedding" in p
+        journalled = _writable_journalled_vector(p.get("embedding"))
+        if not op and journalled is not None:
+            # Guard the width exactly as `encode_for_store` does for the
+            # recompute path: a vector of the wrong width is not a near-miss,
+            # it is a broken leg the HNSW index cannot hold (#4194/#4280).
+            dim = self.required_embedding_dim
+            if dim is not None and len(journalled) != dim:
+                # DELIBERATE refusal, not an oversight (#5004 review). Writing
+                # the journalled vector is impossible at this width, and
+                # RECOMPUTING it would store a vector whose model the journal
+                # never recorded — which is exactly how `derived =
+                # replay(journal)` goes false again. Refusing keeps the store a
+                # pure function of (journal, config); the operator re-embeds
+                # deliberately. Recorded once per (width, store-dim) pair.
+                warned = _warned_set(self)
+                key = ("width", len(journalled), dim)
+                if key not in warned:
+                    warned.add(key)
+                    logger.warning(
+                        "replay: a journaled embedding has width %d but this "
+                        "store holds %d — leaving it unset rather than writing "
+                        "a vector the index cannot hold, or recomputing one "
+                        "the journal never recorded (#5004)",
+                        len(journalled), dim)
+            else:
+                embedding = journalled
+                _record_embedding_identity(p, _warned_set(self))
+        elif not op and owns_embedding:
+            # The journal owns the field and carries NO usable vector — either
+            # an explicit None (the live write had no embedder) or a value the
+            # guard refused. Never recompute: re-encoding here is the round-3
+            # defect (on a re-capture made while the embedder was down, the
+            # live write PRESERVED-or-CLEARED the node's vector, and re-encoding
+            # would produce a vector the live graph does not have).
+            #
+            # #5004 round-6 — an explicit None is a CLEAR, not just a refusal
+            # to write. Live's turn write has an `ELSE NULL` arm for exactly
+            # this case (`_TURN_WRITE_CYPHER`: "a preserved vector for changed
+            # text would rank the turn by text no longer on the node"). An
+            # owned None that merely left `n.embedding` alone therefore
+            # RESURRECTED the vector an EARLIER record had set — on the
+            # highest-volume producer, under the same embedder. `pass` cannot
+            # express a clear; only an explicit arm can (see `$embedding_clear`
+            # in the SET clause).
+            if p.get("embedding") is None:
+                embedding_clear = True
+        # No journalled vector (a pre-#5004 strip-era log): there is nothing to
+        # restore, so recompute — the previous behaviour, kept deliberately so
+        # an old journal still replays and still yields vectors.
         # #331 (review r4): only embed real content — an empty string
         # produced a junk vector in the HNSW index.
-        if not op and p.get("content"):
+        elif not op and p.get("content"):
             try:
                 from tortoise.embeddings import encode_for_store
                 embedding = encode_for_store(
@@ -491,7 +706,18 @@ class _EntityHandlers:
             "n.pointKind=coalesce($pk, n.pointKind)",
             "n.status=coalesce($st, n.status, 'live')",
             "n.authoredBy=coalesce($ab, n.authoredBy)",
-            "n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END",
+            "n.embedding=CASE WHEN $embedding_clear THEN NULL "
+            "    WHEN $embedding IS NULL THEN n.embedding "
+            "    WHEN $embedding_verbatim THEN $embedding "
+            "    ELSE vecf32($embedding) END",
+            # #5004 round-3: a CALLER-owned vector's storage FORM, as its own
+            # clause (mirroring `is_episodic`). `CASE … ELSE n.embedding_verbatim`
+            # keeps the property ABSENT for a server-vectored point: writing an
+            # explicit `false` there would make live (absent) and replay
+            # (false) disagree. Set only when truthy, so it survives the later
+            # re-emits that read the point back through `get_point`.
+            "n.embedding_verbatim=CASE WHEN $evb THEN true "
+            "    ELSE n.embedding_verbatim END",
             "n.content_hash=coalesce($ch, n.content_hash)",
             "n.confidence=coalesce($cf, n.confidence)",
             "n.createdAt=coalesce($ca, n.createdAt, $now)",
@@ -506,6 +732,16 @@ class _EntityHandlers:
             "st": p.get("status"),
             "ab": p.get("authoredBy"),
             "embedding": embedding,
+            # #5004 round-3: a caller-supplied vector is restored RAW — the
+            # same form `create_point` stored it in (`$embedding`, not
+            # `vecf32`, per the recorded PR #3018 decision). Casting it here
+            # would narrow an explicitly caller-owned float64 list to float32
+            # and the rebuild would disagree with live by ~1e-8 on every
+            # component (`0.1` -> `0.10000000149011612`).
+            "embedding_verbatim": bool(p.get("embedding_verbatim")),
+            "evb": bool(p.get("embedding_verbatim")),
+            # #5004 round-6: an owned None CLEARS — see `embedding_clear` above.
+            "embedding_clear": embedding_clear,
             "ch": point_content_hash,
             "cf": p.get("confidence"),
             "ca": p.get("createdAt") or p.get("created_at"),

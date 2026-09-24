@@ -671,7 +671,14 @@ _TURN_WRITE_CYPHER = (
     # the journal records the stored values, never the literal `now`/`draft`
     # — emitting those regresses a promoted turn to draft on replay and
     # drifts createdAt on every re-capture (#3947 review F4).
-    "RETURN turn.id AS id, t.createdAt AS createdAt, t.status AS status"
+    "RETURN turn.id AS id, t.createdAt AS createdAt, t.status AS status, "
+    # #5004 round-3: the embedding the write ACTUALLY left on the node. On a
+    # re-capture with the embedder unavailable the CASE above PRESERVES the
+    # prior vector, and this read-back is the only way to journal what
+    # survived — journalling `turn.emb` (NULL) instead made the replay take
+    # the recompute branch and OVERWRITE the vector the first capture
+    # journalled, reintroducing exactly the divergence #5004 removes.
+    "       t.embedding AS embedding"
 )
 
 
@@ -781,7 +788,7 @@ def _write_capture_turns(
         _TURN_WRITE_CYPHER,
         params={"turns": turn_rows, "sid": session_id, "now": now},
     ).result_set
-    stored = {r[0]: (r[1], r[2]) for r in (rows or [])}
+    stored = {r[0]: (r[1], r[2], r[3]) for r in (rows or [])}
 
     # #1920: a SHORTER re-capture must DELETE the prior capture's turns beyond
     # the new window. The write above MERGEs ``{session_id}_t{i}`` per index,
@@ -833,7 +840,39 @@ def _write_capture_turns(
         sdk._journal_entity_mutation("Point", tid, "delete")
     for i, turn in enumerate(windowed):
         turn_id = f"{session_id}_t{i}"
-        created_at, status = stored.get(turn_id, (None, None))
+        created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
+        # #5004: the turn's vector WAS stored live (`turn_embs[i]` is the `emb`
+        # column of `_TURN_WRITE_CYPHER`), so it must be journalled too — this
+        # is the highest-volume Point producer, and without it a replay
+        # re-encoded under the configured embedder and silently changed every
+        # captured turn's vector.
+        #
+        # #5004 round-3: when THIS capture encoded no vector (`turn_embs[i]`
+        # is None — the embedder was unavailable) the live write may still
+        # PRESERVE the node's prior vector (same content), or CLEAR it
+        # (changed content). Journal `stored_emb`, the value the write left,
+        # NOT `turn_embs[i]`: the key is ALWAYS present, so the replay is told
+        # the journal OWNS this field for this id and must restore-or-leave-
+        # unset rather than re-encode under whatever model is active.
+        _turn_snapshot = {
+            "id": turn_id,
+            "content": turn_texts[i],
+            "pointKind": "event",
+            "speaker": _normalize_turn_role(turn.get("role")),
+            "is_episodic": True,
+            "status": status if status is not None else "draft",
+            "createdAt": created_at if created_at is not None else now,
+        }
+        _turn_snapshot["embedding"] = (
+            turn_embs[i] if turn_embs[i] is not None else stored_emb)
+        # #5004 round-3: when THIS capture encoded nothing, what rides the
+        # record is the vector the write PRESERVED — computed by whatever model
+        # was active at the ORIGINAL capture. Attesting the active model here
+        # would record a false origin (and make a model change look silent if
+        # the original record is gone), so say the vector was preserved and
+        # `stamp_journal_embedding` stamps no identity.
+        if turn_embs[i] is None and stored_emb is not None:
+            _turn_snapshot["embedding_preserved"] = True
         sdk._emit_event(
             # Parity with `create_point`'s emission (#3947 review F5): the
             # PAYLOAD carries `content_hash`. It belongs here and NOT in the
@@ -843,15 +882,7 @@ def _write_capture_turns(
             "PointAdded",
             {"id": turn_id, "kind": "event",
              "content_hash": turn_hashes[i]},
-            point={
-                "id": turn_id,
-                "content": turn_texts[i],
-                "pointKind": "event",
-                "speaker": _normalize_turn_role(turn.get("role")),
-                "is_episodic": True,
-                "status": status if status is not None else "draft",
-                "createdAt": created_at if created_at is not None else now,
-            },
+            point=_turn_snapshot,
             contains_session=session_id,
         )
 
@@ -1212,6 +1243,40 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
         raise ValueError(
             "'is_episodic' is a server-managed field (quota discriminator) "
             "and cannot be set via props."
+        )
+    # #5004 review: the embedding is a DERIVED, server-computed field for the
+    # NORMAL path. It is deliberately NOT rejected here: `create_point` has a
+    # recorded decision (PR #3018 review P2) that a CALLER-supplied `embedding`
+    # is stored VERBATIM — "a silent float64-list → vecf32/float32 rewrite of
+    # an explicitly caller-owned value would change what a vector read
+    # returns" (`_embedding_expr = "$embedding"`). Rejecting the prop would
+    # reverse that ruling silently, so instead the writer marks the payload
+    # `embedding_verbatim` and the REPLAY honours it (restores raw, no
+    # `vecf32`) — see `stamp_journal_embedding` and `_upsert_point_props`.
+    # What this boundary DOES still reject is forging the ATTESTATION: a
+    # caller-supplied vector must not be able to claim a server identity.
+    #
+    # #5004 review: the embedding's journal IDENTITY keys are payload metadata
+    # minted by the writer (`stamp_journal_embedding`). The replay drops them
+    # from the payload (`_POINT_HANDLED`), so a caller-supplied value would
+    # persist LIVE and vanish on a rebuild — a live/replay parity break. They
+    # are brand-new names, so rejecting them cannot break an existing caller;
+    # this closes the only route by which they could become node properties.
+    _embed_identity_keys = set(props) & {
+        "embedding_model", "embedding_revision", "embedding_text_hash",
+        # #5004 round-3/4: the verbatim marker is server-owned too. It is a
+        # declared node property (so a re-emit carries it), which means a
+        # tenant-supplied value WOULD persist live — and it both flips the
+        # replay's storage form and silences the R1 model-change attestation.
+        # `embedding_preserved` is the same argument: truthy makes
+        # `stamp_journal_embedding` skip the identity on a CREATING record, so
+        # a caller could silence the model-change record R1 exists to keep
+        # (and, living only on the live side, it is a parity break too).
+        "embedding_verbatim", "embedding_preserved"}
+    if _embed_identity_keys:
+        raise ValueError(
+            f"{sorted(_embed_identity_keys)} are server-managed embedding "
+            "journal fields and cannot be set via props."
         )
     # #2491: outdated is the terminalizing flag written ONLY by the lifecycle
     # writers via raw cypher (invalidate_point/supersede_point SET
@@ -2836,11 +2901,37 @@ class TortoiseSDK:
         # graph branch order (code-review #4, PR #2664).
         _jsonl_actor = _current_actor_user_id.get()
         if point is not None:
-            # Strip embedding — it is recomputed on replay by
-            # _upsert_point_props (vecf32 serialization is fragile).
-            # content_hash is also stripped — it is derived from content.
-            clean = {k: v for k, v in point.items()
-                     if k not in ("embedding", "content_hash")}
+            # #5004: the embedding IS journalled. R1 (`docs/durability-posture.md`
+            # → *Derived properties that are STORED, not recomputed*; design
+            # source `STORAGE-ARCHITECTURE.md` §3/§14.1 O1, PR #5016, un-merged)
+            # is that the embedding STORES —
+            # it is not regenerated on replay, because a re-embed is a RE-RUN,
+            # not a replay: its output depends on model identity, revision and
+            # tokenizer, none of which the journal used to carry. The old strip
+            # here made `derived = replay(journal)` FALSE for the largest cost
+            # lever, and a changed embedder silently produced a DIFFERENT graph
+            # from the same journal. The payload now carries the vector plus
+            # its identity (model/revision/text-hash) so replay restores it
+            # verbatim and a model change is recorded, not silent.
+            #
+            # content_hash is still stripped — it is a PURE function of
+            # content, so it is genuinely recomputable (#2795 D2).
+            clean = {k: v for k, v in point.items() if k != "content_hash"}
+            # #5004 round-3: PRESENCE IS OWNERSHIP. `get_point` omits a NULL
+            # property, so a point with no vector would arrive here with the
+            # key ABSENT — and the replay would read that as "legacy record,
+            # recompute" and invent a vector the live node does not have. The
+            # producer owns this field on every snapshot it emits, so force
+            # the key present (None when there is genuinely nothing).
+            clean.setdefault("embedding", None)
+            # THE shared seam (also used by `EventAPI._point`) — a second,
+            # divergent writer of this field is the failure mode #5004 exists
+            # to remove. `creating` gates the text-hash attestation: only a
+            # PointAdded/OperatorAdded vector was computed from the content
+            # riding with it (see `stamp_journal_embedding`).
+            from .embeddings import stamp_journal_embedding
+            clean = stamp_journal_embedding(
+                clean, creating=type_ in ("PointAdded", "OperatorAdded"))
             # Operators may not store 'content' as a node property (#548);
             # _upsert_point_props requires it — synthesize a fallback.
             if "content" not in clean:
@@ -3262,9 +3353,34 @@ class TortoiseSDK:
         # change what a vector read returns. The server-computed embedding
         # keeps the original `vecf32()` coercion (unchanged).
         _embedding_expr = "vecf32($embedding)"
+        _verbatim_embedding = False
         if "embedding" in props:
             embedding = props.pop("embedding")
+            # #5004 round-6: the caller's vector is subject to the SAME
+            # store-width guard the server-computed one already passes through
+            # (`encode_for_store` -> `_degrade_to_width`). Without it the live
+            # node stores a width the HNSW index cannot hold, while the REPLAY
+            # refuses that same width and leaves the node vectorless — so the
+            # rebuilt graph loses a vector live holds, i.e. `derived =
+            # replay(journal)` is FALSE and the guard is one-sided. Degrading
+            # BOTH sides to the store's declared width is the only consistent
+            # arm; a wrong-width value is never written by either.
+            _dim = self._get_proj().required_embedding_dim
+            if embedding is not None and _dim is not None:
+                try:
+                    _w = len(embedding)
+                except TypeError:  # not sized — cannot be a vector
+                    _w = None
+                if _w != _dim:
+                    _logger.warning(
+                        "create_point: a caller-supplied embedding of width "
+                        "%s does not match this store's %d — storing the point "
+                        "WITHOUT a vector rather than one the index cannot "
+                        "hold or the replay would refuse (#5004)",
+                        _w if _w is not None else "?", _dim)
+                    embedding = None
             _embedding_expr = "$embedding"  # caller value stored verbatim
+            _verbatim_embedding = embedding is not None
         _create_params["embedding"] = embedding
         for _i, (_key, _val) in enumerate(props.items()):
             _pname = f"_cp{_i}"
@@ -3273,6 +3389,19 @@ class TortoiseSDK:
         # The embedding is written LAST (and `embedding` was popped from props
         # above), so the map carries exactly one `embedding` key.
         _create_map["embedding"] = _embedding_expr
+        # #5004 round-3: a CALLER-owned vector is stored VERBATIM (the recorded
+        # PR #3018 decision) and the replay must restore it in that same FORM.
+        # The noun that carries that fact has to be the NODE, not the journal
+        # payload: every later re-emit (`promote_point`, `merge_points`,
+        # `mitigate_operator`, annotate) reads this point back through
+        # `get_point`, and a payload-only flag was LOST there — the replay then
+        # took the `vecf32` branch and narrowed the vector
+        # (`0.1` -> `0.10000000149011612`), making `derived = replay(journal)`
+        # false on every promote of a caller-vectored point. As a declared,
+        # server-managed node property it rides `get_point` for free and is
+        # restored by its own SET clause (`_upsert_point_props`).
+        if _verbatim_embedding:
+            _create_map["embedding_verbatim"] = "true"
         _create_fields = "".join(
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
@@ -5341,6 +5470,44 @@ class TortoiseSDK:
             props["content_hash"] = _content_hash(props["content"])
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
+        # #5004 round-4: a caller-supplied vector is stored VERBATIM here
+        # (`n += $props`, never `vecf32`) — the same recorded PR #3018 decision
+        # `create_point` implements. Mark it on the NODE (so a LATER re-emit —
+        # `promote_point`, `merge_points`, annotate — carries it and the replay
+        # does not narrow the vector through `vecf32`: `0.3` ->
+        # `0.30000001192092896`). Set BEFORE the writes below, because the
+        # marker has to ride `get_point`; `_sanitize_props` has already run, so
+        # this server-managed key cannot have come from the caller, and the
+        # `is not None` gate leaves a "clear the vector" call unmarked.
+        if props.get("embedding") is not None:
+            # #5004 round-6: same store-width guard as `create_point` — a
+            # wrong-width vector is written live but REFUSED on replay, so the
+            # rebuilt graph would lose a vector live holds.
+            _dim = proj.required_embedding_dim
+            if _dim is not None:
+                try:
+                    _w = len(props["embedding"])
+                except TypeError:
+                    _w = None
+                if _w != _dim:
+                    _logger.warning(
+                        "update_point: a caller-supplied embedding of width "
+                        "%s does not match this store's %d — clearing it "
+                        "rather than storing one the index cannot hold or the "
+                        "replay would refuse (#5004)",
+                        _w if _w is not None else "?", _dim)
+                    props["embedding"] = None
+        # #5004 round-8: the marker follows the vector — SET when the caller
+        # supplies one, CLEARED when the caller clears it. `update_point(
+        # embedding=None)` used to remove the vector but leave the marker, so
+        # the node claimed "caller-owned, stored verbatim" with no vector, and
+        # a rebuild then either dropped the marker (diverging from live) or put
+        # it back beside a RECOMPUTED vector (the false-verbatim class round 6
+        # closed). Gated on the KEY, so an unrelated update does not touch it.
+        if props.get("embedding") is not None:
+            props["embedding_verbatim"] = True
+        elif "embedding" in props:
+            props["embedding_verbatim"] = None
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
@@ -17809,10 +17976,71 @@ class TortoiseSDK:
 
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             if label == "Point":
+                # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
+                # discipline on this generic surface too. `_sanitize_props`
+                # deliberately ACCEPTS a caller `embedding` (the recorded
+                # PR #3018 decision: stored verbatim), and this branch writes
+                # it RAW through `SET n += $p` — but it never set the
+                # `embedding_verbatim` marker. Without the marker a LATER
+                # re-emit still narved the vector: `promote_point` journals
+                # `get_point(pid)`, whose snapshot now carries the raw vector
+                # and no marker, so `_upsert_point_props` took its `vecf32`
+                # arm — live `0.3` vs replay `0.30000001192092896`, the exact
+                # "same journal, different graph" class #5004 removes. The
+                # same store-width guard as `update_point` applies for the
+                # same reason (a wrong-width vector is written live but
+                # REFUSED on replay). Gated on the KEY, so an unrelated
+                # mutation leaves the marker alone; `_sanitize_props` has
+                # already rejected a caller-supplied marker, so this cannot
+                # be forged. NOTE this does NOT widen the #4094 exemption:
+                # `_update_entity` still journals no embedding line of its
+                # own — it only makes the marker ride a re-emit that some
+                # OTHER record journals.
+                if "embedding" in props:
+                    # A LOCAL copy: `_CANONICAL_ENTITY_ID_PROPS` visits every
+                    # label with this SAME dict (`SET n += $props`, and the
+                    # non-Point branch journals it as `state`), so mutating
+                    # `props` here would stamp the Point-only marker onto
+                    # Subject/Object/Document/Source/Event — a round-11
+                    # reviewer reproduced exactly that via
+                    # `update_entity(<subject_id>, embedding=…)`.
+                    point_props = dict(props)
+                    if point_props.get("embedding") is not None:
+                        _dim = proj.required_embedding_dim
+                        if _dim is not None:
+                            try:
+                                _w = len(point_props["embedding"])
+                            except TypeError:
+                                _w = None
+                            if _w != _dim:
+                                _logger.warning(
+                                    "update_entity: a caller-supplied "
+                                    "embedding of width %s does not match "
+                                    "this store's %d — clearing it rather "
+                                    "than storing one the index cannot hold "
+                                    "or the replay would refuse (#5004)",
+                                    _w if _w is not None else "?", _dim)
+                                point_props["embedding"] = None
+                    # `None` (not `False`): `SET n += {k: null}` REMOVES the
+                    # property, matching `update_point`'s clear and keeping
+                    # "absent" meaning "server-vectored" on both sides.
+                    # NOTE the marker is LIVE-ONLY on this path: the branch
+                    # emits no embedding record of its own (#4094), so a
+                    # rebuild does not reproduce it. That residual is pinned
+                    # in `test_update_entity_point_branch_is_a_declared_
+                    # exemption`; the alternative (leaving the vector unmarked)
+                    # re-opens the `vecf32` narrowing on the LATER, JOURNALED
+                    # `promote_point` re-emit, which is the class #5004 exists
+                    # to remove.
+                    point_props["embedding_verbatim"] = (
+                        True if point_props.get("embedding") is not None
+                        else None)
+                else:
+                    point_props = props
                 res = proj.g.query(
                     f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p "
                     "RETURN count(n)",
-                    params={"id": id_val, "p": props},
+                    params={"id": id_val, "p": point_props},
                 )
                 # Post-apply, per matched label — the `_delete_entity`
                 # emitter's ordering contract (a failed/no-op write never
