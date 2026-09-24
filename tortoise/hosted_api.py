@@ -105,8 +105,8 @@ from tortoise.monitoring import (
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
-    _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
+    journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
@@ -2834,11 +2834,17 @@ async def provision_tenant(request: Request):
             "CREATE (:TeamMeta {name: $name, created: $now})",
             {"name": org_name, "now": now},
             org_id=org_id)
-        org_graph.query(_init_q, params=_init_p)
+        # #3390 WRITE-AHEAD: journal BEFORE the CREATE (was record-after-effect
+        # — a kill in the gap left an unowned org_* graph). Rollback must not
+        # remove the line: it is the ownership tombstone the sweep cleans up by.
+        # #7795 review P2-3: `org_id` here is CALLER-SUPPLIED, so the write-ahead
+        # line is written ONLY when THIS call mints the TeamMeta — journaling a
+        # graph we merely adopted would hand a live tenant graph to the session
+        # sweep for DETACH+DELETE. `_minted_here` is computed above, BEFORE this
+        # call, so the write-ahead ordering (journal ⇒ CREATE) is preserved.
         if _minted_here:
-            # #1686: journal the org_* graph THIS call minted (session sweep
-            # drops it).
-            _journal_append_product(graph_name)
+            journal_mint_write_ahead(graph_name)
+        org_graph.query(_init_q, params=_init_p)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
@@ -6995,6 +7001,14 @@ async def register_user(request: Request, response: Response):
         # orgs row (org without a resolvable graph) is worse than an
         # unreferenced namespace.
         import hashlib as _hashlib
+        # #3390 WRITE-AHEAD: journal BEFORE `_make_sdk(namespace=org_id)
+        # ._get_proj()`. A projection's __init__ runs `_ensure_indexes()` (a
+        # query) and therefore MATERIALIZES org_{org_id}; journaling only
+        # before the CREATE would leave a materialization→journal gap (a kill
+        # there strands an unowned graph). The Supabase lane already
+        # compensates by dropping the graph on a later provision failure; the
+        # line is the ownership tombstone for that drop.
+        journal_mint_write_ahead(graph_name)
         try:
             org_graph = _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
@@ -7006,8 +7020,6 @@ async def register_user(request: Request, response: Response):
                 {"name": org_name, "now": now},
                 org_id=org_id)
             org_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted org_* graph (session sweep drops it).
-            _journal_append_product(graph_name)
         except Exception:
             raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
         try:
@@ -7096,9 +7108,10 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 {"name": org_name, "now": now},
                 org_id=org_id)
+            # #3390 WRITE-AHEAD: journal BEFORE the CREATE (was
+            # record-after-effect — an unowned org_* graph on a mid-gap kill).
+            journal_mint_write_ahead(graph_name)
             org_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted org_* graph (session sweep drops it).
-            _journal_append_product(graph_name)
 
             # #318 (multi-tenant pack isolation): activate the starter pack
             # set — registry-mode self-service path (the Supabase-mode path
@@ -12838,6 +12851,14 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
     """
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
+    # #3390 WRITE-AHEAD: journal BEFORE `_make_sdk(namespace=org_id)._get_proj()`
+    # — its `_ensure_indexes()` MATERIALIZES org_{org_id}. A kill between that
+    # materialization and the journal is the orphan window. The idempotency
+    # probe below may early-return on an already-initialised graph: this session
+    # has still materialized it, so the ownership line is written on that path
+    # too (the invariant is materialized ⇒ journaled; #3406 tracks the
+    # sweep-side protection for a pre-existing same-named graph).
+    journal_mint_write_ahead(graph_name)
     proj = _make_sdk(namespace=org_id)._get_proj()
     # ⚠️ Do NOT de-duplicate this literal against the SDK's namespace rule by
     # reading `proj._graph_name` back. That attribute carries the PHYSICAL
@@ -12870,8 +12891,6 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
         {"name": name, "now": datetime.now(UTC).isoformat()},
         org_id=org_id, fork=init_fork, compact=init_compact)
     graph.query(_init_q, params=_init_p)
-    # #1686: journal the minted org_* graph (session sweep drops it).
-    _journal_append_product(graph_name)
     return graph_name
 
 

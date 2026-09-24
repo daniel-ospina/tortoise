@@ -340,6 +340,7 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  - test_write_ahead_mint.py
   # #3808: the CLI half of the capture install (`tortoise install <harness>`
   # in tortoise/__main__.py, an api-classified source) — dual-registered so a
   # CLI-wiring regression still runs the install guard. See the core entry for
@@ -1599,6 +1600,13 @@ durations:
   # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
   # (7 tests, DB-free, app-boot-free) on a loaded machine.
   test_backup_watcher_health.py: 2.0
+  # #3426 (merge resolution — added by the #3390 write-ahead-mint PR): this PR's
+  # own hermetic ordering + AST guard. It has NO CI junit measurement yet, so it
+  # enters at the flat 2.0s default under the #3400/#4221 convention — the
+  # conservative floor keeps the 90% durations-coverage floor satisfied (main sat
+  # at 541/601 = 90.02%, and this fast-pool file without an entry dropped it to
+  # 541/602 = 89.9%). Refresh from the first post-merge main run that includes it.
+  test_write_ahead_mint.py: 2.0
   # #2718: new file, so no CI junit measurement yet — enter at the flat 2.0s
   # default per the #3400/#4221 convention (the conservative floor keeps the
   # durations-coverage floor satisfied) and refresh from the first post-merge
