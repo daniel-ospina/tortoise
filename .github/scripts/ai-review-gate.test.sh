@@ -37,6 +37,35 @@
 #       public key — never a pass)
 #   (n) a malformed trailing line cannot hijack the wrong-repo diagnostic and
 #       suppress the accurate stale/diff explanation
+#   (o) normalized-digest acceptance (#1362): a marker carrying the NORMALIZED
+#       digest of a base-moved diff carries forward (the D1 win); the legacy
+#       RAW digest is STILL accepted for the same diff (backward compat); a
+#       marker matching neither is rejected; a normalized diff= still fails
+#       closed when the fetch fails; and the head-bound path (rule (a)) is
+#       unchanged
+#   (p) a whitespace-only change changes the normalized digest (anti-
+#       `patch-id` pin — `git patch-id --stable` would MATCH and falsely
+#       carry a stale verdict forward)
+#   (q) the #1362 binary carve-out (amendment to the 2026-09-23 ruling, per
+#       the ruling's own rationale — agent-infra#1362 comment 5806797023):
+#       two DIFFERENT binaries at the same path normalize to DIFFERENT
+#       digests (the fail-open is closed, end to end at the gate), a text
+#       base-move keeps the SAME normalized digest (no #4969 regression), a
+#       binary base-move keeps it too, binary add/delete/mode-change entries
+#       keep the `index` line, a hunk-less NON-binary entry keeps it as well
+#       (the predicate is HUNK PRESENCE, not binary-marker presence), the
+#       legacy raw-hash arm still accepts, and everything still fails closed
+#       when the diff cannot be fetched
+#   (q2) multi-entry ENTRY-SCOPING: two distinct binaries sharing a diff with a
+#       hunk-bearing entry keep DISTINCT digests (binary before AND after the
+#       hunk), and the multi-entry normalized bytes are pinned — a normalizer
+#       that shares hunk state across entry boundaries, or drops an entry on
+#       flush, fails HERE (every `index KEPT` vector above is single-entry)
+#   plus direct vector tests of the extracted `normalize_review_diff`
+#       function against the #1362 spec (ENTRY-SCOPED index-line drop —
+#       dropped only when the entry carries a hunk, kept verbatim otherwise —
+#       hunk-header rewrite with the absent-count default of 1, mode-width
+#       boundary, and final-newline preservation)
 #   plus the static invariants: the required job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
 #   trigger must be EXACTLY `pull_request_target` (asserted over `pull_request*`
@@ -91,6 +120,108 @@ if ! grep -q 'AI_REVIEW_GATE_KEY' "$RUN_BLOCK" || ! grep -q 'live_diff_hash' "$R
     exit 1
 fi
 if bash -n "$RUN_BLOCK"; then ok "extracted run block parses (bash -n)"; else bad "extracted run block has a bash syntax error"; fi
+
+# ── normalize_review_diff: direct vector tests (#1362) ────────────────────
+# The gate normalizes the fetched diff before hashing it. Extract the helper
+# from the SAME run block and drive the #1362 spec vectors through it directly,
+# so a subtly wrong sed expression fails HERE with a named vector instead of
+# only as an opaque digest mismatch in the end-to-end cases below.
+NORM_FN="$T/normalize-fn.sh"
+awk '/^normalize_review_diff\(\) \{/ { f=1 } f { print } f && /^\}$/ { exit }' \
+    "$RUN_BLOCK" > "$NORM_FN"
+if [ -s "$NORM_FN" ] && grep -q 'index \[0-9a-f\]' "$NORM_FN"; then
+    ok "extracted normalize_review_diff from the run block"
+    # shellcheck disable=SC1090
+    source "$NORM_FN"
+else
+    bad "could not extract normalize_review_diff from the run block (the vector tests would pass vacuously)"
+fi
+
+check_norm() { # <input> <expected-output>
+    local got
+    got="$(printf '%s' "$1" | normalize_review_diff)"
+    if [ "$got" = "$2" ]; then
+        ok "normalize [$1] -> [$2]"
+    else
+        bad "normalize [$1] -> [$got] (want [$2])"
+    fi
+}
+# Required #1362 vectors.
+check_norm '@@ -1,5 +1,7 @@' '@@ -0,5 +0,7 @@'
+check_norm '@@ -12 +12 @@' '@@ -0,1 +0,1 @@'
+check_norm '@@ -12,0 +13,4 @@ def f():' '@@ -0,0 +0,4 @@ def f():'
+# The index line is dropped ONLY inside an entry that carries a hunk (#1362
+# amendment): the hunk content already carries the change.
+check_norm $'diff --git a/x b/x\nindex 1a2b3c4..5d6e7f8 100644\n@@ -1,2 +1,3 @@\n ctx\n+added' \
+           $'diff --git a/x b/x\n@@ -0,2 +0,3 @@\n ctx\n+added'
+check_norm $'diff --git a/x b/x\nindex 1a2b3c4..5d6e7f8\n@@ -1 +1 @@\n-a\n+b' \
+           $'diff --git a/x b/x\n@@ -0,1 +0,1 @@\n-a\n+b'
+# ...and KEPT in a hunk-less entry, where no hunk content carries it. The
+# predicate is HUNK PRESENCE, not the presence of a binary marker: a binary
+# entry and a hunk-less empty-file add/delete BOTH keep the line.
+check_norm 'index 1a2b3c4..5d6e7f8 100644' 'index 1a2b3c4..5d6e7f8 100644'
+check_norm 'index 1a2b3c4..5d6e7f8' 'index 1a2b3c4..5d6e7f8'
+check_norm $'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ' \
+           $'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ'
+check_norm $'diff --git a/empty b/empty\nnew file mode 100644\nindex 0000000..e69de29' \
+           $'diff --git a/empty b/empty\nnew file mode 100644\nindex 0000000..e69de29'
+# One side missing its count defaults that side to 1; the other count is kept.
+check_norm '@@ -5,3 +9 @@ rest' '@@ -0,3 +0,1 @@ rest'
+check_norm '@@ -5 +9,3 @@ rest' '@@ -0,1 +0,3 @@ rest'
+# Mode width is EXACTLY six octal digits: seven digits is not git's index line.
+check_norm 'index 1a2b3c4..5d6e7f8 1006440' 'index 1a2b3c4..5d6e7f8 1006440'
+check_norm 'index 1a2b3c4..5d6e7f8 10064' 'index 1a2b3c4..5d6e7f8 10064'
+# ...and the mode-width boundary holds INSIDE a hunk entry too: a 7-digit mode
+# is not git's index line, so it is passed through even when a hunk is present.
+check_norm $'diff --git a/x b/x\nindex 1a2b3c4..5d6e7f8 1006440\n@@ -1 +1 @@\n-a\n+b' \
+           $'diff --git a/x b/x\nindex 1a2b3c4..5d6e7f8 1006440\n@@ -0,1 +0,1 @@\n-a\n+b'
+# Non-hex and non-index lines pass through unchanged.
+check_norm 'diff --git a/x b/x' 'diff --git a/x b/x'
+# Final-newline state is preserved (sed); awk would append one and shift the
+# digest, so this pins the choice of tool as much as the rewrite itself.
+nl_missing="$(printf 'x' | normalize_review_diff | wc -c | tr -d ' ')"
+nl_present="$(printf 'x\n' | normalize_review_diff | wc -c | tr -d ' ')"
+if [ "$nl_missing" = "1" ] && [ "$nl_present" = "2" ]; then
+    ok "normalization preserves the final-newline state (missing stays missing)"
+else
+    bad "normalization changed the final-newline state (missing -> '$nl_missing' bytes, present -> '$nl_present' bytes)"
+fi
+
+# ── (q2) multi-entry entry-scoping (the #1362 amendment, pinned) ──────────
+# Every `index KEPT` vector above is a SINGLE-entry fixture, so a normalizer
+# whose hunk state leaks ACROSS entry boundaries — a whole-diff `has_hunk`, or
+# an entry reset that drops the preceding entry — satisfies them all. With a
+# hunk-bearing entry sharing the diff, such a normalizer makes two DISTINCT
+# binaries normalize IDENTICALLY: exactly the unreviewed-binary fail-open this
+# amendment closes. These pairs differ ONLY in a binary entry's `index` line,
+# in BOTH orders, and the multi-entry normalized BYTES are pinned verbatim.
+HUNK_ENTRY=$'diff --git a/t.txt b/t.txt\nindex aaaaaaa..bbbbbbb 100644\n--- a/t.txt\n+++ b/t.txt\n@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2'
+BIN_V1_ENTRY=$'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ'
+BIN_V2_ENTRY=$'diff --git a/f.bin b/f.bin\nindex 3333333..4444444 100644\nBinary files a/f.bin and b/f.bin differ'
+# binary BEFORE hunk
+printf '%s\n%s\n' "$BIN_V1_ENTRY" "$HUNK_ENTRY" > "$T/multi-bh-v1.diff"
+printf '%s\n%s\n' "$BIN_V2_ENTRY" "$HUNK_ENTRY" > "$T/multi-bh-v2.diff"
+# hunk BEFORE binary
+printf '%s\n%s\n' "$HUNK_ENTRY" "$BIN_V1_ENTRY" > "$T/multi-hb-v1.diff"
+printf '%s\n%s\n' "$HUNK_ENTRY" "$BIN_V2_ENTRY" > "$T/multi-hb-v2.diff"
+for _order in bh hb; do
+    _m1="$(normalize_review_diff < "$T/multi-${_order}-v1.diff" | openssl dgst -sha256 | awk '{print $NF}')"
+    _m2="$(normalize_review_diff < "$T/multi-${_order}-v2.diff" | openssl dgst -sha256 | awk '{print $NF}')"
+    if [ -n "$_m1" ] && [ "$_m1" != "$_m2" ]; then
+        ok "(q2) distinct binaries keep DISTINCT digests in a multi-entry diff ($_order)"
+    else
+        bad "(q2) entry-scoping lost: distinct binaries normalized IDENTICALLY in a multi-entry diff ($_order) — $_m1"
+    fi
+done
+# Pin the multi-entry bytes. Resetting the entry buffer BEFORE `flush` drops the
+# binary ENTRY entirely; a whole-diff (precomputed) `has_hunk` drops the binary
+# entry's kept `index` line. A STREAMING leak (initialise `has_hunk` once, never
+# reset) keeps this `bh` vector green and is caught by the `hb` digest case
+# above — which is why BOTH orders are asserted. This vector is what catches the
+# entry-drop and precomputed variants, which would pass every single-entry
+# assertion above.
+check_norm "$(printf '%s\n%s\n' "$BIN_V1_ENTRY" "$HUNK_ENTRY")" \
+           $'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ\ndiff --git a/t.txt b/t.txt\n--- a/t.txt\n+++ b/t.txt\n@@ -0,3 +0,4 @@\n ctx\n+added\n ctx2'
 
 # ── Structural tripwires ─────────────────────────────────────────────────
 # These invariants live in the YAML AROUND the extracted run block and so are
@@ -210,6 +341,38 @@ DH="$(openssl dgst -sha256 < "$DIFF_FILE" | awk '{print $NF}')"
 OTHER_DIFF_FILE="$T/diff2.txt"
 printf 'diff --git a/x b/x\n+other\n' > "$OTHER_DIFF_FILE"
 DH2="$(openssl dgst -sha256 < "$OTHER_DIFF_FILE" | awk '{print $NF}')"
+
+# ── #1362 normalized-digest fixtures ──────────────────────────────────────
+# A realistic diff whose `index` line and hunk headers move on a base update
+# while every changed line stays byte-identical. The raw and normalized
+# digests differ, so a marker keyed to one is refused by an unnormalized gate
+# and accepted by this one. Both digests are pinned as LITERALS, independently
+# computed, so a broken normalizer cannot pass by agreeing with itself.
+DIFF_NORM_FILE="$T/diff-norm.txt"
+cat > "$DIFF_NORM_FILE" <<'DIFFEOF'
+diff --git a/x.py b/x.py
+index 1111111..2222222 100644
+--- a/x.py
++++ b/x.py
+@@ -1,4 +1,6 @@
+ ctx1
+-old
++new
++added
+ ctx2
+@@ -20,3 +22,2 @@ def f():
+ a
+-b
++c
+DIFFEOF
+DH_RAW="a8d3ddc90a83487e02fe2d9af96b348dc113cd7b5dc80babcaf5d4bd2f2b213d"
+DH_NORM_1362="efba06e08d0a4c1832f5ec0afdd8a142ce4f7b4b56777f1810f1657ecc22439e"
+# Fixtures for the anti-`patch-id` pin: identical except for the whitespace in
+# one changed line (`git patch-id --stable` ignores whitespace and MATCHES).
+WS_A_FILE="$T/ws-a.txt"
+WS_B_FILE="$T/ws-b.txt"
+printf 'diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1,1 +1,1 @@\n-hello\n+hello world\n' > "$WS_A_FILE"
+printf 'diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1,1 +1,1 @@\n-hello\n+hello  world\n' > "$WS_B_FILE"
 
 sign() { printf '%s' "$1" | openssl dgst -sha256 -hmac "$KEY" | awk '{print $NF}'; }
 legacy_marker() { # <sha>
@@ -510,6 +673,219 @@ STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-n"
 assert_rc 1 "(n) gate fails"
 assert_contains "(n) reports the real cause" "latest recorded ${STALE} — expected ${HEAD}"
 assert_not_contains "(n) does not misattribute the repo" "was found for some-other/place"
+
+echo "── (o) normalized diff digest (#1362) ─────────────────────────"
+# o1 — the D1 win. Post-#1362 the producer signs the NORMALIZED digest, so a
+# base move that rewrote only index/hunk headers still carries the verdict
+# forward. The marker's sha is stale, so acceptance can ONLY come from (b).
+diff_marker "$STALE" "$DH_NORM_1362" > "$T/body-o1"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o1"
+assert_rc 0 "(o1) a normalized-hash marker carries forward"
+assert_contains "(o1) names the diff-match path" "passed via diff match"
+assert_contains "(o1) reports the normalized digest matched" "matched the normalized digest"
+# o2 — backward compatibility. The legacy RAW digest is STILL accepted for the
+# same diff. Without this arm every marker already recorded breaks and the
+# required check reddens fleet-wide. This is the case that pins the consumer-
+# first land order.
+diff_marker "$STALE" "$DH_RAW" > "$T/body-o2"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o2"
+assert_rc 0 "(o2) a legacy raw-hash marker is still accepted (backward compat)"
+assert_contains "(o2) reports the raw digest matched" "matched the raw digest"
+# o3 — a marker matching NEITHER digest is rejected, and the message names
+# BOTH live digests (normalized + raw) so the operator is not left guessing.
+DH_NEITHER="$(printf 'deadbeef%.0s' $(seq 1 8))"   # exactly 64 hex chars
+diff_marker "$STALE" "$DH_NEITHER" > "$T/body-o3"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o3"
+assert_rc 1 "(o3) a marker matching neither digest is rejected"
+assert_contains "(o3) reports the diff divergence" "does not match this PR's current diff hash"
+assert_contains "(o3) names the normalized digest" "normalized="
+assert_contains "(o3) names the raw digest" "raw="
+# o4 — fail closed. When the diff cannot be fetched BOTH digests are empty and
+# a diff= marker is not accepted via (b). A transient API failure is not a
+# bypass, exactly as before normalization.
+diff_marker "$STALE" "$DH_NORM_1362" > "$T/body-o4"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-o4"
+assert_rc 1 "(o4) normalized diff= fails closed when the fetch fails"
+assert_contains "(o4) says the live hash was unavailable" "live diff hash could not be computed"
+# o5 — rule (a) is unchanged. A diff= marker at the CURRENT head passes on the
+# sha binding alone even when the fetch fails and its diff= matches neither
+# digest. Normalization must never gate the head-bound path.
+diff_marker "$HEAD" "$DH_NEITHER" > "$T/body-o5"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-o5"
+assert_rc 0 "(o5) the head-bound path is unchanged by normalization"
+if printf '%s' "$GATE_OUT" | grep -qF "passed via diff match"; then
+    bad "(o5) head-bound pass must not claim the diff path"
+else
+    ok "(o5) head-bound pass does not claim the diff path"
+fi
+
+echo "── (p) whitespace-only change changes the digest (anti-patch-id) ─"
+# `git patch-id --stable` and its default IGNORE whitespace, so it would MATCH
+# these two diffs and carry a stale verdict across a real whitespace-only
+# change — a false accept. sha256 over normalized bytes must NOT. This is the
+# reason the gate does not use patch-id, pinned as an executable property.
+DH_WS_A="$(normalize_review_diff < "$WS_A_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
+DH_WS_B="$(normalize_review_diff < "$WS_B_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ -n "$DH_WS_A" ] && [ "$DH_WS_A" != "$DH_WS_B" ]; then
+    ok "(p) a whitespace-only change yields a different normalized digest"
+else
+    bad "(p) a whitespace-only change did NOT change the digest — a patch-id-style normalizer would carry a stale verdict forward (got '$DH_WS_A' vs '$DH_WS_B')"
+fi
+# ...and end to end: a marker for the pre-whitespace diff is refused against the
+# post-whitespace live diff.
+diff_marker "$STALE" "$DH_WS_A" > "$T/body-p"
+STUB_DIFF_FILE="$WS_B_FILE" run_gate "$T/body-p"
+assert_rc 1 "(p) a marker for the pre-whitespace diff is rejected"
+
+echo "── (q) #1362 binary carve-out: entry-scoped index retention ────"
+# The amendment to the 2026-09-23 ruling (recorded on agent-infra#1362, comment
+# 5806797023, per the ruling's OWN rationale): the `index` line is dropped
+# exactly when the hunk content already carries the change. A binary entry has
+# no hunks and `Binary files … differ` carries no content, so an unconditional
+# drop made two DISTINCT binary revisions normalize identically — review v1,
+# sign, swap in v2, and the required gate ACCEPTED the unreviewed binary.
+
+# (a) The fail-open is CLOSED. Two different binaries at the same path must
+#     produce DIFFERENT normalized digests. This is the mutation-pinned case:
+#     restore the unconditional index drop and BOTH entries normalize to the
+#     same bytes, so this assertion goes red (verified by mutating the
+#     normalizer to always drop — see the PR body).
+BIN1="$T/bin1.diff"; BIN2="$T/bin2.diff"
+printf 'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ\n' > "$BIN1"
+printf 'diff --git a/f.bin b/f.bin\nindex 3333333..4444444 100644\nBinary files a/f.bin and b/f.bin differ\n' > "$BIN2"
+DH_BIN1_NORM="$(normalize_review_diff < "$BIN1" | openssl dgst -sha256 | awk '{print $NF}')"
+DH_BIN2_NORM="$(normalize_review_diff < "$BIN2" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ -n "$DH_BIN1_NORM" ] && [ "$DH_BIN1_NORM" != "$DH_BIN2_NORM" ]; then
+    ok "(a) two different binaries normalize to DIFFERENT digests"
+else
+    bad "(a) two different binaries normalized IDENTICALLY ($DH_BIN1_NORM) — the index-line drop fail-open is back"
+fi
+# ...and end to end at the GATE, which is where the fail-open was exploitable:
+# a marker signed for the reviewed v1 is accepted against v1 and REJECTED
+# against the unreviewed v2.
+diff_marker "$STALE" "$DH_BIN1_NORM" > "$T/body-bin1"
+STUB_DIFF_FILE="$BIN1" run_gate "$T/body-bin1"
+assert_rc 0 "(a) a marker for the reviewed binary v1 is accepted against v1"
+assert_contains "(a) names the diff-match path" "passed via diff match"
+STUB_DIFF_FILE="$BIN2" run_gate "$T/body-bin1"
+assert_rc 1 "(a) the SAME marker is REJECTED against the unreviewed binary v2 (fail-open closed)"
+assert_contains "(a) reports the diff divergence for v2" "does not match this PR's current diff hash"
+
+# (b) Text base-move keeps the SAME normalized digest — #4969's win is not
+#     regressed. The two renderings differ only in the `index` line and the
+#     hunk start lines; every content line is identical.
+TEXT_B1="$T/text-b1.diff"; TEXT_B2="$T/text-b2.diff"
+printf 'diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2\n' > "$TEXT_B1"
+printf 'diff --git a/f b/f\nindex aaaaaaa..bbbbbbb 100644\n--- a/f\n+++ b/f\n@@ -10,3 +11,4 @@\n ctx\n+added\n ctx2\n' > "$TEXT_B2"
+DH_TB1="$(normalize_review_diff < "$TEXT_B1" | openssl dgst -sha256 | awk '{print $NF}')"
+DH_TB2="$(normalize_review_diff < "$TEXT_B2" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$DH_TB1" = "$DH_TB2" ]; then
+    ok "(b) a text base-move leaves the normalized digest unchanged"
+else
+    bad "(b) a text base-move changed the normalized digest — #4969's win regressed ($DH_TB1 vs $DH_TB2)"
+fi
+RAW_TB1="$(openssl dgst -sha256 < "$TEXT_B1" | awk '{print $NF}')"
+RAW_TB2="$(openssl dgst -sha256 < "$TEXT_B2" | awk '{print $NF}')"
+if [ "$RAW_TB1" != "$RAW_TB2" ]; then
+    ok "(b) control: the RAW digest did move (so this is the normalization, not the fixture)"
+else
+    bad "(b) control: the raw digest did NOT move — the fixture is not a base-move shape"
+fi
+
+# (c) Binary base-move keeps the SAME normalized digest. A no-regression
+#     guard (not a mutation pin — (a)/(d)/(e) carry the pins): the base move
+#     rewrites the sibling TEXT entry's index/header; the binary entry is
+#     byte-identical (a base move does not touch the binary's content, so its
+#     blob-OID pair does not move), so the KEPT index line cannot make the
+#     digest move either.
+BIN_B1="$T/binb1.diff"; BIN_B2="$T/binb2.diff"
+printf 'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ\ndiff --git a/t.txt b/t.txt\nindex 1111111..2222222 100644\n--- a/t.txt\n+++ b/t.txt\n@@ -1,3 +1,4 @@\n ctx\n+added\n ctx2\n' > "$BIN_B1"
+printf 'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ\ndiff --git a/t.txt b/t.txt\nindex aaaaaaa..bbbbbbb 100644\n--- a/t.txt\n+++ b/t.txt\n@@ -10,3 +11,4 @@\n ctx\n+added\n ctx2\n' > "$BIN_B2"
+DH_BB1="$(normalize_review_diff < "$BIN_B1" | openssl dgst -sha256 | awk '{print $NF}')"
+DH_BB2="$(normalize_review_diff < "$BIN_B2" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$DH_BB1" = "$DH_BB2" ]; then
+    ok "(c) a binary base-move leaves the normalized digest unchanged"
+else
+    bad "(c) a binary base-move changed the normalized digest ($DH_BB1 vs $DH_BB2)"
+fi
+
+# (d) Binary add / delete / binary+mode-change entries keep the `index` line.
+BIN_ADD="$T/bin-add.diff"; BIN_DEL="$T/bin-del.diff"; BIN_MODE="$T/bin-mode.diff"
+printf 'diff --git a/f.bin b/f.bin\nnew file mode 100644\nindex 0000000..2222222\nBinary files /dev/null and b/f.bin differ\n' > "$BIN_ADD"
+printf 'diff --git a/f.bin b/f.bin\ndeleted file mode 100644\nindex 1111111..0000000\nBinary files a/f.bin and /dev/null differ\n' > "$BIN_DEL"
+printf 'diff --git a/f.bin b/f.bin\nold mode 100644\nnew mode 100755\nindex 1111111..2222222\nBinary files a/f.bin and b/f.bin differ\n' > "$BIN_MODE"
+for _spec in "add:$BIN_ADD:index 0000000\.\.2222222" "delete:$BIN_DEL:index 1111111\.\.0000000" "mode:$BIN_MODE:index 1111111\.\.2222222"; do
+    _name="${_spec%%:*}"; _rest="${_spec#*:}"; _file="${_rest%%:*}"; _re="${_rest#*:}"
+    if normalize_review_diff < "$_file" | grep -qE "^${_re}$"; then
+        ok "(d) binary ${_name} entry keeps its index line"
+    else
+        bad "(d) binary ${_name} entry LOST its index line"
+    fi
+done
+
+# (e) A hunk-less NON-binary entry keeps the `index` line. The predicate is
+#     HUNK PRESENCE, not the presence of a binary marker: an empty-file add
+#     (`index 0000000..e69de29`) has no hunk and no `Binary files` line, and
+#     must still keep the line.
+printf 'diff --git a/empty b/empty\nnew file mode 100644\nindex 0000000..e69de29\n' > "$T/empty-add.diff"
+if normalize_review_diff < "$T/empty-add.diff" | grep -qE '^index 0000000\.\.e69de29$'; then
+    ok "(e) a hunk-less non-binary (empty-file add) entry keeps its index line"
+else
+    bad "(e) a hunk-less non-binary entry LOST its index line — the predicate is binary-marker presence, not hunk presence"
+fi
+# ...and the flip side, so (e) cannot pass vacuously: the SAME index line IS
+# dropped once the entry carries a hunk.
+printf 'diff --git a/empty b/empty\nindex 0000000..e69de29\n@@ -0,0 +1 @@\n+x\n' > "$T/empty-hunk.diff"
+if normalize_review_diff < "$T/empty-hunk.diff" | grep -qE '^index '; then
+    bad "(e) the index line survived a HUNK-bearing entry — the drop is not entry-scoped"
+else
+    ok "(e) the same index line IS dropped when the entry carries a hunk"
+fi
+
+# (f) The legacy RAW-hash arm still accepts (unchanged behaviour). A marker
+#     signed with the raw digest of a hunk-bearing diff is accepted, so every
+#     marker already recorded stays valid (the consumer-first land order).
+#     A hunk-bearing fixture is required: for a binary-only entry the carve-out
+#     keeps the index line, so the normalized bytes EQUAL the raw bytes and the
+#     raw arm is not separately observable.
+DH_TB1_RAW="$(openssl dgst -sha256 < "$TEXT_B1" | awk '{print $NF}')"
+DH_TB1_NORM="$(normalize_review_diff < "$TEXT_B1" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$DH_TB1_RAW" != "$DH_TB1_NORM" ]; then
+    ok "(f) fixture: the raw and normalized digests differ (so the arm is observable)"
+else
+    bad "(f) fixture: raw == normalized, so the legacy arm is not exercised"
+fi
+diff_marker "$STALE" "$DH_TB1_RAW" > "$T/body-raw-1362"
+STUB_DIFF_FILE="$TEXT_B1" run_gate "$T/body-raw-1362"
+assert_rc 0 "(f) a legacy raw-hash marker is still accepted (backward compat)"
+assert_contains "(f) reports the raw digest matched" "matched the raw digest"
+
+# (g) Everything still fails closed when the diff cannot be fetched: BOTH
+#     digests are empty, so a stale-sha binary `diff=` marker is not accepted.
+diff_marker "$STALE" "$DH_BIN1_NORM" > "$T/body-bin-fc"
+STUB_DIFF_FILE="$BIN1" STUB_DIFF_FAIL=1 run_gate "$T/body-bin-fc"
+assert_rc 1 "(g) a binary normalized diff= fails closed when the diff fetch fails"
+assert_contains "(g) says the live hash was unavailable" "live diff hash could not be computed"
+
+# (g2) A FAILING normalizer clears BOTH digests, not just the normalized one.
+#      The guard at the fetch site only covers a MISSING python3; this exercises
+#      the else-branch that a present-but-broken normalizer takes. Without it, a
+#      broken normalizer would silently fall back to the raw arm and a stale
+#      raw `diff=` marker would still be accepted.
+cat > "$T/bin/python3" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$T/bin/python3"
+diff_marker "$STALE" "$DH_BIN1_NORM" > "$T/body-normfail"
+STUB_DIFF_FILE="$BIN1" run_gate "$T/body-normfail"
+assert_rc 1 "(g2) a failing normalizer rejects a normalized diff= marker (fail closed)"
+assert_contains "(g2) says the live hash was unavailable" "live diff hash could not be computed"
+# ...and the legacy RAW arm is cleared too (no silent fallback to the weaker arm).
+diff_marker "$STALE" "$DH_TB1_RAW" > "$T/body-raw-normfail"
+STUB_DIFF_FILE="$TEXT_B1" run_gate "$T/body-raw-normfail"
+assert_rc 1 "(g2) a failing normalizer clears the RAW arm too (no silent fallback)"
+rm -f "$T/bin/python3"
 
 echo ""
 echo "── Summary ───────────────────────────────────────────────────────"

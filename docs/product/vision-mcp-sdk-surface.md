@@ -178,10 +178,11 @@ handler twice.
 | **1.1** | `tortoise/__all__` listing the 40 approved methods | 0.4 |
 | **1.2** | The approved-surface manifest, cut **once** from that declaration, frozen | 1.1 |
 | **1.3** | The gate: unfiltered `pull_request` check, **fail-closed** on any add/remove/rename | 1.2 |
-| **1.4** | **#3883** — retired names must **WARN** when called, naming the replacement | — |
+| **1.4** | **#3883** — a retired **MCP tool** name must **WARN** when called, naming the replacement. This is the MCP half only; the SDK retires to a failing name (2.5). | — |
 
-**1.4 gates every removal.** Nothing is removed until a caller of a retired name gets a warning
-that names its replacement.
+**1.4 gates every MCP removal.** Nothing is removed from the MCP surface until a caller of a
+retired tool name gets a warning that names its replacement. The SDK does **not** inherit this
+mechanism — see 2.5.
 
 ### Phase 2 — the SDK
 
@@ -191,7 +192,7 @@ that names its replacement.
 | **2.2** | The 4 merges (`create_entity`, `link_entities`, `delete_knowledge`, `update_knowledge`) dispatching internally | 2.1 |
 | **2.3** | `update_memory_graph` — **the rename path that is currently missing** | 2.1 |
 | **2.4** | The Contracts section enforced: pagination cursors, truncation notice, typed errors | 2.1 |
-| **2.5** | 146 retired names → warning aliases (`150 - 4` reused verbatim) | 1.4 |
+| **2.5** | The retired **SDK** names → a **failing name that names its replacement**. **No alias layer, no warning shim, no telemetry** (#3836 (c) ruling): `tortoise-graph` is public on PyPI with no users, so there is no caller to protect and no call telemetry to collect. The earlier “146 → warning aliases” plan is WITHDRAWN. | 2.1 |
 | **2.6** | `check_connection` (the `check_key` + `verify_connection` collapse) | — |
 
 ### Phase 3 — the MCP server

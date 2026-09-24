@@ -49,8 +49,8 @@ AST and reflection are *not* the same question, and nothing reconciled them befo
 `tortoise/sdk.py` already attaches one attribute outside the class body
 (`TortoiseSDK._EVENT_PURGE_LAST = now`); it is private, so it does not surface today, but a
 **public** attach would be visible to reflection and invisible to the AST walk. That is
-exactly the divergence this reconciliation makes loud, and exactly where Phase 2.5's warning
-aliases land.
+exactly the divergence this reconciliation makes loud. A public attach would land here, in the
+gap between the two counts — which is why both are reported.
 
 ## How to add a method to the surface
 
@@ -74,9 +74,11 @@ aliases land.
 Adding a method without steps 2–3 reds `--check`. Adding it without step 3 reds the guard.
 Neither reds silently.
 
-**Removing or renaming** a method is the mirror image, with one extra gate: #3883 requires
-that a retired name still **resolve and warn, naming its replacement**, before anything is
-removed. Do not delete a `def` from the class body until its retired-name warning exists.
+**Removing or renaming** a method is the mirror image, and it carries the same approval gate:
+you may not remove or rename a public SDK method without Daniel's approval (the #4282 mandate).
+The retired name then **fails and names its replacement** (#3836 (c) ruling — there is no SDK
+alias layer, no warning shim, and no call telemetry). Do not delete a `def` from the class body
+until the replacement it points a caller at exists.
 
 ## Related
 

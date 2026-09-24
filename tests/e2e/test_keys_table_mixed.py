@@ -519,23 +519,29 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
 
 
 def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> None:
-    """#2229/#2246: the uniform Rotate action on a NON-held durable row — one
-    click + confirm -> the replacement is minted FIRST (POST /v1/team/keys,
-    old row's label carried over), the old key is revoked (DELETE
-    /v1/team/keys/{id}), the replacement is shown once (never installed —
-    #2246: localStorage is NOT rewritten), and the old row re-renders
-    truthful "revoked" with NO actions. Zero POST /v1/session/key and zero
-    key-authed requests.
+    """#2229/#2246/#4355: the uniform Rotate action on a NON-held durable row —
+    one click + confirm -> ONE call (`POST /v1/team/keys/{id}/rotate`) creates
+    the replacement and revokes the displaced row server-side, the replacement
+    is shown once (never installed — #2246: localStorage is NOT rewritten), and
+    the old row re-renders truthful "revoked" with NO actions. Zero POST
+    /v1/session/key and zero key-authed requests.
+
+    #4355 changed the SHAPE. It used to be two client calls (`POST
+    /v1/team/keys` for the replacement, then `DELETE /v1/team/keys/{id}` for
+    the old row), which is exactly why a team at the cap could not rotate: the
+    replacement mint ran while the old row still held its slot. The server now
+    owns that ordering — and makes it cap-neutral — so this test pins the ONE
+    call (and that no stray mint/delete pair came back).
 
     Stateful harness (the shared _wire_mixed_harness serves a STATIC keys
-    list — this flow mutates it): the mint handler appends the replacement
-    row + returns its plaintext; the DELETE handler stamps revoked_at on the
-    rotated row; the final loadAll re-reads the mutated list."""
+    list — this flow mutates it): the rotate handler appends the replacement
+    row, stamps the displaced row revoked, and returns the new plaintext; the
+    final loadAll re-reads the mutated list."""
     keys = _mixed_keys_fixture()
     session_mints: list = []
     key_authed: list = []
-    minted_bodies: list = []
-    order: list = []  # #2229: pin mint-before-revoke ordering
+    rotate_calls: list = []
+    order: list = []
 
     def handle(route):
         url = route.request.url
@@ -551,25 +557,34 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/team/keys") and method == "POST":
-                # The rotate replacement mint. #2229: label carry-over.
-                order.append("mint")
-                minted_bodies.append(route.request.post_data or "")
+            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}/rotate") and method == "POST":
+                # #4355: THE rotate call — replacement + revoke in one.
+                order.append("rotate")
+                rotate_calls.append(route.request.post_data or "")
                 row = _key_row("key_rot_2229", ROT_NEW_PREFIX,
                                "residue row", created_via="provisioned")
                 keys.append(row)
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"id": row["id"],
-                                               "api_key": ROT_NEW_HELD,
-                                               "key_prefix": row["key_prefix"]}))
-                return
-            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
-                order.append("delete")
                 for k in keys:
                     if k["id"] == ROT_HELD_ID:
                         k["revoked_at"] = "2026-08-03T12:00:00.000Z"
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"revoked": True, "key_id": ROT_HELD_ID}))
+                              body=json.dumps({"id": row["id"],
+                                               "key": ROT_NEW_HELD,
+                                               "key_prefix": row["key_prefix"],
+                                               "replaced_key_id": ROT_HELD_ID,
+                                               "replaced_revoked": True}))
+                return
+            if path.endswith("/v1/team/keys") and method == "POST":
+                # #4355: the two-call shape must be GONE — a live POST mint here
+                # is the regression this test exists to catch.
+                order.append("mint")
+                route.fulfill(status=402, content_type="application/json",
+                              body=json.dumps({"detail": "stray mint — #4355 rotate is one call"}))
+                return
+            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
+                order.append("delete")
+                route.fulfill(status=402, content_type="application/json",
+                              body=json.dumps({"detail": "stray delete — #4355 rotate revokes server-side"}))
                 return
             if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
@@ -640,9 +655,12 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
     expect(newrow.locator("span.live")).to_contain_text("active", timeout=15_000)
     expect(newrow.locator(".key-rotate")).to_be_visible()
     expect(newrow.locator(".key-trash")).to_be_visible()
-    # Mint fired before revoke (#2229 ordering) and carried the label over.
-    assert order == ["mint", "delete"], f"rotate ordering: {order}"
-    assert minted_bodies and '"residue row"' in minted_bodies[0], minted_bodies
+    # #4355: EXACTLY ONE call, and it is the rotate route — no stray mint or
+    # delete leg survived the refactor.
+    assert order == ["rotate"], f"#4355 rotate must be a single call: {order}"
+    assert rotate_calls and '"residue row"' in rotate_calls[0], rotate_calls
+    # No partial-state warning on the happy path.
+    expect(page.locator("[data-rotate-notice]")).to_have_count(0)
     # #2246: nothing was ever installed into the slot — no held install, no
     # re-persist; the new key material exists only in the one-time reveal.
     slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
@@ -652,21 +670,22 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
 
 
 def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
-    """#4342: a 2xx rotate mint that carries NO plaintext must not latch an
-    empty reveal. `regenerateKey` mints the replacement, revokes the OLD key,
-    then used to `setRotatedKey({plaintext: … || ''})` — unconditionally
-    truthy, so the reveal `{rotatedKey && (…)}` rendered an empty
-    `<code class="key-value">` box and its copy ran `writeText('')` (a silent
-    no-op) before clearing the only view. The old key is already revoked by
-    then, so the failure must be surfaced — never a blank box whose copy
+    """#4342: a 2xx rotate response that carries NO plaintext must not latch an
+    empty reveal. `regenerateKey` uses to `setRotatedKey({plaintext: … || ''})`
+    — unconditionally truthy, so the reveal `{rotatedKey && (…)}` rendered an
+    empty `<code class="key-value">` box and its copy ran `writeText('')` (a
+    silent no-op) before clearing the only view. The old key is already revoked
+    by then, so the failure must be surfaced — never a blank box whose copy
     writes the empty string.
 
-    Stateful harness (mirrors test_rotate_durable_key_replaces_in_place_without
-    _holding): the mint appends the replacement row and answers 2xx WITHOUT a
-    key/api_key; the DELETE stamps the old row revoked. A clipboard-write spy
-    pins the "no clipboard write" claim at the API seam as a guard against an
-    auto-write regression — the primary teeth are the ABSENT reveal/copy
-    controls (there is no control left to click) and the truthful banner."""
+    #4355: the rotate is now ONE call, so this pins the same guard against it:
+    the replacement row exists server-side, the displaced row is revoked, and
+    the response omits the plaintext.
+
+    A clipboard-write spy pins the "no clipboard write" claim at the API seam
+    as a guard against an auto-write regression — the primary teeth are the
+    ABSENT reveal/copy controls (there is no control left to click) and the
+    truthful banner."""
     keys = _mixed_keys_fixture()
     session_mints: list = []
     key_authed: list = []
@@ -685,23 +704,30 @@ def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/team/keys") and method == "POST":
-                order.append("mint")
+            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}/rotate") and method == "POST":
+                order.append("rotate")
                 row = _key_row("key_rot_4342", ROT_NEW_PREFIX, "residue row",
                                created_via="provisioned")
                 keys.append(row)
-                # 2xx with NO plaintext — the secret is unrecoverable (#4342).
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"id": row["id"],
-                                               "key_prefix": row["key_prefix"]}))
-                return
-            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
-                order.append("delete")
                 for k in keys:
                     if k["id"] == ROT_HELD_ID:
                         k["revoked_at"] = "2026-08-03T12:00:00.000Z"
+                # 2xx with NO plaintext — the secret is unrecoverable (#4342).
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"revoked": True, "key_id": ROT_HELD_ID}))
+                              body=json.dumps({"id": row["id"],
+                                               "key_prefix": row["key_prefix"],
+                                               "replaced_key_id": ROT_HELD_ID,
+                                               "replaced_revoked": True}))
+                return
+            if path.endswith("/v1/team/keys") and method == "POST":
+                order.append("mint")
+                route.fulfill(status=402, content_type="application/json",
+                              body=json.dumps({"detail": "stray mint — #4355 rotate is one call"}))
+                return
+            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
+                order.append("delete")
+                route.fulfill(status=402, content_type="application/json",
+                              body=json.dumps({"detail": "stray delete — #4355 rotate revokes server-side"}))
                 return
             if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
@@ -758,9 +784,10 @@ def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
     page.on("dialog", lambda d: d.accept())
     row3.locator(".key-rotate").click()
 
-    # The rotate ran to completion (mint, then revoke) — but no reveal latched.
+    # The rotate ran to completion (the single call created + revoked) — but no
+    # reveal latched.
     expect(row3.locator("span.revoked")).to_contain_text("revoked", timeout=15_000)
-    assert order == ["mint", "delete"], f"mint-before-revoke ordering: {order}"
+    assert order == ["rotate"], f"#4355 rotate must be a single call: {order}"
     # NO reveal, NO empty `.key-value` square, NO clipboard write.
     expect(page.locator(".new-key")).to_have_count(0)
     expect(page.locator("code.key-value")).to_have_count(0)
