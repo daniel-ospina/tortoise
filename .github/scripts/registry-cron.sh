@@ -815,6 +815,13 @@ LAST_SWEEP_AT="$(printf '%s' "$STATUS" | jq -r '.last_sweep.last_sweep_at // emp
 # per-graph exception text) and is published in an incident body — redact it.
 LAST_SWEEP_SAFE="$(redact "$(printf '%s' "$STATUS" | jq -c '.last_sweep' 2>/dev/null || echo null)")"
 log "status: enabled=$ENABLED storage_error=${STORAGE_ERR_SAFE:-none} config_error=${CONFIG_ERR_SAFE:-none}"
+# #5028: `per_team` (the whole org census) is serialized BEFORE `last_sweep`, so
+# a 600-char truncation of the raw blob ALWAYS cuts the sweep OUTCOME off the
+# end — the one field a diagnosis needs. Log the outcome untruncated on its own
+# line so it can never be hidden behind the roster.
+ORG_COUNT="$(printf '%s' "$STATUS" | jq -r 'if (.per_team|type)=="object" then (.per_team|length|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+[ -n "$ORG_COUNT" ] || ORG_COUNT=unknown
+log "sweep outcome: last_sweep=$LAST_SWEEP_SAFE orgs=$ORG_COUNT"
 log "raw status: $(redact_truncate "$STATUS" 600)"
 
 if [ "$ENABLED" = "unknown" ]; then
@@ -919,9 +926,13 @@ fi
 # has no server-side ceiling). Name the shape instead of letting it masquerade.
 RUN=""
 CURL_RC=0
+# #5028: time the call. "driver_timeout" alone hid a 600s-vs-260s inversion —
+# the elapsed seconds make budget exhaustion self-evident.
+SWEEP_START="$(date +%s)"
 RUN="$(curl -sS -m 600 -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" -d '{}' \
   "${API}/v1/internal/backups/sweep" 2>/dev/null)" || CURL_RC=$?
+SWEEP_ELAPSED=$(( $(date +%s) - SWEEP_START ))
 if [ "$CURL_RC" -eq 28 ]; then
   RUN='{"status":"driver_timeout"}'
 elif [ -z "$RUN" ]; then
@@ -935,7 +946,7 @@ RUN_STATUS_SAFE="$(redact "$RUN_STATUS")"
 # reads as 0. `graph_totals.backed_up` is the real coverage signal.
 GRAPHS_BACKED_UP="$(printf '%s' "$RUN" | jq -r '.graph_totals.backed_up // 0' 2>/dev/null || echo 0)"
 [ -n "$GRAPHS_BACKED_UP" ] || GRAPHS_BACKED_UP=0
-log "sweep status: $RUN_STATUS_SAFE"
+log "sweep status: $RUN_STATUS_SAFE (took ${SWEEP_ELAPSED}s, curl rc=${CURL_RC})"
 
 # ── 4b. enabled-but-backing-up-nothing (#2823 shape, #2796) ─────────────────
 # A sweep that backed up ZERO teams while the R2 pool already holds team
@@ -1016,9 +1027,9 @@ case "$RUN_STATUS" in
     # sweep may still hold the per-org locks. SWEEP_NO_COVERAGE stays the right
     # KIND: this run produced no coverage, and any run that does back up
     # auto-resolves it. The TEXT is what had to become true.
-    log "sweep ${RUN_STATUS} (curl rc=${CURL_RC}) — filing SWEEP_NO_COVERAGE with a timeout claim (job red)"
+    log "sweep ${RUN_STATUS} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — filing SWEEP_NO_COVERAGE with a timeout claim (job red)"
     file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep did not finish within the driver's budget" \
-      "the driver gave up on POST /v1/internal/backups/sweep after 600s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}). The sweep may still be RUNNING server-side — this leg cannot tell — so this is not evidence that the sweep failed, only that it did not report in time. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
+      "the driver gave up on POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}). The sweep may still be RUNNING server-side — this leg cannot tell — so this is not evidence that the sweep failed, only that it did not report in time. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
     NO_COVERAGE=1
     ;;
   *)
@@ -1033,8 +1044,10 @@ case "$RUN_STATUS" in
 esac
 
 # ── 4. trash purge ride-along (#2304, wired #2317) + reconcile ride-along (#654) ──
-# Both are skipped when the sweep reported already_running (the lock-holder is
-# running; purge/reconcile would only queue behind it). Non-2xx is a hard failure for
+# Both are skipped when the sweep's own locks may still be unresolved:
+# already_running (the lock-holder is running; purge/reconcile would only queue
+# behind it) or driver_timeout/empty_response (the pass may still hold the
+# per-org locks server-side — see the #4939 note at the guard). Non-2xx is a hard failure for
 # reconcile (the cron driver MUST NOT blind the pipeline — a silently skipped
 # reconcile step is the same class of silent-no-op that left this endpoint
 # uninvoked before #654). The purge erases EXPIRED trash tombstones (> 7-day
@@ -1076,7 +1089,11 @@ if [ "$RUN_STATUS" != "already_running" ] \
     RECONCILE_FAILED=1
   fi
 else
-  log "sweep reported already_running (lock held) — skipping purge/reconcile to avoid racing a restore"
+  # #5028: name the ACTUAL status. This branch covers three distinct causes;
+  # asserting a held lock for all of them sent an investigation after a stale
+  # lock that did not exist (0 of 14 sampled runs reported already_running, and
+  # /status.lock was null). A non-lock skip is not a lock.
+  log "sweep skipped (status=$RUN_STATUS_SAFE) — skipping purge/reconcile ride-along"
 fi
 
 # ── 5. driver heartbeat (carries r2_ok so the R2_DOWN signal is auditable) ──
