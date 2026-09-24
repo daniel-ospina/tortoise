@@ -36,11 +36,11 @@ subjects.team: epistemic-team
 
 **⭐ The slots are ALREADY DECLARED and never written.** `ONTOLOGY.md` §4.6 declares on `:Source`:
 
-| field | declared meaning | status |
+| field | declared meaning **as read at research time** (pre-v3.15) | status |
 |---|---|---|
 | `validFrom` / `validTo` | *"Valid-time window — when the source content held in the world"* (§4.7, `#3642`) | **❌ not written by `_upsert_source`** |
 | `expiredAt` | *"Transaction-time expiry — when our record of the Source stopped being current"* (§4.7, `#3642`) | **❌ not written** |
-| `contentHash` | *"Idempotency anchor — **skip re-extraction if unchanged**"* | ✅ written |
+| `contentHash` | *"Idempotency anchor — **skip re-extraction if unchanged**"* | ✅ written — **§4.6 now states this as a *version anchor* (v3.15); the idempotency framing quoted here is the pre-v3.15 wording** |
 | `updatedAt` | *"Last modified (set ON MATCH by `_upsert_source`)"* | ✅ written, **in place, unjournalled** (`#5024`) |
 | `sourceDate` | *"Evidence-age clock for recency decay"* | ⚠️ |
 
@@ -68,11 +68,15 @@ subjects.team: epistemic-team
 
 **Corroborated by 4 independent categories** (openreview paper, vendor engineering docs, OpenAI cookbook, industry practitioner blogs) ⇒ **HIGH confidence.**
 
-### 2.2 ⭐ The lesson that changes the design: **document-level supersession alone is INSUFFICIENT**
+### 2.2 ⭐ The lesson that changes the design: **document-level supersession alone is probably INSUFFICIENT**
 
-One practitioner account is explicit: they **started with a document-granularity supersession model and then revised it to move time onto the relationship edges**, with validity windows and ingest timestamps on the facts.
+⚠️ **Confidence: MEDIUM — one detailed practitioner account** (see §6). This is a single-source finding, and it is reported here as a *signal*, not a settled result. We adopt the design it points to because it also follows independently from our own architecture (the graph is a projection of the journal), not because the account settles the question.
 
-**⇒ If you supersede only the document, you cannot answer "which of my beliefs changed?"** — the document is marked stale, but every extracted fact is untouched and still reads as current. **The owner's stated goal — *"what was believed before, what is believed in the new version"* — is a question about FACTS, and document-level supersession cannot answer it.**
+That practitioner **started with a document-granularity supersession model and then revised it to move time onto the relationship edges**, with validity windows and ingest timestamps on the facts. ⚠️ **This brief does not name the account** — it is the one source above whose identity was not captured, which is itself a reason to treat the finding as a signal rather than a citation.
+
+**⇒ The claim is that if you supersede only the document, you cannot answer "which of my beliefs changed?"** — the document is marked stale, but every extracted fact is untouched and still reads as current. **The owner's stated goal — *"what was believed before, what is believed in the new version"* — is a question about FACTS, and document-level supersession may not be able to answer it.** Treated as a design constraint rather than a proven law.
+
+**⭐ Note on mechanism (this is where we depart from the cited pattern).** The HIGH-confidence evidence in §2.1 describes a **version NODE** (`VERSION_OF` with intervals). **We do not adopt that** — a node per version multiplies nodes against the volume problem, and our journal is already the append-only record. Our model keeps **one node per `url`** carrying the **current** version, and treats prior-version windows as **journal records**, which is what §1's invariant (`derived = replay(journal)`) already implies. The **convergence** is on *where time lives* (both layers); the storage mechanism is ours.
 
 **Corollary:** doc-level supersession is **necessary but not sufficient**. It tells you *what to re-examine*; the fact-level windows tell you *what changed*.
 
@@ -97,7 +101,7 @@ One practitioner account is explicit: they **started with a document-granularity
 | **Graphs become stale historical artifacts when semantics stop evolving** | improvado | the version model must not become the only thing that evolves |
 | **Neither a temporal match nor a related-version match is correct** in real linkage cases | CEUR-WS | version linkage is genuinely hard — **do not claim it is free** |
 
-**Lowest-confidence area:** the adversarial set is 1 source each (`⚠️ single-source` per claim), except the multi-source convergence that **bitemporality adds real complexity and cost** (3+ sources ⇒ MEDIUM–HIGH).
+**Lowest-confidence area:** the adversarial set is 1 source each (`⚠️ single-source` per claim), **except** the multi-source convergence that **bitemporality adds real complexity and cost** — 2 academic surveys, tiered **MEDIUM** in §6 (not MEDIUM–HIGH: two surveys is not the 3+ independent categories the HIGH tier requires).
 
 ---
 
@@ -110,7 +114,7 @@ One practitioner account is explicit: they **started with a document-granularity
 | **D7** — correction events, not in-place edits | ✅ **SUPPORTS** — the standard *is* D7 applied to sources |
 | **§4.7 bitemporal model** — `validFrom`/`validTo` + `createdAt`/`expiredAt` declared on `:Source` | ✅ **SUPPORTS** — this populates declared slots; it does not add an axis |
 | **Append-only evidence convergence** (*"new correction events, not in-place edits"*) | ✅ **SUPPORTS** |
-| **`contentHash` as "skip re-extraction if unchanged"** | ✅ **SUPPORTS** — re-extraction-on-change is already anticipated |
+| **`contentHash` as "skip re-extraction if unchanged"** | ✅ **SUPPORTS** — re-extraction-on-change was already anticipated, and v3.15 makes `contentHash` the version anchor outright |
 | **D30 / `#3919`** — raw lives outside the graph | ✅ **SUPPORTS** — and it *bounds the cost*, see §4 |
 | Any decision that sources are never versioned? | **NONE FOUND** |
 
@@ -126,7 +130,7 @@ One practitioner account is explicit: they **started with a document-granularity
 `validFrom`/`validTo`/`expiredAt` are already declared. Writing them costs **three timestamps per version**, not a copy of the artifact — because **D30 already moved content out of the graph**. *(This is the single biggest reason the version model is affordable for us where it is expensive for others: the expensive part — multi-version content — is already outside the graph.)*
 
 **② Supersede at the FACT level too — or the owner's goal is unreachable.**
-Entities extracted from v1 must be superseded by their v2 counterparts, via correction events (D7). **Document-level alone cannot answer "what was believed before"** (§2.2).
+Entities extracted from v1 must be superseded by their v2 counterparts, via correction events (D7). **Document-level supersession alone is probably insufficient to answer "what was believed before"** (§2.2) — a single-source finding, adopted as a design constraint rather than a proven law.
 
 **③ Record the version on the extraction link.**
 This is the missing piece: *which content was read*. Without it, "are these entities current?" is unanswerable from the graph.
@@ -168,7 +172,7 @@ Named as best practice and as a scaling necessity — and it is the same invaria
 | Version the source AND supersede at the fact/edge level | **HIGH** — 4 independent categories |
 | Superseded facts are closed, not deleted | **HIGH** — Graphiti, Zep, OpenAI cookbook |
 | Provenance belongs at the statement/edge level | **MEDIUM** — payzensecurity + IntuitiveAI |
-| Document-level supersession alone is insufficient | **MEDIUM** ⚠️ emerging — one detailed practitioner account (#5) |
+| Document-level supersession alone is insufficient | **MEDIUM** ⚠️ emerging — one detailed practitioner account (§2.2; the brief does not name it) |
 | Additive supersession / linking replacements / separate current+audit views | **MEDIUM** — IntuitiveAI + improvado |
 | Versioned KGs are resource-intensive; patch-based versioning is inefficient | **MEDIUM** ⚠️ emerging — 2 academic surveys |
 | The specific pitfalls (accidental overwrite, unclosed intervals, mixing the axes) | **LOW** ⚠️ single-source each — but consistent with our own `#5024` |

@@ -14,6 +14,23 @@ doc_status: live
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
 >
+> **⭐ This document states the model we WANT — not a status report on what is built.**
+> It is the canonical target: the shape the system is being brought to. **The code
+> may lag it, and implementation gaps may exist temporarily** — a field the model
+> declares but nothing writes yet, a label the model retires but the code still
+> emits, a rule stated but not yet enforced.
+>
+> **Read it as the specification, not as a description of the current build.** A
+> gap between this document and the code is a **work item**, never a licence to
+> treat the model as wrong or the code as authoritative — the code is what gets
+> changed. Conversely, do not read a capability here as present-tense fact; where
+> the status of a field or path matters, the per-field **Impl** column and the
+> linked issue are the places to look.
+>
+> **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
+> has a defect.** The single exception is a *factual* error — the model itself
+> being wrong — which is corrected here and recorded in the changelog.
+>
 > **Changelog v3.15 (2026-09-24, issue #5013 — a document is a `:Source`; sources are versioned):**
 > - §4.4: **rewritten.** A document is a `:Source`, not an entity. The
 >   `:Document` label and `objectKind: document` are retired; **`content` leaves
@@ -23,12 +40,13 @@ doc_status: live
 > - §4.4 + §6: the two classification axes are **kept and kept separate** —
 >   `sourceKind` (what kind of source) and `documentKind` (what genre of
 >   document). Neither absorbs the other.
-> - §4.3: `aboutDocument` is **kept**; its target label moves to `:Source` and
+> - §3.2: `aboutDocument` is **kept**; its target label moves to `:Source` and
 >   its replay key becomes `url`. It is **not** merged into `aboutSource` — the
 >   two differ in whether `rebuild_all` pass-2b resurrects them (`#2489`).
 >   `Document` is removed as an edge source from the other `about*` predicates,
 >   and one example that used `uses`→`:Document` is corrected to `:Object`
->   (`uses` is declared `Event → Object`).
+>   (`uses` is declared `Event → Object`). **(Edge rows: §3.2; the summary line:
+>   §3.9.)**
 > - §4.6: **source versioning stated.** Identity is `url`; `contentHash`
 >   identifies a **version**; raw content is **append-only**; **extraction is
 >   version-scoped**; `validFrom`/`validTo`/`expiredAt` become the version's
@@ -165,8 +183,9 @@ doc_status: live
 > - §5: registers core object kind `Problem` (deviation between actual and desired
 >   state) + Problem-family note — dev `bug`/`incident` and product-strategy
 >   `customerProblem` subclass it; `risk` is its potential/claim form (dev point kind).
-> - §11.5: new *Object Confidence — Compositional Projection* spec — **proposed,
->   not yet implemented** (the compositional read path ships separately).
+> - §11.x (*Object Confidence — Compositional Projection*, a **proposed** section that
+>   has not been added to this document): **proposed, not yet implemented** (the
+>   compositional read path ships separately).
 > - §1/§4.3/§6: core-subclass enumerations extended with `Problem`.
 >
 > **Changelog v3.9 (2026-09-02, issue #2101 / epic #2080 — §5 response-contract vocabulary, W4 why-layer DM-12):**
@@ -255,7 +274,7 @@ doc_status: live
 > - Pack-mapping item: product-strategy option pointKinds (useCase/userJourney/
 >   jobToBeDone/valueProposition) → objectKinds.
 
-**Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case) — e.g. `doc_status`, `file_hash`, `is_episodic`, `c_cal`, `story_arc`, `passes_frequency_gate`, `provenance_spans` (v3.6, #909).
+**Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case, or a leading-underscore internal field) — e.g. `file_hash`, `is_episodic`, `c_cal`, `passes_frequency_gate`, `provenance_spans`, `_searchText` (v3.6, #909).
 
 ---
 CRITICAL RULE: no modification to this file is allowed without explicit approval of the exact changes by Daniel Ospina.
@@ -284,7 +303,7 @@ Each layer answers a different question. All four are live mechanisms.
 
 | Layer | Question | Entity | How it works |
 |-------|----------|--------|--------------|
-| **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents**) | Nouns. Standing structural relations (owns, memberOf, hasPart) via plain edges. |
+| **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents**) | Nouns. Standing structural relations (ownedBy, memberOf, hasPart) via plain edges. |
 | **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the reconstruction source for `Object.status` (§11), status is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved). |
@@ -302,8 +321,9 @@ Each layer answers a different question. All four are live mechanisms.
 > based on these reasons"* — never *"this decision was made because of these
 > reasons"*. The decision dimension stays queryable as a timeline (events),
 > but decisions are NOT first-class Points. Point kinds `decision`/`vision`/
-> `strategy`/`plan`/`goal`/`target`/`humanApproval`/`event` are LEGACY write
-> kinds (§5) — extraction emits `statement` Points only, Event nodes, and
+> `strategy`/`plan`/`goal`/`target`/`observation`/`hypothesis`/`humanApproval`/
+> `event` are LEGACY write kinds (§5) — extraction emits `statement` Points only,
+> Event nodes, and
 > lifecycle writes on Objects. State confidence is derived at
 > read time from the attached Points' EP confidence (§11) — never stored
 > independently on the Object.
@@ -312,7 +332,7 @@ Each layer answers a different question. All four are live mechanisms.
 
 | Edge | Type | Confidence | Example |
 |------|------|-----------|---------|
-| performs / produces / uses / owns / memberOf / authoredBy / ownedBy / managedBy | **Structural** (plain) | None (factual) | (User)-[performs]->(Event), (User)-[owns]->(Doc) |
+| performs / produces / uses / authoredBy / ownedBy / memberOf / managedBy | **Structural** (plain) | None (factual) | (:Subject "Daniel")-[performs]->(:Event), (:Object "Customer Profile")-[ownedBy]->(:Subject "Daniel") |
 | Event→Point, Point→Event, Point→Point | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — the latter write-only in v1 (argumentation annotation; no EP propagation; the decision stays an Event, never a first-class Point) |
 
 **Principle:** Operators connect only epistemic targets (Event→Point, Point→Event, Point→Point). Subjects connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
@@ -332,7 +352,7 @@ Each layer answers a different question. All four are live mechanisms.
 
 > **Supersession / invalidation semantics (the shared `CORRECTS` edge):** `CORRECTS` is the structural replacement edge — both writes below create it, and only `status='superseded'` separates them (§4.7). `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy** (#2421). `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 >
-> **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects MERGE by `name`, **Sources and `aboutDocument` edges by `url`**, never `target.id`). **⚠️ `aboutDocument`'s replay key is `url`** — the same key a `:Source` resolves by, so the label and the key must always change together: a retargeted label with a stale key resolves to **nothing** and **silently mis-points** the rebuilt edge. A `:Source` resolves by `url`, so the resolver must be updated in the same change as the label retarget; a key mismatch silently mis-points the rebuilt edge. Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
+> **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects MERGE by `name`, Sources **and `aboutDocument`** by `url`; never `target.id`). **⚠️ A predicate's label and its key are one unit: a retargeted label with a stale key resolves to nothing and silently mis-points the rebuilt edge.** `aboutDocument` targets a `:Source` (§4.4), so it resolves by `url` — the same key a `:Source` resolves by. Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
 >
 > **Restatement-vs-correction policy (#2421):** two supersede cases look alike but demand opposite edge handling, so edge disposition is decided **per edge at write time** (never silently bulk-transferred):
 > - **Case 1 — restatement:** the new point says the same thing more precisely (better source, fixed typo, merged duplicate). Every connection still applies; edges and belief transfer — belief-preservation is asserted (eval-spec P6.1/P6.2).
@@ -365,7 +385,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `aboutObject` | Point/Event/**Session** → Object | unidirectional | many→many | `schema:about` (typed) | What Object this describes. A source does not carry this edge — see the row above |
 | `aboutEvent` | Point → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events. A source does not carry this edge |
 | `aboutPoint` | Event → Point | unidirectional | many→many | `schema:about` (typed) | What Point this Event describes. Event-only edge |
-| `aboutDocument` | Event → **Source** | unidirectional | many→many | `schema:about` (typed) | What document this Event is about. **⚠️ It is a distinct predicate from `aboutSource` and must not be merged with it:** `aboutDocument` is in the snapshot-derivable set (`DERIVABLE_STRUCTURAL_RELS`) and is therefore **rebuilt at the old point** by `rebuild_all` pass-2b, whereas `aboutSource` is deliberately excluded and never resurrects — merging them would silently delete that rebuild guarantee (see the #2489 note below) |
+| `aboutDocument` | Event → **Source** | unidirectional | many→many | `schema:about` (typed) | What document this Event is about. **⚠️ It is a distinct predicate from `aboutSource` and must not be merged with it:** `aboutDocument` is in the snapshot-derivable set (`DERIVABLE_STRUCTURAL_RELS`) and is therefore **rebuilt at the old point** by `rebuild_all` pass-2b, whereas `aboutSource` is deliberately excluded and never resurrects — merging them would silently delete that rebuild guarantee (the `#2489` replay rules are in §3.1) |
 | `aboutSource` | Point/Event → Source | unidirectional | many→many | `schema:about` (typed) | What Source this describes (e.g., an evaluation of a source). Creatable via `create_edge` (#391); may coexist with `extractedFrom` when the claim's text was also retrieved from that source. **⚠️ NOT snapshot-derivable by design — it gets no replay descriptor** |
 | `aboutAction` | Point → Point (legacy) | unidirectional | many→many | `schema:about` (typed) | Legacy predicate retained for pre-v3.0 Action edges (Action entity dissolved in v3.0). No automatic producer — creatable only via explicit `create_edge` (#391); endpoints are whatever the resolver finds |
 | `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
@@ -386,7 +406,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `references` | Source → Event/Object/Source | unidirectional | 1→many | — | The source links to / references this entity — target may be an Event, an Object, **or another Source** (producer extension in `link_source_to_entity`, #909 §4.3 #8). A document is itself a `:Source`, so it is covered by the Source target. Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205); external artifacts referenced in a captured conversation become external Source nodes that the session Source `references` (referential chain, #909). |
+| `references` | Source → Event/Object/Source | unidirectional | 1→many | — | The source links to / references this entity — target may be an Event, an Object, **or another Source** (producer extension in `link_source_to_entity`, #909 §4.3 #8). A document is itself a `:Source`, so it is covered by the Source target. Wired in the ingest path — the source a document arrived through is linked to it, and external artifacts referenced in a captured conversation become external Source nodes that the session Source `references` (referential chain, #909). |
 
 `(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary, e.g. `github_issue`, `github_pr`, `linear_card`, `linear_cycle`, `slack_message`, `document`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
 
@@ -397,13 +417,13 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `performs` | Subject → Event | unidirectional | N-ary | **`schema:agent` inverse** — schema.org's "direct performer or driver of the action", reversed (we go Agent→Activity) | X **did** this. The doing relation: subject executes the event. PROV has no Agent→Activity predicate (its `wasAssociatedWith` is Activity→Agent accountability); we name the performer-side verb ourselves, aligned to schema.org's performer concept. |
-| `produces` | Event → Object | unidirectional | 1→many | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the event created |
+| `produces` | Event → **Object or Point** | unidirectional | 1→many | `schema:result` (same direction) / `prov:wasGeneratedBy` inverse | Output artifact the event created — an **Object** (a report, a PR, a build) or a **decision Point** (the #531 `humanApproval` pattern: an approval Event produces the decision Point that seeds its grounding) |
 | `uses` | Event → Object | unidirectional | N-ary | **`prov:used`** (W3C: Activity→Entity, direction-identical — canonical) / `schema:instrument` for mechanisms | Input the event consumed — **including the mechanism** (skill/tool/agent/workflow Object) that produced the output |
 | `wasDerivedFrom` | Object → Object | unidirectional | N-ary | `prov:wasDerivedFrom` | Entity derivation (distinct from Source provenance) |
 
 > **One edge, two names:** `uses` (graph predicate) = `prov:used` (PROV property). Same thing — present tense in our vocabulary, past tense in PROV's. `produces` = `schema:result` (Activity→Entity, matching direction); `prov:wasGeneratedBy` names the reverse (Entity→Activity).
 >
-> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record. (The `references` hop is wired in the ingest path for Documents and — since #388 — for connector entities at the `_upsert_event` choke point — see §3.4.)
+> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(:Source)` — the source a point was read from, which carries the `eventId` of the Event that ingested it, reaching the log record; a session Source also `references` the document Sources it contains (`Source → Source`, §3.4). (The `references` hop is wired in the ingest path for connector entities at the `_upsert_event` choke point — since #388 — see §3.4.)
 
 ### §3.6 Subject ↔ Subject (Organisational)
 
@@ -428,7 +448,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `performs` (in) | Subject → Event | unidirectional | N-ary | `schema:agent` inverse | Actor — who did it |
-| `produces` | Event → Object | unidirectional | 1→many | `schema:result` | Output artifact |
+| `produces` | Event → **Object or Point** | unidirectional | 1→many | `schema:result` | Output artifact — an Object, or a decision Point (#531) |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
 | `op: IMPL/NAND` | Event → Point, Point → Event | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event direction = argumentation annotation, write-only in v1 (no EP propagation) |
@@ -452,7 +472,6 @@ performs, produces, uses, authoredBy, ownedBy, managedBy,
 hasMember, holdsRole, memberOf, reportsTo,
 participatesIn, hasPart, related, dependsOn, references,
 wasDerivedFrom
-wasDerivedFrom
 
 > **#214 (2026-08-06):** `instantiates` removed — Event→Action legacy from v2.5;
 > Action was dissolved in Ontology v3.0.
@@ -465,7 +484,7 @@ wasDerivedFrom
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 
-Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Point), written by `mitigate_operator` (`TortoiseSDK.mitigate_operator`): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with the mitigation Point back-linking `-[:IMPL]->` the operator (#909 §4.3 #7 — registered; previously unregistered).
+Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Point), written by `mitigate_operator` (`TortoiseSDK.mitigate_operator`): `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`, with the mitigation Point back-linking `-[:IMPL]->` the operator (#909 §4.3 #7 — registered).
 
 > **Hard rule (#2315, pinned 2026-09-07):** a `mitigated_by` edge can ONLY
 > originate from an `is_operator:true` Point. `mitigate_operator` is the
@@ -544,7 +563,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 |-------|------|----------|-------------|------|---------|
 | `id` | string | ✅ | `dc:identifier` | ✅ | Canonical identifier |
 | `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
-| `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, Problem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
+| `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, Problem, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
 | `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
 | `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; connector work-item events→in_progress/completed) — **the event stream is the reconstruction source for `Object.status` (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
 | `supersededAt` | ISO8601 | — | — | ✅ | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. A separate fact from `expiredAt` — "replaced by a successor" and "our record stopped being current" are independent, and both can apply (§4.7). |
@@ -560,17 +579,17 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 
 ### §4.4 Document — a source, not an entity
 
-A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, reached through the source; the entities, claims and events **extracted** from it carry the epistemic weight, and `extractedFrom` ties each extracted node to the source it was read from.
+A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, reached through the source; the Points, Events and claims **extracted** from it carry the epistemic weight, and `extractedFrom` ties each extracted Point to the source it was read from.
 
 **A source's fields and its versioning rules are in §4.6.** This section states only what is specific to a document.
 
-**`documentKind` — the genre axis.** When `sourceKind: document`, `documentKind` names the **genre**: research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief, plus pack documentKinds.
+**`documentKind` — the genre axis.** When `sourceKind: document`, `documentKind` names the **genre** of the document. The core vocabulary and the pack extension point are in **§5** (single home).
 
-**`documentKind` is not `sourceKind`.** `sourceKind` answers *what kind of source this is* (`document`, `conversation`, `github_issue`, `agentSession`); `documentKind` answers *what genre of document it is*. Different questions — **neither absorbs the other**.
+**`documentKind` is not `sourceKind`.** `sourceKind` answers *what kind of source this is* (`document`, `conversation`, `github_issue`, `agentSession` — the full vocabulary is in §5); `documentKind` answers *what genre of document it is*. Different questions — **neither absorbs the other**.
 
 **Liveness is a read, not a field.** *"Is this source still good?"* is answered from the entities extracted from it — high confidence, not superseded, not under a `NAND`. **The source inherits its health from its contents**, so nothing is stored to keep in sync and nothing can drift from the graph it describes. There is no `doc_status`.
 
-**Currency is also a read, and it needs an anchor.** Whether the extracted entities are *about the current content* is decided by the **version recorded on the extraction link** against the source's current version (§4.6) — not by any stored flag.
+**Currency is also a read, and it needs an anchor.** Whether the extracted Points are *about the current content* is decided by the **version recorded on the extraction link** against the source's current version (§4.6) — not by any stored flag.
 
 **`content` is not a graph property.** A document's bytes live in raw storage (D30, §2); the graph holds the entity that references them, never the text.
 
@@ -579,7 +598,7 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
 | `eventId` | ULID / content-addressed | ✅ | `dc:identifier` | ✅ | Unique occurrence ID — ULID by default; the **agentSession Event uses a content-addressed form** (hash of session_id + captured_at — deterministic MERGE anchor, #909 §4.3 #3) |
-| `eventKind` | string | ✅ | — | ✅ | meeting, decision, experiment, deployment, review, friction, extraction, documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession + pack eventKinds |
+| `eventKind` | string | ✅ | — | ✅ | Core vocabulary in **§5** (meeting, decision, deployment, turn, humanApproval, …) + pack eventKinds |
 | `format` | string | — | `dc:format` | ✅ | Storage format (jsonl default, markdown) |
 | `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Valid-time extent — Event's **named alias** of `validFrom`/`validTo` (§4.7), not a distinct axis |
 | `capturedAt` | ISO8601 | — | — | ⚠️ | Event's **transaction-time start** (§4.7) — when our record of the occurrence was captured, the bi-temporal complement to `startedAt`/`endedAt` (valid time). Registered #909 §4.3 #2; written on `AgentSession` (+ extracted-occurrence) Events by the hosted capture/commit endpoint and the session indexer; not yet on every Event write path |
@@ -596,31 +615,48 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
 | `url` | string | ✅ | `dc:source` / `pav:retrievedFrom` | ✅ | Permalink back to original |
-| `sourceKind` | string | ✅ | — | ✅ | Extensible source TYPE vocabulary (github_issue, slack_message, linear_card, document...). Tier-form values (T0-T4) mirror to `credibilityTier` (dual-write, #398) |
+| `sourceKind` | string | ✅ | — | ✅ | Extensible source TYPE vocabulary — **the core list and the pack extension point are in §5**. Tier-form values (T0-T4) mirror to `credibilityTier` (dual-write, #398) |
 | `credibilityTier` | string | — | — | ✅ | T0-T4 credibility tier — the property the inheritance adapter reads (v3.2) |
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | **Version anchor** — the digest of the content read. A differing hash on re-fetch is a **new version**, not an edit (see *Versioning* below) |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. Set **in place** on `ON MATCH` by `_upsert_source` — **unjournalled today** (`#5024`) |
-| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The version's valid-time window** — when the content held in the world (declared §4.7, #3642; not yet written by `_upsert_source`) |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
-| `documentKind` | string | — | `bibo:Document` subclasses | ✅ | **Genre**, when `sourceKind: document` — research, planDoc, apiSpec, transcript + pack documentKinds. Distinct from `sourceKind` (§4.4) |
+| `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
 | `format` | string | — | `dc:format` | ⚠️ | Storage format (markdown, jsonl, yaml, cypher). Not yet in `_SOURCE_HANDLED` |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
 | `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on the session Source (registered #909 §4.3 #13; planned for the capture path, slice 5+) |
+| `version` | integer | ✅ | — | ✅ | **Monotonic version counter**, 1 at creation, +1 on each content-hash change. The cheap ordinal beside `contentHash`'s identity |
+| `topics` | array | — | `dc:subject` | ✅ | Topic list captured from the source |
+| `summary` | string | — | `dc:description` | ✅ | Summary captured from the source |
+| `sessionId` | string | — | — | ✅ | The session this source arrived in |
+| `eventId` | string | — | — | ✅ | The Event that ingested this source — the 1-hop audit hop to the mechanism snapshot (§3.5) |
+| `story_arc` | string | — | — | ❌ | Arc continuation, for a source captured as part of a longer session narrative |
+| `sourcePath` | string | — | — | ✅ | Filesystem path, for locally-ingested sources |
+| `needs_extraction` | bool | — | — | ✅ | Explicit signal that this source is awaiting extraction (`--upgrade-all` discovery) |
+| `_searchText` | string | — | — | ✅ | Derived full-text index field (coalesce-on-create, overwrite-on-hash-change) |
 | `reliability` | float 0..1 | — | — | ⚠️ | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
 
-**Versioning.** Identity is `url`; `contentHash` identifies a **version** of that identity. Raw content is **append-only**: a re-fetched source whose content differs is a **new version, never an edit**. A version change **closes the previous version's interval** (`validTo`, `expiredAt`) and **adds a supersession link** — it never overwrites. **Interval-closing is part of the write, not a later repair**: an unclosed `validTo` reads as *"still true"* indefinitely.
+**Versioning.** Identity is `url`; `contentHash` identifies a **version** of that identity. A re-fetched source whose content differs is a **new version, never an edit** — so **identity is stable and version is per-read**, and the two are never conflated.
 
-**Extraction is version-scoped.** A derived node records the version it was read from, so *"are these entities current?"* is a comparison of the **recorded version** against the source's **current version** — a read, like liveness (§4.4), and unanswerable without the version on the link.
+**The version history is append-only in the journal; the graph shows the current version.** The graph is a *projection* of the journal (§3), so the Source node carries **one** version — the current one — with its `contentHash`, its `version` ordinal, and the **current** version's valid-time window (`validFrom`/`validTo`). A version transition **appends a journal record** that closes the previous version's window and records the new one; it does not rewrite an older graph node, because there is no older graph node to rewrite. **A prior version's window is a journal fact, recoverable by replay** — never a second Source node per `url`.
 
-**Stale is not wrong.** Entities extracted from an earlier version **were true of the content that was read**. Supersession is **deferred until the replacement exists**: the earlier version's entities are **marked stale and remain standing**, and are **superseded when re-inference produces their successors** (§4.7). Superseded entities are **superseded, never deleted** — the previous belief stays queryable alongside the new one.
+**What supersedes is the FACTS, not the source.** A version change makes the previously-extracted entities out-of-date; it does not create a Source-to-Source link. The successor facts attach to the standing `:Source` (`extractedFrom` is keyed by `url`, which a version change does not move), and the earlier facts are replaced through the ordinary `CORRECTS` mechanism (§4.7 ‡). **The source is the identity; the entities are the belief.**
 
-**Currency is a read, and `updatedAt` is not it.** No stored flag says *"this source is current"*; currency is computed from the version on the extraction link. `updatedAt` records the last version transition, and is a durability defect until it is journalled (`#5024`).
+**Extraction is version-scoped — the link carries the version read.** Every **Point** derived from a source records **`sourceVersion`** — the `contentHash` of the version it was read from — on its `extractedFrom` link (declared `Point → Source`, §3.3). Currency is then a comparison of that recorded value against the source's current `contentHash`: **a read, never a stored flag** (§4.4), and unanswerable without the version on the link. Derived Events and Objects reach their source through their own links rather than `extractedFrom`, so **the version anchor is a Point-level guarantee** — a class whose provenance does not pass through an `extractedFrom` link is not version-scoped today.
+
+**A Point with several sources is stale when ANY of its links is.** `extractedFrom` is many→many (§3.3), so a Point read from more than one source carries a `sourceVersion` **per link**; the Point is **stale if any** of those links is behind its source's current version, and **current only when every** link is. Partial re-extraction therefore surfaces as staleness rather than passing silently.
+
+**Stale is a read, and `stale` is not `wrong`.** A **Point** is **stale** when its recorded `sourceVersion` differs from its source's current `contentHash` — a **derived predicate**, not a stored status, so nothing can drift. A stale entity **was true of the content that was read** and **remains standing**: supersession is **deferred until the replacement exists**, and when re-inference produces the successor the stale entity is superseded through `CORRECTS`. **Superseded, never deleted** — the previous belief stays queryable alongside the new one. This is the deliberate policy: **a stale belief is strictly better than no belief**, because immediate removal would leave the graph asserting nothing about a subject it previously had a position on.
+
+**Closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the failure mode the whole model exists to prevent — so the journal record that opens a new version closes the old one **in the same act**; it is never a later repair.
+
+**`updatedAt` records the last version transition.** It is not a currency flag — currency is computed from `sourceVersion` against `contentHash`.
 
 ### §4.7 Temporal Model (canonical)
 
@@ -641,8 +677,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 > **occurrence-date input** — the payload-level anchor the hosted commit path
 > copies verbatim into `validFrom` on the same node
 > (`point_props["validFrom"] = pr.point.when`, hosted_api.py:9461-9484).
-> It is the same value under the §4.1 spelling, not a second slot — the
-> pre-v3.12 map grouped them (`validFrom/To + when`) for this reason.
+> It is the same value under the §4.1 spelling, not a second slot — `validFrom` and the payload's occurrence date are **one slot under two spellings**, which is why they grouped together in the field map.
 
 **Axis 2 — Transaction time: "when did our record of it exist?"** The
 graph-write clock. Canonical pair: `createdAt` / `expiredAt`.
@@ -680,7 +715,7 @@ declared, not built (implementation is tracked separately):
 | txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`, and a Source gets `createdAt` only when its event carries one through `_persist_extra_props` (the SDK index path does not) — hence ⚠️. **⚠️ A re-fetched source whose content changed currently mutates in place (`updatedAt`) with no journal record (`#5024`).**
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`. **⚠️ A re-fetched source whose content changed currently mutates in place (`updatedAt`, `version`) with no journal record (`#5024`).**
 
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths, with the legacy mining W-4 post-pass falling back to the wall clock when
@@ -701,9 +736,8 @@ declared, not built (implementation is tracked separately):
 > `CORRECTS` pair alone classifies every invalidated Point as superseded.
 
 **Cross-Entity Field Map** (non-temporal fields; the matrix above is
-authoritative for the temporal slots. The pre-v3.12 map's `createdAt` row mapped
-Event's record-creation to `startedAt` — that contradicted §4.5 and is corrected
-here: Event's transaction-time start is `capturedAt`.)
+authoritative for the temporal slots. Event's transaction-time start is
+`capturedAt`; `startedAt` is its occurrence-time start.)
 
 | Field | Point | Subject | Object | Event | Source |
 |-------|-------|---------|--------|-------|--------|
@@ -718,7 +752,7 @@ here: Event's transaction-time start is `capturedAt`.)
 | format | — | — | — | format | **⚠️ `format` belongs here** — `_SOURCE_HANDLED` does not yet carry it |
 | aboutEdges | ✅ | — | ✅ | ✅ | — |
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
-| is_episodic | ✅ | — | ❌ | ✅ | ✅ |
+| is_episodic | ❌ | — | — | ❌ | ❌ |
 | passes_frequency_gate | — | — | ❌ | — | — |
 
 ---
@@ -729,7 +763,7 @@ here: Event's transaction-time start is `capturedAt`.)
 
 ```
 statement    # the LOGIC layer — THE extraction write kind (state-centric, option B 2026-08-12)
-decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY write kinds (write-compat only)
+decision, vision, strategy, plan, goal, target, observation, hypothesis, humanApproval, event   # LEGACY write kinds (write-compat only)
 ```
 > **State-centric alignment (2026-08-12, option B):** Points are the LOGIC layer
 > only, and the logic is one kind: **`statement`** — the asserted belief.
@@ -759,7 +793,7 @@ decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY 
 ### Object Kind Vocabulary (core)
 
 ```
-Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other,
+Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard, other,
 strategy, plan, goal, target    # commitment-state family (state-centric, 2026-08-12) — states that
                                 # commitments produce; carry lifecycle + derived confidence
 ```
@@ -811,25 +845,26 @@ organization, team, role, legalPerson, naturalPerson, other
 
 > **Account layer vs in-graph Subjects (#2311):** the `organization` / `team` kinds above (and their §6 subclasses) are **in-graph Subjects inside a memory** — semantically distinct from the control-plane account unit that owns the graph(s), the **organization account** (billing/tenure; legacy code/API/DB identifiers still read "team"). Subject kinds are not renamed by #2311. Definitions note: docs/registry-graph-schema.md ("Definitions — account layer vs in-graph Subjects").
 
-### Source Type Vocabulary (core) + Credibility Tier
+### Source Type Vocabulary (`sourceKind`) + Credibility Tier
+
+**The canonical `sourceKind` values** — what kind of source this is. The vocabulary is extensible: **core values are here**, pack kinds are declared in the pack manifests (§9) and registered at load time.
+
+```
+conversation, document, agentSession,
+github_issue, github_pr, slack_message, linear_card, linear_cycle
+```
+
+**Credibility tiers** — a *different* axis, carried on `credibilityTier`:
 
 ```
 T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverified)
 ```
 
-> **v3.2 (#398):** `sourceKind` is the extensible source TYPE vocabulary — pack-declared
-> kinds (github_issue, github_pr, linear_card, linear_cycle, slack_message, document...)
-> resolve to a tier ONLY via explicit registration (`register_source_kind_default`) or
-> an explicit `credibilityTier` assignment; unknown kinds stay neutral (no inheritance).
-> Connector kinds register explicitly neutral in SOURCE_KIND_DEFAULTS
-> (source_credibility.py) — connector Source materialization (#388) therefore never
-> alters EP inheritance. The T0–T4 tier semantics above live on `credibilityTier`. The
-> Beta-prior mapping (T0=(10,1), T1=(5,1), T2=(3,1), T3=(2,1), T4=(1.1,1)) is the
-> validated model (docs/ep-source-credibility-experiment.md §1.1).
+> **v3.2 (#398):** a `sourceKind` resolves to a tier ONLY via explicit registration (`register_source_kind_default`) or an explicit `credibilityTier` assignment; **unknown kinds stay neutral** (no inheritance). Connector kinds register explicitly neutral in `SOURCE_KIND_DEFAULTS` (`source_credibility.py`) — connector Source materialization (#388) therefore never alters EP inheritance. The T0–T4 tier semantics above live on `credibilityTier`. The Beta-prior mapping (T0=(10,1), T1=(5,1), T2=(3,1), T3=(2,1), T4=(1.1,1)) is the validated model (docs/ep-source-credibility-experiment.md §1.1).
 
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
 
-> **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the extensible sourceKind vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
+> **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the `sourceKind` vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
 
 ### Response-Contract Vocabulary (W4 why-layer, #2101 / epic #2080 DM-12)
 
@@ -841,10 +876,10 @@ drift is prevented by the S15 schema-correctness review).
 dig_deeper kinds   supports | nand | superseded | tradeoff     # dig_deeper[k].kind (deterministic labels, never LLM prose)
 dig_deeper labels  read supports · read the counterargument (NAND)
                    · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
-why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (§3.1.1/§6.1)
+why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (W4 why-layer spec §3.1.1/§6.1)
 conflict severity  high | medium                                # deterministic from the counter-claim's persisted EP mean
                                                                # high ⟺ mean ≥ 0.6 (repo high-confidence bar); else medium
-degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (§3.1.3)
+degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (W4 why-layer spec §3.1.3)
 ```
 
 ### Point Status Vocabulary (canonical, #432/#690)
@@ -889,7 +924,7 @@ At query time, `expand_kind("Project")` returns `["Project", "dev:epic"]`. Queri
 | Parent | Core subclasses |
 |--------|-----------------|
 | Object | Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard |
-| Document | **Not a subclass** — a document is a `:Source` (§4.4). Its vocabulary is the `documentKind` genre axis over `sourceKind: document`: research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief |
+| Document | **Not a subclass** — a document is a `:Source` (§4.4). Its vocabulary is the `documentKind` genre axis over `sourceKind: document` (§5) |
 | Subject | organization, team, role, legalPerson, naturalPerson |
 
 > No Object subclass has its own metadata table — they inherit Object fields verbatim. A document's fields are a source's fields, and they are in **§4.6**.
@@ -1065,16 +1100,14 @@ retained as prior history — there is NO unsupersede path that recovers the
 old claim's posterior, so the retained prior is the SOLE recovery vector.
 Every contested computation (annotate_ep_batch, rankers, `get_contested_claims`,
 `_review_prune`, why, analyze) excludes terminal claims via the shared
-live.py predicate (status ∈ {retracted, superseded, outdated, archived,
-deprecated} OR `outdated=true`).
+live.py predicate (status ∈ {retracted, superseded, outdated, archived} OR
+`outdated=true`).
 
-**#2488 merge-blocker caveat:** on this branch the rebuild-side fold decay
-applies to the *supersede* fold only — the `PointInvalidated` rebuild fold
-(`_fold_point_invalidated`) does not exist until #2488 lands, so an
-invalidate→rebuild cycle on THIS branch resurrects the frozen posterior (no
-fold re-applies decay). #2490's merge is gated on #2488; the rebase appends
-`decay_clause('n')` to `_fold_point_invalidated`'s SET (plan Task 2 step 4)
-and the invalidate→rebuild→vacuity parity test ships with it.
+**#2488 merge-blocker:** the rebuild-side fold decay applies to the *supersede*
+fold only. The `PointInvalidated` rebuild fold (`_fold_point_invalidated`) ships
+with **#2488**, so until it lands an invalidate→rebuild cycle **resurrects the
+frozen posterior** (no fold re-applies decay). **#2490** is gated on #2488 and
+adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 
 **Design decisions (recorded for the patent filing):**
 
