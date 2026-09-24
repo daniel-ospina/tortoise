@@ -1216,6 +1216,30 @@ escalation the watchdog stamps nothing as delivered, records
 **retries on the next run** — a failed page delivers nothing, so retrying is not
 a page storm, and silence is the one outcome a pager must never produce.
 
+**Wall-clock anchor (never muted, never zeroed).** The escalation window's
+start is the incident's **server-side `created_at`**, *not* the body's
+`first_failure_ts` — those two differ exactly when it matters. `first_failure_ts`
+is resettable and forgeable in ways `created_at` is not:
+
+- the **stale-clock reset** (no failing run within `STALE_RESET_MINUTES`,
+default 45) sets it to *now*, which would make a sustained incident observed on
+a **>45-minute cadence** unreachable by the wall-clock leg **forever** — the
+exact silent-forever incident #3887 exists to remove; and
+- a hand-edited body can set it in the **future**, which would mute the leg for
+as long as the clock is believed.
+
+Both are therefore ignored by the escalation leg: `created_at` is authoritative,
+and a **future** anchor (of either kind) is treated as untrustworthy and
+**defers to the `ESCALATE_MIN_RUNS` run leg** rather than silencing the pager.
+The same holds when `created_at` itself is **unusable** (no unforgeable start):
+the wall-clock leg is likewise deferred to the run leg, and the page carries
+**no age** rather than a 1970-derived one.
+This changes the escalation leg only — the restart leg still uses the
+resettable `first_failure_ts` and still stale-resets it, so an old or reopened
+incident cannot authorise a restart before `SUSTAINED_DOWN_MINUTES` of observed
+failure. The **run leg** is what stops the new anchor from paging a long-lived
+incident on its *first* observed failing tick: both legs stay required.
+
 **Two deliberate non-adoptions**, both stated so a later reader does not
 tidy them away:
 
@@ -1385,7 +1409,12 @@ surface.
   restart, but cannot authorise one before the issue has actually existed for
   `SUSTAINED_DOWN_MINUTES`. Scalars and the restart ledger are sanitised, and a
   stale clock (no failing run within `STALE_RESET_MINUTES`, default 45)
-  restarts the sustained window **without** clearing the restart ledger.
+  restarts the sustained window **without** clearing the restart ledger. The
+  **escalation** leg does not rest on that resettable clock: its wall-clock
+  anchor is the same server-side `created_at`, and a **future** `first_failure_ts`
+  is untrustworthy and defers to the `ESCALATE_MIN_RUNS` run leg — so neither a
+  stale reset (a >45-min-cadence incident) nor a forged future stamp can zero or
+  mute the pager (§7.5a).
 - **The cooldown and the hourly cap are still read from the body's
   `restarts=` ledger**, so their integrity rests on the bot-only write access
   to the incident issue — a human edit to `restarts=` can weaken them. That is

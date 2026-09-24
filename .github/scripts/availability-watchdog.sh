@@ -186,6 +186,13 @@
 #   FAIL-CLOSED: a `restarts=` value that is present but not fully parseable
 #   refuses to act rather than silently dropping an entry (dropping could only
 #   WEAKEN the cooldown/cap).
+#   The ESCALATION leg's own wall-clock gate anchors on that same server-side
+#   `created_at` (STATE_ESCALATE_ANCHOR_TS), NOT on the resettable
+#   first_failure_ts: the stale-clock reset sets first_failure_ts to `now`,
+#   which would make a >STALE_RESET_MINUTES-cadence incident's window
+#   unsatisfiable forever (the exact #3887 failure), and a body-forged future
+#   first_failure_ts would mute the pager. A future anchor is untrustworthy and
+#   defers to the run leg. The restart leg's anchor is unchanged.
 #
 # SAFETY PROPERTIES
 #   * No token is ever hard-coded; the Fly token comes from a repository
@@ -1193,6 +1200,18 @@ page_required() { # <text>
 
 # ── incident state (carried in the issue body) ──────────────────────────────
 STATE_FIRST_FAILURE_TS=""
+# The ESCALATION leg's wall-clock anchor, set by main() from the incident's
+# SERVER-SIDE `created_at` (the same unforgeable timestamp the restart window is
+# clamped to). It is deliberately SEPARATE from STATE_FIRST_FAILURE_TS: the two
+# legs need different anchors. The RESTART leg must not act before
+# SUSTAINED_DOWN_MINUTES of CONTINUOUS failure, so it uses the resettable
+# first_failure_ts. The ESCALATION leg exists to remove #3887's incident that
+# never reaches a human, so it must NOT be zeroed by the stale-clock reset and
+# must NOT be muted by a forged future first_failure_ts — both of which
+# first_failure_ts can be, and created_at cannot. Empty means "main() did not
+# resolve one": decide_escalation then falls back to STATE_FIRST_FAILURE_TS, so
+# the pure unit seam keeps working unchanged.
+STATE_ESCALATE_ANCHOR_TS=""
 STATE_DOWN_RUNS="0"
 STATE_LAST_DOWN_TS="0"
 STATE_LAST_COMMENT_TS="0"
@@ -1642,13 +1661,23 @@ decide_restart() {
 # globals) so a unit call can drive any pair, and is called by main() AFTER its
 # own normalization step.
 normalize_escalation_knobs() { # <sustained_minutes> <sustained_runs>
-  local s_min="$1" s_runs="$2" d_min d_runs
+  local s_min="$1" s_runs="$2" d_min d_runs raw_enabled
+  # The RAW value is validated FIRST, BEFORE to_int. `to_int` strips non-digits,
+  # so `false`/`off`/`no`/`true`/`yes`/`-1` all collapse to the empty string and
+  # take the default 1 — SILENTLY, because the `case` below then matches `1`.
+  # An operator writing `ESCALATE_ENABLED=false` to kill the pager would keep
+  # paging with no signal, which is the opposite of a kill switch. So any
+  # non-empty raw value that is not exactly `0` or `1` is loud, while the
+  # EFFECTIVE value still fails CLOSED toward paging (`to_int` default 1).
+  raw_enabled="$(printf '%s' "${ESCALATE_ENABLED:-}" | tr -d '[:space:]')"
   ESCALATE_ENABLED="$(to_int "$ESCALATE_ENABLED" "1")"
   case "$ESCALATE_ENABLED" in
     0|1) : ;;
-    *) warn "ESCALATE_ENABLED='${ESCALATE_ENABLED}' is not 0 or 1 — treating it as 1 (fail CLOSED toward paging; a kill switch must be explicit)"
-       ESCALATE_ENABLED=1 ;;
+    *) ESCALATE_ENABLED=1 ;;
   esac
+  if [ -n "$raw_enabled" ] && [ "$raw_enabled" != "0" ] && [ "$raw_enabled" != "1" ]; then
+    warn "ESCALATE_ENABLED='${raw_enabled}' is not 0 or 1 — treating it as ${ESCALATE_ENABLED} (fail CLOSED toward paging; a kill switch must be explicit)"
+  fi
   d_min=$((s_min * 3))
   d_runs=$((s_runs + 1))
   ESCALATE_SUSTAINED_MINUTES="$(int_or "${ESCALATE_SUSTAINED_MINUTES:-}" "$d_min" 1)"
@@ -1678,7 +1707,22 @@ decide_escalation() {
   # BOTH legs, in the same order decide_restart uses: wall-clock first, then
   # observed failing runs. A single failing tick satisfies NEITHER, so one bad
   # probe can never page.
-  if [ $((now - STATE_FIRST_FAILURE_TS)) -lt $((ESCALATE_SUSTAINED_MINUTES * 60)) ]; then
+  #
+  # ANCHOR (G2/G3): main() resolves the wall-clock start to the incident's
+  # SERVER-SIDE `created_at` in STATE_ESCALATE_ANCHOR_TS, so the stale-clock
+  # reset (which sets first_failure_ts=now) can no longer zero the pager's
+  # window, and a body-forged future first_failure_ts can no longer mute it.
+  # The fallback is STATE_FIRST_FAILURE_TS, which is what the unit seam (and any
+  # caller that did not resolve an anchor) supplies.
+  # A FUTURE anchor is UNTRUSTWORTHY (a clock that cannot be true is the
+  # fail-OPEN mute this leg must never have), so it is treated as "the window
+  # has already elapsed" — fail TOWARD paging, the same direction as the
+  # missing-created_at fallback. It cannot cause an immediate page on its own:
+  # the run leg BELOW still requires ESCALATE_MIN_RUNS OBSERVED failing runs,
+  # which one forged stamp cannot supply. So a long-lived incident's first
+  # observed run reaches the run leg, not the page.
+  local anchor="${STATE_ESCALATE_ANCHOR_TS:-$STATE_FIRST_FAILURE_TS}"
+  if [ "$anchor" -le "$now" ] && [ $((now - anchor)) -lt $((ESCALATE_SUSTAINED_MINUTES * 60)) ]; then
     printf 'wait_sustained'; return 0
   fi
   if [ "$STATE_DOWN_RUNS" -lt "$ESCALATE_MIN_RUNS" ]; then
@@ -2001,6 +2045,8 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     STATE_ESCALATE_STATE=""
     STATE_ESCALATE_TS="0"
     STATE_PAGE_OK_TS="0"
+    # A new incident's escalation anchor is its creation — which is this run.
+    STATE_ESCALATE_ANCHOR_TS="$now"
     HUMAN_PAGED_THIS_RUN="0"
     STATE_RESTARTS="$carried_ledger"
     STATE_RESTARTS_INVALID="$carried_invalid"
@@ -2046,6 +2092,23 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
         log "incident #${issue}: first_failure_ts precedes its created_at — clamping the sustained clock to the server-side created_at"
         STATE_FIRST_FAILURE_TS="$created_ts"
       fi
+    fi
+    # ── the ESCALATION leg's wall-clock anchor (G2/G3) ──────────────────────
+    # The escalation leg is the one whose whole job is to reach a human for an
+    # incident that nothing else closes, so its wall-clock start must NOT be a
+    # value the stale-clock reset can zero (G2) and must NOT be one a body edit
+    # can push into the future (G3). The incident's `created_at` is
+    # GitHub-assigned and body-immutable, so it is the anchor whenever it is
+    # usable. When it is NOT usable we have no unforgeable start, and the safe
+    # direction for a PAGER is TOWARD paging: the wall-clock leg is deferred to
+    # the run leg (`ESCALATE_MIN_RUNS`), which still requires that many OBSERVED
+    # failing runs. `0` is the "already elapsed" sentinel — it can never mute.
+    # This is SEPARATE from STATE_FIRST_FAILURE_TS so the restart leg keeps its
+    # resettable continuous-failure clock, byte-identical.
+    if [ -n "$created_ts" ]; then
+      STATE_ESCALATE_ANCHOR_TS="$created_ts"
+    else
+      STATE_ESCALATE_ANCHOR_TS="0"
     fi
     # Stale-clock guard: if no failing run has been recorded recently, this
     # incident is NOT continuous (a human reopened it, a close failed after
@@ -2420,6 +2483,17 @@ ${heal_note}"
   # delivers nothing, so retrying is not a page storm — and silence is the one
   # outcome requirement 5 forbids), and fails this run naming the channel.
   if [ "$esc_pending" = "1" ]; then
+    # Report the SAME window the gate used (the escalation anchor), NOT the
+    # restart clock: after a stale-clock reset first_failure_ts is `now`, so a
+    # page for a 3-hour incident that said "for ~0 min" would contradict the very
+    # fix that let it fire. An UNTRUSTWORTHY anchor carries NO age: the `0`
+    # sentinel means "no unforgeable start" (created_at was unusable) and a
+    # future stamp cannot be true — reporting either would publish a
+    # 1970-derived "for ~28 million min" / "since 1970". Both are clamped to
+    # `now`, the same treatment the gate gives the future stamp.
+    esc_anchor="${STATE_ESCALATE_ANCHOR_TS:-$STATE_FIRST_FAILURE_TS}"
+    if [ "$esc_anchor" -le 0 ] || [ "$esc_anchor" -gt "$now" ]; then esc_anchor="$now"; fi
+    esc_age_min=$(( (now - esc_anchor) / 60 ))
     # The page must not assert a DIAGNOSIS the probe cannot support (#3887
     # review). On the INCONCLUSIVE (runner-egress) path the incident's own heal
     # note says the watchdog cannot tell an app outage from its own network, so
@@ -2433,9 +2507,9 @@ ${heal_note}"
       esc_why="This class is one self-healing cannot close, so nothing else will escalate it."
     fi
     if [ "$esc_decision" = "remind" ]; then
-      esc_text="🔁 STILL RUNNING for ~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min (reminder) — ${esc_subject} since $(fmt_iso "$STATE_FIRST_FAILURE_TS"); ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+      esc_text="🔁 STILL RUNNING for ~${esc_age_min} min (reminder) — ${esc_subject} since $(fmt_iso "$esc_anchor"); ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
     else
-      esc_text="📟 HUMAN NEEDED — ${esc_subject} for ~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min; ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. ${esc_why} Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+      esc_text="📟 HUMAN NEEDED — ${esc_subject} for ~${esc_age_min} min; ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. ${esc_why} Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
     fi
     if page_required "$esc_text"; then
       STATE_ESCALATE_STATE="sent"
@@ -2443,7 +2517,7 @@ ${heal_note}"
       if ! update_issue_body "$issue" "$(render_body "$kind" "$kindlabel" "$heal_note")"; then
         warn "the escalation WAS delivered but recording its outcome in #${issue} failed — the next run re-sends (at-least-once); the human HAS been reached"
       fi
-      note "sustained-incident escalation delivered for #${issue} (${kind}, ${STATE_DOWN_RUNS} failing run(s), ~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min)"
+      note "sustained-incident escalation delivered for #${issue} (${kind}, ${STATE_DOWN_RUNS} failing run(s), ~${esc_age_min} min)"
     else
       STATE_ESCALATE_STATE="failed"
       STATE_ESCALATE_TS="0"

@@ -2176,6 +2176,16 @@ assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKE
 #  (e2e m) the public body/log never carry the recipient id
 #  (e2e n) a stale confirmed escalation ⇒ a REMINDER page
 #  (e2e o) ESCALATION_CHAT_ID really is a separate, working recipient
+#  (unit) G1: a non-numeric/non-boolean ESCALATE_ENABLED (false/off/…), which
+#         `to_int` collapses to the default 1, is LOUD — not silently paging
+#  (unit) G2: the escalation wall-clock is ANCHORED, so a stale-clock reset
+#         (first_failure_ts=now) cannot zero a >45-min-cadence incident's window
+#  (unit) G3: a body-forged FUTURE anchor is untrustworthy and defers to the
+#         run leg (fail toward paging) instead of muting the pager forever
+#  (e2e b2) a >STALE_RESET_MINUTES-cadence incident created 3 h ago → PAGE
+#  (e2e b3) a forged future first_failure_ts → PAGE (created_at is the anchor)
+#  (e2e b4) an UNUSABLE created_at → PAGE with NO 1970-derived age (run leg
+#         alone authorises it; an untrustworthy anchor carries no age)
 # ════════════════════════════════════════════════════════════════════════════
 
 # Unit-call decide_escalation() through the script's own LIB_ONLY seam. The
@@ -2190,6 +2200,22 @@ esc_unit() { # <first_failure_ts> <down_runs> <escalate_ts> <escalate_state> <pa
     STATE_ESCALATE_STATE="$4"; STATE_PAGE_OK_TS="$5"
     decide_escalation "$6"
   ' "$WATCHDOG" "$1" "$2" "$3" "$4" "$5" "$6"
+}
+
+# Unit-call decide_escalation() with an EXPLICIT escalation anchor — the value
+# main() resolves from the incident's server-side `created_at`. This is the ONE
+# seam that can drive the G2/G3 anchoring without dragging the whole
+# probe/issue/network stub through a run, and it lets the two anchors differ
+# (which the real stale-reset path needs).
+esc_anchor_unit() { # <anchor> <first_failure_ts> <down_runs> <now>
+  WATCHDOG_NOW_EPOCH="$NOW" WATCHDOG_LIB_ONLY=1 bash -c '
+    source "$0"
+    normalize_escalation_knobs 10 2
+    STATE_ESCALATE_ANCHOR_TS="$1"
+    STATE_FIRST_FAILURE_TS="$2"; STATE_DOWN_RUNS="$3"
+    STATE_ESCALATE_TS=0; STATE_ESCALATE_STATE=""; STATE_PAGE_OK_TS=0
+    decide_escalation "$4"
+  ' "$WATCHDOG" "$1" "$2" "$3" "$4"
 }
 
 # Unit-call parse_state() and print the escalation triple it derived. parse_state
@@ -2254,9 +2280,45 @@ assert_eq "$(ESCALATE_SUSTAINED_MINUTES=99 ESCALATE_MIN_RUNS=9 knobs_unit 10 2)"
 assert_eq "$(ESCALATE_ENABLED=2 knobs_unit 10 2)" "30/3" "knobs: a numeric non-boolean kill switch (2) leaves the derived thresholds alone"
 assert_eq "$(ESCALATE_ENABLED=2 esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=2 still PAGES (fail CLOSED toward paging, never 'off')"
 assert_contains "$(ESCALATE_ENABLED=2 knobs_warn_unit 10 2)" "is not 0 or 1" "knobs: coercing a non-boolean kill switch is LOUD"
+# G1: `to_int` runs first, so the BOOLEAN-SPELLED kill switches never reach the
+# case above — they collapse to the default 1 and the operator's
+# `ESCALATE_ENABLED=false` SILENTLY keeps paging. The RAW check must warn for
+# these too, while still coercing toward paging.
+assert_contains "$(ESCALATE_ENABLED=false knobs_warn_unit 10 2)" "is not 0 or 1" "knobs: ESCALATE_ENABLED=false is LOUD (silent coercion to 1 would keep paging)"
+assert_contains "$(ESCALATE_ENABLED=off knobs_warn_unit 10 2)" "is not 0 or 1" "knobs: ESCALATE_ENABLED=off is LOUD too"
+assert_eq "$(ESCALATE_ENABLED=false esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=false still PAGES (fail CLOSED toward paging, never silently 0)"
+# …and the warning is NOT a blanket one: the valid values stay quiet.
+assert_eq "$(ESCALATE_ENABLED=1 knobs_warn_unit 10 2)" "" "knobs: a valid ESCALATE_ENABLED=1 is NOT warned (the raw check is targeted)"
+assert_eq "$(ESCALATE_ENABLED=0 knobs_warn_unit 10 2)" "" "knobs: a valid ESCALATE_ENABLED=0 is NOT warned"
 # `banana` is not a boolean either, but to_int maps it to the default 1 before
 # the case — assert what that path actually does.
 assert_eq "$(ESCALATE_ENABLED=banana esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: a non-numeric kill switch (banana → default 1) still pages"
+
+# ── unit: the ESCALATION wall-clock ANCHOR (G2/G3) ─────────────────────────
+# G2: the stale-clock reset sets first_failure_ts=now, which used to make the
+# escalation window unsatisfiable forever (the exact #3887 failure). Anchored on
+# the incident's 3-hour-old created_at, the wall-clock leg still passes and the
+# run leg pages.
+assert_eq "$(esc_anchor_unit "$((NOW - 10800))" "$NOW" 20 "$NOW")" "page" \
+  "G2: an incident created 3 h ago survives a stale-clock reset (ff=now) → page, not wait_sustained"
+assert_eq "$(esc_anchor_unit "$((NOW - 10800))" "$NOW" 1 "$NOW")" "wait_runs" \
+  "G2: the anchor alone does NOT page — the run leg still gates a long-lived incident's FIRST observed run"
+assert_eq "$(esc_anchor_unit "$((NOW - 10800))" "$NOW" 3 "$NOW")" "page" \
+  "G2: …and it pages once run-leg quorum is reached (~30 min of observed runs)"
+# G3: a body-forged FUTURE first_failure_ts must not mute the pager. A future
+# anchor is untrustworthy and defers to the run leg (fail toward paging).
+assert_eq "$(esc_anchor_unit "$((NOW + 100000))" "$((NOW + 100000))" 20 "$NOW")" "page" \
+  "G3: a FUTURE anchor is untrustworthy → page (fail toward paging), never a permanent mute"
+assert_eq "$(esc_anchor_unit "$((NOW + 100000))" "$((NOW + 100000))" 2 "$NOW")" "wait_runs" \
+  "G3: …but the run leg still gates it — a future stamp alone cannot page"
+assert_eq "$(esc_anchor_unit "$((NOW + 100000))" "$((NOW - 7200))" 20 "$NOW")" "page" \
+  "G3: a future anchor does not gate even when the fallback clock alone would pass (fail toward paging)"
+# The unstaged fallback (main() resolved no anchor — the pure caller path):
+# a future first_failure_ts must not mute.
+assert_eq "$(esc_unit "$((NOW + 100000))" 20 0 "" 0 "$NOW")" "page" \
+  "G3: a future first_failure_ts with NO anchor → page (fail toward paging)"
+assert_eq "$(esc_unit "$((NOW + 100000))" 2 0 "" 0 "$NOW")" "wait_runs" \
+  "G3: …still gated by the run leg"
 
 # ── unit: parse_state gates the stamp on its OUTCOME ───────────────────────
 assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_state=sent escalate_ts=$((NOW - 600)) page_ok_ts=$((NOW - 300)) restarts= -->")" \
@@ -2329,6 +2391,70 @@ assert_not_contains "$(patched_body_first)" "escalate_state=sent" "e2e(b): …an
 assert_contains "$(patched_body)" "page_ok_ts=$NOW" "e2e(b): the confirmed-page stamp is persisted"
 assert_contains "$(patched_body)" "### Escalation" "e2e(b): the body carries an Escalation section for the operator"
 assert_contains "$(patched_body)" "A human was paged" "e2e(b): the section reports that a human WAS reached"
+
+# ── e2e(b2): a stale-clock reset must not zero the ESCALATION window (G2) ───
+# The failing runs here are >STALE_RESET_MINUTES (45) apart and the incident is
+# 3 h old. Before the created_at anchor the stale guard set
+# first_failure_ts=now and decide_escalation returned wait_sustained — so a
+# sustained incident observed on a >45-min cadence NEVER reached a human, the
+# exact #3887 failure. The restart clock still resets (that behaviour is
+# unchanged); the pager does not.
+reset_case
+seed_issue down "$((NOW - 10800))" 20 0 "" 42 "$((NOW - 5400))"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "e2e(b2): the sustained incident still fails the run"
+assert_contains "$OUT" "stale incident" "e2e(b2): …the restart clock DID stale-reset (the reset still happens)"
+assert_contains "$OUT" "escalation outcome: page" "e2e(b2): …but the escalation leg still decides to PAGE (the window is not zeroed)"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(b2): EXACTLY ONE page for the >45-min-cadence incident"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "HUMAN NEEDED" "e2e(b2): a human is paged"
+# The page reports the ANCHOR's age (the incident is 3 h old), not the reset
+# first_failure_ts (~0 min) — a page that said "for ~0 min" would contradict the
+# fix that let it fire.
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "for ~180 min" "e2e(b2): the page reports the incident age (180 min), not the reset clock"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "for ~0 min" "e2e(b2): …never a contradictory '~0 min' page"
+
+# ── e2e(b3): a body-forged FUTURE first_failure_ts cannot mute the pager (G3) ─
+# parse_state future-clamps the forged stamp to `now`, and the escalation anchor
+# is the incident's real server-side created_at (3 h ago), so the leg pages
+# instead of sitting on `wait_sustained`.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW + 100000)) down_runs=20 last_down_ts=$((NOW + 100000)) last_comment_ts=0 cap_notified_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_ISSUE_CREATED_AT="epoch:$((NOW - 10800))"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "e2e(b3): a forged future state clock → a normal failing run"
+assert_not_contains "$(patched_body)" "down for -" "e2e(b3): no negative duration is published"
+assert_contains "$OUT" "escalation outcome: page" "e2e(b3): a forged FUTURE first_failure_ts cannot mute the pager"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(b3): …the escalation page still goes out"
+assert_eq "$(count_calls 'FLYCTL')" "0" "e2e(b3): …and the restart leg still declines (the forged clock cannot restart)"
+
+# ── e2e(b4): an UNUSABLE created_at carries NO age into the page ────────────
+# main() sets STATE_ESCALATE_ANCHOR_TS=0 when created_at is unusable (the "no
+# unforgeable start" sentinel). The sentinel authorises the RUN leg but is not a
+# clock, so the page must not publish the age it implies — `now - 0` is
+# "~28 million min" and `fmt_iso 0` is 1970. Before the clamp the page did
+# exactly that; this pins the untrustworthy-anchor treatment.
+reset_case
+seed_issue down "$((NOW - 86400))" 20 0 "" 42
+export STUB_ISSUE_CREATED_AT="not-a-timestamp"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: page" "e2e(b4): an unusable created_at still reaches the pager (the run leg authorises it)"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(b4): exactly one page goes out"
+# The 0 sentinel has no age: the clamp reports ~0 min. Without it the page
+# publishes `(now - 0)/60` — a fixed, absurd epoch-0 age (NOW/60 here). Pin the
+# exact number so the assertion cannot pass vacuously on a different failure.
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "for ~0 min" "e2e(b4): an untrustworthy anchor reports ~0 min, not an epoch-derived age"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "for ~$((NOW / 60)) min" "e2e(b4): …never the (now minus 0) epoch age the 0 sentinel implies"
 
 # ── e2e(c): no repeat inside the reminder window ───────────────────────────
 reset_case
