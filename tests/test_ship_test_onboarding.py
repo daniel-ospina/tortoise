@@ -3003,27 +3003,38 @@ class _PS:
         self.stdout = stdout
 
 
-def test_the_start_time_forms_agree_on_a_space_padded_single_digit_day(
-        monkeypatch) -> None:
-    """FIX 1. `ps` renders `lstart` as `%c`, whose day-of-month field is
-    SPACE-padded (`Thu Jan  1 00:00:00 2026`), while the enumerator's field-split
-    form collapses the whitespace runs. Normalised, the two forms must compare
-    equal — otherwise the TOCTOU re-check refuses every rung on days 1-9, the
-    driver is never signalled, and a healthy passing run falls to `_abandon`.
-    `%c` is fixed by POSIX, so the padding is not locale-specific."""
+@pytest.mark.parametrize("lstart,rendering", [
+    ("Thu Jan  1 00:00:00 2026", "the C padding (day-of-month is space-padded)"),
+    ("2026年 1月 1日 00時00分00秒", "a 4-token locale rendering"),
+    ("Чт янв 1 00:00:00 2026 MSK", "a 6-token locale rendering"),
+])
+def test_the_enumerators_start_time_comes_from_the_same_reader_as_the_recheck(
+        monkeypatch, lstart, rendering) -> None:
+    """FIX A. `%c`'s token COUNT is locale-dependent — `LC_ALL=ja_JP.UTF-8`
+    renders 4 tokens, `LC_ALL=ru_RU.UTF-8` 6 — so a positional reconstruction of
+    `lstart` from the enumeration line either reads the wrong field or truncates
+    the time. Then every rung's TOCTOU re-check refuses, the driver is never
+    signalled, and a healthy run falls to `_abandon` while the Chromium tree is
+    orphaned. The enumerator therefore NEVER reconstructs the time: it takes it
+    from `_start_time_of`, the SAME reader the re-check uses, so the two are
+    equal BY CONSTRUCTION for every rendering."""
     import os
 
     import tools.ship_test_onboarding as mod
 
-    enumerated = f"4242 {os.getpid()} Thu Jan  1 00:00:00 2026 python run-driver"
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _PS(stdout=enumerated))
+    def _fake_run(argv, **k):
+        if argv[1] == "-axo":
+            # the enumerator's selection: the command is the LAST field and no
+            # `lstart` appears anywhere in it, so there is nothing to slice.
+            return _PS(stdout=f"4242 {os.getpid()} python playwright run-driver")
+        return _PS(stdout=lstart + "\n")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
     pid, started = mod._driver_pid_and_starttime()
     assert pid == 4242, pid
-    # the re-read returns the RAW `lstart=` form, space-padded on the same day
-    monkeypatch.setattr(mod.subprocess, "run",
-                        lambda *a, **k: _PS(stdout="Thu Jan  1 00:00:00 2026\n"))
-    reread = mod._start_time_of(4242)
-    assert reread == started, f"{reread!r} != {started!r}"
+    assert started == mod._start_time_of(4242) == mod._norm_start_time(lstart), (
+        f"{rendering}: the enumerator's start time must equal the re-check's, "
+        f"whatever the token count; got {started!r}")
 
 
 @pytest.mark.parametrize("bad_pid", ["0", "-1"])
@@ -3191,12 +3202,19 @@ def test_the_runbook_discloses_the_bound_the_vocabulary_and_the_residue() -> Non
     # ...and the window that produces `not_run`
     assert "not_run" in doc
     assert "killed" in doc.lower() or "dies" in doc.lower()
-    # FIX 8f: the MODULE docstring states the same closed vocabulary and
-    # qualifies the twice-write to the runs that actually enter the teardown.
+    # FIX E: the runbook carries the SAME qualification as the module docstring,
+    # so a reader cannot take the twice-write universal away from either place.
+    doc_flat = " ".join(doc.split())
+    assert "run whose walk settled into the pre-teardown write" in doc_flat, (
+        "the runbook must qualify the twice-write to a settled walk")
+    # FIX 8f + FIX E: the MODULE docstring states the same closed vocabulary and
+    # qualifies the twice-write to a run whose walk SETTLED into the pre-teardown
+    # write (not every run that merely enters the teardown).
     module_flat = " ".join((mod.__doc__ or "").split())
     for term in mod.BROWSER_TEARDOWN_OUTCOMES:
         assert term in module_flat, f"the module docstring does not name {term!r}"
-    assert "on any run that enters the teardown" in module_flat
+    assert "run whose walk settled into the pre-teardown write" in module_flat, (
+        "the module docstring must qualify the twice-write to a settled walk")
 
 
 # ── #4875 — the two aborts that write NO artifact, and the guard that does ───
@@ -3276,6 +3294,27 @@ def test_the_import_guard_path_writes_not_run_and_enters_no_browser_teardown(
     assert written["browser_teardown"]["outcome"] == "not_run"
     assert written["browser_teardown"]["closes"] == []
     assert calls == [], "the import-guard path must not enter a browser teardown"
+
+
+def test_a_walk_that_raises_before_it_settles_writes_no_document(
+        monkeypatch, tmp_path):
+    """FIX E. The "written atomically twice" claim was a false universal. A walk
+    body that raises enters `run_walk`'s `finally` (so the teardown runs) but never
+    reaches `_finalize`, so no pre-teardown copy is written — and the propagating
+    exception skips `_finish`. Measured: ZERO documents. The claim is qualified to
+    a walk whose body SETTLED, and this is the measurement it is qualified to."""
+    import tools.ship_test_onboarding as mod
+
+    def _raising_walk(*a, **k):
+        raise RuntimeError("the walk body blew up before it settled")
+
+    monkeypatch.setattr(mod, "_walk", _raising_walk)
+    with pytest.raises(RuntimeError):
+        _run_fake_walk(monkeypatch, tmp_path, plan=_happy_base(),
+                       ui_sequence=[], mcp_tools_call=_MCP_OK)
+    assert not list(tmp_path.rglob("observation.json")), (
+        "a walk that raised before it settled wrote a document, contradicting "
+        "the qualified twice-write claim")
 
 
 # ── #4907 — the BOUND: the teardown cannot block forever with a browser live ─
@@ -3627,6 +3666,93 @@ def test_the_abandon_artifact_claim_is_conditional_on_the_write(
         wedge_timeout=60.0)
     captured = capsys.readouterr()
     assert "could NOT be written" in captured.err, captured.err
+
+
+def test_the_summary_names_the_artifact_only_when_it_was_written(
+        capsys, tmp_path) -> None:
+    """FIX D. `_abandon` prints the shared summary even when its write failed, so
+    an unconditional `observation → <path>` line names an artifact that does not
+    exist while stderr says otherwise — the contradiction the summary exists to
+    prevent. Both branches are pinned: written names the path, not-written says so
+    on stdout AND stderr."""
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={})
+    obs.verdict = "passed"
+
+    mod._print_summary(obs, tmp_path / "observation.json")
+    captured = capsys.readouterr()
+    assert "[ship-test] observation →" in captured.out, captured.out
+    assert "NOT WRITTEN" not in captured.out, captured.out
+    assert captured.err == "", captured.err
+
+    mod._print_summary(obs, tmp_path / "observation.json",
+                       artifact_written=False)
+    captured = capsys.readouterr()
+    assert "[ship-test] observation →" not in captured.out, captured.out
+    assert "observation NOT WRITTEN" in captured.out, captured.out
+    assert "could NOT be written" in captured.err, captured.err
+
+
+def test_an_abandoned_run_still_warns_about_residue_on_stderr(
+        capsys, monkeypatch, tmp_path) -> None:
+    """FIX C. `_abandon` never reaches `_finish`, so a run that left a live org
+    AND abandoned its teardown used to exit with NO residue warning — contradicting
+    the runbook's "every status except deleted/skipped_no_org/not_reached is warned
+    on stderr". The side-effect warnings now live in the SHARED print path, so the
+    abandon exit carries both the residue alert and the browser-teardown alert."""
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at=mod._now(), target={})
+    obs.verdict = "passed"
+    obs.teardown = {"status": mod.TEARDOWN_BASELINE_UNAVAILABLE}
+    # the record IS `obs.browser_teardown`, as at the real call site, so the
+    # shared side-effect warning sees the `abandoned` outcome `_abandon` records
+    record = obs.browser_teardown
+    exits = []
+    monkeypatch.setattr(mod, "_exit_now", lambda code: exits.append(code))
+    mod._abandon(obs, record, None, tmp_path)
+    captured = capsys.readouterr()
+    assert "[ship-test] RESIDUE —" in captured.err, captured.err
+    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in captured.err, captured.err
+    assert "[ship-test] BROWSER TEARDOWN — abandoned" in captured.err, captured.err
+    # ...and the warnings are warnings only: the exit code is the run's own.
+    assert exits == [mod.EXIT_PASSED], exits
+
+
+@pytest.mark.timeout(60)
+def test_a_finalization_that_raises_still_reaches_the_exit(
+        monkeypatch, tmp_path) -> None:
+    """FIX B. `_abandon` runs on the WATCHDOG thread while the main thread is
+    blocked in a timeout-less `close()`, so `os._exit` is the only thing that
+    bounds the run. A `BrokenPipeError` from a CI-closed log pipe (or a `TypeError`
+    in a step detail) escaping the prints would kill the watchdog and leave the main
+    thread blocked forever — defeating the guarantee this change exists to give.
+    The finalization is suppressed and the exit sits in a `finally`."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+    real = mod._print_summary
+    raised = []
+
+    def _first_summary_raises(*a, **k):
+        if not raised:               # the abandon's summary, on the watchdog
+            raised.append(1)
+            raise BrokenPipeError("the CI log pipe was closed")
+        return real(*a, **k)         # `_finish`'s summary, once the wedge releases
+
+    monkeypatch.setattr(mod, "_print_summary", _first_summary_raises)
+    sink = []
+    _happy_bound_run(monkeypatch, tmp_path, ctx_close_wedges=True,
+                     driver_absent=True,
+                     wedge_timeout=mod.TEARDOWN_BOUND_S * 1.5,
+                     harness_sink=sink)
+    harness = sink[0]
+    assert raised, "the raising summary path was never exercised"
+    assert harness.exits, (
+        "the finalization raised and the last-resort exit was skipped, so the "
+        "main thread would block forever")
+    assert harness.exits == [mod.EXIT_PASSED], harness.exits
 
 
 @pytest.mark.timeout(60)

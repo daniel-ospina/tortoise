@@ -87,13 +87,16 @@ own driver child — enumerated as a direct child with its start time, re-checke
 before signalling, reaped after — which is what releases a close blocked
 against an unresponsive driver. The outcome is recorded in ``observation.json``
 as the ``browser_teardown`` block (``not_run`` / ``clean`` / ``close_error`` /
-``watchdog_kill`` / ``driver_absent`` / ``abandoned``), and on any run that
-enters the teardown the document is written atomically twice: a complete
-pre-teardown copy whose outcome is ``not_run`` (so a run killed inside the
-window still leaves a diagnostic) and the authoritative copy after the
-teardown. A run killed inside the window with the driver unresponsive
-still orphans that driver and its Chromium children — no in-process code runs
-after the kill — which is disclosed as **#4928**, not claimed closed.
+``watchdog_kill`` / ``driver_absent`` / ``abandoned``), and it is written
+atomically twice — but only for a run whose walk settled into the pre-teardown
+write: a complete pre-teardown copy whose outcome is ``not_run`` (so a run
+killed inside the window still leaves a diagnostic) and the authoritative copy
+after the teardown. That is a qualification, not a universal: a walk body that
+raises before it settles writes no pre-teardown copy, and its exception
+propagates past the authoritative write. A run killed inside the window with
+the driver unresponsive still orphans that driver and its Chromium children —
+no in-process code runs after the kill — which is disclosed as **#4928**, not
+claimed closed.
 
 **Teardown (#4319).** Every per-deploy run creates a real production org
 (``Ship Test <epoch>-<hex4>``); the run **reaps it by default**, and the outcome is
@@ -1269,11 +1272,13 @@ def _norm_start_time(text: str) -> str:
     """Collapse whitespace so the two `lstart` READS of one process compare equal.
 
     ``ps`` renders ``lstart`` as ``%c``, whose day-of-month field is SPACE-padded
-    (``Thu Jan  1 00:00:00 2026``), while the enumerator's field-split form
-    collapses those runs. Without one normal form the TOCTOU re-check compares
-    the padded form against the collapsed one and refuses every rung on days
-    1-9, so a healthy run falls to `_abandon`. ``%c`` is fixed by POSIX, not
-    locale-dependent.
+    (``Thu Jan  1 00:00:00 2026``) and whose token COUNT is LOCALE-DEPENDENT
+    (``LC_ALL=ja_JP.UTF-8`` renders four tokens, ``LC_ALL=ru_RU.UTF-8`` six).
+    This is the ONE normal form both reads of a process's start time pass
+    through — `_driver_pid_and_starttime` takes its value FROM `_start_time_of` —
+    so the TOCTOU re-check compares like with like BY CONSTRUCTION, whatever the
+    locale. The enumerator never reconstructs the time from a positional slice
+    of its own `ps` line, which is what made the token count load-bearing.
     """
     return " ".join(str(text).split())
 
@@ -1304,27 +1309,37 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None]:
 
     Enumerated once, at teardown start, as a direct child of THIS process: the
     sync API spawns the driver as a direct child, and E8 measured that killing it
-    takes the whole Chromium tree with it. The start time is carried alongside the
-    pid precisely because a bare pid is racy against reuse — the reader below
-    re-reads it immediately before signalling.
+    takes the whole Chromium tree with it.
+
+    ``command`` is the LAST field of the `ps` selection, so the driver is found
+    by a whole-field match and the start time is NOT reconstructed from the
+    enumeration line. It comes from `_start_time_of` — the SAME reader the
+    TOCTOU re-check calls — so the value the watchdog compares against is the
+    value this enumerator returned, BY CONSTRUCTION. That matters because
+    ``lstart`` renders as ``%c``, whose token COUNT is locale-dependent
+    (``LC_ALL=ja_JP.UTF-8`` → four tokens, ``LC_ALL=ru_RU.UTF-8`` → six): a
+    positional slice of the line would read the wrong field or truncate the
+    time, and then every rung's re-check would refuse, the driver would never be
+    signalled, and a healthy run would fall to `_abandon` while the Chromium tree
+    was orphaned.
 
     A non-positive pid is never returned: ``os.kill(-1, SIGKILL)`` signals every
-    process this uid may signal, so a field-split that misread the pid must never
-    become the signal target.
+    process this uid may signal, so a misread pid must never become the signal
+    target.
     """
     me = os.getpid()
     ps = _ps_binary()
     if ps is None:
         return None, None
     try:
-        out = subprocess.run([ps, "-axo", "pid=,ppid=,lstart=,command="],
+        out = subprocess.run([ps, "-axo", "pid=,ppid=,command="],
                              capture_output=True, text=True,
                              timeout=_ps_timeout()).stdout
     except Exception:
         return None, None
     for line in out.splitlines():
-        parts = line.split(None, 7)
-        if len(parts) < 8:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
             continue
         try:
             pid, ppid = int(parts[0]), int(parts[1])
@@ -1332,9 +1347,11 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None]:
             continue
         if pid <= 0 or ppid != me:
             continue
-        if not any(marker in parts[7] for marker in TEARDOWN_DRIVER_MARKERS):
+        if not any(marker in parts[2] for marker in TEARDOWN_DRIVER_MARKERS):
             continue
-        return pid, _norm_start_time(" ".join(parts[2:7]))
+        started = _start_time_of(pid)
+        if started is not None:
+            return pid, started
     return None, None
 
 
@@ -1442,10 +1459,11 @@ def run_walk(args) -> Observation:
         try:
             obs = _walk(pw, args, obs, td, out_dir, shots, email, password)
         finally:
-            # THE ONE TEARDOWN SITE, entered exactly once. It runs after the
-            # pre-teardown document has been written by `_finalize`, so a run
-            # that dies inside it leaves a complete artifact whose
-            # `browser_teardown.outcome` is `not_run`.
+            # THE ONE TEARDOWN SITE, entered exactly once. On a walk that SETTLED
+            # it runs after the pre-teardown document has been written by
+            # `_finalize`, so a run killed inside it leaves a complete artifact
+            # whose `browser_teardown.outcome` is `not_run`; a walk body that
+            # raised before it settled wrote no such copy.
             _teardown_browser(pw, td, obs, out_dir)
     # THE ONE AUTHORITATIVE WRITE+PRINT SITE: after the teardown, for every
     # returning path. A `_walk` exception propagates past it (the `finally` has
@@ -2008,10 +2026,14 @@ def _abandon(obs, record, driver_pid, out_dir, *, finalized: bool = True) -> Non
     The exit code is the run's OWN, computed exactly as `_finish` would, because
     a cleanup fault must never move the verdict (#4319). An UNFINALIZED run — one
     where a `BaseException` escaped `_walk` before it settled — exits
-    `EXIT_INSTRUMENT_ERROR`, which is what `main` returns for it. The
-    pre-teardown document is already on disk, and the authoritative one is
-    written here, so a run that had to abandon its teardown still says what it
-    measured and why the browser was not released.
+    `EXIT_INSTRUMENT_ERROR`, which is what `main` returns for it. When the walk
+    settled the pre-teardown document is already on disk; the authoritative one
+    is written here (when the write succeeds), so a run that had to abandon its
+    teardown still says what it measured and why the browser was not released.
+
+    Because this runs on the watchdog thread while the main thread is blocked in
+    a timeout-less `close()`, the finalization and the exit below are the LAST
+    chance the process has to end itself: nothing there may raise past the exit.
     """
     record["outcome"] = BROWSER_TEARDOWN_ABANDONED
     record["detail"] = scrub(
@@ -2029,16 +2051,25 @@ def _abandon(obs, record, driver_pid, out_dir, *, finalized: bool = True) -> Non
         wrote = True
     except BaseException:
         pass
-    _print_summary(obs, out_dir / "observation.json")
-    print(f"[ship-test] BROWSER TEARDOWN — {record['outcome']}: {record['detail']}."
-          + (" The artifact on disk records it;" if wrote else
-             " The artifact could NOT be written, so this run's own record is"
-             " incomplete;")
-          + f" the verdict ({scrub(obs.verdict)}) and the exit code are unchanged"
-            f" by it.", file=sys.stderr)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    _exit_now(run_exit_code(obs) if finalized else EXIT_INSTRUMENT_ERROR)
+    try:
+        # THE SHARED PRINT PATH, with the write's outcome so the `observation →`
+        # line cannot name an artifact that is not there. It also carries the
+        # non-clean cleanup warnings (the residue alert and the browser-teardown
+        # alert), which `_finish` prints too — this is the ONLY exit an
+        # abandoned run will take, so those warnings must live here as well.
+        _print_summary(obs, out_dir / "observation.json",
+                       artifact_written=wrote)
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except BaseException:
+        # A closed CI log pipe (`BrokenPipeError`) or a malformed step detail
+        # (`TypeError`) must not kill this thread and skip the exit below.
+        pass
+    finally:
+        # THE EXIT IS UNCONDITIONAL. The main thread is blocked in a timeout-less
+        # `close()`, so this is the only thing that bounds the run; a `finally`
+        # makes it unreachable-by-any-exception, not merely intended.
+        _exit_now(run_exit_code(obs) if finalized else EXIT_INSTRUMENT_ERROR)
 
 
 def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
@@ -2073,12 +2104,15 @@ def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
 def _write_observation(obs: Observation, out_dir: Path) -> Path:
     """Serialize the observation ATOMICALLY: ``mkstemp`` + ``os.replace``.
 
-    A normal run writes the document TWICE — once pre-teardown (the `not_run`
-    fallback, so a run killed inside the bounded window still leaves a complete,
-    parsable artifact) and once after it (authoritative). A truncate-in-place
-    write lets a reader see a half-written file between the two; an atomic
-    replace cannot. Deliberately PRINT-FREE: the verdict is printed once, by
-    `_finish`, so the two writes cannot produce two verdict lines.
+    A run whose walk settled into the pre-teardown write writes the document
+    TWICE — once pre-teardown (the `not_run` fallback, so a run killed inside the
+    bounded window still leaves a complete, parsable artifact) and once after it
+    (authoritative); a walk body that raises before it settles writes neither,
+    because its exception propagates past the authoritative write. A
+    truncate-in-place write lets a reader see a half-written file between the
+    two; an atomic replace cannot. Deliberately PRINT-FREE: the verdict is
+    printed once, by `_finish`, so the two writes cannot produce two verdict
+    lines.
 
     The temp is created with ``tempfile.mkstemp`` — an unguessable name, opened
     ``O_EXCL`` — and the destination leaf is refused when it is a symlink, so a
@@ -2107,14 +2141,43 @@ def _write_observation(obs: Observation, out_dir: Path) -> Path:
     return path
 
 
-def _print_summary(obs: Observation, path: Path) -> None:
+def _warn_side_effects(obs: Observation) -> None:
+    """The non-clean cleanup warnings: LOUD on stderr, never verdict-affecting.
+
+    Called from the SHARED print path, so a run that ABANDONED its teardown —
+    which never reaches `_finish` — still warns about the org it may have left
+    live and the browser it could not release. Both obey #4319: cleanup is not
+    the product, so neither changes the verdict or the exit code.
+    """
+    outcome = obs.browser_teardown.get("outcome")
+    if outcome not in (BROWSER_TEARDOWN_NOT_RUN, BROWSER_TEARDOWN_CLEAN):
+        print(f"[ship-test] BROWSER TEARDOWN — {outcome}: the browser this run owned "
+              f"was not released cleanly"
+              f" ({obs.browser_teardown.get('detail') or 'no detail'})."
+              f" That is a CLEANUP fault: it does not change the verdict"
+              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
+    if obs.teardown.get("status") in TEARDOWN_RESIDUE_STATES:
+        print(f"[ship-test] RESIDUE — teardown {obs.teardown.get('status')}:"
+              f" this run may have left a live org behind in the target tenant."
+              f" That is a CLEANUP fault: it does not change the verdict"
+              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
+
+
+def _print_summary(obs: Observation, path: Path, *,
+                   artifact_written: bool = True) -> None:
     """The run's authoritative stdout summary — the ONE print path.
 
     Shared by `_finish` (the normal exit) and `_abandon` (the bounded last
     resort), so a run that had to end its own teardown still prints the verdict
-    line, the per-step summary, the reason/exit line and the ``observation →
-    path`` line a CI job keys on. The verdict is scrubbed: it can carry free
-    text assembled from an exception message.
+    line, the per-step summary, the reason/exit line, the ``observation → path``
+    line a CI job keys on, and the non-clean cleanup warnings. The verdict is
+    scrubbed: it can carry free text assembled from an exception message.
+
+    ``artifact_written`` is what makes the ``observation → path`` line HONEST:
+    `_abandon` may have failed to write, and naming an artifact that does not
+    exist while stderr contradicts it is exactly the disagreement this path
+    exists to avoid. When it is false the line says the artifact was NOT written,
+    on both streams.
     """
     print(f"[ship-test] {scrub(obs.verdict)}")
     for s in obs.steps:
@@ -2127,7 +2190,14 @@ def _print_summary(obs: Observation, path: Path) -> None:
           f"bundle: {obs.bundle or '(unreadable)'}  instrument: {obs.sha or '(unknown)'}")
     if obs.teardown:
         print(f"[ship-test] teardown: {obs.teardown}")
-    print(f"[ship-test] observation → {path}")
+    if artifact_written:
+        print(f"[ship-test] observation → {path}")
+    else:
+        print(f"[ship-test] observation NOT WRITTEN → {path}")
+        print(f"[ship-test] WARNING — the observation artifact could NOT be "
+              f"written ({path}), so this run's own record is incomplete.",
+              file=sys.stderr)
+    _warn_side_effects(obs)
     if obs.reason == REASON_INSTRUMENT_ERROR:
         # LOUD, on stderr, with the exit code: a run that could not exercise
         # the product must never be mistaken for a measurement of it.
@@ -2144,34 +2214,15 @@ def _finish(obs: Observation, out_dir: Path) -> Observation:
     """The ONE authoritative write+print site.
 
     The write comes FIRST, so stdout and the file are produced from the same
-    finalized record and cannot disagree; the verdict line is printed exactly
-    once, after the bounded teardown has run.
+    finalized record and cannot disagree; the verdict line and the non-clean
+    cleanup warnings are printed exactly once, by the shared print path, after
+    the bounded teardown has run.
     """
     if not obs.reason:
         obs.reason = failure_reason(
             obs.verdict, session_state=(obs.session or {}).get("state", ""))
     path = _write_observation(obs, out_dir)
     _print_summary(obs, path)
-    if obs.browser_teardown.get("outcome") not in (BROWSER_TEARDOWN_NOT_RUN,
-                                                   BROWSER_TEARDOWN_CLEAN):
-        # LOUD, and NEVER verdict-affecting: the browser teardown is cleanup too,
-        # so it obeys the same rule as the org reaper (#4319). Printed HERE, the
-        # single print site, so this line and the file's `browser_teardown` block
-        # are written from the same finalized record.
-        print(f"[ship-test] BROWSER TEARDOWN — "
-              f"{obs.browser_teardown.get('outcome')}: the browser this run owned "
-              f"was not released cleanly"
-              f" ({obs.browser_teardown.get('detail') or 'no detail'})."
-              f" That is a CLEANUP fault: it does not change the verdict"
-              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
-    if obs.teardown.get("status") in TEARDOWN_RESIDUE_STATES:
-        # LOUD, but NOT verdict-affecting: cleanup is not the product. A run can
-        # pass and still owe the tenant an org, and a reader must never have to
-        # infer that from the code.
-        print(f"[ship-test] RESIDUE — teardown {obs.teardown.get('status')}:"
-              f" this run may have left a live org behind in the target tenant."
-              f" That is a CLEANUP fault: it does not change the verdict"
-              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
     return obs
 
 
