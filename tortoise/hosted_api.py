@@ -10192,7 +10192,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     receipt_key = _capture_receipt_key(capture_harness)
     if _session_alive():
         try:
-            _update_onboarding_state(org["org_id"], **{
+            # #4625: write-only — the return is discarded here, and this is
+            # the per-capture hot path (see ``_update_onboarding_state``).
+            _update_onboarding_state(org["org_id"], _echo=False, **{
                 receipt_key: now,
             })
             _record_capture_last_error(org["org_id"], capture_harness, None)
@@ -10221,8 +10223,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 if bucket_empty:
                     cleared = False
                     with suppress(Exception):
+                        # #4625: write-only — this return is discarded, and
+                        # this is the same per-capture hot path as the
+                        # receipt write above.
                         _update_onboarding_state(
-                            org["org_id"], **{receipt_key: None})
+                            org["org_id"], _echo=False,
+                            **{receipt_key: None})
                         cleared = True
                     if cleared:
                         extraction_warnings.append(
@@ -10572,7 +10578,10 @@ def _record_capture_last_error(org_id: str, harness: str | None,
         # GRAPH_NOT_FOUND) — the dashboard sub-line is text; a Python repr
         # would leak structure. Stringify to the message.
         detail = str(detail.get("message") or detail)
-    _update_onboarding_state(org_id, **{key: detail})
+    # #4625: write-only — this caller discards the echo, and computing it
+    # costs two fresh FalkorDB connections on the event loop (see
+    # ``_update_onboarding_state``).
+    _update_onboarding_state(org_id, _echo=False, **{key: detail})
 
 
 # ── #1727 Slice 2 (Task 14, T2-P1): POST /v1/sessions/install-probe ────────
@@ -10636,7 +10645,9 @@ async def session_install_probe(body: InstallProbeRequest,
     _reject_graph_bound_org_surface(org, "install probe")
     key = f"install_probe_{body.harness}"
     try:
-        _update_onboarding_state(org["org_id"], **{key: now})
+        # #4625: write-only — the return is discarded, and #4625 names this
+        # endpoint alongside the capture path.
+        _update_onboarding_state(org["org_id"], _echo=False, **{key: now})
     except Exception:
         _logger.exception(
             "install-probe state write failed (team=%s harness=%s)",
@@ -19941,7 +19952,8 @@ def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
             pass  # telemetry must never break the write path (R19)
 
 
-def _update_onboarding_state(org_id: str, **fields) -> dict:
+def _update_onboarding_state(org_id: str, _echo: bool = True,
+                             **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
     infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
@@ -19950,6 +19962,18 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     never default-to-FLOW) and the drop is REPORTED (raised instead under
     strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
+
+    ``_echo=False`` is the WRITE-ONLY contract for callers that DISCARD that
+    return (#4625): the writes above still happen; only the projection read is
+    skipped, so it cannot change what was written. It exists because the
+    projection is not free — ``_get_onboarding_projection`` probes the
+    registry UP TO TWICE (one probe when the org graph is ABSENT, which
+    returns early in ``_get_onboarding_projection``; two when it is present),
+    and in URI mode each probe builds a fresh registry SDK and
+    opens a NEW FalkorDB connection (TCP + TLS handshake + ``INFO`` +
+    ``list_graphs``), synchronously, on the event loop. Returns ``{}`` when
+    skipped: a caller that discards the value cannot tell the difference.
+    Callers that need the echo (GET/PATCH) keep the default.
 
     NOTE: this router's step-edge branch is NOT on the PATCH catalog path —
     `patch_onboarding_state` pops `catalog_presented` and writes the edge +
@@ -20003,6 +20027,39 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     # Org row (no-op jsonb write) must not silently flip the client's
     # just-ACKed value (test-seam + pre-existing echo semantics). The
     # overlay is never FLOW — operational keys only.
+    #
+    # #4625: the echo is NOT free, and callers that DISCARD it must say so.
+    # ``_get_onboarding_projection`` reaches ``_registry_existing_graphs()``
+    # UP TO TWICE (one probe when the org graph is absent — it returns early
+    # there; two when present, the per-capture case), and in URI mode each
+    # probe builds a fresh
+    # ``_make_sdk(namespace="registry")`` and opens a NEW FalkorDB connection
+    # (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` + ``list_graphs``).
+    # An AGENT capture (the fleet case) calls this router twice — the receipt
+    # write, then the last-error clear — and discards both returns, so the
+    # discarded reads alone open four fresh connections per capture. (A
+    # no-harness capture — a session-JWT/dashboard caller — writes the bare
+    # receipt but has no last-error key, so it makes one call, two
+    # connections.) All of it runs synchronously ON the event loop, which stalls
+    # every read in flight and drives the transport-bound 504s. Measured by
+    # py-spy on the live machine: the loop thread sitting in
+    # ``do_handshake (ssl.py:1319)`` <- ``_registry_existing_graphs`` <-
+    # ``_get_onboarding_projection`` <- ``_record_capture_last_error`` <-
+    # ``_capture_session_impl``.
+    #
+    # Scope: #4625 names "the capture path and install-probe", and exactly the
+    # sites on those two endpoints pass ``_echo=False``. The onboarding, demo,
+    # GitHub-callback and indexing callers also discard the echo, but they are
+    # NOT per-capture — they keep the default so this stays bounded to the
+    # frequency the issue is about.
+    #
+    # ``_echo=False`` is the write-only contract for those callers. The
+    # projection is a strictly read-only graph leg (see
+    # ``_get_onboarding_projection``), so skipping it cannot change what was
+    # written; it changes only what is computed. Default True keeps every
+    # GET/PATCH writer-echo caller byte-identical.
+    if not _echo:
+        return {}
     echo = _get_onboarding_projection(org_id)
     if jsonb_fields:
         echo.update(jsonb_fields)
