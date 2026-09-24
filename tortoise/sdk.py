@@ -2021,9 +2021,13 @@ def _get_kind_expander():
 def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     """Attach promoted epistemic state (D8) to embedded-fallback hits — one
     batch fetch (#1353, E5 #1537). Additive, mirroring SearchResult.to_dict:
-    keys are set ONLY when the state is non-empty, so a graph with no
-    CORRECTS edges renders byte-identically to today. Decoration must never
-    break retrieval — a graph failure returns the hits undecorated.
+    an absent state adds no key, so a graph with no CORRECTS edges renders
+    byte-identically to today — with ONE deliberate exception: #4889's
+    ``subject_unavailable`` is written precisely when the state is *empty* on a
+    graph that cannot carry ``aboutSubject``, so a producer-less graph is NOT
+    byte-identical (that is the point — the silence is replaced by a reason).
+    Decoration must never break retrieval — a graph failure returns the hits
+    undecorated.
 
     #4889: the degraded fallback is a Point-only surface that advertises the
     same promoted-state fields as the primary path, so it owes the same
@@ -2184,21 +2188,28 @@ def _index_no_network_enabled() -> bool:
 def _holds_role_available(graph) -> bool:
     """True when this graph can carry ``holdsRole`` edges at all (#4889).
 
-    ``get_org_structure`` returns ``roles`` from a ``holdsRole`` traversal.
-    That predicate has **no producer anywhere in the tree** — every reference
-    is an edge allow-list, the read query itself, or an explicit
-    ``create_edge``/``create_entity`` caller. On a graph where it is absent
-    the empty ``roles`` list is structural, not a finding, so the method
-    says so instead of returning an unqualified empty result.
+    ``get_org_structure`` returns ``roles`` from a ``holdsRole`` traversal
+    whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``. That predicate has
+    **no producer anywhere in the tree** — every reference is an edge
+    allow-list, the read query itself, or an explicit
+    ``create_edge``/``create_entity`` caller. On a graph where it is absent the
+    empty ``roles`` list is structural, not a finding, so the method says so
+    instead of returning an unqualified empty result.
 
-    Mirrors ``search_engine.subject_binding_available``: one exact edge-type
-    count, and **fail-OPEN** — a probe error returns True so a broken probe
-    can never invent an unavailability claim. Self-clears the moment a
-    ``holdsRole`` edge exists.
+    The probe counts the SAME shape the read traverses (``Subject`` source and
+    target), so a hand-written non-Subject ``holdsRole`` edge cannot suppress
+    the marker while ``roles`` stays permanently empty — the same asymmetry
+    ``search_engine._SUBJECT_SOURCE_SCOPED_PROBE`` fixes for ``aboutSubject``.
+    Bounded by ``_HOLDS_ROLE_PROBE_TIMEOUT_MS``.
+
+    Mirrors ``search_engine.subject_binding_available``: **fail-OPEN** — a probe
+    error returns True so a broken probe can never invent an unavailability
+    claim. Self-clears the moment a ``holdsRole`` edge of that shape exists.
     """
     try:
         rows = graph.query(
-            "MATCH ()-[r:holdsRole]->() RETURN count(r)").result_set
+            _HOLDS_ROLE_SCOPED_PROBE,
+            timeout=_HOLDS_ROLE_PROBE_TIMEOUT_MS).result_set
         if not rows or not rows[0]:
             _logger.warning(
                 "holdsRole availability probe returned no row — assuming "
@@ -2216,6 +2227,18 @@ def _holds_role_available(graph) -> bool:
             "holdsRole availability probe failed — assuming available",
             exc_info=True)
         return True
+
+
+#: The exact ``holdsRole`` shape ``get_org_structure`` traverses. Scoping the
+#: probe to it is what keeps a non-Subject ``holdsRole`` edge from suppressing
+#: the marker on a graph where ``roles`` can never be populated.
+_HOLDS_ROLE_SCOPED_PROBE = (
+    "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)")
+
+#: Bound for the availability probe — the same 200 ms class as the search
+#: assembly's decoration bound. An unbounded count on a read path is the
+#: defect this probe must not reintroduce.
+_HOLDS_ROLE_PROBE_TIMEOUT_MS = 200
 
 
 #: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returns
@@ -21039,8 +21062,11 @@ class TortoiseSDK:
             "members": [dict(row[0]) for row in members.result_set],
             "roles": [dict(row[0]) for row in roles.result_set],
         }
-        if not _holds_role_available(proj.g):
+        if not roles.result_set and not _holds_role_available(proj.g):
             # Additive (#4889): the loud half of a producer-less read leg.
+            # Gated on ``roles`` being EMPTY so the marker's own claim
+            # ("'roles' is structurally empty") can never contradict a
+            # non-empty list under a concurrent edge delete.
             out["unavailable"] = {"roles": HOLDS_ROLE_UNAVAILABLE}
         return out
 

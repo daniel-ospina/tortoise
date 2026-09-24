@@ -51,9 +51,11 @@ class _FakeGraph:
         self._rows = rows
         self._exc = exc
         self.calls: list[str] = []
+        self.kwargs: list[dict] = []
 
     def query(self, cypher, **kwargs):
         self.calls.append(cypher)
+        self.kwargs.append(kwargs)
         if self._exc is not None:
             raise self._exc
         return _ResultSet(self._rows)
@@ -74,12 +76,27 @@ def sdk():
 
 class TestSubjectBindingAvailable:
     def test_zero_edges_is_unavailable(self):
-        g = _FakeGraph(rows=[[0]])
+        # Two UNION ALL legs, each an integer row (0 when it matches nothing).
+        g = _FakeGraph(rows=[[0], [0]])
         assert subject_binding_available(g) is False
 
     def test_any_edge_is_available(self):
-        g = _FakeGraph(rows=[[3]])
+        g = _FakeGraph(rows=[[3], [0]])
         assert subject_binding_available(g) is True
+
+    def test_probe_sums_both_legs(self):
+        """The Point and Event legs are separate rows; only their SUM
+        decides."""
+        assert subject_binding_available(_FakeGraph(rows=[[0], [1]])) is True
+        assert subject_binding_available(_FakeGraph(rows=[[2], [3]])) is True
+        assert subject_binding_available(_FakeGraph(rows=[[0], [0]])) is False
+
+    def test_probe_is_bounded(self):
+        """An unbounded count on the search path is the defect this probe
+        must not reintroduce — it carries a timeout."""
+        g = _FakeGraph(rows=[[0], [0]])
+        subject_binding_available(g)
+        assert g.kwargs[0].get("timeout") is not None
 
     def test_probe_error_fails_open(self):
         """A broken probe must NOT invent an unavailability claim."""
@@ -92,12 +109,12 @@ class TestSubjectBindingAvailable:
 
     @pytest.mark.parametrize("rows", [[[]], [[None]], [["x"]]])
     def test_malformed_probe_result_fails_open(self, rows):
-        """``RETURN count(r)`` yields one integer row; anything else is an
+        """``RETURN count(r)`` yields integer rows; anything else is an
         anomalous probe and must not be read as "no edges"."""
         assert subject_binding_available(_FakeGraph(rows=rows)) is True
 
     def test_probe_is_one_query(self):
-        g = _FakeGraph(rows=[[0]])
+        g = _FakeGraph(rows=[[0], [0]])
         subject_binding_available(g)
         assert len(g.calls) == 1
 
@@ -110,7 +127,7 @@ class TestSubjectBindingAvailable:
         assert ":Point" in _SUBJECT_SOURCE_SCOPED_PROBE
         assert ":Event" in _SUBJECT_SOURCE_SCOPED_PROBE
         assert "(:Subject)" in _SUBJECT_SOURCE_SCOPED_PROBE
-        g = _FakeGraph(rows=[[0]])
+        g = _FakeGraph(rows=[[0], [0]])
         subject_binding_available(g)
         assert g.calls[0] == _SUBJECT_SOURCE_SCOPED_PROBE
 
@@ -269,6 +286,29 @@ class TestGetOrgStructure:
         # roles stays marked; members is never in the map.
         assert "members" not in org["unavailable"]
 
+    def test_non_subject_holdsRole_edge_does_not_suppress_the_marker(self, sdk):
+        """The read traverses Subject→Subject only; an Object→Subject
+        ``holdsRole`` edge (reachable via ``create_edge``) cannot populate
+        ``roles``, so it must not silence the marker."""
+        sdk.create_subject("root-org", "organization")
+        sdk.create_object("a stray object", "repository")
+        proj = sdk._get_proj()
+        root = proj.g.query(
+            "MATCH (s:Subject {name:'root-org'}) RETURN s.id"
+        ).result_set[0][0]
+        oid = proj.g.query(
+            "MATCH (o:Object {name:'a stray object'}) RETURN o.id"
+        ).result_set[0][0]
+        proj.g.query(
+            "MATCH (o:Object {id:$o}), (s:Subject {id:$s}) "
+            "MERGE (o)-[:holdsRole]->(s)",
+            params={"o": oid, "s": root})
+        org = sdk.get_org_structure("root-org")
+        assert org["roles"] == []
+        assert org["unavailable"] == {"roles": HOLDS_ROLE_UNAVAILABLE}, (
+            "a non-Subject holdsRole edge cannot populate `roles`, so the "
+            "marker must stay")
+
     def test_roles_marker_self_clears_on_a_holdsRole_edge(self, sdk):
         sdk.create_subject("root-org", "organization")
         sdk.create_subject("boss", "role")
@@ -295,6 +335,21 @@ class TestHoldsRoleProbe:
 
     def test_any_edge_is_available(self):
         assert _holds_role_available(_FakeGraph(rows=[[1]])) is True
+
+    def test_probe_is_scoped_to_the_read_shape(self):
+        """The read is ``(:Subject)-[:holdsRole]->(:Subject)``; a non-Subject
+        ``holdsRole`` edge must not suppress the marker."""
+        from tortoise.sdk import _HOLDS_ROLE_SCOPED_PROBE
+        assert ":Subject" in _HOLDS_ROLE_SCOPED_PROBE
+        assert "holdsRole" in _HOLDS_ROLE_SCOPED_PROBE
+        g = _FakeGraph(rows=[[0]])
+        _holds_role_available(g)
+        assert g.calls[0] == _HOLDS_ROLE_SCOPED_PROBE
+
+    def test_probe_is_bounded(self):
+        g = _FakeGraph(rows=[[0]])
+        _holds_role_available(g)
+        assert g.kwargs[0].get("timeout") is not None
 
     def test_probe_error_fails_open(self):
         assert _holds_role_available(_FakeGraph(exc=RuntimeError("down"))) is True

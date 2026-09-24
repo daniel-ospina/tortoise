@@ -2190,43 +2190,55 @@ SUBJECT_BINDING_UNAVAILABLE = (
 #: ``(o:Object)-[:aboutSubject]->(s:Subject)``) can never resolve the advertised
 #: Point field, so an unscoped count would report "available" on a graph where
 #: every Point hit still carries no subject.
+#:
+#: Written as a UNION ALL of two label-anchored counts, NOT the single
+#: ``MATCH (n) … WHERE n:Point OR n:Event`` form: FalkorDB does not push a
+#: disjunctive label test into the scan, so that form compiles to an ``All Node
+#: Scan`` over the whole graph (~5.9 ms at 9k nodes) while this one is
+#: Subject-anchored (~0.5 ms). Each leg aggregates without a grouping key, so
+#: each yields exactly one integer row (0 when it matches nothing) and the probe
+#: SUMS them.
 _SUBJECT_SOURCE_SCOPED_PROBE = (
-    "MATCH (n)-[r:aboutSubject]->(:Subject) "
-    "WHERE n:Point OR n:Event RETURN count(r)")
+    "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c "
+    "UNION ALL "
+    "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c")
 
 
 def subject_binding_available(graph) -> bool:
     """True when this graph can carry ``aboutSubject`` edges at all (#4889).
 
-    One exact count over the Point/Event-sourced edge shape. It is
-    label-scoped (:Point / :Event) to the sources
-    ``fetch_point_epistemic_state`` reads, so an Object-sourced
-    ``aboutSubject`` edge cannot make the marker lie (see
-    ``_SUBJECT_SOURCE_SCOPED_PROBE``). Measured steady-state ~100 ms against
-    the 37.5k-Point dogfood graph (the unscoped edge-type-only form is ~44 ms;
-    the label filter buys correctness for the difference).
+    Counts the Point- and Event-sourced ``aboutSubject`` edges
+    ``fetch_point_epistemic_state`` reads, so an Object-sourced edge (the
+    GitHub connector's shape) cannot make the marker lie (see
+    ``_SUBJECT_SOURCE_SCOPED_PROBE``). The query is label-anchored and BOUNDED
+    (``_DECORATION_TIMEOUT_MS``, the same bound the state fetch uses) — an
+    unbounded full-graph scan on the hot search path is the defect this probe
+    must not reintroduce.
 
-    **Fail-OPEN**: a probe error returns True. A broken probe must never
-    invent an unavailability claim, so the failure direction that withholds
-    the marker is the safe one.
+    **Fail-OPEN**: a probe error, an empty result, or a non-integer row
+    returns True. A broken probe must never invent an unavailability claim, so
+    the failure direction that withholds the marker is the safe one.
     """
     try:
-        rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE).result_set
-        if not rows or not rows[0]:
-            # ``RETURN count(r)`` always yields exactly one row; anything
-            # else is an anomalous probe, which must not be read as "no
-            # edges".
+        rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE,
+                           timeout=_DECORATION_TIMEOUT_MS).result_set
+        if not rows:
+            # Each UNION ALL leg aggregates without a grouping key, so the
+            # probe always yields rows; an empty result is anomalous and must
+            # not be read as "no edges".
             logger.warning(
-                "aboutSubject availability probe returned no row — assuming "
+                "aboutSubject availability probe returned no rows — assuming "
                 "available")
             return True
-        count = rows[0][0]
-        if count is None:
-            logger.warning(
-                "aboutSubject availability probe returned a null count — "
-                "assuming available")
-            return True
-        return int(count) > 0
+        total = 0
+        for row in rows:
+            if not row or row[0] is None:
+                logger.warning(
+                    "aboutSubject availability probe returned an anomalous "
+                    "row (%r) — assuming available", row)
+                return True
+            total += int(row[0])
+        return total > 0
     except Exception:  # fail-open, see docstring
         logger.warning(
             "aboutSubject availability probe failed — assuming available",
