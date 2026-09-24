@@ -261,7 +261,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_recall`: the #3926
+  # typed-error guard refactor moved its fingerprint 32a22d4162be59b6 -> d625dc916f15d980.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
@@ -311,7 +314,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_suggest_entry_points`: the #3926
+  # typed-error guard refactor moved its fingerprint 4fc2d2c7d48e54e5 -> 564fb24731914250.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_index_files
@@ -364,7 +370,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 (#3926 typed-error guard) and PR #3949 (#3784 fail-closed decision
+  # observation) both changed the implementation served as `tortoise_create_point`.
+  # The merged implementation carries BOTH, at 6ac682bb45fbc1ab; no tool was added,
+  # removed or renamed, so both recorded approvals stand.
+  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -513,7 +523,10 @@ rows:
   recommended_family: memory
   proposed: true
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_delete`: the #3926
+  # typed-error guard refactor moved its fingerprint bc9ed3ffe618b1f1 -> 92890c80d0ad8e5e.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
@@ -1543,7 +1556,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Genuine served-surface change (#4009): the ERR_QUOTA 402-mapping added by
+  # fced38374 (#3665), carried by PR #3780 — 03a29c8a37a39663 -> 20fc9c5db96c8fd3.
+  # A line shift is not a fingerprint change since #4170, so no line-only row exists.
+  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
+  approval: '#3780 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_graph_set_recording
@@ -2038,7 +2055,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 (#3926 typed-error guard) and PR #3949 (#3784 fail-closed decision
+  # observation) both changed the implementation served as `tortoise_file_decision`.
+  # The merged implementation carries BOTH, at 1a8c8a757eb40d30; no tool was added,
+  # removed or renamed, so both recorded approvals stand.
+  approval: '#4173 @daniel-ospina, #3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval

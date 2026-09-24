@@ -664,6 +664,29 @@ _TURN_WRITE_CYPHER = (
 )
 
 
+def _capture_turn_ids(proj, session_id: str) -> list[str]:
+    """Every turn-Point id currently ``CONTAINS``-wired to ``session_id``.
+
+    #1920: turns are ``{session_id}_t{i}`` (``is_episodic=true``,
+    ``pointKind='event'``). The extraction lane ALSO ``CONTAINS``-wires claim
+    Points into the same :Session, so the match filters on the turn id SHAPE —
+    the prefix PLUS an all-digit index — never the prefix alone: a
+    ``session_id`` that itself ends in ``_t<i>`` would otherwise make another
+    session's turn ids prefix-matches of this one (``sec`` vs ``sec_t0``).
+    """
+    prefix = f"{session_id}_t"
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+        "WHERE t.is_episodic = true AND t.pointKind = 'event' "
+        "AND t.id STARTS WITH $prefix RETURN t.id",
+        params={"sid": session_id, "prefix": prefix},
+    ).result_set
+    # str-only: a non-string id would make the suffix slice raise, and no
+    # writer ever stores one (the same str-only posture the replay folds take).
+    return [r[0] for r in (rows or [])
+            if isinstance(r[0], str) and r[0][len(prefix):].isdigit()]
+
+
 def _write_capture_turns(
     proj,
     sdk,
@@ -672,6 +695,7 @@ def _write_capture_turns(
     *,
     now: str,
     turn_embs: list[list[float] | None],
+    session_existed: bool = True,
 ) -> None:
     """Write a capture's episodic turn stream — ONE batched statement (#3086).
 
@@ -691,6 +715,20 @@ def _write_capture_turns(
     — the statement both node- and edge-writes, and a missing Session would
     leave nodes unwired. ``proj`` is the caller's projection (the SDK lane
     passes ``self._get_proj()``); ``sdk`` supplies the journal seam.
+
+    A SHORTER re-capture DELETES the turns the previous capture left beyond
+    the new window (#1920): the merge alone keeps them on the graph AND
+    ``CONTAINS``-wired, so the Session's episodic ``CONTAINS`` members stop
+    matching the ``turn_count`` the same capture just stored. The removal is
+    a hard ``DETACH DELETE``, journaled as an ``EntityMutated`` op=delete
+    (the ``delete_point`` record) so a rebuild cannot resurrect the orphan.
+
+    ``session_existed`` is the caller's own pre-MERGE probe: when False the
+    Session had no prior capture, so there can be no stale turn to scan for
+    and the prune read is skipped (the fresh-capture hot path keeps its exact
+    query count — #3086 measures this path). It DEFAULTS TO TRUE — the
+    conservative direction: a caller that omits it prunes, so forgetting the
+    parameter cannot silently reinstate #1920.
     """
     turn_texts = _capture_turn_texts(windowed)
     if not turn_texts:
@@ -734,6 +772,27 @@ def _write_capture_turns(
     ).result_set
     stored = {r[0]: (r[1], r[2]) for r in (rows or [])}
 
+    # #1920: a SHORTER re-capture must DELETE the prior capture's turns beyond
+    # the new window. The write above MERGEs ``{session_id}_t{i}`` per index,
+    # so without this the higher-index turn Points stay on the graph AND
+    # ``CONTAINS``-wired to the Session while ``s.turn_count`` is overwritten
+    # with the new length — the stored count and the ``CONTAINS`` walk then
+    # disagree, and the residue is reachable from the session it no longer
+    # belongs to. Read the candidates FIRST and delete exactly that list: a
+    # ``NOT t.id IN $keep`` predicate re-evaluated at delete time could sweep
+    # turns a concurrent capture of this same session_id wrote in between.
+    stale: list[str] = []
+    if session_existed:
+        keep = {row["id"] for row in turn_rows}
+        stale = [tid for tid in _capture_turn_ids(proj, session_id)
+                 if tid not in keep]
+        if stale:
+            proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.id IN $ids DETACH DELETE t",
+                params={"sid": session_id, "ids": stale},
+            )
+
     # #3947: journal the turn writes so a rebuild can recreate them.
     # `contains_session` rides the EVENT ENVELOPE, not the point payload —
     # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
@@ -745,6 +804,22 @@ def _write_capture_turns(
     # there buys no durability on the very lane #3086 measures.
     if sdk._get_event_log() is None:
         return
+    # #1920 (durability half): the stale-turn delete above is a hard delete,
+    # so it needs the SAME honest JSONL record ``delete_point`` emits —
+    # ``EntityMutated`` op=delete, whose fold (``_delete_entity_by_id``) is
+    # the hard delete. Without it a rebuild replays the FIRST capture's
+    # ``PointAdded`` records for the deleted ids and resurrects every orphan;
+    # ``PointRetracted`` is deliberately NOT emitted (its fold tombstones,
+    # the wrong meaning for a removal — #3300/#3299).
+    for tid in stale:
+        # Two stores, one meaning each (#3300), mirroring ``delete_point``:
+        # the turn write made every turn visible as a ``PointAdded``
+        # GraphEvent, so the hard delete must be visible on the same
+        # subscriber surface. The JSONL half is the ``EntityMutated``
+        # op=delete record the replay folds — NOT ``PointRetracted``, whose
+        # fold tombstones (the wrong meaning for a removal).
+        sdk._emit_event("PointRetracted", {"id": tid})
+        sdk._journal_entity_mutation("Point", tid, "delete")
     for i, turn in enumerate(windowed):
         turn_id = f"{session_id}_t{i}"
         created_at, status = stored.get(turn_id, (None, None))
@@ -3566,7 +3641,8 @@ class TortoiseSDK:
         # converge too). The Session MERGE + turn loop stay unconditional
         # (idempotent no-ops for an identical-payload re-POST — 0 new nodes;
         # a LONGER replay payload extends the stored turn list, the hosted
-        # #1727 scope).
+        # #1727 scope; a SHORTER one now DELETES the turns past the new
+        # window, #1920 — see _write_capture_turns).
         # #2335 WI-2b (TRUE retry): the #1727 invariant is REFINED, not
         # removed — the replay skip now fires ONLY when the prior capture
         # SUCCEEDED (capture_ok True) OR the session predates capture_ok
@@ -3692,7 +3768,8 @@ class TortoiseSDK:
         # One batched `UNWIND $turns` transaction instead of the per-turn loop
         # (two FalkorDB round-trips per turn on the event loop).
         _write_capture_turns(
-            proj, self, session_id, windowed, now=now, turn_embs=_turn_embs)
+            proj, self, session_id, windowed, now=now, turn_embs=_turn_embs,
+            session_existed=session_existed)
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
