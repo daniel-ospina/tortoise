@@ -4861,6 +4861,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # TORTOISE_CLASSIFY_LATER (with the flag off, S2.1 emits kinds inline — so
     # the never-classified guarantee holds only on the classify-later arm).
     # Fail-open: _run_vet_pass returns the list unchanged on any failure.
+    # Note the rebinding: with the flag on, ``result["s2_embed"]`` (set at the
+    # end of this function, commented "S2 raw (pre-S4)") is this pass's OUTPUT —
+    # the S2 embedding after VET, still pre-S4. With the flag off it is
+    # unchanged, which is the pre-existing behaviour.
     vet_s2_stats: dict = {}
     vet_s2_pool: dict = {}
     if vet_enabled and embed_list:

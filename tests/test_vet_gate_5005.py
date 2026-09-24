@@ -704,6 +704,42 @@ def test_an_incomparable_item_is_treated_as_survived():
     assert vg.removal_pool(before, after)["removed_texts"] == set()
 
 
+def test_present_entity_name_does_not_get_its_operator_pruned():
+    """A name in ``gone`` from an EARLIER pass's removals — or from a same-pass
+    discard of a duplicate-name entity — must not prune an operator when an
+    entity of that name is present in the output. The embedder drops an
+    entity-named endpoint itself, so the payload is unchanged either way; the
+    defect is the false "whose endpoint was discarded" claim, in a module whose
+    stated design is that every discard is auditable.
+    """
+    # Cross-pass: pass 1 removed entity `e`, the union re-emitted it.
+    s2 = {"entities": [{"name": "e", "kind": "core:tool"}], "events": [],
+          "points": [{"content": "K", "pointKind": "statement"}],
+          "operators": [{"src": "e", "dst": "K", "op_type": "IMPL"}]}
+    pool = vg.removal_pool(s2, {**s2, "entities": []})
+    assert list(pool["removed_entities"]) == ["e"]
+    union = {"entities": [{"name": "e", "kind": "core:concept"}], "events": [],
+             "points": [{"content": "K", "pointKind": "statement"}],
+             "operators": [{"src": "e", "dst": "K", "op_type": "IMPL"}]}
+    out, warnings = vg.apply_vet(union, {}, prior=pool)
+    assert [x["name"] for x in out["entities"]] == ["e"]
+    assert len(out["operators"]) == 1, "the endpoint is present — do not prune"
+    assert not any("pruned" in w for w in warnings)
+
+    # Same-pass: two entities share a name, one is discarded.
+    twin = {"entities": [{"name": "e", "kind": "core:tool"},
+                         {"name": "e", "kind": "core:concept"}],
+            "events": [],
+            "points": [{"content": "K", "pointKind": "statement"}],
+            "operators": [{"src": "e", "dst": "K", "op_type": "IMPL"}]}
+    first = next(vg._item_id(*t) for t in vg._iter_items(twin)
+                 if t[0] == "entities" and t[1] == 0)
+    out2, warnings2 = vg.apply_vet(twin, {first: {"outcome": vg.DISCARD}})
+    assert [x["name"] for x in out2["entities"]] == ["e"]
+    assert len(out2["operators"]) == 1
+    assert not any("pruned" in w for w in warnings2), warnings2
+
+
 def test_a_genuinely_removed_item_still_fills_the_pool():
     """The other side of the same rule: an item that IS absent from ``after``
     contributes its identity AND its content — the #2552 mint materialises

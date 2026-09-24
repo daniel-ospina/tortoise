@@ -597,9 +597,14 @@ def removal_pool(before: object, after: object) -> dict:
     surface — which pruned operators naming a survivor.
 
     Whether a surviving item *shields* one of these texts is decided in
-    :func:`apply_vet`, on the RESOLUTION surface (content only, plus entity
-    names): a survivor's name does not resolve an endpoint, so it must not
-    shield one.
+    :func:`apply_vet`, on the RESOLUTION surface — the ``content`` of surviving
+    points/events (:func:`_content_texts`, which by construction carries no
+    names), plus the names of entities present in the output. A surviving
+    point's or event's *name* does not shield: the embedder does not resolve an
+    endpoint on it. A present ENTITY's name does, for a different reason — the
+    embedder drops an entity-named endpoint rather than minting a Point for it,
+    so no mint can resurrect anything and pruning would only mis-attribute the
+    drop.
     """
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)
@@ -819,8 +824,18 @@ def apply_vet(embed_list: Mapping[str, Any],
     # provides that text: an identical-content survivor still resolves the
     # endpoint, and pruning would lose its edge.
     surviving_texts = _content_texts(out)
+    # An operator naming a SURVIVING entity is not pruned either: the name is
+    # in the embedder's ``emitted_entity_names``, so #2552 cannot fabricate a
+    # Point for it, and the embedder drops the operator itself (its OPERATOR
+    # REFERENCING rule forbids entity endpoints). Without this, a name that
+    # entered ``gone`` from an EARLIER pass's ``removed_entities`` — or from a
+    # same-pass discard of a duplicate-name entity — pruned an operator whose
+    # endpoint was present, with a warning claiming it "was discarded"
+    # (verified; payload-neutral, so the defect is the false audit claim, not a
+    # lost edge). Read AFTER the restore loop, so a restored name is included.
     gone = (removed_context | prior_texts | removed_entity_names
-            | set(prior_entities)) - surviving_texts - set(canonical)
+            | set(prior_entities)) - surviving_texts - set(canonical) \
+        - set(_entity_map(out))
     if gone:
         ops = _as_items(out.get("operators"))
         kept_ops: list[Any] = []
