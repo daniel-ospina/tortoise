@@ -2081,12 +2081,13 @@ def _install_dead_socket_guard() -> None:
         # gate stopped it).
         #
         # DEBUG, not WARNING: as a WARNING this line collided with an
-        # UNRELATED test's `caplog` filter (#4954) —
-        # `tests/test_metering.py:284` filters captured records by the
-        # substring "threshold", and the metering test's tmpdir is named
-        # `test_no_threshold_for_free_tie0`, so the registry PATH embedded in
-        # this line matched it. At DEBUG the line is not captured by a
-        # WARNING-level `caplog` filter.
+        # UNRELATED test's `caplog` filter (#4954). At the time,
+        # `tests/test_metering.py::TestThresholdEvents::test_no_threshold_for_free_tier`
+        # filtered every captured record by the bare substring "threshold",
+        # and pytest names that test's tmpdir `test_no_threshold_for_free_tie0`,
+        # so the registry PATH embedded in this line matched it. (#4957/#4964
+        # has since scoped that capture to the `tortoise.metering` logger.)
+        # At DEBUG the line is not captured by a WARNING-level `caplog` filter.
         #
         # The DEBUG is gated on THIS construction's claim actually being live
         # in `_in_flight_replays` (the key the `RedisMixin.__init__` patch

@@ -2880,9 +2880,9 @@ def test_close_path_with_empty_socket_file_emits_no_replay_warning(
     `socket_file`. The old `socket_file`-empty proxy logged a replay that
     client was never part of; gating on the live in-flight claim does not.
 
-    Captured at DEBUG, not WARNING: the gate line is DEBUG-only (a normal
-    replay is not an anomaly), so a WARNING-level capture could no longer
-    see the record this test exists to prove absent.
+    Captured at DEBUG, not WARNING: the gate line is DEBUG-only, so a
+    WARNING-level capture could no longer see the record this test exists to
+    prove absent.
     """
     import json as _json
 
@@ -2986,17 +2986,19 @@ def test_staged_but_released_claim_emits_no_replay_warning(tmp_path, caplog):
 
 
 def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
-    """#4879 regression: a healthy replay must emit NOTHING at WARNING.
+    """#4879 regression: the replay this test drives must emit NOTHING at WARNING.
 
     As a WARNING the gate line collided with the `caplog` filter of an
-    UNRELATED test (#4954): `tests/test_metering.py:284` filters captured
-    records by the substring "threshold", and the metering test's tmpdir is
-    named `test_no_threshold_for_free_tie0`, so the registry PATH embedded in
-    the line matched it.
+    UNRELATED test (#4954): at the time,
+    `tests/test_metering.py::TestThresholdEvents::test_no_threshold_for_free_tier`
+    filtered every captured record by the bare substring "threshold", and
+    pytest names that test's tmpdir `test_no_threshold_for_free_tie0`, so the
+    registry PATH embedded in the line matched it. (#4957/#4964 has since
+    scoped that capture to the `tortoise.metering` logger.)
 
     The test asserts both:
-    (a) the healthy replay path emits ZERO `tortoise.embedded_lifecycle`
-        records at WARNING, and
+    (a) the replay path this test drives emits ZERO
+        `tortoise.embedded_lifecycle` records at WARNING, and
     (b) the same flow DOES emit the gate line at DEBUG.
 
     RED without the fix (gate line at WARNING): (a) captures the line and
@@ -3016,7 +3018,7 @@ def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
             Path(db_path + ".settings").read_text())["unixsocket"]
         assert os.path.exists(sock), "test setup: server #1 must be live"
 
-        # (a) The healthy replay path is SILENT at WARNING.
+        # (a) The replay path is SILENT at WARNING.
         caplog.clear()
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.embedded_lifecycle"):
@@ -3027,7 +3029,7 @@ def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
             if record.name == "tortoise.embedded_lifecycle"
         ]
         assert warnings == [], (
-            "#4879: a healthy replay must emit NO WARNING from "
+            "#4879: the replay this test drives must emit NO WARNING from "
             "embedded_lifecycle; "
             f"got {[(r.levelname, r.getMessage()) for r in warnings]!r}")
 
@@ -3044,7 +3046,7 @@ def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
         ]
         assert gate, (
             "#4879: the gate line must still be emitted at DEBUG — "
-            "a healthy replay must say which gate allowed it")
+            "the replay this test drives must say which gate allowed it")
         assert any("recorded-socket-present" in r.getMessage() for r in gate), (
             "#4879: the gate that allowed this replay must be named, got "
             f"{[r.getMessage() for r in gate]!r}")
