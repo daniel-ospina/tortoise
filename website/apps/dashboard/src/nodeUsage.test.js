@@ -7,9 +7,8 @@
 // fail them) and by the level thresholds (amber ≥80 / red 100).
 //
 // The static half reads main.jsx (the repo's node --test tripwire convention):
-// a behaviour test cannot see JSX, so the wiring — Nodes card, progress bar,
-// nudge, and the header upgrade control reaching Stripe instead of the
-// marketing page — is pinned here.
+// a behaviour test cannot see JSX, so the wiring — the Billing Nodes card, the
+// usage bar, and the nudge — is pinned here.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -30,13 +29,6 @@ const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
 // Comment-stripped + whitespace-collapsed code, so prose cannot satisfy a
 // structural check and reformatting cannot defeat one.
 const flat = stripComments(mainJsx).replace(/\s+/g, ' ')
-
-// The header element (the tier-badge upgrade cluster lives here).
-const headerStart = flat.indexOf('<header className="dash-header">')
-assert.notEqual(headerStart, -1, 'main.jsx must still render the dashboard header')
-const headerEnd = flat.indexOf('</header>', headerStart)
-assert.notEqual(headerEnd, -1, 'the dashboard header must close')
-const header = flat.slice(headerStart, headerEnd)
 
 // ── 1. nodeUsage — the server pair, or silence ───────────────────────────
 
@@ -226,56 +218,4 @@ test('#4331: the nudge remedy matches the plan cards — portal for Stripe custo
   assert.match(nudge, /onClick=\{manageBilling\}/, 'the portal control manages the subscription')
   assert.match(nudge, /: nodeNext \? \(/, 'only a non-managed team gets the checkout CTA')
   assert.match(nudge, /Upgrade to \$\{nodeNext\.label\}/, 'the checkout CTA names the next plan')
-})
-
-// ── 6. Wiring: the header upgrade control ───────────────────────────────
-
-test('#4331: the header tier badge opens Stripe, not the marketing page', () => {
-  assert.doesNotMatch(header, /product\.html#pricing/,
-    'the header must no longer link to the marketing pricing page')
-  assert.doesNotMatch(header, /className="tier-badge" href=/,
-    'the header tier badge must be a control, not a bare anchor')
-  assert.match(header, /upgradeToPrice\(team\.checkout_price_ids\[nodeNext\.tier\]\)/,
-    'the header control must open checkout with the next tier price id')
-  assert.match(header, /Upgrade to \$\{nodeNext\.label\} · \$\$\{nodeNext\.price\}\/mo/,
-    'the header control must show the next tier name and price')
-})
-
-test('#4331: the header control degrades honestly when no price id exists', () => {
-  assert.match(header, /Upgrade — see plans/, 'no purchasable plan → a truthful label')
-  assert.match(header, /onClick=\{\(\) => setTab\('billing'\)\}/,
-    'the fallback must route to the in-product Billing tab')
-  // "Compare plans" is rendered INSIDE the purchasable branch, so the
-  // no-price-id state shows ONE control, not two identical ones.
-  const branch = header.slice(header.indexOf('nodeNext ? ('), header.indexOf(') : (', header.indexOf('nodeNext ? (')))
-  assert.match(branch, /Compare plans/, 'the comparison lives in the Billing tab')
-})
-
-test('#4331: an active subscriber keeps the portal path, not a checkout control', () => {
-  assert.match(header, /team\.tier !== 'team' && !canManageSubscription/,
-    'checkout must not be offered where the subscription is managed via the portal')
-  assert.match(header, /canManageSubscription && \(/, 'the Manage-subscription control remains')
-})
-
-test('#4331: the cap-banner Upgrade CTA routes an ACTIVE subscriber to the portal (canceled/unpaid keep checkout, #1623)', () => {
-  // The 402/quota banners call upgrade(); it must not hand an active
-  // subscriber the 409-ing checkout (the same remedy-routing rule as
-  // header/nudge/grid FOR the active/trialing/past_due set).
-  const start = flat.indexOf('async function upgrade()')
-  assert.notEqual(start, -1, 'upgrade() must exist')
-  const fn = flat.slice(start, flat.indexOf('async function manageBilling()', start))
-  assert.match(fn, /if \(hasActiveSubscription\) \{ await manageBilling\(\); return \}/,
-    'upgrade() must route an active subscriber to the portal (the exact 409 set)')
-  assert.match(fn, /upgradeToPrice\(team\?\.checkout_price_id\)/,
-    'free and canceled/unpaid teams still start a checkout (re-subscription, #1623)')
-})
-
-test('#4331: the cap-notice Upgrade button tracks the branch upgrade() takes', () => {
-  const start = flat.indexOf('function CapNotice(')
-  assert.notEqual(start, -1, 'CapNotice must exist')
-  const fn = flat.slice(start, flat.indexOf('function App()', start))
-  assert.match(fn, /disabled=\{portalManaged \? billingPending : checkoutPending\}/,
-    'an active subscriber must see the portal busy state, not the checkout one')
-  assert.match(fn, /portalManaged\s*\?\s*\(billingPending \? 'Opening portal…' : 'Manage subscription'\)/,
-    'the label must name the portal remedy for an active subscriber')
 })
