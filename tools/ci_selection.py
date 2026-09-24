@@ -159,6 +159,22 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #3673: the served skill documents and the installer belong to
+                   # this surface. The parity contract between
+                   # `tortoise/onboarding/SKILL.md` and its served mirror is
+                   # asserted by test_onboarding_variants.py, and the installer's
+                   # `SKILLS=(...)` is what the dashboard's shipped-set claim is
+                   # pinned against (test_installer_preserves_foreign_skill_
+                   # content.py, dual-registered onto this surface below).
+                   #
+                   # Before these entries a change to the SERVED copy alone matched
+                   # no pattern: `surfaces=[]` -> the parity gate ran only via the
+                   # tier-1 fallback (coverage by accident, not by design, and it
+                   # would vanish the moment the test left `tier1`). Worse, the
+                   # installer ran NO guard at all — its guard is on `core` and is
+                   # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
+                   "website/apps/dashboard/public/skills/",
+                   "website/apps/dashboard/public/install-tortoise-skills.sh",
                    # #3952: the blog-admin console SPA's build config and its
                    # committed build snapshot own the guard tests added in
                    # tests/test_admin_return_to.py (the build base, and

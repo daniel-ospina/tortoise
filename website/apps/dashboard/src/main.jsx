@@ -8,7 +8,11 @@ import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
 import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } from './upsellGate.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+// #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
+// assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
+// it as source is the mechanism that produced five false greens.
+import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizardPrompts.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -914,57 +918,6 @@ function WizardBlock({ step, title, children }) {
       <div className="wizard-block-body">{children}</div>
     </section>
   )
-}
-
-function wizardPromptText(harness, step, key, mode) {
-  // #2865: the keyed URL comes from harnesses.js — a third hardcoded copy
-  // here would re-create exactly the drift the MCP_URL/CANONICAL_MCP_URL
-  // split exists to prevent.
-  const url = MCP_URL
-  const docs = 'Docs: https://tortoise.premiselabs.co/docs'
-  const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
-  const twoStepNote = 'Tell me when to restart'
-  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\n${docs}`
-
-  // #2827: every body starts at its first actionable instruction. The step
-  // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
-  // caption above the card — the SINGLE place that sentence may appear.
-  if (harness === 'pi') {
-    // #3218: MCP config → skills install → restart. The restart note used to
-    // sit BEFORE the skills line, so an agent following the prompt in order
-    // would restart Pi (loading the skills directory) and only then install
-    // the skills — requiring a second reload for them to appear.
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Pi.\n${docs}`
-    if (step === 2) return step2Text
-  }
-  if (harness === 'cursor') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Cursor.\n${docs}`
-    if (step === 2) return step2Text
-  }
-  if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
-  }
-  if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
-  }
-  // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
-  // verify/file step in the conversation; the workflows body rides
-  // wizardWorkflowsText below.
-  if (harness === 'claude-desktop' || harness === 'claude-web') {
-    if (step === 2) return step2Text
-  }
-  return ''
-}
-
-// #2827: the skills-as-prompt body a filesystem-less harness needs (Claude
-// Desktop and Claude Web keep no local skills, so the Tortoise workflows have
-// to arrive in the conversation). It ends with the same verify/file step every
-// other tab gets — without it a Claude Desktop/Web user never calls
-// tortoise_health/tortoise_create_point, so onboarding never auto-completes.
-// Rendered via WizardPromptCard so it is COPYABLE (it used to be a bare <pre>
-// with no copy affordance).
-function wizardWorkflowsText(key, mode) {
-  return `${WORKFLOWS_PROMPT}\n\n${wizardPromptText('claude-web', 2, key, mode)}`
 }
 
 // #4335: the checkout CTA for the billing surfaces in this issue's scope
@@ -4950,7 +4903,7 @@ function claimIntentInFlight() {
   // running.
   //
   // There is now exactly ONE writer class — server-observed:
-  //   - the agent-side tortoise-onboarding skill checkpoints it after
+  //   - the agent-side onboarding instructions drive the checkpoint after
   //     tortoise_health passes (CLI harnesses, via REST), and
   //   - `_maybe_onboarding_auto_complete()` flips it server-side on the
   //     harness's first successful graph write — which is what covers Claude
@@ -7639,15 +7592,15 @@ function claimIntentInFlight() {
                       if (agentDriven2Step.includes(wizardHarness)) {
                         procedure = (
                           <>
-                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy the connect prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.connectLabel} />
                           </>
                         )
                         procedureTailTitle = `Restart ${HARNESS_NAMES[wizardHarness]} and verify`
                         procedureTail = (
                           <>
-                            <p className="wizard-caption">Then give it this prompt to verify the connection and file your first memory:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy the verify prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.verify}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.verifyLabel} />
                           </>
                         )
                       } else if (agentDriven1Step.includes(wizardHarness)) {
@@ -7661,8 +7614,8 @@ function claimIntentInFlight() {
                           </>
                         ) : (
                           <>
-                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel} />
                           </>
                         )
                       } else if (wizardKeyless) {
@@ -7709,10 +7662,10 @@ function claimIntentInFlight() {
                         procedureTailTitle = 'Give Claude the Tortoise workflows'
                         procedureTail = (
                           <>
-                            <p className="wizard-caption">Start a new chat and paste this prompt:</p>
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>
                             {/* #2865: composed KEY-LESS — a connector surface
                                 never carries a key. */}
-                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label="Copy the workflows prompt" />
+                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label={WIZARD_CAPTIONS.workflowsLabel} />
                           </>
                         )
                       }
@@ -7784,7 +7737,7 @@ function claimIntentInFlight() {
                                       the only unrecoverable-key cue this surface
                                       had — nothing else on it says the key is
                                       unrecoverable after you leave. */}
-                                  <p className="wizard-caption">Your API key is inside the block below — keep it private.</p>
+                                  <p className="wizard-caption">{WIZARD_CAPTIONS.keyPrivate}</p>
                                   {/* #3218: same visibility + recovery statement
                                       as the shared key row (this surface has no
                                       row — its key IS the config block). */}

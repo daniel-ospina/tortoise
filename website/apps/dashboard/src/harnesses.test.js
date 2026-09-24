@@ -11,12 +11,35 @@ import {
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
   HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
   PI_CAPTURE_INSTALL,
-  HARNESS_OAUTH, CANONICAL_MCP_URL,
+  HARNESS_OAUTH, CANONICAL_MCP_URL, ONBOARDING_INSTRUCTIONS_URL, SKILLS_CLAIM,
+  SKILLS_LIST,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
+
+// #4365: the served installer ships THREE capabilities — onboarding is delivered
+// as INSTRUCTIONS (a document the agent reads), never installed into a harness's
+// skills namespace.
+//
+// EXACT assertions only. This file previously also guarded the same prose SHAPE
+// the wizardPrompts gate guarded (an approved-host allowlist, a "no hand-named
+// skill" sweep, install-verb/negation clause heuristics, a set-statement tail
+// rule). EIGHT independent adversarial reviews found ~41 defects in that net and
+// NONE in the product; one cycle introduced a bypass in the net while fixing the
+// net. The shape net is therefore removed from both gates — a net whose gaps are
+// silent reads as coverage, which is worse than no net. The completeness classes
+// it was reaching for live in #4885. What remains is what can be demonstrated:
+// the set itself, and that the claim is DERIVED from it rather than restated.
+test('#4365: the shipped set is exactly three capabilities, and the claim is derived from it', () => {
+  assert.deepEqual(SKILLS_LIST.split(', '),
+    ['how-to-use-tortoise', 'tortoise-decide', 'tortoise-file-finding'])
+  assert.equal(SKILLS_CLAIM, `Install the Tortoise skills (${SKILLS_LIST})`,
+    'SKILLS_CLAIM must be built from SKILLS_LIST — never a second literal')
+  assert.ok(!/onboarding/i.test(SKILLS_LIST),
+    'the shipped set must never include onboarding — it is not a skill')
+})
 
 test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, incl. OAuth chatgpt) cover HARNESS_ORDER exactly', () => {
   assert.equal(HARNESS_ORDER.length, 7)
