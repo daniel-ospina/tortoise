@@ -178,8 +178,9 @@ def onboarding_decide_complete(
     ``COMPLETED_STEP`` edge being NEWLY created — the same structural gate
     as ``onboarding_seed_complete`` (see it for the full contract).
     ``decide-completed`` is the self-fork display row; the build fork's
-    ``catalog-presented`` carries no W11 event, and ``harness-connected`` is
-    deliberately uninstrumented.
+    ``catalog-presented`` carries no W11 event, and ``harness-connected`` and
+    ``connection-written`` (#3451 — a client-side config-write trace, not a
+    funnel transition) are deliberately uninstrumented.
 
     CAVEAT — ``decide-completed`` is the one W11 edge with a sanctioned
     REMOVAL path (the #3912 false-completion repair, an operator-only
