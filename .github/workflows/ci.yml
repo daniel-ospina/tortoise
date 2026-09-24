@@ -36,6 +36,7 @@ jobs:
       driver_scripts: ${{ steps.gate.outputs.driver_scripts }}
       ai_review_gate: ${{ steps.gate.outputs.ai_review_gate }}
       watchdog_scripts: ${{ steps.gate.outputs.watchdog_scripts }}
+      orphan_bound_scripts: ${{ steps.gate.outputs.orphan_bound_scripts }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -282,6 +283,23 @@ jobs:
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
+              ),
+              # orphan_bound_scripts (#4740): the redislite orphan gate's harness
+              # — extracted from python-ci.yml so the bound it enforces (read
+              # from the conftest session-end sweep's own report, never a
+              # hand-picked constant) is testable. Gated on that gate's surface
+              # only.
+              "orphan_bound_scripts": any_file(
+                  startswith(".github/scripts/orphan-bound"),
+                  isfile(".github/workflows/python-ci.yml"),
+                  isfile(".github/workflows/ci.yml"),
+                  # #4740: tests/conftest.py defines the JSON contract the gate
+                  # parses (the session-end sweep's report) — a conftest-only
+                  # contract change must re-run the harness. The report field
+                  # set and its builder live in tortoise/embedded_reaper.py
+                  # (conftest imports them), so that module is a trigger too.
+                  isfile("tests/conftest.py"),
+                  isfile("tortoise/embedded_reaper.py"),
               ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on
@@ -674,6 +692,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Deploy health gate poll (#4545)
         run: bash .github/scripts/deploy-health-gate.test.sh
+
+  orphan-bound-gate:
+    needs: changes
+    if: needs.changes.outputs.orphan_bound_scripts == 'true'  # #4740: orphan-gate surface only
+    # #4740: the redislite orphan gate's harness. Self-contained: writes hygiene
+    # fixtures to a temp dir, no network, no CI runner. It pins that the gate's
+    # bound is READ from the conftest session-end sweep's report (two different
+    # `left` values both pass, so no fixed bound can satisfy both), that a
+    # disagreement between the workflow's count and the sweep's own measurement
+    # reds, that a violation of the sweep's accounting identity
+    # (`reaped + left < before`) reds, that `cleared: false` is keyed on the
+    # measured COUNT (a zero count passes with a warning, a non-zero count
+    # reds), that an 18+ digit number exits 2 as a usage error rather than
+    # reaching the pass line, and that a red verdict never falls through to a
+    # pass line.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Redislite orphan gate (#4740)
+        run: bash .github/scripts/orphan-bound.test.sh
 
   entrypoint-guards:
     needs: changes

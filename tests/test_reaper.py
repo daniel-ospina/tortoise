@@ -4281,6 +4281,53 @@ def test_embedded_orphans_never_uses_the_swallowing_enumerator(monkeypatch):
     assert res["live_servers"] == 0
 
 
+def test_pgrep_redis_servers_or_none_distinguishes_failure_from_zero(
+        monkeypatch):
+    """#4740: `_pgrep_redis_servers` collapses a probe FAILURE into `[]`, which
+    reads identically to a measured zero. The gate binds its bound to the
+    sweep's `left`, so an unmeasured residue must be `None`, not a plausible
+    0 — while the swallowing function's contract for its many other callers
+    is unchanged."""
+    import tortoise.embedded_reaper as _R
+
+    class _Ok:
+        returncode = 0
+        stdout = "111\n222\n"
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Ok())
+    assert _R._pgrep_redis_servers_or_none() == [111, 222]
+
+    def _timeout(*_a, **_k):
+        raise _R.subprocess.TimeoutExpired("pgrep", 5)
+
+    monkeypatch.setattr(_R.subprocess, "run", _timeout)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    def _missing(*_a, **_k):
+        raise OSError("pgrep not found")
+
+    monkeypatch.setattr(_R.subprocess, "run", _missing)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    # pgrep exits 1 on NO MATCHES — a successful probe reporting zero, never a
+    # failure. An unexpected status (2/3) is a failure, not an answer.
+    class _NoMatch:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _NoMatch())
+    assert _R._pgrep_redis_servers_or_none() == []
+
+    class _Bad:
+        returncode = 2
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Bad())
+    assert _R._pgrep_redis_servers_or_none() is None
+
+
 def test_reap_refuses_when_an_owner_attached_after_confirmation(
         monkeypatch, tmp_path):
     """#3599 adversarial review (fail-open): `_orphan_confirmed` is set during
@@ -4884,3 +4931,372 @@ def test_socketless_binding_never_resolves_the_candidate_path(
         {"dbdir": str(decoy), "socket_path": str(decoy / "redis.socket"),
          "pid": os.getpid()})
     assert refusal is not None, "planted symlink forged the socket-less binding"
+
+
+# ── #4740 review 4: the end-sweep's `cleared` derivation ───────────────────
+# `sweep_until_cleared` is the loop conftest's session-end sweep runs. Its
+# `cleared` field is the sweep's own budget/stop-condition claim, carried for
+# diagnosis — not a field the CI orphan gate decides its verdict on; review 4
+# found the previous `cleared = not acted` reported True for a deadline-aborted
+# sweep (`reap()` breaks on its first record and returns [], which is not proof
+# the backlog is clear). These cases pin all four stop shapes.
+
+
+def _scan_aware(records, complete=True):
+    """A `_run_sweep`-shaped result: a list carrying `.complete`."""
+    from tortoise.embedded_reaper import _ScanAwareList
+
+    out = _ScanAwareList(records)
+    out.complete = complete
+    return out
+
+
+def test_sweep_until_cleared_healthy_path():
+    """Acting, then an empty iteration with budget remaining → cleared."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (1, True)
+
+
+def test_sweep_until_cleared_already_expired_deadline_is_not_cleared():
+    """The abort the fix exists for: reap() hits an already-expired deadline
+    on its first record and returns []. `not acted` must not read as clear."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([]), deadline=999.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)
+
+
+def test_sweep_until_cleared_spent_budget_after_work_is_not_cleared():
+    """The budget runs out while servers are still being acted on: the loop
+    must STOP on the spent deadline (not keep iterating) and report not
+    cleared. `run_one` is a bounded sequence so removing the deadline break
+    shows up as a different `total`, not a hang."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([
+        _scan_aware([{"pid": 1}]),
+        _scan_aware([{"pid": 2}]),
+        _scan_aware([]),
+    ])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 9999.0)
+    assert (total, cleared) == (1, False)
+
+
+def test_sweep_until_cleared_truncated_scan_is_not_cleared():
+    """A partial discovery scan that acted on nothing proves nothing, even
+    with budget remaining (`.complete` is fail-closed False)."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([], complete=False), deadline=1030.0,
+        clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)
+
+
+def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
+    """#4740 review 10: the load-bearing `clock` default is the builder's.
+
+    All four stop-shape cases above inject `clock=`, and production
+    (`tests/conftest.py`'s `_sweep`) reaches the clock only through
+    `build_end_sweep_report` with three positional args (no `clock`) — the
+    builder passes its OWN `clock` explicitly into `sweep_until_cleared`. So
+    the default production actually runs with is the builder's, not
+    `sweep_until_cleared`'s. A default of `lambda: 0.0` makes
+    `clock() < deadline` always true, so a deadline-aborted sweep reports
+    `cleared=true` — reported as finished rather than exhausted, losing the
+    exhausted-budget diagnostic. `cleared` is a diagnostic flag that does not
+    decide the gate's verdict at any measured count. No clock is injected here.
+    """
+    import inspect
+    import time
+
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    default = inspect.signature(
+        build_end_sweep_report).parameters["clock"].default
+    assert default is time.monotonic, (
+        f"build_end_sweep_report's clock default must be the real monotonic "
+        f"clock, got {default!r}"
+    )
+    # A deadline already in the past, with the REAL default: the empty
+    # iteration is an already-expired abort, never a cleared backlog.
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=time.monotonic() - 1,
+        probe=lambda: 0)
+    assert report["cleared"] is False
+
+
+def test_hygiene_report_threads_cleared_verbatim():
+    """#4740 review 6: the report builder must use the declared field set AND
+    thread `cleared` through verbatim.
+
+    `cleared` is a diagnostic flag that does not decide the gate's verdict at
+    any measured count. This is behavioural — the real module is imported and
+    called — so the AST shapes that passed the round-5 pin (a subscript store,
+    a dead branch around the literal, a tuple reorder) cannot satisfy it.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        _hygiene_report,
+    )
+
+    assert _hygiene_report(0, False, 1, 5)["cleared"] is False
+    assert _hygiene_report(1, True, 13, 22)["cleared"] is True
+    report = _hygiene_report(0, False, 1, 5)
+    assert set(report) == set(_HYGIENE_REPORT_FIELDS)
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+# ── #4740 review 9: the end-sweep COMPOSITION, pinned behaviourally ───────
+# The composition — pre-sweep probe (`before`), the sweep, post-sweep probe
+# (`left`), and the report built from them — used to be pinned by a static AST
+# check over `tests/conftest.py`'s `_sweep` source. Eight review rounds each
+# closed one syntactic bypass while the next found another (`left = max(...)`,
+# then `for left in (...)`, `if (left := ...)`, `with ... as left`) — a static
+# shape check cannot prove a runtime data-flow property, and each bypassed pin
+# fell silent in exactly the way the pin existed to prevent. The composition
+# now lives in the real `build_end_sweep_report`; these tests DRIVE it, so
+# every bypass above is a wrong VALUE or a wrong call count — caught by
+# behaviour, which syntax cannot reach.
+
+
+def test_live_embedded_server_count_wraps_the_probe(monkeypatch):
+    """`live_embedded_server_count` = len(probe), or None for a failed probe.
+
+    The three cases are deliberately different answers: a constant return for
+    either half (`return 0`, or `0` where `None` belongs) cannot satisfy 0, 3
+    and None at once.
+    """
+    import tortoise.embedded_reaper as _R
+
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: [])
+    assert _R.live_embedded_server_count() == 0
+    monkeypatch.setattr(
+        _R, "_pgrep_redis_servers_or_none", lambda: [111, 222, 333])
+    assert _R.live_embedded_server_count() == 3
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: None)
+    assert _R.live_embedded_server_count() is None
+
+
+def test_build_end_sweep_report_reads_probe_before_and_after_the_sweep():
+    """`before`/`left` are the FIRST and SECOND probe readings, in that order.
+
+    The probe returns 5 then 3, so a swapped arrangement, a probe replaced by
+    a constant, and a post-probe rebind (`left = max(probe() or 0, 1000000)`,
+    or the `for`/`with`/walrus rebinding forms) each produce the wrong dict or
+    the wrong call log.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        build_end_sweep_report,
+    )
+
+    readings = iter([5, 3])
+    calls = []
+
+    def probe():
+        value = next(readings)
+        calls.append(value)
+        return value
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    report = build_end_sweep_report(
+        responses.__next__, deadline=1030.0, probe=probe,
+        clock=lambda: 1000.0,
+    )
+    assert calls == [5, 3], (
+        "the probe must be called exactly twice — before the sweep, then after"
+    )
+    assert report == {"reaped": 1, "cleared": True, "left": 3, "before": 5}
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+def test_build_end_sweep_report_threads_the_sweep_outcome():
+    """`cleared` is the sweep's own outcome, never hardcoded or recomputed.
+
+    An already-expired deadline makes `sweep_until_cleared` return
+    `cleared=False`; a builder that hardcoded `True` (or re-derived it from
+    the count after the call) greens the deadline-aborted backlog the CI gate
+    exists to catch.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=0.0, probe=lambda: 2,
+        clock=lambda: 1000.0,
+    )
+    assert report["reaped"] == 0
+    assert report["cleared"] is False
+
+
+def test_conftest_sweep_returns_build_end_sweep_report():
+    """Reject the enumerated unpinned-report shapes at the `_sweep` call site.
+
+    The behavioural cases above drive `embedded_reaper.build_end_sweep_report`
+    in isolation, so a `_sweep` that short-circuits it — `return {report} or
+    embedded_reaper.build_end_sweep_report(...)` — leaves them all green while
+    the gate reads a hand-written dict. This test rejects these specific
+    shapes:
+
+    * a report-shaped `Dict` literal ANYWHERE in the fixture — in a `Return`
+      or inside a lambda body (a lambda body is not a `Return`, so a local
+      `build_end_sweep_report = lambda ...: {report}` rebinding would
+      otherwise leave the pin green);
+    * a `Return` in `_sweep` other than the single live builder call and the
+      three documented early returns (`no_embedded_servers`, `skipped`,
+      `error`);
+    * a builder call reached through a BARE name rather than the
+      `embedded_reaper` module attribute (a bare name is shadowable by a
+      local rebinding, so the module attribute is the only accepted form);
+    * a builder call that is statically unreachable (`if False:`);
+    * a builder call whose arguments are not exactly the three positional
+      ones — a `lambda: _run_sweep(...)`, the `deadline` name, and
+      `embedded_reaper.live_embedded_server_count` (a fabricated probe,
+      e.g. `lambda: 999`, is a different shape and is rejected).
+
+    This test does not prove the call site correct in general; it rejects the
+    shapes listed above (#4740).
+    """
+    import ast
+
+    from tortoise.embedded_reaper import _HYGIENE_REPORT_FIELDS
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    sweep = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_sweep"
+    )
+
+    # Parent links so a Return's enclosing control flow is visible; a plain
+    # `ast.walk` cannot tell whether a Return sits under `if False:`.
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(sweep):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def under_constant_false_guard(node: ast.AST) -> bool:
+        """True when `node` is statically unreachable (`if False:`)."""
+        cur = parents.get(node)
+        while cur is not None and cur is not sweep:
+            if (
+                isinstance(cur, ast.If)
+                and isinstance(cur.test, ast.Constant)
+                and not cur.test.value
+            ):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    # The three documented early returns, keyed by the sentinel their dict
+    # literal carries. A report-shaped dict reached through a name is an
+    # `ast.Name`, never an `ast.Dict`, so it cannot masquerade as one of these.
+    early_keys = {"no_embedded_servers", "skipped", "error"}
+
+    def is_documented_early_return(node: ast.Return) -> bool:
+        value = node.value
+        if not isinstance(value, ast.Dict):
+            return False
+        keys = {
+            k.value for k in value.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        return len(keys) == 1 and keys <= early_keys
+
+    returns = [n for n in ast.walk(sweep) if isinstance(n, ast.Return)]
+    def is_module_builder_call(value: ast.AST) -> bool:
+        """True for `embedded_reaper.build_end_sweep_report(...)`."""
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "build_end_sweep_report"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "embedded_reaper"
+        )
+
+    builder_returns = [n for n in returns if is_module_builder_call(n.value)]
+    assert len(builder_returns) == 1, (
+        "tests/conftest.py's _sweep must contain exactly one "
+        "`embedded_reaper.build_end_sweep_report(...)` call reached through "
+        "the module attribute; a bare-name call (shadowable by a local "
+        "rebinding), a hand-written report dict, or a short-circuit around "
+        "the builder is not pinned by the behavioural tests and would leave "
+        "the gate reading an unpinned report (#4740)"
+    )
+    builder_return = builder_returns[0]
+    assert not under_constant_false_guard(builder_return), (
+        "tests/conftest.py's _sweep returns "
+        "embedded_reaper.build_end_sweep_report(...) from a statically "
+        "unreachable branch (`if False:`): the count is satisfied by a DEAD "
+        "return while the live path escapes the pin (#4740); dead return at "
+        f"line {builder_return.lineno}"
+    )
+    call = builder_return.value
+    assert isinstance(call, ast.Call)  # narrows the type for the reader
+    assert len(call.args) == 3 and call.keywords == [], (
+        "the builder call must pass exactly 3 positional arguments and no "
+        "keywords — the sweep lambda, the deadline, and the live-server "
+        "probe; any other arity leaves an argument unpinned (#4740)"
+    )
+    sweep_lambda, deadline_arg, probe_arg = call.args
+    assert (
+        isinstance(sweep_lambda, ast.Lambda)
+        and isinstance(sweep_lambda.body, ast.Call)
+        and isinstance(sweep_lambda.body.func, ast.Name)
+        and sweep_lambda.body.func.id == "_run_sweep"
+    ), (
+        "argument 1 must be a `lambda: _run_sweep(...)`; a constant or a "
+        "different callee hands the builder a sweep that never ran (#4740)"
+    )
+    assert isinstance(deadline_arg, ast.Name) and deadline_arg.id == "deadline", (
+        "argument 2 must be the `deadline` name — the budget the sweep and "
+        "the builder share; any other expression decouples them (#4740)"
+    )
+    assert (
+        isinstance(probe_arg, ast.Attribute)
+        and isinstance(probe_arg.value, ast.Name)
+        and probe_arg.value.id == "embedded_reaper"
+        and probe_arg.attr == "live_embedded_server_count"
+    ), (
+        "argument 3 must be `embedded_reaper.live_embedded_server_count` — "
+        "the real probe; a fabricated probe (e.g. `lambda: 999`) hands the "
+        "gate a bound the run never measured (#4740)"
+    )
+    undocumented = [
+        n for n in returns
+        if n is not builder_return and not is_documented_early_return(n)
+    ]
+    assert undocumented == [], (
+        "tests/conftest.py's _sweep must return only the single "
+        "`embedded_reaper.build_end_sweep_report(...)` call or one of the "
+        "three documented early returns (no_embedded_servers / skipped / "
+        "error); any other return is not pinned by the behavioural tests "
+        f"and would leave the gate reading an unpinned report (#4740); found "
+        f"at line(s) {[n.lineno for n in undocumented]}"
+    )
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+    hand_written = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value in _HYGIENE_REPORT_FIELDS
+            for k in n.keys
+        )
+    ]
+    assert hand_written == [], (
+        "the _redislite_hygiene fixture must not contain a report-shaped dict "
+        "literal anywhere — not in a `Return` and not in a lambda body; such "
+        "a literal bypasses the builder and the gate would read it unpinned "
+        f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
+    )
