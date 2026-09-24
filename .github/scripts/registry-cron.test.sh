@@ -88,6 +88,16 @@
 #      subject literally named `global`/`_` keeps its own single key and is
 #      never an alias set — the round-7 P2 that otherwise gave one real team
 #      two create-once points across bash and AlertStore (#2844)
+#  68. a dedup no-op RECORDS the recurrence on the tracked issue (#3907) — a
+#      repeat is never a silent no-op, and never a second issue
+#  69. the recurrence counter is read from the ISSUE's own marked comments, so
+#      it advances (#3 after two) and cannot be reset by the shared R2 object
+#  70. the safety properties survive: a FIRST-TIME fault still files (and
+#      records no recurrence), and a RECOVERED fault still self-heals (closes
+#      the incident and deletes its dedup object)
+#  71. a FAILED recurrence comment is never fatal and never duplicates: the run
+#      stays RED, no second issue is filed, and the driver says the record did
+#      not happen (so it cannot claim a comment it did not post)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -283,7 +293,17 @@ case "$url" in
           fi
         done
         printf '{"items":%s}' "$items" ;;
-      */issues/*/comments*) printf '{}' ;;
+      */issues/*/comments*)
+        # #3907: occurrence counting GETs the issue's comments; the comment
+        # POST is the recording write. Distinguish by method so the counting
+        # walk is actually exercised (a stub that answered the POST shape here
+        # would make the counter read 0 forever).
+        if [ "$method" = "GET" ]; then
+          printf '%s' "${STUB_COMMENTS_JSON:-[]}"
+        else
+          [ "${STUB_COMMENT_FAIL:-0}" = "1" ] && exit 1
+          printf '{}'
+        fi ;;
       */issues/*)
         if [ "$method" = "GET" ]; then
           # emit honours -o/-w: gh_issue_open asks for the code first, then the body.
@@ -340,7 +360,8 @@ reset_case() {
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
-        GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE || true
+        GH_ISSUE_WATCHER_DOWN GH_ISSUE_APP_DOWN GH_ISSUE_R2_DOWN GH_ISSUE_STALE \
+        STUB_COMMENTS_JSON STUB_COMMENT_FAIL || true
   export R2_FLAT_LIST="[]"
 }
 
@@ -1228,6 +1249,89 @@ assert_eq "$(run_keys alert_keys_all global)" "ops/alerts/STALE/global.json" \
 assert_eq "$(run_keys alert_keys_all _)" "ops/alerts/STALE/_.json" \
   "67. a REAL subject named _ is never an alias set"
 rm -f "$KEY_EXT"
+
+# ── 68. a dedup no-op RECORDS the recurrence (#3907) ───────────────────────
+# The pre-#3907 dedup branches logged "already tracked … — no-op" and returned,
+# so an hourly driver on ONE unchanged fault left NO trace on the issue: the
+# finding was filed, but the escalation was invisible. Dedupe that hides the
+# escalation converts "noisy" into "blind". The recurrence is now recorded as a
+# marked comment, and its NUMBER is read from the issue's own prior occurrence
+# comments (not from the R2 object, which the server-side AlertStore rewrites).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export GH_ISSUE_STATE=open
+export STUB_COMMENTS_JSON='[]'
+run_driver
+assert_eq "$RC" 1 "68. the repeat is still RED (1) — dedupe never silences the run"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "68. the repeat still files NO duplicate issue"
+assert_match "$(cat "$LOG")" "GH GET .*/issues/42/comments" "68. the occurrence count is read from the ISSUE"
+assert_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*Recurrence #1" "68. occurrence #1 is recorded on the issue"
+assert_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*dr-occurrence" "68. the comment carries the counting marker"
+
+# ── 69. the recurrence counter ADVANCES from the issue's own comments ───────
+# Two marked comments already on #42 → the next record is #3. This pins that
+# the number is derived from the durable, visible record, so a re-run (or the
+# AlertStore rewriting the shared R2 object) cannot reset it.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export GH_ISSUE_STATE=open
+export STUB_COMMENTS_JSON='[{"body":"🔁 Recurrence #1 <!-- dr-occurrence -->"},{"body":"a human comment"},{"body":"🔁 Recurrence #2 <!-- dr-occurrence -->"}]'
+run_driver
+assert_eq "$RC" 1 "69. the repeat is still RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "69. no duplicate issue is filed"
+assert_match "$(cat "$LOG")" "GH POST .*/issues/42/comments .*Recurrence #3" "69. the counter advances to #3 (2 prior + this one)"
+assert_eq "$(grep -c 'GH POST .*/issues/42/comments' "$LOG" || true)" "1" "69. exactly ONE occurrence comment is posted per run"
+
+# ── 70. a first-time fault still files; a recovered fault still self-heals ──
+# The safety property #3907 must NOT break: the very first incident files (and
+# is not mislabelled as a recurrence of itself), and a recovered fault still
+# closes its incident and deletes its dedup object so the next occurrence is a
+# genuinely new incident.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+run_driver
+assert_eq "$RC" 1 "70a. a first-time fault exits RED (1)"
+assert_match "$(cat "$LOG")" "GH POST .*/issues \{" "70a. a first-time fault still FILES"
+assert_not_match "$(cat "$LOG")" "GH POST .*/comments .*Recurrence" "70a. a first-time fault records no recurrence"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false null null)"
+export GH_ISSUE_SWEEP_CONFIG_ERROR=42
+run_driver
+assert_eq "$RC" 0 "70b. a recovered config error exits 0"
+assert_match "$(cat "$LOG")" "GH PATCH .*/issues/42" "70b. a recovered fault still self-heals (the incident closes)"
+assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/SWEEP_CONFIG_ERROR/_.json" "70b. the dedup object is deleted on resolve"
+
+# ── 71. a FAILED recurrence comment is never fatal and never duplicates ─────
+# The recording is additive: the run is already RED (LOUD was set before any
+# dedup branch), so a failed comment must not abort the self-heal or the other
+# incidents, and must never be replaced by a duplicate issue. The driver also
+# must not claim a record it did not write.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '\"REGISTRY_STREAM_KEY not set\"' null)"
+export STUB_412=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export GH_ISSUE_STATE=open
+export STUB_COMMENTS_JSON='[]'
+export STUB_COMMENT_FAIL=1
+run_driver
+assert_eq "$RC" 1 "71. a failed recurrence comment still exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "71. a failed comment never produces a duplicate issue"
+assert_match "$OUT" "recurrence comment on issue #42 FAILED" "71. the driver does not claim a record it did not write"
+assert_not_match "$OUT" "recorded recurrence #1" "71. no false 'recorded' claim on a failed comment"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

@@ -252,12 +252,63 @@ gh_issue_open() { # number -> 0 when OPEN or unknown; 1 when confirmed closed OR
     *)    return 1 ;;   # closed
   esac
 }
+gh_comment() { # number body -> curl's status (0 when posted)
+  [ -n "$GH_TOKEN" ] || return 0
+  curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${REPO}/issues/$1/comments" \
+    -d "$(jq -nc --arg b "$2" '{body:$b}')" >/dev/null 2>&1
+}
+# #3907: a dedup no-op must still RECORD the occurrence. The pre-#3907 dedup
+# paths logged and returned, so a driver firing hourly on ONE unchanged fault
+# looked like a single quiet run in the issue — dedupe that hides the
+# escalation converts "noisy" into "blind", and #3907's acceptance requires the
+# recurrence to be visible on the issue. The count is read from the ISSUE (our
+# own marked comments), never from the R2 dedup object: the object is shared
+# with the server-side AlertStore, which rewrites it, so a counter kept there
+# would be reset by the other writer.
+OCCURRENCE_MARKER='<!-- dr-occurrence -->'
+OCCURRENCE_MAX_PAGES=20
+gh_occurrence_count() { # number -> integer (0 when unreadable: under-count, never fabricate)
+  local n="${1:-}" page=1 total=0 body cnt len
+  [ -n "$GH_TOKEN" ] && [ -n "$n" ] || { printf '0'; return 0; }
+  while [ "$page" -le "$OCCURRENCE_MAX_PAGES" ]; do
+    body="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/${REPO}/issues/${n}/comments?per_page=100&page=${page}" 2>/dev/null || true)"
+    cnt="$(printf '%s' "$body" | jq -r --arg m "$OCCURRENCE_MARKER" \
+      '[.[]? | select(((.body // "") | contains($m)))] | length' 2>/dev/null || true)"
+    len="$(printf '%s' "$body" | jq -r 'if type == "array" then length else -1 end' 2>/dev/null || echo -1)"
+    case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+    case "$len" in ''|*[!0-9]*) len=-1 ;; esac
+    total=$((total + cnt))
+    [ "$len" -eq 100 ] || break
+    page=$((page + 1))
+  done
+  printf '%s' "$total"
+}
+gh_record_occurrence() { # number kind id
+  # Additive only: it comments and logs, and NEVER changes LOUD or the incident
+  # lifecycle. A failing comment is logged, not fatal — the run is already RED
+  # (file_alert set LOUD before any dedup branch), so the escalation the comment
+  # records is never the sole carrier of the signal.
+  local n="${1:-}" kind="${2:-}" id="${3:-}" count next
+  [ -n "$n" ] || return 0
+  count="$(gh_occurrence_count "$n")"
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  next=$((count + 1))
+  if gh_comment "$n" "$(printf '🔁 **Recurrence #%s** — `[DR] %s — %s` observed again at `%s`. This incident is already tracked by this issue, so no duplicate was filed.\n\n%s' \
+      "$next" "$kind" "${id:-_}" "$(date -u +%FT%TZ)" "$OCCURRENCE_MARKER")"; then
+    log "dedup: recorded recurrence #${next} on issue #${n} (no duplicate filed)"
+  else
+    # Never fatal: LOUD is already set, so the run is RED without the comment —
+    # the next run re-records (the count is derived from the issue, so nothing
+    # is skipped). Say so rather than claiming a record that did not happen.
+    log "dedup: recurrence comment on issue #${n} FAILED — the run is still RED; the next run re-records"
+  fi
+}
 gh_close() { # number comment kind id
   [ -n "$GH_TOKEN" ] || return 0
   local kind="${3:-}" id="${4:-}"
-  curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/issues/$1/comments" \
-    -d "$(jq -nc --arg b "$2" '{body:$b}')" >/dev/null 2>&1 || true
+  gh_comment "$1" "$2" || true
   curl -sS -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' >/dev/null 2>&1 || true
   # delete-to-resolve: drop the R2 dedup object so a RECURRENCE is a new
@@ -309,6 +360,7 @@ file_alert() { # kind title body dedup_id
     alias_num="$(printf '%s' "$(r2_get "$_k")" | jq -r '.issue_number // empty' 2>/dev/null || true)"
     if [ -n "$alias_num" ] && [ -z "${alias_num//[0-9]/}" ] && gh_issue_open "$alias_num"; then
       log "dedup: ${kind} already tracked by open issue #${alias_num} (alias ${_k}) — no-op"
+      gh_record_occurrence "$alias_num" "$kind" "$id"
       rm -f "$tmp"
       return 0
     fi
@@ -357,6 +409,7 @@ file_alert() { # kind title body dedup_id
     issue_num="$(printf '%s' "$(r2_get "$key")" | jq -r '.issue_number // empty' 2>/dev/null || true)"
     if [ -n "$issue_num" ] && [ -z "${issue_num//[0-9]/}" ] && gh_issue_open "$issue_num"; then
       log "dedup: ${kind}/${id:-_} already tracked by open issue #${issue_num} — no-op"
+      gh_record_occurrence "$issue_num" "$kind" "$id"
       rm -f "$tmp"
       return 0
     fi
