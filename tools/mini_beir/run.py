@@ -48,6 +48,17 @@ Results: one JSON per model written to the output dir
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/mini_beir/run.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/mini_beir/run.py`"
+    )
+
 import argparse
 import datetime
 import hashlib
@@ -56,7 +67,6 @@ import math
 import os
 import random
 import shutil
-import sys
 import urllib.request
 import zipfile
 from pathlib import Path
