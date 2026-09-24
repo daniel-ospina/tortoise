@@ -584,6 +584,46 @@ class RunWithEvalKeysTests(unittest.TestCase):
         )
         self.assertNotIn("DEADBEEF", r.stderr)
 
+    def test_env_file_cannot_repoint_the_interpreter(self):
+        # The fail-closed responses exec an absolute path, so a `.env`-supplied
+        # `BASH` (non-exported by bash, so the loader's fill-if-absent branch
+        # would happily export a value over it) must not be able to point them
+        # at a program that exits 0 — which would swallow the sentinel and turn
+        # a shadowed `exec` back into a silent exit-0 with the command not run.
+        swallow = Path(self._tmp.name) / "swallow"
+        swallow.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        swallow.chmod(0o755)
+        env_file = Path(self._tmp.name) / "bash-redirect.env"
+        env_file.write_text(
+            f"OPENROUTER_API_KEY={FIXTURE_OPENROUTER}\nBASH={swallow}\n",
+            encoding="utf-8",
+        )
+        env = self.base_env(EVAL_KEYS_ENV_FILE=str(env_file))
+        env["BASH_FUNC_exec%%"] = "() { return 0; }"
+        r = self.run_wrapper(["true"], env=env, use_fixture=False)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("the command did NOT run", r.stderr)
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
+
+    def test_tracing_refusal_survives_shadowed_set_and_exit(self):
+        # The tracing refusal is the one response whose failure LEAKS a value: a
+        # shadowed `set` leaves xtrace on and a shadowed `exit` then lets the run
+        # continue, so the loader's `export` line prints the full key — after a
+        # message claiming the run was refused. It now goes through the same
+        # absolute-path child, so the refusal is real and the key never prints.
+        env = self.base_env(
+            EVAL_KEYS_ENV_FILE=str(self.env_file),
+            _RWEK_SANITIZED="1",
+        )
+        env["SHELLOPTS"] = "xtrace"
+        env["BASH_FUNC_set%%"] = "() { return 0; }"
+        env["BASH_FUNC_exit%%"] = "() { return 0; }"
+        r = self.run_wrapper(["true"], env=env, use_fixture=False)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("refusing to run", r.stderr)
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stderr)
+        self.assertNotIn(FIXTURE_OPENROUTER, r.stdout)
+
     def test_parses_export_quotes_and_comments(self):
         script = "; ".join(f'printf "%s|" "$EVALTEST_{name}"' for name in (
             "EXPORTED", "QUOTED", "SINGLE", "INLINE", "HASH_IN_VALUE",
