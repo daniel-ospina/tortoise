@@ -611,8 +611,8 @@ class _EntityHandlers:
         # a vector — the journal recorded it with its model identity — restore
         # it VERBATIM and do NOT re-encode. R1 (`docs/durability-posture.md`
         # → *Derived properties that are STORED*; design source
-        # `STORAGE-ARCHITECTURE.md` §3/§14.1
-        # O1): the embedding STORES, it is not regenerated, because a re-embed
+        # `docs/architecture/STORAGE-ARCHITECTURE.md` §3/§14.1
+        # O1, landed via #5016): the embedding STORES, it is not regenerated, because a re-embed
         # is a RE-RUN, not a replay. Re-encoding here was the defect: a replay
         # under a changed embedder silently produced a different graph from the
         # same journal.

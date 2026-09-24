@@ -3,8 +3,8 @@
 THE DEFECT THIS PINS
 --------------------
 `docs/durability-posture.md` §*Derived properties that are STORED* records
-R1; the design source is `STORAGE-ARCHITECTURE.md` §3/§14.1 O1 (PR #5016,
-un-merged). The invariant the storage design rests on::
+R1; the design source is `docs/architecture/STORAGE-ARCHITECTURE.md` §3/§14.1
+O1 (landed via #5016). The invariant the storage design rests on::
 
     derived tables  =  replay(the journal)      NOT  recompute(the sources)
 

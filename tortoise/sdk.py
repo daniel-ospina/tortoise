@@ -2903,7 +2903,8 @@ class TortoiseSDK:
         if point is not None:
             # #5004: the embedding IS journalled. R1 (`docs/durability-posture.md`
             # → *Derived properties that are STORED, not recomputed*; design
-            # source `STORAGE-ARCHITECTURE.md` §3/§14.1 O1, PR #5016, un-merged)
+            # source `docs/architecture/STORAGE-ARCHITECTURE.md` §3/§14.1 O1,
+            # landed via #5016)
             # is that the embedding STORES —
             # it is not regenerated on replay, because a re-embed is a RE-RUN,
             # not a replay: its output depends on model identity, revision and

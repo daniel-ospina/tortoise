@@ -94,8 +94,9 @@ def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
     only available behaviour.
 
     R1 (`docs/durability-posture.md` → *Derived properties that are
-    STORED, not recomputed*: the design source is `STORAGE-ARCHITECTURE.md`
-    §3/§14.1 O1, on PR #5016, un-merged at the time of writing) is that the
+    STORED, not recomputed*: the design source is
+    `docs/architecture/STORAGE-ARCHITECTURE.md` §3/§14.1 O1, landed via #5016)
+    is that the
     embedding STORES —
     it is not regenerated on replay, because a re-embed is a RE-RUN: its output
     depends on model identity, revision and tokenizer, none of which the
