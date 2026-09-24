@@ -2272,11 +2272,12 @@ assert_eq "$(knobs_unit 20 4)" "60/5" "knobs: the defaults SCALE with the sustai
 assert_eq "$(ESCALATE_SUSTAINED_MINUTES=1 ESCALATE_MIN_RUNS=1 knobs_unit 10 2)" "10/2" "knobs: an explicit escalation threshold BELOW the restart gate is clamped UP (a human must never page before the automated action)"
 assert_eq "$(ESCALATE_SUSTAINED_MINUTES=99 ESCALATE_MIN_RUNS=9 knobs_unit 10 2)" "99/9" "knobs: an explicit LOOSER threshold is honoured (clamping only ever tightens)"
 # A NON-BOOLEAN kill switch must fail CLOSED toward paging. `banana` was a trap:
-# `to_int` runs FIRST and coerces any non-numeric value to the default 1, so
-# `banana` never reaches the `case` below — asserting on it left the whole case
-# block unpinned (deleting it kept the suite green, and a numeric
-# ESCALATE_ENABLED=2 then read as the fail-OPEN `off`). `2` is a value `to_int`
-# KEEPS, so it DOES reach the case.
+# a `to_int`-first implementation coerces any non-numeric value to the default 1,
+# so asserting on `banana` alone left the boolean check unpinned — deleting it
+# kept the suite green, and a numeric `ESCALATE_ENABLED=2` then read as the
+# fail-OPEN `off`. The RAW value is now the ONLY kill-switch predicate, which is
+# why the digit-bearing cases at the end of this block matter as much as the
+# spelled-out ones.
 assert_eq "$(ESCALATE_ENABLED=2 knobs_unit 10 2)" "30/3" "knobs: a numeric non-boolean kill switch (2) leaves the derived thresholds alone"
 assert_eq "$(ESCALATE_ENABLED=2 esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=2 still PAGES (fail CLOSED toward paging, never 'off')"
 assert_contains "$(ESCALATE_ENABLED=2 knobs_warn_unit 10 2)" "is not 0 or 1" "knobs: coercing a non-boolean kill switch is LOUD"
@@ -2289,6 +2290,15 @@ assert_contains "$(ESCALATE_ENABLED=off knobs_warn_unit 10 2)" "is not 0 or 1" "
 assert_eq "$(ESCALATE_ENABLED=false esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=false still PAGES (fail CLOSED toward paging, never silently 0)"
 # …and the warning is NOT a blanket one: the valid values stay quiet.
 assert_eq "$(ESCALATE_ENABLED=1 knobs_warn_unit 10 2)" "" "knobs: a valid ESCALATE_ENABLED=1 is NOT warned (the raw check is targeted)"
+# `to_int` strips NON-DIGITS, so `00`, `0abc`, `0.0` and `0x` all collapse to
+# `0` — under a `to_int`-first implementation that SILENTLY MUTED the pager: a
+# malformed operator value choosing the kill switch, which is the #3887 failure
+# mode sitting inside its own fix. Only a LITERAL `0` may disable escalation.
+assert_eq "$(ESCALATE_ENABLED=00 esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=00 still PAGES (a digit-bearing non-boolean must not mute)"
+assert_eq "$(ESCALATE_ENABLED=0abc esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=0abc still PAGES (to_int must not pick the kill switch)"
+assert_eq "$(ESCALATE_ENABLED=0.0 esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=0.0 still PAGES"
+assert_eq "$(ESCALATE_ENABLED=0x esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=0x still PAGES"
+assert_contains "$(ESCALATE_ENABLED=0abc knobs_warn_unit 10 2)" "is not 0 or 1" "knobs: a digit-bearing non-boolean kill switch is LOUD"
 assert_eq "$(ESCALATE_ENABLED=0 knobs_warn_unit 10 2)" "" "knobs: a valid ESCALATE_ENABLED=0 is NOT warned"
 # `banana` is not a boolean either, but to_int maps it to the default 1 before
 # the case — assert what that path actually does.

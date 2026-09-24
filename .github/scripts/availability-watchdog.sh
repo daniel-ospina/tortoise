@@ -1662,22 +1662,24 @@ decide_restart() {
 # own normalization step.
 normalize_escalation_knobs() { # <sustained_minutes> <sustained_runs>
   local s_min="$1" s_runs="$2" d_min d_runs raw_enabled
-  # The RAW value is validated FIRST, BEFORE to_int. `to_int` strips non-digits,
-  # so `false`/`off`/`no`/`true`/`yes`/`-1` all collapse to the empty string and
-  # take the default 1 — SILENTLY, because the `case` below then matches `1`.
-  # An operator writing `ESCALATE_ENABLED=false` to kill the pager would keep
-  # paging with no signal, which is the opposite of a kill switch. So any
-  # non-empty raw value that is not exactly `0` or `1` is loud, while the
-  # EFFECTIVE value still fails CLOSED toward paging (`to_int` default 1).
+  # The RAW value is validated FIRST and is the ONLY kill-switch predicate.
+  # `to_int` strips non-digits, so a value like `0abc`, `0x`, `0.0` or `00`
+  # would collapse to `0` and SILENTLY MUTE the pager — a malformed operator
+  # value choosing the kill switch is exactly the failure class this leg exists
+  # to remove, so it must not be reachable. Likewise `false`/`off`/`no` strip to
+  # the empty string and would take the default. Only a LITERAL `0` disables
+  # escalation; anything else that is not a literal `1` warns and fails CLOSED
+  # toward paging.
   raw_enabled="$(printf '%s' "${ESCALATE_ENABLED:-}" | tr -d '[:space:]')"
-  ESCALATE_ENABLED="$(to_int "$ESCALATE_ENABLED" "1")"
-  case "$ESCALATE_ENABLED" in
-    0|1) : ;;
-    *) ESCALATE_ENABLED=1 ;;
+  case "$raw_enabled" in
+    0) ESCALATE_ENABLED=0 ;;
+    1) ESCALATE_ENABLED=1 ;;
+    "") ESCALATE_ENABLED=1 ;;  # unset/empty: the documented default (not a kill)
+    *)
+      ESCALATE_ENABLED=1
+      warn "ESCALATE_ENABLED='${raw_enabled}' is not 0 or 1 — treating it as 1 (fail CLOSED toward paging; a kill switch must be the literal 0)"
+      ;;
   esac
-  if [ -n "$raw_enabled" ] && [ "$raw_enabled" != "0" ] && [ "$raw_enabled" != "1" ]; then
-    warn "ESCALATE_ENABLED='${raw_enabled}' is not 0 or 1 — treating it as ${ESCALATE_ENABLED} (fail CLOSED toward paging; a kill switch must be explicit)"
-  fi
   d_min=$((s_min * 3))
   d_runs=$((s_runs + 1))
   ESCALATE_SUSTAINED_MINUTES="$(int_or "${ESCALATE_SUSTAINED_MINUTES:-}" "$d_min" 1)"
