@@ -2099,6 +2099,30 @@ def test_5026_b1_live_aboutdocument_ignores_non_document_source(live_proj):
     assert good == 1, "auto-detect fallback did not mint the Subject stub"
 
 
+def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
+    """B1 (#5026): the REPLAY resolver must carry the LIVE path's
+    `documentKind IS NOT NULL` guard. Without it a producer-created
+    aboutDocument edge (reachable through the public `sdk.create_edge`) to a
+    provenance Source is re-attached to that non-document Source on rebuild —
+    live and replay disagree. A genuine document Source at the same shape
+    still resolves."""
+    from tortoise.projection.edges import resolve_structural_target
+
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/prov-b1', title:'ProvB1', "
+        "sourceKind:'github'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/prov-b1", "aboutDocument") is None, \
+        "replay resolved a provenance Source as an aboutDocument target"
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/doc-b1', title:'DocB1R', "
+        "documentKind:'report'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/doc-b1", "aboutDocument") is not None, \
+        "replay refused a genuine document Source"
+
+
 def test_5026_b2_derivable_set_unchanged():
     """B2 (#5026): aboutDocument stays in DERIVABLE_STRUCTURAL_RELS and
     aboutSource stays out (it is not a real rel) — the target label moved to
@@ -2114,24 +2138,74 @@ def test_5026_b6_retired_fields_cannot_reenter(live_proj):
     """B6 (#5026): `content`/`doc_status`/`objectKind`/`status` cannot
     reappear — neither via the fixed clause NOR the open passthrough. A
     NON-retired key (`domain`) still rides the passthrough, so the deny-set
-    did not over-reach."""
+    did not over-reach. The snake/camel synonym spellings are denied too."""
     proj = live_proj
     proj.apply({"type": "DocumentCreated", "id": "doc-b6", "title": "B6",
                 "document_kind": "report", "format": "markdown",
                 "content": "SECRET BODY", "doc_status": "captured",
-                "objectKind": "document", "status": "draft",
+                "docStatus": "captured",
+                "objectKind": "document", "object_kind": "document",
+                "status": "draft",
                 "domain": "legal"})
     rows = proj.g.query(
         "MATCH (s:Source {url:'doc-b6'}) RETURN s.content, s.doc_status, "
-        "s.objectKind, s.status").result_set[0]
+        "s.objectKind, s.status, s.object_kind, s.docStatus").result_set[0]
     assert rows[0] is None, f"retired `content` written: {rows[0]!r}"
     assert rows[1] is None, f"retired `doc_status` written: {rows[1]!r}"
     assert rows[2] is None, f"retired `objectKind` written: {rows[2]!r}"
     assert rows[3] is None, f"retired `status` written: {rows[3]!r}"
+    assert rows[4] is None, f"retired `object_kind` written: {rows[4]!r}"
+    assert rows[5] is None, f"retired `docStatus` written: {rows[5]!r}"
     ok = proj.g.query(
         "MATCH (s:Source {url:'doc-b6'}) RETURN s.domain, s.format").result_set[0]
     assert ok[0] == "legal", f"non-retired passthrough key dropped: {ok[0]!r}"
     assert ok[1] == "markdown", f"fixed-clause `format` dropped: {ok[1]!r}"
+
+
+def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
+    """B6 (#5026): a document IS a :Source, so a SourceCreated whose url
+    equals a document id MERGEs onto the SAME node the document path owns.
+    Its open passthrough must carry the RETIRED-KEYS deny-set, or the retired
+    fields re-enter and survive a rebuild.
+
+    ⛔ Non-over-reach pin (cycle 2): the deny-set must be the literal retired
+    keys, NOT the historical `_DOCUMENT_HANDLED` union. `_upsert_source`'s
+    fixed clause writes neither `summary` nor `topics`, so a Source that
+    legitimately carries them depends on the passthrough — widening the set to
+    all of `_DOCUMENT_HANDLED` would silently drop them (and an `embedding`,
+    which the vector retrieval leg reads)."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-b6s", "title": "B6S",
+                "document_kind": "report", "format": "markdown",
+                "domain": "legal"})
+    proj.apply({"type": "SourceCreated", "url": "doc-b6s",
+                "sourceKind": "document",
+                "content": "SECRET BODY", "doc_status": "captured",
+                "docStatus": "captured", "objectKind": "document",
+                "object_kind": "document", "domain": "contracts",
+                "summary": "a legit Source summary",
+                "topics": ["legit", "source"],
+                "status": "active"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6s'}) RETURN s.content, s.doc_status, "
+        "s.objectKind, s.object_kind, s.docStatus, s.documentKind, "
+        "s.domain, s.format, s.summary, s.topics, s.status").result_set[0]
+    assert rows[0] is None, f"retired `content` via SourceCreated: {rows[0]!r}"
+    assert rows[1] is None, f"retired `doc_status` via SourceCreated: {rows[1]!r}"
+    assert rows[2] is None, f"retired `objectKind` via SourceCreated: {rows[2]!r}"
+    assert rows[3] is None, f"retired `object_kind` via SourceCreated: {rows[3]!r}"
+    assert rows[4] is None, f"retired `docStatus` via SourceCreated: {rows[4]!r}"
+    assert rows[5] == "report", f"document kind lost: {rows[5]!r}"
+    assert rows[6] == "contracts", f"non-retired key dropped: {rows[6]!r}"
+    assert rows[7] == "markdown", f"fixed-clause `format` dropped: {rows[7]!r}"
+    # Non-over-reach: these are NOT retired and `_upsert_source`'s fixed clause
+    # does not write them, so they MUST survive the widened deny-set.
+    assert rows[8] == "a legit Source summary", \
+        f"non-retired `summary` dropped by the deny-set (over-reach): {rows[8]!r}"
+    assert sorted(rows[9] or []) == ["legit", "source"], \
+        f"non-retired `topics` dropped by the deny-set (over-reach): {rows[9]!r}"
+    assert rows[10] == "active", \
+        f"non-retired `status` dropped by the deny-set (over-reach): {rows[10]!r}"
 
 
 # ── #214: Vocabulary edge cleanup ──────────────────────────────────────

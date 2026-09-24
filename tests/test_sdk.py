@@ -972,6 +972,24 @@ class TestSanitizeProps:
         assert p["id"] == pid
 
 
+class TestDocumentFtsPostRetrievalFilters:
+    """D10 (#5026): ``tortoise_fts_query(entity_type='document')`` must
+    address the document :Source on EVERY post-retrieval clause. The kind
+    filter and the recency re-rank interpolate a graph label + id field into
+    Cypher; before the fix the label was still ``:Document`` (matches nothing
+    ⇒ ``kind_ids`` empty ⇒ results silently emptied) and the id field was
+    ``id`` instead of ``url``."""
+
+    def test_document_with_kind_returns_the_document(self, sdk):
+        doc = sdk.create_document("Licensing Brief", "brief")
+        hits = sdk.tortoise_fts_query("licensing", entity_type="document",
+                                      kind="brief")
+        ids = {h["id"] for h in hits}
+        assert doc["id"] in ids, \
+            f"document emptied by the post-retrieval kind filter: {hits}"
+        assert all(h.get("point_kind") == "brief" for h in hits), hits
+
+
 # ── Phase-4 promotion + draft queue (#785) ────────────────────────────
 # promote_point: reviewer-gated draft→live, batch quarantine lock, R16
 # zombie-operator prevention, already-live no-op (DE2E-N9).

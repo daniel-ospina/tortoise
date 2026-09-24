@@ -87,7 +87,7 @@ def test_entity_profile_single_hop():
     """One hop from entity finds connected points and documents."""
     root = _node("root-1", ["Point"], {"content": "root point", "pointKind": "claim"})
     child_p = _node("pt-2", ["Point"], {"content": "connected point", "confidence": 0.8})
-    child_d = _node("doc-1", ["Document"], {"title": "connected doc"})  # noqa: F841
+    child_d = _node("doc-1", ["Source"], {"title": "connected doc", "documentKind": "report"})  # noqa: F841
 
     # Query 0: root lookup. Query 1: BFS from root-1 (one child per direction)
     db = _mock_db({
@@ -150,7 +150,7 @@ def test_entity_profile_categorize_types():
     """Connected nodes of different labels get categorized."""
     root = _node("root-1", ["Point"], {"content": "root"})
     evt = _node("evt-1", ["Event"], {"eventKind": "meeting"})
-    doc = _node("doc-1", ["Document"], {"title": "doc"})
+    doc = _node("doc-1", ["Source"], {"title": "doc", "documentKind": "report"})
     subj = _node("sub-1", ["Subject"], {"name": "Alice"})
 
     db = _mock_db({

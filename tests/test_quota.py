@@ -383,8 +383,8 @@ class TestDocumentsQuota:
 
         kind=None omits documentKind entirely (a session/connector/provenance
         Source); kind='' mirrors the projection's frontmatter-less doc write
-        (``s.documentKind = coalesce($dk, ...)`` with ``$dk`` defaulting to
-        the empty string)."""
+        (``s.documentKind = coalesce($dk, s.documentKind, '')`` — a null or
+        omitted ``$dk`` lands as the non-null empty string)."""
         if kind is None:
             tenant._get_proj().g.query(
                 "CREATE (s:Source {url:$url, title:$t})",
@@ -469,6 +469,40 @@ class TestDocumentsQuota:
             assert count_org_usage(tid, "documents", sdk=tenant) == 1, \
                 "legacy DocumentCreated doc escaped the :Source documents cap"
             # derived cap 0*10 == 0 → the single legacy doc is OVER the cap
+            with pytest.raises(QuotaExceededError,
+                               match="documents limit reached"):
+                enforce_org_limit({"org_id": tid, "max_points": 0},
+                                  "documents", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_b3_null_document_kind_cannot_escape_the_cap(
+            self, reg_sdk, tmp_path):
+        """Adversarial B3 (#5026/D10): an explicit
+        ``document_kind=None`` (ingest's YAML ``type:`` decodes to None;
+        ``EventAPI.add_document(document_kind=None)``; a null field in a
+        replayed JSONL line) must NOT leave the document Source NULL-kind —
+        the meter reads ``documentKind IS NOT NULL``, so a NULL kind would
+        escape the cap. The projection coerces a null/absent kind to '' on
+        CREATE."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0
+            log = EventLog(str(tmp_path / "b3_null_events.jsonl"))
+            api = EventAPI(log, initiated_by="extractor",
+                           projection=tenant._get_proj())
+            for i in range(3):
+                api.add_document(f"doc/b3-null-{i}.md", f"Null kind {i}",
+                                 document_kind=None)
+            kinds = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.url STARTS WITH 'doc/b3-null' "
+                "RETURN s.documentKind").result_set
+            assert kinds and all(r[0] is not None for r in kinds), kinds
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3, \
+                "null-kind document escaped the :Source documents cap"
             with pytest.raises(QuotaExceededError,
                                match="documents limit reached"):
                 enforce_org_limit({"org_id": tid, "max_points": 0},

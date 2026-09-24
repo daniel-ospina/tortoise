@@ -437,12 +437,37 @@ class _EntityHandlers:
     # D10 (ONTOLOGY v3.15 §4.4): the document write path now targets a :Source,
     # so its passthrough skip-set is ``_SOURCE_HANDLED | _DOC_RETIRED``. This
     # keeps every fixed-clause key off the passthrough AND denies the RETIRED
-    # fields — `content`, `doc_status`, `objectKind` — so they can never
-    # re-enter the graph through the open passthrough (adversarial class B6).
+    # fields — `content`, `doc_status`/`docStatus`, `objectKind`/`object_kind`
+    # — so they can never re-enter the graph through the open passthrough
+    # (adversarial class B6).
+    # BOTH spellings are denied: the projection normalizes to camelCase for
+    # the FIXED clauses, but a raw journal payload (a hand-written JSONL line,
+    # `EventAPI.add_document`, or a producer's `create_source(**props)`) can
+    # carry the snake_case spelling, which would otherwise persist verbatim as
+    # a node property no reader owns — a B6 re-entry through the snake door.
     # The historical `_DOCUMENT_HANDLED` set is retained as the base so no
     # previously-handled key becomes an accidental passthrough key.
     _DOC_RETIRED: frozenset = _DOCUMENT_HANDLED | frozenset({
         "needs_extraction",
+        # D10 B6: snake/camel synonyms of the retired props. ``object_kind``
+        # (synonym of ``objectKind``) and ``docStatus`` (synonym of
+        # ``doc_status``) are the two the write path can actually produce;
+        # ``content`` has no second spelling.
+        "object_kind", "docStatus",
+    })
+    # D10 B6: the RETIRED document fields as a LITERAL set — the keys that must
+    # not be writable through ANY open passthrough.
+    # ⛔ Distinct from `_DOC_RETIRED`, which is a SUPERSET of the historical
+    # `_DOCUMENT_HANDLED` and is therefore only safe on the document path
+    # (there, `_upsert_document`'s fixed clause owns every other key). Applying
+    # the full `_DOCUMENT_HANDLED` union to a Source write would ALSO deny
+    # `summary` / `topics` / `embedding` / `status` / `about_entities`, which
+    # `_upsert_source`'s fixed clause does NOT write and which a Source
+    # legitimately carries (a `SourceCreated` passthrough write of `summary` or
+    # an `embedding` — read by the vector retrieval leg — would be silently
+    # dropped). Deny the retirement, not the history.
+    _DOC_RETIRED_KEYS: frozenset = frozenset({
+        "content", "doc_status", "docStatus", "objectKind", "object_kind",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
     # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
@@ -1888,7 +1913,19 @@ class _EntityHandlers:
             "MERGE (s:Source {url:$id}) " + embed_clear +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
-            "    s.documentKind=coalesce($dk, s.documentKind), "
+            # D10 B3 (adversarial): the three-argument coalesce gives a
+            # document node a NON-NULL kind on CREATE. `$dk` is Cypher null
+            # for an explicit `document_kind: null` (ingest's YAML `type:`
+            # decodes to None; `EventAPI.add_document(document_kind=None)`; a
+            # null field in a replayed JSONL line) AND for an omitted key, so
+            # the old two-argument form left `documentKind` NULL on CREATE —
+            # and the documents meter (`documentKind IS NOT NULL`) then read
+            # 0, letting the document escape the cap. The trailing `''` is the
+            # SAME non-null CREATE default the sibling clauses already use
+            # (topics/summary/sessionId/eventId/needs_extraction); on a
+            # re-write that OMITS the kind the middle term preserves the
+            # stored value (#125 coalesce semantics).
+            "    s.documentKind=coalesce($dk, s.documentKind, ''), "
             "    s.format=coalesce($fmt, s.format), "
             "    s.topics=coalesce($topics, s.topics, []), "
             "    s.summary=coalesce($summary, s.summary, ''), "
@@ -1901,7 +1938,11 @@ class _EntityHandlers:
             "    s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END, "
             "    s.updatedAt=$now",
             params={"id": did, "title": ev.get("title", did),
-                    "dk": ev.get("document_kind", ""),
+                    # NO "" default here: a present null and an omitted key
+                    # both stay Cypher null and fall to the third coalesce
+                    # term ("") only on CREATE, so a partial re-write cannot
+                    # wipe the stored kind (see the clause comment above).
+                    "dk": ev.get("document_kind"),
                     "fmt": ev.get("format", "markdown"),
                     "topics": topics, "summary": summary, "sid": sid,
                     "eid": eid, "nx": nx, "st": st, "sp": sp,
@@ -2509,9 +2550,21 @@ class _EntityHandlers:
                 **({"rid": merge_run_id} if merge_run_id is not None else {}),
             },
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props.
+        # D10 B6 (adversarial): a document IS a :Source (url = <doc id>), so a
+        # SourceCreated whose url equals a document id MERGEs onto the SAME
+        # node the document path owns — without a deny-set here a SourceCreated
+        # could write `content`/`doc_status`/`objectKind` (or their snake/camel
+        # synonyms) back onto a document Source, and the write would survive a
+        # rebuild.
+        # ⛔ `_DOC_RETIRED_KEYS`, NOT `_DOC_RETIRED`: the retired-KEYS set is used
+        # deliberately, because `_DOC_RETIRED` is a superset of the historical
+        # `_DOCUMENT_HANDLED` and would also park `summary`/`topics`/
+        # `embedding`/`status`/`about_entities` off a Source passthrough — keys
+        # this Source fixed clause does not write and a Source legitimately
+        # carries (see the `_DOC_RETIRED_KEYS` definition).
         self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
-            ev, self._SOURCE_HANDLED,
+            ev, self._SOURCE_HANDLED | self._DOC_RETIRED_KEYS,
         )
         return r

@@ -175,8 +175,20 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
         # extractedFrom keeps its create-if-missing stub (live _link_source
         # parity).
         if rel == "aboutDocument":
+            # D10 B1 live-parity (adversarial): the LIVE auto-detect
+            # (`_try_about_edge`) resolves an aboutDocument target only when
+            # `e.documentKind IS NOT NULL`, so a session/connector/provenance
+            # Source can never become an aboutDocument target. This replay
+            # match MUST carry the same guard — without it a producer-created
+            # edge (reachable through the public `sdk.create_edge`) to a
+            # provenance Source is re-attached to that non-document Source on
+            # rebuild, i.e. live and replay disagree (the #2489 "one create
+            # path / byte-identical stubs" invariant). The guard is
+            # DELIBERATE live-parity, not an accident: a wrong target must be
+            # refused here, exactly as live refuses it.
             rows = g.query(
-                "MATCH (s:Source {url:$url}) RETURN ID(s), s.id LIMIT 1",
+                "MATCH (s:Source {url:$url}) WHERE s.documentKind IS NOT NULL "
+                "RETURN ID(s), s.id LIMIT 1",
                 params={"url": key}).result_set
             if not rows:
                 logger.warning(
