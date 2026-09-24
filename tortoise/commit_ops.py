@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 
+from .live import is_terminal_status  # #2498 shared terminal vocabulary
+
 _logger = logging.getLogger(__name__)
 
 # Statuses excluded from recall_state's default OBJECT view (the #1350 fold
@@ -65,6 +67,121 @@ def _payload_point_content_by_id(payload: dict, pid: str) -> str:
     return ""
 
 
+def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
+    """#4716 Part 1 — rewrite payload operator endpoint refs through the
+    capture commit's ``payload id -> resolved graph id`` map.
+
+    Two id spaces meet at the commit: the payload's content-addressed
+    ``pt_<sha>`` ids and the ids the graph actually holds. The capture point
+    loop re-resolves each payload point by content hash and keeps the
+    EXISTING node's id on a hit (``sdk.py`` — ``_find_point_by_content`` →
+    ``resolved = hit_id``), but the operator refs used to travel verbatim to
+    ``create_operator`` (called from ``apply_payload_operators``). A payload
+    id that resolved to a different graph id then named nothing,
+    ``create_operator`` raised, and ``apply_payload_operators`` swallowed it
+    (``operator write skipped (inputs missing?)``) — the silent edge drop of
+    #4654.
+
+    This restores, on the v2 capture path, the invariant the v1 builder
+    ``_stream_to_payload`` already enforces ("REMAP operator src/dst +
+    MITIGATES target triples to the re-derived ids, else Layer-1 referential
+    integrity fails", #1272).
+
+    ⚠️ Scope, stated honestly (an earlier revision of this docstring claimed
+    the hosted path was immune — it is NOT, and the claim was falsified by the
+    #4716 PR review; **#4970** carries the residual): the hosted commit (``hosted_api._execute_commit_writes`` §5/§7)
+    passes the RAW payload ``Operator`` models and creates its points with
+    ``create_point(..., dedup=True)``, whose internal re-key to an
+    existing-content node is NOT fed back into the operator refs — so a graph
+    holding the point's content under a non-``pt_`` id reproduces the identical
+    silent drop on the hosted lane. Wiring the remap there is a separate
+    change (it needs §5 to surface the resolved ids); #4716 deliberately scopes
+    this helper's CALL SITE to the capture commit, not its correctness claim to
+    the hosted lane.
+
+    Pure and total: only refs present in ``id_map`` are rewritten, everything
+    else (graph ids, event ids, empty refs) passes through untouched — so an
+    operator referencing an Event, or an id already canonical, is
+    byte-identical. Accepts raw payload dicts (the capture shape) and
+    ``commit_schema`` Operator models; rewritten entries are copies, entries
+    needing no change are returned as the original object, and the INPUTS are
+    never mutated in place.
+    """
+    if not id_map:
+        return list(operators or [])
+    out: list = []
+    for op in operators or []:
+        updates: dict = {}
+        src = _op_attr(op, "src")
+        dst = _op_attr(op, "dst")
+        if isinstance(src, str) and src in id_map:
+            updates["src"] = id_map[src]
+        if isinstance(dst, str) and dst in id_map:
+            updates["dst"] = id_map[dst]
+        target = _op_attr(op, "target")
+        if target is not None:
+            t_src = _target_attr(target, "src")
+            t_dst = _target_attr(target, "dst")
+            t_updates: dict = {}
+            if isinstance(t_src, str) and t_src in id_map:
+                t_updates["src"] = id_map[t_src]
+            if isinstance(t_dst, str) and t_dst in id_map:
+                t_updates["dst"] = id_map[t_dst]
+            if t_updates:
+                updates["target"] = (
+                    {**target, **t_updates} if isinstance(target, dict)
+                    else target.model_copy(update=t_updates))
+        if not updates:
+            out.append(op)
+        elif isinstance(op, dict):
+            out.append({**op, **updates})
+        else:
+            out.append(op.model_copy(update=updates))
+    return out
+
+
+def remap_supersession_point_refs(records: list, id_map: dict) -> list:
+    """#4716 Part 1 (adjacent hole) — same remap for the supersession
+    reference that is a payload id BY CONSTRUCTION.
+
+    ``supersessions`` records carry two point ids: ``superseded`` (resolved by
+    the extractor against the S3 search, so ALREADY a real graph id) and
+    ``supersedes_by`` (the NEW payload point's content-addressed ``pt_<sha>``
+    id). A ``supersedes_by`` whose payload point resolved to an existing graph
+    node under a different id is the SAME two-id-space mismatch the operators
+    had — ``apply_supersessions`` would warn ``point supersession ref '<payload
+    id>' not found — skipped (fail-open)`` and the CORRECTS fold would be lost.
+
+    ``superseded`` is deliberately NOT remapped (code-review P2): it is the
+    record's LANE DISCRIMINATOR downstream — ``apply_supersessions`` dispatches
+    on ``ref.startswith("pt_")`` and ``_supersession_fold_order`` excludes
+    ``pt_`` refs from its entity-lane pre-pass. Running it through the map
+    would let a payload id that maps to a NON-``pt_`` graph id silently flip
+    the record to the entity lane, degrading a CORRECTS fold into "successor is
+    not an Object in the payload". It is already a graph id, so the map has
+    nothing to do for it.
+
+    ``about_entities`` does NOT share the hole either: its values are Object
+    NAMES matched by name at attach time, never ids.
+    """
+    if not id_map:
+        return list(records or [])
+    out: list = []
+    for record in records or []:
+        updates: dict = {}
+        for side in ("supersedes_by",):
+            ref = _sr_attr(record, side)
+            if isinstance(ref, str) and ref in id_map:
+                updates[side] = id_map[ref]
+        if not updates:
+            out.append(record)
+        elif isinstance(record, dict):
+            out.append({**record, **updates})
+        else:
+            out.append(record.model_copy(update=updates))
+    return out
+
+
 def apply_payload_operators(proj, sdk, operators: list, *,
                             point_content_by_id=None) -> None:
     """Apply Layer-1 payload operators with commit semantics (#1532 D3).
@@ -81,6 +198,17 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     (support-edge-first convention, DE2E-11 negative). Never raises on a
     missing target. ``point_content_by_id(pid) -> str`` supplies the
     mitigation reason's content fallback when provided.
+
+    ⛔ ID-SPACE PRECONDITION (#4716 P1): every ``src``/``dst`` and MITIGATES
+    ``target.{src,dst}`` ref MUST be a GRAPH id by the time it reaches here. A
+    caller holding a payload-id space MUST pass the refs through
+    ``remap_operator_endpoint_refs`` FIRST — and, because the MITIGATES reason
+    is resolved from the SAME ref, it must hand a map-aware
+    ``point_content_by_id`` that still resolves the PRE-remap payload id
+    (otherwise a re-keyed dampener's reason degrades to its own graph id).
+    Passing payload ids here is not an error the function can detect: the
+    operator write is swallowed as ``operator write skipped (inputs
+    missing?)``.
     """
     target_op_ids: dict[tuple, str] = {}
     for op in operators:
@@ -133,7 +261,12 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             continue
         reason = point_content_by_id(src) if point_content_by_id else ""
         if not reason:
-            reason = f"[MITIGATION] {src}"
+            # ``mitigate_operator`` already wraps the reason in the
+            # ``[MITIGATION] `` display prefix (sdk.py; ``why.py`` strips
+            # exactly one), so the old ``f"[MITIGATION] {src}"`` fallback
+            # stored a DOUBLE prefix whenever the reason could not be
+            # resolved (#4716 review P2). Fall back to the raw ref.
+            reason = str(src)
         sdk.mitigate_operator(op_id, reason=reason,
                               strength=_op_attr(op, "strength") or 0.5)
 
@@ -376,16 +509,21 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             # re-ingested/overlapping terminal record is an idempotent
             # silent skip, never a warning and never a raised error.
             rows = proj.g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.id, n.status, coalesce(n.outdated, false)",
                 params={"ids": [ref, supersedes_by]},
             ).result_set
-            status_by_id = {r[0]: r[1] for r in rows}
-            if ref not in status_by_id:
+            state_by_id = {r[0]: (r[1], bool(r[2])) for r in rows}
+            if ref not in state_by_id:
                 warn(f"point supersession ref {ref!r} not found — "
                      f"skipped (fail-open)")
                 continue
-            if (status_by_id[ref] or "") in ("superseded", "retracted",
-                                              "archived"):
+            # #2498: the SHARED terminal vocabulary (status set + the legacy
+            # `outdated=true` flag) — the pre-#2498 3-status tuple let an
+            # `outdated` / `deprecated` / flag-dead ref fall through to
+            # sdk.supersede, which now RAISES, turning this documented
+            # idempotent no-op into a spurious warning.
+            if is_terminal_status(*state_by_id[ref]):
                 # already terminal — idempotent re-ingest no-op
                 continue
             try:
@@ -421,9 +559,9 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # probe below compares against the STORED (truncated) form so a
         # long same-successor re-ingest dedups instead of warning. The FULL
         # name is kept for the journaled event (round-2 review, ISSUE 2 —
-        # §11: the event log is truth; replay re-truncates identically at
-        # the fold, so journal fidelity costs nothing at storage). No
-        # truncation happens here — only at the compare and the fold.
+        # §11: the event log is the reconstruction source; replay re-truncates
+        # identically at the fold, so journal fidelity costs nothing at
+        # storage). No truncation happens here — only at the compare and fold.
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
             "RETURN o.id, o.name, o.status, o.supersededBy",

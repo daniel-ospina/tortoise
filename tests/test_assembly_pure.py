@@ -534,6 +534,36 @@ def test_resolver_empty_candidates_never_fire_current_state():
     assert ResolveResult().both_halves_ok(None) is False
 
 
+def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
+    """#3317 pin — the resolver's unresolvable set is EXACTLY ``{retracted}``.
+
+    The two Object sets in this file are different by design (the resolver's
+    is the Object-SEARCH boundary, ``{retracted}``;
+    ``_RECALL_OBJECT_EXCLUDED_STATUSES`` is the five-status successor-probe
+    view). Together these three assertions PIN the resolver set without
+    restating a literal: subset of the recall-excluded set (plus
+    ``retracted`` present) and each of the other four members explicitly
+    absent ⇒ exactly ``{retracted}``.
+
+    The subset direction alone is NOT the oracle for ``outdated`` — the recall
+    set CONTAINS it — so every status whose exclusion is a decision is named
+    here rather than left implied. Widening to ``superseded`` would also break
+    the pinned current-state render (`test_resolver_docker_exact_and_both_halves`),
+    but that is a docker-lane consequence; this pure pin is the fast one.
+    """
+    from tortoise.assembly import (
+        _RECALL_OBJECT_EXCLUDED_STATUSES,
+        _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES,
+    )
+    assert (
+        _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+        <= _RECALL_OBJECT_EXCLUDED_STATUSES
+    )
+    assert "retracted" in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+    for st in ("superseded", "deprecated", "archived", "outdated"):
+        assert st not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+
+
 # ── docker-lane resolver legs (fixture substrate; skip when the shared
 #    server is unreachable — pure tests above never touch this) ────────────
 
@@ -592,28 +622,48 @@ def test_resolver_docker_exact_and_both_halves(_docker_sdk):
 
 
 @_docker_only
-def test_resolver_docker_fts_paraphrase(_docker_sdk):
+def test_resolver_docker_fts_paraphrase(_docker_sdk, force_sparse_tfidf):
     """R7 docker-FTS paraphrase (RESOLUTION-ONLY — the fired-path assembly
     half is Task 6's): a subject term with NO exact-name head but a stored
     Object whose NAME token-matches via FTS ('the grey comfy couch from
-    the store' → couch) resolves source='fts' confidence='med'."""
+    the store' → couch) resolves source='fts' confidence='med'.
+
+    #3095: the embedder state is PINNED OFF (``force_sparse_tfidf``) because
+    this test asserts the NAME-FTS leg's count contract; with a live embedder
+    the hybrid vector leg matches every Object and the count assertion becomes
+    an embedder-availability flake. This test is ABOUT the name-FTS leg, so it
+    must pin the leg decomposition to stay a real FTS contract (see the
+    ``force_sparse_tfidf`` conftest note).
+
+    NOT a statement about the shipped configuration: with the embedder live
+    this term does NOT stay a single-candidate name-FTS match — the hybrid
+    FTS leg (RRF of name-FTS + vector) resolves it to 3 candidates, all
+    stamped ``source="fts"`` — tracked as the resolver leg-decomposition
+    divergence in #3223."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
     res = resolve_subjects(port, ["the grey comfy couch from the store"],
                            shape=AssemblyShape.CURRENT_STATE)
     assert not res.unresolved
-    assert len(res.candidates) == 1
-    c = res.candidates[0]
-    assert c.name == "couch"
-    assert c.source == "fts"
-    assert c.confidence == "med"
+    assert [(c.name, c.source, c.confidence) for c in res.candidates] == \
+        [("couch", "fts", "med")]
 
 
 @_docker_only
-def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk):
+def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk,
+                                                  force_sparse_tfidf):
     """A term matching NO Object stays unresolved on the live lane — the R1
-    fired=False signal (legacy fallback), never an empty/errored fire."""
+    fired=False signal (legacy fallback), never an empty/errored fire.
+
+    #3095: embedder state PINNED OFF (``force_sparse_tfidf``). This pins the
+    SPARSE-leg contract only. With the vector leg live the hybrid FTS leg
+    matches every Object for any query, so 'the teleporting exercise bike'
+    RESOLVES through it and this bootstrap signal is unreachable in the
+    shipped configuration — a pre-existing divergence (reproduced identically
+    before and after #3018), tracked in #3223. When #3223 lands, either this
+    test loses its pin (the fallback becomes reachable again) or it is
+    rewritten to state where the fallback can fire."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
@@ -621,26 +671,188 @@ def test_resolver_docker_unresolved_keeps_legacy(_docker_sdk):
                            ["the couch", "the teleporting exercise bike"],
                            shape=AssemblyShape.ORDERING)
     assert res.both_halves_ok(AssemblyShape.ORDERING) is False
-    assert len(res.unresolved) == 1
+    assert res.unresolved == ("the teleporting exercise bike",)
 
 
 @_docker_only
-def test_resolver_docker_alias_leg(_docker_sdk):
+def test_resolver_docker_alias_leg(_docker_sdk, force_sparse_tfidf):
     """R7 leg 3 live: the Object NAME does not token-match the term but an
     anchored Point search_keys does ('the ikea purchase' → couch — couch's
     bought-point search_keys 'couch ikea 800 dollars'). Exact + FTS both
-    miss (Object names couch/dog bed/sofa share no ikea token)."""
+    miss (Object names couch/dog bed/sofa share no ikea token).
+
+    #3095: embedder state PINNED OFF (``force_sparse_tfidf``) so the FTS leg
+    genuinely misses and the term reaches the alias leg — an unpinned vector
+    leg would swallow the term at the FTS step and the alias contract would
+    never be exercised. Sparse-leg contract only; the shipped-configuration
+    divergence is #3223."""
     _ag.build_base_graph(_docker_sdk)
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
     res = resolve_subjects(port, ["the ikea purchase"],
                            shape=AssemblyShape.CURRENT_STATE)
     assert not res.unresolved
-    assert len(res.candidates) == 1
-    c = res.candidates[0]
-    assert c.name == "couch"
-    assert c.source == "alias"
-    assert c.confidence == "low"
+    assert [(c.name, c.source, c.confidence) for c in res.candidates] == \
+        [("couch", "alias", "low")]
+
+
+@_docker_only
+def test_resolver_docker_excludes_retracted_object(_docker_sdk,
+                                                   force_sparse_tfidf):
+    """#3317: a RETRACTED Object must not resolve through ANY resolver leg.
+
+    Pre-fix every leg was status-blind — the exact (name/id) and alias
+    (anchored search_keys) legs carried no status conjunct, and the FTS leg's
+    terminal exclusion is gated on ``label == 'Point'`` in ``search_engine``,
+    so Object hits pass it — and ``ask()`` resolved and rendered the retracted
+    Object. Post-fix ``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``
+    (``retracted``) is excluded at all three legs.
+
+    The exclusion must stay NARROW: the SUPERSEDED couch in this same fixture
+    still resolves (its state render IS the answer) — pinned by
+    ``test_resolver_docker_exact_and_both_halves`` and
+    ``test_resolver_docker_alias_leg``, which RED if the read-surface object
+    tuple (which contains ``superseded``) is used here instead.
+
+    ``force_sparse_tfidf`` pins the leg decomposition (#3095): with the
+    embedder live the hybrid FTS leg swallows the alias term before the alias
+    leg is reached.
+
+    DECIDED — the ladder's fall-through is NOT short-circuited (a term whose
+    exact name matched only an unresolvable Object does not become
+    "unresolved"; the weaker legs still run). The contract this test pins is
+    that the retracted Object is gone from every leg — a DIFFERENT, live
+    Object resolving is the ladder's documented degrade, not this defect. In
+    the sparse lane that shows up as ``"the couch"`` reaching the alias leg
+    and resolving the live ``sofa`` (low confidence) through the point
+    ``pB-couch-sold`` ("sold the old couch and ordered a new sofa", whose
+    search_keys name both); with the embedder live the hybrid FTS leg is
+    broad for ANY term (the #3223 divergence), which is where an
+    "unmatched term resolves something" behaviour belongs. Stop-on-excluded-
+    match would be an abstention-semantics change to `both_halves_ok`,
+    outside this issue. The residual is owned by #4061 (which also owns the
+    FTS leg's post-truncation filter and its absent-`status` fail-open).
+    """
+    _ag.build_base_graph(_docker_sdk)
+    proj = _docker_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:'couch'}) SET o.status='retracted'")
+    couch_id = proj.g.query(
+        "MATCH (o:Object {name:'couch'}) RETURN o.id").result_set[0][0]
+    from tortoise.assembly import (
+        collect_slices,
+        docker_resolver_port,
+        docker_walker_port,
+    )
+    port = docker_resolver_port(_docker_sdk)
+
+    # leg 1 — exact (name / id): the retracted Object is not returned
+    assert couch_id not in {r["id"] for r in port.exact_objects(["couch"])}
+
+    # leg 2 — name-FTS (the leg search_engine's exclusion is Point-gated on):
+    # no other Object in this fixture bears a 'couch' name token
+    assert port.fts_objects("couch") == []
+
+    # leg 3 — alias amplifier (anchored search_keys)
+    assert couch_id not in {r["id"] for r in port.alias_objects("couch")}
+
+    # end-to-end through the ladder: no term returns the retracted Object —
+    # including the paraphrase that only the FTS/alias legs could match
+    for term in ("the couch", "couch", "the ikea purchase"):
+        got = resolve_subjects(port, [term],
+                               shape=AssemblyShape.CURRENT_STATE)
+        assert couch_id not in {c.object_id for c in got.candidates}, term
+
+    # LIVE control: the exclusion must not be over-broad
+    live = resolve_subjects(port, ["the dog bed"],
+                            shape=AssemblyShape.CURRENT_STATE)
+    assert [(c.name, c.source) for c in live.candidates] == \
+        [("dog bed", "exact")]
+
+    # boundary of the decision: a status OUTSIDE the excluded set keeps
+    # resolving and renders itself verbatim (never "current") — pinned here
+    # so widening the set later cannot pass silently
+    proj.g.query("MATCH (o:Object {name:'sofa'}) SET o.status='deprecated'")
+    dep = resolve_subjects(port, ["the sofa"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert [(c.name, c.source) for c in dep.candidates] == \
+        [("sofa", "exact")]
+    dep_slices = collect_slices(
+        docker_walker_port(_docker_sdk),
+        [_cand(dep.candidates[0].object_id, "sofa", 0)],
+        shape=AssemblyShape.CURRENT_STATE)
+    assert [r["status"] for r in dep_slices.state_rows] == ["deprecated"]
+
+    # the assembled payload never carries the retracted Object as a subject,
+    # and the block STILL FIRES — the latter pinned because a bare
+    # `couch_id not in …` of `subjects=()` would also pass under an over-broad
+    # exclusion (either a data filter or an abort) — this asserts that the
+    # decided ladder fall-through is intact.
+    from tortoise.assembly import _assemble_connected
+    block = _assemble_connected(
+        _docker_sdk, "what is the current status of the couch?")
+    assert block.fired is True
+    assert couch_id not in {s["object_id"] for s in block.subjects}
+
+
+@_docker_only
+def test_walker_explicit_id_renders_retracted_status_verbatim(_docker_sdk):
+    """#3317 decision pin: the walker's state read is NOT a resolution leg.
+
+    Given an id EXPLICITLY (the WalkerPort contract), the state row carries
+    ``status`` VERBATIM; the renderer (``_state_header_hit``) then emits
+    ``STATE (couch): retracted``. Adding a status conjunct to
+    ``docker_walker_port.state_rows`` would not stop a retracted Object from
+    being resolved (resolution has already happened) — it would only erase
+    the honest state line of an admitted subject. The guard lives upstream,
+    at the resolver legs.
+    """
+    _ag.build_base_graph(_docker_sdk)
+    proj = _docker_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:'couch'}) SET o.status='retracted'")
+    oid = proj.g.query(
+        "MATCH (o:Object {name:'couch'}) RETURN o.id").result_set[0][0]
+    from tortoise.assembly import collect_slices, docker_walker_port
+    slices = collect_slices(
+        docker_walker_port(_docker_sdk), [_cand(oid, "couch", 0)],
+        shape=AssemblyShape.CURRENT_STATE)
+    assert [r["status"] for r in slices.state_rows] == ["retracted"]
+
+
+@_docker_only
+@pytest.mark.xfail(
+    strict=False,
+    reason="#3223: with the vector leg live the hybrid FTS query matches a "
+           "term that names no Object, so the R1 fired=False legacy "
+           "fallback is unreachable in the shipped configuration. strict="
+           "False on purpose: an unexpected PASS (the divergence fixed) is "
+           "reported as XPASS rather than failing, so this record can never "
+           "itself turn main red. Delete this test when #3223 lands.")
+def test_resolver_docker_shipped_hybrid_leg_leaves_nothing_unresolved(
+        _docker_sdk):
+    """Shipped-configuration record (#3223): asserts the INTENDED contract —
+    a subject term naming no Object stays in ``unresolved`` (the R1
+    ``fired=False`` signal). Expected to FAIL today, because with the
+    embedder live the hybrid FTS leg resolves such a term through its
+    semantic half, making the fallback unreachable in the configuration that
+    actually ships.
+
+    The three ``force_sparse_tfidf``-pinned tests above cover the SPARSE leg
+    decomposition only; this is the one place the shipped configuration is
+    recorded. Skips when the embedder is genuinely unavailable (a lane
+    without it cannot exercise the divergence at all) — see #3223 for making
+    that state deterministic instead of ambient."""
+    from tortoise.embeddings import EmbeddingModel
+    if EmbeddingModel.get() is None:
+        pytest.skip("embedder unavailable — the shipped hybrid leg cannot be "
+                    "exercised in this lane (see #3223)")
+    _ag.build_base_graph(_docker_sdk)
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    res = resolve_subjects(port, ["the teleporting exercise bike"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert res.unresolved == ("the teleporting exercise bike",), \
+        f"#3223 divergence: expected the no-match term to stay unresolved, "\
+        f"got candidates {[(c.name, c.source) for c in res.candidates]}"
 
 
 # ══════════════════════════════════════════════════════════════════════════

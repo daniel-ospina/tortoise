@@ -68,7 +68,7 @@ BILLING_ROW = {
 
 def _open_billing(page: Page) -> None:
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row=BILLING_ROW, billing_routes=True)
+                       org_row=BILLING_ROW, billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
     expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
@@ -87,20 +87,20 @@ def test_billing_tab_renders_plan_and_usage(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("42")
     # Plan grid: the four public tiers.
     expect(page.locator("body")).to_contain_text("Solo")
-    expect(page.locator("body")).to_contain_text("Pro")
+    expect(page.locator("body")).to_contain_text("Builder")
     expect(page.locator("body")).to_contain_text("Team")
     # Free card is current → "Current plan" badge, no Upgrade CTA.
     expect(page.locator(".plan-card.current")).to_contain_text("Free")
 
 
 def test_upgrade_posts_checkout_with_tier_price_id(page: Page) -> None:
-    """Clicking Upgrade on the Pro card POSTs /v1/billing/checkout with the
-    Pro monthly price id from the mock checkout_price_ids (the contract — a
-    free team has no active subscription, so checkout is the path)."""
+    """Clicking Upgrade on the Builder card POSTs /v1/billing/checkout with
+    the `pro` tier's monthly price id from the mock checkout_price_ids (the
+    contract — a free team has no active subscription, so checkout is the path)."""
     _open_billing(page)
     with page.expect_request(lambda r: r.url.endswith("/v1/billing/checkout")) as req_info:
-        # The Pro card's Upgrade button (the Pro card contains 'Pro' + 'Upgrade').
-        pro_card = page.locator(".plan-card", has_text="Pro")
+        # The Builder card's Upgrade button (the Builder card contains 'Builder' + 'Upgrade').
+        pro_card = page.locator(".plan-card", has_text="Builder")
         pro_card.locator("button", has_text="Upgrade").click()
     req = req_info.value
     body = json.loads(req.post_data or "{}")
@@ -114,20 +114,20 @@ def test_active_subscriber_manage_subscription_posts_portal(page: Page) -> None:
     /v1/billing/portal (plan changes route through the Stripe portal — the
     checkout endpoint 409s on active subscriptions by design)."""
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row={**BILLING_ROW, "subscription_status": "active",
+                       org_row={**BILLING_ROW, "subscription_status": "active",
                                  "tier": "pro"},
                        billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
     expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
-    # Header manage-subscription button (restored #310 surface) renders.
-    expect(page.locator("button.tier-manage")).to_contain_text("Manage subscription")
+    # #4639: the redundant HEADER "Manage subscription" is removed — plan
+    # management lives on the Billing tab, so the Overview tab carries none.
+    expect(page.locator("header button.tier-manage")).to_have_count(0)
     page.locator("nav button", has_text="Billing").click()
-    expect(page.locator("body")).to_contain_text("Pro plan", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("Builder plan", timeout=10_000)
     expect(page.locator("body")).to_contain_text("Active")
     with page.expect_request(lambda r: r.url.endswith("/v1/billing/portal")) as req_info:
-        # The prominent header Manage button (the billing row has a second
-        # one for active subscribers).
+        # The Billing row's Manage button (#4639 removed the header one).
         page.locator("button.tier-manage").first.click()
     req = req_info.value
     assert req.method == "POST"
@@ -165,14 +165,14 @@ def _wire_welcome_flow(page: Page) -> None:
             if "/functions/v1/tenant-provision" in url and route.request.method == "POST":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"api_key": WELCOME_KEY,
-                                                "team_name": "Welcome Team",
+                                                "org_name": "Welcome Team",
                                                 "graph_name": "main"}))
                 return
-            if "/rest/v1/team_memberships" in url:
+            if "/rest/v1/org_memberships" in url:
                 # maybeSingle() → PostgREST returns the single object.
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_welcome",
-                                                "team_name": "Welcome Team",
+                              body=json.dumps({"org_id": "team_welcome",
+                                                "org_name": "Welcome Team",
                                                 "graph_name": "main",
                                                 "status": "active"}))
                 return
@@ -184,7 +184,7 @@ def _wire_welcome_flow(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(API_HOST):
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 # First-timer: NO teams → the welcome card + wizard render
                 # (no auto-provision at mount — #2323 Option B).
                 route.fulfill(status=200, content_type="application/json",
@@ -232,15 +232,16 @@ def test_welcome_reveal_shows_welcome_card_then_dashboard_exit(page: Page) -> No
     _goto_local_dashboard(page)
     # Teamless first-timer: welcome card (no orientation — removed per epic
     # #2534). Org-create is step 0.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=25_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=25_000)
     # Org-create step: type the org name → the SUBMIT provisions
     # (tenant-provision with the typed name; 201 carries the plaintext).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
     page.get_by_role("button", name="Create Organization").click()
-    # Provisioned: the welcome heading flips to the org — the header exit is
-    # enabled once an org exists.
-    expect(page.locator("body")).to_contain_text("Welcome Team is set up", timeout=20_000)
+    # Provisioned: the org name becomes the welcome-card eyebrow (#2912 — the
+    # h1 is now the STAGE, so the provisioned org is the eyebrow above it), and
+    # the header exit is enabled once an org exists.
+    expect(page.locator(".welcome-eyebrow")).to_have_text("Welcome Team", timeout=20_000)
     # Escape hatch: the header 'Open my dashboard →' (enabled once the org
     # exists) → dashboard shell at /. Scoped to the header — the done-step
     # wizard carries a same-named button.

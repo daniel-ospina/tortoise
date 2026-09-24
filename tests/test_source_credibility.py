@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 
@@ -326,6 +327,7 @@ def sdk():
     s = TortoiseSDK(db_path)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _set_source_tier_raw(sdk, url, tier, ingested_at="2024-01-01T00:00:00+00:00"):

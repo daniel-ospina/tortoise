@@ -9,7 +9,7 @@ Covers the self-hosted authenticated-MCP story end-to-end:
      non-loopback binds, the --allowed-hosts flag, and the static-mode
      missing-key error path
   4. local HTTP roundtrip: key create → tenant app → 401 no-auth → tools/list
-     with key → write lands in the canonical team_{team_id} graph → Origin
+     with key → write lands in the canonical org_{org_id} graph → Origin
      header accepted
   5. the bootstrap key actually authenticates
 """
@@ -266,13 +266,13 @@ def test_serve_http_main_dispatch_tenant(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("auth_args,namespace", [
-    (["--auth", "tenant"], "team_{id}"),
-    (["--auth", "static", "--api-key", "tt_x"], "team_selfhost"),
-    (["--auth", "none"], "team_selfhost"),
+    (["--auth", "tenant"], "org_{id}"),
+    (["--auth", "static", "--api-key", "tt_x"], "org_selfhost"),
+    (["--auth", "none"], "org_selfhost"),
 ])
 def test_serve_http_namespace_note_all_modes_tilde_expansion(monkeypatch, capsys, auth_args, namespace):
     """#719 P2: the fresh-namespace isolation note must fire for EVERY HTTP auth
-    mode (tenant → team_{id}; static/none → team_selfhost — SELFHOST_TEAM_ID),
+    mode (tenant → org_{id}; static/none → team_selfhost — SELFHOST_ORG_ID),
     and a tilde-form TORTOISE_DB_PATH (~/.tortoise/tortoise.db, the quickstart's
     documented form) must be expanduser'd so the exists-check fires and the
     diagnostic prints the EXPANDED path instead of a shell-unescaped '~'."""
@@ -688,7 +688,7 @@ def test_serve_http_api_key_requires_static_auth(monkeypatch, tmp_path, capsys):
 
 def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
     """key create → tenant app: no-auth 401; tools/list with the key works;
-    a write lands in the canonical team_{team_id} graph (not an empty or
+    a write lands in the canonical org_{org_id} graph (not an empty or
     orphaned namespace); Origin header accepted."""
     from fastapi.testclient import TestClient
 
@@ -702,9 +702,9 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
     # guaranteed visible (no cross-process handoff, no RDB reload race).
     sdk = TortoiseSDK(namespace="registry")
     rows = sdk._get_registry().query(
-        "MATCH (k:APIKey) RETURN k.team_id").result_set
+        "MATCH (k:APIKey) RETURN k.org_id").result_set
     assert rows, "registry key must be visible (in-process CLI created it, #880)"
-    team_id = rows[0][0]
+    org_id = rows[0][0]
 
     wrapper = _boot_tenant_app(registry_sdk=sdk)
     accept = "application/json, text/event-stream"
@@ -726,7 +726,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         assert "tortoise_create_point" in names
         assert len(tools) > 5
 
-        # write → lands in team_{team_id}
+        # write → lands in org_{org_id}
         r = c.post("/mcp", json={
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "tortoise_create_point",
@@ -735,8 +735,8 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         body = _parse_sse_json(r)
         assert not body["result"]["isError"], body
 
-        team_sdk = TortoiseSDK(namespace=team_id)
-        pts = team_sdk._get_proj().g.query("MATCH (p:Point) RETURN count(p)").result_set
+        org_sdk = TortoiseSDK(namespace=org_id)
+        pts = org_sdk._get_proj().g.query("MATCH (p:Point) RETURN count(p)").result_set
         assert pts and pts[0][0] >= 1, "write must land in the team graph"
 
         # isolation: default 'tortoise' graph must NOT hold it
@@ -813,6 +813,6 @@ def test_bootstrap_key_persists_and_verifies(local_db):
     fresh = TortoiseSDK(namespace="registry")
     try:
         res = fresh.apikey_verify(key)
-        assert res and res.get("team_id"), "key must verify after restart"
+        assert res and res.get("org_id"), "key must verify after restart"
     finally:
         fresh.close()

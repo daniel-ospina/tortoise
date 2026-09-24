@@ -444,7 +444,12 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
             "WHERE op.id IN $ids "
-            "AND (t.is_operator = false AND t.op_type IS NULL) "
+            # #3139/#3154: index-independent form — a bare `= false` is
+            # emptied by a GRAPH.COPY'd boolean index, making every operator
+            # look inert (zero live connections) and silently starving the
+            # dream selector of factors.
+            "AND (t.is_operator IS NULL OR t.is_operator = false) "
+            "AND t.op_type IS NULL "
             f"AND {_live_only('t.status')} "
             "WITH op, count(DISTINCT t) AS live_conn "
             "WHERE live_conn >= 2 "
@@ -524,8 +529,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE a.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "RETURN DISTINCT b.id, a.id, type(r)",
                     params={"frontier": frontier_list},
                 ).result_set
@@ -540,8 +548,11 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 rows = proj.g.query(
                     f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
                     f"WHERE b.id IN $frontier {live_a} {live_b} "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate.
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "AND (type(r) = 'NAND' "
                     "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
                     "RETURN DISTINCT a.id, b.id, type(r)",
@@ -616,10 +627,10 @@ def _stale_first_claims(proj, limit: int | None = None) -> list[str]:
     n.lastDreamedAt`` would rank never-dreamed claims FRESHEST, the
     opposite of the contract). This is the plan's explicit-null-scan-union
     alternative: one deterministic query instead of a union scan, at the
-    cost of not sorting on the raw indexed property (the :Point(
-    lastDreamedAt) / :Point(is_operator, lastDreamedAt) indexes still
-    accelerate the property access and the is_operator filter on
-    docker/server).
+    cost of not sorting on the raw indexed property (the plain :Point(
+    lastDreamedAt) index still accelerates the property access; #3154
+    retired the :Point(is_operator, lastDreamedAt) composite — no engine
+    indexes the boolean property).
     """
     base = (
         "MATCH (n:Point) "

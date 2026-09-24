@@ -18,7 +18,7 @@ import urllib.request
 def delete_user_by_email(base_url: str, service_key: str, email: str) -> bool:
     """Delete the auth user with the exact given email (no-op when absent).
 
-    Cascades to team_memberships (FK ON DELETE CASCADE, migration 0001).
+    Cascades to org_memberships (FK ON DELETE CASCADE, migration 0001).
     Returns True if a user was deleted."""
     headers = {
         "Authorization": f"Bearer {service_key}",

@@ -17,8 +17,14 @@
 //   validation below mirrors POST /v1/onboarding/team (server regex).
 // - the fork card is once-per-org (set-once server-side); build branch
 //   renders the registry-backed capability catalog (W8 — the offline
-//   fallback lives in BUILD_CATALOG_PLACEHOLDER) whose render marks the
-//   catalog-presented step edge (surface 4).
+//   fallback lives in BUILD_CATALOG_PLACEHOLDER). #3913: rendering the
+//   catalog performs NO write — the dashboard records no `catalog-presented`
+//   step edge (the build fork completes on the two acts the server OBSERVES).
+
+// #3724: the not-connected OBSERVATION phrase is ONE source shared with the
+// Overview's connection card (connectionObservation.js) — the two surfaces
+// state the same server fact and used to drift apart as two literals.
+import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED } from './connectionObservation.js'
 
 export const WIZARD_STEPS = Object.freeze([
   {
@@ -29,19 +35,77 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'fork',
     label: "Choose how you'll use Tortoise",
-    sub: 'This tells your agent what to set up. You pick once per organization.',
+    // #3218: "you pick once per organization" stays — the fork IS set-once
+    // (state.py _SEMANTICS['fork'] = SET_ONCE; a changed value is a 409
+    // fork_already_set). Only the `unsure` answer leaves fork NULL, so the
+    // "answer any time" affordance belongs on THAT option, never here.
+    sub: 'This tells your agent what to set up — you choose once per Organization.',
   },
   {
     id: 'connect',
     label: 'Connect your agent',
-    sub: 'Connect Tortoise to your Organization.',
+    // #2912: the old sub ("Connect Tortoise to your Organization.") restated the
+    // label instead of saying what the step ASKS. The step is a harness pick.
+    sub: 'Pick which harness to connect.',
   },
   {
     id: 'done',
     label: "You're all set",
-    sub: 'Your agent takes over from here. Open Settings → Setup guide to follow what happens next.',
+    // #2912 (PR-gate UX): the step-3 body already ends with "Open Settings →
+    // Setup guide to follow what happens next" — the header sub used to repeat
+    // that sentence verbatim inside one viewport.
+    sub: 'Your agent takes over from here.',
   },
 ])
+
+// #2912 (PR-gate UX P1): the wizard header and the sr-only step announcement
+// must name the stage the SAME way. Two contexts override the step's own
+// label:
+//   - step 0 on an org-holding account is a read-only summary ("Your
+//     Organization"), not an invitation to create one;
+//   - the paused reconnect's whole point is that the agent is NOT connected,
+//     so rendering "You're all set" as the page <h1> directly above the lede
+//     "You're set up, but your agent isn't connected yet" contradicted itself.
+// Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
+// by a source-text grep.
+export function wizardStageLabel(step, { hasOrg = false, paused = false, connected = false, buildFork = false } = {}) {
+  if (step === 3) {
+    // A real connection OUTRANKS the local skip (#2361 r3): connect → Back →
+    // Skip must still read as connected, never as paused. Checked first so the
+    // two flags cannot compose into the false "paused" reading.
+    if (connected) return WIZARD_STEPS[3]?.label ?? ''
+    // #3428/#2937 (lane B3): step 3's own label ("You're all set") is itself a
+    // harness-connected CLAIM — the very claim the deleted human writer used to
+    // manufacture. With the writer gone, a user who finishes the connect step
+    // without a server-observed connection lands here with `paused` false, and
+    // the old code greeted them with "You're all set". `connected` is the
+    // caller's server-derived `serverHarnessConnected`.
+    //
+    // The default is deliberately `false` (fail-honest): a caller that forgets
+    // to pass `connected` understates the connection, which is the harmless
+    // direction — it can never claim a connection we did not observe.
+    //
+    // review cycle 4 (item 13) made the BUILD arm state what was OBSERVED
+    // instead of asserting the connection is absent. review cycle 6 (item 2)
+    // makes the SELF arms do the same, for the same two reasons: its body
+    // refuses to assert the absence too ("we can't tell it's connected yet"),
+    // and the categorical sentence is factually false for a user whose session
+    // was CAPTURED — capture writes Session nodes and extracted points but
+    // files only `capture-disclosed`, never `harness-connected`, so that user
+    // can be connected-and-capturing under a screen reading "Not connected
+    // yet".
+    //
+    // Both forks now print the observation phrasing, so the fork no longer
+    // SELECTS a string here. `buildFork` stays in the signature deliberately:
+    // both call sites pass it (that call shape is pinned in
+    // wizardArchived.test.js) and it records the fork input; it is simply no
+    // longer a discriminator.
+    if (paused) return SETUP_PAUSED_NO_CONNECTION_OBSERVED
+    return NO_CONNECTION_OBSERVED
+  }
+  if (step === 0 && hasOrg) return 'Your Organization'
+  return WIZARD_STEPS[step]?.label ?? ''
+}
 
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,
 // nudge-not-force — NEVER a billing gate. Fork SEMANTICS are W2-owned;
@@ -54,18 +118,25 @@ export const WIZARD_STEPS = Object.freeze([
 export const WIZARD_FORK_OPTIONS = Object.freeze([
   {
     id: 'self',
-    label: 'Use it for your own agents',
-    description: 'Your agent files decisions and findings to your organization memory graph.',
+    label: 'For my internal setup',
+    description: 'Your agent files decisions and findings to your Organization memory graph.',
   },
   {
     id: 'build',
     label: 'Build an application on top',
-    description: 'You get the capability catalog — the indexers and extractors you can build with.',
+    // #3218: the build branch's step 2 is "Call the SDK" (main.jsx
+    // connect-build) — the description has to name the SDK, not just the
+    // capability catalog, or the copy promises a catalog and delivers an API.
+    description: 'You get the Tortoise SDK and the capability catalog — the indexers and extractors you can build with.',
   },
   {
     id: 'unsure',
     label: 'Not sure yet — decide later',
-    description: 'Skip the choice — you pick once per organization, any time from the Setup guide.',
+    // #3218: 'unsure' is the ONLY path that does not consume the set-once
+    // fork (it writes fork_unsure_at; fork stays NULL) — so the deferral
+    // affordance is stated here and the set-once consequence is stated on the
+    // step sub, instead of one sentence asserting both.
+    description: 'Skip for now — nothing is locked in. Answer any time from Settings → Setup guide.',
   },
 ])
 
@@ -76,9 +147,9 @@ export const WIZARD_FORK_OPTIONS = Object.freeze([
 // endpoint is unreachable. The names/kinds/descriptions are kept
 // byte-identical to the registry's 3 launch rows (the JS unit tests pin
 // this shape; a registry rename must be mirrored here + in the Python
-// test_capability_catalog.py CANONICAL_NAMES). The fallback's render marks
-// the catalog-presented step edge via POST /v1/onboarding/state/checkpoint
-// (surface 4 write contract — unchanged by W8).
+// test_capability_catalog.py CANONICAL_NAMES). The fallback's render records
+// NOTHING: #3913 removed the `catalog-presented` step edge from the dashboard
+// entirely (the only client checkpoint write is the fork pick itself).
 export const BUILD_CATALOG_PLACEHOLDER = Object.freeze([
   { name: 'Session recorder', kind: 'indexer', description: 'Files agent conversations to the graph.' },
   { name: 'Session extractor', kind: 'extractor', description: 'Pulls decisions and findings out of recorded sessions.' },

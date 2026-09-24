@@ -2,7 +2,7 @@
 
 Multi-tenant pack isolation: a shared pack catalog (``pack_registry``) plus
 per-tenant activation records stored graph-natively in each tenant's graph
-(``graph_name=team_{team_id}``, the LANDED isolation boundary). The tenant
+(``graph_name=org_{org_id}``, the LANDED isolation boundary). The tenant
 graph itself is the isolation boundary, so cross-tenant access is
 structurally impossible — a query with tenant B's identity reads tenant B's
 graph (auth-only scoping; no tenant selector exists on any surface).
@@ -19,7 +19,7 @@ Design decisions (locked 2026-08-15, issue #318 — decision comment
       tier exists (pricing/GTM decision).
 - D4  Read-only introspection surface (REST ``GET /v1/packs`` + MCP
       ``packs_list``) — this module is the shared ensure-then-read core.
-- D5  Existing-tenant backfill handles ``team_{name}`` vs ``team_{id}``
+- D5  Existing-tenant backfill handles ``org_{name}`` vs ``org_{id}``
       naming via the RECORDED graph_name (graph-scripts/backfill_pack_installs.py).
 - D6  Existence masking — empty result when nothing to see; errors only for
       auth failures.
@@ -144,16 +144,16 @@ def _target_graph(sdk: TortoiseSDK, graph_name: str | None):
     """The graph to read/write pack state in.
 
     ``graph_name=None`` → the SDK's namespace-scoped graph (the LANDED
-    isolation boundary ``team_{team_id}`` for team SDKs). An explicit
+    isolation boundary ``org_{org_id}`` for org SDKs). An explicit
     ``graph_name`` targets a specific graph — used by the D5 backfill to
-    handle legacy ``team_{name}``-named tenant graphs (recorded graph_name).
+    handle legacy ``org_{name}``-named tenant graphs (recorded graph_name).
     """
     proj = sdk._get_proj()
     if graph_name is None:
         return proj.g
     # Epic #1647 (PR #1684 CI-fix): on the DOCKER lane the redirect derives
     # per-path test_<stem>_<hash> names — an explicit legacy name
-    # (team_team-k, the D5 backfill's recorded graph_name) does NOT exist
+    # (org_org-k, the D5 backfill's recorded graph_name) does NOT exist
     # as a physical server graph. Routing it raw splits the lock AND the
     # target from the SDK's namespace graph (the #1307 race survives on
     # docker: provision locks derived-X, backfill locks raw-Y, both write
@@ -162,13 +162,13 @@ def _target_graph(sdk: TortoiseSDK, graph_name: str | None):
     # path+name) applied to the explicit name.
     # Epic #1647 (PR #1684 CI-fix): on the DOCKER TEST lane the redirect
     # derives per-path test_<stem>_<hash> names — an explicit legacy name
-    # (team_team-k, the D5 backfill's recorded graph_name) does NOT exist as
+    # (org_org-k, the D5 backfill's recorded graph_name) does NOT exist as
     # a physical server graph. Routing it raw splits the lock AND the target
     # from the SDK's namespace graph (the #1307 race survives on docker:
     # provision locks derived-X, backfill locks raw-Y, both write the same
     # derived graph). Resolve through the projection's derivation — BUT ONLY
     # when the redirect actually fired (TEST_MODE=1 + explicit path): in
-    # PROD (URI set, no TEST_MODE) the graph IS the real team_<name> and
+    # PROD (URI set, no TEST_MODE) the graph IS the real org_<name> and
     # deriving would corrupt the backfill into phantom test_ graphs.
     _test_session = os.environ.get("TORTOISE_TEST_MODE") == "1"
     _explicit = getattr(proj, "_explicit_path", None)
@@ -193,13 +193,13 @@ def _resolved_graph_name(sdk: TortoiseSDK, graph_name: str | None) -> str:
     """Resolve the PHYSICAL graph identity a call reads/writes.
 
     ``graph_name=None`` → the SDK's namespace-scoped graph; the projection
-    exposes the LANDED name (``team_{team_id}`` for team SDKs — the #7886
+    exposes the LANDED name (``org_{org_id}`` for org SDKs — the #7886
     isolation boundary). An explicit ``graph_name`` (D5 backfill read
-    target, ``team_{team_id}``) is already the physical name.
+    target, ``org_{org_id}``) is already the physical name.
 
     Locking keys on this RESOLVED name (conf 75, PR #1312): a hosted
     provision (``graph_name=None``) and the backfill (explicit
-    ``team_{team_id}``) write the SAME physical graph, so they must
+    ``org_{org_id}``) write the SAME physical graph, so they must
     serialize on the SAME lock. Keying on the passed string instead would
     split one graph across two locks (race survives in the mixed path) and
     collapse every None caller onto one shared ``default`` lock
@@ -236,7 +236,7 @@ def _resolved_graph_name(sdk: TortoiseSDK, graph_name: str | None) -> str:
 # lock is sufficient there; server-side (FalkorDB server/docker) engines
 # keep their atomic MERGE. The lock key is the RESOLVED graph name (conf
 # 75, PR #1312), so mixed paths (hosted provision ``graph_name=None`` vs
-# the backfill's explicit ``team_{team_id}``) hitting the same physical
+# the backfill's explicit ``org_{org_id}``) hitting the same physical
 # graph share one lock, while distinct tenants never serialize against
 # each other.
 #
@@ -287,8 +287,8 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
         try:
             with _pack_install_lock(lock_graph, ns):
                 g.query(
-                    "MERGE (p:PackInstall {namespace: $ns}) "
-                "SET p.version = $version, p.status = 'active', "
+                    f"MERGE (p:{PACK_INSTALL_LABEL} {{namespace: $ns}}) "
+                    "SET p.version = $version, p.status = 'active', "
                 "    p.source = 'starter', "
                 "    p.installed_at = coalesce(p.installed_at, $now)",
                 params={"ns": ns, "version": meta["version"], "now": now},
@@ -342,7 +342,7 @@ def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None) -> list
 def _read_installs(g) -> list[tuple[str, str, str, str, str | None]]:
     """Raw install-state read: (namespace, version, status, source, installed_at)."""
     rows = g.query(
-        "MATCH (p:PackInstall) "
+        f"MATCH (p:{PACK_INSTALL_LABEL}) "
         "RETURN p.namespace, p.version, p.status, p.source, p.installed_at "
         "ORDER BY p.namespace",
     ).result_set

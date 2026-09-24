@@ -4,7 +4,7 @@ Extends the #318 pack-isolation model with TENANT-AUTHORED manifests:
 the shared catalog stays read-only for tenants; a tenant's custom packs
 are stored graph-natively as ``(:PackManifest {namespace, name, version,
 yaml, sha256, status, installed_at})`` nodes in the tenant's OWN graph
-(``team_{team_id}`` — the LANDED isolation boundary, so cross-tenant
+(``org_{org_id}`` — the LANDED isolation boundary, so cross-tenant
 access is structurally impossible, same as #318).
 
 Design (plan §4/§5, test-design #1898 surfaces 7/8):
@@ -41,7 +41,12 @@ from threading import Lock
 
 import yaml
 
-from tortoise.pack_state import _pack_install_lock, _resolved_graph_name, _target_graph
+from tortoise.pack_state import (
+    PACK_INSTALL_LABEL,
+    _pack_install_lock,
+    _resolved_graph_name,
+    _target_graph,
+)
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +68,7 @@ _ONTOLOGY_ONLY_KEYS = ("connectors", "tools")
 # Key: (tenant_identity, pack_config_version) → compiled view. The shared
 # catalog is NOT in the key (it is cached-global read-only, safe to share);
 # the tenant's manifest set IS (isolation + invalidation). tenant_identity
-# = the SDK's resolved graph name (team_{team_id}) — the #2031 consumer
+# = the SDK's resolved graph name (org_{org_id}) — the #2031 consumer
 # path derives it from the tenant-scoped SDK, never from a caller-supplied
 # id (a mismatched id/identity pairing is structurally impossible).
 _TENANT_VIEWS: dict[tuple[str, str], dict] = {}
@@ -221,7 +226,7 @@ def upsert_tenant_manifest(sdk, manifest_yaml: str) -> dict:
         )
         # Activate (PackInstall source='custom') — idempotent additive MERGE.
         g.query(
-            "MERGE (p:PackInstall {namespace: $ns}) "
+            f"MERGE (p:{PACK_INSTALL_LABEL} {{namespace: $ns}}) "
             "SET p.version = $version, p.status = 'active', "
             "    p.source = 'custom', p.installed_at = coalesce(p.installed_at, $now)",
             params={"ns": ns, "version": str(raw.get("version", "0.1.0")), "now": now},
@@ -238,7 +243,7 @@ def _graph_identity(sdk) -> str:
 
     #2031 review fix: ``_resolved_graph_name`` takes ``(sdk, graph_name)`` —
     passing ``None`` resolves the SDK's namespace-scoped graph name (e.g.
-    ``team_team-xxx``). The pre-#2031 one-arg call TypeError'd into the
+    ``org_org-xxx``). The pre-#2031 one-arg call TypeError'd into the
     catch-all, collapsing EVERY tenant's key to "default" (one shared memo
     entry + one global dirty flag) — activated once tenant_view gained its
     first real consumer on the hosted capture hot path. The fallback is
@@ -288,7 +293,8 @@ def delete_tenant_manifest(sdk, namespace: str) -> bool:
     with _pack_install_lock(lock_graph, namespace):
         g.query(f"MATCH (m:{PACK_MANIFEST_LABEL} {{namespace: $ns}}) DELETE m",
                 params={"ns": namespace})
-        g.query("MATCH (p:PackInstall {namespace: $ns, source: 'custom'}) "
+        g.query(f"MATCH (p:{PACK_INSTALL_LABEL} "
+                "{namespace: $ns, source: 'custom'}) "
                 "SET p.status = 'removed'", params={"ns": namespace})
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.add(_graph_identity(sdk))
@@ -309,9 +315,9 @@ def tenant_view(sdk) -> dict:
     global registry (read-only, safe to share — #1154).
 
     The tenant identity is the SDK's resolved graph name — callers must
-    pass the tenant-scoped SDK (``_make_sdk(namespace=team_id)``); there is
+    pass the tenant-scoped SDK (``_make_sdk(namespace=org_id)``); there is
     no separate identity argument to mismatch (#2031 review: the pre-#2031
-    ``team_id`` parameter was dead — every caller could pair any id with
+    ``org_id`` parameter was dead — every caller could pair any id with
     any sdk).
 
     #2031 consumer wiring: the memoized view now also carries the manifest

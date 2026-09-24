@@ -50,6 +50,7 @@ import requests
 
 # #2185 seam: the canonical usage-sink fire helper (models.py is dependency-
 # free of model_adapters — this one-way import cannot cycle).
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.models import _emit_usage_sink
 
 
@@ -354,6 +355,66 @@ def _http_status(exc: BaseException) -> int | None:
     return None
 
 
+# Response-body signatures that identify a provider-KEY limit (this
+# credential's budget/quota is spent) rather than a credential/authorization
+# failure. Matched case-insensitively against the HTTP response body.
+#
+# OpenRouter is the documented case (#4860): an exhausted key budget is HTTP
+# **403** with ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``
+# — the key is VALID, its budget is spent, so rotating is correct. A wrong
+# credential is ALSO reported as 401/403; its body carries no limit signature
+# (e.g. "No auth credentials found"), so it stays FATAL and never rotates.
+#
+# Vocabulary (each string is the provider's own phrasing; anything not matched
+# stays a credential/config failure — fail-closed):
+#   * "key limit exceeded"    — OpenRouter key budget (monthly/total/free)
+#   * "insufficient_quota"    — OpenAI-compatible quota error code
+#   * "quota exceeded"        — generic quota phrasing
+#   * "credit limit exceeded" — generic credit phrasing
+#   * "limit exceeded"        — generic budget phrasing; OpenRouter's own
+#     message contains "key limit exceeded". Deliberately BROAD on a 403: it
+#     also matches "rate limit exceeded"/"organization limit exceeded"/
+#     "token limit exceeded". Those are provider-side LIMIT conditions, not
+#     credential bugs — rotation is bounded and re-raises once every leg is
+#     spent, so the worst case is a slower fatal, never a masked bad key (no
+#     credential-failure body carries this phrase).
+_KEY_LIMIT_SIGNATURES = (
+    "key limit exceeded",
+    "insufficient_quota",
+    "quota exceeded",
+    "credit limit exceeded",
+    "limit exceeded",
+)
+
+
+def _http_response_body(exc: BaseException) -> str:
+    """Best-effort lowercased response body of an HTTP exception, or "".
+
+    ``raise_for_status()`` attaches the response to ``requests.HTTPError``
+    (``err.response`` is the ``requests.Response``; ``.text`` is its body),
+    and ``urllib.error.HTTPError`` is itself file-like (``.read()``). This
+    never raises (a body-read failure must not mask the ORIGINAL provider
+    error) and never hides a real status: no recoverable body → "" — which
+    is why a signature-less 403 stays fatal."""
+    try:
+        for obj in (getattr(exc, "response", None), exc):
+            if obj is None:
+                continue
+            text = getattr(obj, "text", None)
+            if isinstance(text, str) and text.strip():
+                return text.lower()
+        read = getattr(exc, "read", None)
+        if callable(read):
+            raw = read()
+            if isinstance(raw, (bytes, bytearray)):
+                return bytes(raw).decode("utf-8", "replace").lower()
+            if isinstance(raw, str):
+                return raw.lower()
+    except Exception:  # a body-read failure must never mask the provider error
+        return ""
+    return ""
+
+
 def _is_network_oserror(exc: BaseException) -> bool:
     """OSError with a network-transport errno (connection reset/refused/route
     down/timeout/pipe) — the transient-under-load class (#1350)."""
@@ -404,18 +465,35 @@ def is_fatal(exc: BaseException) -> bool:
 
 
 def is_billing_exhausted(exc: BaseException) -> bool:
-    """True → HTTP 402 (Payment Required) — the provider's credits ran out.
+    """True → the provider's OWN budget/limit for THIS key is spent.
 
-    The one 'fatal' class that is PROVIDER-specific (a balance emptied
-    mid-run), not config-inherent: auth (401/403) means the credential is
-    wrong everywhere, config 4xx means the request shape is wrong everywhere
-    — rotation would just retry the same bug. A 402 is a runtime condition
-    of THAT provider; ``RotatingModel`` cooldowns it and rotates to an
-    alternative so the run continues (#1951). Deliberately NOT part of the
-    M2/M3 taxonomy export contract — ``is_fatal``/``classify_llm_error``
-    semantics are unchanged for the retry/abort consumers (run.py M3,
-    extractor_v2); only the rotation pool consults this hook."""
-    return _http_status(exc) == 402
+    The 'fatal' class that is PROVIDER-specific (a balance/quota emptied
+    mid-run), not config-inherent: a wrong credential (401, or a signature-
+    less 403), and a config 4xx, mean the bug is the same on every leg —
+    rotation would retry it and mask the real cause. Two statuses are
+    provider-specific and rotation-eligible:
+
+      * **HTTP 402** (Payment Required) — credits ran out (#1951).
+      * **HTTP 403 carrying a key-limit body signature** (#4860) —
+        OpenRouter reports an exhausted key budget as 403
+        ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``,
+        NOT 402. The BODY, not the status, is the discriminator
+        (``_KEY_LIMIT_SIGNATURES``); a 403 whose body carries no limit
+        signature stays FATAL (owner constraint: never blanket-treat 403).
+
+    ``RotatingModel`` cooldowns the lane and rotates to an alternative so
+    the run continues; with no alternative lane it raises loud
+    (``RotatingModel`` n==1 guard). Deliberately NOT part of the M2/M3
+    taxonomy export contract — ``is_fatal``/``classify_llm_error`` semantics
+    are unchanged for the retry/abort consumers (run.py M3, extractor_v2);
+    only the rotation pool consults this hook."""
+    status = _http_status(exc)
+    if status == 402:
+        return True
+    if status == 403:
+        body = _http_response_body(exc)
+        return any(sig in body for sig in _KEY_LIMIT_SIGNATURES)
+    return False
 
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
@@ -882,8 +960,13 @@ def _should_send_json_mode(system: str | None, user: str | None) -> bool:
 
     True only when TORTOISE_JSON_MODE is enabled (default "1", read per
     call — the toggle can flip mid-run) AND the prompt requests JSON
-    (delegated to ``_prompt_requests_json``)."""
-    return (os.environ.get("TORTOISE_JSON_MODE", "1") == "1"
+    (delegated to ``_prompt_requests_json``).
+
+    #4097: the env read goes through the declared truthy contract, so
+    ``TORTOISE_JSON_MODE=true``/``yes``/``on`` now enables it — previously the
+    exact ``== "1"`` match made those spellings silently DISABLE a default-ON
+    mode."""
+    return (is_truthy(os.environ.get("TORTOISE_JSON_MODE", "1"))
             and _prompt_requests_json(system, user))
 
 

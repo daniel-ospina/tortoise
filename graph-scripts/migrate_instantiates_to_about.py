@@ -8,8 +8,9 @@ Usage:
 
 Runs against EVERY graph namespace that could carry the edge: the URI-default
 graph (derived exactly as sdk.py does — ``urlparse(uri).path.lstrip('/') or
-"tortoise"``), plus ``*_tortoise`` (registry/selfhost) and ``team_*`` (hosted
-tenant) graphs from ``list_graphs()``. ``--graphs`` overrides the filter with
+"tortoise"``), plus ``*_tortoise`` (registry/selfhost) and the hosted-tenant
+namespace form — ``org_*`` since #3543, ``team_*`` before it — from
+``list_graphs()``. ``--graphs`` overrides the filter with
 an explicit list. Dry-run selects and counts only; live mode converts per
 graph with per-graph try/except so one graph's failure leaves others intact.
 Re-running is safe: after a live run every graph reports zero remaining
@@ -51,7 +52,10 @@ def target_graphs(uri: str, explicit: list[str] | None) -> tuple[list[str], list
     targets = []
     excluded = []
     for g in all_graphs:
-        if g == uri_graph or g.endswith("_tortoise") or g.startswith("team_"):
+        # #3543: tenant graphs are `org_*` post-rename and `team_*` before
+        # it (no data migration rewrites the namespace) — target both.
+        if (g == uri_graph or g.endswith("_tortoise")
+                or g.startswith(("org_", "team_"))):
             targets.append(g)
         else:
             excluded.append(g)

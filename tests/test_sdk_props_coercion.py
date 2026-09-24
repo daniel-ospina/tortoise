@@ -8,6 +8,7 @@ Covers:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -25,6 +26,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── _coerce_props unit tests ──────────────────────────────────────────
@@ -340,14 +342,20 @@ class TestFromUriForwarding:
             captured.update(kwargs)
 
         monkeypatch.setattr(FalkorProjection, "__init__", fake_init)
+        # TEST-PREFIXED path: `from_uri` journals its resolved graph name in a
+        # test session, and the session-end sweep drops every journaled graph
+        # except the env-URI default — a shared path would put the dev/compose
+        # graph in that drop set (#7795). The census in test_derived_names.py
+        # takes its literal-test-prefix branch, so no route-table exemption is
+        # needed here.
         FalkorProjection.from_uri(
-            "rediss://myuser:mypass@db.example.com:6379/tortoise"
+            "rediss://myuser:mypass@db.example.com:6379/test_sdk_props_coercion"
         )
         assert captured["username"] == "myuser"
         assert captured["password"] == "mypass"
         assert captured["host"] == "db.example.com"
         assert captured["port"] == 6379
-        assert captured["graph_name"] == "tortoise"
+        assert captured["graph_name"] == "test_sdk_props_coercion"
         assert captured["ssl"] is True
 
     def test_from_uri_docker_no_ssl(self, monkeypatch):
@@ -358,9 +366,11 @@ class TestFromUriForwarding:
             captured.update(kwargs)
 
         monkeypatch.setattr(FalkorProjection, "__init__", fake_init)
-        FalkorProjection.from_uri("docker://:@localhost:16379/tortoise")
+        FalkorProjection.from_uri(
+            "docker://:@localhost:16379/test_sdk_props_coercion"
+        )
         assert captured["ssl"] is False
-        assert captured["graph_name"] == "tortoise"
+        assert captured["graph_name"] == "test_sdk_props_coercion"
 
 
 # ── _load_dotenv parsing (inline comments, quoted values, bare #) ────────

@@ -134,7 +134,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 ## 2. E2E-1 — signup provisions the master list in Supabase ONLY
 
-**Goal:** a fresh signup creates `teams` + `team_memberships` + `api_keys`
+**Goal:** a fresh signup creates `teams` + `org_memberships` + `api_keys`
 rows in Supabase and writes **nothing** to the registry.
 
 ### 2.1 Create a verification signup
@@ -147,8 +147,8 @@ curl -s -X POST https://api.premiselabs.co/v1/register \
   -d '{"email":"verify-'"$(date +%s)"'@example.com","password":"verify-pass-123"}'
 ```
 
-✅ **Expect:** `200` with `{"api_key":"tt_…","team_id":"…","graph_name":"team_…"}`.
-Save the `api_key` and `team_id` — you'll use them in E2E-2/3/5/9.
+✅ **Expect:** `200` with `{"api_key":"tt_…","org_id":"…","graph_name":"team_…"}`.
+Save the `api_key` and `org_id` — you'll use them in E2E-2/3/5/9.
 
 Option B — real user flow (also covers the manual round-trip, §11):
 open `https://tortoise.premiselabs.co/signup`, sign up with email + password.
@@ -160,11 +160,11 @@ Open the Supabase dashboard SQL editor:
 
 ```sql
 SELECT id, name, tier, graph_name, email FROM teams ORDER BY created_at DESC LIMIT 5;
-SELECT team_id, user_id, role, status FROM team_memberships ORDER BY created_at DESC LIMIT 5;
-SELECT team_id, key_prefix, created_via, revoked_at FROM api_keys ORDER BY created_at DESC LIMIT 5;
+SELECT org_id, user_id, role, status FROM org_memberships ORDER BY created_at DESC LIMIT 5;
+SELECT org_id, key_prefix, created_via, revoked_at FROM api_keys ORDER BY created_at DESC LIMIT 5;
 ```
 
-✅ **Expect:** your new team in `teams`, a matching `team_memberships` row
+✅ **Expect:** your new team in `teams`, a matching `org_memberships` row
 (role `owner`, status `active`), and an `api_keys` row
 (`created_via='provisioned'`, `revoked_at` NULL).
 
@@ -191,7 +191,7 @@ must not have added any registry nodes.
 curl -s https://api.premiselabs.co/v1/team -H "Authorization: Bearer tt_…"
 ```
 
-✅ **Expect:** `200` with your `team_id`, `tier` (`free`), `max_users`, `max_graphs`, and `write_ops_limit` — quota/tier now comes from Supabase `teams` (note: `max_api_keys` is a quota concept, not a `/v1/team` response field — review P2, PR #887).
+✅ **Expect:** `200` with your `org_id`, `tier` (`free`), `max_users`, `max_graphs`, and `write_ops_limit` — quota/tier now comes from Supabase `teams` (note: `max_api_keys` is a quota concept, not a `/v1/team` response field — review P2, PR #887).
 
 ### 3.2 The same key authenticates on MCP
 
@@ -240,7 +240,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://api.premiselabs.co/v1/team \
 > Note: invite **mint requires the Team tier** (a verification signup is
 > `free`, so minting returns `402`). Either run this against a Team-tier
 > team, or temporarily bump the verification team's tier in the dashboard
-> SQL editor (`UPDATE teams SET tier='team' WHERE id='<team_id>';`) and
+> SQL editor (`UPDATE teams SET tier='team' WHERE id='<org_id>';`) and
 > restore it afterwards.
 
 ### 4.1 Mint (owner/admin invites by email)
@@ -248,7 +248,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://api.premiselabs.co/v1/team \
 ```bash
 curl -s -X POST https://api.premiselabs.co/v1/invites \
   -H "Authorization: Bearer tt_…" -H "Content-Type: application/json" \
-  -d '{"team_id":"<team_id>","email":"invitee-'"$(date +%s)"'@example.com","role":"admin"}'
+  -d '{"org_id":"<org_id>","email":"invitee-'"$(date +%s)"'@example.com","role":"admin"}'
 ```
 
 ✅ **Expect:** `200` with `{"invite_id":"…","status":"invited","token":"…","expires_at":"…","role":"admin"}`.
@@ -262,7 +262,7 @@ curl -s -X POST https://api.premiselabs.co/v1/invites/accept \
   -d '{"token":"<token>"}'
 ```
 
-✅ **Expect:** `200` with `{"team_id":"…","role":"admin"}` — the membership
+✅ **Expect:** `200` with `{"org_id":"…","role":"admin"}` — the membership
 is created with the **invited role**.
 
 ### 4.3 Consumed invite cannot be re-accepted
@@ -274,7 +274,7 @@ Repeat 4.2 with the same token:
 SQL cross-check (dashboard):
 
 ```sql
-SELECT id, team_id, email, role, status, accepted_at FROM invitations ORDER BY created_at DESC LIMIT 3;
+SELECT id, org_id, email, role, status, accepted_at FROM invitations ORDER BY created_at DESC LIMIT 3;
 ```
 
 ✅ **Expect:** status `accepted` + a non-NULL `accepted_at`.
@@ -286,7 +286,7 @@ SELECT id, team_id, email, role, status, accepted_at FROM invitations ORDER BY c
 ### 5.1 Run the sweep (or wait for the hourly cron)
 
 ```bash
-curl -s -X POST https://api.premiselabs.co/v1/internal/backups/sweep \
+curl -s --max-time 600 -X POST https://api.premiselabs.co/v1/internal/backups/sweep \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY"
 ```
 
@@ -355,8 +355,8 @@ curl -s https://api.premiselabs.co/v1/onboarding/github/status -H "Authorization
 keeps the lookup anchor:
 
 ```sql
-SELECT user_id, team_id, role, status, api_key IS NULL AS key_nulled, lookup_hash IS NOT NULL AS hash_kept
-FROM team_memberships ORDER BY updated_at DESC LIMIT 3;
+SELECT user_id, org_id, role, status, api_key IS NULL AS key_nulled, lookup_hash IS NOT NULL AS hash_kept
+FROM org_memberships ORDER BY updated_at DESC LIMIT 3;
 ```
 
 ✅ **Expect:** for the revealed membership: `key_nulled = true` AND `hash_kept = true`.
@@ -374,7 +374,7 @@ uv run python -m pytest tests/e2e/test_welcome_page.py -q --timeout=120
 A gated action already happened in §3.3 (the API-key mint). Cross-check:
 
 ```sql
-SELECT id, team_id, actor_user_id, operation, resource_type, resource_id, created_at
+SELECT id, org_id, actor_user_id, operation, resource_type, resource_id, created_at
 FROM audit_events WHERE operation = 'api_key_create'
 ORDER BY created_at DESC LIMIT 5;
 ```
@@ -402,15 +402,35 @@ security = `scheme: lookup_hash_sha256` (Supabase).
 
 ## 10. #596 monitor confirmation — no_teams state, watcher quiet
 
+> ⚠️ **Superseded in part by #2823 (2026-09-11).** This step is a one-time
+> #669 cutover checklist, and its expectation below was written BEFORE the
+> sweep learned to report which control plane it enumerated. `no_teams` on its
+> own is NOT a healthy signal — it is exactly what the post-flip sweep printed
+> for 31 days while backing nothing up (the raw registry handle read the graph
+> the flip deleted). Verify the dialect and the watcher heartbeat, not the
+> status word: expected now is `last_sweep.source == "supabase"` (or
+> `last_sweep.last_run_source`) and a `watcher.age_minutes` that is a measured
+> number. `/status` carries no sweep-status field of its own, so the sweep's own
+> outcome is read from the sweep result / the driver's run: `last_sweep.source:
+> registry`, a sweep result of `enum_failed`, or an unmeasurable watcher age is
+> the failure signature, and the hourly driver fails the run red for a 0-backup
+> result it cannot corroborate.
+> See `docs/ops/registry-backup-dr.md` §Control plane / dialect (#2823).
+
 ```bash
-curl -s https://api.premiselabs.co/v1/internal/backups/status \
+curl -s --max-time 20 https://api.premiselabs.co/v1/internal/backups/status \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY"
 ```
 
 ✅ **Expect:**
 
-- `"no_teams": true` (chronic zero-team state — the watcher's honest signal),
-- `"watcher": {"running": true, …}` with a fresh `last_poll_at`, and
+- `"no_teams": true` (chronic zero-team state) **and** `"last_sweep": {"source": "supabase", …}`
+  — the dialect lives under `last_sweep`, never at the top level (`jq '.source'`
+  on `/status` is always `null`; a `registry` source here means the sweep read
+  the WRONG control plane — #2823 — not that the deployment is empty),
+- `"watcher": {"running": true, "age_minutes": <a measured number>}` with a
+  fresh `last_poll_at` (`null`/absent age = no heartbeat read = NOT verified),
+  and
 - **no new GitHub issue / Telegram alert** from the #596 watcher during the
   flip window (the enumeration-delta guard is suppressed by
   `TORTOISE_SUPPRESS_ENUM_DELTA=1`, so a spurious "wiped enumeration source"
@@ -495,7 +515,7 @@ left the graph absent).
 | 3 | `_iter_registered_teams` + `_purge_deleted_teams` | boot event-retention + deleted-team purge read the registry | Supabase teams (deleted_at IS NULL); purge skips the registry cascade post-flip |
 | 4 | `/health/ready` | the data-plane probe opened the registry namespace | probe the default (`tortoise`) graph |
 | 5 | **metering** (`/v1/team` → `get_current_usage`, `record_write_ops`) | MeteringRecord nodes lived in the registry — every authenticated request recreated it | migration `0014_metering_records` + seam; atomic `metering_increment` RPC |
-| 6 | `quota.resolve_team_limits` (MCP tool enforcement) | read the registry Team node | teams row via the seam (NULL = unlimited parity) |
+| 6 | `quota.resolve_org_limits` (MCP tool enforcement) | read the registry Team node | teams row via the seam (NULL = unlimited parity) |
 
 Also applied during the flip: migration 0014, Edge Function secrets verified,
 `TORTOISE_SUPPRESS_ENUM_DELTA=1` active for the window. **Remaining follow-up:

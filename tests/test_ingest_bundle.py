@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -28,6 +29,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── Graph query helpers (raw Cypher assertions) ─────────────────────
@@ -903,6 +905,7 @@ def sdk_logged():
     sdk._log_path = log
     yield sdk
     sdk.close()
+    shutil.rmtree(base, ignore_errors=True)
 
 
 def _batch_records(sdk):
