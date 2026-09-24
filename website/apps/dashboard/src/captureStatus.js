@@ -81,8 +81,7 @@ export function captureStatusLabelForHarness(state, harness) {
 // (the pill AND the failure line), so the predicate cannot outlive the facts it
 // describes: an unsupported row renders the registry reason and nothing else,
 // and never acquires the disclosure.
-// Returns `HARNESS_ATTRIBUTION` in exactly those cases and null otherwise, so a
-// row that names no harness never acquires the disclosure.
+// Returns `HARNESS_ATTRIBUTION` in exactly those cases and null otherwise.
 //
 // Call sites render it as a dim fragment beside the harness name, inside the
 // head's polite live region — never inside the `role="alert"` failure sentence,
