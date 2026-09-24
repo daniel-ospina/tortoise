@@ -388,7 +388,7 @@ Public repository that houses:
 | Reviewing a PR | `skills/code-review/SKILL.md` | Unreviewed code in production |
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
-| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `uv run python tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
 
 ### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
 
@@ -422,10 +422,10 @@ run the collision pre-flight — **all surfaces, untruncated**:
 
 ```bash
 # from the target repo's worktree (`--repo .` pins the target to THIS repo):
-python3 tools/collision_preflight.py <N> --repo .
+uv run python tools/collision_preflight.py <N> --repo .
 # or name the repo explicitly (required when dispatching an issue that lives in
 # another repo — the tool RESOLVES the target, it never infers it from the cwd):
-python3 tools/collision_preflight.py <N> --repo owner/name
+uv run python tools/collision_preflight.py <N> --repo owner/name
 ```
 
 **The target is established, never assumed (#4027).** Every repository-scoped `gh` call carries
@@ -473,7 +473,7 @@ Never dispatch to a cmux pane with a bare `cmux send`. **Use `tools/cmux_dispatc
 only dispatch path that confirms the ARTIFACT rather than the send:
 
 ```bash
-python3 tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
+uv run python tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
     --label <lane> --file <brief.txt>        # exit 0 ONLY if it became a turn
 ```
 

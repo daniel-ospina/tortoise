@@ -201,13 +201,13 @@ Do not hand-type the SHA. Run the emitter in the checkout you actually measured 
 output into the issue or comment:
 
 ```bash
-python3 tools/finding_provenance.py --emit
+uv run python tools/finding_provenance.py --emit
 ```
 
 Before reporting, ask the cheap question — *is my checkout behind, and by how many commits?*:
 
 ```bash
-python3 tools/finding_provenance.py --checkout
+uv run python tools/finding_provenance.py --checkout
 ```
 
 The gate is mechanical, not a convention. [`tools/finding_provenance.py`](tools/finding_provenance.py)
@@ -215,9 +215,9 @@ answers whether the finding was measured against a tree that **contains** the fi
 test (`git merge-base --is-ancestor`), never SHA equality — and **fails** on a stale measurement:
 
 ```bash
-python3 tools/finding_provenance.py --validate finding.md            # contains current origin/main?
-python3 tools/finding_provenance.py --validate finding.md --fix 65b26f6c2   # contains the claimed fix?
-gh issue view 4009 --json body -q .body | python3 tools/finding_provenance.py --validate -
+uv run python tools/finding_provenance.py --validate finding.md            # contains current origin/main?
+uv run python tools/finding_provenance.py --validate finding.md --fix 65b26f6c2   # contains the claimed fix?
+gh issue view 4009 --json body -q .body | uv run python tools/finding_provenance.py --validate -
 ```
 
 Exit `0` = current, `1` = stale / undated / predates the fix, `2` = environment error. **A missing

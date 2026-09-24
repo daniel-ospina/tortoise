@@ -46,9 +46,24 @@ check_version
 # (the shared/unknown-path rules still expand selection to the full matrix
 # for broad changes). Only triggers on STAGED tests/ changes, and only
 # stages the manifest when it actually changed.
+#
+# #5128: `tools/ci_selection.py` now carries the inline >=3.12 interpreter
+# guard, so bare `python3` (3.9 via Apple CLT on this host) would REFUSE
+# instead of running — and the `2>/dev/null` below would swallow that refusal
+# and silently skip the registration it exists to perform. Resolve the project
+# interpreter instead: the worktree's venv when it is there, else `uv run`
+# (which finds the pinned 3.12). Mirrors tools/install-reaper-schedule.sh's
+# $REPO/.venv/bin/python resolution, without its unchecked PATH fallback.
+py_tool() {
+  if [ -x .venv/bin/python ]; then
+    .venv/bin/python "$@"
+  else
+    uv run python "$@"
+  fi
+}
 if git diff --cached --name-only | grep -qE '^tests/.*\.py$'; then
-  if python3 tools/ci_selection.py --register --dry-run 2>/dev/null | grep -q "would register"; then
-    python3 tools/ci_selection.py --register
+  if py_tool tools/ci_selection.py --register --dry-run 2>/dev/null | grep -q "would register"; then
+    py_tool tools/ci_selection.py --register
     git add config/ci-surfaces.yml
   fi
 fi

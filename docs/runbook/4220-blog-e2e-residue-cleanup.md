@@ -113,7 +113,7 @@ as the #2146 cleanup), or a locally linked `supabase` CLI
 gh workflow run "Blog write E2E (manual, #4220)" \
   --repo daniel-ospina/tortoise -f mode=purge -f prefix=both
 # or locally:
-SUPABASE_ACCESS_TOKEN=... python3 graph-scripts/4220_blog_residue_cleanup.py --prefix both
+SUPABASE_ACCESS_TOKEN=... uv run python graph-scripts/4220_blog_residue_cleanup.py --prefix both
 ```
 
 **Step 2 — review the listed slugs** (they should all read
@@ -125,7 +125,7 @@ SUPABASE_ACCESS_TOKEN=... python3 graph-scripts/4220_blog_residue_cleanup.py --p
 gh workflow run "Blog write E2E (manual, #4220)" \
   --repo daniel-ospina/tortoise -f mode=purge -f prefix=both -f execute=true
 # or locally:
-SUPABASE_ACCESS_TOKEN=... python3 graph-scripts/4220_blog_residue_cleanup.py \
+SUPABASE_ACCESS_TOKEN=... uv run python graph-scripts/4220_blog_residue_cleanup.py \
   --prefix both --execute
 ```
 

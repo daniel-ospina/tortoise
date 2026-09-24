@@ -296,7 +296,7 @@ Compares Pro/Team pricing options ($29/$49/$79) using criteria (competitor posit
 Compares 3 license options (AGPLv3-dual, BSL+AGPL, SSPL) using 7 criteria and 20+ findings. Full pattern: criteria → options → findings → edges → compute_confidence → ranked output. Run as:
 
 ```bash
-TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/decide_licensing.py
+TORTOISE_DB_URI=docker://:@localhost:16379/tortoise uv run python graph-scripts/decide_licensing.py
 ```
 
 ### `graph-scripts/decide.py`

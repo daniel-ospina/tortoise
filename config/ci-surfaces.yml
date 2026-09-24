@@ -782,6 +782,15 @@ surfaces:
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
+  # #5128: the class-level half of the interpreter-guard fix — every
+  # `tools/**/*.py` + `graph-scripts/*.py` entry point must refuse a <3.12
+  # interpreter inline, before its imports (the documented `python3 tools/x.py`
+  # invocation otherwise dies with an unattributed `INTERNAL ERROR` under an
+  # ambient 3.9, e.g. `tools/branch_reaper.py` ← `datetime.UTC`).
+  # `core` is the default/fallback surface; `graph-scripts/` already selects it,
+  # and a tools-only change is covered by the per-file `tools/ci_selection.py`
+  # carve-outs (the corpus-wide reach gap is declared in the test's docstring).
+  - test_entry_point_python_guard.py
   # #4097: the env-truthiness contract + the non-divergence guard. The guard scans
   # all of `tortoise/**` + `tests/_embedded.py` for a new ad-hoc vocabulary literal or a
   # new narrow `== "1"` read, so it is registered in EVERY surface that owns a scanned
