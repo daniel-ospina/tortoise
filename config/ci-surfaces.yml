@@ -986,6 +986,10 @@ surfaces:
   - test_surface_manifest.py
   - test_suspension_parity.py
   - test_taxonomy.py
+  # #4069: temp-dir hygiene + the operator-invoked backlog sweep. Core-owned —
+  # the reaper/embedded tests they sit beside are core-registered.
+  - test_tmpdir_hygiene.py
+  - test_tmpdir_sweep.py
   - test_tool_registry.py
   # #4282 (Node A scoreboard): every registered tool + SDK binding must RESOLVE to a
   # live callable. The test executes the resolution (getattr / mcp._list_tools), never
@@ -1609,6 +1613,16 @@ durations:
   # 90% durations-coverage floor satisfied; refresh from the first post-merge
   # main run that includes it.
   test_installer_preserves_foreign_skill_content.py: 2.0
+  # #4069: the two new temp-dir hygiene files. Same case as the six above — a
+  # file that has never run on CI cannot appear in a junit artifact, so it takes
+  # the flat 2.0s default rather than a local number. Local timing on the
+  # #4221 verification host says these are NOT trivial (~55s and ~95s for 11 +
+  # 25 tests, the session sweep dominating), which is exactly the reading this
+  # map's policy rejects as lane-inflated: it is left in this comment as the
+  # reason the refresh matters, not as an entered value. Refresh both from the
+  # first post-merge main run that includes them.
+  test_tmpdir_hygiene.py: 2.0
+  test_tmpdir_sweep.py: 2.0
   # #4470: same convention — the file is new, so no CI junit measurement yet;
   # enter at the flat 2.0s default (the conservative floor keeps the 90%
   # durations-coverage floor satisfied) and refresh from the first post-merge
