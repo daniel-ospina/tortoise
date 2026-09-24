@@ -8,6 +8,11 @@ import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
 // gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
 import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } from './upsellGate.js'
+// #4331: node usage vs the plan's ENFORCED node allowance — the server's
+// nodes_used/max_nodes pair and its display derivations (the Billing Nodes
+// card, the usage bar, and the at/near-limit nudge). Pure, node --test
+// unit-tested (nodeUsage.test.js).
+import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
@@ -2647,6 +2652,20 @@ function claimIntentInFlight() {
   // free/anon team with a price, the portal for a team that already has a
   // Stripe customer, null (no nudge) otherwise. Never a dead control.
   const limitNudgeRoute = nudgeRoute(team)
+
+  // #4331: node usage vs the plan's ENFORCED node allowance, as /v1/team
+  // states both fields (never computed here). `nodeState` is null when the
+  // server has not supplied both numbers OR the tenant graph could not be
+  // read (`graph_ready === false`) — a failed read must never render as a
+  // confident "0 / N (0%)". `nodeHint` is the at/near-limit nudge (Billing
+  // card only); `nodeNext` is the next plan this deployment can actually
+  // check out (the nudge's checkout target).
+  const nodeState = team && team.graph_ready !== false ? nodeUsage(team) : null
+  const nodeNext = nextUpgradePlan(planOptions(), team)
+  // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher
+  // allowance" promise when no plan above the current one is purchasable
+  // (top tier, or an empty catalog).
+  const nodeHint = nodeNudge(team, Boolean(nodeNext))
 
   // #1623: parameterized upgrade — the header Upgrade button uses the
   // server-resolved default (team.checkout_price_id); the Billing page and
@@ -9860,7 +9879,16 @@ function claimIntentInFlight() {
               </div>
               <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
-                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
+                {/* #4331: the ENFORCED node count vs the plan's node allowance
+                    (server fields — NOT point_count, which is :Point-only and
+                    demo-excluded). Both the value and the denominator come
+                    from nodeState, so an absent field / unreadable graph shows
+                    "—" rather than a fabricated 0. */}
+                <div className="card"><div className="card-val">{nodeState ? nodeState.used.toLocaleString() : '—'}</div><div className="card-label">Nodes used{nodeState && nodeState.max > 0 ? ` / ${nodeState.max.toLocaleString()}` : ''}</div></div>
+                {/* The sibling graph-derived count: a broken graph reads
+                    `graph_ready=false` with `point_count=0`, so mirror the
+                    node card's honesty instead of showing a fabricated 0. */}
+                <div className="card"><div className="card-val">{team.graph_ready === false ? '—' : (team.point_count ?? 0)}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
               </div>
@@ -9877,6 +9905,58 @@ function claimIntentInFlight() {
                     {Math.round(((team.write_ops_used ?? 0) / team.write_ops_limit) * 100)}% of monthly write ops
                     {team.overage_eligible && team.overage_cost_usd ? ` · overage after limit at $${team.overage_cost_usd}/10k ops` : ''}
                   </p>
+                </div>
+              )}
+              {/* #4331: node usage bar + at/near-limit nudge. Same track and
+                  geometry as the write-ops bar, but graduated by level —
+                  accent < 80%, amber ≥ 80%, red at 100% (the write-ops bar
+                  stays accent at every level) — plus the upgrade nudge
+                  (Free: keep writing; paid: a higher allowance). The nudge
+                  deliberately promises no
+                  chargeable node overage: the owner DECIDED it (option B,
+                  ~$2/10k nodes/mo above cap on Solo/pro/Team, 2026-09-20)
+                  but it is NOT implemented in this lane. */}
+              {nodeState && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ background: 'var(--surface-hover, rgba(255,255,255,0.06))', borderRadius: 6, height: 8, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${nodeState.pct}%`,
+                      background: nodeBarColor(nodeState.level),
+                      height: '100%',
+                    }} />
+                  </div>
+                  <p className="dim small" style={{ marginTop: 6 }}>
+                    {nodeUsageText(nodeState)}
+                  </p>
+                  {nodeHint && (
+                    <p className="dim small" style={{ marginTop: 4 }}>
+                      {nodeHint}{' '}
+                      {/* Same remedy routing as the Billing plans grid below: an
+                          existing Stripe customer (active/trialing/past_due/
+                          canceled/unpaid) manages through the portal —
+                          checkout 409s on an active subscription — while
+                          everyone else gets the next purchasable plan. */}
+                      {canManageSubscription ? (
+                        <button
+                          type="button"
+                          className="ghost small"
+                          onClick={manageBilling}
+                          disabled={billingPending}
+                        >
+                          {billingPending ? 'Opening portal…' : 'Manage subscription'}
+                        </button>
+                      ) : nodeNext ? (
+                        <button
+                          type="button"
+                          className="ghost small"
+                          onClick={() => upgradeToPrice(team.checkout_price_ids[nodeNext.tier])}
+                          disabled={checkoutPending}
+                        >
+                          {checkoutPending ? 'Opening checkout…' : `Upgrade to ${nodeNext.label}`}
+                        </button>
+                      ) : null}
+                    </p>
+                  )}
                 </div>
               )}
               {hasActiveSubscription && (
