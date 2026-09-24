@@ -130,7 +130,7 @@ def test_prompt_digest_covers_the_vet_switch(monkeypatch):
 def test_prompt_digest_knobs_are_names_the_extractor_reads():
     """The tuple rotted once — it listed ``TORTOISE_LABEL_SEED`` while the
     extractor reads ``TORTOISE_LABEL_ORDER_SEED``, so the shuffle seed sat
-    silently outside the fingerprint (caught in the #5005 review). Pin every
+    silently outside the fingerprint. Pin every
     entry to a name the extractor source actually contains: a dead entry is
     exactly the maintenance failure that leaks a stale cache hit."""
     import inspect

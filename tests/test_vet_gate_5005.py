@@ -647,6 +647,29 @@ def test_falsy_content_survivor_still_shields_its_endpoint():
     assert len(payload.get("operators") or []) == 1, payload.get("operators")
 
 
+def test_present_null_content_is_the_minted_text():
+    """A MISSING ``content`` key emits nothing, but a PRESENT null emits the
+    literal point ``"None"`` (``execute_embed`` uses ``str(content)``). Treating
+    the two alike left an operator on ``"None"`` unpruned, and the mint
+    re-materialised the discarded item (verified end-to-end)."""
+    el = {"entities": [], "events": [],
+          "points": [{"name": "T", "content": None, "pointKind": "statement"},
+                     {"content": "X", "pointKind": "statement"}],
+          "operators": []}
+    out = vg.vet_candidates(el, narrative="n",
+                            arbiter=_discard_matching("T"))
+    vetted, _w = vg.apply_vet(el, out["decisions"])
+    assert "none" in vg.removal_pool(el, vetted)["removed_texts"]
+    union = {"entities": [], "events": [],
+             "points": [{"content": "X", "pointKind": "statement"}],
+             "operators": [{"src": "None", "dst": "X", "op_type": "IMPL"}]}
+    final, _w2 = vg.apply_vet(
+        union, {}, prior=vg.removal_pool(el, vetted))
+    assert final["operators"] == []
+    payload, _res = _payload_of(final)
+    assert [p["content"] for p in payload["points"]] == ["X"]
+
+
 def test_removal_pool_of_an_unchanged_list_is_empty():
     """A surviving ENTITY contributes no content, so `identity(before) -
     content(after)` used to carry its name forward as `removed` — a false pool

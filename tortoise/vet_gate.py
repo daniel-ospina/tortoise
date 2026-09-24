@@ -476,7 +476,7 @@ def _item_content(section: str, item: Mapping[str, Any]) -> str:
     and leave an operator on its content unpruned, to be re-minted. Entities
     carry no content and contribute nothing here.
     """
-    if section == "entities" or item.get("content") is None:
+    if section == "entities" or "content" not in item:
         return ""
     return str(item.get("content")).strip()
 
@@ -487,8 +487,8 @@ def _item_text_variants(section: str, item: Mapping[str, Any]) -> set[str]:
     The UNION of the candidate identity (``name or content``) and the content:
     `execute_embed` *resolves* an endpoint on content but its #2552 mint pre-pass
     materializes whatever text the operator wrote — so a point carrying both keys
-    can be re-materialised from either. Subtracting ``surviving_texts`` keeps the
-    broader set safe (a survivor providing either form shields the operator).
+    can be re-materialised from either. Only a survivor's CONTENT shields an
+    endpoint; its name does not resolve in ``execute_embed``, so it must not.
     """
     return (_norm_variants(_item_text(section, item))
             | _norm_variants(_item_content(section, item)))
