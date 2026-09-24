@@ -502,6 +502,7 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
   # else matched.
@@ -1507,6 +1508,14 @@ durations:
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
 #
+# Post-#3400 additions: a file that is NOT yet on main has no main-run
+# measurement, yet the 90% coverage floor blocks its merge — so its entry is
+# sourced from the first run in which that file executed (its own junit
+# `testcase/@time`), not from run 34725816431. First such entry:
+#   test_rotate_key.py from run 35782572252 (pytest-log-test-a)
+# This is a stopgap, not the intended state: auto-populating it is #4817,
+# and the value-level re-sweep that supersedes the number is #4729.
+#
 # #4221: the six `test_shared_state_*.py` files (moved out of
 # tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
 # pool for the first time here. They have NO CI junit measurement — a file that
@@ -1589,6 +1598,7 @@ durations:
   test_platform_seams.py: 73.3
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
   test_quota.py: 65.3
+  test_rotate_key.py: 3.6
   # #3501: the migration-backlog gate. A pure static scan of website/ (no
   # wrangler, no server), so it runs in the python-ci matrix like any other
   # static guard. Measured 53s-90s standalone across runs — a SINGLE SAMPLE of a
