@@ -135,6 +135,28 @@ NEVER_ACROSS = [
     # so these are named in the marker list instead.
     ("we mustnt ship the build", "we ship the build", "negation"),
     ("we neednt retry the deploy", "we retry the deploy", "negation"),
+    ("we hadnt shipped the build", "we shipped the build", "negation"),
+    # A numeric token is its own value, separators included: canonicalising to
+    # word characters alone collapsed "1.2", "50%" and "$50" onto "12" and
+    # "50" and folded a different quantity into its neighbour.
+    ("we shipped 1.2 tons", "we shipped 12 tons", "number"),
+    ("the answer is 1.2", "the answer is 12", "number"),
+    ("we got 50% of the vote", "we got 50 of the vote", "number"),
+    ("we paid $50", "we paid 50", "number"),
+    # Multi-word relative days are placed by POSITION, so a swap of two of them
+    # is a difference — appending them in the phrase list's own order made the
+    # tuple permutation-invariant and put the set back.
+    ("we ship next week and receive last month",
+     "we ship last month and receive next week", "date"),
+    ("we ship monday and receive next week",
+     "we ship next week and receive monday", "date"),
+    # "may" is read as a month only in a date position, so a month swap is a
+    # date difference...
+    ("we ship in may and receive in june",
+     "we ship in june and receive in may", "date"),
+    # ... while the modal is not a date at all, and the hedge change refuses
+    # both decisions through the substitution rule.
+    ("we may ship friday", "we can ship friday", "substituted_content"),
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
@@ -296,6 +318,20 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the team meets weekly in main office",
                                "the team meets weekly")
         assert v2.fold_allowed("gym at 6pm", "workout at the gym at six pm")
+
+    def test_an_ambiguous_month_is_a_date_only_in_a_date_position(self):
+        """"may" is a month and the commonest modal, and neither blanket rule is
+        safe: as a date word everywhere it made a hedge a DATE change (a value
+        dimension, so it terminalised the claim); nowhere it lost a real month
+        difference.  It counts after a date preposition only.
+        """
+        assert v2.distinguishing_difference("we ship in may",
+                                            "we ship in june") == "date"
+        label = v2.distinguishing_difference("we may ship friday",
+                                             "we can ship friday")
+        assert label != "date"
+        assert not v2.supersede_allowed("we may ship friday",
+                                        "we can ship friday")
 
     def test_a_load_bearing_frame_connective_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5139).

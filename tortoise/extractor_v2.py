@@ -3060,7 +3060,7 @@ _NEGATION_MARKERS = frozenset({
     "wont", "wouldnt", "shouldnt", "couldnt", "hasnt", "havent", "aint",
     # The apostrophe-omitted spellings `_CLITIC_RE` cannot see: with the
     # separator gone the token is an ordinary word, so it has to be named.
-    "mustnt", "neednt", "shant", "mightnt", "oughtnt", "darent",
+    "mustnt", "neednt", "shant", "mightnt", "oughtnt", "darent", "hadnt",
 })
 _CONDITION_MARKERS = frozenset({
     "if", "unless", "until", "when", "whenever", "provided", "assuming",
@@ -3075,10 +3075,6 @@ _CONDITION_PHRASES = (
 )
 # Relative days + month names.  Not interchangeable with the value dimension:
 # "shipped in march" vs "shipped in april" carries no number.
-#
-# "may" is deliberately absent: it is a month AND the most common English
-# modal, and reading "we may ship" vs "we can ship" as a DATE difference
-# labels a modality change as a value change the boundary lets through.
 _DATE_WORDS = frozenset({
     "today", "tomorrow", "yesterday",
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
@@ -3088,6 +3084,14 @@ _DATE_WORDS = frozenset({
     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
     "oct", "nov", "dec",
 })
+# "may" is NOT in the set.  It is a month AND the commonest English modal, and
+# neither reading is safe as a blanket rule: as a date word everywhere it turns
+# "we may ship" vs "we can ship" into a DATE change — a value dimension, so a
+# hedge would terminalize the claim — and as a date word nowhere it loses a real
+# month difference ("we ship in may and receive in june" vs its mirror).  It is
+# read as a month only in a date position; see `_date_tokens`.
+_DATE_PREPOSITIONS = frozenset({"in", "of", "by", "during", "since", "until"})
+_MONTH_AMBIGUOUS = frozenset({"may"})
 # Relative days spelled in more than one word.  The single-word set alone
 # cannot see the modifier, so "tomorrow morning" and "the day after tomorrow
 # morning" share the token "tomorrow" and read as one claim.
@@ -3236,7 +3240,11 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
     out: list[tuple[str, str]] = []
     anchor = ""
     for t in _guard_token_seq(_canonicalise_clocks(content)):
-        value = _canon_token(t) if any(c.isdigit() for c in t) else None
+        # The token itself, NOT `_canon_token(t)`: stripping non-word
+        # characters collapses "1.2" into "12", "50%" into "50" and "$50"
+        # into "50", turning a different quantity into the same binding.  The
+        # token is already normalised and a clock is already a placeholder.
+        value = t if any(c.isdigit() for c in t) else None
         if value is None:
             v = _num_word_value(t)
             value = str(v) if v is not None else None
@@ -3279,11 +3287,29 @@ def _date_tokens(content: str) -> tuple[str, ...]:
     Ordered, not a set: a date is as bound to its verb as a number is to its
     noun, and "we ship on monday and receive on tuesday" vs its mirror carries
     one date set and two meanings.
+
+    Position, not category: multi-word days are merged with the single-word
+    ones by where they sit in the claim.  Appending them in the phrase list's
+    own order made the tuple permutation-invariant, which put the phrase form
+    straight back where the set had been.
     """
-    out = [t for t in _guard_token_seq(content) if t in _DATE_WORDS]
     flat = _norm(content)
-    out.extend(p for p in _DATE_PHRASES if p in flat)
-    return tuple(out)
+    seq = _guard_token_seq(flat)
+    found: list[tuple[int, str]] = []
+    for i, t in enumerate(seq):
+        unambiguous = t in _DATE_WORDS
+        # A month that is also a modal counts only in a date position —
+        # immediately after a date preposition.
+        ambiguous = (t in _MONTH_AMBIGUOUS and i
+                     and seq[i - 1] in _DATE_PREPOSITIONS)
+        if unambiguous or ambiguous:
+            found.append((i, t))
+    for phrase in _DATE_PHRASES:
+        start = flat.find(phrase)
+        if start >= 0:
+            found.append((flat[:start].count(" "), phrase))
+    found.sort()
+    return tuple(t for _, t in found)
 
 
 def _proper_nouns(content: str) -> frozenset[str]:
@@ -3368,8 +3394,10 @@ def _marker_scope(content: str) -> tuple[str, ...]:
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
             # A placeholder, so a marker attached to a different value is
-            # visible ("we ship at 6pm, not at 5pm" vs its mirror).
-            out.append("#" + _canon_token(t))
+            # visible ("we ship at 6pm, not at 5pm" vs its mirror).  The token
+            # itself, not its word characters: `_canon_token` would collapse
+            # "1.2", "50%" and "$50" onto "12" and "50".
+            out.append("#" + t)
             continue
         out.append(t)
     return tuple(out)
