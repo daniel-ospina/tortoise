@@ -4952,7 +4952,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ``vet_s2_pool`` carries the S2 pass's removals forward: without it, an
     # operator S4 re-added against an S2-discarded item would be re-minted by
     # execute_embed, and an entity S4 started referencing would 422 the
-    # session (both verified). The union list is re-vetted wholesale rather
+    # session. The union list is re-vetted wholesale rather
     # than as a delta because merge_embed_lists rewrites/reorders it — the S2
     # verdict ids (which are positional) do not describe the union's items.
     vet_union_stats: dict = {}

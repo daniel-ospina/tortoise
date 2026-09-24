@@ -105,8 +105,8 @@ referent**, and removing it would fail ``commit_schema.validate_layer1``
 "a wrong drop is memory loss" outcome the failure policy forbids. Because the
 gate runs **twice** (before S3, then on the post-S4 union), the guard is
 carried across passes via :func:`removal_pool` — a cross-pass reference (S4
-naming an entity the S2 pass removed) is invisible to a per-pass check and was
-verified to produce exactly that 422.
+naming an entity the S2 pass removed) is invisible to a per-pass check and is
+exactly what produces that 422.
 """
 from __future__ import annotations
 
@@ -207,7 +207,7 @@ def _norm_variants(text: object) -> set[str]:
     also probed untruncated (a minted endpoint registers the untruncated key
     only when the truncated form did not already resolve). A removed item must
     therefore be recognised under EITHER form, or an operator on its content
-    escapes the prune and the text is re-materialised as a Point (verified).
+    escapes the prune and the text is re-materialised as a Point.
     """
     raw = str(text or "").strip()
     if not raw:
@@ -548,14 +548,15 @@ def _entity_map(embed_list: object) -> dict[str, Mapping[str, Any]]:
 def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     """Normalized texts an operator endpoint names.
 
-    Mirrors ``execute_embed``'s resolution surface: ``src``/``dst`` for any
-    IMPL/NAND/MITIGATES, and the target — read as
+    Mirrors ``execute_embed``'s resolution surface: ``src``/``dst`` whichever
+    ``op_type`` an operator carries (the embedder reads them unconditionally),
+    and the target — read as
     ``op.get("target") or op.get("target_edge")``, the **first present, not a
     union** — **only for a MITIGATES**, which is the only ``op_type`` the
     embedder reads a target for (``if _op_type == "MITIGATES"``). Reading it for
     every operator would drop a valid edge on a field the embedder never looks
-    at (verified: an IMPL carrying a stray ``target`` that named a discarded
-    point was pruned, losing the edge). Endpoints are coerced with the embedder's
+    at — an IMPL carrying a stray ``target`` naming a discarded point would be
+    pruned, losing the edge. Endpoints are coerced with the embedder's
     own ``str(v or "")`` so a NON-STRING endpoint (an LLM can emit ``42``) is not
     skipped and left to be re-minted, and a target is honoured only when it is a
     ``dict``, exactly as the embedder requires.
@@ -581,9 +582,9 @@ def removal_pool(before: object, after: object) -> dict:
     ``{"removed_texts": set[str], "removed_entities": {name: item}}``. The gate
     runs twice; without carrying the first pass's removals forward, the union
     pass cannot prune an operator that S4 re-added against an earlier-discarded
-    item, nor restore an entity S4 started referencing — both verified to put
-    the discarded content back into the payload (a resurrected Point, and a
-    Layer-1 422).
+    item, nor restore an entity S4 started referencing — both of which put the
+    discarded content back into the payload (a resurrected Point, and a Layer-1
+    422).
 
     Derived by diff, not by re-reading the verdicts, so a *downgraded* discard
     (the Layer-1 guard) correctly contributes nothing to the pool.
@@ -591,20 +592,21 @@ def removal_pool(before: object, after: object) -> dict:
     **A removal is an absent ITEM, not a text missing from a surface.** Every
     collected text is the identity *and* content of an item with no value-equal
     counterpart in ``after``, because the #2552 mint materialises whichever form
-    an operator wrote. Deriving the set from a surface difference instead (the
-    shape this replaced) invents removals for every surviving item that carries
-    a ``name`` — a name is in the identity surface and not in the content
-    surface — which pruned operators naming a survivor.
+    an operator wrote. Deriving the set from a surface difference would invent
+    removals for every surviving item that carries a ``name`` — a name is in the
+    identity surface and not in the content surface — and prune operators naming
+    a survivor.
 
     Whether a surviving item *shields* one of these texts is decided in
     :func:`apply_vet`, on the RESOLUTION surface — the ``content`` of surviving
     points/events (:func:`_content_texts`, which by construction carries no
-    names), plus the names of entities present in the output. A surviving
-    point's or event's *name* does not shield: the embedder does not resolve an
-    endpoint on it. A present ENTITY's name does, for a different reason — the
-    embedder drops an entity-named endpoint rather than minting a Point for it,
-    so no mint can resurrect anything and pruning would only mis-attribute the
-    drop.
+    names), plus the names of entities present in the output *as the mint keys
+    them*. A surviving point's or event's *name* does not shield: the embedder
+    does not resolve an endpoint on it. A present ENTITY's name does, for a
+    different reason — the embedder drops an entity-named endpoint rather than
+    minting a Point for it, so pruning would only mis-attribute the drop. That
+    shield is limited to names the mint guard can actually match, i.e. names no
+    longer than :data:`_MAX_CONTENT` (see :func:`apply_vet`).
     """
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)
@@ -632,7 +634,7 @@ def _rewrite_entity_references(embed_list: Mapping[str, Any],
 
     ``validate_layer1`` compares ``about_entities`` and slot names by EXACT
     string, so an entity named ``pytest`` does not satisfy a point naming
-    ``PyTest`` — the session still 422s (verified). Rewriting is a KEEP action
+    ``PyTest`` — the session still 422s. Rewriting is a KEEP action
     (fail-open): the reference means the same entity; only its spelling is
     canonicalised. Immutable mappings are skipped rather than raising.
     """
@@ -681,7 +683,7 @@ def apply_vet(embed_list: Mapping[str, Any],
        **load-bearing, not cosmetic**: ``execute_embed`` has a MINT-BEFORE-WIRE
        pre-pass (#2552) that materializes an unresolved endpoint as a **new
        statement Point**, so an unpruned operator silently *resurrects* the
-       discarded candidate — verified end-to-end. It reads an operator's
+       discarded candidate. It reads an operator's
        endpoints exactly as the embedder does: ``src``/``dst`` with ``str(v or
        "")`` coercion, and — **only for a MITIGATES** — the target, as
        ``target or target_edge`` (the first present, not a union). It also
@@ -693,8 +695,8 @@ def apply_vet(embed_list: Mapping[str, Any],
     4. **A referenced-but-missing entity is restored** from ``prior``, and the
        reference's spelling is reconciled to the emitted name. S4 runs between
        the two passes and can reference an entity the S2 pass removed; that
-       cross-pass reference is invisible to a per-pass guard and was verified
-       to produce a Layer-1 422. ``validate_layer1`` compares ``about_entities``
+       cross-pass reference is invisible to a per-pass guard and produces a
+       Layer-1 422. ``validate_layer1`` compares ``about_entities``
        and slot names by EXACT string, so an entity named ``pytest`` with a
        point naming ``PyTest`` 422s — whether the entity was *restored* (S4's
        reference arrived after the removal) or *downgraded to KEEP* by Rule 2
@@ -773,7 +775,7 @@ def apply_vet(embed_list: Mapping[str, Any],
                     # STRIP: execute_embed emits ``str(name).strip()`` and
                     # validate_layer1 matches that exact string, so a padded
                     # entity name rewritten verbatim would CREATE the 422 the
-                    # reconciliation exists to prevent (verified).
+                    # reconciliation exists to prevent.
                     canonical[name] = str(item.get("name") or "").strip()
                     warnings.append(
                         f"vet: entity {str(item.get('name'))!r} was DISCARDed "
@@ -800,7 +802,7 @@ def apply_vet(embed_list: Mapping[str, Any],
         original = prior_entities.get(name)
         if original is not None and str(original.get("name") or ""):
             # STRIP, as above: the emitted name is stripped (see the downgrade
-            # branch for the verified failure this prevents).
+            # branch for why).
             canonical[name] = str(original["name"]).strip()
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
@@ -830,12 +832,20 @@ def apply_vet(embed_list: Mapping[str, Any],
     # REFERENCING rule forbids entity endpoints). Without this, a name that
     # entered ``gone`` from an EARLIER pass's ``removed_entities`` — or from a
     # same-pass discard of a duplicate-name entity — pruned an operator whose
-    # endpoint was present, with a warning claiming it "was discarded"
-    # (verified; payload-neutral, so the defect is the false audit claim, not a
-    # lost edge). Read AFTER the restore loop, so a restored name is included.
+    # endpoint was present, with a warning claiming it "was discarded".
+    #
+    # The shield has to key EXACTLY as the mint does, or it un-prunes an
+    # endpoint the mint will fabricate: ``_mint_endpoint`` compares
+    # ``_norm(str(ref).strip()[:1000])`` against ``emitted_entity_names``, which
+    # holds the FULL name — so an entity whose name exceeds ``_MAX_CONTENT`` is
+    # NOT seen by the guard, and an operator naming it mints a claim Point out
+    # of a participant name. Such a name therefore does not shield — shielding a
+    # 1,100-char name fabricates a Point.
+    present_entity_names = {n for n in _entity_map(out)
+                            if _norm(n[:_MAX_CONTENT]) == n}
     gone = (removed_context | prior_texts | removed_entity_names
             | set(prior_entities)) - surviving_texts - set(canonical) \
-        - set(_entity_map(out))
+        - present_entity_names
     if gone:
         ops = _as_items(out.get("operators"))
         kept_ops: list[Any] = []
@@ -866,8 +876,8 @@ def audit_candidates(embed_list: object,
     This is the **report**, not a gate. Its output is what the owner reviews to
     set the thresholds the design refuses to invent (D13/O5: draft → run →
     look → refine). One line per candidate — the same predicate as
-    :func:`vet_candidates`, so the body has exactly ``stats["candidates"]``
-    lines and an empty-text item (which no gate saw) is not a blank row.
+    :func:`vet_candidates`, so the report carries one row per candidate (plus
+    a header) and an empty-text item — which no gate saw — is not a blank row.
     Stable order, tab-separated:
 
         <section>\\t<outcome>\\t<rule_id>\\t<text>\\t<reason>

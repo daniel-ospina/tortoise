@@ -255,11 +255,12 @@ def test_unreferenced_entity_is_removed_and_non_vet_keys_preserved():
 # ── the removal must survive execute_embed's MINT-BEFORE-WIRE pre-pass ─────
 
 def test_discarded_target_edge_is_pruned_and_not_resurrected():
-    """Verified defect: ``_operator_endpoint_text`` read only ``target`` while
-    ``execute_embed`` reads ``target`` **or** ``target_edge`` — so a MITIGATES
-    whose only reference to a discarded point was its ``target_edge`` kept the
-    operator, and the mint pre-pass put the discarded text back as a NEW
-    Point. The audit surface said "discarded" while the payload shipped it."""
+    """``_operator_endpoint_text`` reads a MITIGATES' target as ``target`` **or**
+    ``target_edge``, exactly as ``execute_embed`` does — so an operator whose
+    ONLY reference to a discarded point is its ``target_edge`` is pruned. A
+    read of ``target`` alone keeps the operator, and the mint pre-pass then puts
+    the discarded text back as a NEW Point — the audit surface saying
+    "discarded" while the payload ships it."""
     el = {"entities": [], "events": [],
           "points": [{"content": "drop me", "pointKind": "statement"},
                      {"content": "survivor", "pointKind": "statement"},
@@ -278,10 +279,10 @@ def test_discarded_target_edge_is_pruned_and_not_resurrected():
 
 
 def test_removed_entity_endpoint_does_not_fabricate_a_point():
-    """Verified defect: with the entity gone, ``emitted_entity_names`` no
-    longer contains it, so #2552's guard did not fire and the mint pre-pass
-    fabricated a claim Point out of the participant name. The operator must be
-    pruned instead."""
+    """With the entity gone from the output, ``emitted_entity_names`` does not
+    contain it, so #2552's guard cannot fire and the mint pre-pass would
+    fabricate a claim Point out of a participant name. The operator is pruned
+    instead."""
     el = {"entities": [{"name": "pytest", "kind": "core:tool"}],
           "events": [],
           "points": [{"content": "real claim", "pointKind": "statement"}],
@@ -301,9 +302,9 @@ def test_removed_entity_endpoint_does_not_fabricate_a_point():
 
 
 def test_discarding_one_of_two_identical_items_keeps_the_edge():
-    """Verified defect: the prune matched removed item TEXT, so discarding one
-    of two identical-content points pruned the SURVIVOR's operator — an edge
-    lost although the endpoint still resolved."""
+    """The prune fires only when no surviving item provides the endpoint, so
+    discarding one of two identical-content points keeps the SURVIVOR's
+    operator — its endpoint still resolves, and the edge is not lost."""
     el = {"entities": [], "events": [],
           "points": [{"content": "same text", "pointKind": "statement"},
                      {"content": "same text", "pointKind": "statement"},
@@ -344,7 +345,7 @@ def test_target_precedence_matches_execute_embed_no_over_prune():
 def test_target_is_ignored_for_non_mitigates_operators():
     """``execute_embed`` reads a target ONLY under ``if op_type == MITIGATES``.
     Reading it for every operator dropped a valid edge on a field the embedder
-    never looks at (verified: an IMPL carrying a stray ``target`` naming a
+    never looks at — an IMPL carrying a stray ``target`` naming a
     discarded point was pruned)."""
     for op_type in ("IMPL", "NAND"):
         el = {"entities": [], "events": [],
@@ -375,10 +376,10 @@ def test_empty_text_item_id_cannot_be_used_to_discard():
 
 
 def test_non_string_endpoint_is_not_left_to_be_re_minted():
-    """execute_embed str()-coerces every endpoint; VET recorded the removal via
-    a stringifying normalise but skipped a non-string endpoint, so an operator
-    with ``src: 42`` survived and the mint pre-pass put ``42`` back. Verified
-    end-to-end before the fix (payload points ``['keep', '42']``)."""
+    """``execute_embed`` str()-coerces every endpoint, so a non-string endpoint
+    (an LLM can emit ``src: 42``) is recognised under its coerced form. Skipping
+    it keeps the operator, and the mint pre-pass then adds ``42`` to the payload
+    as a point."""
     el = {"entities": [], "events": [],
           "points": [{"content": 42, "pointKind": "statement"},
                      {"content": "keep", "pointKind": "statement"}],
@@ -396,7 +397,7 @@ def test_non_string_endpoint_is_not_left_to_be_re_minted():
 def test_cross_pass_reference_with_different_spelling_is_reconciled():
     """``validate_layer1`` compares ``about_entities`` by EXACT string, so
     restoring ``pytest`` while S4's point names ``PyTest`` left the 422 in
-    place (verified) — while the warning claimed restoration. The reference's
+    place while the warning claimed restoration. The reference's
     spelling is reconciled to the restored name."""
     from tortoise.extractor_v2 import merge_embed_lists
     s2 = {"entities": [{"name": "pytest", "kind": "core:tool"},
@@ -447,10 +448,10 @@ def test_total_on_malformed_decisions_and_prior():
 
 
 def test_prior_with_only_removed_texts_still_prunes():
-    """Regression: the early return tested `prior_entities` alone, so
-    a prior carrying ONLY removed points/events (``removed_entities == {}`` —
-    the common case) skipped the operator prune and left an operator to be
-    re-minted."""
+    """The early return must consider a prior carrying ONLY removed
+    points/events (``removed_entities == {}`` — the common case); keying it on
+    ``prior_entities`` alone skips the operator prune and leaves an operator to
+    be re-minted."""
     el = {"entities": [], "events": [],
           "points": [{"content": "keep", "pointKind": "statement"}],
           "operators": [{"src": "C", "dst": "keep", "op_type": "IMPL"}]}
@@ -461,12 +462,10 @@ def test_prior_with_only_removed_texts_still_prunes():
 
 
 def test_both_keys_item_records_content_for_the_prune():
-    """Regression: the pool used the candidate-identity text
-    (``name or content``) while ``execute_embed`` resolves endpoints on
-    CONTENT — so a discarded both-keys point recorded only its NAME and an
-    operator on its content survived and was re-minted. The pool now carries
-    BOTH forms, because the #2552 mint pre-pass can materialise either.
-    """
+    """``execute_embed`` resolves endpoints on CONTENT while a candidate's
+    identity is ``name or content``, so the pool carries BOTH forms — the #2552
+    mint pre-pass can materialise either. Recording only the name leaves an
+    operator on the discarded point's content to be re-minted."""
     el = {"entities": [], "events": [],
           "points": [{"name": "N", "content": "C", "pointKind": "statement"},
                      {"content": "keep", "pointKind": "statement"}],
@@ -492,7 +491,7 @@ def test_survivor_name_does_not_shield_a_removed_items_content():
     survivor side must be the RESOLUTION surface (content only): a survivor's
     *name* does not resolve an endpoint in ``execute_embed``, so it must not
     shield one. Applying the union to both sides left `B` — the discarded
-    item's content — to be minted back (verified)."""
+    item's content — to be minted back."""
     el = {"entities": [], "events": [],
           "points": [{"name": "A", "content": "B", "pointKind": "statement"},
                      {"content": "A", "pointKind": "statement"},
@@ -568,10 +567,10 @@ def test_immutable_slot_ref_does_not_raise():
 
 
 def test_padded_entity_name_is_stripped_when_reconciled():
-    """Regression: the spelling map stored the RAW name, but
-    ``execute_embed`` emits ``str(name).strip()`` and ``validate_layer1``
-    matches THAT exact string — so a padded entity name was rewritten verbatim
-    into the reference and TURNED A PASSING PAYLOAD INTO A 422."""
+    """``execute_embed`` emits ``str(name).strip()`` and ``validate_layer1``
+    matches THAT exact string, so the spelling map stores the stripped name.
+    Rewriting a padded name verbatim into a reference turns a passing payload
+    into a 422."""
     el = {"entities": [{"name": " pytest ", "kind": "core:tool"}],
           "events": [],
           "points": [{"content": "P", "pointKind": "statement",
@@ -648,9 +647,9 @@ def test_falsy_content_survivor_still_shields_its_endpoint():
 
 def test_present_null_content_is_the_minted_text():
     """A MISSING ``content`` key emits nothing, but a PRESENT null emits the
-    literal point ``"None"`` (``execute_embed`` uses ``str(content)``). Treating
-    the two alike left an operator on ``"None"`` unpruned, and the mint
-    re-materialised the discarded item (verified end-to-end)."""
+    literal point ``"None"`` (``execute_embed`` uses ``str(content)``) — so an
+    operator on ``"None"`` is pruned. Treating the two alike leaves it unpruned,
+    and the mint re-materialises the discarded item."""
     el = {"entities": [], "events": [],
           "points": [{"name": "T", "content": None, "pointKind": "statement"},
                      {"content": "X", "pointKind": "statement"}],
@@ -738,6 +737,23 @@ def test_present_entity_name_does_not_get_its_operator_pruned():
     assert [x["name"] for x in out2["entities"]] == ["e"]
     assert len(out2["operators"]) == 1
     assert not any("pruned" in w for w in warnings2), warnings2
+
+    # A name LONGER than the mint's 1000-char key does NOT shield: the mint
+    # compares the truncated ref against the full name, so it would fabricate a
+    # claim Point out of a participant name. The operator must be pruned.
+    long_name = "A" * 1100
+    big = {"entities": [{"name": long_name, "kind": "core:tool"},
+                        {"name": long_name, "kind": "core:concept"}],
+           "events": [],
+           "points": [{"content": "K", "pointKind": "statement"}],
+           "operators": [{"src": long_name, "dst": "K", "op_type": "IMPL"}]}
+    first_big = next(vg._item_id(*t) for t in vg._iter_items(big)
+                     if t[0] == "entities" and t[1] == 0)
+    out3, warnings3 = vg.apply_vet(big, {first_big: {"outcome": vg.DISCARD}})
+    assert out3["operators"] == [], (
+        "a >1000-char name is not what `emitted_entity_names` holds — the mint "
+        "would fabricate a Point for the truncated ref")
+    assert any("pruned" in w for w in warnings3), warnings3
 
 
 def test_a_genuinely_removed_item_still_fills_the_pool():
