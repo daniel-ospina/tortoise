@@ -185,8 +185,8 @@ partly offset, which is exactly why the figure looked plausible.
 | RAM | **hot** working set × 2.05 KB, + buffer churn headroom | **~7 GB** (all hot) | **~6.9 GB per hot tenant** — only hot tenants count |
 | **disk** — index only | total embeddings × 2.05 KB | **~7 GB** | **~6.9 TB** |
 | **disk** — index **+ raw vector column** | the above + total embeddings × 1.54 KB | **~12 GB** | **~12 TB** |
-| **IOPS** | random page reads on cold traversals | the real unknown (§3) |
-| **planning time** | partition count (1,000 partitions) | **unmeasured — must test (M2)** |
+| **IOPS** | random page reads on cold traversals | **the real unknown** (§3) | **the real unknown** (§3) |
+| **planning time** | partition count (1,000 partitions) | **unmeasured — must test (M2)** | **unmeasured — must test (M2)** |
 
 **⚠️ The binding constraint moves from RAM to IOPS + planning, exactly as §2 already argued for the rest of the
 store.** Position A was the one exception claimed against that rule; it does not hold.

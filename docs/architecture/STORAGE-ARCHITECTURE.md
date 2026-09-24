@@ -112,8 +112,8 @@ and §4.2:
 ### Why these four are truth — the test is PER-WRITE, not per-class
 **⚠️ CORRECTED 2026-09-23 after review. An earlier draft stated the test as *"append-only — rows are added, never updated"*. That test is FALSE for two of the four types it places in the truth layer**, and it put one class in both layers:
 - `Source.updatedAt` is **set ON MATCH** by `_upsert_source`; `Source.reliability` is a **derived** query-time cache written onto the node (`#398`, `sdk.py:20567` `_write_reliability_cache`).
-- `Document.updatedAt` is set, and `doc_status` transitions **`captured`→`extracted`**.
-- **`Document ⊂ Object`** (`ONTOLOGY.md` §1/§4.4/§6 — `objectKind: document`), so the class appeared in **both** layers.
+- `Document.updatedAt` is set, and `doc_status` transitions **`captured`→`extracted`**. **⚠️ `doc_status` is RETIRED under D10/v3.15 (Q3)** — liveness is a READ, not a stored field, and this flip is **one of only two unjournalled raw-`SET` writes in the system** (`ingest.py:262-266`). The statement above describes the code **as it stands today**, not the target.
+- **`Document ⊂ Object`** (`ONTOLOGY.md` §1/§4.4/§6 — `objectKind: document`), so the class appeared in **both** layers. **⚠️ SUPERSEDED (v3.15/D10): a document is a `:Source`, not an Object subclass** — see §9.3/§9.5. This bullet records the state that motivated the change.
 
 **✅ The test that DOES hold, and it binds at the WRITE/FIELD level rather than the class or table level:**
 > **TRUTH = a derivation root — nothing else can reconstruct it. DERIVED = reconstructible by replaying the journal.**
@@ -429,6 +429,79 @@ GRAPH    — entities · claims · operators · connections
 **③ ⛔ NEVER use a vector to decide whether two sources are the same.** Embedding similarity detects **the same TOPIC, not the same document** — it will merge two unrelated sources about pricing. **Identity is a canonicalised URL plus a content hash** (`#3998`'s absent-raw state is a third value on that record, not a fourth kind of source).
 
 **⚠️ The honest gap, so this is not over-claimed.** **No ablation isolates a separate parent vector** — the evidence is framework practice plus measured *hierarchical* gains, and all of it is document RAG, **not agent-memory graphs.** **① is measured. ② is well-supported practice, not a measurement.** That is why the order above is the answer: **if we could only have one, it is the link.**
+
+### 9.5 ⭐ The five consequences of "a document is a source" — ruled (owner, 2026-09-24)
+
+**D10 is one sentence. Landing it touches five things**, and each was run through the `AGENTS.md` decision protocol (**research first, contradiction test before anything else**). The outcome is instructive: **three of the five turned out to be *preservation*, not change.** The ruling is applied in `ONTOLOGY.md` **v3.15** (PR **#5022**) — this section is the *reasoning*; the ontology is the *contract*.
+
+#### Q1 — the `aboutDocument` link: **KEEP IT; move only its label.** ⛔ *This is the one hard block.*
+Two link types look like near-duplicates:
+- `aboutDocument` — *"this event is about document X"*
+- `aboutSource` — *"this point is about source Y"*
+
+**Merging them is the obvious tidy-up, and it is refused.** The two are **not** interchangeable in the rebuild machinery:
+
+| | in the snapshot-derivable set? | what `rebuild_all` pass-2b does |
+|---|---|---|
+| `aboutDocument` | ✅ **yes** (`DERIVABLE_STRUCTURAL_RELS`, `#2489`) | **re-creates it at the OLD point** from its immutable snapshot |
+| `aboutSource` | ❌ **deliberately excluded** | **never resurrects at old** — so it gets no replay descriptor at all |
+
+**⇒ Collapsing `aboutDocument` into `aboutSource` moves the edge class OUT of the replayable set. That is a durability regression**, and it would be invisible until a rebuild was actually needed. **The contradiction test caught this and disqualified the recommendation that proposed it** — which is the rule working, not the analysis failing.
+
+**What *does* change:** its **target label** (`:Document` → `:Source`), and therefore its **replay key** — `coalesce(title, name)` → **`url`**, because a `:Source` resolves by `url`. **⚠️ These two must change in the same step**: a label retarget with an unchanged key resolves to nothing and **silently mis-points the rebuilt edge**. Equal in spirit: `aboutSource` **cannot** be made derivable by this change, and doing so is real design work — filed separately, not folded in.
+
+#### Q2 — the classification axes: **KEEP BOTH.** They answer different questions.
+
+| axis | question it answers | values | where declared |
+|---|---|---|---|
+| `sourceKind` | *what kind of SOURCE is it?* | `document`, `conversation`, `github_issue`, `agentSession` | **the packs** (`sourceTypes`) |
+| `documentKind` | *what GENRE of document is it?* | research, planDoc, apiSpec, transcript… | the ontology (§4.4 vocabulary) |
+
+**These are not the same question, and collapsing them is a category error** — the library world has kept *document type* and *genre* in **separate MARC fields for decades** (genre/form vs content type vs media type vs carrier type). **⚠️ A correction to my own earlier report:** an intermediate reading concluded D10 ruled `documentKind` out. **It does not.** `documentKind` survives — it just stops being an Object-subclass vocabulary and becomes a **genre axis over `sourceKind: document`**.
+
+**⭐ And the finding that reframes the whole decision:** `document` was **already** a declared pack `sourceTypes` value (`packs/dev/manifest.yaml`) **while** `ONTOLOGY.md` §4.4 called it an Object subclass. **The repo has been asserting both models at once.** D10 is therefore **less an overturn than a choice between two models the old decisions contradict each other about** — and it makes the ontology agree with the packs.
+
+#### Q3 — the document fields: **`doc_status` goes; `format` moves; the rest stay.**
+
+| field | ruling | why |
+|---|---|---|
+| `doc_status` | **⛔ DROPPED** | §9.3's whole point: liveness is a **READ**, not a stored status. **It is also one of only two unjournalled raw-`SET` writes in the system** (`ingest.py:262-266`) — dropping it removes a write that breaks the rebuild invariant |
+| `format` | **MOVES to `:Source`** | it is genuinely a source property; `_SOURCE_HANDLED` does not carry it yet |
+| `documentKind` | **KEPT** | the genre axis — see Q2 |
+| `title`, `topics`, `summary` | **KEPT** | already `:Source` properties (measured) |
+| `content` | **⛔ LEAVES THE GRAPH** | raw text is raw storage's job (D30). This was the 29th site and it had gone unnoticed |
+| `objectKind` | **⛔ RETIRED** | a document is not an Object |
+
+#### Q4 — the `documents` cap: **KEEP IT, RE-POINT IT AT `:Source`.**
+**Why the cap exists at all:** the main node cap counts `(:Point …) OR (:Object) OR (:Subject)`. **A `:Document` is none of those, so documents were invisible to it** — `#1726`'s own recorded rationale is *"the points gate is vacuous for Documents."* The separate `documents` resource closed that hole and gates `/v1/index/docs`.
+
+**⚠️ The reason does not expire when a document becomes a source — a `:Source` is equally invisible to the main cap.** So:
+
+| option | verdict |
+|---|---|
+| retire the cap | ⛔ **ungates `/v1/index/docs`** — the exact hole it was built to close |
+| fold it into the node cap | ⛔ **silently starts metering ~2,193 sources** that were never metered — a price change disguised as a cleanup |
+| **keep it, re-point at `:Source`** | ✅ **keeps both the protection and the reason** |
+
+#### Q5 — the replay key: **fold, change the key, migrate — and it is free today.**
+A `:Document` resolved by `coalesce(title, name)`; a `:Source` resolves by `url`. **A source keyed the old way would resolve to nothing and mis-point the rebuilt edge.**
+
+**⭐ The whole risk is currently worth $0, and this is the single most time-sensitive item in D10:**
+- **Production holds zero `:Document` nodes**, and
+- **the commit lane creator has never run** (`commit_count = 0`).
+
+**⇒ The migration is free NOW and stops being free the moment that lane first runs.** `#2489`'s own boundary is that **rebuild does NOT repair pre-existing graphs** (a `#2500`-style backfill is explicitly out of scope), so there is no later recovery path. **This is why Q5 cannot be deferred behind the commit lane.**
+
+#### ⚠️ And the finding that is NOT about D10 at all — **T6**
+While checking D10, a separate defect surfaced and it may be the more consequential one: **a `:Source` mutates in place.** `_upsert_source` bumps `updatedAt` / `version` / `contentHash` on an `ON MATCH` when the hash differs, and the hosted commit path flips a status — **neither is journalled.**
+
+**That breaks §3's central invariant** (`derived = replay(journal)`) **and it contradicts the field's own rule for evidence** — the append-only/write-once convergence is explicit that *"changes are handled by new correction events, not in-place edits"*, which is also what **our own D7** says. **A source that is re-fetched and found changed is a NEW VERSION, not an edit.**
+
+**Two options, and they are not mutually exclusive:**
+- **journal the re-materialisation** — makes §3's invariant true, at the cost of log growth unless re-checks are made repeat-safe; or
+- **declare the re-materialised fields *recomputable*** — which fits the field's model and must be applied **field by field, not by class**, or it becomes the same category error as Q2.
+
+**This belongs to §3, not to D10**, and it is tracked separately.
 
 ---
 
