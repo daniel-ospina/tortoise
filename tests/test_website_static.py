@@ -448,10 +448,23 @@ class TestRenderElementInventory:
         # it must show the selected plan's overage line too.
         dialog_start = live.index('id="create-org-title-purchase"')
         dialog_end = live.index("Continue to checkout", dialog_start)
-        assert "overageLine && (" in live[dialog_start:dialog_end], (
-            "the paid-new-org purchase dialog must render the selected "
+        dialog = live[dialog_start:dialog_end]
+        assert "newOrgSelectedPlan?.overageLine && (" in dialog, (
+            "the paid-new-org purchase dialog must render the SELECTED "
             "plan's overage line — it commits checkout for a metered "
             "subscription")
+        # A bare `overageLine` substring is not enough: the same silent no-op
+        # this test exists to prevent is reachable by breaking the SELECTION,
+        # which leaves the render textually intact while `newOrgSelectedPlan`
+        # is undefined and nothing renders. Pin the predicate and the render
+        # variable so a predicate regression reds instead of passing.
+        assert ("team?.checkout_price_ids?.[p.tier] === createTeamPlan" in live), (
+            "the dialog's selected plan must be resolved by PRICE ID against "
+            "checkout_price_ids (the state holds a price id, not a tier key) "
+            "— matching on p.tier directly would resolve nothing and render "
+            "no disclosure")
+        assert "newOrgSelectedPlan.overageLine" in dialog, (
+            "the dialog must render the resolved plan's own overageLine")
 
         assert "per additional 10k" not in main, (
             "the overage price string belongs in pricing.json, not re-typed "
