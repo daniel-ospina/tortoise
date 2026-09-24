@@ -3390,14 +3390,9 @@ class TortoiseSDK:
         """Capture an agent session into the graph (#312 delta 4, #822).
 
         Mirrors the hosted POST /v1/sessions logic minus quota/auth. The
-        hosted lane resolves the capture harness through
-        ``_observed_capture_harness`` — it keeps the Session's STORED harness on
-        a re-capture so the harness cannot RELABEL (#3681: first-writer-wins),
-        and takes the caller's ``body.harness`` on a fresh session or on a
-        re-capture of a Session with no stored harness. Either way the harness
-        is a caller declaration: no credential→harness binding exists (#3700),
-        so the server never OBSERVES which harness captured. This SDK path
-        stores the caller-supplied ``harness`` (selfhost/embedded has no server
+        hosted lane resolves the capture harness from the server's own record
+        (#3681's ``_observed_capture_harness``); this SDK path stores the
+        caller-supplied ``harness`` (selfhost/embedded has no server
         credential lane to resolve it from). See the note at the
         ``if harness:`` clause below. Turns become episodic Points keyed
         {session_id}_t{i} (deterministic + idempotent), the M2 LLM extractor
@@ -3523,15 +3518,11 @@ class TortoiseSDK:
         # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
         # NEVER erases a stored value) — the conditional clause keeps the
         # query valid in both embedded and Docker lanes (no unused binding).
-        # NOT hosted parity (#3681): the hosted lane resolves the harness
-        # through ``_observed_capture_harness`` — it keeps the Session's STORED
-        # harness on a re-capture of an existing session_id so the harness
-        # cannot RELABEL, and takes the caller's ``body.harness`` on a fresh one
-        # or on a re-capture of a Session with no stored harness (#3700: a
-        # caller declaration either way, never a harness the server OBSERVED);
-        # this SDK path still writes the caller-supplied value
-        # (selfhost/embedded has no server credential lane). Do not read the
-        # clause below as a parity pin.
+        # NOT hosted parity (#3681): the hosted lane resolves the harness from
+        # the server's own record (``_observed_capture_harness``) so a re-POST
+        # of an existing session_id cannot RELABEL it; this SDK path still
+        # writes the caller-supplied value (selfhost/embedded has no server
+        # credential lane). Do not read the clause below as a parity pin.
         # Review PR #1827 (parity with hosted_api.py): created_at uses
         # coalesce so an idempotent re-POST preserves the ORIGINAL capture
         # time.
