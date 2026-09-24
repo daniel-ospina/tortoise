@@ -108,10 +108,13 @@
 #      the lock case; a non-lock skip (driver_timeout/empty_response) must
 #      never assert a held lock
 #  78. #5028: a sweep --max-time timeout (curl rc 28) names driver_timeout and
-#      reports the elapsed seconds; the ride-along stays skipped
+#      reports the elapsed seconds in the log line AND the filed incident body;
+#      the ride-along stays skipped
 #  79. #5028: an empty sweep body names empty_response (not a held lock)
 #  80. #5028: the sweep OUTCOME is logged untruncated even when `per_team`
 #      (the org census) precedes it in the payload
+#  81. #5028: the outcome's org census is `unknown` (never blank) when /status
+#      carries no object `per_team`; an object still reports the real count
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1514,6 +1517,9 @@ assert_eq "$RC" 1 "78. a sweep timeout stays RED (1)"
 assert_contains "$OUT" "sweep skipped (status=driver_timeout)" "78. a timeout names driver_timeout"
 assert_not_contains "$OUT" "lock held" "78. a timeout is NOT reported as a held lock"
 assert_match "$OUT" "curl rc=28, took [0-9]+s" "78. the timeout reports rc 28 and the elapsed seconds"
+# #5028: the elapsed is carried in the FILED body too, not only the log line —
+# the incident is what a human reads weeks later, when the run's stdout is gone.
+assert_match "$(cat "$LOG")" 'after [0-9]+s \(curl exit 28' "78. the filed incident body carries the elapsed seconds"
 assert_not_contains "$OUT" "ride-along OK" "78. a timeout still skips the purge/reconcile ride-along"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
@@ -1544,6 +1550,43 @@ assert_contains "$OUT" "\"last_sweep_at\":\"$TS_RECENT\"" "80. the outcome line 
 assert_contains "$OUT" "orgs=78" "80. the outcome line carries the org census count"
 RAW_PREVIEW="$(printf '%s' "$STUB_STATUS_BODY" | head -c 600)"
 assert_not_contains "$RAW_PREVIEW" "last_sweep" "80. (control) the 600-char raw blob genuinely cuts last_sweep off"
+
+# ── 81. #5028: the outcome names the org census — `unknown`, never blank ───
+# The outcome line must report the real count when `per_team` is an object and
+# say `unknown` when it is absent or a non-object. A blank `orgs=` reads as
+# "0 orgs" at a glance — the same silent-degradation shape the untruncated
+# outcome line exists to prevent. BOTH the jq `else "unknown"` and the
+# `[ -n … ] ||` guard are pinned (the else catches a non-object; the guard
+# catches the empty output of a jq failure).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+# (a) `per_team` absent entirely.
+export STUB_STATUS_BODY="$(printf '{"enabled":true,"config_error":null,"storage_error":null,"last_sweep":{"last_sweep_at":"%s","last_team_count":0},"watcher":{"running":true,"age_minutes":1}}' "$TS_RECENT")"
+run_driver
+assert_eq "$RC" 0 "81. a run whose /status omits per_team stays healthy"
+assert_contains "$OUT" "sweep outcome: last_sweep=" "81. the outcome line is still emitted"
+assert_contains "$OUT" "orgs=unknown" "81. an absent per_team reports orgs=unknown"
+assert_not_match "$OUT" "orgs=[0-9]" "81. an absent per_team never reports a numeric count"
+# (b) `per_team` present but a non-object (schema drift).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export STUB_STATUS_BODY="$(printf '{"enabled":true,"config_error":null,"storage_error":null,"per_team":"drifted","last_sweep":{"last_sweep_at":"%s","last_team_count":0},"watcher":{"running":true,"age_minutes":1}}' "$TS_RECENT")"
+run_driver
+assert_eq "$RC" 0 "81. a run with a non-object per_team stays healthy"
+assert_contains "$OUT" "orgs=unknown" "81. a non-object per_team reports orgs=unknown"
+# (c) an object `per_team` still reports the real count.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export STUB_STATUS_BODY="$(printf '{"enabled":true,"config_error":null,"storage_error":null,"per_team":{"orgA":"ok","orgB":"ok"},"last_sweep":{"last_sweep_at":"%s","last_team_count":0},"watcher":{"running":true,"age_minutes":1}}' "$TS_RECENT")"
+run_driver
+assert_eq "$RC" 0 "81. a run with an object per_team stays healthy"
+assert_contains "$OUT" "orgs=2" "81. an object per_team reports the real org count"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
