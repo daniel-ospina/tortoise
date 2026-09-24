@@ -2629,6 +2629,12 @@ function claimIntentInFlight() {
     const first = newOrgPlanOptions(t)[0]
     return first ? t.checkout_price_ids[first.tier] : ''
   }
+  // #4815: the plan the paid-new-org purchase dialog has selected (its default
+  // is set when the dialog opens). The dialog renders THIS plan's metered-tier
+  // disclosure, derived from the same planOptions()/pricing.json source as the
+  // Billing grid — never a second copy of the price string.
+  const newOrgSelectedPlan = newOrgPlanOptions(team).find(
+    (p) => team?.checkout_price_ids?.[p.tier] === createTeamPlan)
   const hasActiveSubscription = team && ACTIVE_STATUSES.includes(team.subscription_status)
   // #1623 (review P2): canceled/unpaid teams still have a Stripe customer —
   // the portal gives invoice history + cancel management.
@@ -8666,6 +8672,11 @@ function claimIntentInFlight() {
                         </button>
                       ))}
                   </div>
+                  {/* #4815: metered-tier disclosure for the SELECTED plan, from
+                      the same pricing.json source the Billing grid reads. */}
+                  {newOrgSelectedPlan?.overageLine && (
+                    <p className="dim small" style={{ marginTop: 6 }}>{newOrgSelectedPlan.overageLine}</p>
+                  )}
                   {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
                     <button className="btn-primary" onClick={startNewOrgCheckout} disabled={createTeamBusy}>

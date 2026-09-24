@@ -415,7 +415,13 @@ class TestRenderElementInventory:
         grids rendered nothing, so a metered tier was invisible on the card
         the user upgrades from — the card Solo is bought on. The string must
         come from pricing.json's own `display.overage_line`, never a second
-        hardcoded copy of the price."""
+        hardcoded copy of the price.
+
+        The assertions are scoped to the LIVE surfaces: `main.jsx` carries a
+        SECOND `planOptions()` grid inside the archived
+        `LEGACY_WIZARD_ARCHIVED` block (dead code, never rendered), so a
+        whole-file substring would pass a disclosure that only ever rendered
+        there."""
         js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
         main = (REPO_ROOT / "website" / "apps" / "dashboard" / "src"
                 / "main.jsx").read_text(encoding="utf-8")
@@ -424,8 +430,29 @@ class TestRenderElementInventory:
             "planOptions() must expose the disclosure only for a metered tier")
         assert "pricing.display?.overage_line" in js, (
             "the disclosure must be pricing.json's own display.overage_line")
-        assert "{p.overageLine && (" in main, (
-            "the plan grid must render the disclosure when the flag is set")
+
+        # Excise the archived wizard block (same anchor/marker pair
+        # overview.test.js derives its A0 slice with) so the render assertions
+        # below can only be satisfied by code that actually runs.
+        archived_anchor = "LEGACY_WIZARD_ARCHIVED && welcomeOriented && ("
+        archived_start = main.index(archived_anchor)
+        archived_end = main.index("\n                )}\n", archived_start)
+        live = main[:archived_start] + main[archived_end:]
+
+        assert "{p.overageLine && (" in live, (
+            "the LIVE Billing plan grid must render the disclosure when the "
+            "flag is set — a line rendered only in the archived (dead) grid "
+            "is not a disclosure")
+
+        # The paid-new-org purchase dialog commits a metered subscription, so
+        # it must show the selected plan's overage line too.
+        dialog_start = live.index('id="create-org-title-purchase"')
+        dialog_end = live.index("Continue to checkout", dialog_start)
+        assert "overageLine && (" in live[dialog_start:dialog_end], (
+            "the paid-new-org purchase dialog must render the selected "
+            "plan's overage line — it commits checkout for a metered "
+            "subscription")
+
         assert "per additional 10k" not in main, (
             "the overage price string belongs in pricing.json, not re-typed "
             "in the dashboard")

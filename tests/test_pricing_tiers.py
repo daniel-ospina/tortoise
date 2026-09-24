@@ -24,19 +24,21 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # `tortoise.pricing` loads; the E2E fixture is served to the E2E server through
 # the SAME `TORTOISE_PRICING_PATH` env var (`tests/e2e/hosted/conftest.py`), and
 # it carries its OWN copy of `billing.overage_tiers` and `tiers.<t>.overage`. An
-# edit to one that misses the other is a silent divergence — this is the 4th
-# lockstep sync (#303, #2317, #2317, #4815), so the parity guard below reads
-# every artifact, not just the one the module happens to be pointed at.
+# edit to one that misses the other is a silent divergence — the fixture is a
+# hand-maintained copy that has needed repeated lockstep syncs, so the parity
+# guard below reads every artifact, not just the one the module happens to be
+# pointed at.
 _PRICING_ARTIFACTS = {
     "product/pricing.json": _REPO_ROOT / "product" / "pricing.json",
     "tests/e2e/hosted/fixtures/pricing-e2e.json": (
         _REPO_ROOT / "tests" / "e2e" / "hosted" / "fixtures" / "pricing-e2e.json"),
 }
 
-# The E2E fixture's DECLARED deltas (its own ``$e2e_note``): it drops the
-# internal ``anon`` tier, adds the ``e2e_small`` cap tier, and sets
-# pro/team ``features.hourly_backups`` true. An explicit allow-list — anything
-# else differing is drift, not a declaration.
+# The E2E fixture's deltas, as an explicit allow-list — anything else
+# differing is drift, not a declaration. Its own ``$e2e_note`` declares TWO of
+# them: it adds the ``e2e_small`` cap tier and sets pro/team
+# ``features.hourly_backups`` true. The ``anon`` absence is NOT claimed by the
+# note; the allow-list below is the authority for it.
 _FIXTURE_ONLY_TIERS = frozenset({"e2e_small"})
 _FIXTURE_MISSING_TIERS = frozenset({"anon"})
 
@@ -95,14 +97,21 @@ class TestPricingLoader:
     def test_every_paid_tier_has_overage(self):
         """#4815 (owner ruling): overage is ON for EVERY paid tier — the tier
         price buys FEATURES (graphs, colleagues), never a paying customer's
-        exclusion from metering. Solo was the last paid tier without overage;
-        this going red means a paid tier has silently stopped emitting
+        exclusion from metering. Solo was the last paid tier without overage.
+
+        Both statements of eligibility are pinned: the per-tier DISPLAY flag
+        (``tiers.<t>.overage``, what the plan card renders) and metering,
+        which reads ``billing.overage_tiers`` through ``has_overage()``.
+        Going red on the second means a paid tier silently stopped emitting
         threshold events / reporting ``overage_eligible``."""
         paid = [t for t in pricing.all_tiers() if pricing.tier_price(t) > 0]
         assert paid, "pricing.json must define at least one paid tier"
         for tier in paid:
             assert pricing.tier_limits(tier)["overage"] is True, (
                 f"paid tier {tier!r} must have overage=True (#4815)")
+            assert pricing.has_overage(tier) is True, (
+                f"paid tier {tier!r} must be in billing.overage_tiers — "
+                f"metering reads that, not tiers.{tier}.overage (#4815)")
 
     def test_overage_tiers_list_agrees_with_tier_flags(self):
         """pricing.json states overage eligibility TWICE — per-tier
