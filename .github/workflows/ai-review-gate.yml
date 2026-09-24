@@ -7,6 +7,11 @@ name: ai-review-gate
 # EITHER the PR's current head sha OR its current diff:
 #   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
 #   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> diff=<sha256> (<owner/repo>) sig=<hmac>
+#   review recorded: reviews/<PR>.json verdict=clean-low @ <full-sha> diff=<sha256> (<owner/repo>) sig=<hmac>
+# The verdict vocabulary is CLOSED and is `clean(-micro|-low)?` (#4755). `clean-low` is
+# emitted by record-review.sh for a content-only (prose/stylesheet) diff whose linked
+# issue may be standard/complex (agent-infra #1348). It must NOT become `verdict=.*`:
+# an out-of-vocabulary verdict (e.g. `verdict=clean-anything`) must still fail.
 #
 # The optional `diff=` segment (issue #2982; accepted shape per #3076) is part
 # of the SIGNED text, so every regex here must accept it — a regex that does
@@ -358,6 +363,7 @@ jobs:
           # " diff=<64hex>" segment is inside the HMAC input:
           #   … verdict=clean @ <40hex> (<owner/repo>) sig=<64hex>             (legacy)
           #   … verdict=clean @ <40hex> diff=<64hex> (<owner/repo>) sig=<64hex> (#2982)
+          #   … verdict=clean-low @ <40hex> diff=<64hex> (<owner/repo>) sig=<64hex> (#4755)
           # A regex missing the optional diff= segment rejects every
           # correctly-signed post-#2982 marker WITHOUT ever reaching the HMAC
           # check. That was #3076: the gate fell through to the diagnostic
@@ -370,8 +376,8 @@ jobs:
           # to enumerate candidates for rule (b): the diff-keyed carry-forward
           # arm (#2982) accepts a STALE `@ sha` iff its signed diff= equals the
           # live diff hash.
-          sha_ok_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ ${expected}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
-          marker_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ [0-9a-f]{40}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
+          sha_ok_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ ${expected}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
+          marker_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ [0-9a-f]{40}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
 
           all_markers="$(printf '%s\n' "$body" | grep -E "$marker_re" || true)"
           all_markers="$(printf '%s\n' "$all_markers" | sed '/^$/d')"
@@ -456,7 +462,7 @@ jobs:
             # to guess between "re-record", "fix the repo field", and "fix the
             # key". Priority: unsigned → wrong repo → malformed → stale.
             all_lines="$(printf '%s\n' "$body" \
-              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ " || true)"
+              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ " || true)"
             all_lines="$(printf '%s\n' "$all_lines" | sed '/^$/d')"
 
             if [ -z "$all_lines" ]; then
@@ -495,7 +501,7 @@ jobs:
               # for the repo). Group 3 is the repo segment.
               l_text="${line% sig=*}"
               l_repo=""
-              if [[ "$l_text" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)$ ]]; then
+              if [[ "$l_text" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro|-low)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)$ ]]; then
                 l_repo="${BASH_REMATCH[3]}"
               fi
               if [ -n "$l_repo" ] && [ "$l_repo" != "$REPO_NAME" ]; then
@@ -521,7 +527,7 @@ jobs:
             if [ -n "$head_malformed" ]; then
               m_sha="$(printf '%s' "${head_malformed% sig=*}" | openssl dgst -sha256 | awk '{print $NF}')"
               echo "::error::AI review evidence for the current head carries a signature but its marker text is not a shape this gate accepts — malformed marker (producer/gate contract drift, or a damaged line)."
-              echo "::error::  expected: review recorded: reviews/<PR>.json verdict=clean(-micro)? @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>"
+              echo "::error::  expected: review recorded: reviews/<PR>.json verdict=clean(-micro|-low)? @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>"
               echo "::error::  sha256=${m_sha:0:12}"
               echo "::error::  marker=${head_malformed}"
               echo "::error::Re-record on the final head:"
@@ -546,7 +552,7 @@ jobs:
             # cause — that would suppress the accurate stale/diff diagnostic on
             # a REQUIRED check (review finding, #3057).
             latest_repo=""
-            if [[ "$latest_raw" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)(\ sig=[0-9a-f]{64})?$ ]]; then
+            if [[ "$latest_raw" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro|-low)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)(\ sig=[0-9a-f]{64})?$ ]]; then
               latest_repo="${BASH_REMATCH[3]}"
             fi
             if [ -n "$latest_repo" ] && [ "$latest_repo" != "$REPO_NAME" ]; then
