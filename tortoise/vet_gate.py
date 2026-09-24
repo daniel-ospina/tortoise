@@ -445,22 +445,24 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     """Normalized texts an operator endpoint names.
 
     Mirrors ``execute_embed``'s own resolution surface exactly: ``src``/``dst``
-    **and** ``target`` **and** ``target_edge`` (``execute_embed`` reads
-    ``op.get("target") or op.get("target_edge")``). Missing ``target_edge`` is
-    what let a discarded MITIGATES target be re-minted as a brand-new Point.
+    and the MITIGATES target, read as
+    ``op.get("target") or op.get("target_edge")`` — the **same** precedence,
+    not a union, so an operator carrying both (execute_embed honours ``target``
+    and ignores ``target_edge``) is not pruned on a field the embedder never
+    reads. Missing ``target_edge`` is what let a discarded MITIGATES target be
+    re-minted as a brand-new Point.
     """
     out: set[str] = set()
     for key in ("src", "dst"):
         v = op.get(key)
         if isinstance(v, str) and v.strip():
             out.add(_norm(v))
-    for container in ("target", "target_edge"):
-        target = op.get(container)
-        if isinstance(target, Mapping):
-            for key in ("src", "dst"):
-                v = target.get(key)
-                if isinstance(v, str) and v.strip():
-                    out.add(_norm(v))
+    target = op.get("target") or op.get("target_edge")
+    if isinstance(target, Mapping):
+        for key in ("src", "dst"):
+            v = target.get(key)
+            if isinstance(v, str) and v.strip():
+                out.add(_norm(v))
     return out
 
 
@@ -552,6 +554,13 @@ def apply_vet(embed_list: Mapping[str, Any],
                 continue
             iid = _item_id(section, i, item)
             if iid not in discarded_ids:
+                kept.append(item)
+                continue
+            if not _item_text(section, item):
+                # An empty-text item is not a candidate, so no arbiter verdict
+                # can legitimately address it: ``vet_candidates`` never emitted
+                # its id. Refuse the removal (the id space must not be a way to
+                # discard something the arbiter never saw).
                 kept.append(item)
                 continue
             if family == "entity":

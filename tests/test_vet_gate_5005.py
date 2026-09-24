@@ -301,6 +301,39 @@ def test_discarding_one_of_two_identical_items_keeps_the_edge():
         "the surviving twin still provides the endpoint — the edge must stay")
 
 
+def test_target_precedence_matches_execute_embed_no_over_prune():
+    """execute_embed resolves a MITIGATES target as ``target or target_edge``
+    — the *first* one present, not a union. An operator carrying both (where
+    ``target_edge`` names a discarded point but ``target`` is the one the
+    embedder honours) must NOT be pruned on a field execute_embed ignores."""
+    el = {"entities": [], "events": [],
+          "points": [{"content": "drop me", "pointKind": "statement"},
+                     {"content": "a", "pointKind": "statement"},
+                     {"content": "b", "pointKind": "statement"}],
+          "operators": [{"src": "a", "dst": "b", "op_type": "MITIGATES",
+                         "target": {"src": "a", "dst": "b"},
+                         "target_edge": {"src": "drop me", "dst": "b"}}]}
+    out = vg.vet_candidates(el, narrative="n",
+                            arbiter=_discard_matching("drop me"))
+    new, _warnings = vg.apply_vet(el, out["decisions"])
+    assert [p["content"] for p in new["points"]] == ["a", "b"]
+    assert len(new["operators"]) == 1
+    payload, _res = _payload_of(new)
+    assert "drop me" not in [p["content"] for p in payload["points"]]
+
+
+def test_empty_text_item_id_cannot_be_used_to_discard():
+    """``vet_candidates`` never emits an id for an empty-text item, so no
+    legitimate verdict can address one. The id space must not be a way to
+    remove something the arbiter was never shown."""
+    el = {"entities": [], "events": [],
+          "points": [{"content": "real", "pointKind": "statement"},
+                     {"content": "", "pointKind": "statement"}],
+          "operators": []}
+    new, _warnings = vg.apply_vet(el, {"points:1:": {"outcome": vg.DISCARD}})
+    assert len(new["points"]) == 2
+
+
 def test_cross_pass_reference_restores_entity_and_payload_validates():
     """Verified defect (the strongest one): the Layer-1 guard is per-pass, so
     an entity the S2 pass removed and S4 later referenced reached
