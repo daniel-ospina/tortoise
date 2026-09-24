@@ -213,10 +213,13 @@ for _order in bh hb; do
         bad "(q2) entry-scoping lost: distinct binaries normalized IDENTICALLY in a multi-entry diff ($_order) — $_m1"
     fi
 done
-# Pin the multi-entry bytes. A whole-diff `has_hunk` drops the binary entry's
-# kept `index` line; resetting the entry buffer BEFORE `flush` drops the binary
-# ENTRY entirely — both would pass every single-entry assertion above, and both
-# turn this vector red.
+# Pin the multi-entry bytes. Resetting the entry buffer BEFORE `flush` drops the
+# binary ENTRY entirely; a whole-diff (precomputed) `has_hunk` drops the binary
+# entry's kept `index` line. A STREAMING leak (initialise `has_hunk` once, never
+# reset) keeps this `bh` vector green and is caught by the `hb` digest case
+# above — which is why BOTH orders are asserted. This vector is what catches the
+# entry-drop and precomputed variants, which would pass every single-entry
+# assertion above.
 check_norm "$(printf '%s\n%s\n' "$BIN_V1_ENTRY" "$HUNK_ENTRY")" \
            $'diff --git a/f.bin b/f.bin\nindex 1111111..2222222 100644\nBinary files a/f.bin and b/f.bin differ\ndiff --git a/t.txt b/t.txt\n--- a/t.txt\n+++ b/t.txt\n@@ -0,3 +0,4 @@\n ctx\n+added\n ctx2'
 

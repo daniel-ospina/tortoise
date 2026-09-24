@@ -30,9 +30,11 @@ green.
 
   The second form is emitted when the PR diff can be fetched from the REST
   API. The `diff=<sha256>` segment is optional (added producer-side by #2982)
-  and is part of the SIGNED text — it records the sha256 of the PR's three-dot
-  diff **after normalization** (#1362), so a review stays tied to the reviewed
-  artifact rather than only the commit sha. The gate must accept BOTH shapes: a
+  and is part of the SIGNED text — it binds the review to the PR's three-dot
+  diff, so a review stays tied to the reviewed artifact rather than only the
+  commit sha. It is **defined** to be the post-normalization digest (#1362);
+  today's deployed producer still emits the raw digest — see the
+  producer-status note below. The gate must accept BOTH shapes: a
   regex that omits the optional segment rejects every correctly-signed
   post-#2982 marker before the HMAC check is ever reached (#3076).
 
@@ -82,8 +84,10 @@ refreshes `scripts/lib/diff-normalize.py` — see the producer-status note above
 
 Both the producer and the gate hash the bytes returned by the REST API
 (`Accept: application/vnd.github.v3.diff`) — never a local `git diff`, whose
-output would not byte-match the API's. Those bytes are normalized before
-hashing (#1362, below).
+output would not byte-match the API's. The gate normalizes those bytes before
+hashing (#1362, below); the producer hashes them RAW until the #1362 producer
+half (agent-infra#1431) lands and the farm is refreshed — see the
+producer-status note above.
 
 ### Diff normalization (#1362)
 
@@ -161,12 +165,14 @@ the marker is signed and that the signed `diff=` equals this PR's diff at check
 time. The binding between a recorded sha and the diff actually reviewed is
 enforced by `record-review.sh`'s stale-sha guard, not by the gate.
 
-That matters with the producer half deployed (agent-infra PR #767). Its
-`--force-stale` (and its head-fetch fail-open arm) computes `diff=` from the
-PR's **current** diff while keeping the caller-supplied stale sha, so a marker
-minted that way IS accepted here even though the reviewed artifact cannot be
-shown unchanged. Closing that trust gap is producer-side work
-(agent-infra#784).
+The producer half (agent-infra PR #767) is deployed and closes this gap
+producer-side (agent-infra#784, closed): on BOTH arms where a stale sha cannot
+be shown unchanged — the `--force-stale` override and the head-fetch fail-open
+arm — `record-review.sh` drops the diff binding (`DIFF_HASH=""`), so the marker
+degrades to the legacy sha-only shape and rule (b) cannot carry it. A marker
+minted through either arm is therefore rejected by the strict sha path until it
+is re-recorded at the current head; the gate cannot tell which revision a
+reviewer saw (see the note above).
 
 Do **not** "fix" it here by requiring the recorded sha to be an ancestor of the
 current head: this repo's documented refresh path is `git rebase origin/main` +

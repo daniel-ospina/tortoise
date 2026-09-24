@@ -95,12 +95,13 @@ name: ai-review-gate
 # saw. It verifies only that the marker is signed and that the signed `diff=`
 # equals this PR's diff at check time. The binding between a recorded sha and
 # the diff actually reviewed is enforced by record-review.sh's stale-sha guard,
-# not here. The producer half (agent-infra PR #767) has SHIPPED, so its
-# `--force-stale` override and its head-fetch fail-open arm compute `diff=`
-# from the PR's CURRENT diff while keeping the caller-supplied stale sha, so a
-# marker minted that way IS accepted by rule (b) even though the reviewed
-# artifact cannot be shown unchanged. Close that
-# trust gap on the PRODUCER side (agent-infra#784) — do NOT add a
+# not here. The producer half (agent-infra PR #767) SHIPPED and closed that gap
+# producer-side (#784): on BOTH arms where a stale sha cannot be shown
+# unchanged — the `--force-stale` override and the head-fetch fail-open arm —
+# record-review.sh drops the diff binding (`DIFF_HASH=""`), so the marker
+# degrades to the legacy sha-only shape and rule (b) cannot carry it; only the
+# strict sha path applies and the gate keeps rejecting until re-recorded at the
+# current head. Do NOT add a
 # "recorded sha is an ancestor of head" bound here: the repo's documented
 # refresh path is `git rebase origin/main` (sha rewritten, three-dot diff
 # byte-identical when the rebase does not reconcile main into the PR's files),
