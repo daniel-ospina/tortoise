@@ -11037,9 +11037,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         )
     external_urls: list[str] = []
     for src in payload.sources:
-        external_urls.append(src.url)
+        # S0b (#5012): resolve the inbound spelling to the node that owns its
+        # canonical identity, so the session↔external `references` join below
+        # (keyed on these urls) addresses the SAME node create_source wrote.
+        u = sdk._resolve_source_url(src.url)
+        external_urls.append(u)
         sdk.create_source(
-            src.url, src.sourceKind, tier=src.credibilityTier,
+            u, src.sourceKind, tier=src.credibilityTier,
             contentHash=src.contentHash or "", is_episodic=True,
         )
     for url in session_urls:

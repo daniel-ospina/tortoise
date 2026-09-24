@@ -20212,6 +20212,21 @@ class TortoiseSDK:
             self._get_proj()._link_source(did, props["extractedFrom"], label="Document")
         return result
 
+    def _resolve_source_url(self, url: str) -> str:
+        """Map an inbound source url to the node's key (S0b, #5012).
+
+        A URL variant registered earlier resolves to the node that owns its
+        canonical identity, so a by-url reader/mutator addresses the SAME node
+        the write did (registration alone is not enough — a node's stored
+        ``url`` is the first-seen spelling).  Never raises: on any failure the
+        url is returned unchanged, so a reader behaves exactly as before.
+        """
+        from tortoise.source_identity import resolve_source_key
+        try:
+            return resolve_source_key(self._get_proj().g, url)
+        except Exception:
+            return url
+
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
                       source_path: str | None = None,
@@ -20333,6 +20348,7 @@ class TortoiseSDK:
         already a tier-form (keeps the dual-write invariant). Dirty-marks the
         inheritance gate + clears the reliability cache.
         """
+        url = self._resolve_source_url(url)
         from tortoise.source_credibility import TIER_PRIORS, canonical_tier
         _orig = tier
         tier = canonical_tier(tier)
@@ -20388,6 +20404,7 @@ class TortoiseSDK:
         from `pointKind='assessment'` Points (latest per assessor wins by
         createdAt; outdated filtered); until Task 5 lands, factor = 1.0.
         """
+        url = self._resolve_source_url(url)
         import os  # noqa: I001
         from datetime import datetime, timezone  # noqa: F401
         from tortoise.source_credibility import (
@@ -20460,6 +20477,7 @@ class TortoiseSDK:
         sourceDate changed vs cached components) or after write events
         (set_source_tier/assess_source/create_source(tier=)).
         """
+        url = self._resolve_source_url(url)
         import os  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.source_credibility import resolve_tier
@@ -20571,6 +20589,7 @@ class TortoiseSDK:
           - Refreshes the reliability cache + dirty-marks the inheritance gate
             so EP recomputes promptly.
         """
+        url = self._resolve_source_url(url)
         try:
             score_f = float(score)
         except (TypeError, ValueError):
@@ -20655,6 +20674,7 @@ class TortoiseSDK:
 
     def _invalidate_inheritance_gate_for_source(self, url: str) -> None:
         """Dirty-mark all points extracted from a source (inheritance recompute)."""
+        url = self._resolve_source_url(url)
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point)-[:extractedFrom]->(s:Source {url:$url}) "
@@ -20666,6 +20686,7 @@ class TortoiseSDK:
 
     def _write_reliability_cache(self, url: str, reliability, components: dict, now) -> None:
         """Write-through reliability projection on the Source node (documented cache)."""
+        url = self._resolve_source_url(url)
         import json as _json
         proj = self._get_proj()
         proj.g.query(
@@ -20683,6 +20704,7 @@ class TortoiseSDK:
         set_source_tier, create_source(tier=). Prevents indefinite staleness —
         the cache is a documented projection, never authoritative.
         """
+        url = self._resolve_source_url(url)
         proj = self._get_proj()
         proj.g.query(
             "MATCH (s:Source {url:$url}) "
@@ -20884,6 +20906,7 @@ class TortoiseSDK:
 
     def complete_source(self, url: str, content: str = None, external_id: str = None) -> dict:  # noqa: RUF013
         """Populate Source node fields: contentHash, version, externalId."""
+        url = self._resolve_source_url(url)
         import hashlib
         proj = self._get_proj()
         updates = {}
