@@ -110,20 +110,34 @@ class EventAPI:
         # live node and the journal agree by construction (one compute, not
         # two).
         if operator is None and isinstance(content, str) and content:
-            from .embeddings import encode_for_store, stamp_journal_embedding
             vec = None
             try:
-                vec = encode_for_store(
-                    content,
-                    getattr(self.projection, "required_embedding_dim", None))
+                from .embeddings import encode_for_store, stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100
-                vec = None
+                # #5148: the SEAM MODULE itself is unreachable — a damaged or
+                # partial install (`numpy` is a core dependency, so this is an
+                # environment fault, not a supported configuration). A write
+                # must still not fail on it, which is the rule this block
+                # already follows for an unavailable EMBEDDER. PRESENCE IS
+                # OWNERSHIP holds regardless, and NOTHING is lost by skipping
+                # the stamp: with no vector, `stamp_journal_embedding` only
+                # re-sets `embedding` to the `None` written below, and its
+                # attestation block requires a vector to fire.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                try:
+                    vec = encode_for_store(
+                        content,
+                        getattr(self.projection, "required_embedding_dim", None))
+                except Exception:  # noqa: BLE001, RUF100
+                    vec = None
             # PRESENCE IS OWNERSHIP (#5004 round-3): the key is set EVEN when
             # the encode failed or the embedder is unavailable, so the replay
             # is told the journal owns this field for this id and must not
             # invent a vector the live node does not have.
             p["embedding"] = vec
-            stamp_journal_embedding(p, creating=True)
+            if stamp_journal_embedding is not None:
+                stamp_journal_embedding(p, creating=True)
         return p
 
     # -- ingest lifecycle / idempotency gate --------------------------------

@@ -2658,6 +2658,19 @@ class FalkorProjection(
         self._skip_guard = False
         self._is_embedded = (path is not None)
         self._path = path
+        # #5119: `_vector_index_api` MUST exist before the health check below.
+        # Recovery replays the journal through `apply()` -> `_upsert_point_props`,
+        # which reads `self.required_embedding_dim` to guard a journalled
+        # vector's WIDTH — and that property reads THIS attribute. Initialised
+        # only further down (after `_ensure_indexes`), it raised
+        # `AttributeError` on every replayed event, so `recover_from_log`
+        # counted zero applied events and refused with "replay produced an
+        # empty graph": a total graph loss became UNRECOVERABLE, and the only
+        # signal was a warning. `None` is the property's own documented answer
+        # while no index exists, and embedded (`redislite`) is brute-force by
+        # design, so hoisting the initialisation is behaviour-preserving for
+        # every path that reaches `_ensure_indexes`.
+        self._vector_index_api = None
         # Ops safety residual (#428): auto health check on open + transparent
         # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
         # event log when lost/corrupt; production (FLY_APP_NAME) and server
@@ -2688,7 +2701,10 @@ class FalkorProjection(
         # degradation_chain and cross-lens calls): 'cypher' engines skip the
         # failing signature-A attempt and query via signature B directly,
         # saving one failed round trip per query.
-        self._vector_index_api = None
+        #
+        # Its `None` default is set ABOVE, before the health check — the
+        # recovery replay reads it through `required_embedding_dim`, so it must
+        # exist first (#5119).
         self._ensure_indexes()
 
         # Lifecycle hardening (plan Task 4 + issue #1005):
