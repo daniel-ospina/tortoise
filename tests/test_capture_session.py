@@ -3639,21 +3639,92 @@ def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatc
         assert len(stamped) == 1, f"points of one capture share one eventId: {stamped}"
 
 
-def test_capture_session_recapture_shorter_conversation_pins_state(sdk):
-    """P1 (D3): re-capturing the same session_id with a SHORTER different
-    conversation — turn-stream MERGE is keyed {sid}_t{i}, so higher-index
-    turns from the prior capture stay CONTAINS-wired (stale residue) while
-    response turns report the new length. PIN the accepted state."""
-    res = sdk.capture_session([{"role": "user", "content": "first capture with five turns"},
-                               {"role": "assistant", "content": "second"},
-                               {"role": "user", "content": "third"}])
+def test_recapture_shorter_conversation_deletes_orphaned_turns(sdk):
+    """#1920: a shorter re-capture must DELETE the prior capture's
+    higher-index turn Points.
+
+    The turn store is keyed ``{session_id}_t{i}`` and written with MERGE, so
+    re-capturing turn 1..4 of a 10-turn session left ``_t4.._t9`` in the
+    graph, still ``CONTAINS``-wired to the Session, while ``s.turn_count``
+    was overwritten with the new length — the stored count and the
+    ``CONTAINS`` walk disagreed, and the stale turns stayed reachable from
+    the session (and, for a journaled store, were resurrected by a rebuild:
+    see ``test_recapture_shorter_does_not_resurrect_turns_on_rebuild``).
+
+    The defect is the MERGE's *absence* of a delete half, not a wrong count:
+    the invariant pinned here is that the Session's episodic ``CONTAINS``
+    members are exactly the turn window of the LAST capture.
+
+    This REVERSES the #1529 D3 pin (``..._pins_state``), which recorded the
+    residue as the accepted state; #1920 is the owner decision that it is a
+    defect, not a state to pin.
+    """
+    conv = [{"role": "user" if i % 2 == 0 else "assistant",
+             "content": f"turn number {i}"} for i in range(10)]
+    res = sdk.capture_session(conv)
     sid = res["session_id"]
+    assert res["turns"] == 10
+    proj = sdk._get_proj()
+
+    def _wired() -> set[str]:
+        return set(proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->"
+            "(t:Point {pointKind:'event'}) RETURN collect(t.id)",
+            params={"sid": sid}).result_set[0][0] or [])
+
+    assert _wired() == {f"{sid}_t{i}" for i in range(10)}
+
     sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
                         session_id=sid)
-    wired = sdk._get_proj().g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-        "RETURN collect(t.id)", params={"sid": sid}).result_set[0][0]
-    assert set(wired) == {f"{sid}_t{i}" for i in range(3)}, wired
+
+    # Indicator 1: the stored turn_count and the CONTAINS walk agree.
+    stored = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+        params={"sid": sid}).result_set[0][0]
+    assert stored == 1, stored
+    assert _wired() == {f"{sid}_t0"}, _wired()
+
+    # Indicator 2: the orphaned turns are DELETED, not merely unlinked.
+    for i in range(1, 10):
+        n = proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
+                         params={"id": f"{sid}_t{i}"}).result_set[0][0]
+        assert n == 0, f"orphaned turn {sid}_t{i} must be deleted"
+
+
+def test_recapture_prune_spares_claims_and_other_sessions(sdk):
+    """#1920 scoping: the prune removes ONLY this session's own turn Points.
+
+    The extraction lane CONTAINS-wires claim Points into the SAME :Session
+    (they are not turns), and a sibling session's turns live in the same
+    graph. A prune scoped on "everything CONTAINS-wired but not in the new
+    window" would delete both.
+    """
+    res = sdk.capture_session(CONV)
+    sid = res["session_id"]
+    other = sdk.capture_session(CONV)["session_id"]
+    proj = sdk._get_proj()
+
+    wired = set(proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "RETURN collect(p.id)",
+        params={"sid": sid}).result_set[0][0] or [])
+    turn_ids = {f"{sid}_t{i}" for i in range(3)}
+    claims = wired - turn_ids
+    assert claims, f"premise: extraction CONTAINS-wires claims: {wired}"
+    other_turns = {f"{other}_t{i}" for i in range(3)}
+
+    sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
+                        session_id=sid)
+
+    survivors = set(proj.g.query(
+        "MATCH (p:Point) WHERE p.id IN $ids RETURN collect(p.id)",
+        params={"ids": sorted(claims)}).result_set[0][0] or [])
+    assert survivors == claims, (
+        f"the prune deleted extracted claims: {sorted(claims - survivors)}")
+    for tid in sorted(other_turns):
+        assert proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
+                            params={"id": tid}).result_set[0][0] == 1, (
+            f"the prune swept a sibling session's turn {tid}")
 
 
 # ── #1532 P4: capture-path parity (window / role / quota / MITIGATES / id) ──

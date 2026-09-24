@@ -41,6 +41,7 @@
 /invite-accept.html  https://app.premiselabs.co/invite-accept  301
 
 # Trailing-slash → canonical
+/contact/  /contact  301
 /privacy/  /privacy  301
 /tos/      /tos      301
 /license/  /license  301
@@ -55,6 +56,7 @@
 /index.html  /  301
 
 # .html extension duplicates (non-auth only)
+/contact.html  /contact  301
 /docs.html  /docs          301
 /faq.html   /faq           301
 /self-hosted.html  /self-hosted  301

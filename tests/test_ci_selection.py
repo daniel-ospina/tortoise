@@ -482,6 +482,22 @@ def test_collision_preflight_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_run_with_eval_keys_tool_change_fails_closed_to_full():
+    # #2718/#4860: tools/run-with-eval-keys.sh owns
+    # tests/test_run_with_eval_keys.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/"
+    # NON_PYTHON_PREFIXES entry swallows a `.sh` path, so without a
+    # TOOL_CARVEOUTS entry `changed` is empty and select() takes the docs-only
+    # return (surfaces=[], tier-1 smoke only) — a wrapper-only change (a new
+    # managed key, a fingerprint-format edit) would ship without its guard
+    # suite ever running. No SOURCE_PATTERNS entry matches a `.sh` path, so it
+    # lands in the unknown-path fail-closed branch -> FULL matrix + both legs.
+    r = _sel(["tools/run-with-eval-keys.sh"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_finding_provenance_tool_change_fails_closed_to_full():
     # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
     # Same silent-drop class as the collision-preflight carve-out above — the
@@ -1934,6 +1950,103 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 "does not block the merge (#2656)")
         assert _verdict(*green[:-1], "skipped") == 0, (
             "a skipped need is not a failure (docs-only PRs skip the matrix)")
+
+
+def test_required_gate_excludes_the_long_legs():
+    """The required check's transitive `needs:` closure IS the merge-path
+    critical path (a job's `if:` is evaluated only AFTER its `needs` complete).
+
+    This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
+    (strict up-to-date protection + `gh pr merge --auto --merge`, see
+    commit-workflow `04-merge-deploy.md`), so `python-ci-gate` going green is
+    what releases the merge — the workflow run does not have to finish. When
+    the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
+    ~30m on a green run, against a ~20m main-merge cadence) the head went
+    BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
+    must NOT depend on the >15m legs — directly OR transitively — and those legs
+    must still EXIST: they move out of the gate, they are not deleted, and they
+    keep running pre-merge (advisory) and post-merge on main.
+
+    The TRANSITIVE half is load-bearing, not pedantry: an earlier version of
+    this change left the push-only `canary-streak` in `needs:`, and because
+    `canary-streak` `needs: test`, the *skipped* job still held the aggregate
+    for the whole ~30m `test` leg on every PR (run 35960027173: the gate was
+    not scheduled while `test (a)` ran, though every short leg had completed).
+    A direct-`needs` assertion cannot see that shape.
+
+    Keeping them running on the PR lane (rather than skipping them there) is
+    deliberate and belongs to the same contract: the `--admin` rail requires
+    the PR lane to EXECUTE every test shard main's lane executes
+    (`scripts/admin-merge.sh` lane parity, tortoise #4263/#4457) — a `skipped`
+    shard is not coverage — so a push-only leg would make every `--admin` merge
+    refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
+    """
+    workflow = _load_python_ci()
+    jobs = workflow["jobs"]
+
+    def _needs(name: str) -> list[str]:
+        n = jobs[name].get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
+
+    direct = list(_needs("python-ci-gate"))
+    closure, frontier = set(direct), list(direct)
+    while frontier:
+        for parent in _needs(frontier.pop()):
+            if parent not in closure:
+                closure.add(parent)
+                frontier.append(parent)
+
+    for leg in ("test", "test-slow", "test-carve-out"):
+        assert leg in jobs, (
+            f"{leg} must still RUN — the latency fix removes it from the "
+            "required aggregate, it does not delete the leg")
+        assert leg not in closure, (
+            f"{leg} is a >15m leg reachable from `python-ci-gate` through "
+            "`needs:` — directly or transitively — which re-adds the ~30m "
+            "merge-path latency this change removes. A skipped intermediate "
+            "job does NOT break the chain: its own `needs:` still hold the "
+            "aggregate (the `canary-streak` → `test` shape).")
+    assert "manifest-integrity" in closure, (
+        "the required aggregate must still include the manifest drift gate, "
+        "or a drift stops blocking merges (#2656)")
+
+    # `leg in jobs` alone only proves the leg is DEFINED. The fix's disclosure
+    # leans on the legs still EXECUTING (advisory on PRs, detection on main), so
+    # pin that too: both triggers must remain, and no leg may be silenced.
+    triggers = workflow.get("on", workflow.get(True)) or {}
+    assert "push" in triggers and "pull_request" in triggers, (
+        "the long legs must still run on push (post-merge detection on main) "
+        "AND on pull requests (advisory pre-merge) — dropping either trigger "
+        "silently deletes a leg the disclosure depends on")
+    for leg in ("test", "test-slow", "test-carve-out"):
+        spec = jobs[leg]
+        assert spec.get("steps"), (
+            f"{leg} must still have steps — an empty job would 'run' nothing")
+        assert not spec.get("continue-on-error"), (
+            f"{leg} must not be continue-on-error — its failure must stay "
+            "visible, or the post-merge detection is silent")
+        assert spec.get("if") not in ("false", False), (
+            f"{leg} must not be unconditionally disabled")
+        # NOT push-only: the workflow's own comment cites the `--admin` rail's
+        # lane parity as the reason these legs are not skipped on PRs, so a
+        # per-leg `github.event_name` filter is the exact regression to refuse.
+        # And job-level `continue-on-error` is not enough — a silenced STEP
+        # inside the job produces the same missing signal.
+        assert "github.event_name" not in str(spec.get("if") or ""), (
+            f"{leg} must not carry an event filter (e.g. push-only): a "
+            "`skipped` shard is not coverage, and the `--admin` rail's lane "
+            "parity (`ADMIN_MERGE_LANE_PARITY=require`) refuses a merge when "
+            "the PR lane did not execute a shard main's lane executes "
+            "(#4263/#4457)")
+        pytest_steps = [s for s in spec.get("steps", [])
+                        if "pytest" in (s.get("run") or "")]
+        assert pytest_steps, f"{leg} must still RUN pytest"
+        silenced = [s.get("name") for s in pytest_steps
+                    if s.get("continue-on-error")]
+        assert not silenced, (
+            f"{leg}'s pytest step(s) must not be continue-on-error — that "
+            "silences the signal the disclosure says is still produced: "
+            f"{silenced}")
 
 
 # ── #2938: surface audit (report-only) ───────────────────────────────────
@@ -3518,4 +3631,125 @@ def test_every_changed_set_diff_disables_rename_detection():
         "Add --no-renames if it is a changed-set selection diff, or teach "
         "changed_set_git_diff_commands the new spelling (#4378):\n  "
         + "\n  ".join(unparsed)
+    )
+
+
+# ── #4740 review 4: the orphan-assert steps' fail-closed pgrep probe ───────
+# Each of the three `Assert no redislite orphans` steps in python-ci.yml is
+# the newest fail-closed control on the orphan count, and NO other test can
+# see it: `orphan-bound.test.sh` reads only the gate script, and the gate
+# receives an already-computed `--count`. A mutation (`-le 1` → `-lt 1`, or a
+# revert to `COUNT=$(pgrep … | wc -l)`) would be undetectable. This pin reads
+# the workflow text and requires, per step, that pgrep's OWN status is
+# captured and the count is never read from a `pgrep | …` pipeline (whose
+# status is the last command's — `tr`, always 0 — so a failed probe would
+# read as a measured 0 and pass).
+
+
+def _orphan_assert_steps() -> list[dict]:
+    wf = _load_python_ci()
+    steps = [
+        s
+        for job in wf["jobs"].values()
+        for s in (job.get("steps") or [])
+        if str(s.get("name", "")).startswith("Assert no redislite orphans")
+    ]
+    return steps
+
+
+def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
+    """#4740 review 4: pgrep's own status must gate the orphan count."""
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, (
+        f"expected the three 'Assert no redislite orphans' steps, found "
+        f"{len(steps)} — this pin must not pass vacuously"
+    )
+    for s in steps:
+        # Drop whole-line comments: they QUOTE the rejected pipeline form
+        # (`COUNT=$(pgrep … | wc -l)`) and the `${PIPESTATUS[0]}` rationale, so
+        # scanning raw text would flag the documentation rather than the code.
+        body = "\n".join(
+            line
+            for line in s["run"].splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "PIPESTATUS" not in body, (
+            "a ${PIPESTATUS[0]} read after `COUNT=$(pgrep … | wc -l)` is the "
+            "`tr` status, never pgrep's, so the guard would be inert (#4740)"
+        )
+        assert re.search(r"\$\(pgrep\b[^)]*\|", body) is None, (
+            "COUNT must not be read from a `pgrep | …` pipeline: its status is "
+            "the last command's, so a failed probe reads as a measured 0 and "
+            "passes (the #4740 fail-open)"
+        )
+        assert 'PIDS=$(pgrep -f "redislite/bin/redis-server")' in body, (
+            "pgrep must run on a bare assignment so `$?` is its own status"
+        )
+        assert "prc=$?" in body, "pgrep's own status must be captured"
+        assert '[ "$prc" -le 1 ]' in body, (
+            "rc 0 (matches) and rc 1 (none) are real measurements; anything "
+            "else must fail closed (#4740)"
+        )
+        assert "exit 1" in body, "the failed-probe guard must exit non-zero"
+        assert 'COUNT=$(printf \'%s\' "$PIDS" | wc -w | tr -d \' \')' in body, (
+            "COUNT must be derived from the pgrep output `$PIDS`, not a "
+            "constant — a `COUNT=0` would hand the gate a measured-zero that "
+            "no later leak could ever exceed (#4740 review 10)"
+        )
+        assert '--count "$COUNT"' in body, (
+            "the orphan gate must consume the derived COUNT (#4740 review 10)"
+        )
+
+
+def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
+    """#4740 review 5: each empty-selection block must WRITE the no-pytest
+    report to the very path the orphan gate is handed.
+
+    Cases 11-13 of orphan-bound.test.sh pin the gate's READING of that report,
+    but nothing pinned the PRODUCER: deleting one `printf` left both the
+    harness and the pgrep pin green, so the cycle-1 P0 (the gate parses a
+    `missing` report and REDs a legitimately-empty selection) could silently
+    return. This reads the real workflow via `_load_python_ci()`.
+    """
+    report_path = "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+    producers = [
+        s
+        for job in _load_python_ci()["jobs"].values()
+        for s in (job.get("steps") or [])
+        if isinstance(s.get("run"), str) and '"skipped":"no-pytest"' in s["run"]
+    ]
+    assert len(producers) == 3, (
+        f"expected the three empty-selection blocks that write the "
+        f"'no-pytest' report, found {len(producers)} — one `printf` deleted "
+        f"leaves the gate parsing a missing report and REDs a healthy skip "
+        f"(the #4740 cycle-1 P0)"
+    )
+    for s in producers:
+        printf_lines = [
+            line
+            for line in s["run"].splitlines()
+            if '"skipped":"no-pytest"' in line
+        ]
+        assert len(printf_lines) == 1, (
+            f"step {s.get('name')!r} must write the no-pytest report exactly "
+            f"once, found {len(printf_lines)} lines carrying it"
+        )
+        line = printf_lines[0].strip()
+        assert line.startswith("printf '"), (
+            f"step {s.get('name')!r} must WRITE the report with printf, got "
+            f"{line!r}"
+        )
+        assert line.endswith(f'> "{report_path}"'), (
+            f"step {s.get('name')!r} must write the no-pytest report to "
+            f"{report_path} — the exact path the orphan gate is handed, not a "
+            f"different file (#4740)"
+        )
+    handed = [
+        s
+        for s in _orphan_assert_steps()
+        if f'--hygiene "{report_path}"' in s["run"]
+    ]
+    assert len(handed) == 3, (
+        f"all three orphan-assert steps must be handed {report_path}, the "
+        f"path the empty-selection blocks write; found {len(handed)}"
     )
