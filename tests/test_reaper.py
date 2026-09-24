@@ -142,8 +142,14 @@ def _make_no_path_server():
     concurrent test sessions spawning servers in the same tempdir cannot
     confuse the lookup). Returns the REALPATH'd socket (matching
     discover() output — macOS /var -> /private/var symlink).
+
+    #3767: constructed through the GUARDED `tortoise.FalkorDB` (not raw
+    redislite) so the fixture is faithful to production — a real embedded
+    server carries tortoise's `.tortoise-owners` instrument, which is the
+    positive ownership claim reap() now requires before a fast (unconfirmed)
+    kill.
     """
-    from redislite.falkordb_client import FalkorDB
+    from tortoise import FalkorDB
     db = FalkorDB()  # no path -> fresh tempdir server
     time.sleep(1)
     sock = os.path.realpath(db.client.socket_file)
@@ -893,7 +899,7 @@ def _spawn_orphan(monkeypatch=None):
     import sys as _sys
     code = (
         "import os,subprocess,sys,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        "from tortoise import FalkorDB; db=FalkorDB();\n"
         "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
     )
     proc = sp.Popen([_sys.executable, "-c", code],
@@ -2798,7 +2804,15 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
         monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
                             lambda pid: pid == live_pid)
         monkeypatch.setattr("tortoise.embedded_reaper._socket_dir_from_cmdline",
-                            lambda pid: str(dbdir))  # original (gone) path
+                            # #3767: REALPATH'd — production returns a
+                            # canonical path and `_has_ownership_claim`'s
+                            # absent-dir arm compares it against the
+                            # already-canonical `dbdir_real`. A raw
+                            # `/var/...` here never matches `/private/var/...`
+                            # on macOS, so the ownership claim refused and
+                            # the record classified 'protected' instead of
+                            # the 'candidate' shape this test pins.
+                            lambda pid: os.path.realpath(str(dbdir)))
         monkeypatch.setattr(
             "tortoise.embedded_reaper._pgrep_redis_servers", lambda: [live_pid])
         try:

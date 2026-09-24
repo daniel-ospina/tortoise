@@ -945,6 +945,10 @@ surfaces:
   - test_install_reaper_schedule.py
   - test_reaper.py
   - test_reaper_orphan.py
+  # #3767: the reaper's ownership claim (name/containment is not ownership).
+  # Hermetic (raw unix sockets + monkeypatches, no embedded DB) and grouped with
+  # its siblings; `tortoise/embedded_reaper.py` changes select the `core` surface.
+  - test_reaper_ownership.py
   - test_redirect_seam.py
   - test_references_edge.py
   - test_relationships_bounded.py
@@ -1635,6 +1639,13 @@ durations:
   # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
   # (7 tests, DB-free, app-boot-free) on a loaded machine.
   test_backup_watcher_health.py: 2.0
+  # #3767: the reaper's ownership-claim suite — hermetic (raw unix sockets +
+  # monkeypatches, no embedded DB), grouped with test_reaper*.py. No CI junit
+  # measurement yet, so it enters at the flat 2.0s default per the
+  # #3400/#4221 convention (the conservative floor: keeps durations coverage at
+  # 100% and cannot mis-balance the LPT pack). Refresh from the first
+  # post-merge main run that includes it.
+  test_reaper_ownership.py: 2.0
   # #3426 (merge resolution — added by the #3390 write-ahead-mint PR): this PR's
   # own hermetic ordering + AST guard. It has NO CI junit measurement yet, so it
   # enters at the flat 2.0s default under the #3400/#4221 convention — the
