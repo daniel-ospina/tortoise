@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+from tortoise.source_identity import normalize_source_url, resolve_source_key
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -82,11 +84,18 @@ def _mint_subject_stub(g, name: str) -> None:
     )
 
 
-def _mint_source_stub(g, url: str, source_kind: str | None = None) -> None:
+def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
     """MERGE the Source stub _link_source creates — single create path for live
     + replay (mirror _link_source's ON CREATE exactly: title=url, empty
     contentHash, ingestedAt now; session: refs carry is_episodic=true so the
     #1486 one-time episodic backfill does not re-match a replay-minted Source).
+
+    Returns the resolved ``url`` key of the node the stub/registration
+    addresses (S0b, #5012): a URL variant resolves to the node its canonical
+    identity already names — via the SHARED ``resolve_source_key`` — so no
+    write path can mint a second ``:Source``.  Callers MUST use the returned
+    key for their subsequent MATCH/MERGE (the raw spelling may not be the
+    node's stored ``url``).
 
     ``source_kind`` defaults to the ref-appropriate value. Ontology §4.6 +
     #909 §4.3 #6 register **agentSession** as the source-kind VALUE for session
@@ -100,17 +109,28 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> None:
     """
     if source_kind is None:
         source_kind = "agentSession" if str(url).startswith("session:") else "document"
-    params = {"url": url, "sk": source_kind, "now": _now_iso()}
+    # S0b (#5012): resolve a URL variant to the node its canonical identity
+    # already names, so the stub path cannot mint a second :Source either.
+    key = resolve_source_key(g, url)
+    canonical = normalize_source_url(key)
+    params = {"url": key, "raw_url": url, "cu": canonical,
+              "sk": source_kind, "now": _now_iso()}
     ep_clause = ""
-    if str(url).startswith("session:"):
+    if str(key).startswith("session:"):
         params["ep"] = True
         ep_clause = ", s.is_episodic=$ep"
     g.query(
         "MERGE (s:Source {url:$url}) "
         "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
-        f"    s.contentHash='', s.ingestedAt=$now{ep_clause}",
+        "    s.canonicalUrl=$cu, s.urlAliases=[$raw_url], "
+        f"    s.contentHash='', s.ingestedAt=$now{ep_clause} "
+        "ON MATCH SET s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+        "    s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+        "        THEN s.urlAliases "
+        "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END",
         params=params,
     )
+    return key
 
 
 def resolve_structural_target(g, label: str, key: str, rel: str):
@@ -143,7 +163,7 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
     if label == "Source":
-        _mint_source_stub(g, key)
+        key = _mint_source_stub(g, key)
         rows = g.query(
             "MATCH (s:Source {url:$url}) RETURN ID(s), s.id LIMIT 1",
             params={"url": key}).result_set
@@ -408,7 +428,7 @@ class _EdgeHandlers:
             # (_mint_source_stub — mirror query text, incl. the session: is_episodic
             # clause) so live wiring and rebuild replay mint byte-identical stubs
             # (one create path).
-            _mint_source_stub(self.g, ref, source_kind)
+            ref = _mint_source_stub(self.g, ref, source_kind)
             self.g.query(
                 f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
                 "MERGE (n)-[:extractedFrom]->(s)",
@@ -438,16 +458,24 @@ class _EdgeHandlers:
                 f"(Action was dissolved in Ontology v3.0)."
             )
         # MERGE Source with auto-create (mirrors _link_source) — #205
+        key = resolve_source_key(self.g, source_url)
+        canonical = normalize_source_url(key)
         self.g.query(
             "MERGE (s:Source {url:$url}) "
             "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
-            "    s.contentHash='', s.ingestedAt=$now",
-            params={"url": source_url, "sk": source_kind, "now": _now_iso()},
+            "    s.canonicalUrl=$cu, s.urlAliases=[$raw_url], "
+            "    s.contentHash='', s.ingestedAt=$now "
+            "ON MATCH SET s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+            "    s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "        THEN s.urlAliases "
+            "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END",
+            params={"url": key, "raw_url": source_url, "cu": canonical,
+                    "sk": source_kind, "now": _now_iso()},
         )
         self.g.query(
             f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
             f"MERGE (s)-[:references]->(e)",
-            params={"url": source_url, "eid": entity_id},
+            params={"url": key, "eid": entity_id},
         )
 
     # ponytail: SDK compat alias (Phase 1b will rename caller)

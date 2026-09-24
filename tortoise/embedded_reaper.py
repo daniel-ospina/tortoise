@@ -1178,6 +1178,37 @@ def _pgrep_redis_servers() -> list[int]:
     return pids
 
 
+def _pgrep_redis_servers_or_none() -> list[int] | None:
+    """Live redislite redis-server PIDs, or None when the PROBE failed.
+
+    `_pgrep_redis_servers` collapses a timeout, a missing pgrep, or any
+    subprocess error into `[]` — indistinguishable from "measured zero".
+    A caller that must report an unaccounted residue (#4740: the conftest
+    session-end sweep's `left`, which the CI orphan gate binds its bound to)
+    needs the difference: `[]` means measured-none, `None` means
+    not-measured. Kept alongside (not inside) `_pgrep_redis_servers` so the
+    many existing callers keep their exact `[]`-on-failure contract.
+
+    pgrep exits 0 on matches and 1 on no matches — both are successful
+    probes. Any other status, a timeout, or an OSError is a failed probe.
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "redislite/bin/redis-server"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if out.returncode not in (0, 1):
+        return None
+    pids: list[int] = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
 def _socket_dir_from_cmdline(pid: int) -> str | None:
     """Extract the unixsocket dir from a redis-server cmdline.
 
@@ -2779,6 +2810,109 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     out = _ScanAwareList(acted)
     out.complete = discovery_complete
     return out
+
+
+# #4740: the field set of the session-end hygiene report the CI orphan gate
+# (`.github/scripts/orphan-bound.sh`) consumes. It lives here, with the report
+# builder, as the single source of truth: `tests/conftest.py` imports both
+# instead of redeclaring, and the orphan-bound harness reads this assignment
+# from this file's source. Order is the order the report is built in.
+_HYGIENE_REPORT_FIELDS = ("reaped", "cleared", "left", "before")
+
+
+def _hygiene_report(reaped, cleared, left, before) -> dict:
+    """Build the session-end hygiene report the CI orphan gate consumes (#4740).
+
+    ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
+    threaded through verbatim and never synthesised here. ``cleared`` is a
+    diagnostic flag that does not decide the gate's verdict at any measured
+    count: at every count it reports whether the sweep's time budget sufficed
+    — a function of runner load — not the residue.
+    Keeping the construction out of ``_sweep`` also leaves no local report
+    literal there for a dead branch or a subscript store to bypass (the
+    round-5 pin's hole).
+    """
+    values = {
+        "reaped": reaped,
+        "cleared": cleared,
+        "left": left,
+        "before": before,
+    }
+    return {f: values[f] for f in _HYGIENE_REPORT_FIELDS}
+
+
+def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
+    """Drive discover->reap iterations until the backlog clears or the
+    deadline passes; return ``(total_acted, cleared)``.
+
+    ``cleared`` is the sweep's own budget/stop-condition claim, carried into
+    the report for diagnosis — not a field the CI orphan gate decides its
+    verdict on. It is True ONLY when ALL hold:
+
+    * the loop stopped on an iteration that acted on NOTHING (the backlog is
+      empty — the intended stop), not on the deadline;
+    * the deadline had NOT passed when that empty iteration returned, so the
+      empty result is a real measurement rather than ``reap()``'s
+      first-record deadline break returning a partial, possibly empty list;
+    * that iteration's discovery scan was COMPLETE (``.complete`` on the
+      scan-aware list — fail-closed False for an unknown/truncated scan). A
+      partial scan that acted on nothing proves nothing.
+
+    #4740 review 4: the previous ``cleared = not acted`` treated an
+    already-expired-deadline abort (``reap()`` returns ``[]`` because its
+    first record hit the deadline) as a CLEARED backlog, so the gate greened
+    a residue whose entire backlog had never been examined. A spent deadline
+    is not proof the backlog is clear.
+    """
+    total = 0
+    cleared = False
+    acted = []
+    while True:
+        acted = run_one()
+        total += len(acted)
+        if not acted:
+            # The one stop that can mean "cleared" — but only if the budget
+            # remained: an empty list returned BECAUSE the deadline had
+            # already expired is an unexamined backlog, not a clear one.
+            cleared = clock() < deadline
+            break
+        if clock() >= deadline:
+            # Budget exhausted while servers were still being acted on: the
+            # residue is arbitrary, so `cleared` stays False.
+            break
+    # A partial discovery scan is never "cleared", whatever it acted on.
+    cleared = cleared and bool(getattr(acted, "complete", False))
+    return total, cleared
+
+
+def live_embedded_server_count() -> int | None:
+    """Live embedded redis-server count, or None when the probe itself failed.
+
+    #4740: the number the CI orphan gate binds its bound to. `None` (the probe
+    failed) is NOT 0 (measured none) — the gate must name an unmeasured
+    residue rather than read a timeout/missing-pgrep as "nothing left". This
+    is a module-level function, not a closure in `tests/conftest.py`, so it is
+    unit-testable by monkeypatching `_pgrep_redis_servers_or_none`.
+    """
+    probe = _pgrep_redis_servers_or_none()
+    return None if probe is None else len(probe)
+
+
+def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> dict:
+    """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
+
+    Extracted from `tests/conftest.py`'s `_sweep` so the COMPOSITION — the
+    pre-sweep reading, the sweep, the post-sweep reading, and their arrangement
+    into the report — is behaviourally testable (`tests/test_reaper.py` drives
+    this function directly). `probe` is called twice: the first reading is
+    `before`, the second is `left`; `cleared` is threaded verbatim from
+    `sweep_until_cleared`, because `cleared` is a diagnostic flag that does
+    not decide the gate's verdict at any measured count.
+    """
+    before = probe()
+    reaped, cleared = sweep_until_cleared(run_one, deadline, clock)
+    left = probe()
+    return _hygiene_report(reaped, cleared, left, before)
 
 
 def _zero_client_state_read() -> dict:

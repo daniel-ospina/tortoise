@@ -306,9 +306,9 @@ def test_recovery_flow_present() -> None:
     assert "r.status === 401" in WELCOME_CODE
     assert "This reset link has expired or is invalid" in WELCOME_CODE
     assert "sign in with your new password" in WELCOME_CODE
-    # The legacy client bridge is GONE. It could not read an HttpOnly session
-    # cookie, so its no-session branch fired on EVERY successful login and
-    # bounced the user back to /auth.
+    # The legacy client bridge is GONE. It resolved the legacy parent-domain
+    # cookie, so a browser holding no legacy session had no session it could see
+    # and was bounced back to /auth.
     for legacy in (
         "runSessionBridge",
         "createTortoiseSupabaseClient",
@@ -458,11 +458,11 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
     """#3501: welcome.html must NOT wait for, or read, a client-side session.
 
     This replaces the pre-#3501 assertion that the page ran a bounded
-    `waitForSession`/`SIGNED_IN` wait. Under the BFF there is no
-    JavaScript-readable session, so that wait could only ever time out — and
-    its no-session branch bounced every successfully-authenticated visitor back
-    to /auth. That was the #3485 login loop, reproduced by construction for
-    every user.
+    `waitForSession`/`SIGNED_IN` wait. That wait resolved the legacy parent-domain
+    `sb-tortoise-auth-token` cookie, which a BFF login never writes (the BFF session
+    is the HttpOnly `__Host-session`), so a browser holding no legacy session could
+    only ever time out — and its no-session branch bounced that visitor back to
+    /auth. That was the #3485 login loop, reproduced by construction for that visitor.
 
     The decision now happens SERVER-side in `functions/welcome.ts`, which reads
     the HttpOnly cookie and redirects before any HTML is served (pinned by
