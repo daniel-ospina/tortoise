@@ -3464,6 +3464,43 @@ class TestInternalProvision:
         assert gn in _read_journal_file(str(journal)), \
             "tenant_provision mint must be journaled (#1686)"
 
+    def test_provision_does_not_journal_a_graph_it_did_not_mint(
+            self, internal_client, monkeypatch, tmp_path):
+        """#7795 review P2-3: `provision_tenant` takes a CALLER-SUPPLIED
+        `org_id` (`body.get("org_id")`) with no existence guard, so an
+        unconditional journal append would hand the session sweep a graph
+        THIS call did not create — a live tenant graph for DETACH+DELETE.
+        The append is existence-guarded (mirroring
+        `_eager_provision_org_graph`): a provision whose graph already
+        carries a `TeamMeta` mints nothing and must NOT journal it."""
+        from tests._embedded import _read_journal_file
+
+        journal = tmp_path / "provision_preexisting.graphs.jsonl"
+        monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+        payload = {
+            "org_id": "provisioned-team-preexisting",
+            "org_name": "Provisioned Team Preexisting",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-pe",
+        }
+        # First call mints the graph (and journals it — pinned by the test
+        # above).
+        r1 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r1.status_code == 200, r1.text
+        gn = r1.json()["graph_name"]
+        assert gn in _read_journal_file(str(journal))
+        # Reset the RECORD only: the graph (and its TeamMeta) still exists,
+        # so the second call mints nothing and must not re-journal it.
+        journal.write_text("")
+        r2 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["graph_name"] == gn
+        assert gn not in _read_journal_file(str(journal)), \
+            "the graph pre-existed this call — journaling it would hand the " \
+            "sweep a tenant graph this call did not mint (#7795 P2-3)"
+
     def test_provision_missing_fields_returns_400(self, internal_client):
         r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
         assert r.status_code == 400, r.text

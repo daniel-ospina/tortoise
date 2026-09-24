@@ -2817,6 +2817,15 @@ async def provision_tenant(request: Request):
 
         # Provision FalkorDB namespace for the org
         org_graph = sdk._get_proj().db.select_graph(graph_name)
+        # #7795 review P2-3: `org_id` here is CALLER-SUPPLIED
+        # (`body.get("org_id")`) with no existence guard, so this call may be
+        # handed a graph it did NOT mint. The journal is the session sweep's
+        # OWNERSHIP record — append only when THIS call creates the TeamMeta,
+        # or a live tenant graph would be handed to the sweep to
+        # DETACH+DELETE. Mirrors the existence check in
+        # `_eager_provision_org_graph` below.
+        _seen = org_graph.query("MATCH (m:TeamMeta) RETURN count(m)").result_set
+        _minted_here = not (_seen and _seen[0][0])
         # #2001 (W5): eager OnboardingState init in the SAME statement as
         # TeamMeta (graph-side atomicity) — first-org semantics here
         # (selfhost single-tenant mint; fork card asked once, set-once).
@@ -2826,8 +2835,10 @@ async def provision_tenant(request: Request):
             {"name": org_name, "now": now},
             org_id=org_id)
         org_graph.query(_init_q, params=_init_p)
-        # #1686: journal the minted org_* graph (session sweep drops it).
-        _journal_append_product(graph_name)
+        if _minted_here:
+            # #1686: journal the org_* graph THIS call minted (session sweep
+            # drops it).
+            _journal_append_product(graph_name)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
