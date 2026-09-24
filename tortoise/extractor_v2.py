@@ -66,6 +66,7 @@ import warnings
 import weakref
 from typing import Any
 
+from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
@@ -523,6 +524,17 @@ def _classify_later_enabled() -> bool:
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
     review FIX B) and goes through the declared truthy contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
+
+
+def _vet_enabled() -> bool:
+    """#5005: the call-time S2.2 VET toggle.
+
+    Unset/0 → the gate is entirely off-path: the VET passes do not run, the
+    list is untouched, and the only result delta is the additive ``vet``
+    evidence key — matching the ``TORTOISE_CLASSIFY_LATER`` precedent
+    (``#1695`` Task 5), so the rate effect is measurable before it is trusted.
+    Value matching goes through the declared truthy contract (#4097)."""
+    return is_truthy(os.environ.get("TORTOISE_VET"))
 
 
 def _default_kind_classifier(model):
@@ -4801,13 +4813,60 @@ def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
             for i, t in enumerate(conversation) if t.get("content")]
 
 
+def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
+                  prior: dict | None = None
+                  ) -> tuple[dict, dict, list[str], dict]:
+    """One S2.2 VET pass (#5005) — never raises.
+
+    Returns ``(new_embed_list, stats, warnings, pool)``. On ANY failure the
+    input list is returned UNCHANGED with a warning: fail-open is the step's
+    stated failure policy (§4.2) — a wrong keep is noise, a wrong drop is
+    memory loss. `apply_vet` removes only explicit ``DISCARD`` outcomes, so the
+    no-arbiter path is a no-op on the list.
+
+    ``prior`` is the earlier pass's ``removal_pool`` (S2 → union). It is
+    **required for correctness, not cosmetic**: S4 runs between the two passes
+    and can reference an item the S2 pass removed, which a per-pass guard
+    cannot see. The returned ``pool`` is this pass's removals, to hand to the
+    next one.
+    """
+    if not embed_list:
+        return embed_list, {}, [], {}
+    try:
+        out = _vet_gate.vet_candidates(embed_list, narrative=narrative,
+                                       arbiter=arbiter)
+        new_list, apply_warnings = _vet_gate.apply_vet(
+            embed_list, out["decisions"], prior=prior)
+        stats = {
+            "stats": out["stats"],
+            "batch": out["batch"],
+            # the raw decisions ride the result so a discard is auditable and
+            # its counterfactual is recoverable (no silent discard).
+            "decisions": out["decisions"],
+        }
+        pool = _vet_gate.removal_pool(embed_list, new_list)
+        return (new_list, stats, list(out["warnings"]) + list(apply_warnings),
+                pool)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        return embed_list, {}, [
+            f"vet failed ({type(e).__name__}: {e}) — candidates kept "
+            "(fail-open)"], {}
+
+
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
                        session_date: str | None = None,
-                       kind_classifier=None) -> dict:
+                       kind_classifier=None,
+                       vet_arbiter=None) -> dict:
     """The v2 production entry: conversation → S1 (chunked+compiled) → S2 →
     S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
+
+    ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
+    decision-only model that answers *"should this candidate exist at all?"*.
+    None + ``TORTOISE_VET`` unset → VET is entirely off-path. When the flag is
+    on and no arbiter is injected, VET runs its mechanical Level-2 batch checks
+    and keeps every candidate (fail-open). See ``tortoise/vet_gate.py``.
 
     ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
     None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the
@@ -4877,6 +4936,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             classify_later = False
             errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_later_init_failed")
+    # #5005: S2.2 VET — off unless TORTOISE_VET (or an injected arbiter).
+    vet_enabled = vet_arbiter is not None or _vet_enabled()
+    vet_warnings: list[str] = []
     edus = _edus_from_conversation(conversation)
     if not edus:
         return {"session_id": session_id, "story_arc": "", "embed_list": {},
@@ -4894,6 +4956,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                                    "s2": {}, "union": {},
                                    "restamp_overrides": 0,
                                    "slot_rekeys": 0},
+                "vet": {"enabled": vet_enabled, "s2": {}, "union": {}},
                 "chain_enforcer": {"notes": [], "stats": {
                     "items_checked": 0, "violations": 0,
                     "rewired": 0, "warned": 0}}}
@@ -4949,6 +5012,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats, "s2")
         _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── S2.2 VET (#5005): the adversarial selection gate. Runs BEFORE the
+    # resolve/embed tail on every arm, and before the classify pass only under
+    # TORTOISE_CLASSIFY_LATER (with the flag off, S2.1 emits kinds inline — so
+    # the never-classified guarantee holds only on the classify-later arm).
+    # Fail-open: _run_vet_pass returns the list unchanged on any failure.
+    # Note the rebinding: with the flag on, ``result["s2_embed"]`` (set at the
+    # end of this function, commented "S2 raw (pre-S4)") is this pass's OUTPUT —
+    # the S2 embedding after VET, still pre-S4. With the flag off it is
+    # unchanged, which is the pre-existing behaviour.
+    vet_s2_stats: dict = {}
+    vet_s2_pool: dict = {}
+    if vet_enabled and embed_list:
+        embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
+            embed_list, story, arbiter=vet_arbiter)
+        vet_warnings.extend(_w)
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
     # domain items the core-only S2 emitted as "unclassified" get their
@@ -5022,6 +5101,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats, "s4")
         _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── S2.2 VET — post-S4 union pass (#5005), the authoritative one. S4 is a
+    # second extraction pass (the live ``run_s4`` gap-filler — distinct from
+    # the design's REMOVED "S4 — granularity review"; see the G5 record in the
+    # module docstring), so VET runs again on the union to gate what S4 added.
+    # ``vet_s2_pool`` carries the S2 pass's removals forward: without it, an
+    # operator S4 re-added against an S2-discarded item would be re-minted by
+    # execute_embed, and an entity S4 started referencing would 422 the
+    # session. The union list is re-vetted wholesale rather
+    # than as a delta because merge_embed_lists rewrites/reorders it — the S2
+    # verdict ids (which are positional) do not describe the union's items.
+    vet_union_stats: dict = {}
+    if vet_enabled and complete_list:
+        complete_list, vet_union_stats, _w, _ = _run_vet_pass(
+            complete_list, story, arbiter=vet_arbiter, prior=vet_s2_pool)
+        vet_warnings.extend(_w)
 
     # ── classify-later post-merge pass (#1695 Task 5): E4 + kind-preservation
     # re-stamp → classify(union, kind-missing only) → slot re-key. The S2
@@ -5181,6 +5276,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         "restamp_overrides": restamp_overrides,
         "slot_rekeys": slot_rekeys,
     }
+    # #5005: the S2.2 VET evidence surface (additive — an empty block when the
+    # flag is off). The off-path delta is exactly this key: the embed list and
+    # every downstream payload byte are unchanged when the flag is off.
+    result["vet"] = {
+        "enabled": vet_enabled,
+        "s2": vet_s2_stats,
+        "union": vet_union_stats,
+    }
+    if vet_warnings:
+        result["warnings"] = vet_warnings + (result.get("warnings") or [])
     if classify_later:
         # the unclassified terminal is resolved at write (execute_embed's
         # sentinel repair) — count it in the census. The UNION pass

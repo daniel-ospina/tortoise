@@ -974,6 +974,7 @@ surfaces:
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
+  - test_vet_gate_5005.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
