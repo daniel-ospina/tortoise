@@ -96,12 +96,10 @@ name: ai-review-gate
 # equals this PR's diff at check time. The binding between a recorded sha and
 # the diff actually reviewed is enforced by record-review.sh's stale-sha guard,
 # not here. The producer half (agent-infra PR #767) SHIPPED and closed that gap
-# producer-side (#784): on BOTH arms where a stale sha cannot be shown
-# unchanged — the `--force-stale` override and the head-fetch fail-open arm —
+# producer-side (#784): in the `--force-stale` and head-fetch fail-open arms
 # record-review.sh drops the diff binding (`DIFF_HASH=""`), so the marker
-# degrades to the legacy sha-only shape and rule (b) cannot carry it; only the
-# strict sha path applies and the gate keeps rejecting until re-recorded at the
-# current head. Do NOT add a
+# degrades to the legacy sha-only shape and rule (b) cannot carry it.
+# Do NOT add a
 # "recorded sha is an ancestor of head" bound here: the repo's documented
 # refresh path is `git rebase origin/main` (sha rewritten, three-dot diff
 # byte-identical when the rebase does not reconcile main into the PR's files),

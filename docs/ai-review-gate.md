@@ -29,7 +29,9 @@ green.
   ```
 
   The second form is emitted when the PR diff can be fetched from the REST
-  API. The `diff=<sha256>` segment is optional (added producer-side by #2982)
+  API and the stale-sha guard has not degraded the record to the legacy
+  sha-only shape (see the arms in the producer-status note below).
+  The `diff=<sha256>` segment is optional (added producer-side by #2982)
   and is part of the SIGNED text — it binds the review to the PR's three-dot
   diff, so a review stays tied to the reviewed artifact rather than only the
   commit sha. It is **defined** to be the post-normalization digest (#1362);
@@ -41,7 +43,8 @@ green.
   > **Producer status.** The `diff=` form ships in the producer half of #2982
   > (`record-review.sh` in agent-infra, PR #767), which **is deployed** (merged
   > 2026-09-23; the installed `~/.pi/agent/scripts/record-review.sh` is
-  > byte-identical to agent-infra `main` and emits `diff=<raw sha256>`). The
+  > byte-identical to agent-infra `main` and emits `diff=<raw sha256>` on its
+  > normal path). The
   > **raw** digest is therefore the live stale-sha carry-forward arm; the
   > **normalized** digest stays inert until the #1362 producer half
   > (agent-infra#1431) lands *and* the farm refreshes
@@ -166,13 +169,10 @@ time. The binding between a recorded sha and the diff actually reviewed is
 enforced by `record-review.sh`'s stale-sha guard, not by the gate.
 
 The producer half (agent-infra PR #767) is deployed and closes this gap
-producer-side (agent-infra#784, closed): on BOTH arms where a stale sha cannot
-be shown unchanged — the `--force-stale` override and the head-fetch fail-open
-arm — `record-review.sh` drops the diff binding (`DIFF_HASH=""`), so the marker
-degrades to the legacy sha-only shape and rule (b) cannot carry it. A marker
-minted through either arm is therefore rejected by the strict sha path until it
-is re-recorded at the current head; the gate cannot tell which revision a
-reviewer saw (see the note above).
+producer-side (agent-infra#784, closed): in the `--force-stale` and head-fetch
+fail-open arms `record-review.sh` drops the diff binding (`DIFF_HASH=""`), so
+the marker degrades to the legacy sha-only shape and rule (b) cannot carry it —
+the gate still cannot tell which revision a reviewer saw (see the note above).
 
 Do **not** "fix" it here by requiring the recorded sha to be an ancestor of the
 current head: this repo's documented refresh path is `git rebase origin/main` +
