@@ -2021,13 +2021,27 @@ def _get_kind_expander():
 def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     """Attach promoted epistemic state (D8) to embedded-fallback hits — one
     batch fetch (#1353, E5 #1537). Additive, mirroring SearchResult.to_dict:
-    keys are set ONLY when the state is non-empty, so a graph with no
-    CORRECTS edges renders byte-identically to today. Decoration must never
-    break retrieval — a graph failure returns the hits undecorated."""
+    a key is added only when its state field is present — except for #4889's
+    ``subject_unavailable``, which is written when the state is *empty* on a
+    graph that cannot carry ``aboutSubject`` (the loud half of a read surface
+    that would otherwise be silently empty). Decoration must never break
+    retrieval — a graph failure returns the hits undecorated.
+
+    #4889: the degraded fallback is a Point-only surface that advertises the
+    same promoted-state fields as the primary path, so it owes the same
+    ``subject`` decoration AND the same fail-loud contract. Before this, a
+    fallback hit carried no ``subject`` at all even on a graph with a producer,
+    and no ``subject_unavailable`` when the binding was dead — the exact
+    silent-absence shape #4889 removes on the primary path.
+    """
     if not results:
         return results
     try:
-        from tortoise.search_engine import fetch_point_epistemic_state
+        from tortoise.search_engine import (
+            SUBJECT_BINDING_UNAVAILABLE,
+            fetch_point_epistemic_state,
+            subject_binding_available,
+        )
         state = fetch_point_epistemic_state(graph, [r["id"] for r in results])
     except Exception:
         _logger.warning("embedded fallback decoration failed — returning "
@@ -2045,6 +2059,17 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
                 r[key] = st[key]
+        # #4889: same additive subject field as SearchResult.to_dict.
+        if st.get("subject"):
+            r["subject"] = st["subject"]
+    # #4889: the same fail-loud marker as the primary path — only when the
+    # whole batch resolved no subject AND the graph cannot carry one for
+    # Points/Events. Fail-open (the probe returns True on any error), so a
+    # broken probe never fabricates an unavailability claim.
+    if not any(r.get("subject") for r in results) \
+            and not subject_binding_available(graph):
+        for r in results:
+            r["subject_unavailable"] = SUBJECT_BINDING_UNAVAILABLE
     return results
 
 
@@ -2156,6 +2181,71 @@ def _index_no_network_enabled() -> bool:
     delegates here), so the declared truthy contract has one place to assert.
     """
     return env_flag("TORTOISE_INDEX_NO_NETWORK", False)
+
+
+def _holds_role_available(graph) -> bool:
+    """True when this graph can carry ``holdsRole`` edges at all (#4889).
+
+    ``get_org_structure`` returns ``roles`` from a ``holdsRole`` traversal
+    whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``. That predicate has
+    **no producer anywhere in the tree** — every reference is an edge
+    allow-list, the read query itself, or an explicit
+    ``create_edge``/``create_entity`` caller. On a graph where it is absent the
+    empty ``roles`` list is structural, not a finding, so the method says so
+    instead of returning an unqualified empty result.
+
+    The probe counts the SAME shape the read traverses (``Subject`` source and
+    target), so a hand-written non-Subject ``holdsRole`` edge cannot suppress
+    the marker while ``roles`` stays permanently empty — the same asymmetry
+    ``search_engine._SUBJECT_SOURCE_SCOPED_PROBE`` fixes for ``aboutSubject``.
+    Bounded by ``_HOLDS_ROLE_PROBE_TIMEOUT_MS``.
+
+    Mirrors ``search_engine.subject_binding_available``: **fail-OPEN** — a probe
+    error returns True so a broken probe can never invent an unavailability
+    claim. Self-clears the moment a ``holdsRole`` edge of that shape exists.
+    """
+    try:
+        rows = graph.query(
+            _HOLDS_ROLE_SCOPED_PROBE,
+            timeout=_HOLDS_ROLE_PROBE_TIMEOUT_MS).result_set
+        if not rows or not rows[0]:
+            _logger.warning(
+                "holdsRole availability probe returned no row — assuming "
+                "available")
+            return True
+        count = rows[0][0]
+        if count is None:
+            _logger.warning(
+                "holdsRole availability probe returned a null count — "
+                "assuming available")
+            return True
+        return int(count) > 0
+    except Exception:  # fail-open, see docstring
+        _logger.warning(
+            "holdsRole availability probe failed — assuming available",
+            exc_info=True)
+        return True
+
+
+#: The exact ``holdsRole`` shape ``get_org_structure`` traverses. Scoping the
+#: probe to it is what keeps a non-Subject ``holdsRole`` edge from suppressing
+#: the marker on a graph where ``roles`` can never be populated.
+_HOLDS_ROLE_SCOPED_PROBE = (
+    "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)")
+
+#: Bound for the availability probe — the same 200 ms class as the search
+#: assembly's decoration bound. An unbounded count on a read path is the
+#: defect this probe must not reintroduce.
+_HOLDS_ROLE_PROBE_TIMEOUT_MS = 200
+
+
+#: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returns
+#: when the ``holdsRole`` leg has no producer on this graph.
+HOLDS_ROLE_UNAVAILABLE = (
+    "holdsRole has no producer anywhere in the tree — only an explicit "
+    "create_edge/create_entity caller — so 'roles' is structurally empty "
+    "rather than a finding about this Subject."
+)
 
 
 class TortoiseSDK:
@@ -13960,6 +14050,7 @@ class TortoiseSDK:
             fetch_point_epistemic_state, fallback_tfidf,
             SearchResult, SearchScores,
             search_provenance_enabled,
+            subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
             _recency_factors,
@@ -14648,6 +14739,21 @@ class TortoiseSDK:
                 captured_at=pt.get("captured_at", ""),
             )
             results.append(result)
+
+        # #4889: make a structurally-empty Subject layer loud instead of
+        # letting an absent ``subject`` key read as "these points have no
+        # subject". One probe, and ONLY when the whole batch resolved no
+        # subject — a mixed batch needs no marker (the field is working).
+        # Fail-open by construction: ``subject_binding_available`` returns
+        # True on any probe error, so a broken probe never fabricates an
+        # unavailability claim. This sits in the advertising surface only;
+        # ``fetch_point_epistemic_state`` itself stays single-query, so the
+        # shared assembly's query budget is untouched.
+        if (entity_type == "point" and results
+                and not any(r.subject for r in results)
+                and not subject_binding_available(graph)):
+            for r in results:
+                r.subject_unavailable = SUBJECT_BINDING_UNAVAILABLE
 
         # 9. Order results
         if order_by == "graph":
@@ -20922,7 +21028,21 @@ class TortoiseSDK:
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:
-        """Return organisational structure: members, roles, sub-orgs."""
+        """Return organisational structure: members, roles, sub-orgs.
+
+        #4889: ``roles`` is read from ``holdsRole``, which has no producer
+        anywhere in the tree (only an explicit ``create_edge``), so on a
+        graph that never wrote one the empty list is structural. The
+        additive ``unavailable`` map names the producer-less leg(s) — it is
+        emitted only while the predicate is absent, so the default shape
+        (and every graph that holds a ``holdsRole`` edge) is unchanged.
+
+        ``members`` is deliberately NOT marked: ``memberOf`` has a real
+        producer (``onboarding/seed.py::seed_onboarding_anchors``, reached
+        from hosted onboarding and the ``tortoise_onboarding_seed`` tool), so
+        an empty list there means no membership was filed — a finding, not a
+        gap.
+        """
         proj = self._get_proj()
         # Issue #327: labeled Subject start (id|name OR both indexed -> Index
         # Scan) then traverse outward; roles filters the source Subject p.
@@ -20936,10 +21056,17 @@ class TortoiseSDK:
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )
-        return {
+        out = {
             "members": [dict(row[0]) for row in members.result_set],
             "roles": [dict(row[0]) for row in roles.result_set],
         }
+        if not roles.result_set and not _holds_role_available(proj.g):
+            # Additive (#4889): the loud half of a producer-less read leg.
+            # Gated on ``roles`` being EMPTY so the marker's own claim
+            # ("'roles' is structurally empty") can never contradict a
+            # non-empty list under a concurrent edge delete.
+            out["unavailable"] = {"roles": HOLDS_ROLE_UNAVAILABLE}
+        return out
 
     def ulid(self) -> str:
         from .ids import ulid as _ulid
