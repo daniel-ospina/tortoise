@@ -507,7 +507,7 @@ While checking D10, a separate defect surfaced and it may be the more consequent
 
 ---
 
-### 9.6 ⭐ A source is VERSIONED — and the version lives on the extraction link (owner ruling, 2026-09-24)
+### 9.6 ⭐ A source is VERSIONED — and the version lives on the extraction link as `sourceVersion` (owner ruling, 2026-09-24)
 
 The owner raised the gap the D10 pass left open: *"shouldn't we have some form of version tracking for sources? at least to know if they changed and we might need to re-infer the Entities and check they're not superseded in a new version of a doc."* The answer is **yes**, and the model is now stated in `ONTOLOGY.md` §4.6 (`v3.15`). This section records **why it costs what it costs** — a storage question, and therefore this section's.
 
@@ -531,10 +531,10 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 #### ⭐ The missing piece, in one line
 
-**`extractedFrom` records the SOURCE, not the source VERSION.** Identity is not version. Without the version on the link:
+**`extractedFrom` records the SOURCE, not the source VERSION.** Identity is not version. **The version rides on the link itself, as `sourceVersion`** — the `contentHash` of the version that was read (per-link, since `extractedFrom` is many→many; `ONTOLOGY.md` §4.6). Without the version on the link:
 
 - *"are these entities **trustworthy**?"* → answerable (confidence, no NAND, not superseded — already a read);
-- *"are these entities **about the content we currently hold**?"* → needs the version, and since there is **one node per `url`** the anchor must sit on the **LINK**, not on a version node.
+- *"are these entities **about the content we currently hold**?"* → needs the version, and since there is **one node per `url`** the anchor must sit on the **LINK** — as **`sourceVersion`** — not on a version node.
 
 **Both are reads; only one has an anchor.** That is the whole gap — and it is why the fix is a field on an edge, not a new subsystem.
 
@@ -1072,7 +1072,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §12.1b unindexed embeddings | ⭐ **`#4997`** | **only `:Point` has a vector index; `Object`/`Event` full-scan and report `ok`; 19 MB stored unindexed** |
 | §12.2c vector vs traversal | ⭐ **`#4997`** · `#2730` | **the entity vector is an ENTRY/RESOLUTION key, never the reasoning mechanism — and our Objects have no description to embed** |
 | §9.4 source summary vector | — | **needs a ruling (V2); `Source` already carries `summary`, `topics`, `url`, `contentHash`** |
-| §9.6 source versioning | — | **the version must be recorded on the extraction link**; a version costs **three timestamps + a hash** (D30 keeps content out of the graph) — **bound it: windows and hashes only, never content copies** |
+| §9.6 source versioning | — | **the version must be recorded on the extraction link as `sourceVersion`**; a version costs **three timestamps + a hash** (D30 keeps content out of the graph) — **bound it: windows and hashes only, never content copies** |
 
 **Not yet filed from this document (candidates, not decisions):**
 

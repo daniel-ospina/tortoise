@@ -325,16 +325,18 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 #### ⭐ The version model — and the one thing S6 must do (owner ruling, 2026-09-24)
 
-**`extractedFrom` records the SOURCE, not the source VERSION.** Identity (`url`) is not version (`contentHash`). Without the version on that edge, *"are these entities current?"* is **unanswerable from the graph** — *"are they trustworthy?"* is answerable today (confidence, NAND, supersession), but *"are they about the content we now hold?"* is not. **Both are reads; only one has an anchor.**
+**`extractedFrom` records the SOURCE, not the source VERSION.** Identity (`url`) is not version (`contentHash`). **The version rides on the link as `sourceVersion`** — and it is **per-link**, because `extractedFrom` is many→many. Without the version on that edge, *"are these entities current?"* is **unanswerable from the graph** — *"are they trustworthy?"* is answerable today (confidence, NAND, supersession), but *"are they about the content we now hold?"* is not. **Both are reads; only one has an anchor.**
 
-**S6's obligation, in one line:** when a run writes derived nodes, it must **record the version it read on the extraction link.** That is the whole extractor-side change — and it is cheap, because D30 keeps content out of the graph, so a version costs **three timestamps and a hash**.
+**S6's obligation, in one line:** when a run writes derived nodes, it must **record the version it read on the extraction link, as `sourceVersion`** (`ONTOLOGY.md` §4.6) — the `contentHash` of the version read. That is the whole extractor-side change — and it is cheap, because D30 keeps content out of the graph, so a version costs **three timestamps and a hash**.
+
+**⚠️ Scope of the anchor — it is a Point-level guarantee.** `sourceVersion` rides on `extractedFrom`, which is declared `Point → Source`. Derived **Events and Objects reach their source through their own links**, not through `extractedFrom`, so **a class whose provenance does not pass through an `extractedFrom` link is not version-scoped** — it carries no recorded version read, and *"is this current?"* cannot be answered for it. Whether that gap should close (and on which link) is **open**, not assumed solved.
 
 | Rule | Statement |
 |---|---|
 | Identity | `url` — stable across versions |
 | Version | `contentHash` — identifies a **version** of that identity |
 | Raw content | **append-only** — a differing hash on re-fetch is a **new version, never an edit** |
-| Extraction | **version-scoped** — the version read is recorded on the extraction link |
+| Extraction | **version-scoped** — the version read is recorded on the extraction link as **`sourceVersion`** |
 | Version change | appends a **journal record** that **closes** the current version's window and opens the new one — never an overwrite |
 
 **⭐ One node per `url` — the version history lives in the journal, and what is superseded is the FACTS.** `:Source` MERGEs on `url`, so exactly one node per source carries the **current** version; a version change creates no second node and rewrites no older one. No Source→Source supersession edge exists or is needed: successor facts attach to the standing `:Source` (`extractedFrom` is keyed by `url`), and the earlier facts are replaced through the ordinary `CORRECTS` mechanism. **The source is the identity; the entities are the belief.**
