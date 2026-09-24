@@ -1936,6 +1936,42 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             "a skipped need is not a failure (docs-only PRs skip the matrix)")
 
 
+def test_required_gate_excludes_the_long_legs():
+    """The required check's `needs` IS the merge-path critical path.
+
+    This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
+    (strict up-to-date protection + `gh pr merge --auto --merge`, see
+    commit-workflow `04-merge-deploy.md`), so `python-ci-gate` going green is
+    what releases the merge — the workflow run does not have to finish. When
+    the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
+    ~30m on a green run, against a ~20m main-merge cadence) the head went
+    BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
+    must NOT depend on the >15m legs, and those legs must still EXIST — they
+    move out of the gate, they are not deleted: they keep running pre-merge
+    (advisory) and post-merge on main. A future edit that re-adds one silently
+    restores the latency this change removes.
+
+    Keeping them running on the PR lane (rather than skipping them there) is
+    deliberate and belongs to the same contract: the `--admin` rail requires
+    the PR lane to EXECUTE every test shard main's lane executes
+    (`scripts/admin-merge.sh` lane parity, tortoise #4263/#4457) — a `skipped`
+    shard is not coverage — so a push-only leg would make every `--admin` merge
+    refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
+    """
+    jobs = _load_python_ci()["jobs"]
+    needs = set(jobs["python-ci-gate"].get("needs") or [])
+    for leg in ("test", "test-slow", "test-carve-out"):
+        assert leg in jobs, (
+            f"{leg} must still RUN — the latency fix removes it from the "
+            "required aggregate, it does not delete the leg")
+        assert leg not in needs, (
+            f"{leg} is a >15m leg; putting it back in `python-ci-gate.needs` "
+            "re-adds the ~30m merge-path latency this change removes")
+    assert "manifest-integrity" in needs, (
+        "the required aggregate must still include the manifest drift gate, "
+        "or a drift stops blocking merges (#2656)")
+
+
 # ── #2938: surface audit (report-only) ───────────────────────────────────
 # The audit must resolve what the rejected mechanical derivation could not:
 # package-level imports, `tortoise/api.py` (absent from SOURCE_PATTERNS),

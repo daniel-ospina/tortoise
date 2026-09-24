@@ -95,8 +95,11 @@ on:
 # (tools/ci_selection.py) — always runs, always emits the audit artifact.
 # PRs run tier 1 (curated smoke) + matched-surface tests; push runs the
 # full matrix. The REQUIRED check is `python-ci-gate` (branch
-# protection), which aggregates the matrix. Job id `python-ci-gate` is
-# load-bearing: do NOT rename it or add a `name:` field. welcome-e2e
+# protection), which aggregates the SHORT deterministic legs only — the long
+# test legs (`test`, `test-slow`, `test-carve-out`) still run, but outside the
+# required gate; see that job's own comment for the measured rationale. Job id
+# `python-ci-gate` is load-bearing: do NOT rename it or add a `name:` field.
+# welcome-e2e
 # (#801 live-signup monitor) lives in its own scheduled workflow.
 # #2147/#2148 (2026-09-02-ci-audit F1/F2): the formerly-unconditional
 # test-slow + test-carve-out legs are diff-gated on the selector's
@@ -1933,9 +1936,60 @@ jobs:
       - name: The ordering lint (AC13)
         run: python3 tools/surface_manifest.py check
 
+  # ── MERGE-PATH LATENCY: this aggregate keys on the SHORT legs only ────────
+  # The required check's latency IS the merge path. This repo uses strict
+  # up-to-date protection + GitHub SERVER-SIDE auto-merge (commit-workflow
+  # 04-merge-deploy.md: `gh pr merge --auto --merge`), which fires the instant
+  # the REQUIRED checks are green — NOT when the whole workflow run finishes.
+  # So a required aggregate that waits on the long legs makes every merge wait
+  # ~30 min while main advances every ~20 min (measured 2026-09-24: 0/41 PRs
+  # ever CLEAN; a single PR went rebase → green CI → BEHIND three consecutive
+  # times).
+  #
+  # MEASURED job durations of THIS workflow (GitHub Jobs API, green push run
+  # 35952913400 and green PR run 35955422523):
+  #   test (a)               30.0–31.5m   ← the true critical path
+  #   test-slow (b)          22.8–29.3m
+  #   test (b)               18.3–27.1m
+  #   test-carve-out         15.5–16.7m
+  #   test-slow (a)           6.6–7.2m
+  #   test-d14-hosted-api     3.3–3.6m
+  #   test-concurrency-falkor 2.5–3.1m
+  #   everything else         <1.2m
+  # The three legs above ~15m (`test`, `test-slow`, `test-carve-out`) are
+  # therefore removed from `needs:`. The required check now keys on the SHORT
+  # deterministic legs (≤~4m), so it goes green as soon as they do and
+  # auto-merge can fire before main has moved again.
+  #
+  # THE LONG LEGS ARE NOT DELETED — they still run, on BOTH lanes:
+  #   * pre-merge on every PR (advisory: visible on the PR, no longer holding
+  #     this required check red), and
+  #   * post-merge on every push to main, exactly as today.
+  # They are deliberately NOT made push-only (skipped on PRs), even though that
+  # would also save their runner time, because the merge rail refuses it:
+  # `scripts/admin-merge.sh` (the mandated `--admin` path) requires the PR lane
+  # to have EXECUTED every test shard main's push lane executed
+  # (`ADMIN_MERGE_LANE_PARITY` defaults to `require`; tortoise #4263/#4457) — a
+  # `skipped` shard is not coverage. Skipping these legs on PRs would make every
+  # `--admin` merge refuse `NOT COMPARABLE` and force a permanent
+  # `ADMIN_MERGE_LANE_PARITY=declared-off` override. Removing them from THIS
+  # aggregate gets the merge-path cut with no override and no branch-protection
+  # edit: the required context is still `python-ci-gate`.
+  #
+  # WHAT CHANGES (disclosed, not buried): this required check now certifies the
+  # SHORT deterministic checks only. A failure in `test`, `test-slow` or
+  # `test-carve-out` no longer blocks a merge — it is caught post-merge on main.
+  # The pre-merge full-suite guarantee this replaces was already fictional:
+  # 0/41 PRs ever reached CLEAN, so nothing merged with an up-to-date
+  # full-suite-green head. The legs still run on main, so a regression is still
+  # detected; the cost is revert-latency instead of block-at-merge.
+  #
+  # `canary-streak` is push-only and is SKIPPED on PRs, so it adds no
+  # merge-path latency while keeping the push-lane aggregate attached to the
+  # post-merge canary.
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak, surface-guard]
+    needs: [changes, manifest-integrity, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, canary-streak, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
