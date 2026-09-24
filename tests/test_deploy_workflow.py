@@ -585,18 +585,38 @@ def test_deploy_jobs_audit_every_bypassable_gate():
         for step in job.get("steps", []):
             if "deploy-bypass.sh audit" in (step.get("run") or ""):
                 audits[job_name] = step
-    assert set(audits) == {"deploy-api", "post-deploy-verify"}, (
-        f"both deploy jobs must audit their bypassable gates, got {sorted(audits)}"
-    )
-    named: list[str] = []
+    per_job: dict[str, set[str]] = {}
     for job_name, step in audits.items():
         assert step.get("if") == "always()", f"{job_name} audit must run on failure too"
         run = step["run"]
         assert not re.search(r"\$\{\{\s*vars\.", run), (
             "audit values must be env-bound, not interpolated"
         )
-        named += re.findall(r'--state\s+"?([A-Z0-9_]+)=', run)
-    assert sorted(named) == sorted(key for key, *_ in _bypass_gates()), (
+        per_job[job_name] = set(re.findall(r'--state\s+"?([A-Z0-9_]+)=', run))
+    # The per-JOB mapping, not the flattened union. A union cannot see a gate
+    # MOVE between jobs — swapping the four `--state` lines across the two
+    # audits leaves the multiset identical, so the guard passes while
+    # `post-deploy-verify`'s audit stops stating its own gate and starts
+    # claiming one it does not hold (exactly the #4538 DB-health move).
+    expected_jobs = {
+        "deploy-api": {
+            "SKIP_PACK_SMOKE",
+            "SKIP_FLY_MACHINES_GUARD",
+            "SKIP_FLY_SECRET_PROVENANCE",
+        },
+        "post-deploy-verify": {"SKIP_DB_HEALTH_GATE"},
+    }
+    assert set(audits) == set(expected_jobs), (
+        f"both deploy jobs must audit their bypassable gates, got {sorted(audits)}"
+    )
+    assert per_job == expected_jobs, (
+        f"each job's audit must name exactly the bypassable gates THAT JOB holds — got "
+        f"{ {k: sorted(v) for k, v in per_job.items()} }, expected "
+        f"{ {k: sorted(v) for k, v in expected_jobs.items()} }. A flattened union cannot "
+        "see a gate moving between jobs (#4538)."
+    )
+    all_named = set().union(*per_job.values())
+    assert all_named == {key for key, *_ in _bypass_gates()}, (
         "every bypassable gate must be named by exactly one job's audit"
     )
 

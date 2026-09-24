@@ -325,7 +325,7 @@ cmd_audit() {
 # The scheduled machine check. Reads the four lanes out of the `vars` context
 # (no API, no token scope) and ages each one that is set.
 cmd_expiry() {
-  local window='' today='' violations=0 key row value set_at set_at_var
+  local window='' today='' violations=0 key row value value_lc set_at set_at_var
   local age state note
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -350,8 +350,18 @@ cmd_expiry() {
     # `vars` context into this step's env.
     value="${!key-}"
     set_at="${!set_at_var-}"
+    # ⛔ GitHub's expression `==` compares strings CASE-INSENSITIVELY, so the
+    #    workflow lanes (`vars.SKIP_* == 'true'`) fire on `TRUE`/`True` exactly
+    #    as on `true`. This monitor must match the ENGINE, never the other way:
+    #    a case-sensitive test here reads `TRUE` as "armed (not set)", leaves
+    #    violations=0, goes green forever — and instructs the operator to
+    #    delete the only record the bypass could be aged from, while the same
+    #    run's deploy summary says BYPASSED. That disagreement IS the
+    #    "a failure looks like its success" defect this helper exists to
+    #    remove, so normalise the lane before testing it.
+    value_lc="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
 
-    if [ "$value" != 'true' ]; then
+    if [ "$value_lc" != 'true' ]; then
       if [ -n "$set_at" ]; then
         printf '::warning::%s is not set (gate is ARMED) but %s=%s is left behind — delete the stale date: gh variable delete %s\n' \
           "$key" "$set_at_var" "$set_at" "$set_at_var" >&2

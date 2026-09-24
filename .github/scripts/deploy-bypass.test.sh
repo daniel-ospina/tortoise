@@ -290,11 +290,25 @@ assert_eq "${r%%|*}" "0" "window control: 2 days is fine at the default window"
 r="$(SKIP_PACK_SMOKE=true SKIP_PACK_SMOKE_SET_AT=2026-09-20 run_expiry --today 2026-09-22 --window-days 1)"
 assert_eq "${r%%|*}" "1" "window control: the same 2 days violates --window-days 1"
 
-# 29. the lane comparison is the workflow's EXACT `== 'true'` — `TRUE`/`1` are
-#     NOT bypasses, so the check can never disagree with what bypasses.
+# 29. the lane test must MATCH the engine. GitHub's expression `==` compares
+#     strings case-INSENSITIVELY, so `TRUE` DOES bypass the gate and the monitor
+#     must age it: a case-sensitive test here reads it as "armed (not set)",
+#     returns green, and tells the operator to delete the only record of the
+#     bypass while the deploy summary says BYPASSED — the exact
+#     failure-looks-like-success defect #4759 removes. Only the string `true`,
+#     ANY CASING, is a bypass; `1` genuinely is not.
 r="$(SKIP_PACK_SMOKE=TRUE SKIP_PACK_SMOKE_SET_AT='' run_expiry --today 2026-09-22)"
-assert_eq "${r%%|*}" "0" "expiry: 'TRUE' is not a bypass (exact match with the workflow lane)"
-assert_contains "${r#*|}" "\`SKIP_PACK_SMOKE\` — armed (not set)" "expiry: 'TRUE' reads as armed"
+assert_eq "${r%%|*}" "1" "expiry: 'TRUE' IS a bypass (GitHub compares case-insensitively) — exits 1"
+assert_contains "${r#*|}" "bypass set with NO start date" "expiry: 'TRUE' with no start date is a violation, not 'armed'"
+r="$(SKIP_PACK_SMOKE=TRUE SKIP_PACK_SMOKE_SET_AT=2026-01-01 run_expiry --today 2026-09-22)"
+assert_eq "${r%%|*}" "1" "expiry: 'TRUE' is aged like 'true' — exits 1 past the window"
+assert_contains "${r#*|}" "past the 7-day window" "expiry: 'TRUE' past the window is a VIOLATION"
+
+# 29b. ...and the normalisation is only about CASING: `1` is not the string
+#      "true", so it stays a non-bypass (and stays on the armed branch).
+r="$(SKIP_PACK_SMOKE=1 SKIP_PACK_SMOKE_SET_AT='' run_expiry --today 2026-09-22)"
+assert_eq "${r%%|*}" "0" "expiry: '1' is NOT a bypass"
+assert_contains "${r#*|}" "\`SKIP_PACK_SMOKE\` — armed (not set)" "expiry: '1' reads as armed"
 
 # 30. a bad --today / --window-days is a usage error, never a silent pass.
 rc=0
@@ -317,7 +331,7 @@ assert_eq "$(grep -cE 'check-fly-(machines-guard|secret-drift)\.py|deploy-health
 echo "──────────────────────────────────────────"
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=76
+expected_assertions=80
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

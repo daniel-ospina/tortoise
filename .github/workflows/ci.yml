@@ -719,7 +719,7 @@ jobs:
 
   deploy-bypass-report:
     needs: changes
-    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4759: deploy-bypass surface only
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4759: any monitor/deploy-gate surface (shared watchdog_scripts group)
     # #4759: the bypass reporter / expiry helper's harness. Self-contained: no
     # network, no gh — every input is an argument or an env binding, exactly as
     # the workflow supplies them. It proves a bypass lands in
