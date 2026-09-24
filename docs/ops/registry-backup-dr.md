@@ -32,8 +32,14 @@ session only; keys stay revoked). The default graph can never be deleted.
 
 **Purge** (physical erasure) runs on demand via the internal endpoint:
 
-    curl -X POST $API/v1/internal/backups/purge \
-      -H "Authorization: Bearer $INTERNAL_KEY"
+    curl -m 300 -X POST $API/v1/internal/backups/purge \
+      -H "Authorization: Bearer $INTERNAL_KEY" \
+      -H "Content-Type: application/json"
+    # -m 300: /v1/internal/ is exempt from the app's 10 s transport wait bound
+    # (#4939), so THIS timeout is the only bound on the request. Always pass one.
+    # The JSON Content-Type is NOT what makes the body parse (the handler parses
+    # whatever is there) but send it anyway — a body sent without it is exactly
+    # how the mirror check below silently read the wrong bucket once.
     # optional {"grace_days": N} (1..365) for drills; default 7
 
 Per expired tombstone (deleted_at <= now - 7d; legacy tombstones with no
@@ -250,10 +256,10 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 
 ### Verify (operator runbook)
 
-1. Config contract present: `curl $API/v1/internal/backups/status` (internal
+1. Config contract present: `curl -m 20 $API/v1/internal/backups/status` (internal
    key) → `lock` block shows `enabled:true`; without `CF_API_TOKEN` it shows
    `status:unverifiable` — verify with (2)/(3) instead.
-2. Live drift check: `curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+2. Live drift check: `curl -m 60 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
    $API/v1/internal/backups/verify-lock` → expect `"status":"verified"`
    (`drift`/`absent` = the rule is missing or shorter than `BACKUP_LOCK_DAYS`).
 3. Rule-list check (no app/token needed): `npx wrangler r2 bucket lock list
@@ -271,8 +277,17 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
    confirm the sweep prune logs "bucket-locked … skipping" for in-window
    objects and still prunes the rest, and that an in-window object is pruned
    normally once the window passes.
-6. Mirror check: `curl … /v1/internal/backups/verify-lock -d '{"account_id":"<R2_MIRROR_ACCOUNT_ID>","bucket":"<R2_MIRROR_BUCKET>"}'`
-   (same rule must protect the mirror).
+6. Mirror check: `curl -m 60 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+   -H "Content-Type: application/json" \
+   $API/v1/internal/backups/verify-lock -d '{"account_id":"<R2_MIRROR_ACCOUNT_ID>","bucket":"<R2_MIRROR_BUCKET>"}'`
+   (same rule must protect the mirror). **Check the response's `bucket` field is
+   the MIRROR, not the primary** — a body that does not reach the handler falls
+   back to the primary bucket and still returns 200, which reads as a pass.
+
+> ⚠️ Every `/v1/internal/` curl in this runbook carries an explicit `-m`. The
+> app's 10 s transport wait bound does **not** cover this prefix (#4939), so the
+> client's own `--max-time` is the only bound — a command without one hangs with
+> nothing printed instead of refusing legibly.
 
 ### Residuals (recorded with this decision)
 - A guard-rejected archive (P0 / empty / data-loss) whose immediate delete is
@@ -582,7 +597,7 @@ uv run python tools/rotate-backup-keys.py --role registry_stream \
 fly deploy --app tortoise-y4mjjq
 # 3. VERIFY the rotation run: drill the OLDEST archive (must restore with
 #    the RETAINED key — in-app, no manual decryption):
-#      curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+#      curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
 #        -H "Content-Type: application/json" \
 #        -d '{"org_id":"<team>","backup_key":"backups/<team>/.../dump.enc"}' \
 #        https://api.premiselabs.co/v1/internal/backups/drill
@@ -616,7 +631,7 @@ post-overlap. Point the app at the store with `BACKUP_KEY_STORE=file` +
 **Verification (operator, post-setup):**
 ```bash
 # Trigger a drill against the oldest archive to confirm the key works:
-curl -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+curl -m 900 -sS -X POST -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"org_id":"<team>","backup_key":"backups/<team>/.../dump.enc"}' \
   https://api.premiselabs.co/v1/internal/backups/drill
