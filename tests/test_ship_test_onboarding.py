@@ -1128,14 +1128,45 @@ class _FakeRequester:
 
 
 class _FakeBrowser:
-    def __init__(self, ctx):
+    """The real `Browser`: `close()` closes the browser AND everything it owns — a
+    context still open is force-closed (`ctx_reaped#<serial>`), not leaked — and a
+    second `close()` has no effect (a launched browser re-sends and swallows the
+    target-closed error). Contexts are tracked so the force-close is VISIBLE and
+    distinguishable from the instrument's own `ctx_closed#<serial>`."""
+
+    def __init__(self, ctx, new_context_raises=False):
         self._ctx = ctx
+        self._owned = []           # only contexts it actually created
+        self._used = False
+        self._closed = False
+        self._new_context_raises = new_context_raises
+        ctx.browser = self
+        ctx.events.append("launch")
 
     def new_context(self, **k):
-        return self._ctx
+        if self._closed:
+            raise RuntimeError("browser is closed")
+        if self._new_context_raises:
+            raise RuntimeError("context creation failed")
+        if self._used:
+            # A second call is a DISTINCT sibling, so a context the instrument
+            # abandons is visible in the log instead of being an invisible return
+            # of the object it already has.
+            ctx = self._ctx.sibling()
+        else:
+            self._used = True
+            ctx = self._ctx
+        self._owned.append(ctx)
+        self._ctx.events.append(f"ctx_created#{ctx.serial}")
+        return ctx
 
     def close(self):
-        pass
+        if self._closed:
+            return
+        self._closed = True
+        for owned in self._owned:      # force-close, as Browser.close() really does
+            owned._reap()
+        self._ctx.events.append("browser_closed")
 
 
 class _FakePage:
@@ -1217,36 +1248,67 @@ class _FakePage:
 
 
 class _FakeCtx:
-    def __init__(self, plan, base_url, org_create=False, org_click_raises=False):
-        self.request = _FakeRequester(plan)
+    _serial = 0
+
+    def __init__(self, plan, base_url, org_create=False, org_click_raises=False,
+                 shares=None):
+        # A sibling context (a second `browser.new_context()`) SHARES the request
+        # recorder and the event sink, so it is a distinct object whose missing
+        # close is visible, while the test's handle keeps seeing every request.
+        # Each context carries a unique SERIAL, so a leak cannot be balanced out by
+        # closing another one twice — an `id()` can be reused after its object is
+        # collected, and two contexts can carry the same one.
+        _FakeCtx._serial += 1
+        self.serial = _FakeCtx._serial
+        self.request = shares.request if shares else _FakeRequester(plan)
         self.cookies = []          # the instrument must never read the jar
+        self.events = shares.events if shares else []
         self._base = base_url
         self._org_create = org_create
         self._org_click_raises = org_click_raises
         self.page = None
+        self.browser = None        # set by the browser that creates it
+        self._closed = False
 
     def new_page(self):
         self.page = _FakePage(self._base, self._org_create, self._org_click_raises)
         return self.page
 
     def close(self):
-        pass
+        # The real `BrowserContext.close()` returns early when it is already
+        # closing or closed, so a second call is a no-op, not a failure.
+        if self._closed:
+            return
+        self._closed = True
+        self.events.append(f"ctx_closed#{self.serial}")
+
+    def _reap(self):
+        """What `Browser.close()` does to a context the run left open."""
+        if self._closed:
+            return
+        self._closed = True
+        self.events.append(f"ctx_reaped#{self.serial}")
+
+    def sibling(self):
+        return _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
+                        shares=self)
 
 
 class _FakeChromium:
-    def __init__(self, ctx):
+    def __init__(self, ctx, launch_raises=False, new_context_raises=False):
         self._ctx = ctx
+        self._launch_raises = launch_raises
+        self._new_context_raises = new_context_raises
 
     def launch(self, **k):
-        return _FakeBrowser(self._ctx)
-
-    def new_context(self, **k):
-        return self._ctx
+        if self._launch_raises:
+            raise RuntimeError("browser launch failed")
+        return _FakeBrowser(self._ctx, self._new_context_raises)
 
 
 class _FakeSyncPlaywright:
-    def __init__(self, ctx):
-        self.chromium = _FakeChromium(ctx)
+    def __init__(self, ctx, launch_raises=False, new_context_raises=False):
+        self.chromium = _FakeChromium(ctx, launch_raises, new_context_raises)
 
     def __enter__(self):
         return self
@@ -1258,8 +1320,17 @@ class _FakeSyncPlaywright:
 def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    mcp_tools_call, surface="card", skip_write=False,
                    org_create=False, org_click_raises=False, org_name=None,
-                   keep_org=False):
-    """Execute the real `run_walk` against a fake browser. Returns the record."""
+                   keep_org=False, front_door_hittable=True,
+                   playwright_available=True, launch_raises=False,
+                   new_context_raises=False):
+    """Execute the real `run_walk` against a fake browser. Returns the record.
+
+    `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
+    as not hittable, driving the pre-session product finding;
+    `playwright_available=False` makes the driver import fail, which is the
+    fail-closed default path; `new_context_raises=True` makes the driver start and
+    then refuse a context.
+    """
     import sys
     import types
 
@@ -1268,16 +1339,24 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     base = "https://app.premiselabs.co"
     ctx = _FakeCtx(plan, base, org_create=org_create,
                    org_click_raises=org_click_raises)
-    fake_sync = types.ModuleType("playwright.sync_api")
-    fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(ctx)
-    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
-    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
+    if playwright_available:
+        fake_sync = types.ModuleType("playwright.sync_api")
+        fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(
+            ctx, launch_raises, new_context_raises)
+        monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
+    else:
+        # `None` in sys.modules makes `from playwright.sync_api import ...` raise
+        # ImportError — the driver-missing path, without touching the disk.
+        monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
 
     # (leaf stubs: things that would otherwise hit the network or need a page)
     monkeypatch.setattr(mod, "_git_sha", lambda: "deadbeef")
     monkeypatch.setattr(mod, "deployed_sha", lambda api_url: "9605f5f249")
     monkeypatch.setattr(mod, "deployed_bundle", lambda base_url: "assets/index-x.js")
-    monkeypatch.setattr(mod, "front_door_probe", lambda page, **k: {"hittable": True})
+    monkeypatch.setattr(mod, "front_door_probe",
+                        lambda page, **k: {"hittable": front_door_hittable})
     monkeypatch.setattr(mod, "connection_surface_kind", lambda page, **k: surface)
     monkeypatch.setattr(mod, "page_body", lambda page: "")
     monkeypatch.setattr(mod, "recorded_body", lambda page: "")
@@ -1308,6 +1387,7 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     # teardown block in the artifact. A future exit routed past `_finalize`
     # falsifies this for the whole suite instead of for one hand-written case.
     assert obs.teardown, "run_walk exited without recording teardown"
+    _assert_browser_reaped(ctx)
     return obs, ctx, mod
 
 
@@ -1366,6 +1446,10 @@ def test_walk_without_a_session_is_an_instrument_error_and_writes_nothing(monkey
     assert ("POST", "/api/v1/team/keys") not in [(c[0], c[1]) for c in ctx.request.calls]
     assert not any(c[0] == "POST" for c in ctx.request.calls)
     assert obs.session["detail"].startswith("401")
+    # the recorded teardown STATUS, not mere truthiness: this test passes no
+    # `--keep-org`, so the status recorded for this pre-baseline exit is
+    # `not_reached` (#4843).
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
 
 
 def test_walk_reports_a_failed_write_as_an_instrument_error_not_a_non_observation(
@@ -1394,7 +1478,6 @@ def test_walk_reports_a_failed_write_as_an_instrument_error_not_a_non_observatio
     # re-pointed/emptied teardown state records the truthy, non-residue
     # `not_reached`, which reports an unreaped org as clean.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
@@ -1412,13 +1495,17 @@ def test_walk_reports_a_never_readable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
-    # This exit is exercised only here, and the harness serves no org-list
-    # route, so the recorded state must be the fail-closed one. Asserting the
-    # STATUS (not just that teardown is truthy) is what catches a teardown state
-    # that reached this exit degraded — a re-bound or emptied object records the
-    # truthy, non-residue `not_reached`, which reports an unreaped org as clean.
+    # PIN THE CALL SITE, not just the verdict: the step-7 read produces the SAME
+    # verdict, reason and teardown status, so neutering the poll guard would
+    # leave this test green. `poll_readable` is set on the write step only when
+    # control gets PAST the poll guard.
+    assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
+    # The harness serves no org-list route, so the recorded state must be the
+    # fail-closed one. Asserting the STATUS (not just that teardown is truthy) is
+    # what catches a teardown state that reached this exit degraded — a re-bound
+    # or emptied object records the truthy, non-residue `not_reached`, which
+    # reports an unreaped org as clean.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
@@ -1437,10 +1524,308 @@ def test_walk_reports_a_200_but_unparseable_projection_as_an_instrument_error(
     assert obs.verdict.startswith("instrument-error:"), obs.verdict
     assert "projection_unreadable" in obs.verdict
     assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # PIN THE CALL SITE, not just the verdict: the step-7 read produces the SAME
+    # verdict, reason and teardown status, so neutering the poll guard would
+    # leave this test green. `poll_readable` is set on the write step only when
+    # control gets PAST the poll guard.
+    assert "poll_readable" not in obs.steps[-1].extra, obs.steps[-1].extra
     # ...and the recorded teardown status, for the same reason as the
-    # never-readable case above: this exit is exercised only here.
+    # never-readable case above.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
+
+
+# ── the exits nothing reached (#4843) ───────────────────────────────────────
+# A marker `raise` above each of these left the whole suite green before this
+# change. Three are POST-create — the create-attempt flag and the click are at
+# `:1313`–`:1314` — so each is a path on which this run may have created an org,
+# and each records `obs.teardown` from whatever teardown state reached it. With
+# no test, a degraded teardown state there (a re-bound or emptied object, an
+# in-place field assignment) is invisible to the suite AND flips a residue state
+# to the truthy, deliberately-non-residue `not_reached` — an unreaped org
+# reported as a clean run (the #4291 conflation). So each asserts the recorded
+# teardown STATUS, not merely that `obs.teardown` is truthy: `not_reached`
+# satisfies truthiness.
+#
+# The last two are PRE-create: no org can exist yet, and these tests pass no
+# `--keep-org`, so the recorded status is the clean `TEARDOWN_NOT_REACHED`
+# rather than a residue alarm.
+
+def test_the_teardown_statuses_are_classified_as_residue_or_clean() -> None:
+    """The classifier the statuses get their residue/clean meaning from: a
+    `baseline_unavailable`
+    teardown WARNS — a live org may remain — while `not_reached` is deliberately
+    NOT a residue state, so it raises no false alarm."""
+    assert _mod.TEARDOWN_BASELINE_UNAVAILABLE in _mod.TEARDOWN_RESIDUE_STATES
+    assert _mod.TEARDOWN_NOT_REACHED not in _mod.TEARDOWN_RESIDUE_STATES
+
+
+def _assert_teardown_recorded_fail_closed(obs, mod) -> None:
+    """These harnesses serve no org-list route, so `GET /api/v1/organizations`
+    404s and the recorded status is the fail-closed `baseline_unavailable` — a
+    residue state. Specific enough that any OTHER state a degraded teardown
+    object would record (notably the truthy, non-residue `not_reached`) reds."""
+    assert obs.teardown, "this exit must carry the teardown state"
+    assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE, (
+        f"expected the fail-closed state, got {obs.teardown!r}")
+
+
+def _assert_not_the_generic_error_handler(obs, name: str) -> None:
+    """No `error` step, and the walk's last step is `name`: it did not exit
+    through the walk's generic `except Exception` handler, which appends an
+    `error` step and returns immediately (so it is always the LAST step).
+
+    DEFENCE IN DEPTH, not the discriminator. Each of these tests already fails
+    on a marker raise without it — through a verdict or reason assertion, or (at
+    the claim-failure exit, which sets its own reason before returning) through
+    the step-identity assertion.
+    """
+    assert not [s for s in obs.steps if s.name == "error"], (
+        f"exited through the error handler, not the {name!r} step: {obs.steps}")
+    assert obs.steps[-1].name == name, obs.steps[-1].name
+
+
+def _assert_browser_reaped(ctx) -> None:
+    """Nothing the run launched is left unrecorded as closed: exactly one browser,
+    closed LAST, and every context it created is settled — closed by the
+    instrument itself
+    (`ctx_closed#<serial>`) or force-closed by the browser's own close
+    (`ctx_reaped#<serial>`), which is what the real object does with the contexts it
+    owns. A run that never launched closes nothing.
+
+    This is the no-leak property, so it does not require the graceful shape: the
+    instrument's own explicit context close is pinned once, by
+    `test_the_walk_closes_its_own_context_before_the_browser`.
+    """
+    events = ctx.events
+    if "launch" not in events:
+        assert events == [], events
+        return
+    created = [e.split("#", 1)[1] for e in events if e.startswith("ctx_created#")]
+    settled = [e.split("#", 1)[1] for e in events
+               if e.startswith(("ctx_closed#", "ctx_reaped#"))]
+    assert sorted(settled) == sorted(created), (
+        f"still open: {sorted(set(created) - set(settled))}; "
+        f"settled but never created: {sorted(set(settled) - set(created))}; "
+        f"events={events}")
+    assert events.count("launch") == 1, events
+    assert events.count("browser_closed") == 1, events
+    assert events[-1] == "browser_closed", events
+
+
+@pytest.mark.parametrize("events,accepted", [
+    (["launch", "ctx_created#1", "ctx_closed#1", "browser_closed"], True),
+    # launch succeeded, then the driver refused a context: nothing was created
+    (["launch", "browser_closed"], True),
+    # one context, force-closed by the browser rather than closed by the run
+    (["launch", "ctx_created#1", "ctx_reaped#1", "browser_closed"], True),
+    # two contexts, both settled: the multiset the harness never compares live
+    (["launch", "ctx_created#1", "ctx_created#2", "ctx_closed#2",
+      "ctx_reaped#1", "browser_closed"], True),
+    # one of two left open
+    (["launch", "ctx_created#1", "ctx_created#2", "ctx_closed#1",
+      "browser_closed"], False),
+    # a second browser, one of them never closed
+    (["launch", "launch", "ctx_created#1", "ctx_closed#1", "browser_closed"], False),
+    # the browser is never closed: the leak this pin exists for
+    (["launch", "ctx_created#1", "ctx_closed#1"], False),
+    # the browser is closed before the context it owns
+    (["launch", "browser_closed", "ctx_created#1", "ctx_closed#1"], False),
+])
+def test_the_reap_pin_gates_only_a_settled_run(events, accepted):
+    """The pin's contract, exercised directly on constructed event logs, including
+    shapes the tool cannot currently produce (a force-reaped context, two contexts,
+    a browser closed before its own context)."""
+    ctx = _FakeCtx({}, "https://app.premiselabs.co")
+    ctx.events.extend(events)
+    if accepted:
+        _assert_browser_reaped(ctx)
+    else:
+        with pytest.raises(AssertionError):
+            _assert_browser_reaped(ctx)
+
+
+def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
+        monkeypatch, tmp_path):
+    """The screen renders no connection surface at all, so the NEGATIVE
+    direction was never measured: `INCOMPLETE_NO_SURFACE` (exit 1), never a
+    product failure — and it stops before the agent write."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[ABSENT],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG)
+
+    assert obs.verdict == mod.INCOMPLETE_NO_SURFACE
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    # the CREATE really happened (the premise that makes this exit post-create),
+    # and it stopped at the read: no key minted, no agent write
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert ctx.request.onboarding_state_calls(), "the step-5 read never happened"
+    assert not any(c[0] == "POST" for c in ctx.request.calls)
+    _assert_not_the_generic_error_handler(obs, "before-observation")
+    # ...and the step is this exit's, not the claim-failure exit's: that one
+    # carries `page_claims_connection`, this one does not.
+    assert "page_claims_connection" not in obs.steps[-1].extra
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_whose_screen_claims_a_connection_the_server_never_saw_is_a_product_failure(
+        monkeypatch, tmp_path):
+    """The screen says "Connected" while the server's own projection shows no
+    observation. That is the `no_claim_before_observation` assertion failing —
+    the product finding this instrument exists to make — and it is distinct from
+    the absent-surface class directly above, which records no such assertion at
+    all."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG)
+
+    assert obs.verdict.startswith("failed:"), obs.verdict
+    assert obs.assertions.get("no_claim_before_observation") is False
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    assert ctx.request.onboarding_state_calls(), "the step-5 read never happened"
+    assert not any(c[0] == "POST" for c in ctx.request.calls)
+    _assert_not_the_generic_error_handler(obs, "before-observation")
+    # the exit's OWN step: the claim-failure branch records the page's claim,
+    # the absent-surface branch above does not.
+    assert "page_claims_connection" in obs.steps[-1].extra
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_without_a_mintable_key_is_an_instrument_error(monkeypatch, tmp_path):
+    """The write step has no credential: the wizard showed no `tt_`/`tk_` key and
+    the BFF refuses to mint one. The run cannot make the server-observed write,
+    so it is an INSTRUMENT fault (exit 3) — never `server_did_not_observe`, which
+    would blame the product for a credential the instrument never got."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
+        ("POST", "/api/v1/team/keys"): [(403, {"error": "forbidden"})],
+    }
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[NOT_CONNECTED],
+        mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG)
+
+    assert obs.verdict.startswith("instrument-error:"), obs.verdict
+    assert "no_agent_key" in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    # the CREATE really happened (the premise that makes this exit post-create)…
+    assert ctx.page.fills == [('input[aria-label="Organization name"]', _RUN_ORG)]
+    # …and the refusal really was the mint call, not a missing call
+    assert [c for c in ctx.request.calls if c[0] == "POST"], ctx.request.calls
+    assert "mint failed" in obs.steps[-1].detail, obs.steps[-1].detail
+    _assert_not_the_generic_error_handler(obs, "agent-write")
+    _assert_teardown_recorded_fail_closed(obs, mod)
+
+
+def test_walk_reports_a_signup_cta_that_is_not_hittable_as_a_product_finding(
+        monkeypatch, tmp_path):
+    """The front-door probe reports the signup CTA as not hittable. This runs
+    BEFORE any session is resolved, so it is a PRODUCT finding (exit 1), not an
+    instrument fault.
+    No org can exist yet and this test passes no `--keep-org`, so the recorded
+    status is the clean `not_reached` (which is deliberately NOT a residue
+    state)."""
+    obs, _ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={("GET", "/api/session"): _SESSION_200},
+        ui_sequence=[], mcp_tools_call=_MCP_OK, front_door_hittable=False)
+
+    assert obs.verdict.startswith("failed:"), obs.verdict
+    assert "not hittable" in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_FAILED
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+
+
+def test_walk_without_the_driver_records_a_fail_closed_observation(
+        monkeypatch, tmp_path):
+    """The playwright import fails: the driver is missing. That must still
+    produce a RECORDED, fail-closed observation rather than a traceback — the
+    verdict `failed: playwright unavailable`, an instrument exit code, and a
+    recorded teardown status of `not_reached` — no browser context ever existed,
+    and this test passes no `--keep-org`."""
+    obs, _ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        playwright_available=False)
+
+    assert obs.verdict.startswith("failed: playwright unavailable"), obs.verdict
+    # the exception type is named, not swallowed
+    assert "ModuleNotFoundError" in obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+
+
+def test_a_browser_launch_that_fails_is_recorded_and_nothing_is_left_open(
+        monkeypatch, tmp_path):
+    """`pw.chromium.launch` raising lands in the same fail-closed class
+    (instrument error, exit 3) as a missing driver, through the walk body's own
+    `except` — and there is no browser or context to close, so the harness's reap
+    assertion sees an empty event list."""
+    obs, _ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        launch_raises=True)
+
+    assert obs.verdict.startswith("failed: RuntimeError"), obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+
+
+def test_the_fakes_distinguish_a_forced_close_from_the_instruments_own():
+    """Layer 2 (`test_the_walk_closes_its_own_context_before_the_browser`) rests on
+    this distinction: a context the BROWSER closes for a run must be recorded as
+    `ctx_reaped#<serial>`, never `ctx_closed#<serial>` — or that test passes on a
+    run that never closed its own context."""
+    base = "https://app.premiselabs.co"
+    abandoned = _FakeCtx({}, base)
+    browser = _FakeBrowser(abandoned)
+    browser.new_context()
+    browser.close()
+    assert abandoned.events == ["launch", f"ctx_created#{abandoned.serial}",
+                               f"ctx_reaped#{abandoned.serial}",
+                               "browser_closed"], abandoned.events
+
+    closed = _FakeCtx({}, base)
+    second = _FakeBrowser(closed)
+    second.new_context()
+    closed.close()
+    second.close()
+    assert f"ctx_closed#{closed.serial}" in closed.events, closed.events
+    assert f"ctx_reaped#{closed.serial}" not in closed.events, closed.events
+
+
+def test_a_context_that_cannot_be_created_still_closes_the_browser(monkeypatch, tmp_path):
+    """The driver starts and then refuses a context: the same fail-closed class
+    (instrument error, exit 3) and the same walk-body `except` that catches a
+    launch failure. Nothing was created, so the browser is all there is to close —
+    and the run closes it."""
+    obs, ctx, mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan={}, ui_sequence=[], mcp_tools_call=_MCP_OK,
+        new_context_raises=True)
+
+    assert obs.verdict.startswith("failed: RuntimeError"), obs.verdict
+    assert mod.exit_code_for(obs.reason) == mod.EXIT_INSTRUMENT_ERROR
+    assert obs.teardown["status"] == mod.TEARDOWN_NOT_REACHED
+    assert ctx.events == ["launch", "browser_closed"], ctx.events
+
+
+def test_the_walk_closes_its_own_context_before_the_browser(monkeypatch, tmp_path):
+    """The instrument's teardown SHAPE, pinned once: it closes the context it
+    created, itself. `Browser.close()` force-closes an open context by itself and a
+    second context close is a no-op, so this is a shape standard, not a leak guard —
+    which is why the no-leak pin above must not require it."""
+    plan = {("GET", "/api/session"): [(401, {"error": "not_signed_in"})]}
+    obs, ctx, _mod = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[], mcp_tools_call=_MCP_OK)
+
+    assert obs.verdict.startswith("instrument-error:"), obs.verdict
+    assert f"ctx_closed#{ctx.serial}" in ctx.events, ctx.events
+    assert "browser_closed" in ctx.events, ctx.events
 
 
 def test_walk_skip_agent_write_cannot_launder_a_lying_ui(monkeypatch, tmp_path):
@@ -1494,6 +1879,7 @@ def test_main_returns_three_for_a_walk_that_never_authenticated(monkeypatch, tmp
     rc = mod.main(["--base-url", base, "--auth-url", base, "--api-url", base,
                    "--allow-prod", "--out", str(tmp_path / "o")])
     assert rc == mod.EXIT_INSTRUMENT_ERROR == 3
+    _assert_browser_reaped(ctx)
 
 
 # ── the call sites the poll-only tests missed (#4291 review cycle 4) ────────
@@ -1527,7 +1913,6 @@ def test_walk_step5_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     # records the truthy, non-residue `not_reached`, which would report an
     # unreaped org as clean.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tmp_path):
@@ -1554,7 +1939,6 @@ def test_walk_step7_unreadable_projection_is_an_instrument_error(monkeypatch, tm
     assert obs.assertions.get("shown_when_observed") is None
     # ...and the teardown STATUS, for the same reason as the exits above.
     assert obs.teardown["status"] == mod.TEARDOWN_BASELINE_UNAVAILABLE
-    assert mod.TEARDOWN_BASELINE_UNAVAILABLE in mod.TEARDOWN_RESIDUE_STATES
 
 
 def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_session(
@@ -1607,7 +1991,7 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     assert obs.verdict == "passed", (obs.verdict, obs.reason)
     # this test drives run_walk directly rather than through _run_fake_walk, so
     # it must make the single-exit guarantee explicit itself
-    assert obs.teardown, "every exit must carry the teardown state"
+    assert obs.teardown, "this exit must carry the teardown state"
     # this harness serves no org-list route, so the baseline read 404s and the
     # walk honestly records the fail-closed state: no baseline, no delete
     assert obs.teardown["status"] == _mod.TEARDOWN_BASELINE_UNAVAILABLE
@@ -1618,6 +2002,7 @@ def test_walk_with_an_explicit_agent_key_still_reads_the_truth_through_the_sessi
     for _method, url, _data in ctx.request.onboarding_state_calls():
         assert url.startswith(base + "/api/v1/onboarding/state"), url
     assert "agent-key" in obs.session["mechanism"]
+    _assert_browser_reaped(ctx)
 
 
 # ── #4319 — the run reaps the org it created ────────────────────────────────
@@ -1968,18 +2353,21 @@ def test_no_exit_from_the_walk_writes_the_artifact_without_teardown():
     NOT checked here, by construction — a source assertion cannot be an
     adversarial proof, and extending it just moves the boundary. (d) sees
     Name-bindings, so the NON-Name ones escape it: a `match … case _ as td`
-    capture, `import … as td`, `except … as td`. And two further forms get past
-    the whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
+    capture, `import … as td`, `except … as td`. And further forms get past the
+    whole half: an `_finish`/`_finalize` alias, attribute-form `getattr`, and
     mutating the teardown object's fields in place.
 
-    What covers those forms is the recorded teardown STATUS, asserted in the
-    test for each post-create exit a test reaches — `:1370` step 5, `:1428` the
-    failed write, `:1449` the poll, `:1471` step 7, `:1491` the final exit,
-    `:1497` the exception exit. The status, not merely that `obs.teardown` is
-    truthy: `not_reached` satisfies mere truthiness, so a truthiness-only assert
-    cannot see a residue state degrade into a clean one. Three post-create exits
-    (`:1390`, `:1401`, `:1460`) are reached by NO test, so they carry no such
-    assertion and only `_run_teardown`'s runtime gates guard them (#4843).
+    What covers those forms is the recorded teardown STATUS. Every `_finalize`
+    exit in `run_walk` is executed by at least one test, and at least one of the
+    tests reaching each exit asserts the status — not merely that `obs.teardown`
+    is truthy, since `not_reached` satisfies truthiness and a truthiness-only
+    assert cannot see a residue state degrade into a clean one. Five of them were
+    reached by no test at all until #4843.
+
+    SCOPE: `_finalize` exits only. Two abort paths sit OUTSIDE `run_walk`'s
+    try/except and write no artifact at all — a `--out` that cannot be created,
+    and a driver that will not start — so they are not "exits" in this sense and
+    no test here covers them (#4875).
     """
     tree = ast.parse(textwrap.dedent(_inspect.getsource(_mod.run_walk)))
 

@@ -37,6 +37,19 @@
 #       public key — never a pass)
 #   (n) a malformed trailing line cannot hijack the wrong-repo diagnostic and
 #       suppress the accurate stale/diff explanation
+#   (o) normalized-digest acceptance (#1362): a marker carrying the NORMALIZED
+#       digest of a base-moved diff carries forward (the D1 win); the legacy
+#       RAW digest is STILL accepted for the same diff (backward compat); a
+#       marker matching neither is rejected; a normalized diff= still fails
+#       closed when the fetch fails; and the head-bound path (rule (a)) is
+#       unchanged
+#   (p) a whitespace-only change changes the normalized digest (anti-
+#       `patch-id` pin — `git patch-id --stable` would MATCH and falsely
+#       carry a stale verdict forward)
+#   plus direct vector tests of the extracted `normalize_review_diff`
+#       function against the #1362 spec (index-line drop, hunk-header rewrite
+#       with the absent-count default of 1, mode-width boundary, and
+#       final-newline preservation)
 #   plus the static invariants: the required job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
 #   trigger must be EXACTLY `pull_request_target` (asserted over `pull_request*`
@@ -91,6 +104,55 @@ if ! grep -q 'AI_REVIEW_GATE_KEY' "$RUN_BLOCK" || ! grep -q 'live_diff_hash' "$R
     exit 1
 fi
 if bash -n "$RUN_BLOCK"; then ok "extracted run block parses (bash -n)"; else bad "extracted run block has a bash syntax error"; fi
+
+# ── normalize_review_diff: direct vector tests (#1362) ────────────────────
+# The gate normalizes the fetched diff before hashing it. Extract the helper
+# from the SAME run block and drive the #1362 spec vectors through it directly,
+# so a subtly wrong sed expression fails HERE with a named vector instead of
+# only as an opaque digest mismatch in the end-to-end cases below.
+NORM_FN="$T/normalize-fn.sh"
+awk '/^normalize_review_diff\(\) \{/ { f=1 } f { print } f && /^\}$/ { exit }' \
+    "$RUN_BLOCK" > "$NORM_FN"
+if [ -s "$NORM_FN" ] && grep -q 'index \[0-9a-f\]' "$NORM_FN"; then
+    ok "extracted normalize_review_diff from the run block"
+    # shellcheck disable=SC1090
+    source "$NORM_FN"
+else
+    bad "could not extract normalize_review_diff from the run block (the vector tests would pass vacuously)"
+fi
+
+check_norm() { # <input> <expected-output>
+    local got
+    got="$(printf '%s' "$1" | normalize_review_diff)"
+    if [ "$got" = "$2" ]; then
+        ok "normalize [$1] -> [$2]"
+    else
+        bad "normalize [$1] -> [$got] (want [$2])"
+    fi
+}
+# Required #1362 vectors.
+check_norm '@@ -1,5 +1,7 @@' '@@ -0,5 +0,7 @@'
+check_norm '@@ -12 +12 @@' '@@ -0,1 +0,1 @@'
+check_norm '@@ -12,0 +13,4 @@ def f():' '@@ -0,0 +0,4 @@ def f():'
+check_norm 'index 1a2b3c4..5d6e7f8 100644' ''
+check_norm 'index 1a2b3c4..5d6e7f8' ''
+# One side missing its count defaults that side to 1; the other count is kept.
+check_norm '@@ -5,3 +9 @@ rest' '@@ -0,3 +0,1 @@ rest'
+check_norm '@@ -5 +9,3 @@ rest' '@@ -0,1 +0,3 @@ rest'
+# Mode width is EXACTLY six octal digits: seven digits is not git's index line.
+check_norm 'index 1a2b3c4..5d6e7f8 1006440' 'index 1a2b3c4..5d6e7f8 1006440'
+check_norm 'index 1a2b3c4..5d6e7f8 10064' 'index 1a2b3c4..5d6e7f8 10064'
+# Non-hex and non-index lines pass through unchanged.
+check_norm 'diff --git a/x b/x' 'diff --git a/x b/x'
+# Final-newline state is preserved (sed); awk would append one and shift the
+# digest, so this pins the choice of tool as much as the rewrite itself.
+nl_missing="$(printf 'x' | normalize_review_diff | wc -c | tr -d ' ')"
+nl_present="$(printf 'x\n' | normalize_review_diff | wc -c | tr -d ' ')"
+if [ "$nl_missing" = "1" ] && [ "$nl_present" = "2" ]; then
+    ok "normalization preserves the final-newline state (missing stays missing)"
+else
+    bad "normalization changed the final-newline state (missing -> '$nl_missing' bytes, present -> '$nl_present' bytes)"
+fi
 
 # ── Structural tripwires ─────────────────────────────────────────────────
 # These invariants live in the YAML AROUND the extracted run block and so are
@@ -210,6 +272,38 @@ DH="$(openssl dgst -sha256 < "$DIFF_FILE" | awk '{print $NF}')"
 OTHER_DIFF_FILE="$T/diff2.txt"
 printf 'diff --git a/x b/x\n+other\n' > "$OTHER_DIFF_FILE"
 DH2="$(openssl dgst -sha256 < "$OTHER_DIFF_FILE" | awk '{print $NF}')"
+
+# ── #1362 normalized-digest fixtures ──────────────────────────────────────
+# A realistic diff whose `index` line and hunk headers move on a base update
+# while every changed line stays byte-identical. The raw and normalized
+# digests differ, so a marker keyed to one is refused by an unnormalized gate
+# and accepted by this one. Both digests are pinned as LITERALS, independently
+# computed, so a broken normalizer cannot pass by agreeing with itself.
+DIFF_NORM_FILE="$T/diff-norm.txt"
+cat > "$DIFF_NORM_FILE" <<'DIFFEOF'
+diff --git a/x.py b/x.py
+index 1111111..2222222 100644
+--- a/x.py
++++ b/x.py
+@@ -1,4 +1,6 @@
+ ctx1
+-old
++new
++added
+ ctx2
+@@ -20,3 +22,2 @@ def f():
+ a
+-b
++c
+DIFFEOF
+DH_RAW="a8d3ddc90a83487e02fe2d9af96b348dc113cd7b5dc80babcaf5d4bd2f2b213d"
+DH_NORM_1362="efba06e08d0a4c1832f5ec0afdd8a142ce4f7b4b56777f1810f1657ecc22439e"
+# Fixtures for the anti-`patch-id` pin: identical except for the whitespace in
+# one changed line (`git patch-id --stable` ignores whitespace and MATCHES).
+WS_A_FILE="$T/ws-a.txt"
+WS_B_FILE="$T/ws-b.txt"
+printf 'diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1,1 +1,1 @@\n-hello\n+hello world\n' > "$WS_A_FILE"
+printf 'diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1,1 +1,1 @@\n-hello\n+hello  world\n' > "$WS_B_FILE"
 
 sign() { printf '%s' "$1" | openssl dgst -sha256 -hmac "$KEY" | awk '{print $NF}'; }
 legacy_marker() { # <sha>
@@ -510,6 +604,69 @@ STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-n"
 assert_rc 1 "(n) gate fails"
 assert_contains "(n) reports the real cause" "latest recorded ${STALE} — expected ${HEAD}"
 assert_not_contains "(n) does not misattribute the repo" "was found for some-other/place"
+
+echo "── (o) normalized diff digest (#1362) ─────────────────────────"
+# o1 — the D1 win. Post-#1362 the producer signs the NORMALIZED digest, so a
+# base move that rewrote only index/hunk headers still carries the verdict
+# forward. The marker's sha is stale, so acceptance can ONLY come from (b).
+diff_marker "$STALE" "$DH_NORM_1362" > "$T/body-o1"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o1"
+assert_rc 0 "(o1) a normalized-hash marker carries forward"
+assert_contains "(o1) names the diff-match path" "passed via diff match"
+assert_contains "(o1) reports the normalized digest matched" "matched the normalized digest"
+# o2 — backward compatibility. The legacy RAW digest is STILL accepted for the
+# same diff. Without this arm every marker already recorded breaks and the
+# required check reddens fleet-wide. This is the case that pins the consumer-
+# first land order.
+diff_marker "$STALE" "$DH_RAW" > "$T/body-o2"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o2"
+assert_rc 0 "(o2) a legacy raw-hash marker is still accepted (backward compat)"
+assert_contains "(o2) reports the raw digest matched" "matched the raw digest"
+# o3 — a marker matching NEITHER digest is rejected, and the message names
+# BOTH live digests (normalized + raw) so the operator is not left guessing.
+DH_NEITHER="$(printf 'deadbeef%.0s' $(seq 1 8))"   # exactly 64 hex chars
+diff_marker "$STALE" "$DH_NEITHER" > "$T/body-o3"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o3"
+assert_rc 1 "(o3) a marker matching neither digest is rejected"
+assert_contains "(o3) reports the diff divergence" "does not match this PR's current diff hash"
+assert_contains "(o3) names the normalized digest" "normalized="
+assert_contains "(o3) names the raw digest" "raw="
+# o4 — fail closed. When the diff cannot be fetched BOTH digests are empty and
+# a diff= marker is not accepted via (b). A transient API failure is not a
+# bypass, exactly as before normalization.
+diff_marker "$STALE" "$DH_NORM_1362" > "$T/body-o4"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-o4"
+assert_rc 1 "(o4) normalized diff= fails closed when the fetch fails"
+assert_contains "(o4) says the live hash was unavailable" "live diff hash could not be computed"
+# o5 — rule (a) is unchanged. A diff= marker at the CURRENT head passes on the
+# sha binding alone even when the fetch fails and its diff= matches neither
+# digest. Normalization must never gate the head-bound path.
+diff_marker "$HEAD" "$DH_NEITHER" > "$T/body-o5"
+STUB_DIFF_FILE="$DIFF_NORM_FILE" STUB_DIFF_FAIL=1 run_gate "$T/body-o5"
+assert_rc 0 "(o5) the head-bound path is unchanged by normalization"
+if printf '%s' "$GATE_OUT" | grep -qF "passed via diff match"; then
+    bad "(o5) head-bound pass must not claim the diff path"
+else
+    ok "(o5) head-bound pass does not claim the diff path"
+fi
+
+echo "── (p) whitespace-only change changes the digest (anti-patch-id) ─"
+# `git patch-id --stable` and its default IGNORE whitespace, so it would MATCH
+# these two diffs and carry a stale verdict across a real whitespace-only
+# change — a false accept. sha256 over normalized bytes must NOT. This is the
+# reason the gate does not use patch-id, pinned as an executable property.
+DH_WS_A="$(normalize_review_diff < "$WS_A_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
+DH_WS_B="$(normalize_review_diff < "$WS_B_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ -n "$DH_WS_A" ] && [ "$DH_WS_A" != "$DH_WS_B" ]; then
+    ok "(p) a whitespace-only change yields a different normalized digest"
+else
+    bad "(p) a whitespace-only change did NOT change the digest — a patch-id-style normalizer would carry a stale verdict forward (got '$DH_WS_A' vs '$DH_WS_B')"
+fi
+# ...and end to end: a marker for the pre-whitespace diff is refused against the
+# post-whitespace live diff.
+diff_marker "$STALE" "$DH_WS_A" > "$T/body-p"
+STUB_DIFF_FILE="$WS_B_FILE" run_gate "$T/body-p"
+assert_rc 1 "(p) a marker for the pre-whitespace diff is rejected"
 
 echo ""
 echo "── Summary ───────────────────────────────────────────────────────"
