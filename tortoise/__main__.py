@@ -20,6 +20,27 @@ from pathlib import Path
 # a repo merely LIVING under an ancestor dir named venv/ is not.
 _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
 
+# The RECORDED local-receipt refusal set: a refusal in this set must never be
+# papered over with a 2xx local receipt (#4675's Task-15 acceptance line —
+# *"a LOCAL receipt is written on a **2xx** (403/402/503 ⇒ exit 1, honest
+# error, NO receipt) … that rule is correct and must not be weakened"*).
+#
+# Named EXPLICITLY rather than derived from `classify_failure`, because the two
+# answer DIFFERENT questions, and both answers are correct:
+#
+#   * the classifier answers *"may this become valid by waiting?"* — and 402 is
+#     TRANSIENT there, deliberately: #4614's data-loss fix needs a quota-refused
+#     capture KEPT in the spool (its `est` is computed from the incoming
+#     capture, so the identical capture succeeds once a node is freed).
+#   * this set answers *"is this a refusal the user must be shown?"* — and 402
+#     is.
+#
+# Deriving one from the other let #4614's reclassification of 402 silently
+# weaken the receipt rule: the receipt gates stopped excluding it, so a 402
+# whose session happened to be durable minted a receipt for a refusal.
+# `tests/test_session_confirm.py` pins the two rules as independent.
+_NO_RECEIPT_REFUSAL_STATUSES = frozenset({402, 403, 503})
+
 
 def _markdown_files(root: Path | str) -> list[Path]:
     """Sorted *.md files under `root` that the indexer will walk (and
@@ -3447,16 +3468,23 @@ def _session_post(api_key: str, api_url: str):
             AND their stored text files; every inconclusive read falls through
             to the original outcome and defers, which is always safe.
 
-            503 is excluded to match the LOCAL-receipt gate in
+            The recorded refusal set (:data:`_NO_RECEIPT_REFUSAL_STATUSES` =
+            402/403/503) is excluded BY NAME here, with the same constant and
+            for the same reason as the LOCAL-receipt gate in
             `_confirm_already_captured` — see the recorded 2xx-only rule there.
-            Uniformity is deliberate: a reviewer must not have to work out why
-            one path confirms a 503 and the other does not. The deferral is
-            recoverable either way (503 is `retry`, so the entry is kept and
-            re-posted); #4925 holds the question of broadening both.
+            Both 402 and 503 are `retry` to the CLASSIFIER (402 since #4614's
+            data-loss fix, 503 via `status >= 500`), so the classifier gate
+            alone would confirm them. Uniformity is deliberate: a reviewer must
+            not have to work out why one path confirms a 402 and the other does
+            not. The deferral is recoverable either way (each is `retry`, so the
+            entry is kept and re-posted); #4925 holds the question of broadening
+            both.
             """
             from tortoise.capture_spool import classify_failure
-            if outcome.ok or outcome.status == 503 or classify_failure(
-                    outcome.status, outcome.detail) != "retry":
+            if (outcome.ok
+                    or outcome.status in _NO_RECEIPT_REFUSAL_STATUSES
+                    or classify_failure(
+                        outcome.status, outcome.detail) != "retry"):
                 return outcome
             if not isinstance(payload, dict):
                 # A non-mapping payload has nothing to confirm against; the
@@ -3851,10 +3879,13 @@ def _cmd_session_drain(api_key: str, api_url: str,
     for r in summary.probe_refusals:
         print(f"spool refusal: {r['session_id']} — {r['detail']}",
               file=_sys.stderr)
-    if summary.attempted or summary.discarded or summary.probe_refusals:
+    if summary.attempted or summary.discarded or summary.probe_refusals \
+            or summary.held_by_backoff:
         print(
             f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
-            f"skipped {summary.skipped}, held back {summary.held_back}, "
+            f"skipped {summary.skipped} "
+            f"({summary.held_by_backoff} waiting on backoff), "
+            f"held back {summary.held_back}, "
             f"probe refusals {len(summary.probe_refusals)}, "
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
@@ -4006,7 +4037,10 @@ def _cmd_sessions_import(args) -> int:
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
     or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
-    (403/402/503 ⇒ exit 1, honest error, NO receipt) — EXCEPT a deferred keyless
+    (403 ⇒ exit 1, honest error, NO receipt) — and a RETRYABLE refusal
+    (402/408/425/429/5xx) is additionally spooled for a later drain by
+    `_spool_if_retryable` while still exiting 1 with no receipt (#4714) —
+    EXCEPT a deferred keyless
     2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
     receipt so an explicit re-import can re-attempt extraction once a key is
     configured. Re-import of the
@@ -4121,7 +4155,7 @@ def _cmd_sessions_import(args) -> int:
 
         The server's capture guard REFUSES rather than enqueues (its capacity
         gate advertises `Retry-After`), and `classify_failure` already treats
-        5xx / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
+        5xx / 402 / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
         therefore a DEFERRAL, not a rejection of the content: the POST reached
         the server, there is no server-side copy to fall back on, and without
         this the turns are lost. `claude` and `pi` survive the identical 504
@@ -4136,8 +4170,12 @@ def _cmd_sessions_import(args) -> int:
         traceback (the hook's fail-open contract).
         """
         try:
+            import time as _time
+
             from tortoise.capture_spool import (
+                RETRY_MAX_SECONDS,
                 Snapshot,
+                _backoff_ms,
                 capture_key,
                 classify_failure,
                 read_spool_meta,
@@ -4184,11 +4222,24 @@ def _cmd_sessions_import(args) -> int:
                 print(f"Session {session_id} is already filed; the spooled copy "
                       "is a no-op.", file=_sys.stderr)
             else:
-                # Name the command: only the claude/pi SessionStart hook
-                # drains automatically, so for a codex/cursor-only install
-                # nothing would file this without the user being told how.
-                print(f"Spooled session: {session_id} — run 'tortoise session "
-                      "drain' to file it.", file=_sys.stderr)
+                now_ms = _time.time() * 1000.0
+                window = _backoff_ms(meta)
+                if now_ms < window <= now_ms + RETRY_MAX_SECONDS * 1000:
+                    # The window is CARRIED across a rewrite now, so a drain
+                    # inside it will NOT file this: promising one would be false
+                    # (#4714 review). The upper bound matters too — `_flush_one`
+                    # treats a window beyond now + RETRY_MAX as corrupt and files
+                    # it IMMEDIATELY, so claiming a drain is pointless there
+                    # would be the opposite lie.
+                    print(f"Spooled session: {session_id} — a retry is waiting "
+                          "on the backoff window; a later drain will file it.",
+                          file=_sys.stderr)
+                else:
+                    # Name the command: only the claude/pi SessionStart hook
+                    # drains automatically, so for a codex/cursor-only install
+                    # nothing would file this without the user being told how.
+                    print(f"Spooled session: {session_id} — run 'tortoise session "
+                          "drain' to file it.", file=_sys.stderr)
         except Exception as exc:
             print(f"spool write failed: {exc}", file=_sys.stderr)
 
@@ -4204,14 +4255,20 @@ def _cmd_sessions_import(args) -> int:
         RETRYABLE ONLY. A non-retryable status is not the post-commit-timeout
         shape this closes. The same gate the drain's `_refused` applies.
 
-        **503 is excluded explicitly.** The local receipt is 2xx-only by a
+        **The recorded refusal set is excluded by NAME**
+        (:data:`_NO_RECEIPT_REFUSAL_STATUSES` = 402/403/503) rather than by
+        deriving it from `classify_failure`. The local receipt is 2xx-only by a
         RECORDED decision (#4675's own body: *"a LOCAL receipt is written on a
         **2xx** (403/402/503 ⇒ exit 1, honest error, NO receipt) … that rule is
         correct and must not be weakened"*; `tortoise/__main__.py` carries it as
-        the Task-15 acceptance line). `classify_failure` calls 503 `retry`
-        (`status >= 500`), so the classifier gate does NOT exclude it — this
-        line is what keeps the recorded rule true. The cost of honouring it is
-        a deferral, not a loss: a 503 whose commit landed is spooled (503 is
+        the Task-15 acceptance line). The classifier no longer excludes two of
+        the three: it calls 503 `retry` (`status >= 500`) and, since #4614's
+        data-loss fix, 402 `retry` too. So the classifier gate alone would let a
+        402 whose session happened to be durable mint a receipt for a refusal —
+        the set is what keeps the recorded rule true, and it is deliberately
+        INDEPENDENT of the classifier: the classifier decides what to KEEP in
+        the spool, this decides what to RECEIPT. The cost of honouring it is a
+        deferral, not a loss: a 402/503 whose commit landed is spooled (both are
         `retry`, so `_spool_if_retryable` keeps it) and filed by a later
         attempt. #4925 records the tension — 503 and 504 are both 5xx and the
         post-commit shape is identical; broadening needs that reopened.
@@ -4234,7 +4291,8 @@ def _cmd_sessions_import(args) -> int:
             from tortoise.session_confirm import FILED, confirm_capture
             from tortoise.session_verify import session_detail
 
-            if status == 503 or classify_failure(status, detail) != "retry":
+            if (status in _NO_RECEIPT_REFUSAL_STATUSES
+                    or classify_failure(status, detail) != "retry"):
                 return False
             if confirm_capture(session_detail, api_url, api_key,
                                session_id, turns) != FILED:
@@ -4288,7 +4346,9 @@ def _cmd_sessions_import(args) -> int:
             # Deliberately broad: reading a DIAGNOSTIC body must never replace
             # the honest failure with a traceback, whatever it raises.
             body = f"<error body unreadable: {read_exc}>"
-        # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
+        # 403 ⇒ fail, NO receipt, honest error (Task 15 acceptance); a
+        # RETRYABLE refusal (402/408/425/429/5xx, INCLUDING 503) is spooled for a
+        # later drain (#4714) but still exits 1 above with no receipt.
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
         if _confirm_already_captured(e.code, body):
             return 0
@@ -4334,7 +4394,9 @@ def _cmd_sessions_import(args) -> int:
     # Any 2xx is a success — the server stored the Session and wrote its
     # per-harness receipt state key. A degraded extraction (error/empty) or
     # server-side errors/warnings still imported the session; surface them as
-    # warnings, not failures (403/402/503 ⇒ fail above via HTTPError).
+    # warnings, not failures (403 ⇒ fail above via HTTPError; a retryable
+    # 402/408/425/429/5xx — including 503 — is spooled by _spool_if_retryable
+    # and also fails).
     if result.get("errors") or result.get("warnings") or \
             result.get("extraction_mode") in ("error", "empty"):
         print("import warnings: " + str(
