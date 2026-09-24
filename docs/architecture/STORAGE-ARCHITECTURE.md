@@ -505,6 +505,59 @@ While checking D10, a separate defect surfaced and it may be the more consequent
 
 ---
 
+### 9.6 ⭐ A source is VERSIONED — and the version lives on the extraction link (owner ruling, 2026-09-24)
+
+The owner raised the gap the D10 pass left open: *"shouldn't we have some form of version tracking for sources? at least to know if they changed and we might need to re-infer the Entities and check they're not superseded in a new version of a doc."* The answer is **yes**, and the model is now stated in `ONTOLOGY.md` §4.6 (`v3.15`). This section records **why it costs what it costs** — a storage question, and therefore this section's.
+
+**The requirement was already half-stated.** `§4.6` already defined `contentHash` as *"idempotency anchor — skip re-extraction if unchanged"* and already listed `document` under `sourceKind`. The ontology stated the requirement and **the model never completed it**. This change **populates declared slots** (`validFrom`/`validTo`/`expiredAt` were declared and never written) rather than adding new ones.
+
+#### The model, in five rules
+
+| Rule | Statement |
+|---|---|
+| Identity | `url` — stable across versions |
+| Version | `contentHash` — identifies a **version** of that identity |
+| Raw content | **append-only** — a differing hash on re-fetch is a **new version, never an edit** |
+| Extraction | **version-scoped** — *"are these entities current?"* compares the **recorded** version against the **current** version |
+| Version change | **closes** the previous interval and **adds a supersession link** — never an overwrite |
+
+**And one rule that is a write-time obligation, not a later repair: interval-closing is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs, and it is exactly what T6 above produces today.
+
+#### ⭐ The missing piece, in one line
+
+**`extractedFrom` records the SOURCE, not the source VERSION.** Identity is not version. Without the version on the link:
+
+- *"are these entities **trustworthy**?"* → answerable (confidence, no NAND, not superseded — already a read);
+- *"are these entities **about the content we currently hold**?"* → **unanswerable.**
+
+**Both are reads; only one has an anchor.** That is the whole gap — and it is why the fix is a field on an edge, not a new subsystem.
+
+#### ⭐ The policy — **B: mark stale now, supersede on re-inference** (owner)
+
+When a re-fetched source's content differs, the old version's entities are **marked stale immediately** and **superseded when re-inference produces their successors**.
+
+**Not A (immediate supersession).** A withdraws the belief *before* producing its successor — between the source changing and re-inference running, the graph asserts **nothing** about a subject it previously had a position on. A stale-but-present belief is strictly better than no belief.
+
+**And `stale ≠ wrong`.** Supersession is **additive**: the old facts are marked, never deleted. The same rule as D7, and the same rule the journal follows.
+
+#### ⭐ Why it is affordably cheap HERE and expensive elsewhere
+
+The field's own warning is that **"versioned KGs are resource-intensive"** — true of systems that copy the artifact per version. **D30 already moved content out of the graph**, so for us a version costs:
+
+> **three timestamps and a hash — not a copy of the artifact.**
+
+**Bound it there: windows and hashes only, never content copies.** If a version ever starts carrying bytes, this stops being cheap and §13's cost argument changes. The content lives in Supabase storage (§9.1) once, addressed by `url` + `contentHash`.
+
+#### ⭐ Why document-level versioning ALONE would not have answered the owner's question
+
+The convergence is on **two layers with different jobs**: the **source** carries the version and its window; the **facts/edges** carry `valid_at`/`invalid_at`/`invalidated_by`, **invalidated rather than deleted**. One practitioner account **started at document-level supersession and revised to move time onto the relationship edges** — because if you supersede only the document, **the facts are untouched**, and *"what did we believe before?"* is a question **about facts**. Document-level is **necessary but not sufficient**.
+
+**⇒ This is why the version goes on the extraction link and not only on the source** — and it is why the storage cost lands on the edge, not on a document store.
+
+**Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; §4.7 already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
+
+---
+
 ## 10. Two storage patterns worth taking from Hindsight (2026-09-23)
 The extractor doc §§11–13 carry the full verification. Two findings are **storage** decisions:
 
@@ -1013,6 +1066,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 | §12.1b unindexed embeddings | ⭐ **`#4997`** | **only `:Point` has a vector index; `Object`/`Event` full-scan and report `ok`; 19 MB stored unindexed** |
 | §12.2c vector vs traversal | ⭐ **`#4997`** · `#2730` | **the entity vector is an ENTRY/RESOLUTION key, never the reasoning mechanism — and our Objects have no description to embed** |
 | §9.4 source summary vector | — | **needs a ruling (V2); `Source` already carries `summary`, `topics`, `url`, `contentHash`** |
+| §9.6 source versioning | — | **the version must be recorded on the extraction link**; a version costs **three timestamps + a hash** (D30 keeps content out of the graph) — **bound it: windows and hashes only, never content copies** |
 
 **Not yet filed from this document (candidates, not decisions):**
 

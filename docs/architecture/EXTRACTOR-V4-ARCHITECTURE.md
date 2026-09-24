@@ -309,7 +309,25 @@ S6  COMMIT     create entities + connections + metadata/lifecycle
 | **Q4** | The `documents` cap is **re-pointed at `:Source`** — not retired, not folded into the node cap | a `:Source` is **equally invisible to the main node cap**, so the reason the cap exists does not expire; retiring it **ungates `/v1/index/docs`** |
 | **Q5** | Fold + change the replay key + migrate — **free TODAY, and that expires** | **zero `:Document` nodes and the commit lane has never run** ⇒ the migration is free now. **It cannot be deferred past this extractor's first COMMIT run** (`#2489`: rebuild does not repair pre-existing graphs) |
 
-**⚠️ And one finding that is NOT about D10 — T6, and it touches S6 COMMIT directly.** While checking the above, a separate defect surfaced: **a `:Source` mutates in place** — `_upsert_source` bumps `updatedAt`/`version`/`contentHash` on a hash-differing `ON MATCH`, and the hosted commit path flips a status, **and neither is journalled.** **That breaks `derived = replay(journal)` and contradicts our own D7** (and the field's append-only evidence rule: *changes are handled by new correction events, not in-place edits*). **A re-fetched source that has changed is a NEW VERSION, not an edit.** Reasoned in `STORAGE-ARCHITECTURE.md` §9.5; belongs to that doc's §3, and is tracked separately.
+**⚠️ And one finding that is NOT about D10 — T6, and it touches S6 COMMIT directly.** While checking the above, a separate defect surfaced: **a `:Source` mutates in place** — `_upsert_source` bumps `updatedAt`/`version`/`contentHash` on a hash-differing `ON MATCH`, and the hosted commit path flips a status, **and neither is journalled.** **That breaks `derived = replay(journal)` and contradicts our own D7** (and the field's append-only evidence rule: *changes are handled by new correction events, not in-place edits*). **A re-fetched source that has changed is a NEW VERSION, not an edit.** Reasoned in `STORAGE-ARCHITECTURE.md` §9.5 and §9.6; belongs to that doc's §3, and is tracked separately.
+
+#### ⭐ The version model — and the one thing S6 must do (owner ruling, 2026-09-24)
+
+**`extractedFrom` records the SOURCE, not the source VERSION.** Identity (`url`) is not version (`contentHash`). Without the version on that edge, *"are these entities current?"* is **unanswerable from the graph** — *"are they trustworthy?"* is answerable today (confidence, NAND, supersession), but *"are they about the content we now hold?"* is not. **Both are reads; only one has an anchor.**
+
+**S6's obligation, in one line:** when a run writes derived nodes, it must **record the version it read on the extraction link.** That is the whole extractor-side change — and it is cheap, because D30 keeps content out of the graph, so a version costs **three timestamps and a hash**.
+
+| Rule | Statement |
+|---|---|
+| Identity | `url` — stable across versions |
+| Version | `contentHash` — identifies a **version** of that identity |
+| Raw content | **append-only** — a differing hash on re-fetch is a **new version, never an edit** |
+| Extraction | **version-scoped** — the version read is recorded on the extraction link |
+| Version change | **closes** the previous interval and **adds a supersession link** — never an overwrite |
+
+**⭐ The policy is B — mark stale now, supersede on re-inference (owner).** A re-fetched source's entities are **marked stale immediately** and **superseded only when re-inference produces their successors**. **Not A (immediate supersession)**: A withdraws the belief *before* producing its successor, so between the source changing and re-inference running the graph asserts **nothing** about a subject it previously had a position on — strictly worse than a stale-but-present belief. **`stale ≠ wrong`:** supersession is **additive**, never a delete.
+
+**⚠️ Interval-closing is part of the WRITE, not a later repair.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs, and it is exactly what T6 produces today. **And document-level alone would not answer the owner's question**: if you supersede only the document, the **facts are untouched** — *"what did we believe before?"* is a question about **facts**, which is why the version belongs on the **link**. Tracked: `#5038` · `#5024` · `#5025` · `#5026`.
 **In:** whatever arrived. **Out:** one common shape + the source mapping that produced it.
 Normalises the shape **and applies the declared field→type mapping** (§3). Passes the mapping forward so later steps know what is already typed versus what must be inferred.
 
