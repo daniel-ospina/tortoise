@@ -14,7 +14,8 @@
 // WHAT THIS FILE PINS. Reading main.jsx as comment-stripped text: the row's
 // disclosure expression, the two bindings the row reads, that main.jsx names
 // neither `HARNESS_ATTRIBUTION` nor `HARNESS_CAPTURE_STATUS_LABEL` in code, the
-// row's support gate, and that the failure line sits inside it.
+// row's support gate, that the failure line sits inside it, and that the alert
+// is described by the row name group.
 //
 // WHAT IT IS NOT. A source pin is a tripwire, not a proof: it cannot see CSS or
 // a DOM-level edit, and text can satisfy a pattern without rendering. The durable
@@ -117,4 +118,17 @@ test('#3700 / #4896: the failure line renders only on a supported row', () => {
     'the failure line must sit inside the capture-support guard — with no leading `!`')
   assert.match(code, /role="alert"[\s\S]{0,160}\{\s*lastError\(h\)\s*\}/,
     'the alert must render the helper\'s value')
+})
+
+test('#3700: the alert is described by the row name group', () => {
+  // The accessibility half of the disclosure: the assertive alert carries the
+  // harness name and its disclosure as its accessible description. Both halves
+  // of the linkage are pinned and must MATCH, so renaming one side alone (the
+  // alert described by nothing) fails here.
+  const nameId = code.match(/className="harness-status-name"\s+id=\{`([^`]+)`\}/)
+  assert.ok(nameId, 'the row name group must carry the describedby target id')
+  const describedBy = code.match(/role="alert"\s+aria-describedby=\{`([^`]+)`\}/)
+  assert.ok(describedBy, 'the alert must carry aria-describedby')
+  assert.equal(describedBy[1], nameId[1],
+    'the alert must be described by the row name group it belongs to')
 })

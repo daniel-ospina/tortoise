@@ -11059,8 +11059,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # allowlist filter.
 #
 # #3809: the key names come from ``tortoise.capture_receipts`` — imported above
-# as ``_capture_receipt_key`` / ``_capture_last_error_key`` — so this server and
-# ``tortoise session verify`` derive the same name.
+# as ``_capture_receipt_key`` / ``_capture_last_error_key``.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
