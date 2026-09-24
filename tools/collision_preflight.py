@@ -401,9 +401,20 @@ _CLAIM_WORK_OBJECT_RE = (
 # excludes `*`/`_` (so `**claim**` is not split) and further word characters
 # (so `claims` is not `claim`).
 _CLAIM_VERB_RE = r"[*_]{0,3}claim(?:ing)?[*_]{0,3}(?![A-Za-z0-9*_])"
-# What may separate the verb from its object: whitespace, a `-`/`/` joiner, or
-# NOTHING at all immediately before an issue number (`claim#4027`).
-_CLAIM_OBJECT_SEP = r"(?:\s+|[-/]|(?=#\d))"
+# What may separate the verb from its object. Adjacency is NOT what makes the
+# verb a verb: punctuation between a claim verb and the issue number it governs
+# is ordinary ("Claiming: #4027", "claiming — #4027", "claiming (#4027)"), so
+# before a NUMBER the separator may be any run of non-word characters —
+# including none, for the attached `claim#4027`. A number is the
+# machine-unambiguous work object (no prose reading puts a bare `#N` directly
+# after the noun "claim"), which is why the widening is safe here. Before a WORD
+# object the separator stays tight (whitespace, or an attached `-`/`/` joiner).
+# That is deliberate, not an oversight: punctuation before a determined work
+# noun is genuinely ambiguous — "a false claim, the PR was merged" is the NOUN
+# followed by a new clause, not the verb governing an object — and avoiding
+# exactly that misreading is why the object requirement exists. Widening it
+# there would re-arm the bare noun the #4368 narrowing removed.
+_CLAIM_OBJECT_SEP = r"(?:[^\w]*(?=#\d)|\s+|[-/])"
 
 # A negator adjacent to the claim verb means the claim was DECLINED, not made
 # ("I am not claiming this", "never claim this", "won't claim it", "without
@@ -603,21 +614,33 @@ def closing_reference(text: str, issue: int) -> bool:
 
 
 def branch_name(ref: str) -> str:
-    """The local BRANCH name behind a ref: ``refs/heads/feat/3963-x`` ->
-    ``feat/3963-x``. A PR ``headRefName`` is already a bare branch name, so
-    normalising both lets the self-match set hold either shape (#4375)."""
-    prefix = "refs/heads/"
-    return ref[len(prefix):] if ref.startswith(prefix) else ref
+    """The branch name behind a ref. ``refs/heads/feat/3963-x`` and the pushed
+    ``refs/remotes/origin/feat/3963-x`` both normalise to ``feat/3963-x``; a PR
+    ``headRefName`` is already a bare branch name. Normalising the remote form
+    too is what lets the self-match set recognise a lane's OWN PUSHED branch
+    (#4375): a lane that pushed before re-checking sees its work under
+    ``refs/remotes/``, and normalising only ``refs/heads/`` left that form
+    blocking the lane's own dispatch (#4368)."""
+    for namespace in ("refs/heads/", "refs/remotes/"):
+        if not ref.startswith(namespace):
+            continue
+        rest = ref[len(namespace):]
+        if namespace == "refs/remotes/":
+            # refs/remotes/<remote>/<branch> -> <branch>
+            _, _, rest = rest.partition("/")
+        return rest
+    return ref
 
 
 def _current_branch(git_bin: str, path: str, timeout: float) -> str | None:
     """The branch checked out at `path`, or None (detached HEAD / error).
 
-    Used to recognise the INVOKING checkout as this issue's own work when it
-    carries the issue number (#4375): a lane re-running the pre-flight for the
-    issue it is already working on must not be blocked by its own branch or
-    worktree. Any failure returns None, which leaves the self set empty — the
-    fail-closed direction."""
+    `path` is the TARGET checkout (``target.path``), not the invoking shell's
+    cwd: it is read to recognise the target repo's own branch as this issue's
+    work when that branch carries the issue number (#4375), so a lane
+    re-running the pre-flight for the issue it is already working on is not
+    blocked by its own branch or worktree. Any failure returns None, which
+    leaves the self set empty — the fail-closed direction."""
     rc, out, _err, _to = _run(
         [git_bin, "symbolic-ref", "--short", "-q", "HEAD"], path, timeout,
     )
@@ -735,9 +758,10 @@ def scan_branch_surface(
     """Number matching always; keyword matching only where it is precise
     enough to be useful (`allow_keywords` is False for the remote namespace).
 
-    A ref in `self_branches` is the ISSUE'S OWN work — the INVOKING checkout's
-    branch for this issue — and is recorded as a WEAK, non-blocking signal
-    instead of a collision (#4375). The self check runs BEFORE the number match
+    A ref in `self_branches` is the ISSUE'S OWN work — the TARGET checkout's
+    branch for this issue, in whatever shape it appears (local or pushed
+    remote-tracking) — and is recorded as a WEAK, non-blocking signal instead
+    of a collision (#4375). The self check runs BEFORE the number match
     because the issue's own branch carries the issue number by convention, and
     matching that first made the gate unsatisfiable while the issue was being
     worked on. A branch belonging to ANOTHER lane is not in `self_branches` and
@@ -789,7 +813,7 @@ def scan_worktree_surface(
     keyword match on the basename and branch only (never the parent dir).
 
     A worktree is the ISSUE'S OWN checkout — and a WEAK, non-blocking signal
-    (#4375) — when its path is the INVOKING checkout, or its branch is that
+    (#4375) — when its path is the TARGET checkout, or its branch is that
     checkout's branch. Another lane's worktree is in neither set and still
     blocks."""
     self_branches = self_branches or set()
@@ -931,6 +955,7 @@ def _pr_ref(pr: dict) -> str:
 def scan_pr_surface(
     surface: Surface, prs: list[dict], issue: int, keywords: list[str],
     min_keywords: int, keyword_only_advisory: bool = False,
+    self_branches: set[str] | None = None,
 ) -> None:
     """PR surface matching.
 
@@ -942,18 +967,26 @@ def scan_pr_surface(
     PR #2926 and "filed as #2751" on PR #2754 read as strong COLLISIONs).
     Keyword matching applies to the head ref only (name-like), never prose.
 
-    Two #4375 relaxations, both WEAK (non-blocking):
+    Three #4375 relaxations, all WEAK (non-blocking):
 
     * `PR number == issue`. GitHub numbers issues and PRs in one space, so that
       PR *IS* the issue — the work, not a duplicate of it. Recognising this
       FIRST (before the number/keyword tiers) is what makes the gate satisfiable
       for an issue that has its own PR.
+    * a PR whose HEAD REF is in `self_branches` (the TARGET checkout's branch
+      for this issue, matched in local or pushed-remote form). The issue's own
+      PR usually carries the number in its branch name, not in its GitHub
+      number, so without this the lane's own PR blocked its own dispatch
+      (#4368). The head check runs BEFORE the number tier, which would
+      otherwise read that branch name as separate in-flight work. Another
+      lane's head ref is not in `self_branches` and still blocks.
     * `keyword_only_advisory` (the CLOSED-PR surface): a keyword overlap with a
       MERGED PR is completed work, so it is recorded WEAK. An UNMERGED closed PR
       is abandoned-but-unfinished and keeps `keyword` strength (blocking),
       decided PER-PR from `merged_at` with an absent/null value meaning
       unmerged. The STRONG tiers on this surface are unchanged.
     """
+    self_branches = self_branches or set()
     for pr in prs:
         title = pr.get("title") or ""
         body = pr.get("body") or ""
@@ -962,6 +995,12 @@ def scan_pr_surface(
             surface.add(_pr_ref(pr),
                         f"PR number == issue ({issue}): this PR *is* the issue, "
                         "not separate in-flight work (non-blocking)", "weak")
+            continue
+        if branch_name(head) in self_branches:
+            surface.add(_pr_ref(pr),
+                        f"PR head branch is #{issue}'s OWN branch (this is the "
+                        "work, not separate in-flight work) — non-blocking",
+                        "weak")
             continue
         if number_present(title, issue):
             surface.add(_pr_ref(pr), f"matched issue-number ({issue}) in title", "strong")
@@ -1369,16 +1408,16 @@ def run_preflight(
         )
 
     # 1b. SELF-IDENTITY (#4375). What counts as "this issue's own work" for
-    #     THIS run: the invoking checkout's own branch/worktree when that branch
+    #     THIS run: the TARGET checkout's own branch/worktree when that branch
     #     carries the issue number. Such refs are recorded WEAK, never
     #     blocking; a DIFFERENT lane's branch/worktree for the same issue is not
     #     in these sets and still blocks (two lanes on one issue are caught).
     self_branches: set[str] = set()
     self_worktrees: set[str] = set()
     if target.path is not None:
-        invoking = _current_branch(git_bin, cwd, timeout)
-        if invoking and number_present(invoking, issue):
-            self_branches.add(invoking)
+        target_branch = _current_branch(git_bin, cwd, timeout)
+        if target_branch and number_present(target_branch, issue):
+            self_branches.add(target_branch)
             self_worktrees.add(target.path)
 
     # 2. PR surfaces — enumerated to COMPLETENESS, each over the transport that
@@ -1422,6 +1461,7 @@ def run_preflight(
             scan_pr_surface(
                 surface, prs, issue, keywords, min_keywords,
                 keyword_only_advisory=(surface_name == SURFACE_CLOSED_PRS),
+                self_branches=self_branches,
             )
             if not surface.truncated:
                 surface.note = f"{len(prs)} PR(s) enumerated (complete, cap {limit})"

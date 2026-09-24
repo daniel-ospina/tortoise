@@ -486,6 +486,56 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(self.surface_row(out, "local branches"), ("HIT", 2))
         self.assertEqual(self.surface_row(out, "local worktrees"), ("HIT", 2))
 
+    def test_4375_own_pushed_remote_branch_is_weak_not_blocking(self):
+        # A lane that PUSHED its branch before re-checking sees its own work as
+        # refs/remotes/origin/<branch>. That ref is the same work as the local
+        # branch and must receive the same self relaxation: normalising only
+        # refs/heads/ left the pushed form blocking, so pushing made the gate
+        # refuse the lane's own dispatch. A DIFFERENT lane's pushed branch is
+        # not self and still blocks.
+        mine = self.add_worktree("impl/3061-pushed", branch="fix/3061-pushed")
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/fix/3061-pushed", "HEAD")
+        rc, out = self.run_tool(repo_arg=str(mine), cwd=mine)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("OWN branch", out)
+        self.assertEqual(self.surface_row(out, "local branches"), ("HIT", 1))
+        self.assertEqual(self.surface_row(out, "remote branches"), ("HIT", 1))
+
+        _git(self.repo, "update-ref",
+             "refs/remotes/origin/fix/3061-other", "HEAD")
+        rc, out = self.run_tool(repo_arg=str(mine), cwd=mine)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("refs/remotes/origin/fix/3061-other", out)
+        self.assertEqual(self.surface_row(out, "remote branches"), ("HIT", 2))
+
+    def test_4375_own_pr_head_branch_is_weak_not_blocking(self):
+        # The issue's own PR usually carries the number in its BRANCH name, not
+        # its GitHub number, so the PR surface needs the same self relaxation
+        # as the branch surfaces. Without it the lane's own PR blocked its own
+        # dispatch. A DIFFERENT lane's PR for the same issue still blocks.
+        mine = self.add_worktree("impl/3061-ownpr", branch="fix/3061-ownpr")
+        self.gh_fixtures(open_prs=[{
+            "number": 9001, "title": "fix(collision): stop refusing dispatch",
+            "body": "", "headRefName": "fix/3061-ownpr",
+        }])
+        rc, out = self.run_tool(repo_arg=str(mine), cwd=mine)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("OWN branch", out)
+        self.assertEqual(self.surface_row(out, "open PRs"), ("HIT", 1))
+
+        self.gh_fixtures(open_prs=[{
+            "number": 9002, "title": "unrelated", "body": "",
+            "headRefName": "fix/3061-other",
+        }])
+        rc, out = self.run_tool(repo_arg=str(mine), cwd=mine)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertEqual(self.surface_row(out, "open PRs"), ("HIT", 1))
+
     def test_closed_pr_closing_reference_is_still_a_hit(self):
         # "Closes #N" IS a claim on the issue and must stay a strong hit.
         for body in ("Closes #3061.", "closes: #3061", "Fixes #3061",
@@ -1122,6 +1172,14 @@ class CollisionPreflightTest(unittest.TestCase):
             "The claim that the surface is complete is wrong.",
             "We should be careful about claims like this.",
             "There is a claim of ownership over the docs.",
+            # Punctuation between the NOUN and a following clause must not be
+            # read as a verb+object separator. Nothing separates these from the
+            # genuine `Claiming: #N` claim except the OBJECT (a determined noun
+            # vs a number) — which is why the punctuation relaxation is
+            # number-only.
+            "This is a false claim. The issue is closed.",
+            "There is a claim, the PR was merged.",
+            "The claim — the issue is closed — is wrong.",
         ):
             with self.subTest(body=body):
                 self.gh_fixtures(issue=self.issue_payload(comments=[
@@ -1147,6 +1205,26 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("REMEDY", out)
                 self.assertIn("comment by other-agent", out)
                 self.assertIn("NO dismissal switch", out)
+
+    def test_4368_claim_punctuation_between_verb_and_object_still_blocks(self):
+        # The object requirement must not demand ADJACENCY. Punctuation between
+        # a claim verb and the issue number it governs is ordinary writing.
+        # `main`'s bare-noun pattern matched these because it required nothing
+        # at all; the narrowed arm required the object immediately after
+        # whitespace / an attached `-`/`/`, so a `Claiming: #4027` handoff read
+        # CLEAN — a FALSE CLEAN, the direction that duplicates work, and the
+        # exact failure this gate exists to prevent.
+        for body in ("Claiming: #4027", "Claiming - #4027",
+                     "Claiming — #4027", "Claiming, #4027",
+                     "Claiming (#4027)", "claim:#4027"):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("claim-style comment", out)
 
     # ── claim classification: a blocking verb arm + a weak terse arm ────────
 

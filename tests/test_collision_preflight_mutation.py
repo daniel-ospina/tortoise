@@ -8,8 +8,8 @@ REAL ``tests/test_collision_preflight.py`` against deliberately broken detectors
 and asserts the expected node IDs FAIL, then asserts those same nodes PASS
 against the unmutated tool (the fail-then-pass proof).
 
-Four mutant directions
-----------------------
+Seven mutant directions
+-----------------------
 ``M1`` — the over-blocking defect, verbatim: the committed pre-#4368 fixture
 ``tests/fixtures/collision_preflight_pre_4368.py.txt`` (frozen, NOT read from
 ``origin/main`` — see :func:`_build_m1_mutant`). Every *relaxation* class (the
@@ -29,6 +29,23 @@ cannot fail against it.
 ``M4`` — fail-open terse arm: the fixed detector with the ``_TERSE_CLAIM_RE``
 branch dropped from ``scan_issue_surface``. The terse fragments must still be
 REPORTED (as weak); silently dropping them loses the advisory signal.
+
+``M5`` — fail-open claim separator: the fixed detector with
+``_CLAIM_OBJECT_SEP`` narrowed back to the adjacent-object form. This is the
+false-CLEAN defect the #4368 follow-up fixes — ``Claiming: #4027`` read CLEAN
+because punctuation between the verb and the number it governs defeated the
+object requirement. The punctuation class must fail under it.
+
+``M6`` — over-blocking own PUSHED branch: the fixed detector with
+``branch_name`` normalising only ``refs/heads/`` again. A lane that pushed
+before re-checking then sees its own work as ``refs/remotes/origin/<branch>``
+and blocks its own dispatch. The pushed-branch relaxation class must fail
+under it.
+
+``M7`` — over-blocking own PR: the fixed detector with the head-branch
+relaxation removed from ``scan_pr_surface``. The issue's own PR names the
+number in its branch, not its GitHub number, so without the relaxation it
+blocks the lane's own dispatch. The own-PR relaxation class must fail under it.
 
 Mechanics (hermetic: no network, no Docker, no FalkorDB)
 --------------------------------------------------------
@@ -124,11 +141,48 @@ M4_MUTANT = (
     '            pass\n'
 )
 
+# M5: narrow `_CLAIM_OBJECT_SEP` back to the adjacent-object form (fail-open:
+# punctuation between the verb and its issue number stops being detected).
+M5_ANCHOR = (
+    '_CLAIM_OBJECT_SEP = r"(?:[^\\w]*(?=#\\d)|\\s+|[-/])"\n'
+)
+M5_MARKER = "M5-MUTANT(#4368 punctuation)"
+M5_MUTANT = (
+    f'# {M5_MARKER}: the object must be ADJACENT again (the fail-open defect).\n'
+    '_CLAIM_OBJECT_SEP = r"(?:\\s+|[-/]|(?=#\\d))"\n'
+)
+
+# M6: normalise only `refs/heads/` again (over-blocking: a lane's own PUSHED
+# branch, seen as `refs/remotes/origin/<branch>`, blocks its own dispatch).
+M6_ANCHOR = '    for namespace in ("refs/heads/", "refs/remotes/"):\n'
+M6_MARKER = "M6-MUTANT(#4368 remote self-ref)"
+M6_MUTANT = (
+    f'    for namespace in ("refs/heads/",):  # {M6_MARKER}: pushed refs are not normalised.\n'
+)
+
+# M7: drop the head-branch self relaxation from `scan_pr_surface`
+# (over-blocking: the issue's own PR blocks its own dispatch).
+M7_ANCHOR = (
+    '        if branch_name(head) in self_branches:\n'
+    '            surface.add(_pr_ref(pr),\n'
+    '                        f"PR head branch is #{issue}\'s OWN branch (this is the "\n'
+    '                        "work, not separate in-flight work) — non-blocking",\n'
+    '                        "weak")\n'
+    '            continue\n'
+)
+M7_MARKER = "M7-MUTANT(#4368 PR self)"
+M7_MUTANT = (
+    f'        # {M7_MARKER}: the own-head-branch relaxation is removed.\n'
+)
+
 # ── declared threat-surface coverage ───────────────────────────────────────
 M1 = "M1_over_blocking(origin/main)"
 M2 = "M2_fail_open(verdict)"
 M3 = "M3_fail_open(claim-pattern)"
 M4 = "M4_fail_open(terse-weak-arm)"
+M5 = "M5_fail_open(claim-separator)"
+M6 = "M6_over_blocking(own-pushed-branch)"
+M7 = "M7_over_blocking(own-pr)"
 
 
 @dataclass(frozen=True)
@@ -210,6 +264,22 @@ COVERAGE: tuple[Coverage, ...] = (
         "report/the terse fragments are still reported (weak)",
         M4,
         ("test_terse_work_claim_phrases_are_weak_not_blocking",),
+    ),
+    # -- the #4368 follow-up classes (punctuation + pushed-branch + own-PR) --
+    Coverage(
+        "fail-open/claim punctuation: `Claiming: #N` must still block",
+        M5,
+        ("test_4368_claim_punctuation_between_verb_and_object_still_blocks",),
+    ),
+    Coverage(
+        "relaxation/own PUSHED remote branch (refs/remotes/origin/…) is weak",
+        M6,
+        ("test_4375_own_pushed_remote_branch_is_weak_not_blocking",),
+    ),
+    Coverage(
+        "relaxation/own PR head branch (not just number==issue) is weak",
+        M7,
+        ("test_4375_own_pr_head_branch_is_weak_not_blocking",),
     ),
 )
 
@@ -374,6 +444,12 @@ class CollisionPreflightMutationTest(unittest.TestCase):
             fixed_text, M3_ANCHOR, M3_MUTANT, M3_MARKER, "M3")
         m4_text = _apply_mutation(
             fixed_text, M4_ANCHOR, M4_MUTANT, M4_MARKER, "M4")
+        m5_text = _apply_mutation(
+            fixed_text, M5_ANCHOR, M5_MUTANT, M5_MARKER, "M5")
+        m6_text = _apply_mutation(
+            fixed_text, M6_ANCHOR, M6_MUTANT, M6_MARKER, "M6")
+        m7_text = _apply_mutation(
+            fixed_text, M7_ANCHOR, M7_MUTANT, M7_MARKER, "M7")
 
         # 2. Materialize the trees. The FIXED tree must be byte-identical to
         #    the real tool, so the only variable between runs is the tool text.
@@ -386,6 +462,9 @@ class CollisionPreflightMutationTest(unittest.TestCase):
             M2: _make_tree(root / "m2", m2_text),
             M3: _make_tree(root / "m3", m3_text),
             M4: _make_tree(root / "m4", m4_text),
+            M5: _make_tree(root / "m5", m5_text),
+            M6: _make_tree(root / "m6", m6_text),
+            M7: _make_tree(root / "m7", m7_text),
         }
 
         # 3. Every mutant must actually run.
@@ -446,7 +525,9 @@ class CollisionPreflightMutationTest(unittest.TestCase):
         try:
             module.COVERAGE = (*saved_coverage, fake)
             synthetic = _SyntheticRun({"test_never_fails_under_m1": False})
-            type(self)._runs = {d: synthetic for d in (M1, M2, M3, M4)}
+            type(self)._runs = {
+                d: synthetic for d in (M1, M2, M3, M4, M5, M6, M7)
+            }
             with self.assertRaises(AssertionError) as ctx:
                 self.test_every_declared_class_is_pinned_by_a_failing_node()
             self.assertIn("SYNTHETIC unpinned class", str(ctx.exception))
@@ -487,7 +568,8 @@ class CollisionPreflightMutationTest(unittest.TestCase):
                             "M1 mutant equals the fixed detector")
         self.assertIn("VERDICT", self._m1_source)
         for direction, marker in ((M2, M2_MARKER), (M3, M3_MARKER),
-                                  (M4, M4_MARKER)):
+                                  (M4, M4_MARKER), (M5, M5_MARKER),
+                                  (M6, M6_MARKER), (M7, M7_MARKER)):
             text = (self._runs[direction].tree / "tools" /
                     "collision_preflight.py").read_text()
             self.assertIn(marker, text,
