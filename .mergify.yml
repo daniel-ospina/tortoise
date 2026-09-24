@@ -1,0 +1,75 @@
+# Mergify configuration — the merge queue for `main`.
+#
+# WHY THIS FILE EXISTS
+#   `strict: true` branch protection makes validation a **singleton lock** rather
+#   than a property of a tree. A green check certifies exactly one composition —
+#   `main ∪ this PR` — so every merge invalidates every other PR's certification,
+#   a landed PR must be re-updated, and N merges cost N full CI cycles. Landing
+#   becomes serialized at one PR per required-CI duration.
+#
+#   #3016 (the base race) records Option 1: replace the lock with a queue and
+#   stop requiring authors to update their branch. #4798 records the change of
+#   route from GitHub's native queue (which needs an organization-owned repo) to
+#   this queue (owner ruling 2026-09-24). The queue performs the update itself:
+#   it merges the PR onto the current base inside a `mergify/merge-queue/main`
+#   branch and runs CI there, so a merge is validated against the tree that will
+#   actually exist — while the author does nothing.
+#
+#   Unlike GitHub's native merge queue, this needs **no workflow changes**: the
+#   queue branch produces ordinary `push`/`pull_request` check runs, so no
+#   workflow requires a `merge_group:` trigger.
+#
+# CONFIGURATION CONTRACT — read before editing
+#   1. Every check named here MUST also be a *required* status check, and every
+#      required status check MUST be named here. A required check that the queue
+#      branch never reports on **deadlocks the queue** for every PR.
+#   2. The live required set is the source of truth for the list below:
+#        gh api repos/daniel-ospina/tortoise/branches/main/protection \
+#          -q '.required_status_checks.contexts[]'
+#      Re-read it when it changes; a stale list is a silent deadlock.
+#   3. `check-success` is deliberate, never `check-pending` or `-check-failure`:
+#      a skipped or neutral check must not read as a pass.
+#
+# Last reconciled with the live required set: 2026-09-24
+#   pricing-artifact, docs, test-isolation, license-surface, legal-e2e,
+#   python-ci-gate
+
+queue_rules:
+  - name: main
+    # Entry gate — evaluated against the PR, before it is queued.
+    queue_conditions:
+      - base=main
+      - -draft
+      - check-success=python-ci-gate
+      - check-success=pricing-artifact
+      - check-success=docs
+      - check-success=test-isolation
+      - check-success=license-surface
+      - check-success=legal-e2e
+    # Re-asserted against the *queue branch*, immediately before the merge.
+    # This is the whole point of the queue: the check that gates the merge ran
+    # on the tree being merged, not on a stale head.
+    #
+    # Only the critical-path check is named here, deliberately. A condition here
+    # must be a check that actually *reports on the queue branch*; the remaining
+    # five required checks are enforced by branch protection on the queue-branch
+    # head instead. Adding a check that the queue branch never reports on would
+    # block the merge forever — the deadlock this file's contract warns about.
+    merge_conditions:
+      - check-success=python-ci-gate
+    merge_method: squash
+    # Speculative batching: PRs that merge cleanly together are tested as one
+    # group, so a single CI cycle can certify several merges. Deliberately
+    # conservative at 2 until this repo's batch-failure behaviour is observed —
+    # a failing batch is re-tested bisected, so a large batch is a slow failure.
+    batch_size: 2
+    batch_max_wait_time: 5 min
+
+pull_request_rules:
+  - name: queue ready PRs onto main
+    conditions:
+      - base=main
+      - -draft
+    actions:
+      queue:
+        name: main

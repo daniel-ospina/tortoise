@@ -67,6 +67,9 @@ python tools/ship_test_onboarding.py \
   no-observation); `--agent-key tt_…` to supply the **agent write** credential
   (CLI-only, deliberately not env-settable) instead of minting one through the
   session. It does **not** carry the projection read.
+* **The browser teardown is bounded at 30 s** (`TEARDOWN_BOUND_S`) and its outcome
+  is recorded as `browser_teardown` — see *Browser teardown* below. It is cleanup:
+  it never changes the verdict or the exit code.
 * A degraded session store answers 503 on `/api/v1` while `/api/session` still
   answers 200, and a bad or graph-bound `--agent-key` fails the MCP write: both
   are instrument faults (exit 3), and both used to be graded as product
@@ -123,6 +126,62 @@ origin's proxy as the org's owner, and `deleted` is recorded only after a
 readable re-read shows the org gone from that same list (the list is derived
 from active memberships, and the delete cascade removes them).
 
+## Browser teardown — the bound, and what it leaves (#4907)
+
+The instrument **owns** the Playwright driver's lifecycle (`sync_playwright().start()`
+plus an explicit teardown) instead of inheriting it from a `with`. The closes are
+unbounded in the API — `Browser.close()` is a timeout-less `send` — and cannot be
+interrupted, so the bound comes from outside them: a watchdog thread signals the
+run's **own** Playwright driver child, which is what releases a close blocked
+against an unresponsive driver.
+
+* **The bound is 30 seconds** (`TEARDOWN_BOUND_S = 30.0`, seconds). The ladder is
+graceful first: `SIGTERM` at B/2 (15 s), then `SIGKILL` at 3B/4 (22.5 s), so the
+run returns by B. A healthy run's teardown (~2.6 s measured) finishes well inside
+the first rung, so a healthy run sends no signal and does not wait out the bound:
+the graceful window is ~6x the healthy path, while a close that never returns is
+still hard-bounded.
+* **Only the run's own child is ever signalled.** The pid's identity — its parent
+pid AND its start time, read together in a single `ps` call — is captured once,
+as a direct child of the instrument's own process; that whole identity is
+**re-read as one value immediately before every rung** (a bare pid is racy
+against reuse, and a start time read separately can belong to the process that
+reused the pid). With no child enumerated the watchdog signals nothing, and —
+when the close then returns — records `driver_absent`, whose detail names whether
+no candidate was found or an enumerated child's identity could not be read.
+Only after a signal is the child reaped.
+* **The bound holds even with nothing to signal (`abandoned`).** The ladder is
+released by a *signal*, so if no driver child is enumerable there is nothing that
+can release a close which never returns. After the final rung, with a close still
+blocked, the run writes the record (`outcome: abandoned`, naming whether a child
+was found) and **ends itself with its own exit code** rather than hang forever —
+a cleanup fault may not move the verdict (#4319). The window is bounded either
+way; what changes is that the process, not the driver, provides the bound.
+* **The watchdog touches no Playwright object** — only the signal call and its own
+record — so the sync API's thread-affinity rule holds.
+* **The outcome is recorded, in a closed vocabulary.** `browser_teardown.outcome`
+is one of `not_run` | `clean` | `close_error` | `watchdog_kill` |
+`driver_absent` | `abandoned`, and `browser_teardown.closes` names each closer (`context`,
+`browser`, `playwright`) with its `how` and any exception. A non-clean outcome
+prints a `BROWSER TEARDOWN — …` line on stderr. **It never changes the verdict or
+the exit code** — cleanup is not the product (#4319's rule, applied to the
+browser).
+* **The artifact is written twice, atomically, for a run whose walk settled into
+the pre-teardown write.** A complete PRE-teardown document (outcome `not_run`) is
+written before the teardown starts, and the authoritative one after it. A run
+killed inside the ≤30 s window therefore still leaves a complete, parsable
+artifact saying the teardown never finished — the `not_run` window is disclosed,
+not discovered. That is a qualification, not a universal: a walk body that raises
+before it settles writes no pre-teardown copy, and its exception propagates past
+the authoritative write, so that run leaves no document at all.
+* **Residue, not closed (#4928).** A run killed inside that window **while the
+driver is unresponsive** still orphans the driver and its Chromium children: no
+in-process code runs after the kill, and the frozen driver cannot read the stdin
+EOF that would otherwise make it exit. This is the E10 leak from the issue's
+scoping, and it is disclosed rather than papered over — a reaper that outlives the
+run (an external supervisor, or a prune-on-next-run step) is a separate change,
+deliberately not this one.
+
 ## The observation artifact
 
 `<out>/observation.json` plus per-step screenshots. The record carries:
@@ -138,6 +197,7 @@ from active memberships, and the delete cascade removes them).
 | `assertions` | `front_door_reachable`, `walk_completed`, `no_claim_before_observation`, `shown_when_observed` |
 | `session` | How the run authenticated: `state` (one of `signed_in` / `not_signed_in` / `store_unavailable` / `unreachable`), `detail`, `mechanism` |
 | `teardown` | The run's own cleanup outcome (#4319). `status` is one of `deleted` / `skipped_no_org` (nothing was created) / `not_reached` (no browser context, or the run exited before the cleanup baseline was read) / `kept_by_flag` (`--keep-org`) / `baseline_unavailable` / `not_listed` / `not_attempted` / `list_unreadable` / `ambiguous` / `name_mismatch` / `http_refused` / `not_confirmed` / `failed`. Every status except `deleted`/`skipped_no_org`/`not_reached` means a live org may remain and is warned on stderr. The keys carried depend on the status: `org_id` on `deleted`/`name_mismatch`/`http_refused`/`not_confirmed`; `http_status` + `upstream_status` on `list_unreadable`/`http_refused` (an upstream 429 arrives as a 503); `verify_status` + `verify_upstream_status` on `not_confirmed`; `created_ids` on `ambiguous`/`not_attempted`; `before_count`/`after_count` on `not_listed`; `grace_hours` + `hard_delete_after` on `deleted` |
+| `browser_teardown` | The BROWSER teardown's outcome (#4907), distinct from the org reaper's. `outcome` is one of `not_run` / `clean` / `close_error` / `watchdog_kill` / `driver_absent` / `abandoned`; `closes[]` is `{name, how, detail}` per closer (`context`, `browser`, `playwright`); `detail` summarises a non-clean outcome. `not_run` is the PRE-teardown document's value — a run killed inside the ≤30 s window keeps it — and is never the value after a completed teardown. Any value other than `not_run`/`clean` is warned on stderr and never changes the verdict or the exit code. See *Browser teardown* above and **#4928** for the residue |
 | `reason` | The failure CLASS — empty iff `verdict == "passed"`. `instrument_error` (exit 3, says nothing about the product) vs `server_did_not_observe` / `positive_not_shown` / `positive_not_attempted` / `walk_incomplete` / `walk_failed` (exit 1) |
 | `verdict` | `passed` / `failed: …` / `incomplete: …` / `instrument-error: …` |
 
@@ -156,7 +216,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-exit funnel) | 132 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) — **plus the bound's own set**: the wedge (context, browser, and `pw.stop()`), the raising closes, the healthy zero-signal run, the exact-pid/`driver_absent`/stale-start-time/reused-ppid cases, the ladder's rungs and its at-most-one-of-each, the exactly-one-entry count, the two no-browser paths, and the killed-inside-the-window document — plus the **hardening set**: a healthy run's margin over the measured teardown with no signal, the abandon path's printed summary, its write-conditional `observation →` line, its shared residue/browser warnings and its unconditional exit, a signal seam that raises, a walk that raises before it settles writing no document, the locale-dependent `%c` start time (four-token, six-token and space-padded renderings all agree with the re-check by construction), the refusal of a non-positive pid, the absolute `ps` path and its budgeted timeout, and the `ps`-**output** seam pins that keep the enumerator's correctness off the venue (a marked child winning over an earlier unmarked one, a marker-matching process that is not this process's child being skipped, a pid whose identity re-read names another parent being refused, and BOTH `ps` reads asking for unlimited width — a host truncates the last column, which is what cut the marker on the CI runner, #4956) — with the ONE live-process-table test retrying the real enumeration inside a short bound and re-reading the whole identity, so a venue whose `ps` renders the table differently cannot decide whether the instrument is correct — the symlink-refusing atomic write, and the scrubbed free text — every one reading `observation.json` **from disk** and asserting the recorded value — **plus the acceptance map**, which names for each of the nine criteria the test that proves it and pins the `_walk` exit count at 11, so a criterion cannot lose its covering test unnoticed | 216 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the
@@ -168,26 +228,39 @@ path, `--skip-agent-write`, an explicit `--agent-key`, and the teardown control
 set — so the call site is
 behaviourally fixed, not greped. The teardown control set is mutation-checked
 (dropping the baseline set difference, or the create-attempted gate, turns it
-RED). A few *structural* `inspect.getsource` assertions remain for ORDERING that
-the harness does not aim at (that the
+RED), and so is the BOUND: a watchdog that never fires, fires at once, sends each
+rung twice, collapses the rungs, signals a non-enumerated pid, skips the
+identity re-check, signals with no child, or is omitted/moved out of the
+`finally` — each reddens a named test. The ladder's ARITHMETIC is additionally
+CI-provable on its own: `--mutation-selfcheck` exercises the real `_ladder` plus
+five mutants of it. A few *structural* `inspect.getsource` / AST assertions remain for ORDERING
+that the harness does not aim at (that the
 session gate precedes the agent write, that the write-failure check precedes the
-projection check), plus one completeness assertion over `run_walk`'s call sites.
-It is parsed from `run_walk`'s AST, not text-scanned, so a behaviour-identical
-reformat or a renamed teardown local cannot false-red it, and it checks four
-things: `_finish` is not spelled there (no `Name`, no `Attribute`); there is no
-bare `getattr`/`globals`/`eval`/`exec`/`vars` call; every `_finalize(` call has
-three positional arguments whose third is the LOCAL bound by `Teardown(...)`;
-and that local has exactly one Name-binding (every `ast.Name` in a Store context
-counts — plain assignment, `for`/comprehension target, `with … as`, `+=`, `:=`).
-It covers the call sites spelled out in `run_walk`'s own body and the cheap forms
-only — a helper, an alias, a NON-Name binding (`import … as`, `except … as`,
-`match … case _ as`) or an in-place field assignment gets past it — so it is a
+projection check), plus one completeness assertion over the walk's call sites.
+That assertion parses the ASTs of `run_walk`, `_walk` and `_finalize` — not text —
+so a behaviour-identical reformat or a renamed local cannot false-red it. It pins
+the funnel invariant: the **authoritative** writer (`_finish`) is spelled exactly
+once, in `run_walk`, AFTER the bounded teardown; the browser teardown is a
+statement of the `finally` whose `try` body holds the `_walk` call; `_finalize`
+is not called from `run_walk`; there is no bare
+`getattr`/`globals`/`eval`/`exec`/`vars` call in any of the three; the run's single
+`td` (built once by unpacking `_build_observation`) is handed to `_walk` and to
+the teardown; each of `_walk`'s **11** `_finalize(` calls passes three positional
+arguments whose third is `_walk`'s own `td` parameter; `_walk` spells neither
+`_finish` nor `_write_observation`; and `_finalize` spells `_finish` never and
+`_write_observation` exactly once (the pre-teardown write). It covers the cheap
+forms only — a helper, an alias, a NON-Name binding (`import … as`,
+`except … as`, `match … case _ as`) or an in-place field assignment gets past it —
+so it is a
 refactor guard, not a containment proof. What carries
 the `not_reached`-reports-an-unreaped-org-as-clean class instead is the recorded
-teardown STATUS, asserted in the test for each post-create exit a test reaches
-(three of them — the absent-surface, the lying-screen and the no-agent-key exits
-— are reached by no test and rest on `_run_teardown`'s runtime gates alone:
-#4843);
+teardown STATUS — every `_finalize` exit is executed by at least one test, and
+at least one of the tests reaching each exit asserts the recorded status,
+including the five that no test reached until #4843 (the absent surface,
+the screen that lies, no agent key, a signup CTA that is not hittable, and the
+missing playwright driver). Two abort paths sit outside `run_walk`'s `try` and
+write no artifact — an `--out` that cannot be created, and a driver that will not
+start — and each has its own test now (#4875);
 they complement the behavioural tests, they do not replace
 them. The RED/GREEN property is the core
 requirement: a behaviour-identical reformat must not move the verdict, and a UI

@@ -134,6 +134,10 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/welcome.html",
                    "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
+                   # #2409: the public contact form's page. Registered here for the
+                   # same reason as the rest of this tuple — a PR touching only
+                   # this page must still select the guard that holds it.
+                   "website/contact.html",
                    "website/index.html",
                    "website/privacy.html",
                    # #3485: the shared cross-subdomain session bridge is a
@@ -412,6 +416,16 @@ SOURCE_PATTERNS = {
             # CORE_ALSO: many core-registered tests (test_backup_sweep.py,
             # test_backup_multigraph_e2e.py, test_backup_watcher.py,
             # test_alert_store.py) also pin it.
+            # #4367: email_notify.py OWNS `_build_invite_link` (and the invite
+            # sender itself). `tests/test_email_integration_resend.py` —
+            # registered in `api` — is the guard that pins the invite-link
+            # contract and replays the recorded accept-page cassette, and
+            # `test_email_notify.py` (also `api`) pins the sender. Without this
+            # entry an email_notify.py-only change matched no pattern, fell
+            # through to `core`, and NEITHER guard ran on the PR that can break
+            # them — the regression was caught only post-merge, on push to
+            # main. Same silent-drop shape as the #2938/#3154 entries above.
+            "tortoise/email_notify.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
@@ -627,6 +641,19 @@ TOOL_CARVEOUTS = (
     # exact "proxy silent in the case it exists to cover" class this harness is
     # written to detect, so it must not apply to the harness itself.
     "tools/embedded_evidence.py",
+    # #2718/#4860: the eval-key isolation launcher owns
+    # tests/test_run_with_eval_keys.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows `tools/run-with-eval-keys.sh`, so a
+    # wrapper-only change (e.g. a fingerprint-format edit, or a change to the
+    # managed-key set) would come back as `changed=[]`, select() would take the
+    # docs-only return, and the wrapper's own guard suite would never run on
+    # the PR that changed the wrapper. No SOURCE_PATTERNS entry matches a `.sh`
+    # path, so it lands in the unknown-path branch -> FULL matrix (fail closed)
+    # — the safe default for the file that owns provider-key isolation.
+    # Pinned by
+    # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
+    "tools/run-with-eval-keys.sh",
 )
 
 

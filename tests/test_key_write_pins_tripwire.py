@@ -35,6 +35,7 @@ Route-coverage matrix (also documented above the helpers in hosted_api.py):
 |----------------------------------|-----------------------|-----------------------|
 | POST   /v1/team/keys             | create_api_key        | DI (get_current_org  |
 |                                  |                       |   _session)           |
+| POST   /v1/team/keys/{id}/rotate | rotate_api_key        | DI + fail-closed      |
 | PATCH  /v1/team/keys/{key_id}    | toggle_api_key_enabled| inline helpers        |
 | DELETE /v1/team/keys/{key_id}    | revoke_api_key        | DI + fail-closed      |
 | PATCH  /v1/team/dashboard-login  | toggle_dashboard_login| inline membership gate|
@@ -90,6 +91,10 @@ KEY_WRITE_HANDLERS: dict[str, tuple[str, ...]] = {
     "toggle_dashboard_login": ("_session_pinned_org", "_require_owner_admin"),
     # DI seam + the shared fail-closed helper on the key lookup.
     "revoke_api_key": ("get_current_org_session", "_ensure_key_in_pinned_org"),
+    # #4355: the replacement-aware rotate — same seams as its DELETE sibling
+    # (the DI resolves the pinned org; the fail-closed helper proves the
+    # displaced row belongs to it BEFORE any class/liveness detail is read).
+    "rotate_api_key": ("get_current_org_session", "_ensure_key_in_pinned_org"),
 }
 # Route decorator paths that carry key-write semantics (GET list is a read and
 # is deliberately excluded — same boundary as the client tripwire's scan of
@@ -377,6 +382,55 @@ class TestKeyWritePinsTripwireBehavior:
         assert r.json()["detail"] == "Not your API key"
         row = fake.query("api_keys", select=["revoked_at"], filters=[("id", "eq", kid)])[0]
         assert row["revoked_at"] is None  # untouched (revoke never ran)
+
+    # ── POST /v1/team/keys/{id}/rotate (#4355): pin governs the rotate ─────
+    def test_rotate_honors_pin_and_lands_in_pinned_team(self, client, fake, monkeypatch):
+        """A session rotate pinning the NON-first membership (B) must rotate
+        B's key — a pin-ignoring server resolves memberships[0] (A) and fails
+        closed (the key is not in A), so the 200 + team-B row is the
+        discriminator. Same shape as the create/revoke arms."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        kid = self._key_id(fake, teamB)
+        beforeA = len(_keys_of(fake, teamA))
+        r = client.post(
+            f"/v1/team/keys/{kid}/rotate?org_id={teamB}",
+            headers={"Authorization": "Bearer eyJ.sess"}, json={},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["replaced_key_id"] == kid
+        assert body["replaced_revoked"] is True
+        old = fake.query("api_keys", select=["revoked_at"], filters=[("id", "eq", kid)])[0]
+        assert old["revoked_at"] is not None, "the displaced row must be revoked"
+        new = fake.query("api_keys", select=["org_id"], filters=[("id", "eq", body["id"])])
+        assert new and new[0]["org_id"] == teamB, (
+            "rotate ignored the ?org_id= pin (landed outside team B)"
+        )
+        assert len(_keys_of(fake, teamA)) == beforeA, (
+            "rotate leaked into team A (pin ignored → memberships[0])"
+        )
+
+    def test_rotate_non_member_pin_403_no_write(self, client, fake, monkeypatch):
+        """A non-member pin fails closed 403 "No membership in team" via the
+        shared DI membership gate BEFORE any lookup, and nothing is written.
+        (The route carries no inline _session_pinned_org — the DI owns it —
+        which is exactly why KEY_WRITE_HANDLERS names get_current_org_session
+        as its seam.)"""
+        teamA, _teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        _keyC, teamC = _provision_anon(client, fake)
+        kid = self._key_id(fake, teamA)
+        rows_before = len(fake.query("api_keys", select=["id"]))
+        r = client.post(
+            f"/v1/team/keys/{kid}/rotate?org_id={teamC}",
+            headers={"Authorization": "Bearer eyJ.sess"}, json={},
+        )
+        assert r.status_code == 403, r.text
+        assert "No membership in team" in str(r.json())
+        old = fake.query("api_keys", select=["revoked_at"], filters=[("id", "eq", kid)])[0]
+        assert old["revoked_at"] is None, "a refused rotate must not revoke anything"
+        assert len(fake.query("api_keys", select=["id"])) == rows_before, (
+            "a refused rotate must not mint a replacement"
+        )
 
     # ── PATCH /v1/team/dashboard-login: SERVER-contract arm ────────────────
     # The first-party client does not pin this route today (module docstring),

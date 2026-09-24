@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 5
+# tortoise-hook-version: 6
 # Tortoise memory injection for Claude Code — SessionStart hook.
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
