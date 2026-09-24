@@ -35,7 +35,7 @@ import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
-import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
+import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
 // #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
 // unit-tested). #2166 + #2426: isManagedKey selects the durable product keys
 // the API Keys page shows — bootstrap session credentials excluded, expiring
@@ -1201,6 +1201,14 @@ function claimIntentInFlight() {
   // class "a click must not destroy the one-time secret"). Cleared on the
   // reveal's own Copy & done and on logout/team switch.
   const [rotatedKey, setRotatedKey] = React.useState(null)
+  // #4355: the rotate partial-state disclosure. `POST /v1/team/keys/{id}/rotate`
+  // creates the replacement FIRST and then CLAIM-revokes the old row; when the
+  // destructive leg could not be completed AND its rollback also failed, the
+  // response carries `replaced_revoked:false` + a `warning` and BOTH keys are
+  // live. That is a state the user has to act on (the "what is live" surfaces
+  // and the count are now one too high), so it gets its own persistent notice
+  // rather than riding the transient `error` slot that `loadAll` overwrites.
+  const [rotateNotice, setRotateNotice] = React.useState('')
   // key-create modal state
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
@@ -1316,6 +1324,13 @@ function claimIntentInFlight() {
   const [memoryErrors, setMemoryErrors] = React.useState({})      // per-ROW errors (role=alert) — never the global banner
   const indexPollRef = React.useRef(null)
   const docsPollRef = React.useRef(null)
+  // #1926: the id of the LIVE index/docs job whose poll callbacks may apply.
+  // A superseded job's late tick — or a completion that lands AFTER the
+  // source was toggled off — compares its own id against this and drops out.
+  // Clearing `indexJob`/`docsJob` alone could not stop a callback already in
+  // flight; this is the identity the guard reads.
+  const indexJobIdRef = React.useRef(null)
+  const docsJobIdRef = React.useRef(null)
   // #1845: source-scope selector state (shared by the docs + issues rows).
   // reposList = SHORT repo names from GET /v1/onboarding/github/repos (loaded
   // once when connected); branchLists[repo] = branches for a repo (lazy-loaded
@@ -1757,7 +1772,8 @@ function claimIntentInFlight() {
   // .expires_at (when present) for the expiry echo.
   async function mintKey(activeKey, name, expiresInDays) {
     // #2167 rule 4: session-mode durable-key CREATE (shared by createKey +
-    // #2211's wizardMintDurableKey + regenerateKey's rotate mint) rides the
+    // #2211's wizardMintDurableKey — #4355 moved rotate OFF this path, onto
+    // the cap-neutral POST /v1/team/keys/{id}/rotate) rides the
     // session JWT + pins ?org_id=<selected> (multi-membership correctness —
     // server honors it membership-checked with a suspension 403, zero server
     // changes) and NEVER merges a key-preference header (a held key must not
@@ -3120,25 +3136,45 @@ function claimIntentInFlight() {
   // tries + terminal-status short-circuit; the handle lives in a ref
   // (cleared on success + unmount); per-team staleness guard. Deliberately
   // does NOT copy the old github connect poll's dangling-timer anti-pattern.
-  function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone }) {
-    if (ref.current) { clearInterval(ref.current); ref.current = null }
+  //
+  // #1926: the poll releases only its OWN interval handle (`releaseOwn`), so a
+  // tick already in flight when the source is toggled off — or one superseded
+  // by a NEW poll for the same ref — can never clear the handle that replaced
+  // it. A stale tick also applies NO onStatus/onDone, so a completion that
+  // lands after the toggle-off never surfaces (the caller owns the identity
+  // via `isStale`; a caller that omits it keeps the pre-#1926 behavior).
+  function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone, isStale }) {
+    stopBoundedPoll(ref)
     const teamAtStart = orgIdRef.current
+    const stale = () => typeof isStale === 'function' && isStale()
+    let handle = null
+    const releaseOwn = () => {
+      const mine = handle
+      handle = null
+      if (mine != null) clearInterval(mine)
+      // only clear the shared ref when it still points at OUR handle
+      if (ref.current === mine) ref.current = null
+    }
     let tries = 0
     const tick = async () => {
       tries += 1
-      if (orgIdRef.current !== teamAtStart) { stopBoundedPoll(ref); return }  // per-team staleness guard
+      if (orgIdRef.current !== teamAtStart) { releaseOwn(); return }  // per-team staleness guard
+      if (stale()) { releaseOwn(); return }
       try {
         const job = await api(url, { useSession: true })
+        if (stale()) { releaseOwn(); return }
         if (onStatus) onStatus(job)
-        if (job && isTerminal(job)) { stopBoundedPoll(ref); if (onDone) onDone(job); return }
+        if (job && isTerminal(job)) { releaseOwn(); if (onDone) onDone(job); return }
       } catch (e) {
+        if (stale()) { releaseOwn(); return }
         // 404 = the in-memory job was evicted (1h TTL) — a TERMINAL state
         // the UI renders honestly ("status expired — re-check"), not a retry loop.
-        if (e && e.status === 404) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'expired', error: e.message }); return }
+        if (e && e.status === 404) { releaseOwn(); if (onDone) onDone({ status: 'expired', error: e.message }); return }
       }
-      if (tries >= maxTries) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'timeout' }) }
+      if (tries >= maxTries) { releaseOwn(); if (onDone) onDone({ status: 'timeout' }) }
     }
-    ref.current = setInterval(tick, interval)
+    handle = setInterval(tick, interval)
+    ref.current = handle
   }
   function stopBoundedPoll(ref) {
     if (ref.current) { clearInterval(ref.current); ref.current = null }
@@ -3303,24 +3339,53 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1924: one PATCH helper for the per-source ENABLE intents — the four call
+  // sites (2 sources × on/off) differ only in key, value and error copy. It
+  // writes the ENABLE flag only; the GitHub CONNECTION (github_connected) is
+  // never touched here, which is the whole point of #1924.
+  async function setSourceEnabled(key, enabled, row, message) {
+    setMemoryBusy(row)
+    setRowError(row, '')
+    try {
+      await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+        body: JSON.stringify({ [key]: enabled }) })
+      await refreshOnboarding()
+      return true
+    } catch (e) {
+      setRowError(row, (e && e.message) || message)
+      return false
+    } finally {
+      setMemoryBusy('')
+    }
+  }
+
+  // #1924: the off-toggle writes the per-source ENABLE intent
+  // (`issues_enabled`) — NEVER `github_connected`. Flipping the connection
+  // flag was a full GitHub disconnect: it also killed the docs source, and
+  // re-enabling forced a fresh OAuth round-trip just to hide issues.
   async function toggleIssues(next) {
     if (memoryBusy) return
     if (!next) {
-      // off: PATCH the display flag (no server-side disconnect exists —
-      // re-enabling re-runs the OAuth connect).
-      setMemoryBusy('issues')
-      setRowError('issues', '')
+      // #1926: stop the in-flight re-index FIRST and invalidate its callbacks
+      // (an interval tick already past its await would otherwise still apply),
+      // then clear the job — so no "Indexing complete" can render for a source
+      // the user just turned off.
+      indexJobIdRef.current = null
+      stopBoundedPoll(indexPollRef)
+      setIndexJob(null)
       setIssuesWantOn(false)
-      try {
-        await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-          body: JSON.stringify({ github_connected: false }) })
-        await refreshOnboarding()
-      } catch (e) {
-        setRowError('issues', (e && e.message) || 'Could not update GitHub issues — try again.')
-      } finally {
-        setMemoryBusy('')
-      }
-    } else if (onboarding && onboarding.github_connected) {
+      await setSourceEnabled('issues_enabled', false, 'issues',
+        'Could not update GitHub issues — try again.')
+      return
+    }
+    // ON: clear any persisted off-intent first, so the switch, the row and the
+    // server never disagree about what the user asked for.
+    if (onboarding && onboarding.issues_enabled === false) {
+      const ok = await setSourceEnabled('issues_enabled', true, 'issues',
+        'Could not update GitHub issues — try again.')
+      if (!ok) return
+    }
+    if (onboarding && onboarding.github_connected) {
       // already connected → re-poll the diff (in-flight single-flight reuse)
       reindexGithub()
     } else {
@@ -3329,15 +3394,31 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1924: docs is an independent source — its own enable intent, and an off
+  // path that did not exist before this change (the switch was terminal once
+  // indexed, so docs could never be turned off).
   async function toggleDocs(next) {
     if (memoryBusy) return
-    setDocsWantOn(next)
-    setRowError('docs', '')
-    if (next && onboarding && onboarding.github_connected && !(onboarding.github_docs_indexed)) {
-      // toggle-on reveals the explicit Index-docs action (T1-P7) — the user
-      // presses it to run the job (auto-running would surprise); the row
-      // already shows the action button when docsWantOn.
+    if (!next) {
+      // #1926 (sibling of the issues fix): stop the in-flight docs index poll
+      // and invalidate its callbacks so no stale completion report renders.
+      docsJobIdRef.current = null
+      stopBoundedPoll(docsPollRef)
+      setDocsJob(null)
+      setDocsWantOn(false)
+      await setSourceEnabled('docs_enabled', false, 'docs',
+        'Could not update GitHub docs — try again.')
+      return
     }
+    if (onboarding && onboarding.docs_enabled === false) {
+      const ok = await setSourceEnabled('docs_enabled', true, 'docs',
+        'Could not update GitHub docs — try again.')
+      if (!ok) return
+    }
+    // #1835/#1894: toggle-on reveals the explicit Index-docs action (T1-P7) —
+    // the user presses it to run the job (auto-running would surprise); the
+    // row already shows the action button when docsWantOn.
+    setDocsWantOn(true)
   }
 
   async function reindexGithub() {
@@ -3355,9 +3436,17 @@ function claimIntentInFlight() {
       const jobId = res && res.job_id
       if (!jobId) throw new Error('index job did not return a job id')
       setIndexJob({ status: 'started', job_id: jobId })
+      // #1926: bind the LIVE job id before the poll starts. A tick from a
+      // superseded job — or one that lands after the off-toggle nulled this —
+      // reads it and drops out instead of reporting a completion.
+      indexJobIdRef.current = jobId
       startBoundedPoll(indexPollRef, {
         url: `/v1/index/github/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        // #1926: the poll's single stale guard — all of its onStatus/onDone
+        // paths check this, so a superseded job (and a completion that lands
+        // after the off-toggle) applies nothing.
+        isStale: () => indexJobIdRef.current !== jobId,
         onStatus: setIndexJob,
         // #1894: refresh onboarding state on terminal so the newly-stamped
         // github_indexed_at appears WITHOUT a manual reload.
@@ -3396,9 +3485,13 @@ function claimIntentInFlight() {
       const jobId = res && res.job_id
       if (!jobId) throw new Error('docs job did not return a job id')
       setDocsJob({ status: 'started', job_id: jobId })
+      // #1926: same live-id guard as the github re-poll (see reindexGithub).
+      docsJobIdRef.current = jobId
       startBoundedPoll(docsPollRef, {
         url: `/v1/index/docs/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        // #1926: same single stale guard as the github re-poll.
+        isStale: () => docsJobIdRef.current !== jobId,
         onStatus: setDocsJob,
         // #1894: refresh onboarding state on terminal so the newly-stamped
         // github_docs_indexed_at appears WITHOUT a manual reload.
@@ -3447,8 +3540,11 @@ function claimIntentInFlight() {
           setWizardGithub((g) => ({ ...g, busy: false }))
           if (st && st.connected) {
             setIssuesWantOn(true)
+            // #1924: connecting from the Issues row is an explicit "bring
+            // issues in" — clear any stale off-intent in the same write so the
+            // source cannot come back up disabled.
             api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-              body: JSON.stringify({ github_connected: true }) }).catch(() => {})
+              body: JSON.stringify({ github_connected: true, issues_enabled: true }) }).catch(() => {})
             refreshOnboarding().catch(() => {})
             // connected+indexing: the OAuth callback auto-enqueues the
             // first run — surface it via the re-poll (single-flight reuse
@@ -4380,6 +4476,7 @@ function claimIntentInFlight() {
     // #4330 (review cycle 2, P2): the dialog's cap notice is per-session data.
     setKeyModalCapNotice('')
     setRotatedKey(null) // #2735: the rotate reveal is one-time plaintext — never survives logout
+    setRotateNotice('') // #4355: the rotate partial-state notice belongs to the old user's keys
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
     setClaimKey('')
@@ -4486,6 +4583,12 @@ function claimIntentInFlight() {
       // managedKeys (isManagedKey render filter) + durableConnectKey's
       // rows-resolution keep working off the full payload.
       setSessions(Array.isArray(s) ? s : s.sessions || [])
+      // #4355: return the loaded rows so a caller that must decide something
+      // from the TRUE state (the rotate catch's ambiguous-failure branch) reads
+      // the same payload this call landed in `keys` — state updates are async,
+      // so the closure's `keys` is still the pre-refresh snapshot here.
+      // undefined when the read failed or the team went stale mid-refresh.
+      return Array.isArray(k) ? k : k.keys || []
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
       if (orgIdRef.current === _teamAtCall) {
@@ -5065,6 +5168,7 @@ function claimIntentInFlight() {
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
     setRotatedKey(null)    // #2735: the rotate reveal is one-time plaintext — never survives a team switch
+    setRotateNotice('')    // #4355: a partial-state warning is about THIS team's keys — never the new team's
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setNewKeyExpiryDate('') // #2426: a picked Custom date must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
@@ -6093,17 +6197,26 @@ function claimIntentInFlight() {
   }
 
   async function regenerateKey(keyId) {
-    // #1147/#2229: rotate = mint the REPLACEMENT first (the old key still
-    // authorizes the request), then revoke the old — a single mint (no
-    // bootstrap-pool growth), session-authed. The old row's label carries
-    // into the replacement mint so an in-place rotate keeps the row's
-    // identity. Available on every tier: regenerating does not grow the key
-    // count.
-    // #2246 (ADR-010): rotate is now available on EVERY durable row (uniform
-    // table actions) and NEVER installs the replacement into the browser — no
-    // localStorage/teamKeysRef/apiKey write. The replacement is shown once
-    // (setRotatedKey) for the user to configure into their agent; the old key
-    // is revoked.
+    // #4355: rotate is ONE server call — `POST /v1/team/keys/{id}/rotate`.
+    //
+    // Why the two-call shape is gone. It used to `mintKey()` then
+    // `revokeKey(keyId, {skipConfirm:true})` — both against the SAME capped
+    // `POST /v1/team/keys` / `DELETE` pair. The mint leg therefore ran while
+    // the old row still held its slot, so a team AT `max_api_keys` had its
+    // replacement refused 402 and the rotate simply failed — the issue this
+    // endpoint closes. The single call is CAP-NEUTRAL BY CONSTRUCTION: the
+    // replacement consumes the slot the displaced row releases (the server
+    // proves the old row is one the count actually charged, then admits the
+    // mint against the post-release count). `POST /v1/team/keys` itself is
+    // unchanged and still 402s at the cap — rotate is not an exemption.
+    //
+    // The server owns the ordering that used to live here (create first, then
+    // revoke), so the client no longer has a window between the two legs. What
+    // it keeps is the stale-response rule below: a team switch during the RTT
+    // must not land this team's reveal (or its warning) under the new team's
+    // header. The replacement is still never installed into the browser (no
+    // localStorage/teamKeysRef/apiKey write) — it is shown once via
+    // `setRotatedKey`, and the old key is revoked by the same call (#2246).
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
@@ -6113,6 +6226,9 @@ function claimIntentInFlight() {
     // #2426: the confirm ALSO states the replacement's expiry — the old
     // key's lifetime span is re-applied from mint-time with a fresh clock
     // (Cloudflare 'resets relative to now' semantics); Never stays Never.
+    // The span still rides the body as `expires_in`; a null span sends no
+    // expiry at all, and the SERVER then inherits the displaced row's exact
+    // `expires_at` (never widening an expiring key to a Never one).
     const rowLifetime = lifetimeDaysFromRow(row0)
     const replacementExpiry = rowLifetime
       ? `The replacement expires ${fmtExpiryDate(new Date(Date.now() + rowLifetime * _MS_PER_DAY).toISOString())} (the same ${rowLifetime}-day lifetime as this key).`
@@ -6121,26 +6237,41 @@ function claimIntentInFlight() {
     setCapNotice('')
     setError('')
     setBusy(true)
+    // Round-20 (P2)/#4355: capture the team at call — the request is a mutate
+    // that revokes a row, and a mid-flight switch must neither land this
+    // team's reveal/warning under the new team's header nor publish its error
+    // there. Declared OUTSIDE the try so the catch's stale-response guard
+    // reads the same value.
+    const _teamAtCall = currentOrgId
     try {
-      const _teamAtCall = currentOrgId
-      // #2229: label carry-over — the row may leave the closure list mid-
-      // flight (switch/refresh) — degrade to an unlabeled mint.
+      // #2229/#4355: label carry-over — the row may leave the closure list
+      // mid-flight (switch/refresh) — degrade to an unlabeled rotate. The
+      // expiry re-application (#2426) rides the SAME body.
       const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
-      // #2426: rotate re-applies the old row's lifetime span (expires_in
-      // days from expires_at − created_at; Never → null → no param).
-      const mk = await mintKey('', (oldRow && oldRow.name) || undefined,
-                               lifetimeDaysFromRow(oldRow))
-      // Round-29 (review P1): NEVER revoke without a confirmed target — if
-      // the team moved during the mint RTT, bail BEFORE the destructive leg
-      // (the old row may not belong to the now-selected team). The minted
-      // replacement stays as a visible team-A durable (same accepted orphan
-      // semantics as createKey's identity guard).
+      // #2230/#2167 rule 4: pin the SELECTED team — without it the server
+      // resolves the session team from memberships[0] and a multi-membership
+      // owner rotates against the wrong team's key set (mirrors the revoke
+      // DELETE + the toggle/rename PATCH pins).
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const rbody = {}
+      const carryName = (oldRow && oldRow.name) || undefined
+      if (carryName) rbody.name = carryName
+      const carryDays = lifetimeDaysFromRow(oldRow)
+      if (carryDays != null && !Number.isNaN(carryDays)) rbody.expires_in = carryDays
+      const mk = await api(`/v1/team/keys/${keyId}/rotate${q}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true,
+        body: JSON.stringify(rbody),
+      })
+      // #4342/#4355: the single call has already revoked the old key AND (when
+      // it could) revoked the displaced row — so a team switch across this RTT
+      // must not land the reveal or the partial-state notice under the new
+      // team's header. Bail after reloading the true state instead.
       if (orgIdRef.current !== _teamAtCall) return
-      await revokeKey(keyId, { skipConfirm: true })
-      if (orgIdRef.current !== _teamAtCall) return
-      // #4342: a 2xx mint that carries no revealable plaintext is NOT a
-      // reveal. The secret is unrecoverable at this point AND the OLD key was
-      // revoked on the line above, so the only honest outcome is to say so —
+      // #4342: a 2xx rotate that carries no revealable plaintext is NOT a
+      // reveal. The secret is unrecoverable at this point AND the old key was
+      // revoked by the call above, so the only honest outcome is to say so —
       // never to latch `rotatedKey` with a falsy (or non-string, or blank)
       // plaintext, which rendered an empty `.key-value` box whose copy wrote
       // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
@@ -6151,15 +6282,34 @@ function claimIntentInFlight() {
       if (!plaintext) {
         // Refresh FIRST, then surface the reason: `loadAll` owns the same
         // `error` slot and overwrites it from its own catch, so a compound
-        // failure (the rotate legs succeeded, the refresh did not) would
-        // otherwise replace the one message that tells the user their old key
-        // is gone and which row to clean up. The identity guard mirrors the
+        // failure (the rotate succeeded, the refresh did not) would otherwise
+        // replace the one message that tells the user their old key is gone
+        // and which row to clean up. The identity guard mirrors the
         // stale-response rule — a switch during the refresh must not carry this
         // team's error under the new team's header.
         await loadAll('')
         if (orgIdRef.current !== _teamAtCall) return
         setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
+      }
+      // #4355: the server states whether the displaced row was actually
+      // revoked. When the destructive leg could not be completed AND its
+      // rollback also failed, BOTH keys are live — the server still returns
+      // the live replacement's plaintext (the only alternative is losing a
+      // live secret) and a warning. Surface it as its own persistent notice:
+      // this is a state the user has to clean up, and it is exactly what the
+      // other "what is live" surfaces now over-count by one.
+      setRotateNotice(mk && mk.warning ? String(mk.warning) : '')
+      // #2246 (review, P2)/#4355: the SAME row-truth prefix clear `revokeKey`
+      // performs. The server revoked the displaced row inside this call, so an
+      // in-memory welcome/connect plaintext belonging to THAT row must not
+      // outlive it — otherwise the overview "live" claim and the connect
+      // snippet keep embedding a credential this rotate just killed. (The
+      // rotate replacement itself is shown once via setRotatedKey and is never
+      // installed into the browser, so nothing else needs clearing.)
+      if (row0 && row0.key_prefix) {
+        if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
+        if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
       }
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable. #2735: its OWN reveal state
@@ -6169,13 +6319,45 @@ function claimIntentInFlight() {
       setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {
-      if (orgIdRef.current === currentOrgId) {
-        if (e.status === 402) {
-          // #2229: rotate-specific cap copy — see rotateCapNoticeFrom.
-          setCapNotice(rotateCapNoticeFrom(e.message, team, teamHasUpgrade(team)))
-          setError('')
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — not our state, not our error
+      // #4355: a rotate 402 means the org is OVER its limit (a 1-for-1
+      // rotation is admitted BY construction, so the notice's copy describes
+      // the over-cap state, not the old mint-then-revoke mechanism).
+      // #4335: the "or upgrade" tail is only truthful when an upgrade path
+      // exists, so the notice takes the same hasUpgrade flag as the create path.
+      if (e.status === 402) {
+        setCapNotice(rotateCapNoticeFrom(e.message, team, teamHasUpgrade(team)))
+        setError('')
+      } else {
+        // #4355: any other failure may be a LOST RESPONSE, not a lost
+        // request. The server creates the replacement and then revokes the
+        // displaced row in ONE call, so a dropped/timed-out reply can leave
+        // the old key revoked server-side, the replacement secret already
+        // gone (reveal-once), and the table still rendering the row active —
+        // while `e.message` would assert an outcome the client cannot know.
+        // The two-call shape could not reach that state from a lost MINT
+        // response (the revoke was a separate call it never made), so this is
+        // a regression the single call introduces and the client must disclose.
+        // Re-read the true state FIRST (the refresh owns the same `error`
+        // slot, so it must run before the message is set), then say only what
+        // the table shows. The identity guard mirrors the other stale-response
+        // rules: a switch across this reload must not land under the new team.
+        let rowsAfter = null
+        try {
+          rowsAfter = await loadAll('')
+        } catch { /* loadAll owns its own error slot */ }
+        if (orgIdRef.current !== _teamAtCall) return
+        const after = Array.isArray(rowsAfter)
+          ? rowsAfter.find((k) => (k.id || k.key_id) === keyId)
+          : null
+        if (after && after.revoked_at) {
+          // The rotate DID complete: the row is revoked and the replacement's
+          // plaintext was never delivered, so it cannot be shown.
+          setError(`The rotate request did not return a usable response, and it may have completed: ${rowName} now shows as revoked, so a replacement key exists whose value cannot be shown. Revoke the unused replacement row and create a new key.`)
         } else {
-          setError(e)
+          // The row is still listed active (or the refresh itself failed):
+          // the outcome is genuinely unknown and a replacement may still exist.
+          setError(`The rotate request failed (${e.message}), and its outcome could not be confirmed — ${rowName} is still listed as active, but a replacement may have been created. Refresh the key list before relying on this key.`)
         }
       }
     } finally {
@@ -6326,10 +6508,11 @@ function claimIntentInFlight() {
       // welcomeKey/wizardDurableKey alive past their row's death: the
       // overview "live" claims and the connect step keep embedding the
       // REVOKED key (an empty-tail the effect cannot see). The direct
-      // prefix clear closes it. Also covers regenerateKey's rotate (it
-      // revokes the old row via revokeKey skipConfirm) — the replacement
-      // is shown via setRotatedKey, and the welcome plaintext must not
-      // survive its own row's rotation.
+      // prefix clear closes it. #4355 note: rotate no longer reaches here (it
+      // is ONE call to /rotate, which revokes the displaced row server-side),
+      // so `regenerateKey` performs this SAME prefix clear itself — the
+      // replacement is shown via setRotatedKey, and the welcome plaintext must
+      // not survive its own row's rotation.
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
@@ -8999,6 +9182,19 @@ function claimIntentInFlight() {
             {/* #4330: the SAME notice component the create-key modal renders. */}
             {capNotice && <CapNotice text={capNotice} team={team} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgradeToPrice} onManage={manageBilling} />}
 
+            {/* #4355: the rotate partial-state disclosure. `replaced_revoked:false`
+                means the replacement was created but the displaced row could not
+                be revoked AND its rollback failed — BOTH keys are live, so the
+                count is one over what the user intended and the table lists a
+                key they meant to retire. Rendered as its own persistent notice
+                (not the transient `error` slot, which `loadAll` overwrites). */}
+            {rotateNotice && (
+              <p className="small" role="alert" data-rotate-notice
+                 style={{ margin: '0 0 1rem', color: 'var(--warn, #b45309)' }}>
+                {rotateNotice}
+              </p>
+            )}
+
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone
                 `.new-key` block — but regenerateKey still set newKey/
@@ -9863,10 +10059,12 @@ function MemorySources(props) {
   const githubConnected = !!state.github_connected
   const sessionsOn = !!state.session_recording
   const docsIndexed = !!state.github_docs_indexed
-  // issues state machine: off → on-but-not-connected (inline Connect CTA) →
-  // connected+indexing. The switch reads connected OR the user's intent.
-  const issuesOn = githubConnected || issuesWantOn
-  const docsOn = docsWantOn || docsIndexed
+  // #1924: the Issues/Docs switches control their OWN source via a persisted
+  // ENABLE intent (issues_enabled / docs_enabled) that is INDEPENDENT of the
+  // GitHub connection. Before this, the Issues switch's off-state WAS the
+  // connection (a full disconnect that also killed docs).
+  const issuesOn = issuesSourceOn(state, issuesWantOn)
+  const docsOn = docsSourceOn(state, docsWantOn)
   // #1894: "Indexed · <relative time>" (honest — no time when the persisted
   // timestamp is absent, e.g. legacy indexed teams). Independent of
   // connectivity: the label is a historical claim about indexing.
@@ -9893,7 +10091,7 @@ function MemorySources(props) {
         <div className="toggle-body">
           <h4>GitHub issues</h4>
           <p>Issues become work items with a lifecycle record.</p>
-          {githubConnected ? (
+          {issuesOn && githubConnected ? (
             <>
               <p className="dim small" aria-live="polite">
                 {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}
@@ -9955,8 +10153,12 @@ function MemorySources(props) {
               </button>{' '}
               to bring issues in as memory sources.
             </p>
+          ) : githubConnected ? (
+            // #1924: Issues off is NOT a GitHub disconnect — say so, so the
+            // off state never reads as "your connection was torn down".
+            <p className="dim small">Issues are off. GitHub stays connected for docs — turn this back on any time; no re-authorization needed.</p>
           ) : null}
-          {indexJob && <GithubIndexStatus job={indexJob} now={now} />}
+          {issuesOn && indexJob && <GithubIndexStatus job={indexJob} now={now} />}
           {memoryErrors.issues && <p className="error" role="alert">{memoryErrors.issues}</p>}
         </div>
       </div>
@@ -9969,10 +10171,9 @@ function MemorySources(props) {
           role="switch"
           aria-checked={docsOn}
           data-on={docsOn ? 'true' : 'false'}
-          data-locked-on={docsIndexed ? 'true' : undefined}  // #1894: terminal indexed docs switch — full-opacity ON (CSS scopes on this attr; the generic disabled busy-dim stays for busy windows)
           aria-label="GitHub docs as a memory source"
           onClick={() => onToggleDocs(!docsOn)}
-          disabled={memoryBusy === 'docs' || docsIndexed}  // #1835: connect-inline like issues — not connected just reveals the CTA; review P1-1: docs indexed ⇒ the switch is terminal (re-index refreshes, never un-indexes)
+          disabled={memoryBusy === 'docs'}  // #1924: NOT terminal once indexed — docs can be turned off independently of the GitHub connection (and of issues)
         />
         <div className="toggle-body">
           <h4>GitHub docs</h4>
@@ -9987,10 +10188,14 @@ function MemorySources(props) {
           ) : !githubConnected && !docsIndexed ? (
             <p className="dim small">Connect GitHub first to index docs.</p>
           ) : null}
-          {docsIndexed && docsLabel && (
+          {docsOn && docsIndexed && docsLabel && (
             <p className="memory-source-state" aria-live="polite">{docsLabel}</p>
           )}
-          {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
+          {githubConnected && !docsOn && docsIndexed && (
+            // #1924: docs off is a source choice, not a disconnect or a delete.
+            <p className="dim small">Docs are off. Your indexed docs stay in the graph — turn this back on any time; no re-authorization needed.</p>
+          )}
+          {githubConnected && docsOn && !docsJob && (
             <>
               {/* #1845: repo + branch scope for the docs index — "All repos"
                   default; when specific repos are picked, each gets its own
@@ -10082,7 +10287,7 @@ function MemorySources(props) {
               </p>
             </>
           )}
-          {docsJob && <DocsIndexStatus job={docsJob} now={now} />}
+          {docsOn && docsJob && <DocsIndexStatus job={docsJob} now={now} />}
           {memoryErrors.docs && <p className="error" role="alert">{memoryErrors.docs}</p>}
         </div>
       </div>

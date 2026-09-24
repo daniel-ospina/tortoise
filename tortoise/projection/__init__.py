@@ -3277,6 +3277,9 @@ class FalkorProjection(
         # rebuild pass (see `_upsert_point_props`) so the report is emitted once
         # per key per pass instead of once per graph-only point.
         self._deny_drop_warned = set()
+        # #5004: the same once-per-pass de-dup for the replay's embedding-identity
+        # warnings (an embedder swap would otherwise emit one line per Point).
+        self._embed_identity_warned = set()
 
         # #3947: capture the episodic Point population BEFORE the wipe, and
         # PROVE the replay can recreate it BEFORE wiping anything (#2943: a
@@ -3333,14 +3336,21 @@ class FalkorProjection(
                     # are not node properties. `content_hash` is NOT in this
                     # list: it is `_upsert_point_props`'s CONDITIONAL write, and
                     # the pass-1b tail is its carrier for the ids the journal
-                    # did not derive (see _REPLAY_GAP_PROPS). `embedding` is
-                    # not carried by the pre-wipe snapshot (the replay
-                    # re-derives it), while a rebuild restores it from the live
-                    # pre-wipe capture when one exists; `updatedAt` is
-                    # replay-owned.
+                    # did not derive (see _REPLAY_GAP_PROPS).
+                    # `embedding` is stripped because this is a SYNTHETIC event
+                    # for a GRAPH-ONLY id — the journal holds no record of it at
+                    # all, so there is no journalled vector to carry (#5004 only
+                    # changed the path where the journal DOES carry one). The
+                    # rebuild restores it from the live pre-wipe capture in the
+                    # pass-1b tail; `updatedAt` is replay-owned.
+                    # `embedding_verbatim` is stripped WITH it: the tail is this
+                    # path's only restorer, and carrying the marker here without
+                    # the vector made `_upsert_point_props` take the verbatim
+                    # branch for a recomputed value. The tail honours the
+                    # marker instead (round-7).
                     clean = {k: v for k, v in props.items()
-                             if k not in ("embedding", "updatedAt",
-                                          "_nid", "_graph_id")}
+                             if k not in ("embedding", "embedding_verbatim",
+                                          "updatedAt", "_nid", "_graph_id")}
                     is_op = bool(props.get("is_operator") or props.get("op_type"))
                     ev_type = "OperatorAdded" if is_op else "PointAdded"
                     if is_op:
@@ -3932,9 +3942,20 @@ class FalkorProjection(
                 # an unavailable embedder). Targeted SET — the
                 # `_GuardedGraph` bulk-wipe guard is DETACH DELETE-only.
                 if is_recreate:
+                    # #5004 round-4: `embedding_verbatim` is wiped here TOO.
+                    # It is a declared NODE property now, and the wipe's own
+                    # premise ("a re-creation is a FRESH node live") applies to
+                    # it exactly as it does to `embedding`: its clause uses
+                    # `CASE … ELSE n.embedding_verbatim`, which PRESERVES the
+                    # dead incarnation's marker when the re-creation carries
+                    # none — so the rebuilt node would hold a property the live
+                    # node does not (the #330/#3312 parity break), and a leaked
+                    # `true` would make a later re-emit store the new vector
+                    # RAW and skip the R1 attestation.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
-                        "SET n.embedding = NULL, n.content_hash = NULL",
+                        "SET n.embedding = NULL, n.content_hash = NULL, "
+                        "    n.embedding_verbatim = NULL",
                         params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
@@ -3966,7 +3987,20 @@ class FalkorProjection(
                     # declaration). A re-creation explicitly cleared both
                     # conditional fields before the upsert, so it owns them
                     # whether or not the upsert then wrote them back.
-                    if is_recreate or wrote_embedding:
+                    #
+                    # #5004 review: key PRESENCE matters INDEPENDENTLY of
+                    # `wrote_embedding`. When the journal carried a vector the
+                    # replay REFUSED to write (a wrong-width vector this store
+                    # cannot hold), gating on `wrote_embedding` alone left the
+                    # id unmarked and the pass-1b tail re-applied the OLDER
+                    # pre-wipe snapshot — making `rebuild_all` a function of
+                    # pre-wipe graph state (a populated store, `rebuild()`, and
+                    # a fresh store then disagreed). Round-3: the mark is the
+                    # KEY's presence, not its truthiness — an owned `None` is
+                    # the journal saying "no vector here", so the tail must not
+                    # re-apply an older one either.
+                    if (is_recreate or wrote_embedding
+                            or "embedding" in p):
                         journal_embed_write.add(p["id"])
                     if is_recreate or wrote_content_hash:
                         journal_hash_write.add(p["id"])
@@ -4132,8 +4166,12 @@ class FalkorProjection(
                                        if k not in BELIEF_PROPS}
                     wrote_embedding, wrote_content_hash = (
                         self._upsert_point_props(_prom_props))
-                    # #4305: id-wide journal-owned derived marks.
-                    if wrote_embedding:
+                    # #4305: id-wide journal-owned derived marks. #5004: the
+                    # payload carrying the key is itself ownership, even when
+                    # the fold refused to write it (wrong width, or an owned
+                    # None) — otherwise the pass-1b tail re-applies the older
+                    # pre-wipe snapshot.
+                    if wrote_embedding or "embedding" in p:
                         journal_embed_write.add(p["id"])
                     if wrote_content_hash:
                         journal_hash_write.add(p["id"])
@@ -4149,8 +4187,11 @@ class FalkorProjection(
                     op_p = _promotion_point_with_operator(p)
                     wrote_embedding, wrote_content_hash = (
                         self._upsert_point_props(op_p))
-                    # #4305: id-wide journal-owned derived marks.
-                    if wrote_embedding:
+                    # #4305: id-wide journal-owned derived marks. #5004: the
+                    # payload carrying the key is itself ownership, even when
+                    # the fold refused to write it (wrong width, or an owned
+                    # None).
+                    if wrote_embedding or "embedding" in p:
                         journal_embed_write.add(p["id"])
                     if wrote_content_hash:
                         journal_hash_write.add(p["id"])
@@ -4808,10 +4849,22 @@ class FalkorProjection(
                 clauses.append("n += $props")
                 params["props"] = gap
             if restore_embedding:
-                # `vecf32()` cast exactly like `_upsert_point_props`: the HNSW
-                # index rejects a bare list, and a bare-list write would leave
-                # the restored vector unsearchable.
-                clauses.append("n.embedding = vecf32($emb)")
+                if sp.get("embedding_verbatim"):
+                    # #5004 round-7: a CALLER-owned vector must keep its RAW
+                    # form. `vecf32()` is the ONE form it must not take (it
+                    # narrows a float64 list: `0.1` -> `0.10000000149011612`),
+                    # and this path is the graph-only id's only restorer — the
+                    # synthetic event deliberately carries neither the vector
+                    # nor the marker. The marker is restored with it, or the
+                    # property exists on live and not on replay (a #330/#3312
+                    # break this change would otherwise introduce).
+                    clauses.append("n.embedding = $emb")
+                    clauses.append("n.embedding_verbatim = true")
+                else:
+                    # `vecf32()` cast exactly like `_upsert_point_props`: the
+                    # HNSW index rejects a bare list, and a bare-list write
+                    # would leave the restored vector unsearchable.
+                    clauses.append("n.embedding = vecf32($emb)")
                 params["emb"] = list(emb)
             try:
                 self.g.query(
@@ -5894,7 +5947,10 @@ class FalkorProjection(
         for label, props in (("Subject", ("id", "name")),
                              ("Object", ("id", "name")),
                              ("Event", ("eventId",)),
-                             ("Source", ("id", "url"))):
+                             # canonicalUrl (#5012 S0b): the S0a canonical
+                             # identity S0b resolves against, so the resolver
+                             # is an index seek, not a label scan.
+                             ("Source", ("id", "url", "canonicalUrl"))):
             for prop in props:
                 try:
                     self.g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")

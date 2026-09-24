@@ -59,6 +59,7 @@ aboutObjects: tortoise
 | Read-path latency profile — phase-by-phase measurement of the ask lane, store round-trips, and the captured-turn embedding census (WAVE-R / M1, #4194) | `docs/research/2026-09-19-m1-read-path-latency-profile.md` |
 | Temporal reasoning in competitor agent-memory systems (2026-09-02) | `docs/research/2026-09-02-temporal-reasoning-competitors.md` |
 | Temporal retrieval admission trace — where #2578's temporal evidence is lost (#2976, 2026-09-11) | `docs/research/2026-09-11-2976-temporal-retrieval-trace.md` |
+| Capture consent — separating the MCP Bearer credential from session-capture authorization (#3615, 2026-09-16) | `docs/research/2026-09-16-3615-capture-consent.md` |
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |
 | Reaper race scoping/research (#1658) | `docs/scoping/2026-08-24-1658-reaper-race-scoping.md` |
 | Reaper destruction-path threat model on a shared `$TMPDIR` — demonstrated CWE-377 symlink-write + attacker-chosen kill/rmtree, and the escalated provenance-guard decision (#4098) | `docs/scoping/2026-09-18-4098-tmpdir-hardening-scoping.md` |
