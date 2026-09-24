@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 # all-MiniLM-L6-v2 as the default (evidence gate: recall +15.7%, p=0.0005;
 # HNSW spot-check cleared). Rotating the embedder = editing this line.
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+#: #4194: the model's vector width, in ONE place. The Point HNSW index is
+#: created with this width (tortoise/projection/__init__.py) and the vector leg
+#: requires it, so a stored vector of any other length is not a near-miss — it
+#: is a broken leg. The STORE declares this width to the write path
+#: (``FalkorProjection.required_embedding_dim``), which routes through
+#: :func:`encode_for_store` / :func:`encode_batch_for_store` — those degrade a
+#: wrong-width row to ``None`` (fail-soft, LOGGED) rather than handing it to
+#: ``vecf32``. A store with no vector index (the embedded brute-force lane)
+#: declares ``None`` — it has no width to enforce, so the encoder's own width
+#: governs.
+EMBEDDING_DIM = 384
 # Supply-chain pin (VULN-001, security review): resolved HF commit at bake time
 # (2026-08-21). A mutable tag would silently serve tampered weights.
 EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
@@ -369,24 +380,165 @@ class EmbeddingModel:
         return self._model.encode(texts, batch_size=batch_size, show_progress_bar=False)
 
 
-def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
-    """Compute embedding for a single text. Returns 384-dim list or None.
+def _truncate_for_embedding(content: str, max_tokens: int) -> str:
+    """The ONE stored-text composition used by every write-side embedder.
 
-    Truncates to max_tokens before encoding to prevent OOM.
-    Returns None if model unavailable or encoding fails.
+    Word-truncation to ``max_tokens`` before encoding prevents OOM. Shared by
+    :func:`compute_embedding` and :func:`compute_embeddings` so the batched
+    and single forms can never compose a different string for the same input
+    (#4194).
     """
+    return " ".join(content.split()[:max_tokens])
+
+
+def compute_embeddings(
+    texts: list[str], max_tokens: int = 512,
+) -> list[list[float] | None]:
+    """Batched form of :func:`compute_embedding` — SAME embedder, per text.
+
+    Returns one entry per input text: a vector of the ENCODER's own width, or
+    ``None`` where the model is unavailable / the encode failed. This exists so
+    a whole capture window can be embedded in ONE model call instead of one per
+    turn (#4194) without forking the embedder: it routes through the same
+    ``EmbeddingModel`` singleton, the same :func:`_truncate_for_embedding`
+    composition and the same un-normalised model output as
+    :func:`compute_embedding`, so a batched vector and a single vector are
+    byte-identical for the same text.
+
+    ⛔ The width a STORE can hold is the INDEX's constraint, and there is no
+    index on the embedded FalkorDBLite lane (brute-force
+    ``vec.euclideanDistance`` is dimension-agnostic), so this generic encoder
+    does not apply one — see :func:`encode_batch_for_store`, which the store's
+    write paths call. Enforcing :data:`EMBEDDING_DIM` here silently NULLed
+    every vector for a non-384 encoder on the index-less lane, and the
+    cross-lens candidate pool filters on ``p.embedding IS NOT NULL`` — the
+    #4280 regression (``tests/test_cross_lens_candidates.py``).
+
+    ⛔ This is a widely-REPLACED seam (``tools/longmem_eval/encode_cache.py``
+    and the longmem eval doubles swap the function itself), so it keeps its
+    narrow ``(texts, max_tokens)`` call shape on purpose: a caller-side width
+    keyword would raise ``TypeError`` inside every replacement and be swallowed
+    by the write paths' ``except Exception`` — the same fail-open in a new
+    place.
+    """
+    if not texts:
+        return []
     model = EmbeddingModel.get()
     if model is None:
-        return None
+        return [None] * len(texts)
     try:
-        words = content.split()[:max_tokens]
-        truncated = " ".join(words)
-        vec = model.encode([truncated])
-        if vec is None or len(vec) == 0:
-            return None
-        return vec[0].tolist()
+        truncated = [_truncate_for_embedding(t, max_tokens) for t in texts]
+        vecs = model.encode(truncated)
+        if vecs is None or len(vecs) != len(texts):
+            return [None] * len(texts)
+        return [vec.tolist() for vec in vecs]
     except Exception:
-        return None
+        return [None] * len(texts)
+
+
+#: #4280: width mismatches already warned about, keyed ``(expected_dim, actual)``.
+#: A width misconfiguration drops EVERY row, so an unlatched warning storms a
+#: bulk write (one line per Point); the signal is the first occurrence of each
+#: distinct mismatch.
+_WIDTH_MISMATCH_WARNED: set[tuple[int | None, int]] = set()
+
+
+def _degrade_to_width(
+    vectors: list[list[float] | None], expected_dim: int | None,
+) -> list[list[float] | None]:
+    """Drop the rows a store of width ``expected_dim`` cannot hold (#4280).
+
+    ``None`` means the caller's store has NO width-fixing vector index, so the
+    encoder's own width governs and nothing is dropped. A dropped row becomes
+    ``None`` (the node is still written; the read path declares the leg
+    impaired) and is LOGGED once per distinct ``(expected_dim, actual)`` — a
+    silent drop is indistinguishable from "the leg ran and found nothing",
+    which is exactly how #4280 hid (fail-open).
+    """
+    if expected_dim is None:
+        return list(vectors)
+    out: list[list[float] | None] = []
+    dropped = 0
+    widths: set[int] = set()
+    for row in vectors:
+        if row is not None and len(row) != expected_dim:
+            dropped += 1
+            widths.add(len(row))
+            out.append(None)
+        else:
+            out.append(row)
+    if dropped:
+        fresh = {(expected_dim, w) for w in widths} - _WIDTH_MISMATCH_WARNED
+        if fresh:
+            _WIDTH_MISMATCH_WARNED.update(fresh)
+            logger.warning(
+                "embedder returned %d/%d row(s) whose width != the store's "
+                "required %d — those vectors are NOT stored (the dense leg "
+                "degrades to keyword-only for them). Rotating the embedder "
+                "requires re-embedding the store. (Warned once per distinct "
+                "mismatch.)",
+                dropped, len(vectors), expected_dim,
+            )
+    return out
+
+
+def encode_for_store(
+    content: str, expected_dim: int | None,
+) -> list[float] | None:
+    """Encode ONE text through the seam, degraded to the STORE's width (#4280).
+
+    The store-scoped wrapper the Point write paths use:
+    ``expected_dim`` is ``FalkorProjection.required_embedding_dim``
+    (:data:`EMBEDDING_DIM` when the store has a Point HNSW index, ``None`` on
+    the index-less embedded brute-force lane). It calls the
+    :func:`compute_embedding` SEAM — the module global, so an installed
+    ``EncodeCache`` still intercepts — and then applies the width the store
+    declared.
+
+    ⛔ The seam is called with the ONE positional argument its replacements
+    declare (``compute_embedding(content)``; the encoder's own 512-word cap) and
+    this helper takes no ``max_tokens``: several in-repo doubles are
+    ``lambda content: ...``, and a second positional argument would raise
+    ``TypeError`` inside them — swallowed by the write paths'
+    ``except Exception`` into the same silent no-vector degrade #4280 is about.
+    """
+    vec = compute_embedding(content)
+    return _degrade_to_width([vec], expected_dim)[0]
+
+
+def encode_batch_for_store(
+    texts: list[str], expected_dim: int | None,
+) -> list[list[float] | None]:
+    """Batched :func:`encode_for_store` — one model call, same width guard.
+
+    The batch length is enforced against the input: the turn writers index the
+    result per windowed turn, so a REPLACEMENT of the seam that returns a short
+    batch would otherwise raise ``IndexError`` inside the capture loop — after
+    the Session write — and leave a partial session. A short batch degrades to
+    no vector per text, which the writers already handle.
+    """
+    vecs = compute_embeddings(texts)
+    if len(vecs) != len(texts):
+        logger.warning(
+            "embedder returned %d row(s) for %d text(s) — no vector is "
+            "stored for this batch (#4280).", len(vecs), len(texts),
+        )
+        return [None] * len(texts)
+    return _degrade_to_width(vecs, expected_dim)
+
+
+def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
+    """Compute embedding for a single text. Returns the model's vector or None.
+
+    Truncates to max_tokens before encoding to prevent OOM.
+    Returns None if model unavailable or encoding fails. The WIDTH is the
+    encoder's own — a store that has a width-fixing vector index applies its
+    own constraint via :func:`encode_for_store` (#4280).
+
+    Delegates to :func:`compute_embeddings` so the single and batched forms
+    share one composition and can never diverge (#4194).
+    """
+    return compute_embeddings([content], max_tokens)[0]
 
 
 def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:

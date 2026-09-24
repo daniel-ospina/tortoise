@@ -1565,6 +1565,69 @@ def test_active_suite_markers_recycled_pid_is_stale(monkeypatch, tmp_path):
     assert tokens == ["legacy-no-start", "right-identity"], tokens
 
 
+def test_dead_suite_marker_does_not_hold_the_only_safe_gate(
+        monkeypatch, tmp_path):
+    """#4487 directive (verified ALREADY satisfied): the only-safe gate must be
+    honest about corpse markers.
+
+    A suite that dies abnormally leaves its marker behind and nothing on this
+    host unlinks it (measured 2026-09-21 12:4x: 100 marker files, 95 with a
+    dead pid). The gate must treat a marker whose PID is dead as ABSENT — by
+    the guard itself, not a separate janitor — so a pile of corpses can never
+    keep ``suites_active`` True forever. A LIVE marker must still hold the
+    gate shut (#1005/#1557).
+
+    This is a REGRESSION test, not a mutation test: the filter already exists
+    (``active_suite_markers`` skips ``not _pid_identity_matches``), so it
+    passes pre-fix. It pins the property against future edits.
+    """
+    from tortoise.embedded_reaper import (
+        ZERO_CLIENT_CONFIRM_MINUTES,  # noqa: F401
+        _mark_orphan_confirmation,
+        _process_start_time,
+        active_suite_tokens,
+    )
+    marker_dir = tmp_path / "active_suites"
+    marker_dir.mkdir()
+    # A SIGKILLed suite's corpse: pid provably dead on both platforms, and a
+    # recorded start so the identity read is the one under test.
+    (marker_dir / "99999999-dead").write_text("pid=99999999\nstart=1.0\n")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)  # confirm on the SECOND sweep
+    assert active_suite_tokens() == [], (
+        "a dead-pid corpse must not count as a live suite (the gate must "
+        "not be pinned shut by SIGKILLed suites)")
+
+    # A server dir that exists (not the socketless path) with 0 clients.
+    sockdir = tmp_path / "sockdir"
+    sockdir.mkdir()
+    sock = str(sockdir / "redis.socket")
+    for _ in range(2):
+        rec = _zero_client_candidate(sock, os.getpid())
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "with an empty LIVE suite set (corpses ignored) the window path must "
+        "confirm — otherwise a corpse pile re-shuts the #4487 gate")
+
+    # A LIVE suite marker re-shuts the gate for a fresh 0-client server.
+    start = _process_start_time(os.getpid())
+    assert start is not None
+    (marker_dir / f"{os.getpid()}-live").write_text(
+        f"pid={os.getpid()}\nstart={start}\n")
+    assert active_suite_tokens(), "the live marker must be seen"
+    sock2 = str(tmp_path / "sockdir2" / "redis.socket")
+    (tmp_path / "sockdir2").mkdir()
+    for _ in range(2):
+        rec2 = _zero_client_candidate(sock2, os.getpid())
+        rec2["path_based"] = False
+        _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is not True, (
+        "a LIVE suite's marker must still hold the gate shut (#1557)")
+
+
 def test_parse_lstart_both_platform_formats():
     """#1642 FIX 5: ps -o lstart= formats differ between macOS (day before
     month) and Linux (month before day); both must parse, plus a
@@ -3789,6 +3852,255 @@ def test_owner_records_connected_client_is_never_confirmed(
         "a server with connected clients must never be confirmed")
 
 
+# ── #4577: the held-flock liveness signal (kernel fact, not inference) ──────
+# The writer (`embedded_lifecycle.record_owner`) holds a SHARED flock on
+# `<socket_dir>/.tortoise-owners/.lock` for the process's lifetime; the
+# kernel releases it on death. The reader probe below is the PRIMARY
+# liveness signal; `_owner_records` stays as the fallback for pre-change
+# owners (no `.lock` file) for which the probe reads UNKNOWN.
+
+def _hold_owner_lock(sock_dir):
+    """Hold a SHARED flock on `<sock_dir>/.tortoise-owners/.lock`, exactly
+    as a live owner process does. Caller releases via `_release_owner_lock`."""
+    import fcntl
+
+    from tortoise.embedded_reaper import OWNER_LOCK_NAME
+    d = _owner_dir(sock_dir)
+    fd = os.open(str(Path(d) / OWNER_LOCK_NAME),
+                 os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    return fd
+
+
+def _release_owner_lock(fd):
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
+def test_owner_lock_held_blocks_orphan_confirmation(monkeypatch, tmp_path):
+    """#4577: a live owner's SHARED flock on `.tortoise-owners/.lock` is a
+    KERNEL-FACT liveness signal — the server must never be orphan-confirmed
+    while it is held, even though every owner RECORD is provably dead (the
+    record-based signal alone WOULD confirm it).
+
+    Mutation: delete the `if _owner_lock_held(...) is True:` branch from
+    `_mark_orphan_confirmation`; the dead-pid record then reads `(0, 1)`,
+    `no_live_owner` fires, the record IS confirmed, and the held-lock
+    assertion fails."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _owner_records
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES", 0.0)
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    # Every owner RECORD is dead -> the record chain confirms on its own.
+    _write_owner(_owner_dir(sock), 99999999, 1234567890)
+    assert _owner_records(sp) == (0, 1), "test precondition: all records dead"
+
+    fd = _hold_owner_lock(sock)
+    try:
+        rec = _zero_client_candidate(sp, os.getpid())
+        _mark_orphan_confirmation([rec])
+        assert rec.get("_orphan_confirmed") is not True, (
+            "a held owner lock must veto orphan confirmation")
+    finally:
+        _release_owner_lock(fd)
+
+    # With the lock released the SAME dead-owner record confirms: the lock
+    # was the veto, and a free lock is not itself an authorization.
+    rec2 = _zero_client_candidate(sp, os.getpid())
+    _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is True, (
+        "without the lock the dead-owner record must still confirm")
+
+
+def test_owner_lock_released_by_the_kernel_on_holder_death(
+        monkeypatch, tmp_path):
+    """#4577: a SIGKILLed owner holds nothing — the kernel releases the flock
+    with the process, so the probe reads False and the dead-pid record then
+    confirms exactly as before.
+
+    Mutation: make `_owner_lock_held` test the lock file's EXISTENCE
+    (`os.path.exists`) instead of attempting `flock(LOCK_EX|LOCK_NB)`; the
+    dead holder's `.lock` file survives, the probe wrongly returns True, the
+    confirmation never happens, and the `_orphan_confirmed` assertion fails."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _owner_lock_held
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    proc = None
+    try:
+        sp = str(base / "redis.socket")
+        child = (
+            "import os, sys, fcntl\n"
+            "d = os.path.join(sys.argv[1], '.tortoise-owners')\n"
+            "os.makedirs(d, exist_ok=True)\n"
+            "fd = os.open(os.path.join(d, '.lock'),\n"
+            "             os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_SH)\n"
+            "open(os.path.join(d, '%d-0' % os.getpid()), 'w').close()\n"
+            "print('READY', flush=True)\n"
+            "sys.stdin.readline()\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child, str(base)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        assert proc.stdout.readline().strip() == "READY", "child never ready"
+        assert _owner_lock_held(sp) is True, "child must hold the lock"
+        proc.kill()  # SIGKILL: no teardown runs in the child
+        proc.wait(timeout=30)
+        proc = None
+
+        assert _owner_lock_held(sp) is False, (
+            "the kernel must release a SIGKILLed holder's flock")
+        _markerless_suite(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES", 0.0)
+        rec = _zero_client_candidate(sp, os.getpid())
+        _mark_orphan_confirmation([rec])
+        assert rec.get("_orphan_confirmed") is True, (
+            "a dead holder's record must confirm as before")
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_owner_lock_missing_falls_back_to_records(monkeypatch, tmp_path):
+    """#4577 backward compatibility: an owner created BEFORE this change has
+    no `.lock` file. The probe must read UNKNOWN (None) — never "orphan" —
+    and the existing record chain must decide exactly as before.
+
+    Mutation: change the reader's missing-file `return None` to
+    `return False`; the `is None` assertion fails. (Returning True would be
+    worse still: a genuine dead-owner orphan would be protected forever.)"""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _owner_lock_held
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES", 0.0)
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+
+    # Live record, no lock: the record chain protects it (fallback path).
+    _write_owner(_owner_dir(sock), os.getpid(), _own_start())
+    assert _owner_lock_held(sp) is None, (
+        "a pre-change owner has no lock -> UNKNOWN, never a verdict")
+    rec = _zero_client_candidate(sp, os.getpid())
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True, (
+        "no lock -> fall back to records, which show a live owner")
+
+    # Dead record, no lock: the record chain still confirms (unchanged flow).
+    shutil.rmtree(_owner_dir(sock))
+    _write_owner(_owner_dir(sock), 99999999, 1234567890)
+    rec2 = _zero_client_candidate(sp, os.getpid())
+    _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is True, (
+        "no lock -> the existing dead-owner record still confirms")
+
+
+def test_owner_lock_symlink_is_not_followed(tmp_path):
+    """#4577 / #4098: a symlink planted at `.lock` must not be followed. If
+    the reader followed it, it would probe — and see a SHARED lock on — the
+    link TARGET (an attacker-chosen file), reporting a live owner that does
+    not exist. `O_NOFOLLOW` makes the open fail, which reads UNKNOWN.
+
+    Mutation: drop `O_NOFOLLOW` from the reader's `os.open`; the symlink is
+    followed, the target's shared lock is observed, the probe returns True
+    instead of None, and the assertion fails."""
+    import fcntl
+
+    from tortoise.embedded_reaper import _owner_lock_held
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    target = tmp_path / "victim.lock"
+    target.write_text("")
+    (Path(_owner_dir(sock)) / ".lock").symlink_to(target)
+    fd = os.open(str(target), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        assert _owner_lock_held(sp) is None, (
+            "the probe must not follow a symlink planted at `.lock`")
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_owner_lock_probe_never_blocks_on_a_planted_fifo(tmp_path):
+    """#4577 review P1: `_owner_lock_held` must never BLOCK on a planted
+    non-regular `.lock`. `open(FIFO, O_RDONLY)` with no writer parks FOREVER,
+    and the probe runs for every candidate in `_mark_orphan_confirmation` —
+    including the conftest end-sweep, which arms NO SIGALRM watchdog — so a
+    single planted FIFO would hang the sweep and pin every orphan on the
+    host. The module already guards its own lock path this way (#4098).
+
+    Mutation: drop `O_NONBLOCK` or the `S_ISREG` check from
+    `_owner_lock_held`; this test then hangs (pytest-timeout reds it)."""
+    from tortoise.embedded_reaper import (
+        OWNER_LOCK_NAME,
+        OWNERS_DIRNAME,
+        _owner_lock_held,
+    )
+    decoy = tmp_path / "decoy"
+    (decoy / OWNERS_DIRNAME).mkdir(parents=True)
+    lock = decoy / OWNERS_DIRNAME / OWNER_LOCK_NAME
+    os.mkfifo(lock)
+    sp = str(decoy / "redis.socket")
+    assert _owner_lock_held(sp) is None, (
+        "a non-regular `.lock` must read UNKNOWN, never block the probe")
+    # A REAL regular lock file still probes normally (the guard is not
+    # over-broad): free -> False.
+    os.unlink(lock)
+    lock.write_text("")
+    assert _owner_lock_held(sp) is False
+
+
+def test_owner_lock_probe_none_path_never_raises():
+    """#4577 review P2: the probe's contract is "never raises"; a falsy
+    `socket_path` must return UNKNOWN rather than raise TypeError from
+    `os.path.dirname(None)`.
+
+    Mutation: remove the `if not socket_path: return None` guard."""
+    from tortoise.embedded_reaper import _owner_lock_held
+    assert _owner_lock_held(None) is None  # type: ignore[arg-type]
+    assert _owner_lock_held("") is None
+
+
+def test_reap_skips_server_whose_owner_lock_is_held(monkeypatch, tmp_path):
+    """#4577: reap() must never kill — nor even report as a would-kill — a
+    server whose owner holds the shared lock, even when the dead-owner
+    records and the 0-client probe would otherwise authorize it.
+
+    Mutation: delete the `if _owner_lock_held(...) is True:` branch from
+    `reap()`; with the lock held the dry run below appends the record to
+    `acted`, so the `acted == []` assertion fails."""
+    from tortoise.embedded_reaper import reap
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: None)
+    sock_dir = tmp_path / "redislite_lockreap"
+    sock_dir.mkdir()
+    sp = str(sock_dir / "redis.socket")
+    _write_owner(_owner_dir(sock_dir), 99999999, 1234567890)  # all records dead
+    rec = {
+        "classification": "candidate", "socket_path": sp,
+        "pid": os.getpid(), "dbdir": str(sock_dir), "path_based": False,
+        "client_count": 0, "_orphan_confirmed": True, "settings": None,
+    }
+    fd = _hold_owner_lock(sock_dir)
+    try:
+        acted = reap([rec], dry_run=True, only_safe=False)
+        assert acted == [], "a held owner lock must block the kill"
+    finally:
+        _release_owner_lock(fd)
+    # Released: the confirmed dead-owner orphan is a would-kill again.
+    acted2 = reap([rec], dry_run=True, only_safe=False)
+    assert acted2 and acted2[0] is rec, (
+        "with the lock released the confirmed orphan is a would-kill")
+
+
 def _load_embedded_orphans():
     """Import tools/embedded_orphans.py by path (it is a CLI, not a module)."""
     import importlib.util
@@ -3967,6 +4279,53 @@ def test_embedded_orphans_never_uses_the_swallowing_enumerator(monkeypatch):
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Ok())
     res = mod.census()  # must not reach _pgrep_redis_servers at all
     assert res["live_servers"] == 0
+
+
+def test_pgrep_redis_servers_or_none_distinguishes_failure_from_zero(
+        monkeypatch):
+    """#4740: `_pgrep_redis_servers` collapses a probe FAILURE into `[]`, which
+    reads identically to a measured zero. The gate binds its bound to the
+    sweep's `left`, so an unmeasured residue must be `None`, not a plausible
+    0 — while the swallowing function's contract for its many other callers
+    is unchanged."""
+    import tortoise.embedded_reaper as _R
+
+    class _Ok:
+        returncode = 0
+        stdout = "111\n222\n"
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Ok())
+    assert _R._pgrep_redis_servers_or_none() == [111, 222]
+
+    def _timeout(*_a, **_k):
+        raise _R.subprocess.TimeoutExpired("pgrep", 5)
+
+    monkeypatch.setattr(_R.subprocess, "run", _timeout)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    def _missing(*_a, **_k):
+        raise OSError("pgrep not found")
+
+    monkeypatch.setattr(_R.subprocess, "run", _missing)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    # pgrep exits 1 on NO MATCHES — a successful probe reporting zero, never a
+    # failure. An unexpected status (2/3) is a failure, not an answer.
+    class _NoMatch:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _NoMatch())
+    assert _R._pgrep_redis_servers_or_none() == []
+
+    class _Bad:
+        returncode = 2
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Bad())
+    assert _R._pgrep_redis_servers_or_none() is None
 
 
 def test_reap_refuses_when_an_owner_attached_after_confirmation(
@@ -4572,3 +4931,372 @@ def test_socketless_binding_never_resolves_the_candidate_path(
         {"dbdir": str(decoy), "socket_path": str(decoy / "redis.socket"),
          "pid": os.getpid()})
     assert refusal is not None, "planted symlink forged the socket-less binding"
+
+
+# ── #4740 review 4: the end-sweep's `cleared` derivation ───────────────────
+# `sweep_until_cleared` is the loop conftest's session-end sweep runs. Its
+# `cleared` field is the sweep's own budget/stop-condition claim, carried for
+# diagnosis — not a field the CI orphan gate decides its verdict on; review 4
+# found the previous `cleared = not acted` reported True for a deadline-aborted
+# sweep (`reap()` breaks on its first record and returns [], which is not proof
+# the backlog is clear). These cases pin all four stop shapes.
+
+
+def _scan_aware(records, complete=True):
+    """A `_run_sweep`-shaped result: a list carrying `.complete`."""
+    from tortoise.embedded_reaper import _ScanAwareList
+
+    out = _ScanAwareList(records)
+    out.complete = complete
+    return out
+
+
+def test_sweep_until_cleared_healthy_path():
+    """Acting, then an empty iteration with budget remaining → cleared."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (1, True)
+
+
+def test_sweep_until_cleared_already_expired_deadline_is_not_cleared():
+    """The abort the fix exists for: reap() hits an already-expired deadline
+    on its first record and returns []. `not acted` must not read as clear."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([]), deadline=999.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)
+
+
+def test_sweep_until_cleared_spent_budget_after_work_is_not_cleared():
+    """The budget runs out while servers are still being acted on: the loop
+    must STOP on the spent deadline (not keep iterating) and report not
+    cleared. `run_one` is a bounded sequence so removing the deadline break
+    shows up as a different `total`, not a hang."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([
+        _scan_aware([{"pid": 1}]),
+        _scan_aware([{"pid": 2}]),
+        _scan_aware([]),
+    ])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 9999.0)
+    assert (total, cleared) == (1, False)
+
+
+def test_sweep_until_cleared_truncated_scan_is_not_cleared():
+    """A partial discovery scan that acted on nothing proves nothing, even
+    with budget remaining (`.complete` is fail-closed False)."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([], complete=False), deadline=1030.0,
+        clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)
+
+
+def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
+    """#4740 review 10: the load-bearing `clock` default is the builder's.
+
+    All four stop-shape cases above inject `clock=`, and production
+    (`tests/conftest.py`'s `_sweep`) reaches the clock only through
+    `build_end_sweep_report` with three positional args (no `clock`) — the
+    builder passes its OWN `clock` explicitly into `sweep_until_cleared`. So
+    the default production actually runs with is the builder's, not
+    `sweep_until_cleared`'s. A default of `lambda: 0.0` makes
+    `clock() < deadline` always true, so a deadline-aborted sweep reports
+    `cleared=true` — reported as finished rather than exhausted, losing the
+    exhausted-budget diagnostic. `cleared` is a diagnostic flag that does not
+    decide the gate's verdict at any measured count. No clock is injected here.
+    """
+    import inspect
+    import time
+
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    default = inspect.signature(
+        build_end_sweep_report).parameters["clock"].default
+    assert default is time.monotonic, (
+        f"build_end_sweep_report's clock default must be the real monotonic "
+        f"clock, got {default!r}"
+    )
+    # A deadline already in the past, with the REAL default: the empty
+    # iteration is an already-expired abort, never a cleared backlog.
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=time.monotonic() - 1,
+        probe=lambda: 0)
+    assert report["cleared"] is False
+
+
+def test_hygiene_report_threads_cleared_verbatim():
+    """#4740 review 6: the report builder must use the declared field set AND
+    thread `cleared` through verbatim.
+
+    `cleared` is a diagnostic flag that does not decide the gate's verdict at
+    any measured count. This is behavioural — the real module is imported and
+    called — so the AST shapes that passed the round-5 pin (a subscript store,
+    a dead branch around the literal, a tuple reorder) cannot satisfy it.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        _hygiene_report,
+    )
+
+    assert _hygiene_report(0, False, 1, 5)["cleared"] is False
+    assert _hygiene_report(1, True, 13, 22)["cleared"] is True
+    report = _hygiene_report(0, False, 1, 5)
+    assert set(report) == set(_HYGIENE_REPORT_FIELDS)
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+# ── #4740 review 9: the end-sweep COMPOSITION, pinned behaviourally ───────
+# The composition — pre-sweep probe (`before`), the sweep, post-sweep probe
+# (`left`), and the report built from them — used to be pinned by a static AST
+# check over `tests/conftest.py`'s `_sweep` source. Eight review rounds each
+# closed one syntactic bypass while the next found another (`left = max(...)`,
+# then `for left in (...)`, `if (left := ...)`, `with ... as left`) — a static
+# shape check cannot prove a runtime data-flow property, and each bypassed pin
+# fell silent in exactly the way the pin existed to prevent. The composition
+# now lives in the real `build_end_sweep_report`; these tests DRIVE it, so
+# every bypass above is a wrong VALUE or a wrong call count — caught by
+# behaviour, which syntax cannot reach.
+
+
+def test_live_embedded_server_count_wraps_the_probe(monkeypatch):
+    """`live_embedded_server_count` = len(probe), or None for a failed probe.
+
+    The three cases are deliberately different answers: a constant return for
+    either half (`return 0`, or `0` where `None` belongs) cannot satisfy 0, 3
+    and None at once.
+    """
+    import tortoise.embedded_reaper as _R
+
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: [])
+    assert _R.live_embedded_server_count() == 0
+    monkeypatch.setattr(
+        _R, "_pgrep_redis_servers_or_none", lambda: [111, 222, 333])
+    assert _R.live_embedded_server_count() == 3
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: None)
+    assert _R.live_embedded_server_count() is None
+
+
+def test_build_end_sweep_report_reads_probe_before_and_after_the_sweep():
+    """`before`/`left` are the FIRST and SECOND probe readings, in that order.
+
+    The probe returns 5 then 3, so a swapped arrangement, a probe replaced by
+    a constant, and a post-probe rebind (`left = max(probe() or 0, 1000000)`,
+    or the `for`/`with`/walrus rebinding forms) each produce the wrong dict or
+    the wrong call log.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        build_end_sweep_report,
+    )
+
+    readings = iter([5, 3])
+    calls = []
+
+    def probe():
+        value = next(readings)
+        calls.append(value)
+        return value
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    report = build_end_sweep_report(
+        responses.__next__, deadline=1030.0, probe=probe,
+        clock=lambda: 1000.0,
+    )
+    assert calls == [5, 3], (
+        "the probe must be called exactly twice — before the sweep, then after"
+    )
+    assert report == {"reaped": 1, "cleared": True, "left": 3, "before": 5}
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+def test_build_end_sweep_report_threads_the_sweep_outcome():
+    """`cleared` is the sweep's own outcome, never hardcoded or recomputed.
+
+    An already-expired deadline makes `sweep_until_cleared` return
+    `cleared=False`; a builder that hardcoded `True` (or re-derived it from
+    the count after the call) greens the deadline-aborted backlog the CI gate
+    exists to catch.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=0.0, probe=lambda: 2,
+        clock=lambda: 1000.0,
+    )
+    assert report["reaped"] == 0
+    assert report["cleared"] is False
+
+
+def test_conftest_sweep_returns_build_end_sweep_report():
+    """Reject the enumerated unpinned-report shapes at the `_sweep` call site.
+
+    The behavioural cases above drive `embedded_reaper.build_end_sweep_report`
+    in isolation, so a `_sweep` that short-circuits it — `return {report} or
+    embedded_reaper.build_end_sweep_report(...)` — leaves them all green while
+    the gate reads a hand-written dict. This test rejects these specific
+    shapes:
+
+    * a report-shaped `Dict` literal ANYWHERE in the fixture — in a `Return`
+      or inside a lambda body (a lambda body is not a `Return`, so a local
+      `build_end_sweep_report = lambda ...: {report}` rebinding would
+      otherwise leave the pin green);
+    * a `Return` in `_sweep` other than the single live builder call and the
+      three documented early returns (`no_embedded_servers`, `skipped`,
+      `error`);
+    * a builder call reached through a BARE name rather than the
+      `embedded_reaper` module attribute (a bare name is shadowable by a
+      local rebinding, so the module attribute is the only accepted form);
+    * a builder call that is statically unreachable (`if False:`);
+    * a builder call whose arguments are not exactly the three positional
+      ones — a `lambda: _run_sweep(...)`, the `deadline` name, and
+      `embedded_reaper.live_embedded_server_count` (a fabricated probe,
+      e.g. `lambda: 999`, is a different shape and is rejected).
+
+    This test does not prove the call site correct in general; it rejects the
+    shapes listed above (#4740).
+    """
+    import ast
+
+    from tortoise.embedded_reaper import _HYGIENE_REPORT_FIELDS
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    sweep = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_sweep"
+    )
+
+    # Parent links so a Return's enclosing control flow is visible; a plain
+    # `ast.walk` cannot tell whether a Return sits under `if False:`.
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(sweep):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def under_constant_false_guard(node: ast.AST) -> bool:
+        """True when `node` is statically unreachable (`if False:`)."""
+        cur = parents.get(node)
+        while cur is not None and cur is not sweep:
+            if (
+                isinstance(cur, ast.If)
+                and isinstance(cur.test, ast.Constant)
+                and not cur.test.value
+            ):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    # The three documented early returns, keyed by the sentinel their dict
+    # literal carries. A report-shaped dict reached through a name is an
+    # `ast.Name`, never an `ast.Dict`, so it cannot masquerade as one of these.
+    early_keys = {"no_embedded_servers", "skipped", "error"}
+
+    def is_documented_early_return(node: ast.Return) -> bool:
+        value = node.value
+        if not isinstance(value, ast.Dict):
+            return False
+        keys = {
+            k.value for k in value.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        return len(keys) == 1 and keys <= early_keys
+
+    returns = [n for n in ast.walk(sweep) if isinstance(n, ast.Return)]
+    def is_module_builder_call(value: ast.AST) -> bool:
+        """True for `embedded_reaper.build_end_sweep_report(...)`."""
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "build_end_sweep_report"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "embedded_reaper"
+        )
+
+    builder_returns = [n for n in returns if is_module_builder_call(n.value)]
+    assert len(builder_returns) == 1, (
+        "tests/conftest.py's _sweep must contain exactly one "
+        "`embedded_reaper.build_end_sweep_report(...)` call reached through "
+        "the module attribute; a bare-name call (shadowable by a local "
+        "rebinding), a hand-written report dict, or a short-circuit around "
+        "the builder is not pinned by the behavioural tests and would leave "
+        "the gate reading an unpinned report (#4740)"
+    )
+    builder_return = builder_returns[0]
+    assert not under_constant_false_guard(builder_return), (
+        "tests/conftest.py's _sweep returns "
+        "embedded_reaper.build_end_sweep_report(...) from a statically "
+        "unreachable branch (`if False:`): the count is satisfied by a DEAD "
+        "return while the live path escapes the pin (#4740); dead return at "
+        f"line {builder_return.lineno}"
+    )
+    call = builder_return.value
+    assert isinstance(call, ast.Call)  # narrows the type for the reader
+    assert len(call.args) == 3 and call.keywords == [], (
+        "the builder call must pass exactly 3 positional arguments and no "
+        "keywords — the sweep lambda, the deadline, and the live-server "
+        "probe; any other arity leaves an argument unpinned (#4740)"
+    )
+    sweep_lambda, deadline_arg, probe_arg = call.args
+    assert (
+        isinstance(sweep_lambda, ast.Lambda)
+        and isinstance(sweep_lambda.body, ast.Call)
+        and isinstance(sweep_lambda.body.func, ast.Name)
+        and sweep_lambda.body.func.id == "_run_sweep"
+    ), (
+        "argument 1 must be a `lambda: _run_sweep(...)`; a constant or a "
+        "different callee hands the builder a sweep that never ran (#4740)"
+    )
+    assert isinstance(deadline_arg, ast.Name) and deadline_arg.id == "deadline", (
+        "argument 2 must be the `deadline` name — the budget the sweep and "
+        "the builder share; any other expression decouples them (#4740)"
+    )
+    assert (
+        isinstance(probe_arg, ast.Attribute)
+        and isinstance(probe_arg.value, ast.Name)
+        and probe_arg.value.id == "embedded_reaper"
+        and probe_arg.attr == "live_embedded_server_count"
+    ), (
+        "argument 3 must be `embedded_reaper.live_embedded_server_count` — "
+        "the real probe; a fabricated probe (e.g. `lambda: 999`) hands the "
+        "gate a bound the run never measured (#4740)"
+    )
+    undocumented = [
+        n for n in returns
+        if n is not builder_return and not is_documented_early_return(n)
+    ]
+    assert undocumented == [], (
+        "tests/conftest.py's _sweep must return only the single "
+        "`embedded_reaper.build_end_sweep_report(...)` call or one of the "
+        "three documented early returns (no_embedded_servers / skipped / "
+        "error); any other return is not pinned by the behavioural tests "
+        f"and would leave the gate reading an unpinned report (#4740); found "
+        f"at line(s) {[n.lineno for n in undocumented]}"
+    )
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+    hand_written = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value in _HYGIENE_REPORT_FIELDS
+            for k in n.keys
+        )
+    ]
+    assert hand_written == [], (
+        "the _redislite_hygiene fixture must not contain a report-shaped dict "
+        "literal anywhere — not in a `Return` and not in a lambda body; such "
+        "a literal bypasses the builder and the gate would read it unpinned "
+        f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
+    )

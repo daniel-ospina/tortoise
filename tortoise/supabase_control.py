@@ -62,6 +62,8 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
+import time
 import uuid as _uuid
 from datetime import UTC, datetime, timezone
 
@@ -70,6 +72,21 @@ import httpx
 from .retention import RESTORE_WINDOW_HOURS  # #4179 single window authority
 
 _logger = logging.getLogger(__name__)
+
+
+def _record_client_call(started: float) -> None:
+    """Record ONE control-plane HTTP call as ``(duration, thread name)``.
+
+    #3498 item 2 — the FALSIFIER: a call recorded on ``MainThread`` ran on the
+    event loop, i.e. was never offloaded. Instrumentation is best-effort and
+    must never affect auth, so every failure here is swallowed.
+    """
+    try:
+        from .monitoring import record_control_plane_client_call
+        record_control_plane_client_call(
+            time.perf_counter() - started, threading.current_thread().name)
+    except Exception:  # pragma: no cover — telemetry must never break auth
+        pass
 
 # Env-var names: SUPABASE_SERVICE_ROLE_KEY is the canonical name (edge
 # functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name —
@@ -277,8 +294,12 @@ class SupabaseControlPlane:
         }
         try:
             import httpx  # noqa: F401
-            resp = self._http.post(url, params={"select": "*"},
-                                   headers=headers, json=body or {})
+            started = time.perf_counter()
+            try:
+                resp = self._http.post(url, params={"select": "*"},
+                                       headers=headers, json=body or {})
+            finally:
+                _record_client_call(started)
         except RuntimeError:
             raise
         except Exception as e:  # transport errors — fail closed
@@ -427,32 +448,36 @@ class SupabaseControlPlane:
             # A per-request timeout is forwarded ONLY when supplied — httpx
             # reads ``timeout=None`` as "disable timeouts".
             req_kwargs = {} if timeout is None else {"timeout": timeout}
-            if method == "GET":
-                resp = self._http.get(url, params=params, headers=headers,
-                                      **req_kwargs)
-            elif method == "PATCH":
-                headers["Content-Type"] = "application/json"
-                # return=representation when a select is given → the caller
-                # sees the UPDATED rows ([] when the WHERE matched nothing),
-                # enabling atomic conditional claims (single UPDATE ... WHERE
-                # + rowcount via body, PR #1264 review P2).
-                headers["Prefer"] = ("return=representation" if select
-                                      else "return=minimal")
-                resp = self._http.patch(url, params=params, headers=headers,
-                                        json=json_body or {}, **req_kwargs)
-            elif method == "POST":
-                headers["Content-Type"] = "application/json"
-                headers["Prefer"] = "return=representation"
-                resp = self._http.post(url, params=params, headers=headers,
-                                       json=json_body or {}, **req_kwargs)
-            elif method == "DELETE":
-                # PostgREST row delete (service role). Only used by the
-                # post-grace hard-delete purge (#302) — soft paths PATCH.
-                headers["Prefer"] = "return=minimal"
-                resp = self._http.delete(url, params=params, headers=headers,
-                                         **req_kwargs)
-            else:
-                raise ValueError(f"unsupported method {method!r}")
+            started = time.perf_counter()
+            try:
+                if method == "GET":
+                    resp = self._http.get(url, params=params, headers=headers,
+                                          **req_kwargs)
+                elif method == "PATCH":
+                    headers["Content-Type"] = "application/json"
+                    # return=representation when a select is given → the caller
+                    # sees the UPDATED rows ([] when the WHERE matched nothing),
+                    # enabling atomic conditional claims (single UPDATE ... WHERE
+                    # + rowcount via body, PR #1264 review P2).
+                    headers["Prefer"] = ("return=representation" if select
+                                          else "return=minimal")
+                    resp = self._http.patch(url, params=params, headers=headers,
+                                            json=json_body or {}, **req_kwargs)
+                elif method == "POST":
+                    headers["Content-Type"] = "application/json"
+                    headers["Prefer"] = "return=representation"
+                    resp = self._http.post(url, params=params, headers=headers,
+                                           json=json_body or {}, **req_kwargs)
+                elif method == "DELETE":
+                    # PostgREST row delete (service role). Only used by the
+                    # post-grace hard-delete purge (#302) — soft paths PATCH.
+                    headers["Prefer"] = "return=minimal"
+                    resp = self._http.delete(url, params=params, headers=headers,
+                                             **req_kwargs)
+                else:
+                    raise ValueError(f"unsupported method {method!r}")
+            finally:
+                _record_client_call(started)
         except RuntimeError:
             raise
         except Exception as e:  # transport errors — fail closed
@@ -2974,6 +2999,34 @@ def org_id_for_stripe_customer(cp, customer_id: str) -> str | None:
         "organizations", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
     )
     return rows[0]["id"] if rows else None
+
+
+def org_billing_state(cp, org_id: str) -> dict:
+    """Billing-identity columns for one org (checkout guard + portal read).
+
+    The FORWARD twin of :func:`org_id_for_stripe_customer` (the reverse
+    webhook lookup). Supabase mode only: the registry lane keeps its
+    ``Team``-node read inline in ``hosted_api`` (selfhost). ``{}`` when the
+    org row is absent.
+
+    ``stripe_customer_id`` is a 0006 base column; ``subscription_status`` /
+    ``customer_email`` are the 0012 additive tier, read through the #1096
+    fail-soft ladder so a pre-0012 schema degrades THESE READS to None instead
+    of failing the portal. (The checkout WRITE stays fail-closed: on a first
+    bind ``update_org_billing`` still PATCHes 0012 columns, so a pre-0012
+    deployment cannot complete a checkout — deploy drift, not a normal path.)
+
+    Used by the two billing routes that must agree on WHERE the
+    ``stripe_customer_id`` mirror lives (#4640): the checkout sync-persist and
+    the portal read. A registry-graph read here would miss the authoritative
+    row the webhook wrote post-#669.
+    """
+    row = _orgs_row_fail_soft(
+        cp, org_id,
+        select=["stripe_customer_id", "subscription_status", "customer_email"],
+        additive_tiers=[_ORG_ADDITIVE_BILLING_TIER],
+    )
+    return row or {}
 
 
 def update_org_billing(cp, org_id: str, updates: dict) -> None:

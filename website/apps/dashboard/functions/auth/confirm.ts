@@ -64,6 +64,7 @@ import {
 } from "../_shared/auth/session";
 import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { verifyOtp } from "../_shared/auth/supabase";
+import { cspNonce, strictCspWithNonce } from "../_shared/security-headers";
 
 interface FlowRow {
   flow_id: string;
@@ -122,15 +123,27 @@ function escapeHtml(value: string): string {
  * sibling auth routes) so no new asset pipeline is introduced and the page
  * cannot be stale relative to the handler.
  */
-function recoveryInterstitial(email: string | null, pendingId: string): Response {
+// Exported for the regression guard (#3525): `src/securityHeaders.test.js` calls
+// this and asserts the REAL response carries `no-store`, the flow cookie, and a
+// nonce that the inline `<script>`/`<style>` actually match — a source-level
+// regex on this file would also pass on a commented-out header.
+export function recoveryInterstitial(email: string | null, pendingId: string): Response {
   const shown = email ? escapeHtml(email) : "your account";
+  // #3525: this is the one self-rendered HTML page in the dashboard AND the one
+  // with no inline event handlers, so it can be nonce-gated — the treatment the
+  // MCP consent page already uses. The policy is NOT nonce-ONLY: it carries the
+  // platform-injected Cloudflare beacon origin beside the nonce (every policy
+  // must — see `_shared/security-headers.ts`), so any script served from that
+  // origin would run here un-nonced. What this page authors is a single inline
+  // script, and that one still needs the nonce.
+  const nonce = cspNonce();
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Confirm your sign-in — Tortoise</title>
-<style>
+<style nonce="${nonce}">
   :root { --bg:#060b14; --surface:#0d1a2d; --text:#cbd5e1; --dim:#94a3b8; --accent:#06b6d4; --red:#ef4444; --border:#1e293b;
           --mono:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace; --serif:Georgia,'Times New Roman',serif; }
   *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
@@ -160,7 +173,7 @@ function recoveryInterstitial(email: string | null, pendingId: string): Response
     <p class="error" id="error" role="alert" aria-live="polite"></p>
     <p class="small">If this is not your account, close this page — no one is signed in yet.</p>
   </main>
-  <script>
+  <script nonce="${nonce}">
     (function () {
       var btn = document.getElementById('continue');
       var err = document.getElementById('error');
@@ -191,6 +204,7 @@ function recoveryInterstitial(email: string | null, pendingId: string): Response
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     "Strict-Transport-Security": HSTS,
+    "Content-Security-Policy": strictCspWithNonce(nonce),
   });
   headers.append("Set-Cookie", buildCookie(FLOW_COOKIE, pendingId, RECOVERY_MAX_AGE_S));
   return new Response(html, { status: 200, headers });

@@ -7,7 +7,7 @@
 // there is no longer a second copy to keep in sync. Fail-closed: no session / not
 // admin → null/false, never a soft pass. Cookie name sb-tortoise-auth-token
 // matches the app's custom storage key (supabase.ts), still used by the admin
-// console's data layer (SCOPE.md §4 W2, backlog #3559).
+// console's data layer (SCOPE.md §4 W2, backlog #4178).
 //
 // ZERO-DEPENDENCY (plain TS, no imports).
 

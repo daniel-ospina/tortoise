@@ -110,6 +110,261 @@ def test_capture_session_shape(sdk):
     assert isinstance(res["warnings"], list)
 
 
+def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
+    """#2813: the four E3 fields the v2 extractor emits (quote / when /
+    search_keys / source_turn_id) must land as NODE properties — not merely
+    ride the capture response's ``props`` superset. The extractor is shared
+    with the eval lane (tools/longmem_eval/ingest_v2.py), whose writer DID
+    persist them; the SDK persistence writer was forked and silently dropped
+    them, so the reply looked correct while the node stored nothing."""
+    import tortoise.extractor_v2 as ev2
+
+    payload = {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2813_regression",
+            "content": "the auth dead-end is the top issue",
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    # Response shape is deliberately UNCHANGED: the passthrough whitelist
+    # still reports the raw payload values (search_keys stays a list there).
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+        "search_keys": ["auth", "dead-end"],
+        "source_turn_id": "turn-2813",
+    }
+    # The actual regression: the NODE carries them (search_keys flattened to
+    # the graph's space-joined string by _flatten_search_keys_prop).
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0]
+    assert row[0] == "We decided to ship serve --http first.", row
+    assert row[1] == "2026-08-01", row
+    assert row[2] == "auth dead-end", row
+    assert row[3] == "turn-2813", row
+
+
+def _passthrough_payload(content: str) -> dict:
+    """The v2 payload shape the #2813/#2949 tests drive — one point carrying
+    all four E3 passthrough fields."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2949_passthrough",
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+
+def _install_fake_extract(monkeypatch, payload: dict) -> None:
+    import tortoise.extractor_v2 as ev2
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+
+def _read_passthrough_props(sdk, pid: str) -> list:
+    return list(sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0])
+
+
+def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
+    """#2949 (review P2): the v2 seam's dedup step-2 pre-resolves the canonical
+    BEFORE calling create_point, so a dedup hit writes none of the four
+    passthrough props — yet the response used to append the payload's ``props``
+    dict. The response thus
+    advertised quote/when/search_keys/source_turn_id that were ABSENT from the
+    resolved node: the exact #2813 symptom ("the reply looked correct while the
+    node stored nothing") persisting on the dedup path. A canonical written
+    before #2813 — or by a lane that does not pass these fields — carries none
+    of them, so the seam must report the STORED state (the same principle as
+    step 2's "never report a phantom id").
+
+    MUTATION THAT REDS THIS TEST: remove the read-back
+    (``if not created_here:`` → ``if False:``) — the response then echoes the
+    payload and advertises props the node does not have. An UNCONDITIONAL
+    read-back (``→ if True:``) does NOT red this test — it still yields the
+    canonical's empty stored props here; it reds the create-path
+    ``test_capture_v2_persists_passthrough_props_on_node`` instead."""
+    content = "the auth dead-end is the top issue"
+    # Pre-existing canonical with NO passthrough props (pre-#2813 shape).
+    canonical = sdk.create_point("statement", content)
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    # Resolved to the PRE-EXISTING canonical, no new node minted.
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["dedup"] == "content_hash_hit", res["points"]
+
+    # THE PARITY: the response must not advertise props the node lacks.
+    assert res["points"][0]["props"] == {}, res["points"][0]["props"]
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+
+def test_capture_dedup_hit_reports_stored_values_over_payload(
+        sdk, monkeypatch):
+    """#2949 (review P2), second arm: when the canonical DOES carry stored
+    passthrough props, the dedup-hit response must report THOSE (read back,
+    never re-stamped) — not the payload's. Guards the vacuous alternative fix
+    of blanking ``props`` on every dedup hit: the stored state must survive.
+    ``search_keys`` is reported in its stored flat-string form
+    (``_flatten_search_keys_prop``)."""
+    content = "the auth dead-end is the top issue"
+    canonical = sdk.create_point(
+        "statement", content, quote="ORIGINAL quote", when="2020-01-01",
+        search_keys=["original", "keys"], source_turn_id="turn-0")
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["props"] == {
+        "quote": "ORIGINAL quote",
+        "when": "2020-01-01",
+        "search_keys": "original keys",
+        "source_turn_id": "turn-0",
+    }, res["points"][0]["props"]
+    # The canonical was never re-stamped (first-writer).
+    assert _read_passthrough_props(sdk, canonical["id"]) == [
+        "ORIGINAL quote", "2020-01-01", "original keys", "turn-0"]
+
+
+def test_capture_create_path_omits_unstored_passthrough_props(
+        sdk, monkeypatch):
+    """#2949 (re-review P2): the CREATE path must mirror the graph's PRESENCE,
+    not the payload's. Two payload props are never stored on the node:
+      - ``search_keys: []`` — the v2 extractor emits the list unconditionally
+        (``_clean_search_keys(None) -> []``) and create_point's
+        ``_flatten_search_keys_prop`` POPS an empty/blank list;
+      - ``source_turn_id: None`` — emitted unconditionally as ``int|None``
+        and never persisted (the graph drops null props).
+    Both must be omitted from the response; a field the node DOES hold stays
+    advertised.
+
+    MUTATION THAT REDS THIS TEST: delete the presence normalization above the
+    write (the ``if v is not None`` filter and/or the empty-search_keys pop) —
+    the response again advertises a field the node does not hold."""
+    content = "the auth dead-end is the top issue"
+    payload = _passthrough_payload(content)
+    payload["points"][0]["search_keys"] = []
+    payload["points"][0]["source_turn_id"] = None
+
+    _install_fake_extract(monkeypatch, payload)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    quote, when, sk, tid = _read_passthrough_props(sdk, pid)
+    assert sk is None, (quote, when, sk, tid)   # popped by _flatten_search_keys_prop
+    assert tid is None, (quote, when, sk, tid)  # a null prop is not stored
+    # ...so the response advertises neither.
+    assert "search_keys" not in res["points"][0]["props"], res["points"]
+    assert "source_turn_id" not in res["points"][0]["props"], res["points"]
+    # The fields the node DOES hold stay advertised.
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+    }, res["points"][0]["props"]
+
+
+def test_capture_passthrough_read_clause_covers_whitelist():
+    """#2949 (review F4): the dedup-hit read-back field list is DERIVED from
+    the single ordered declaration, so it cannot silently omit a newly
+    whitelisted E3 field — the pre-fix defect, where the create path stored by
+    whitelist membership while a hand-written inline RETURN omitted the field
+    (the #2813 class on the dedup path).
+
+    MUTATION THAT REDS THIS TEST: hand-write the read-back (drop a field from
+    ``_capture_passthrough_read_fields``) — the coverage assertion fails."""
+    from tortoise.sdk import (
+        _CAPTURE_PASSTHROUGH_ORDER,
+        _CAPTURE_PASSTHROUGH_PROPS,
+        _capture_passthrough_read_fields,
+    )
+    clause = _capture_passthrough_read_fields()
+    missing = sorted(
+        k for k in _CAPTURE_PASSTHROUGH_PROPS if f"n.{k}" not in clause)
+    assert missing == [], (
+        f"read-back {clause!r} omits whitelisted props {missing!r}")
+    assert clause.count("n.") == len(_CAPTURE_PASSTHROUGH_PROPS), clause
+    assert set(_CAPTURE_PASSTHROUGH_ORDER) == set(_CAPTURE_PASSTHROUGH_PROPS)
+    assert len(_CAPTURE_PASSTHROUGH_ORDER) == len(_CAPTURE_PASSTHROUGH_PROPS)
+
+
+def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
+    """#2949 (review F4) behavioral arm: the shared read-back helper returns
+    EVERY whitelisted field the node holds, through the SAME generated RETURN
+    clause. A runtime drop (a field missing from the derivation) REDs here.
+    ``search_keys`` is read back in its stored flat-string form."""
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+    pid = sdk.create_point(
+        "statement", "read helper probe", quote="q-2949",
+        when="2026-01-01", search_keys=["a", "b"],
+        source_turn_id="turn-2949")["id"]
+    stored = sdk._read_capture_passthrough_props(sdk._get_proj(), pid)
+    assert set(stored) == set(_CAPTURE_PASSTHROUGH_PROPS), stored
+    assert stored == {
+        "quote": "q-2949",
+        "when": "2026-01-01",
+        "search_keys": "a b",
+        "source_turn_id": "turn-2949",
+    }, stored
+
+
 def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
     """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
     USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state
@@ -3384,21 +3639,92 @@ def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatc
         assert len(stamped) == 1, f"points of one capture share one eventId: {stamped}"
 
 
-def test_capture_session_recapture_shorter_conversation_pins_state(sdk):
-    """P1 (D3): re-capturing the same session_id with a SHORTER different
-    conversation — turn-stream MERGE is keyed {sid}_t{i}, so higher-index
-    turns from the prior capture stay CONTAINS-wired (stale residue) while
-    response turns report the new length. PIN the accepted state."""
-    res = sdk.capture_session([{"role": "user", "content": "first capture with five turns"},
-                               {"role": "assistant", "content": "second"},
-                               {"role": "user", "content": "third"}])
+def test_recapture_shorter_conversation_deletes_orphaned_turns(sdk):
+    """#1920: a shorter re-capture must DELETE the prior capture's
+    higher-index turn Points.
+
+    The turn store is keyed ``{session_id}_t{i}`` and written with MERGE, so
+    re-capturing turn 1..4 of a 10-turn session left ``_t4.._t9`` in the
+    graph, still ``CONTAINS``-wired to the Session, while ``s.turn_count``
+    was overwritten with the new length — the stored count and the
+    ``CONTAINS`` walk disagreed, and the stale turns stayed reachable from
+    the session (and, for a journaled store, were resurrected by a rebuild:
+    see ``test_recapture_shorter_does_not_resurrect_turns_on_rebuild``).
+
+    The defect is the MERGE's *absence* of a delete half, not a wrong count:
+    the invariant pinned here is that the Session's episodic ``CONTAINS``
+    members are exactly the turn window of the LAST capture.
+
+    This REVERSES the #1529 D3 pin (``..._pins_state``), which recorded the
+    residue as the accepted state; #1920 is the owner decision that it is a
+    defect, not a state to pin.
+    """
+    conv = [{"role": "user" if i % 2 == 0 else "assistant",
+             "content": f"turn number {i}"} for i in range(10)]
+    res = sdk.capture_session(conv)
     sid = res["session_id"]
+    assert res["turns"] == 10
+    proj = sdk._get_proj()
+
+    def _wired() -> set[str]:
+        return set(proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->"
+            "(t:Point {pointKind:'event'}) RETURN collect(t.id)",
+            params={"sid": sid}).result_set[0][0] or [])
+
+    assert _wired() == {f"{sid}_t{i}" for i in range(10)}
+
     sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
                         session_id=sid)
-    wired = sdk._get_proj().g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-        "RETURN collect(t.id)", params={"sid": sid}).result_set[0][0]
-    assert set(wired) == {f"{sid}_t{i}" for i in range(3)}, wired
+
+    # Indicator 1: the stored turn_count and the CONTAINS walk agree.
+    stored = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+        params={"sid": sid}).result_set[0][0]
+    assert stored == 1, stored
+    assert _wired() == {f"{sid}_t0"}, _wired()
+
+    # Indicator 2: the orphaned turns are DELETED, not merely unlinked.
+    for i in range(1, 10):
+        n = proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
+                         params={"id": f"{sid}_t{i}"}).result_set[0][0]
+        assert n == 0, f"orphaned turn {sid}_t{i} must be deleted"
+
+
+def test_recapture_prune_spares_claims_and_other_sessions(sdk):
+    """#1920 scoping: the prune removes ONLY this session's own turn Points.
+
+    The extraction lane CONTAINS-wires claim Points into the SAME :Session
+    (they are not turns), and a sibling session's turns live in the same
+    graph. A prune scoped on "everything CONTAINS-wired but not in the new
+    window" would delete both.
+    """
+    res = sdk.capture_session(CONV)
+    sid = res["session_id"]
+    other = sdk.capture_session(CONV)["session_id"]
+    proj = sdk._get_proj()
+
+    wired = set(proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "RETURN collect(p.id)",
+        params={"sid": sid}).result_set[0][0] or [])
+    turn_ids = {f"{sid}_t{i}" for i in range(3)}
+    claims = wired - turn_ids
+    assert claims, f"premise: extraction CONTAINS-wires claims: {wired}"
+    other_turns = {f"{other}_t{i}" for i in range(3)}
+
+    sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
+                        session_id=sid)
+
+    survivors = set(proj.g.query(
+        "MATCH (p:Point) WHERE p.id IN $ids RETURN collect(p.id)",
+        params={"ids": sorted(claims)}).result_set[0][0] or [])
+    assert survivors == claims, (
+        f"the prune deleted extracted claims: {sorted(claims - survivors)}")
+    for tid in sorted(other_turns):
+        assert proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
+                            params={"id": tid}).result_set[0][0] == 1, (
+            f"the prune swept a sibling session's turn {tid}")
 
 
 # ── #1532 P4: capture-path parity (window / role / quota / MITIGATES / id) ──
