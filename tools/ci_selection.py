@@ -134,6 +134,10 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/welcome.html",
                    "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
+                   # #2409: the public contact form's page. Registered here for the
+                   # same reason as the rest of this tuple — a PR touching only
+                   # this page must still select the guard that holds it.
+                   "website/contact.html",
                    "website/index.html",
                    "website/privacy.html",
                    # #3485: the shared cross-subdomain session bridge is a
