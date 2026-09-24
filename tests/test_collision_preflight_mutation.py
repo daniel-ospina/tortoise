@@ -10,8 +10,9 @@ against the unmutated tool (the fail-then-pass proof).
 
 Four mutant directions
 ----------------------
-``M1`` — the over-blocking defect, verbatim: ``git show
-origin/main:tools/collision_preflight.py``. Every *relaxation* class (the
+``M1`` — the over-blocking defect, verbatim: the committed pre-#4368 fixture
+``tests/fixtures/collision_preflight_pre_4368.py.txt`` (frozen, NOT read from
+``origin/main`` — see :func:`_build_m1_mutant`). Every *relaxation* class (the
 claim-arm prose noun, the terse work-claim phrases, the merged-PR keyword
 advisory, the issue's own PR/invoking checkout) must fail under it.
 
@@ -248,25 +249,29 @@ def _apply_mutation(text: str, anchor: str, mutant: str, marker: str,
     return out
 
 
+M1_FIXTURE = ROOT / "tests" / "fixtures" / "collision_preflight_pre_4368.py.txt"
+
+
 def _build_m1_mutant() -> str:
-    """The real over-blocking detector: ``origin/main``'s tool, verbatim."""
-    proc = subprocess.run(
-        ["git", "show", "origin/main:tools/collision_preflight.py"],
-        cwd=ROOT, capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        raise AssertionError(
-            "M1 mutant unavailable: `git show "
-            "origin/main:tools/collision_preflight.py` failed (rc="
-            f"{proc.returncode}): {proc.stderr.strip()}"
-        )
-    text = proc.stdout
+    """The real over-blocking detector: the pre-#4368 tool, verbatim.
+
+    Frozen as a committed fixture rather than read from a live ``origin/main``
+    ref. A git-ref read cannot work here: the test job's ``actions/checkout``
+    uses the default depth 1, so no ``origin/main`` ref exists — the read fails
+    with ``rc=128 invalid object name 'origin/main'`` and every node in this
+    class errors. And once this PR merges, the ref WOULD carry the fix, so the
+    byte-identical guard below would raise on every subsequent run (push to
+    main included). The fixture is the artifact under mutation; it must not
+    move, so it is checked in beside the harness.
+    """
+    text = M1_FIXTURE.read_text()
     if not text.strip():
-        raise AssertionError("M1 mutant unavailable: origin/main copy is empty")
+        raise AssertionError(f"M1 mutant unavailable: {M1_FIXTURE.name} is empty")
     if text == TOOL.read_text():
         raise AssertionError(
-            "M1 mutant is byte-identical to the fixed detector — origin/main "
-            "already carries the fix, so M1 pins nothing"
+            f"M1 mutant is byte-identical to the fixed detector — the pre-#4368 "
+            f"fixture ({M1_FIXTURE.name}) was overwritten with the fixed tool, "
+            "so M1 pins nothing"
         )
     return text
 
