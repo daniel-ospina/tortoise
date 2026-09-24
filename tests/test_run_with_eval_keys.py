@@ -497,42 +497,60 @@ class RunWithEvalKeysTests(unittest.TestCase):
                 self.assertIn("the command did NOT run", r.stderr)
 
     def test_a_failed_strip_cannot_be_reported_as_the_env_file(self):
-        # The strip proof's response is now uninhabitable by a shadowed `exit`,
-        # so the false-attribution path needs `exec` shadowed as well (then the
-        # refusal cannot replace the process and the run continues). On that
-        # path the receipt must stay TRUE per key: a value the strip failed to
-        # remove is never named as coming from the file, while a key that DID
-        # come from the file is still reported as such — the earlier global
-        # label called both of them aborted.
-        env_file = Path(self._tmp.name) / "deepseek-only.env"
-        env_file.write_text(f"DEEPSEEK_API_KEY={FIXTURE_DEEPSEEK}\n", encoding="utf-8")
-        env = self.base_env(
-            EVAL_KEYS_ENV_FILE=str(env_file),
-            OPENROUTER_API_KEY=SABOTAGE,
-            _RWEK_SANITIZED="1",
+        # The strip proof's response is uninhabitable by a shadowed `exit`, so
+        # the false-attribution path needs `exec` shadowed as well (then the
+        # refusal cannot replace the process and the run continues). On that path
+        # the receipt must stay TRUE per key — including when `export` is
+        # shadowed too, which makes the loader's `export` a no-op while the
+        # ambient value is still the one in the environment. Recording the file
+        # as the source by INTENT (appending after the export without checking it
+        # took) mislabelled exactly that case.
+        file_value = "sk-or-v1-FILEVALUE0123456789abcdefghijklmnopqrst"
+        env_file = Path(self._tmp.name) / "two-keys.env"
+        env_file.write_text(
+            f"OPENROUTER_API_KEY={file_value}\n"
+            f"DEEPSEEK_API_KEY={FIXTURE_DEEPSEEK}\n",
+            encoding="utf-8",
         )
-        env["BASH_FUNC_unset%%"] = "() { return 0; }"
-        env["BASH_FUNC_exit%%"] = "() { return 0; }"
-        env["BASH_FUNC_exec%%"] = "() { return 0; }"
-        r = self.run_wrapper(["true"], env=env, use_fixture=False)
-        # the only outcome an attacker could want — a silent success — is gone
-        self.assertEqual(r.returncode, 3, r.stderr)
-        self.assertIn("AMBIENT STRIP FAILED", r.stderr)
-        lines = {
-            line.split()[1]: line
-            for line in r.stderr.splitlines()
-            if " source=" in line
-        }
-        # the surviving ambient value is NOT attributed to the file
-        self.assertIn("aborted", lines["OPENROUTER_API_KEY"])
-        self.assertNotIn(
-            f"source={env_file.resolve()}", lines["OPENROUTER_API_KEY"]
-        )
-        # …while the key the file really did supply keeps the truthful label
-        self.assertIn(f"source={env_file.resolve()}", lines["DEEPSEEK_API_KEY"])
-        # and no value is ever printed
-        self.assertNotIn(SABOTAGE, r.stderr)
-        self.assertNotIn(FIXTURE_DEEPSEEK, r.stderr)
+        for shadow_export in (False, True):
+            with self.subTest(export_shadowed=shadow_export):
+                env = self.base_env(
+                    EVAL_KEYS_ENV_FILE=str(env_file),
+                    OPENROUTER_API_KEY=SABOTAGE,
+                    _RWEK_SANITIZED="1",
+                )
+                env["BASH_FUNC_unset%%"] = "() { return 0; }"
+                env["BASH_FUNC_exit%%"] = "() { return 0; }"
+                env["BASH_FUNC_exec%%"] = "() { return 0; }"
+                if shadow_export:
+                    env["BASH_FUNC_export%%"] = "() { return 0; }"
+                r = self.run_wrapper(["true"], env=env, use_fixture=False)
+                # the outcome an attacker wants — a silent success — is gone
+                self.assertEqual(r.returncode, 3, r.stderr)
+                self.assertIn("NOT SANITIZED", r.stderr)
+                lines = {
+                    line.split()[1]: line
+                    for line in r.stderr.splitlines()
+                    if " source=" in line
+                }
+                opened = lines["OPENROUTER_API_KEY"]
+                if shadow_export:
+                    # the export was a no-op, so the value really IS the ambient
+                    # one — it must not be attributed to the file
+                    self.assertIn(f"len={len(SABOTAGE)}", opened)
+                    self.assertIn("aborted", opened)
+                    self.assertNotIn(f"source={env_file.resolve()}", opened)
+                    self.assertIn("source=unset", lines["DEEPSEEK_API_KEY"])
+                else:
+                    # the export took: the file's value is what the child gets,
+                    # and the file is truthfully named as its source
+                    self.assertIn(f"len={len(file_value)}", opened)
+                    self.assertIn(f"source={env_file.resolve()}", opened)
+                    self.assertIn(
+                        f"source={env_file.resolve()}", lines["DEEPSEEK_API_KEY"]
+                    )
+                self.assertNotIn(SABOTAGE, r.stderr)
+                self.assertNotIn(file_value, r.stderr)
 
     def test_a_shadowed_exec_fails_loudly_instead_of_silently(self):
         # The one outcome that must never look like success is "the wrapped

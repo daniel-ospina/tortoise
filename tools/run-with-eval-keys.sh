@@ -369,7 +369,23 @@ if [ -f "$_RWEK_ENV_FILE" ] && [ -r "$_RWEK_ENV_FILE" ]; then
 
     if is_managed_key "$_rwek_key"; then
       export "$_rwek_key=$_rwek_value"
-      _RWEK_FROM_FILE="$_RWEK_FROM_FILE $_rwek_key"
+      # Record the file as this key's source ONLY if the export actually took.
+      # `export` is a builtin a caller can shadow; recording the INTENT would
+      # then name the env file as the source of a value the file never supplied
+      # (the ambient survivor is still in the environment), which is the
+      # false-attribution class this record exists to prevent. A shadowed
+      # `export` also means the run's key provenance is untrustworthy, so the
+      # strip state is flipped too. (The `${!key+x}` test distinguishes "unset"
+      # from "set to empty", so an empty file value is still recorded.)
+      case "${!_rwek_key+x}" in
+        ?*)
+          case "${!_rwek_key}" in
+            "$_rwek_value") _RWEK_FROM_FILE="$_RWEK_FROM_FILE $_rwek_key" ;;
+            *) _RWEK_ABORTED=1 ;;
+          esac
+          ;;
+        *) _RWEK_ABORTED=1 ;;
+      esac
     else
       # fill-if-absent: an inherited key, or one an earlier `.env` line already
       # set, is never clobbered — `_load_dotenv`'s deliberate semantics. The
@@ -405,7 +421,7 @@ fi
 # is chosen here, by assignment (not shadowable), so the header stays true on the
 # one path where the abort could not replace this process (a shadowed `exec`).
 if [ -n "${_RWEK_ABORTED:-}" ]; then
-  _RWEK_STRIP_STATE='provider keys: AMBIENT STRIP FAILED, this run was NOT sanitized'
+  _RWEK_STRIP_STATE='provider keys: NOT SANITIZED, the ambient strip or the .env load did not take'
 else
   _RWEK_STRIP_STATE='provider keys: ambient stripped'
 fi
