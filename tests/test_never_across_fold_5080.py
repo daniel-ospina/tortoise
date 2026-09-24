@@ -72,10 +72,30 @@ NEVER_ACROSS = [
      "his manager approved the plan", "substituted_content"),
     ("the plan is approved", "our plan is approved", "substituted_content"),
     # A pair of numbers is BOUND to the nouns beside them: the same two
-    # numbers in a different pairing is not the same claim.
+    # numbers in a different pairing is not the same claim, and comparing the
+    # numbers alone reads both pairings as one claim.
     ("we shipped 3 crates to 2 stores",
      "we shipped 2 crates to 3 stores", "number"),
     ("we have 2 cats and 3 dogs", "we have 3 cats and 2 dogs", "number"),
+    ("we have 2 cats and 3 dogs", "we have 2 dogs and 3 cats", "number"),
+    ("we shipped 3 crates to 2 stores",
+     "we shipped 3 stores to 2 crates", "number"),
+    # A clitic the hand-written list cannot enumerate: the rule is "X + n't",
+    # not the ~17 verbs someone thought to write down.
+    ("we mustn't ship the build", "we ship the build", "negation"),
+    ("we needn't retry the deploy", "we retry the deploy", "negation"),
+    ("the report is ready", "bob's report is ready",
+     "substituted_content"),
+    ("bob's report is ready", "alice's report is ready",
+     "substituted_content"),
+    # A condition the single-word list misses.
+    ("we hold the release pending the tests", "we hold the release",
+     "condition"),
+    ("we ship iff the build passes", "we ship the build passes",
+     "condition"),
+    # A state pair: one side's "off" must not read as a detail added to "on".
+    ("the flag is on", "the flag is off", "substituted_content"),
+    ("the feature is on", "the feature is off", "substituted_content"),
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
@@ -150,10 +170,13 @@ class TestDistinguishingDifference:
         assert v2.distinguishing_difference(
             "i don't like it", "i like it") == "negation"
 
-    @pytest.mark.parametrize("apostrophe", ["\u2019", "\u02bc", "\uff07"])
+    @pytest.mark.parametrize("apostrophe",
+                             ["\u2019", "\u02bc", "\uff07", "\u2018",
+                              "\u201b", "\u2032"])
     def test_a_clitic_in_any_apostrophe_spelling_negates(self, apostrophe):
-        """LLM output routinely spells the clitic with U+2019; a negator the
-        marker list cannot see is a negator the boundary fails to guard."""
+        """LLM output routinely spells the clitic with a curly apostrophe, and
+        a negator the marker list cannot see is a negator the boundary fails
+        to guard."""
         assert v2.distinguishing_difference(
             f"i don{apostrophe}t like it", "i like it") == "negation"
         assert v2.distinguishing_difference(
@@ -162,6 +185,15 @@ class TestDistinguishingDifference:
         # ... and the spelling itself is still not a difference.
         assert v2.distinguishing_difference(
             f"i don{apostrophe}t like it", "i dont like it") is None
+
+    @pytest.mark.parametrize("clitic", ["mustn't", "needn't", "shan't",
+                                        "mightn't", "couldn't"])
+    def test_a_clitic_is_a_negator_whatever_the_verb(self, clitic):
+        """The rule is the clitic, not a hand-enumerated verb list: a fixed
+        word list cannot hold every verb a negator attaches to."""
+        assert v2.distinguishing_difference(
+            f"we {clitic} ship the build",
+            "we ship the build") == "negation"
 
     def test_a_notation_change_is_not_a_value_difference(self):
         """'six' and '6' are one value in two spellings."""
@@ -173,6 +205,19 @@ class TestDistinguishingDifference:
         assert v2.distinguishing_difference(
             "we ship the web server first.", "we ship the web server first"
         ) is None
+
+    @pytest.mark.parametrize("phrase", ["as long as", "so long as", "in case",
+                                        "in the event", "on condition that",
+                                        "provided that", "conditional on"])
+    def test_a_multi_word_condition_is_a_condition(self, phrase):
+        """A condition carried by more than one word is invisible to a
+        single-word marker list, and the pair then reads as one claim with a
+        detail added rather than two claims with and without a condition."""
+        assert v2.distinguishing_difference(
+            f"we keep backups {phrase} the deploy fails",
+            "we keep backups") == "condition"
+        assert not v2.fold_allowed(
+            f"we keep backups {phrase} the deploy fails", "we keep backups")
 
     def test_a_latin_difference_is_decided_by_script_not_by_content(self):
         """A script change is the one language difference decidable without a
@@ -193,6 +238,18 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the team meets weekly in main office",
                                "the team meets weekly")
         assert v2.fold_allowed("gym at 6pm", "workout at the gym at six pm")
+
+    def test_a_one_sided_antonym_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        Antonymy is not one of the declared dimensions, and the general rule
+        allows a one-sided token because that is the broadening case.  A pair
+        where BOTH sides carry a differing state word IS caught (the
+        `the flag is on` / `the flag is off` rows above); a state word on one
+        side only is not, and telling an antonym from a detail needs a lexicon
+        or a model — it belongs to the contradiction classifier, not here.
+        """
+        assert v2.fold_allowed("the flag is off", "the flag")
 
     def test_a_role_inversion_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent.

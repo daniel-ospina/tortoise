@@ -3061,8 +3061,15 @@ _NEGATION_MARKERS = frozenset({
 })
 _CONDITION_MARKERS = frozenset({
     "if", "unless", "until", "when", "whenever", "provided", "assuming",
-    "whether",
+    "whether", "iff", "pending", "once", "while", "given",
 })
+# Connectives that carry a condition in more than one word.  A single-word
+# marker list misses them entirely, and the pair then reads as one claim with a
+# detail added rather than two claims with and without a condition.
+_CONDITION_PHRASES = (
+    "as long as", "so long as", "in case", "in the event", "on condition that",
+    "provided that", "assuming that", "in the case that", "conditional on",
+)
 # Relative days + month names.  Not interchangeable with the value dimension:
 # "shipped in march" vs "shipped in april" carries no number.
 #
@@ -3095,6 +3102,13 @@ _ENTITY_PRONOUNS = frozenset({
     "themselves", "this", "that", "these", "those",
 })
 _CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS
+# "on" is a frame stopword because of its preposition use, but it also names a
+# STATE ("the flag is on").  Leaving it frame makes a state pair lopsided —
+# only "off" is one-sided — and a lopsided pair is the broadening case the
+# boundary allows, so "the flag is on" folded into "the flag is off".  As
+# content, the two are one-sided against each other and the substitution rule
+# sees them.
+_CONTENT_STOPWORDS = _CONTENT_STOPWORDS - {"on"}
 _UNREADABLE = frozenset({"unreadable"})
 # Token edges stripped before comparison.  `_norm` lowercases and collapses
 # whitespace but keeps punctuation, so "team." and "team" would otherwise read
@@ -3103,7 +3117,11 @@ _TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
 # Clitic apostrophes, normalised to the ASCII form before tokenising.  LLM
 # output routinely spells "don't" with U+2019, and a negator the marker list
 # cannot see is a negator the boundary fails to guard.
-_APOSTROPHES = str.maketrans({"\u2019": "'", "\u02bc": "'", "\uff07": "'"})
+_APOSTROPHES = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u02bc": "'", "\u02b9": "'", "\u2032": "'", "\u2035": "'",
+    "\uff07": "'",
+})
 # Non-Latin scripts, by the codepoint block that identifies them.
 _SCRIPT_BLOCKS = (
     ("greek", 0x0370, 0x03FF),
@@ -3136,11 +3154,13 @@ def _guard_token_seq(content: str) -> list[str]:
     the positions the comparison is about.
     """
     text = _norm(content).translate(_APOSTROPHES)
-    # Internal apostrophes go too, so that one claim's two spellings are one
-    # token set: "don't" and "dont" both negate, and "it's" and "its" are the
-    # same possessive to a comparison that cannot conjugate a verb.
-    return [t.replace("'", "")
-            for t in (_s.strip(_TOKEN_EDGE_PUNCT) for _s in text.split()) if t]
+    # The apostrophe is KEPT.  It is the only signal that distinguishes a
+    # possessive from a plural, and it is what marks a clitic negator the
+    # marker list does not enumerate ("mustn't" is a negation, "mustnt" is not
+    # a word any list can be complete against).  Helpers that need the two
+    # spellings of one word to agree strip it themselves.
+    return [t for t in (_s.strip(_TOKEN_EDGE_PUNCT)
+                        for _s in text.split()) if t]
 
 
 def _guard_tokens(content: str) -> set[str]:
@@ -3148,45 +3168,59 @@ def _guard_tokens(content: str) -> set[str]:
     return set(_guard_token_seq(content))
 
 
-def _value_token_seq(content: str) -> tuple[str, ...]:
-    """Number-shaped tokens in one normalised form, IN ORDER: number words map
-    to their value ("six" → "6"), and clock forms are removed entirely.
+def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
+    """Each value token paired with the content token BEFORE it, IN ORDER.
 
-    Clock forms are removed because ``_value_signature`` compares them in its
-    own normalised encoding, where "6pm", "six pm" and "6:00 pm" are one
-    value — leaving their raw tokens here would read a notation change as a
-    value change.  The signature alone is not sufficient either: it returns
-    early once both sides carry one, and so misses a differing number sitting
-    BESIDE an equal clock value ("3 crates at 9am" vs "4 crates at 9am").
+    Number words map to their value ("six" → "6") and clock forms are removed
+    entirely, because ``_value_signature`` compares those in its own normalised
+    encoding, where "6pm", "six pm" and "6:00 pm" are one value.  The signature
+    alone is not sufficient: it returns early once both sides carry one, so it
+    misses a differing number sitting BESIDE an equal clock value ("3 crates at
+    9am" vs "4 crates at 9am").
 
-    Ordered, not a set: a claim's numbers are bound to the nouns beside them,
-    and "we shipped 3 crates to 2 stores" vs "we shipped 2 crates to 3
-    stores" carries the same two numbers in a different pairing.  A set reads
-    that as one claim, and the in-capture seam would DELETE the rival.
+    The PAIRING is the point, and it is why neither a set nor a bare sequence
+    will do.  "we have 2 cats and 3 dogs" and "we have 2 dogs and 3 cats" carry
+    one number sequence and two quantities; "3 crates to 2 stores" and "2
+    crates to 3 stores" likewise.  Anchoring each value to the content token it
+    sits beside separates the pairings.  The anchor is the token already seen,
+    so no lookahead is needed and a paraphrase that reorders clauses still
+    anchors each value to the same word — which is what keeps #4652's
+    marker-free paraphrase foldable.
     """
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
+    anchor = ""
     for t in _guard_token_seq(_CLOCK_RE.sub(" ", _norm(content))):
-        if any(c.isdigit() for c in t):
-            out.append(t)
-        else:
+        value = t if any(c.isdigit() for c in t) else None
+        if value is None:
             v = _num_word_value(t)
-            if v is not None:
-                out.append(str(v))
+            value = str(v) if v is not None else None
+        if value is not None:
+            out.append((anchor, value))
+            continue
+        if t not in _CONTENT_STOPWORDS and t not in _CLOCK_UNITS \
+                and t not in _DATE_WORDS:
+            anchor = t
     return tuple(out)
 
 
 def _negation_markers(content: str) -> frozenset[str]:
-    """Negation markers.  ``_guard_token_seq`` has already stripped the
-    apostrophe, so 'dont' — a list entry — is what "don't" becomes.
+    """Negation markers, in one canonical spelling.
+
+    Apostrophes are stripped for the comparison, so one claim's two spellings
+    agree; and the clitic rule is general (``X`` + "n't"), because a fixed word
+    list cannot enumerate every verb a negator attaches to — "mustn't" is a
+    negation and appears in no list written by hand.
     """
-    return frozenset(t for t in _guard_tokens(content)
+    return frozenset(t.replace("'", "") for t in _guard_tokens(content)
                      if t in _NEGATION_MARKERS or t.endswith("n't"))
 
 
 def _condition_markers(content: str) -> frozenset[str]:
-    """Condition/qualifier markers."""
-    return frozenset(t for t in _guard_tokens(content)
-                     if t in _CONDITION_MARKERS)
+    """Condition/qualifier markers — single words and multi-word connectives."""
+    found = {t for t in _guard_tokens(content) if t in _CONDITION_MARKERS}
+    flat = _norm(content)
+    found.update(p for p in _CONDITION_PHRASES if p in flat)
+    return frozenset(found)
 
 
 def _date_tokens(content: str) -> frozenset[str]:
@@ -3216,12 +3250,23 @@ def _content_tokens(content: str) -> set[str]:
     """
     out: set[str] = set()
     for t in _guard_tokens(content):
+        t = t.replace("'", "")
         if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
             continue
         out.add(t)
     return out
+
+
+def _possessives(content: str) -> frozenset[str]:
+    """Possessive determiners/owners ("bob's", "the team's").
+
+    Read from the token stream, which keeps the apostrophe, because
+    ``_content_tokens`` strips it to make one word's two spellings agree and
+    the possessive signal is exactly what that loses.
+    """
+    return frozenset(t for t in _guard_tokens(content) if t.endswith("'s"))
 
 
 def _marker_scope(content: str) -> tuple[str, ...]:
@@ -3242,7 +3287,7 @@ def _marker_scope(content: str) -> tuple[str, ...]:
     out: list[str] = []
     for t in _guard_token_seq(content):
         if t in _NEGATION_MARKERS or t.endswith("n't") or t in _CONDITION_MARKERS:
-            out.append(t)
+            out.append(t.replace("'", ""))
             continue
         if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
             continue
@@ -3289,14 +3334,19 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
         out.add("language")
     content_a, content_b = _content_tokens(a), _content_tokens(b)
     only_a, only_b = content_a - content_b, content_b - content_a
+    one_sided = only_a | only_b
     if only_a and only_b:
         out.add("substituted_content")
-    elif (only_a | only_b) & _ENTITY_PRONOUNS:
-        # A pronoun or possessive on ONE side re-subjects the claim: "the
-        # manager approved the plan" and "his manager approved the plan" are
-        # not one claim in two spellings.  Every other one-sided token is the
-        # documented broadening case ("the team meets weekly in main office"
-        # ← "the team meets weekly"), which must stay foldable.
+    elif one_sided & _ENTITY_PRONOUNS:
+        # A pronoun on ONE side re-subjects the claim: "the manager approved
+        # the plan" and "his manager approved the plan" are not one claim in
+        # two spellings.  A possessive is caught by the set comparison below.
+        # Every other one-sided token is the documented broadening case ("the
+        # team meets weekly in main office" ← "the team meets weekly"), which
+        # must stay foldable.
+        out.add("substituted_content")
+    poss_a, poss_b = _possessives(a), _possessives(b)
+    if (poss_a or poss_b) and poss_a != poss_b:
         out.add("substituted_content")
     # Negation and condition are SCOPE-bearing, and a set cannot express that:
     # "the cache is not the problem, the lock is" and "the cache is the
@@ -3335,7 +3385,7 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
         # a differing number ANYWHERE in the claim, including the one that sits
         # beside an equal signature — which comparing signatures alone misses,
         # because it returns early once both sides carry one.
-        if sig_a != sig_b or _value_token_seq(a) != _value_token_seq(b):
+        if sig_a != sig_b or _value_bindings(a) != _value_bindings(b):
             dimension = "number"
         elif _date_tokens(a) != _date_tokens(b):
             dimension = "date"
