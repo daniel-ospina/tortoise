@@ -454,43 +454,92 @@ class RunWithEvalKeysTests(unittest.TestCase):
         # it took is what makes the receipt's `source=` line trustworthy. The
         # marker path (`_RWEK_SANITIZED=1`, the caller-settable opt-out) skips
         # the re-exec, so a shadowed `unset` leaves an ambient key in place — the
-        # proof must then abort with 3 rather than print a receipt that
-        # attributes that value to the env file.
-        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE, _RWEK_SANITIZED="1")
-        env["BASH_FUNC_unset%%"] = "() { return 0; }"
-        r = self.run_wrapper(["true"], env=env)
-        self.assertEqual(r.returncode, 3, r.stderr)
-        self.assertIn("survived the ambient strip", r.stderr)
-        # no per-key receipt line, so no source claim is made about the ambient
-        # value the strip failed to remove
-        self.assertNotIn("fingerprint=", r.stderr)
-        self.assertNotIn(SABOTAGE, r.stderr)
+        # proof must then refuse to run (exit 3) rather than print a receipt
+        # attributing that value to the env file. The refusal is executed by an
+        # absolute-path `"$BASH" -p -c …`, so it holds with `exit` shadowed too.
+        for extra in ({}, {"BASH_FUNC_exit%%": "() { return 0; }"}):
+            with self.subTest(exit_shadowed=bool(extra)):
+                env = self.base_env(
+                    OPENROUTER_API_KEY=SABOTAGE, _RWEK_SANITIZED="1", **extra
+                )
+                env["BASH_FUNC_unset%%"] = "() { return 0; }"
+                r = self.run_wrapper(["true"], env=env)
+                self.assertEqual(r.returncode, 3, r.stderr)
+                self.assertIn("survived the ambient strip", r.stderr)
+                # no receipt at all: no per-key source claim is made
+                self.assertNotIn("fingerprint=", r.stderr)
+                self.assertNotIn(SABOTAGE, r.stderr)
 
-    def test_a_shadowed_exit_cannot_produce_a_false_source(self):
-        # The proof's RESPONSE is `printf` + `exit` — builtins a caller can
-        # shadow. With `exit` shadowed the FATAL is printed and ignored, the run
-        # continues, and the child receives the ambient key. Nothing in-band can
-        # stop that (there is no privilege boundary — see the launcher header),
-        # but the receipt must not LIE about it: the source label is assigned (an
-        # assignment is not a builtin) so the ambient value is never reported as
-        # coming from the env file.
-        env = self.base_env(OPENROUTER_API_KEY=SABOTAGE, _RWEK_SANITIZED="1")
+    def test_a_shadowed_exec_and_exit_still_fail_loudly(self):
+        # The previous round's sentinel used `printf` + `exit`, so shadowing
+        # `exit` (or both) restored the silent exit-0. The sentinel is now an
+        # absolute-path `"$BASH" -p -c …`: a slash-qualified word is not a
+        # function lookup, and `-p` makes the child import no exported function,
+        # so its own printf is real.
+        for extra in (
+            {"BASH_FUNC_exec%%": "() { return 0; }"},
+            {
+                "BASH_FUNC_exec%%": "() { return 0; }",
+                "BASH_FUNC_exit%%": "() { return 0; }",
+            },
+            {
+                "BASH_FUNC_exec%%": "() { return 0; }",
+                "BASH_FUNC_exit%%": "() { return 0; }",
+                "BASH_FUNC_printf%%": "() { return 0; }",
+            },
+        ):
+            with self.subTest(shadowed=sorted(extra)):
+                r = self.run_wrapper(["true"], env=self.base_env(**extra))
+                self.assertNotEqual(
+                    r.returncode, 0, "a shadowed exec still looked like success"
+                )
+                self.assertEqual(r.returncode, 3, r.stderr)
+                self.assertIn("the command did NOT run", r.stderr)
+
+    def test_a_failed_strip_cannot_be_reported_as_the_env_file(self):
+        # The strip proof's response is now uninhabitable by a shadowed `exit`,
+        # so the false-attribution path needs `exec` shadowed as well (then the
+        # refusal cannot replace the process and the run continues). On that
+        # path the receipt must stay TRUE per key: a value the strip failed to
+        # remove is never named as coming from the file, while a key that DID
+        # come from the file is still reported as such — the earlier global
+        # label called both of them aborted.
+        env_file = Path(self._tmp.name) / "deepseek-only.env"
+        env_file.write_text(f"DEEPSEEK_API_KEY={FIXTURE_DEEPSEEK}\n", encoding="utf-8")
+        env = self.base_env(
+            EVAL_KEYS_ENV_FILE=str(env_file),
+            OPENROUTER_API_KEY=SABOTAGE,
+            _RWEK_SANITIZED="1",
+        )
         env["BASH_FUNC_unset%%"] = "() { return 0; }"
         env["BASH_FUNC_exit%%"] = "() { return 0; }"
-        r = self.run_wrapper(["true"], env=env)
+        env["BASH_FUNC_exec%%"] = "() { return 0; }"
+        r = self.run_wrapper(["true"], env=env, use_fixture=False)
+        # the only outcome an attacker could want — a silent success — is gone
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("AMBIENT STRIP FAILED", r.stderr)
+        lines = {
+            line.split()[1]: line
+            for line in r.stderr.splitlines()
+            if " source=" in line
+        }
+        # the surviving ambient value is NOT attributed to the file
+        self.assertIn("aborted", lines["OPENROUTER_API_KEY"])
         self.assertNotIn(
-            f"source={self.env_file}",
-            r.stderr,
-            "the receipt attributed a surviving ambient key to the env file",
+            f"source={env_file.resolve()}", lines["OPENROUTER_API_KEY"]
         )
-        self.assertIn("ambient strip failed", r.stderr)
+        # …while the key the file really did supply keeps the truthful label
+        self.assertIn(f"source={env_file.resolve()}", lines["DEEPSEEK_API_KEY"])
+        # and no value is ever printed
         self.assertNotIn(SABOTAGE, r.stderr)
+        self.assertNotIn(FIXTURE_DEEPSEEK, r.stderr)
 
     def test_a_shadowed_exec_fails_loudly_instead_of_silently(self):
-        # A caller CAN export `BASH_FUNC_exec%%`. That makes the re-exec AND the
-        # final `exec "$@"` no-ops, so the wrapped command never runs — the one
-        # outcome that must never look like success. The sentinel after the
-        # final exec turns it into exit 3 with a FATAL, not a receipt + exit 0.
+        # The one outcome that must never look like success is "the wrapped
+        # command never ran". Two mechanisms stop it from doing so: the sentinel
+        # after the final exec, and — because an absolute-path `"$BASH" -p -c`
+        # is not a function lookup — the sentinel works whatever else the caller
+        # shadowed.
         env = self.base_env()
         env["BASH_FUNC_exec%%"] = "() { return 0; }"
         r = self.run_wrapper(["true"], env=env)
