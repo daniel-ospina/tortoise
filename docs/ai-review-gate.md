@@ -49,7 +49,7 @@ green.
   signed `@ <sha>` is the PR's current head, OR its signed `diff=<sha256>`
   equals the diff hash the gate computes live from the GitHub REST API for
   this PR. The diff-match arm fails closed: if the live diff hash cannot be
-  computed (API blip, missing `gh`/`openssl`), a *stale-sha* `diff=` marker is
+  computed (API blip, missing `gh`/`openssl`/`python3`), a *stale-sha* `diff=` marker is
   not accepted. The gate computes TWO digests from the same fetched bytes and
   accepts a marker whose signed `diff=` equals EITHER — the normalized digest
   (#1362) or the legacy raw digest, so existing markers keep working. A marker
@@ -94,23 +94,49 @@ matched; the shipped raw digest did not, and the reviewed PR was refused. The
 owner ruling (2026-09-23) is to compute the digest over a **normalized** diff.
 
 The normalization is a signed cross-repo contract with
-`record-review.sh` (agent-infra#1362); both sides implement exactly the same
-spec. Process the diff as lines (split on `\n`, preserve the final line's
-trailing-newline state):
+`record-review.sh` / its `scripts/lib/diff-normalize.py` (agent-infra#1362);
+both sides MUST implement exactly the same predicate below (the producer half
+is agent-infra#1431 — if the two halves diverge, every freshly-signed marker
+stops matching fleet-wide, the #3076 shape). Process the diff **entry-scoped**
+(entry boundaries are `^diff --git ` lines), as lines (split on `\n`, preserve
+the final line's trailing-newline state):
 
-1. **Drop** every `^index [0-9a-f]+\.\.[0-9a-f]+( [0-7]{6})?$` line.
-2. **Rewrite** every
+1. **Drop** an `^index [0-9a-f]+\.\.[0-9a-f]+( [0-7]{6})?$` line **only when its
+   entry contains at least one hunk line** (`^@@ `).
+2. **Keep** the `index` line **verbatim** when the entry contains **no** hunk
+   line — a binary entry (`^Binary files .* differ$` / `^GIT binary patch$`) or
+   a hunk-less empty-file add/delete.
+3. **Rewrite** every
    `^@@ -([0-9]+)(,([0-9]+))? \+([0-9]+)(,([0-9]+))? @@(.*)$` to
    `@@ -0,<old-count> +0,<new-count> @@<heading>`, each count defaulting to `1`
-   when its group is absent (`@@ -5 +5 @@` means one line each).
-3. Every other line passes through unchanged.
+   when its group is absent (`@@ -5 +5 @@` means one line each) — this applies
+   to every entry.
+4. Every other line passes through unchanged.
+
+The contract sentence: **drop the `index` line exactly when the hunk content
+already carries the change.**
+
+> **Binary carve-out (amendment to the 2026-09-23 ruling).** A binary entry has
+> no hunks and `Binary files … differ` carries no content, so its `index` line
+> is the **only** content-bearing field. Dropping it made two *distinct* binary
+> revisions normalize identically: review binary v1, sign the marker, swap in
+> v2, and the required gate **accepted** an unreviewed binary — a fail-open.
+> The amendment is required by the ruling's own rationale ("the `index` line is
+> redundant with hunk content" — false precisely when there is no hunk content)
+> and is recorded on agent-infra#1362, comment 5806797023. The producer must
+> mirror it with the **same hunk-presence predicate** (agent-infra#1431) — a
+> binary-marker-presence predicate would diverge on a hunk-less *non-binary*
+> entry (the empty-file add/delete in step 2).
 
 Hunk **content**, hunk **counts**, and the `diff --git` / `---` / `+++` / mode /
 rename / binary lines and section heading are deliberately **not** normalized —
-counts derive from content, so they move only when content moves. Implement
-this with a line filter (`sed`), never with `git patch-id`: `--stable` and the
-default both **ignore whitespace**, so a whitespace-only change would carry a
-stale verdict forward (a false accept). sha256 over normalized bytes does not.
+counts derive from content, so they move only when content moves. The
+transformation needs has-this-entry-seen-a-hunk state, so it is a line filter
+**with state** (the consumer uses an inline `python3` block mirroring the
+producer's `split("\n")` / `"\n".join(…)`; a stateless `sed` one-liner cannot
+express it). Never use `git patch-id`: `--stable` and the default both
+**ignore whitespace**, so a whitespace-only change would carry a stale verdict
+forward (a false accept). sha256 over normalized bytes does not.
 
 The gate computes **both** digests from the same fetched bytes and accepts a
 marker whose signed `diff=` equals either:
