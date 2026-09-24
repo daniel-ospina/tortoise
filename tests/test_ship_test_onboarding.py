@@ -3185,7 +3185,8 @@ def test_both_ps_reads_ask_for_an_untruncated_field(monkeypatch) -> None:
     column: the CI runner did, and the hostedtoolcache interpreter path alone is
     ~49 characters, which puts a trailing `run-driver` marker past the width the
     runner cut at (80 columns). The marker then disappears, the enumerator finds
-    no candidate, and a healthy run abandons with its Chromium tree live. BOTH readers therefore ask for unlimited width: dropping `-ww`
+    no candidate, and a healthy run abandons with its Chromium tree live. BOTH
+    readers therefore ask for unlimited width: dropping `-ww`
     from the enumeration reddens this test, and dropping it from the identity
     read would let a truncated start time collapse two processes into one
     identity."""
