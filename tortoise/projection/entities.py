@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 # importable here.
 from tortoise.ids import content_hash as _content_hash
 from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+from tortoise.source_identity import normalize_source_url, resolve_source_key
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,11 @@ class _EntityHandlers:
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
         "title", "ingestedAt", "version", "externalId", "updatedAt",
+        # S0a/S0b (#5012): server-managed source-identity props.  They are
+        # written by `_upsert_source`'s fixed SET clauses, never by the
+        # open-set passthrough (which would let a payload clobber the
+        # canonical identity).
+        "canonicalUrl", "urlAliases",
         # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
         # the MERGE clause, never persisted verbatim snake_case) and
         # `_searchText` (set by the write path, coalesce-on-create /
@@ -1892,6 +1898,11 @@ class _EntityHandlers:
         url = source_url or inner.get("source", "")
         if not url:
             return
+        # S0b (#5012): connector events are 100% of this choke point — resolve
+        # the inbound spelling to the ONE node its canonical identity names, so
+        # the connector registration path cannot mint a second :Source either.
+        key = resolve_source_key(self.g, url)
+        canonical = normalize_source_url(key)
         # #388 conf-60 direction guard: NEVER let a fallback key displace a
         # real URL. chat_getPermalink returns None on ANY exception (rate
         # limits, transient outages), so a failed permalink poll emits the
@@ -1914,15 +1925,21 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.sourceKind = $sk, s.title = $url, "
+            "    s.canonicalUrl = $cu, s.urlAliases = [$raw_url], "
             "    s.contentHash = '', s.ingestedAt = $now "
-            "ON MATCH SET s.sourceKind = coalesce(s.sourceKind, $sk)",
-            params={"url": url, "sk": sk or "document", "now": _now_iso()},
+            "ON MATCH SET s.sourceKind = coalesce(s.sourceKind, $sk), "
+            "    s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+            "    s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "        THEN s.urlAliases "
+            "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END",
+            params={"url": key, "raw_url": url, "cu": canonical,
+                    "sk": sk or "document", "now": _now_iso()},
         )
         # (Source)-[:references]->(Event) — always, when the event exists.
         self.g.query(
             "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
             "MERGE (s)-[:references]->(e)",
-            params={"url": url, "eid": eid},
+            params={"url": key, "eid": eid},
         )
         # #388 conf-62/conf-60: a fallback-key materialization (`slack:{channel}` /
         # `linear:{team_key}` / bare `source`) can predate the real URL (a
@@ -1933,20 +1950,35 @@ class _EntityHandlers:
         # now-authoritative url, and delete the Source node outright if that
         # edge was its ONLY relationship (deg=1 → orphaned). Shared Sources
         # (still referencing other events / extractedFrom by Points) keep the
-        # node — only the superseded edge goes. EP-neutral: connector kinds
-        # are neutral on both sides of the swap. Direction-guarded by conf-60
+        # node — only the superseded edge goes. Direction-guarded by conf-60
         # above: this sweep runs only when the incoming url is a real URL (or
         # no real-URL Source references the event), so a fallback key can
-        # never supersede a real permalink Source.
+        # never supersede a real permalink Source. EP-neutral for an untiered
+        # pair; a deleted node's accumulated tier is inherited (never
+        # overwritten — the survivor's own value wins).
+        #
+        # The survivor is chosen by canonical identity, not by which node was
+        # materialized first, so a node that is ABOUT to be deleted (deg = 1)
+        # hands its accumulated tier/hash/title to the survivor rather than
+        # losing it. The copy is scoped to the deletion branch: a superseded
+        # node that survives (deg > 1, still shared) must not graft its
+        # metadata onto an unrelated live node.
         self.g.query(
             "MATCH (old:Source)-[r:references]->(e:Event {eventId: $eid}) "
             "WHERE old.url <> $url "
-            "WITH old, r, size([(old)-[x]-(y) | x]) AS deg "
+            "MATCH (s:Source {url: $url}) "
+            "WITH old, r, s, size([(old)-[x]-(y) | x]) AS deg "
             "DELETE r "
-            "WITH old, deg "
+            "WITH old, s, deg "
             "WHERE deg = 1 "
+            "SET s.credibilityTier = coalesce(s.credibilityTier, old.credibilityTier), "
+            "    s.title = coalesce(s.title, old.title), "
+            "    s.sourcePath = coalesce(s.sourcePath, old.sourcePath), "
+            "    s.ingestedAt = coalesce(s.ingestedAt, old.ingestedAt), "
+            "    s.contentHash = CASE WHEN coalesce(s.contentHash, '') = '' "
+            "        THEN coalesce(old.contentHash, '') ELSE s.contentHash END "
             "DELETE old",
-            params={"url": url, "eid": eid},
+            params={"url": key, "eid": eid},
         )
         # (Source)-[:references]->(Object {id}) — only on explicit
         # sourceObjectId (github entity path; event.object is never an Object
@@ -1956,7 +1988,7 @@ class _EntityHandlers:
             self.g.query(
                 "MATCH (s:Source {url: $url}), (o:Object {id: $oid}) "
                 "MERGE (s)-[:references]->(o)",
-                params={"url": url, "oid": obj_id},
+                params={"url": key, "oid": obj_id},
             )
 
     def _event_guarded_merge(self, inner: dict, candidate: str, props: dict,
@@ -2079,12 +2111,25 @@ class _EntityHandlers:
         url = ev.get("url", "")
         if not sid and not url:
             return None
-        key = url or sid
+        raw_key = url or sid
+        # ── S0a/S0b (#5012): canonical source identity ──
+        # S0a runs FIRST and is mechanical (no model, no graph).  S0b then
+        # resolves the inbound spelling to the ONE node its canonical identity
+        # names (adopting a pre-canonical node on the way).  The MERGE key
+        # STAYS ``url`` so every existing by-url read/mutation site keeps
+        # working; ``canonicalUrl``/``urlAliases`` are the new identity props.
+        # Identity is a canonicalised URL — NEVER an embedding (STORAGE §9.4).
+        # The resolver is shared with the stub/link writers (edges.py) so a
+        # URL variant cannot mint a second ``:Source`` on ANY write path.
+        key = resolve_source_key(self.g, raw_key)
+        canonical = normalize_source_url(raw_key)
         search_text = ev.get("_searchText") or ev.get("title")
         run_clause = ", s.__runId = $rid" if merge_run_id is not None else ""
         r = self.g.query(
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.id = coalesce($id, $url), "
+            "              s.canonicalUrl = $cu, "
+            "              s.urlAliases = [$raw_url], "
             "              s.sourceKind = $sk, "
             "              s.contentHash = coalesce($hash, ''), "
             "              s.title = $title, "
@@ -2115,11 +2160,17 @@ class _EntityHandlers:
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                     THEN $now ELSE s.updatedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
+            "           s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+            "           s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "               THEN coalesce(s.urlAliases, []) "
+            "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                        THEN $st ELSE s._searchText END",
             params={
                 "url": key, "id": sid or key,
+                "cu": canonical,
+                "raw_url": raw_key,
                 "sk": ev.get("sourceKind", "document"),
                 "hash": ev.get("contentHash"),
                 "title": ev.get("title", key),
