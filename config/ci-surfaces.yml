@@ -981,6 +981,11 @@ surfaces:
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
   - test_suggest_entry_points.py
   - test_supabase_control.py
+  # #4606: the pin that stops a PR neutering its own surface gate. It guards
+  # `.github/workflows/python-ci.yml`, a non-python prefix, so a workflow-only
+  # edit would otherwise select NO surface — the same rationale as the
+  # `test_*_rename_table.py` / `test_sdk_surface.py` rows above.
+  - test_surface_guard_pin_4606.py
   - test_surface_manifest.py
   - test_suspension_parity.py
   - test_taxonomy.py

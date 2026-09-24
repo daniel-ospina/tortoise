@@ -1932,6 +1932,55 @@ jobs:
           python-version: '3.12'
       - name: Install
         run: pip install -e .
+      # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
+      # Both steps below would otherwise run the CHECKOUT'S OWN copies, so a PR
+      # could add a surface tool and stub the guard out in the same commit: the
+      # required `surface-guard` job would go green on a rewritten gate.
+      #
+      # Both tools resolve `ROOT = Path(__file__).resolve().parent.parent`, so
+      # the pin overwrites them IN PLACE under `tools/`: the PR's TREE stays the
+      # subject of the check (that is the point — it is what might have
+      # expanded), while the LOGIC that measures it comes from the protected
+      # base ref and cannot be edited by the PR under test.
+      #
+      # On `push`/`schedule` there is no `base_ref` and the checkout IS the
+      # protected ref, so `HEAD` is used. A `git show` that fails leaves `set -e`
+      # to fail the step, so the pin fails CLOSED rather than silently skipping.
+      - name: Pin the gate's tooling to the base ref
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.base_ref }}" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            base=FETCH_HEAD
+          else
+            base=HEAD
+          fi
+          base_sha=$(git rev-parse "$base")
+          echo "pinned surface tooling from $base ($base_sha)"
+          # `tools/` itself must be a REAL directory. If the PR swaps it for a
+          # symlink, `mv -f` resolves THROUGH it, the pinned copies land in the
+          # PR's own tree, and each tool's `ROOT = Path(__file__).resolve().parent
+          # .parent` then re-roots the entire check onto that decoy tree — while
+          # every per-file assertion below still passes. Assert the CONTAINER,
+          # not only the files.
+          test -d tools && test ! -L tools \
+            || { echo "::error::tools/ is not a real directory"; exit 1; }
+          for f in tools/surface-guard.py tools/surface_manifest.py; do
+            tmp="$(mktemp)"
+            # `mv -f` REPLACES the path. A plain `> "$f"` redirect FOLLOWS it, so
+            # a PR that commits `tools/surface-guard.py -> /dev/null` would have
+            # the pin written harmlessly into the void and the step below would
+            # then run an EMPTY program, exit 0, and report success. `mv -f`
+            # unlinks the link and renames over it instead. The `test` then fails
+            # CLOSED if anything non-regular (or empty) survived.
+            # The source is `$base_sha`, not `$base`, so the sha echoed above is
+            # the sha that was actually pinned.
+            git show "$base_sha:$f" > "$tmp"
+            mv -f "$tmp" "$f"
+            test -f "$f" && test ! -L "$f" && test -s "$f" \
+              || { echo "::error::$f is not a non-empty regular file after the pin"; exit 1; }
+          done
+          wc -l tools/surface-guard.py tools/surface_manifest.py
       - name: The surface cannot expand without an explicit human decision
         run: python3 tools/surface-guard.py
       - name: The ordering lint (AC13)
