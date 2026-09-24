@@ -76,9 +76,12 @@ record's ``reason`` field carries the same split (``instrument_error`` vs
 ``server_did_not_observe``), so a deploy job can branch on it without parsing
 prose. The observation
 directory always holds ``observation.json`` + step screenshots, pass or fail —
-with one deliberate exception (#4875): an abort that predates the observation
-itself (an ``--out`` that cannot be created, a driver that will not start)
-raises before any writer exists and therefore writes nothing.
+with deliberate exceptions (#4875), each asserted by name in the fast suite: an
+abort that predates the observation itself (an ``--out`` that cannot be created,
+a driver that will not start) raises before any writer exists and therefore
+writes nothing, and a walk body that raises before it settles writes no
+pre-teardown copy at all (its exception propagates past the authoritative
+write). The exception list is exhaustive.
 
 **Browser teardown (#4907).** The run owns the Playwright driver's lifecycle
 (``start()`` + an explicit teardown) rather than inheriting it, and the browser
@@ -1269,16 +1272,16 @@ TEARDOWN_DRIVER_MARKERS = ("run-driver", "playwright")
 
 
 def _norm_start_time(text: str) -> str:
-    """Collapse whitespace so the two `lstart` READS of one process compare equal.
+    """Collapse whitespace so `lstart` renderings of one process compare equal.
 
     ``ps`` renders ``lstart`` as ``%c``, whose day-of-month field is SPACE-padded
     (``Thu Jan  1 00:00:00 2026``) and whose token COUNT is LOCALE-DEPENDENT
     (``LC_ALL=ja_JP.UTF-8`` renders four tokens, ``LC_ALL=ru_RU.UTF-8`` six).
-    This is the ONE normal form both reads of a process's start time pass
-    through — `_driver_pid_and_starttime` takes its value FROM `_start_time_of` —
-    so the TOCTOU re-check compares like with like BY CONSTRUCTION, whatever the
-    locale. The enumerator never reconstructs the time from a positional slice
-    of its own `ps` line, which is what made the token count load-bearing.
+    Both the enumeration and the TOCTOU re-check take their start time from
+    `_child_identity` and pass it through this ONE normal form, so the two
+    compare like with like BY CONSTRUCTION, whatever the locale. Neither read
+    reconstructs the time from a positional slice, which is what made the token
+    count load-bearing.
     """
     return " ".join(str(text).split())
 
@@ -1304,24 +1307,80 @@ def _ps_binary() -> str | None:
     return None
 
 
-def _driver_pid_and_starttime() -> tuple[int | None, str | None]:
-    """This run's OWN Playwright driver child, as ``(pid, start_time)``.
+# Why the enumerator returned no driver. The OUTCOME vocabulary stays the closed
+# six above (`driver_absent` is the outcome for both "not found" reasons); this
+# names WHICH nothing it was, so `browser_teardown.detail` can name it instead
+# of reporting an enumerated-but-unverifiable child as "no child was
+# enumerated".
+DRIVER_ENUM_FOUND = "found"
+DRIVER_ENUM_NO_CANDIDATE = "no_candidate"
+DRIVER_ENUM_IDENTITY_UNREADABLE = "identity_unreadable"
+
+
+def _child_identity(pid: int) -> tuple[int, str] | None:
+    """One process's whole identity, read ATOMICALLY: ``(ppid, start_time)``.
+
+    ONE `ps` selection returns both fields, so the pid and the start time can
+    never come from two different processes: a pid reused between two separate
+    reads would otherwise yield the SUCCESSOR's start time, the watchdog's
+    re-check would re-read that same value and pass, and ``os.kill`` would
+    SIGKILL a process that is not this run's child — the exact false positive the
+    start time exists to prevent.
+
+    ``ppid`` is the FIRST whitespace-delimited field; the start time is the REST
+    of the line, normalised — never a positional token slice, because ``lstart``
+    renders as ``%c`` whose token COUNT is locale-dependent (four in ``ja_JP``,
+    six in ``ru_RU``).
+
+    ``None`` means the identity could not be read at all this time — ``ps`` was
+    absent or timed out, the process exited, or the output was unrecognizable. A
+    partial identity is never returned.
+    """
+    ps = _ps_binary()
+    if ps is None:
+        return None
+    try:
+        out = subprocess.run([ps, "-o", "ppid=,lstart=", "-p", str(pid)],
+                             capture_output=True, text=True,
+                             timeout=_ps_timeout()).stdout
+    except Exception:
+        return None
+    parts = out.split(None, 1)
+    if len(parts) < 2:
+        return None
+    try:
+        ppid = int(parts[0])
+    except ValueError:
+        return None
+    start = _norm_start_time(parts[1])
+    if not start:
+        return None
+    return ppid, start
+
+
+def _driver_pid_and_starttime() -> tuple[int | None, str | None, str]:
+    """This run's OWN Playwright driver child: ``(pid, start_time, status)``.
 
     Enumerated once, at teardown start, as a direct child of THIS process: the
     sync API spawns the driver as a direct child, and E8 measured that killing it
     takes the whole Chromium tree with it.
 
-    ``command`` is the LAST field of the `ps` selection, so the driver is found
-    by a whole-field match and the start time is NOT reconstructed from the
-    enumeration line. It comes from `_start_time_of` — the SAME reader the
-    TOCTOU re-check calls — so the value the watchdog compares against is the
-    value this enumerator returned, BY CONSTRUCTION. That matters because
-    ``lstart`` renders as ``%c``, whose token COUNT is locale-dependent
-    (``LC_ALL=ja_JP.UTF-8`` → four tokens, ``LC_ALL=ru_RU.UTF-8`` → six): a
-    positional slice of the line would read the wrong field or truncate the
-    time, and then every rung's re-check would refuse, the driver would never be
-    signalled, and a healthy run would fall to `_abandon` while the Chromium tree
-    was orphaned.
+    ``command`` is the LAST field of the `ps` selection and the driver marker is
+    matched ANYWHERE in the command field (a substring test, not a whole-field
+    one), so the start time is NOT reconstructed from the enumeration line. Each
+    candidate that passes the parent/marker filter is then identified by
+    `_child_identity` — the SAME reader the TOCTOU re-check calls — and accepted
+    only when that read reports THIS process as its parent. So the value the
+    watchdog compares against is the value this enumerator returned, BY
+    CONSTRUCTION, in ONE read.
+
+    ``status`` is one of the ``DRIVER_ENUM_*`` constants. It distinguishes "no
+    candidate was found" from "a marker-matching child was enumerated but its
+    identity could not be read (or no longer verified as this process's child)":
+    the OUTCOME vocabulary is unaffected — both are `driver_absent` — but the
+    record's `detail` must not call the second one "no child was enumerated".
+    The identity read is retried ONCE before giving up, because a single `ps`
+    timeout is not evidence about the child.
 
     A non-positive pid is never returned: ``os.kill(-1, SIGKILL)`` signals every
     process this uid may signal, so a misread pid must never become the signal
@@ -1330,13 +1389,14 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None]:
     me = os.getpid()
     ps = _ps_binary()
     if ps is None:
-        return None, None
+        return None, None, DRIVER_ENUM_NO_CANDIDATE
     try:
         out = subprocess.run([ps, "-axo", "pid=,ppid=,command="],
                              capture_output=True, text=True,
                              timeout=_ps_timeout()).stdout
     except Exception:
-        return None, None
+        return None, None, DRIVER_ENUM_NO_CANDIDATE
+    unverified = False
     for line in out.splitlines():
         parts = line.split(None, 2)
         if len(parts) < 3:
@@ -1349,28 +1409,24 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None]:
             continue
         if not any(marker in parts[2] for marker in TEARDOWN_DRIVER_MARKERS):
             continue
-        started = _start_time_of(pid)
-        if started is not None:
-            return pid, started
-    return None, None
+        identity = _child_identity(pid)
+        if identity is None:
+            identity = _child_identity(pid)      # one retry, then give up
+        if identity is None or identity[0] != me:
+            # The marker-matching child could not be verified as this run's child
+            # (it exited, `ps` failed, or the pid was reused between the
+            # enumeration and the identity read). It must NOT be signalled — and
+            # it must NOT be reported as "no candidate found" either.
+            unverified = True
+            continue
+        return pid, identity[1], DRIVER_ENUM_FOUND
+    if unverified:
+        return None, None, DRIVER_ENUM_IDENTITY_UNREADABLE
+    return None, None, DRIVER_ENUM_NO_CANDIDATE
 
 
 def _send_signal(pid: int, signum: int) -> None:
     os.kill(pid, signum)
-
-
-def _start_time_of(pid: int) -> str | None:
-    """The process's start time, re-read at signal time (the TOCTOU re-check)."""
-    ps = _ps_binary()
-    if ps is None:
-        return None
-    try:
-        out = subprocess.run([ps, "-o", "lstart=", "-p", str(pid)],
-                             capture_output=True, text=True,
-                             timeout=_ps_timeout()).stdout
-    except Exception:
-        return None
-    return _norm_start_time(out) or None
 
 
 def _reap(pid: int) -> None:
@@ -1909,8 +1965,10 @@ def _teardown_browser(pw, td, obs, out_dir) -> None:
     seam and a record — so the sync API's thread-affinity rule is not violated.
 
     Safety, by construction: the pid is enumerated ONCE, as a direct child of
-    this process, together with its start time, and the start time is re-read
-    immediately before every rung (a bare pid is racy against reuse). With no
+    this process, together with its parent pid and start time — read as ONE
+    identity in a single `ps` call, and re-read as that same whole value
+    immediately before every rung (a bare pid is racy against reuse, and a start
+    time read separately can belong to the process that reused the pid). With no
     child enumerated the watchdog signals nothing, and the outcome is
     `driver_absent` if the close then returns. Only after a signal is the child
     reaped. Each failure is RECORDED and cannot change the verdict or the exit
@@ -1927,7 +1985,8 @@ def _teardown_browser(pw, td, obs, out_dir) -> None:
 
     started = _monotonic()
     bound = TEARDOWN_BOUND_S
-    driver_pid, driver_start = _driver_pid_and_starttime()
+    driver_pid, driver_start, enum_status = _driver_pid_and_starttime()
+    me = os.getpid()
     signals: list[tuple[int, int]] = []
     refused_reuse: list[bool] = []
     signal_failed: list[bool] = []
@@ -1942,10 +2001,17 @@ def _teardown_browser(pw, td, obs, out_dir) -> None:
                 fired.set()
                 if driver_pid is None:
                     continue               # nothing of ours to signal
+                # The identity is re-read as ONE value — parent pid AND start
+                # time from a single `ps` — so a pid reused since the enumeration
+                # cannot present its successor's start time and pass.
                 try:
-                    if _start_time_of(driver_pid) != driver_start:
-                        refused_reuse.append(True)
-                        continue           # the pid is no longer our child
+                    identity = _child_identity(driver_pid)
+                except BaseException:
+                    identity = None
+                if identity is None or identity != (me, driver_start):
+                    refused_reuse.append(True)
+                    continue               # the pid is no longer our child
+                try:
                     _send_signal(driver_pid, signum)
                 except BaseException:
                     # A failing signal seam must not kill this thread: the run is
@@ -1960,7 +2026,7 @@ def _teardown_browser(pw, td, obs, out_dir) -> None:
             # is still blocked.
             if not done.is_set():
                 _abandon(obs, record, driver_pid, out_dir,
-                         finalized=td.finalized)
+                         enum_status=enum_status, finalized=td.finalized)
 
     watchdog = threading.Thread(target=_watchdog, daemon=True)
     watchdog.start()
@@ -1987,12 +2053,18 @@ def _teardown_browser(pw, td, obs, out_dir) -> None:
     elif fired.is_set():
         record["outcome"] = BROWSER_TEARDOWN_DRIVER_ABSENT
         if driver_pid is None:
-            record["detail"] = ("the teardown needed the watchdog, and no driver "
-                                "child was enumerated to signal")
+            if enum_status == DRIVER_ENUM_IDENTITY_UNREADABLE:
+                record["detail"] = ("the teardown needed the watchdog; an "
+                                    "enumerated driver child's identity could not "
+                                    "be read as this run's child, so nothing was "
+                                    "signalled")
+            else:
+                record["detail"] = ("the teardown needed the watchdog, and no driver "
+                                    "child was enumerated to signal")
         elif refused_reuse:
             record["detail"] = (f"the teardown needed the watchdog; the enumerated "
                                 f"driver child {driver_pid} was refused by the "
-                                f"start-time re-check, so nothing was signalled")
+                                f"identity re-check, so nothing was signalled")
         elif signal_failed:
             record["detail"] = (f"the teardown needed the watchdog; signalling the "
                                 f"enumerated driver child {driver_pid} failed, so "
@@ -2017,7 +2089,9 @@ def _exit_now(code: int) -> None:
     os._exit(code)
 
 
-def _abandon(obs, record, driver_pid, out_dir, *, finalized: bool = True) -> None:
+def _abandon(obs, record, driver_pid, out_dir, *,
+             enum_status: str = DRIVER_ENUM_NO_CANDIDATE,
+             finalized: bool = True) -> None:
     """The ladder is spent and a close is still blocked: end the run, bounded.
 
     Called from the watchdog thread with the main thread stuck in a timeout-less
@@ -2036,11 +2110,15 @@ def _abandon(obs, record, driver_pid, out_dir, *, finalized: bool = True) -> Non
     chance the process has to end itself: nothing there may raise past the exit.
     """
     record["outcome"] = BROWSER_TEARDOWN_ABANDONED
+    if driver_pid is not None:
+        why = f"driver child {driver_pid} had not released the close"
+    elif enum_status == DRIVER_ENUM_IDENTITY_UNREADABLE:
+        why = ("an enumerated driver child's identity could not be read as this "
+               "run's child")
+    else:
+        why = "no driver child enumerated to release it"
     record["detail"] = scrub(
-        "the ladder was spent with the teardown still blocked and "
-        + ("no driver child enumerated to release it"
-           if driver_pid is None
-           else f"driver child {driver_pid} had not released the close")
+        "the ladder was spent with the teardown still blocked and " + why
         + "; the run terminated itself so it could not hang forever")
     if not obs.reason:
         obs.reason = failure_reason(

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import inspect as _inspect
+import os
 import signal
 import textwrap
 import threading
@@ -1135,7 +1136,7 @@ class _FakeRequester:
 # the closes, a watchdog thread taking the rungs), so the harness that proves it
 # has to be able to WEDGE, RAISE, and BE SIGNALLED — and to say WHY a wedged call
 # was released. The five seams the tool exposes (`_driver_pid_and_starttime`,
-# `_send_signal`, `_start_time_of`, `_reap`, `_monotonic`) are installed from the
+# `_send_signal`, `_child_identity`, `_reap`, `_monotonic`) are installed from the
 # shared `_DriverHarness` below, which also carries the driver-event sink: an
 # instance-only attribute would have no handle, because the fake playwright is
 # built inside a lambda.
@@ -1178,10 +1179,12 @@ class _DriverHarness:
         self.signals = []            # (pid, signum), in the order sent
         self.signal_times = []       # the clock seam's reading at each signal
         self.wedges = []
-        self.driver = (4242, "fake-lstart")   # (pid, start_time) the enumerator returns
-        self.start_time_override = None       # makes the TOCTOU re-read disagree
+        self.driver = (4242, "fake-lstart", _mod.DRIVER_ENUM_FOUND)
+        # A tuple (ppid, start_time) the RE-check sees instead, so a DIFFERENT
+        # PARENT and a DIFFERENT START TIME are both expressible (pid reuse).
+        self.identity_override = None
         self.signal_raises = False            # a signal seam that raises, for the guard
-        self.start_time_reads = []
+        self.identity_reads = []
         self.reaps = []
         self.clock_reads = []
         self.teardown_start = None
@@ -1220,11 +1223,18 @@ class _DriverHarness:
         for wedge in list(self.wedges):
             wedge.release(signum)
 
-    def start_time_of(self, pid):
-        self.start_time_reads.append(pid)
-        if self.start_time_override is not None:
-            return self.start_time_override
-        return self.driver[1]
+    def child_identity(self, pid):
+        """The TOCTOU re-check's ONE reader: the process's whole identity.
+
+        Defaults to what the enumerator recorded — this run as the parent, the
+        driver's start time — so the re-check passes by construction; the
+        override makes it disagree on EITHER field, which is the pid-reuse
+        simulation.
+        """
+        self.identity_reads.append(pid)
+        if self.identity_override is not None:
+            return self.identity_override
+        return (os.getpid(), self.driver[1])
 
     def reap(self, pid):
         self.reaps.append(pid)
@@ -1496,7 +1506,8 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    ctx_close_wedges=False, ctx_close_raises=False,
                    browser_close_wedges=False, browser_close_raises=False,
                    stop_wedges=False, driver_absent=False,
-                   start_time_override=None, wedge_release_on=None,
+                   enum_identity_unreadable=False, identity_override=None,
+                   wedge_release_on=None,
                    wedge_timeout=None, expect_reaped=True, signal_raises=False,
                    stop_raises_base=False, harness_sink=None):
     """Execute the real `run_walk` against a fake browser. Returns the record.
@@ -1520,8 +1531,12 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
         # (an unfinalized run), where the ctx is never handed back.
         harness_sink.append(harness)
     if driver_absent:
-        harness.driver = (None, None)
-    harness.start_time_override = start_time_override
+        harness.driver = (None, None, mod.DRIVER_ENUM_NO_CANDIDATE)
+    if enum_identity_unreadable:
+        # An enumerated, marker-matching child whose identity could not be read:
+        # the record must NOT claim "no child was enumerated".
+        harness.driver = (None, None, mod.DRIVER_ENUM_IDENTITY_UNREADABLE)
+    harness.identity_override = identity_override
     harness.signal_raises = signal_raises
     ctx = _FakeCtx(plan, base, org_create=org_create,
                    org_click_raises=org_click_raises, harness=harness,
@@ -1570,7 +1585,7 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     # teardown's process-facing reads/writes are the fake's.
     monkeypatch.setattr(mod, "_driver_pid_and_starttime", harness.enumerate_driver)
     monkeypatch.setattr(mod, "_send_signal", harness.send_signal)
-    monkeypatch.setattr(mod, "_start_time_of", harness.start_time_of)
+    monkeypatch.setattr(mod, "_child_identity", harness.child_identity)
     monkeypatch.setattr(mod, "_reap", harness.reap)
     monkeypatch.setattr(mod, "_monotonic", harness.clock)
     monkeypatch.setattr(mod, "_exit_now", harness.exit_now)
@@ -1612,7 +1627,7 @@ def test_the_teardown_seams_are_declared() -> None:
     for without spawning a driver."""
     import tools.ship_test_onboarding as mod
 
-    for name in ("_driver_pid_and_starttime", "_send_signal", "_start_time_of",
+    for name in ("_driver_pid_and_starttime", "_send_signal", "_child_identity",
                  "_reap", "_monotonic"):
         assert callable(getattr(mod, name)), name
     assert mod._monotonic() > 0
@@ -2961,7 +2976,11 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
     driver marker — would otherwise be pinned by nothing: a mutant returning any
     child, or a process that is not a child at all, would pass the suite. Here
     two REAL children are spawned, the unmarked one FIRST, so an enumerator that
-    returned "the first child" fails."""
+    returned "the first child" fails.
+
+    The identity is read ATOMICALLY: the start time the enumerator carries must
+    re-read identically from `_child_identity` TOGETHER with this process as the
+    parent — the pair the watchdog's re-check compares."""
     import os
     import subprocess
     import sys
@@ -2974,22 +2993,21 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
         [sys.executable, "-c", "import time; time.sleep(30)", marker])
     try:
         deadline = time.monotonic() + 10
-        pid, started = None, None
+        pid, started, status = None, None, None
         while time.monotonic() < deadline:
-            pid, started = mod._driver_pid_and_starttime()
+            pid, started, status = mod._driver_pid_and_starttime()
             if pid is not None:
                 break
             time.sleep(0.1)
         assert pid == driver.pid, (
             f"enumerated {pid}; expected the MARKED child {driver.pid} "
             f"(the unmarked {plain.pid} was spawned first)")
-        ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
-                              capture_output=True, text=True).stdout.strip()
-        assert ppid == str(os.getpid()), f"{pid} is not this process's child"
+        assert status == mod.DRIVER_ENUM_FOUND, status
         assert started, "no start time was carried alongside the pid"
-        assert mod._start_time_of(pid) == started, (
-            "the start time must re-read identically, or the TOCTOU re-check "
-            "would silently refuse to signal the real driver")
+        assert mod._child_identity(pid) == (os.getpid(), started), (
+            "the whole identity (parent pid AND start time) must re-read "
+            "identically in ONE read, or the TOCTOU re-check would silently "
+            "refuse to signal the real driver")
     finally:
         for p in (plain, driver):
             p.kill()
@@ -3015,9 +3033,10 @@ def test_the_enumerators_start_time_comes_from_the_same_reader_as_the_recheck(
     `lstart` from the enumeration line either reads the wrong field or truncates
     the time. Then every rung's TOCTOU re-check refuses, the driver is never
     signalled, and a healthy run falls to `_abandon` while the Chromium tree is
-    orphaned. The enumerator therefore NEVER reconstructs the time: it takes it
-    from `_start_time_of`, the SAME reader the re-check uses, so the two are
-    equal BY CONSTRUCTION for every rendering."""
+    orphaned. The enumerator therefore NEVER reconstructs the time from its own
+    `ps` line: the whole identity comes from `_child_identity` — the SAME reader
+    the re-check calls — so the enumerated value and the re-read are equal BY
+    CONSTRUCTION for every rendering, and the ppid travels in the SAME read."""
     import os
 
     import tools.ship_test_onboarding as mod
@@ -3027,14 +3046,18 @@ def test_the_enumerators_start_time_comes_from_the_same_reader_as_the_recheck(
             # the enumerator's selection: the command is the LAST field and no
             # `lstart` appears anywhere in it, so there is nothing to slice.
             return _PS(stdout=f"4242 {os.getpid()} python playwright run-driver")
-        return _PS(stdout=lstart + "\n")
+        # the ONE identity read: ppid first, then the locale-rendered start time
+        return _PS(stdout=f"{os.getpid()} {lstart}\n")
 
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
-    pid, started = mod._driver_pid_and_starttime()
+    pid, started, status = mod._driver_pid_and_starttime()
     assert pid == 4242, pid
-    assert started == mod._start_time_of(4242) == mod._norm_start_time(lstart), (
-        f"{rendering}: the enumerator's start time must equal the re-check's, "
-        f"whatever the token count; got {started!r}")
+    assert status == mod.DRIVER_ENUM_FOUND, status
+    assert started == mod._norm_start_time(lstart), (
+        f"{rendering}: the enumerator must carry the identity read's own start "
+        f"time; got {started!r}")
+    assert mod._child_identity(4242) == (os.getpid(), started), (
+        f"{rendering}: the re-check must read the same whole identity")
 
 
 @pytest.mark.parametrize("bad_pid", ["0", "-1"])
@@ -3047,11 +3070,12 @@ def test_a_nonpositive_pid_is_never_returned_as_the_driver(monkeypatch, bad_pid)
 
     line = f"{bad_pid} {os.getpid()} Thu Jan  1 00:00:00 2026 python run-driver"
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _PS(stdout=line))
-    assert mod._driver_pid_and_starttime() == (None, None)
+    assert mod._driver_pid_and_starttime() == (
+        None, None, mod.DRIVER_ENUM_NO_CANDIDATE)
 
 
 def test_the_ps_binary_is_absolute_and_a_missing_one_refuses(monkeypatch) -> None:
-    """FIX 2. Both `ps` calls run the ABSOLUTE binary, so a PATH-planted `ps`
+    """FIX 2. Both `ps` readers run the ABSOLUTE binary, so a PATH-planted `ps`
     cannot choose the pid the watchdog signals; when that binary is absent the
     reader refuses (no pid, so nothing is signalled) rather than falling back."""
     import os
@@ -3067,18 +3091,19 @@ def test_the_ps_binary_is_absolute_and_a_missing_one_refuses(monkeypatch) -> Non
 
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
     mod._driver_pid_and_starttime()
-    mod._start_time_of(1)
+    mod._child_identity(1)
     assert len(calls) == 2, calls
     assert all(c[0] == mod._PS_BIN for c in calls), calls
 
     monkeypatch.setattr(mod, "_PS_BIN", "/nonexistent/ps")
-    assert mod._driver_pid_and_starttime() == (None, None)
-    assert mod._start_time_of(1) is None
+    assert mod._driver_pid_and_starttime() == (
+        None, None, mod.DRIVER_ENUM_NO_CANDIDATE)
+    assert mod._child_identity(1) is None
 
 
 def test_the_ps_read_is_budgeted_inside_the_ladder_slack(monkeypatch) -> None:
     """FIX 8d. The last rung is at 3B/4, so B/4 of slack remains; the re-read's own
-    bound must sit inside that slack, and both `ps` calls must use it, or a slow
+    bound must sit inside that slack, and both `ps` readers must use it, or a slow
     `ps` could push the abandon past the bound."""
     import tools.ship_test_onboarding as mod
 
@@ -3094,8 +3119,59 @@ def test_the_ps_read_is_budgeted_inside_the_ladder_slack(monkeypatch) -> None:
 
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
     mod._driver_pid_and_starttime()
-    mod._start_time_of(1)
+    mod._child_identity(1)
     assert seen == [mod._ps_timeout(), mod._ps_timeout()], seen
+
+
+def test_the_identity_read_is_retried_once_before_giving_up(monkeypatch) -> None:
+    """FIX B. The identity read is the one read that can fail transiently (a `ps`
+    timeout, a momentary exit race), so it is retried ONCE: a single failed read
+    is not evidence about the child. The retry is pinned by COUNT, so a mutant
+    that gives up on the first `None` (or loops forever) is RED."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    reads = []
+
+    def _flaky(pid):
+        reads.append(pid)
+        return None if len(reads) == 1 else (os.getpid(), "fake-lstart")
+
+    monkeypatch.setattr(mod, "_child_identity", _flaky)
+    monkeypatch.setattr(
+        mod.subprocess, "run",
+        lambda *a, **k: _PS(stdout=f"4242 {os.getpid()} python run-driver"))
+    assert mod._driver_pid_and_starttime() == (
+        4242, "fake-lstart", mod.DRIVER_ENUM_FOUND)
+    assert reads == [4242, 4242], reads
+
+
+def test_an_unreadable_identity_is_reported_distinctly_from_no_candidate(
+        monkeypatch) -> None:
+    """FIX B. When a marker-matching child WAS enumerated but its identity could
+    not be read (or no longer verified as this process's child), the enumerator
+    must not report `no_candidate`: the record's `detail` has to name WHICH
+    nothing it was. The read is attempted twice (the retry), then the status is
+    `identity_unreadable` — a DIFFERENT status from `no_candidate` for the same
+    `(None, None)` pid/start pair."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    reads = []
+
+    def _unreadable(pid):
+        reads.append(pid)
+        return None
+
+    monkeypatch.setattr(mod, "_child_identity", _unreadable)
+    monkeypatch.setattr(
+        mod.subprocess, "run",
+        lambda *a, **k: _PS(stdout=f"4242 {os.getpid()} python run-driver"))
+    assert mod._driver_pid_and_starttime() == (
+        None, None, mod.DRIVER_ENUM_IDENTITY_UNREADABLE)
+    assert reads == [4242, 4242], reads
 
 
 def test_the_run_exit_code_has_one_definition_for_main_and_the_abandon_path():
@@ -3217,8 +3293,43 @@ def test_the_runbook_discloses_the_bound_the_vocabulary_and_the_residue() -> Non
         "the module docstring must qualify the twice-write to a settled walk")
 
 
-# ── #4875 — the two aborts that write NO artifact, and the guard that does ───
-# Both aborts raise OUT of `run_walk` before any writer exists, so neither may be
+def test_the_module_docstring_exception_list_is_exhaustive() -> None:
+    """FIX C. The "the observation directory always holds ..." promise named ONE
+    deliberate exception (#4875), so a walk body that raises before it settles —
+    which writes NO document, as
+    `test_a_walk_that_raises_before_it_settles_writes_no_document` measures —
+    read as a contradiction of the universal. The parenthetical now names every
+    abort that writes nothing, so the exception list is exhaustive."""
+    import tools.ship_test_onboarding as mod
+
+    flat = " ".join((mod.__doc__ or "").split())
+    assert "with deliberate exceptions (#4875)" in flat, flat
+    assert "an ``--out`` that cannot be created" in flat, flat
+    assert "a driver that will not start" in flat, flat
+    assert "a walk body that raises before it settles" in flat, flat
+    assert "The exception list is exhaustive." in flat, flat
+
+
+def test_the_enumerator_docstring_does_not_claim_a_whole_field_guard() -> None:
+    """FIX D. The enumerator's marker guard is a SUBSTRING test on the command
+    field (`marker in parts[2]`), but the docstring claimed a "whole-field
+    match" — a claim stronger than the code. The claim is now the code's own,
+    and this pins the wording so a future edit cannot silently restore the
+    stronger one without either matching whole tokens (and adding the test that
+    proves a mere substring is rejected) or reddening here."""
+    import tools.ship_test_onboarding as mod
+
+    doc = " ".join((mod._driver_pid_and_starttime.__doc__ or "").split())
+    assert "matched ANYWHERE in the command field" in doc, doc
+    assert "a substring test, not a whole-field one" in doc, doc
+    assert "by a whole-field match" not in doc, doc
+    # ...and the guard really is the substring test the docstring now describes.
+    source = _inspect.getsource(mod._driver_pid_and_starttime)
+    assert "marker in parts[2]" in source, source
+
+
+# ── #4875 — the aborts that write NO artifact, and the guard that does ───────
+# Each abort raises OUT of `run_walk` before any writer exists, so none may be
 # folded into the funnel: `_finalize` now WRITES, so routing an abort through it
 # would manufacture an artifact the abort path never had. They were covered by no
 # test at all before #4907.
@@ -3522,6 +3633,30 @@ def test_no_driver_child_means_no_signal_and_driver_absent(monkeypatch, tmp_path
     assert block["outcome"] == "driver_absent", block
     # FIX 8c: the no-child case says so, and does not claim a re-check refusal.
     assert "no driver child was enumerated" in block["detail"], block["detail"]
+    assert "identity could not be read" not in block["detail"], block["detail"]
+
+
+@pytest.mark.timeout(60)
+def test_an_enumerated_child_with_an_unreadable_identity_is_not_reported_as_absent(
+        monkeypatch, tmp_path):
+    """FIX B. `driver_absent` covers two DIFFERENT nothings, and the record must
+    name which: a run where a marker-matching child WAS enumerated but its
+    identity could not be read must not claim "no driver child was enumerated" —
+    that reports a real candidate as absent. The outcome vocabulary is unchanged
+    (both are `driver_absent`); only `detail` differs, so the OTHER message is
+    pinned by `test_no_driver_child_means_no_signal_and_driver_absent`."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True,
+        enum_identity_unreadable=True,
+        wedge_timeout=mod.TEARDOWN_BOUND_S * 0.6)
+    assert ctx.harness.signals == [], ctx.harness.signals
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] == "driver_absent", block
+    assert "identity could not be read" in block["detail"], block["detail"]
+    assert "no driver child was enumerated" not in block["detail"], block["detail"]
 
 
 @pytest.mark.timeout(120)
@@ -3563,9 +3698,10 @@ def test_a_close_that_never_releases_abandons_the_run_inside_the_bound(
 
 @pytest.mark.timeout(60)
 def test_a_stale_start_time_is_not_signalled(monkeypatch, tmp_path):
-    """AC4/TOCTOU. A bare pid is racy against reuse, so the start time is RE-READ
-    immediately before every rung. When it disagrees with the enumeration the
-    watchdog signals nothing — a reused pid is not this run's child.
+    """AC4/TOCTOU. A bare pid is racy against reuse, so the whole identity is
+    RE-READ as one value immediately before every rung. When its start time
+    disagrees with the enumeration the watchdog signals nothing — a reused pid is
+    not this run's child.
 
     On the real path the close is still blocked at the last rung, so the refusal
     is observed at the LAST RESORT: the run abandons (`abandoned`, with the
@@ -3573,17 +3709,19 @@ def test_a_stale_start_time_is_not_signalled(monkeypatch, tmp_path):
     the fake exit seam, so nothing here depends on a self-release by timeout, and
     deleting `_abandon` removes the exit call — which reddens this test.
     """
+    import os
+
     import tools.ship_test_onboarding as mod
 
     monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
     _obs, ctx, _mod = _happy_bound_run(
         monkeypatch, tmp_path, ctx_close_wedges=True,
-        start_time_override="a different start time",
+        identity_override=(os.getpid(), "a different start time"),
         wedge_timeout=mod.TEARDOWN_BOUND_S)
     harness = ctx.harness
     assert harness.signals == [], harness.signals
     # re-read once per rung, and the pid it inspected is the ENUMERATED one
-    assert harness.start_time_reads == [4242, 4242], harness.start_time_reads
+    assert harness.identity_reads == [4242, 4242], harness.identity_reads
     # the last resort ran, with the run's own exit code
     assert harness.exits == [mod.EXIT_PASSED], harness.exits
     assert harness.exit_docs[0] is not None, "nothing was on disk at abandon time"
@@ -3592,7 +3730,38 @@ def test_a_stale_start_time_is_not_signalled(monkeypatch, tmp_path):
     # (FIX 8c): the on-disk record after the main thread completes.
     block = _browser_teardown_from_disk(tmp_path)
     assert block["outcome"] == "driver_absent", block
-    assert "refused by the start-time re-check" in block["detail"], block["detail"]
+    assert "refused by the identity re-check" in block["detail"], block["detail"]
+
+
+@pytest.mark.timeout(60)
+def test_a_reused_pid_with_a_different_ppid_is_not_signalled(monkeypatch, tmp_path):
+    """FIX A's pid-reuse half. The identity is parent pid AND start time, read in
+    ONE `ps`; the re-check must require BOTH to match. A stub whose re-read
+    reports our own child's start time but a DIFFERENT parent is a pid that was
+    reused by some other process (or whose parentage changed): nothing may be
+    signalled.
+
+    Same shape as the stale-start-time test: the ladder is spent and the run is
+    bounded through `_abandon`. The assertion the change exists for is that the
+    recorded outcome is NOT `watchdog_kill` — a single-field (start-time-only)
+    re-check would signal the reused pid and record `watchdog_kill`."""
+    import tools.ship_test_onboarding as mod
+
+    monkeypatch.setattr(mod, "TEARDOWN_BOUND_S", 1.0)
+    _obs, ctx, _mod = _happy_bound_run(
+        monkeypatch, tmp_path, ctx_close_wedges=True,
+        identity_override=(os.getpid() + 1, "fake-lstart"),
+        wedge_timeout=mod.TEARDOWN_BOUND_S)
+    harness = ctx.harness
+    assert harness.signals == [], harness.signals
+    assert harness.identity_reads == [4242, 4242], harness.identity_reads
+    assert harness.exits == [mod.EXIT_PASSED], harness.exits
+    assert harness.exit_docs[0] is not None, "nothing was on disk at abandon time"
+    assert harness.exit_docs[0]["outcome"] == "abandoned", harness.exit_docs[0]
+    block = _browser_teardown_from_disk(tmp_path)
+    assert block["outcome"] != "watchdog_kill", block
+    assert block["outcome"] == "driver_absent", block
+    assert "refused by the identity re-check" in block["detail"], block["detail"]
 
 
 def test_a_healthy_run_records_clean_with_no_signal_inside_the_first_rung(
@@ -3955,6 +4124,7 @@ ACCEPTANCE_CRITERIA = {
         "test_the_watchdog_signals_only_the_enumerated_driver_child",
         "test_no_driver_child_means_no_signal_and_driver_absent",
         "test_a_stale_start_time_is_not_signalled",
+        "test_a_reused_pid_with_a_different_ppid_is_not_signalled",
     ],
     "AC5 entered once; the ladder once each": [
         "test_the_browser_teardown_is_entered_exactly_once",

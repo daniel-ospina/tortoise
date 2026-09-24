@@ -141,12 +141,15 @@ run returns by B. A healthy run's teardown (~2.6 s measured) finishes well insid
 the first rung, so a healthy run sends no signal and does not wait out the bound:
 the graceful window is ~6x the healthy path, while a close that never returns is
 still hard-bounded.
-* **Only the run's own child is ever signalled.** The pid is enumerated once, as a
-direct child of the instrument's own process, together with its start time; the
-start time is **re-read immediately before every rung** (a bare pid is racy
-against reuse). With no child enumerated the watchdog signals nothing, and —
-when the close then returns — records `driver_absent`. Only after a signal is the
-child reaped.
+* **Only the run's own child is ever signalled.** The pid's identity — its parent
+pid AND its start time, read together in a single `ps` call — is captured once,
+as a direct child of the instrument's own process; that whole identity is
+**re-read as one value immediately before every rung** (a bare pid is racy
+against reuse, and a start time read separately can belong to the process that
+reused the pid). With no child enumerated the watchdog signals nothing, and —
+when the close then returns — records `driver_absent`, whose detail names whether
+no candidate was found or an enumerated child's identity could not be read.
+Only after a signal is the child reaped.
 * **The bound holds even with nothing to signal (`abandoned`).** The ladder is
 released by a *signal*, so if no driver child is enumerable there is nothing that
 can release a close which never returns. After the final rung, with a close still
@@ -213,7 +216,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) — **plus the bound's own set**: the wedge (context, browser, and `pw.stop()`), the raising closes, the healthy zero-signal run, the exact-pid/`driver_absent`/stale-start-time cases, the ladder's rungs and its at-most-one-of-each, the exactly-one-entry count, the two no-browser paths, and the killed-inside-the-window document — plus the **hardening set**: a healthy run's margin over the measured teardown with no signal, the abandon path's printed summary, its write-conditional `observation →` line, its shared residue/browser warnings and its unconditional exit, a signal seam that raises, a walk that raises before it settles writing no document, the locale-dependent `%c` start time (four-token, six-token and space-padded renderings all agree with the re-check by construction), the refusal of a non-positive pid, the absolute `ps` path and its budgeted timeout, the symlink-refusing atomic write, and the scrubbed free text — every one reading `observation.json` **from disk** and asserting the recorded value — **plus the acceptance map**, which names for each of the nine criteria the test that proves it and pins the `_walk` exit count at 11, so a criterion cannot lose its covering test unnoticed | 206 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) — **plus the bound's own set**: the wedge (context, browser, and `pw.stop()`), the raising closes, the healthy zero-signal run, the exact-pid/`driver_absent`/stale-start-time/reused-ppid cases, the ladder's rungs and its at-most-one-of-each, the exactly-one-entry count, the two no-browser paths, and the killed-inside-the-window document — plus the **hardening set**: a healthy run's margin over the measured teardown with no signal, the abandon path's printed summary, its write-conditional `observation →` line, its shared residue/browser warnings and its unconditional exit, a signal seam that raises, a walk that raises before it settles writing no document, the locale-dependent `%c` start time (four-token, six-token and space-padded renderings all agree with the re-check by construction), the refusal of a non-positive pid, the absolute `ps` path and its budgeted timeout, the symlink-refusing atomic write, and the scrubbed free text — every one reading `observation.json` **from disk** and asserting the recorded value — **plus the acceptance map**, which names for each of the nine criteria the test that proves it and pins the `_walk` exit count at 11, so a criterion cannot lose its covering test unnoticed | 212 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the
@@ -227,7 +230,7 @@ behaviourally fixed, not greped. The teardown control set is mutation-checked
 (dropping the baseline set difference, or the create-attempted gate, turns it
 RED), and so is the BOUND: a watchdog that never fires, fires at once, sends each
 rung twice, collapses the rungs, signals a non-enumerated pid, skips the
-start-time re-check, signals with no child, or is omitted/moved out of the
+identity re-check, signals with no child, or is omitted/moved out of the
 `finally` — each reddens a named test. The ladder's ARITHMETIC is additionally
 CI-provable on its own: `--mutation-selfcheck` exercises the real `_ladder` plus
 five mutants of it. A few *structural* `inspect.getsource` / AST assertions remain for ORDERING
