@@ -1,8 +1,10 @@
 """M8 archive integrity tests for the onboarding script (epic #1976, #1998 W2).
 
 Guarantees the ONE-live-script contract (DE2E-5 M8): after W2, the single live
-onboarding script is `tortoise/onboarding/SKILL.md` (the tortoise-onboarding
-skill); the old `AGENT_ONBOARDING.md` prompt + its per-harness variant headers
+onboarding artifact is `tortoise/onboarding/SKILL.md` (the tortoise-onboarding
+INSTRUCTIONS document — delivered as instructions the agent reads, never an
+installed skill since #4365; the skill-shaped filename is the served path);
+the old `AGENT_ONBOARDING.md` prompt + its per-harness variant headers
 are ARCHIVED under `tortoise/onboarding/archive/` and the deploy-time staging
 pipeline (`stage_variants.py`, `website/onboarding-prompt.md`,
 `website/onboarding/<h>.md`) is retired. A two-live-scripts regression must

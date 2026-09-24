@@ -91,18 +91,21 @@ def test_welcome_page_no_session_redirects_to_auth(page: Page) -> None:
     expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=25_000)
 
 
-def test_onboarding_skill_serves_markdown(page: Page) -> None:
-    """The live tortoise-onboarding skill (#1998) must be fetchable as
-    markdown from the deployed dashboard mirror — the onboarding artifact URL
-    the CLI prints after `tortoise onboard` (#544, repointed by #1998)."""
+def test_onboarding_instructions_serves_markdown(page: Page) -> None:
+    """The live tortoise-onboarding INSTRUCTIONS document (#4365) must be
+    fetchable as markdown from the deployed dashboard mirror — the onboarding
+    artifact URL the CLI prints after `tortoise onboard` (#544, repointed by
+    #1998). Since #4365 it is instructions the agent READS, not an installed
+    skill: the installer ships the three reusable capabilities only. The
+    skill-shaped filename/URL is kept deliberately (it is the served path)."""
     resp = page.request.get(ONBOARDING_SKILL_URL, timeout=15_000)
-    assert resp.ok, f"skill URL returned {resp.status}"
+    assert resp.ok, f"instructions URL returned {resp.status}"
     assert "text/markdown" in (resp.headers.get("content-type") or "")
     body = resp.text()
-    assert body.startswith("---"), "unexpected skill body (frontmatter missing)"
-    assert "name: tortoise-onboarding" in body, "unexpected skill body (frontmatter name)"
+    assert body.startswith("---"), "unexpected instructions body (frontmatter missing)"
+    assert "name: tortoise-onboarding" in body, "unexpected instructions body (name)"
     assert "tortoise_health" in body and "harness-connected" in body, (
-        "skill missing canonical content markers"
+        "instructions missing canonical content markers"
     )
 
 
