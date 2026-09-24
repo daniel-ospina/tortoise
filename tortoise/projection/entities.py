@@ -492,6 +492,10 @@ class _EntityHandlers:
     # reported by the undeclared-list warning below, NOT suppressed here.
     _POINT_DECLARED_PROPS: frozenset = frozenset({
         "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+        # E4 (#5007): the verbatim span POINTER — offsets into the Source's raw
+        # text, declared so the replay open-set passthrough does not log a
+        # FALSE undeclared-prop drift warning on every rebuild.
+        "span_start", "span_end",
         # #3689 review P2 (A): the four canonical annotator dims are legitimately
         # carried on a PointAdded snapshot by `create_point(annotator_*=…)` /
         # `_update_entity` — declaring them keeps the replay open-set

@@ -11559,6 +11559,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 tier=pr.point.tier,
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
+                # E4 (#5007): the verbatim span pointer rides to the node
+                span_start=pr.point.span_start,
+                span_end=pr.point.span_end,
                 source_ref=pr.point.source_ref,
                 extractedFrom=session_ref_urls.get(
                     pr.point.source_ref, pr.point.source_ref),
@@ -11583,6 +11586,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 tier=pr.point.tier,
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
+                # E4 (#5007): the verbatim span pointer rides to the node
+                span_start=pr.point.span_start,
+                span_end=pr.point.span_end,
                 source_ref=pr.point.source_ref,
                 extractedFrom=session_ref_urls.get(
                     pr.point.source_ref, pr.point.source_ref),
