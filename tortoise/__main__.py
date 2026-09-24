@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -590,6 +591,22 @@ def _cmd_init(args):
 
     graph_ready = False
     uri_mode = False
+    # #4579: bound before the mode branches so every error return below can
+    # release a probe that was created before the failure.
+    _proj = None
+
+    def _close_probe() -> None:
+        """#4579: release the reachability probe (idempotent, never raises).
+
+        Every error return in the two mode branches routes through here —
+        including the `except ImportError` arms, which are declared FIRST and
+        therefore also catch an ImportError raised by a LATER statement
+        (`_proj.g.query`, the `_mark_embedded_opened` import, the fallback
+        notice import) after the probe is already bound.
+        """
+        with contextlib.suppress(Exception):
+            if _proj is not None:
+                _proj.close()
 
     if is_db_uri(target):
         # 1. URI mode — connect to the configured URI target itself (never a
@@ -605,6 +622,7 @@ def _cmd_init(args):
         except ImportError:
             print(f"  ❌ falkordb not installed — required for URI mode")  # noqa: F541
             print(f"     pip install falkordb")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
             err = str(e).lower()
@@ -613,6 +631,7 @@ def _cmd_init(args):
             else:
                 print(f"  ❌ FalkorDB unreachable ({e})")
             print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
+            _close_probe()
             return 1
     else:
         # 2. Fallback: embedded mode (SQLite-backed) at the resolved path
@@ -661,8 +680,13 @@ def _cmd_init(args):
             print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")  # noqa: F541
             print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")  # noqa: F541
             print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
+            # #4579: release a probe that succeeded before a later step in
+            # this branch failed — otherwise it can outlive the call and,
+            # collected late, leave the daemon running uninstrumented.
+            _close_probe()
             print(f"  ❌ Embedded mode init failed: {e}")
             return 1
 
@@ -670,6 +694,7 @@ def _cmd_init(args):
         return 1
 
     # Write welcome Point to the graph
+    sdk = None  # #4579: bound before the try so the close seam always sees it
     try:
         from tortoise.sdk import TortoiseSDK
         if uri_mode:
@@ -703,6 +728,33 @@ def _cmd_init(args):
         # '?' placeholder a user can't act on. Omit the count and point at
         # doctor so the failure is diagnosable, not masked.
         point_count = None
+    finally:
+        # #4579: release the clients THIS call opened, on every path.
+        #
+        # `tortoise init` is an in-process entry point (`_cmd_onboard`
+        # invokes it directly; agents/tests call `main(["init"])`), and it
+        # opens TWO clients on the same embedded daemon: the reachability
+        # probe projection and the welcome-write `TortoiseSDK`. Neither was
+        # closed here, which is correct for a one-shot CLI process — the
+        # exit cascade closes them — but wrong for any in-process caller.
+        #
+        # Left to GC/atexit, the two clients share the daemon, so the
+        # co-tenant release path withdraws each `.tortoise-owners` record
+        # WITHOUT shutting the daemon down (the shared branch only
+        # disconnects). The daemon then outlives the call UNINSTRUMENTED
+        # with its registry data dir present — exactly the class #3767
+        # deliberately refuses to fast-kill — so a long-lived host process
+        # (or the `test-slow (b)` leg, whose session sweep is the last
+        # reaper pass) leaks it. Closing explicitly makes the LAST client
+        # take the normal `_cleanup()` path, which shuts the daemon down and
+        # reclaims its socket dir. Order-independent: only the final close
+        # performs the shutdown; the other is a co-tenant disconnect.
+        for _client in (sdk, _proj):
+            if _client is None:
+                continue
+            with contextlib.suppress(Exception):
+                # teardown context: a failed close must not fail init
+                _client.close()
 
     if point_count is None:
         print("  Graph: tortoise  |  Points: unavailable — run 'tortoise doctor'")

@@ -22,6 +22,7 @@ import time
 import numpy as np
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
+from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .ids import content_hash
 
 
@@ -276,6 +277,44 @@ class EmbeddingModel:
     _last_failure_kind: str | None = None
 
     @classmethod
+    def _embedder_required(cls) -> bool:
+        """``TORTOISE_EMBEDDING_MODEL_REQUIRED`` — the fail-loud opt-in (OFF).
+
+        #4861: resolved through the declared truthy contract (#4097), like every
+        other flag here, so ``0``/``false``/``no``/``off`` also opt out. UNSET →
+        :meth:`get` returns ``None`` exactly as before, so dev and hosted
+        behaviour cannot drift: the contract is off by default and reversible.
+        """
+        return env_flag("TORTOISE_EMBEDDING_MODEL_REQUIRED", False)
+
+    @classmethod
+    def _unavailable(cls, *, context: str) -> "EmbeddingModel | None":  # noqa: UP037
+        """The single exit for "no model": ``None``, or raise when REQUIRED.
+
+        #4861 — every ``None`` path in :meth:`get` returns through here, so its
+        four origins (the outer and in-lock negative caches, and the transient
+        load failure) cannot drift apart: a REQUIRED process fails by name, at
+        the point of use, instead of silently running keyword-only while a
+        green run and a runner-down run stay indistinguishable.
+
+        ``failure_kind`` is carried through unchanged so the two cases stay
+        distinguishable — ``not_installed`` (the environment never had the
+        embedder) vs ``load_failed`` / ``load_timeout`` (it had it and the load
+        broke). A REQUIRED process does not accept ``not_installed`` as an
+        excuse: "designed absence" is only designed for a process that did not
+        ask for the embedder.
+        """
+        if not cls._embedder_required():
+            return None
+        raise EmbedderUnavailableError(
+            failure_kind=cls._last_failure_kind or "model_unavailable",
+            model=EMBEDDING_MODEL,
+            revision=EMBEDDING_MODEL_REVISION,
+            last_error=cls._last_error,
+            context=context,
+        )
+
+    @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
         """Get or create the singleton. Returns None if model unavailable.
 
@@ -301,7 +340,7 @@ class EmbeddingModel:
             # None immediately instead of blocking up to 90s per request in a
             # degraded environment (offline dev, cold CI, OOM). Retry after the
             # cooldown window via the normal "retries on next get()" path.
-            return None
+            return cls._unavailable(context="negative cache, load failed within cooldown")
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -315,7 +354,8 @@ class EmbeddingModel:
                     now_locked = time.monotonic()
                     if cls._last_failed_at is not None and \
                             (now_locked - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
-                        return None
+                        return cls._unavailable(
+                            context="negative cache (in-lock), load failed within cooldown")
                     cls._instance = cls(load_timeout=timeout)
         model = cls._instance._model if (cls._instance and cls._instance._model) else None
         if model is None and cls._instance is not None:
@@ -333,6 +373,10 @@ class EmbeddingModel:
             # available=True (P2 review fix).
             cls._last_failure_kind = None
             cls._last_error = None
+        if model is None:
+            # #4861: the transient-failure exit — the last of the four origins,
+            # and the one a REQUIRED runner hits when the load itself broke.
+            return cls._unavailable(context="load failed (timeout/OOM)")
         return model
 
     @classmethod

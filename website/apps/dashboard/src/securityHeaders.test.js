@@ -1106,8 +1106,8 @@ test('the only cookie writers are the two audited files', () => {
 // ── 3. the /auth/confirm interstitial, driven for real ──────────────────────
 
 test('the /auth/confirm interstitial is nonce-gated and uncacheable', async () => {
-  const { recoveryInterstitial } = loadConfirmModule()
-  const res = recoveryInterstitial('victim@example.com', 'flow-abc')
+  const { emailInterstitial } = loadConfirmModule()
+  const res = emailInterstitial('victim@example.com', 'flow-abc', 'recovery')
 
   assert.match(
     res.headers.get('Cache-Control') ?? '',

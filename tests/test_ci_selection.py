@@ -8,6 +8,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 """
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import shutil
@@ -294,6 +295,65 @@ def test_shared_module_goes_full():
     assert r2["full"] is True
 
 
+def test_every_conftest_module_level_tests_import_is_shared():
+    """#4069: a `tests/` helper conftest imports at MODULE level is suite-wide.
+
+    `tests/conftest.py` re-exports suite-wide fixtures, so a `tests/` helper it imports at
+    module level runs for EVERY surface's tests; the manifest never classifies it (it is
+    not a `test_*.py` file), so unless it is in `SHARED_MODULES` a change to it selects
+    `core` only and an api/onboarding/battery break it induces never runs on the PR that
+    made it (the #1349/#3332/#3910 silent-under-selection class).
+
+    Scope is deliberately `tests.*` only: this criterion justifies a *test helper* being
+    suite-wide, not a product module (whose classification is its own path pattern plus
+    the cross-cutting judgment list `SHARED_MODULES` carries). The product modules conftest
+    imports at module level are therefore NOT covered here; that residual is measured on
+    #4486, not asserted away.
+
+    The import set is read from the AST and the walk is GENERIC: it recurses into every
+    nested statement container (class bodies, `match` cases, `except*` blocks, with/for
+    bodies, ...) and stops only at function-like nodes, whose bodies are not module level.
+    Enumerating the containers to descend into is what let an earlier version of this ratchet
+    be narrower than the rule it documents, so there is no such list here. Relative imports
+    (`from . import _x`) are deliberately unmatched: `tests/` has no `__init__.py`, so they
+    cannot appear at conftest module level today, and this test states that rather than
+    pretending they are covered.
+    """
+    conftest_path = Path(__file__).resolve().parent / "conftest.py"
+    module = ast.parse(conftest_path.read_text())
+    imported: set[str] = set()
+
+    def walk(node) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue  # a function-local import is not module level
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    if alias.name == "tests" or alias.name.startswith("tests."):
+                        imported.add(alias.name)
+                continue
+            if isinstance(child, ast.ImportFrom):
+                if child.level == 0 and child.module == "tests":
+                    for alias in child.names:
+                        imported.add(f"tests.{alias.name}")
+                elif child.level == 0 and child.module and child.module.startswith("tests."):
+                    imported.add(child.module)
+                continue
+            walk(child)
+
+    walk(module)
+    assert imported, "expected tests/conftest.py to import a tests.* module at module level"
+    for module in sorted(imported):
+        rel = module.replace(".", "/") + ".py"
+        assert rel in SHARED_MODULES, (
+            f"{rel} is imported at conftest MODULE level (so it runs for every "
+            f"surface's tests) but is not in SHARED_MODULES — a change to it would "
+            f"select core only")
+        result = _sel([rel])
+        assert result["full"] is True, result
+        assert result["test_files"] == "ALL", result
+
+
 def test_every_shared_module_entry_selects_the_full_matrix():
     """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
 
@@ -504,6 +564,23 @@ def test_gen_ask_transcripts_change_selects_sdk_not_tier1():
     assert "sdk" in r["surfaces"], r
     assert "test_ask_seed_shape.py" in r["test_files"], r
     assert "test_ask_regression_llm.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
+    # #4069: tools/tmpdir_sweep.py owns tests/test_tmpdir_sweep.py and
+    # tests/test_tmpdir_hygiene.py. The mechanism is the CORE_ALSO entry:
+    # `_selection_relevant()` consults it, so the `tools/` path survives the
+    # flat NON_PYTHON_PREFIXES filter, and the match loop then adds `core` and
+    # marks the path found — so a tool-only change selects `core` instead of
+    # tier-1 smoke or the unknown-path full matrix. Mutation check: removing
+    # the CORE_ALSO entry filters the path out (docs-only early return → empty
+    # surfaces, tier-1 smoke), which fails asserts 2–5 below.
+    r = _sel(["tools/tmpdir_sweep.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_tmpdir_sweep.py" in r["test_files"], r
+    assert "test_tmpdir_hygiene.py" in r["test_files"], r
     assert set(r["test_files"]) != _tier1()
 
 

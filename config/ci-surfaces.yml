@@ -267,6 +267,10 @@ surfaces:
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
+  # D10: the document-source gold fixture + the proof the `documents` cap
+  # predicate is not vacuous (#5100, #5013). Sits with the quota surface
+  # because the predicate under test IS the `documents` cap.
+  - test_document_source_gold.py
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
@@ -567,6 +571,7 @@ surfaces:
   - test_dry_run_preview.py
   - test_cmux_dispatch.py
   - test_embedder_provision.py
+  - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
@@ -641,6 +646,7 @@ surfaces:
   - test_rebuild_turn_points_3947.py
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
+  - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
   # under whatever embedder is configured. `tortoise/projection/entities.py`
@@ -936,8 +942,17 @@ surfaces:
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
   - test_projection_version_gate.py
   - test_query_suggestions.py
+  # #4299: the launchd schedule installer's guard (install-reaper-schedule.sh).
+  # Registered here because it guards the same subsystem as test_reaper.py;
+  # without this line `test_integrity_covers_all_test_files` fails — every
+  # tests/**/test_*.py must be classified (the scope-v5 drift trap).
+  - test_install_reaper_schedule.py
   - test_reaper.py
   - test_reaper_orphan.py
+  # #3767: the reaper's ownership claim (name/containment is not ownership).
+  # Hermetic (raw unix sockets + monkeypatches, no embedded DB) and grouped with
+  # its siblings; `tortoise/embedded_reaper.py` changes select the `core` surface.
+  - test_reaper_ownership.py
   - test_redirect_seam.py
   - test_references_edge.py
   - test_relationships_bounded.py
@@ -984,6 +999,10 @@ surfaces:
   - test_surface_manifest.py
   - test_suspension_parity.py
   - test_taxonomy.py
+  # #4069: temp-dir hygiene + the operator-invoked backlog sweep. Core-owned —
+  # the reaper/embedded tests they sit beside are core-registered.
+  - test_tmpdir_hygiene.py
+  - test_tmpdir_sweep.py
   - test_tool_registry.py
   # #4282 (Node A scoreboard): every registered tool + SDK binding must RESOLVE to a
   # live callable. The test executes the resolution (getattr / mcp._list_tools), never
@@ -1517,6 +1536,12 @@ carve_out:
 # which the server-side bulk-wipe guard refuses on a non-test graph).
 - test_rebuild_config_preservation.py
 - test_redis_guard.py
+# #4524: the vecf32 overwrite-seam guards. The defect is embedded-only (the
+# server lane lands the same write), so the module is module-level
+# `embedded_only` — without this registration a full URI-set selection would
+# collect it and SKIP every case via the marker hook, a permanently green and
+# permanently unexecuted gate on main (the #4047 shape).
+- test_vecf32_overwrite_seams_4524.py
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
@@ -1560,6 +1585,7 @@ durations:
 # 90% floor once this file enters the pool, so a weight is required — the flat
 # default is what the floor exists to reject. Refresh from junit once the file
 # lands on main.
+  test_install_reaper_schedule.py: 7.8   # #4299: newly-declared fast file — measured (14 tests, 7.76s local) rather than the flat 2.0s default, because coverage sits ON the #3400 90% floor (544/605 unmeasured = 89.9% FAIL; 545/605 measured = 90.1%). Supersede from this PR's junit on the next #3400 regeneration.
   test_fly_secret_drift.py: 434.0
   # #3827: new file in this pool — no CI junit measurement exists yet, so it takes
   # the flat 2.0s default under the #3400 policy above rather than the local timings
@@ -1601,12 +1627,29 @@ durations:
   # 90% durations-coverage floor satisfied; refresh from the first post-merge
   # main run that includes it.
   test_installer_preserves_foreign_skill_content.py: 2.0
+  # #4069: the two new temp-dir hygiene files. Same case as the six above — a
+  # file that has never run on CI cannot appear in a junit artifact, so it takes
+  # the flat 2.0s default rather than a local number. Local timing on the
+  # #4221 verification host says these are NOT trivial (~55s and ~95s for 11 +
+  # 25 tests, the session sweep dominating), which is exactly the reading this
+  # map's policy rejects as lane-inflated: it is left in this comment as the
+  # reason the refresh matters, not as an entered value. Refresh both from the
+  # first post-merge main run that includes them.
+  test_tmpdir_hygiene.py: 2.0
+  test_tmpdir_sweep.py: 2.0
   # #4470: same convention — the file is new, so no CI junit measurement yet;
   # enter at the flat 2.0s default (the conservative floor keeps the 90%
   # durations-coverage floor satisfied) and refresh from the first post-merge
   # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
   # (7 tests, DB-free, app-boot-free) on a loaded machine.
   test_backup_watcher_health.py: 2.0
+  # #3767: the reaper's ownership-claim suite — hermetic (raw unix sockets +
+  # monkeypatches, no embedded DB), grouped with test_reaper*.py. No CI junit
+  # measurement yet, so it enters at the flat 2.0s default per the
+  # #3400/#4221 convention (the conservative floor: keeps durations coverage at
+  # 100% and cannot mis-balance the LPT pack). Refresh from the first
+  # post-merge main run that includes it.
+  test_reaper_ownership.py: 2.0
   # #3426 (merge resolution — added by the #3390 write-ahead-mint PR): this PR's
   # own hermetic ordering + AST guard. It has NO CI junit measurement yet, so it
   # enters at the flat 2.0s default under the #3400/#4221 convention — the
@@ -2380,6 +2423,7 @@ durations:
   test_dream_noop_3139.py: 3.5
   test_durability_posture.py: 1.6
   test_embedder_provision.py: 1.1
+  test_embedding_model_required.py: 0.5
   test_entity_delete_rebuild.py: 1.9
   test_env_truthy.py: 11.2
   test_health_client_effect.py: 3.5
