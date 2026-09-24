@@ -461,9 +461,8 @@ export const HARNESS_CAPTURE_REASON = {
 // #1728 (Task 17): receipt/probe labels for the 4-state capture status
 // (shared by the wizard step-1 and the dashboard panel).
 //
-// #3700: the two states in this table that NAME a harness are derived from a
-// per-harness onboarding key whose harness is the CALLER's DECLARATION, not a
-// server observation:
+// #3700: two states in this table are derived from a per-harness onboarding
+// key whose harness is the CALLER's DECLARATION, not a server observation:
 //   * `active` reads `session_capture_receipt_<harness>` — `body.harness` on a
 //     fresh session (an authenticated agent self-report), or the Session's
 //     STORED harness on a re-capture when it has one (itself recorded from the

@@ -3,10 +3,9 @@
 //
 // #3700's deliverable is a DISCLOSURE the user can see: the harness a per-harness
 // row names is the caller's own declaration (`body.harness`), not something
-// Tortoise verified. captureStatus.test.js executes the DECISIONS behind it
-// (`harnessAttributionForHarness` returns the attribution for the rows that carry
-// a per-harness signal, null otherwise). The RENDER is outside that suite's
-// reach: it imports captureStatus.js and harnesses.js, not main.jsx, and this
+// Tortoise verified. captureStatus.test.js executes the DECISIONS behind it.
+// The RENDER is outside that suite's reach: it imports captureStatus.js and
+// harnesses.js, not main.jsx, and this
 // package's test runtime is `node --test` with no DOM or React renderer. The
 // assertions below therefore read main.jsx as TEXT — which is what makes the copy
 // module's single-source rule (harnesses.js owns the words; main.jsx renders the
@@ -118,8 +117,8 @@ test('#3700 / #4896: the failure line renders only on a supported row', () => {
   // `HARNESS_CAPTURE_LAST_ATTEMPT`, which fails if a caveat is added to the copy.
   assert.match(code, /const\s+supported\s*=\s*!!HARNESS_CAPTURE_SUPPORT\[h\]/,
     'the row\'s support gate must be the DOUBLE negation of HARNESS_CAPTURE_SUPPORT[h] — never hard-coded, and never a single `!` (the inverted gate)')
-  assert.match(code, /supported\s*&&\s*lastError\(h\)\s*&&/,
-    'the failure line must sit inside the capture-support guard')
+  assert.match(code, /\{\s*supported\s*&&\s*lastError\(h\)\s*&&/,
+    'the failure line must sit inside the capture-support guard — with no leading `!`')
   assert.match(code, /role="alert"[\s\S]{0,160}\{\s*lastError\(h\)\s*\}/,
     'the alert must render the helper\'s sentence unchanged (no caveat at the call site)')
 })

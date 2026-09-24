@@ -10091,9 +10091,8 @@ function MemorySources(props) {
   const status = (h) => captureStatusForHarness(state, h)
   const lastError = (h) => captureErrorForHarness(state, h)
   // #3700: the per-row harness attribution — rendered beside the harness name,
-  // once per row, on the rows that carry a per-harness signal (a per-harness
-  // state or a recorded per-harness failure). Never inside the `role="alert"`
-  // failure sentence (see captureStatus.js).
+  // once per row. Never inside the `role="alert"` failure sentence (see
+  // captureStatus.js).
   const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
 
   return (
