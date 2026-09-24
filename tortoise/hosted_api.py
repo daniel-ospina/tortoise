@@ -2211,8 +2211,13 @@ app.add_middleware(InFlightMiddleware)
 # ``asyncio.wait_for(..., timeout=SLO_MS * 8 / 1000.0)`` call inside it, and the
 # p95 budget is ``tortoise.volunteer.SLO_MS``. That fallback-instead-of-error is
 # a RECORDED DECISION, not an oversight, and a uniform bound would silently
-# reverse it. The exemption is intentional — do not "fix" it by making the
-# bounds uniform.
+# reverse it.
+#
+# OVERRIDES: uniform per-route timeout bounds — there are now TWO deliberate
+# departures, and this line names both so a reader holding only one of them
+# cannot mistake it for the complete list: (1) the `POST /v1/context` exact
+# exemption above, and (2) the `/v1/internal/` PREFIX exemption below. Both are
+# intentional — do not "fix" them by making the bounds uniform.
 #
 #: The exact-match exemptions, METHOD-scoped: the ruling exempts
 #: `POST /v1/context` because that handler's fail-open ceiling is a recorded
@@ -2229,15 +2234,34 @@ _TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
 #: request wait until it can be served"; the budget is "derived from clients'
 #: own startup patience"). Every route under this prefix is an operator/cron
 #: endpoint behind `_check_internal` (`FASTAPI_INTERNAL_KEY`) with no user and no
-#: user-patience budget to derive from — the caller publishes its own instead
-#: (`registry-cron.sh` posts the sweep with `curl -m 600`). A user-patience bound
-#: does not bound anything a user waits on here; it only makes a 600 s batch job
-#: fail at 10 s, which is exactly what left the DR sweep refusing on every hourly
-#: run for 12 days while the archives aged (#4939).
+#: user-patience budget to derive from. A user-patience bound does not bound
+#: anything a user waits on here; it only makes a 600 s batch job fail at 10 s,
+#: which is exactly what left the DR sweep refusing on every hourly run for 12
+#: days while the archives aged (#4939).
+#:
+#: WHO publishes the replacement patience, by class — the two differ, and the
+#: record must not flatter the weaker one:
+#:   * CRON callers, in `registry-cron.sh`: sweep `-m 600`, purge `-m 300`,
+#:     reconcile `-m 120`, drill `-m 900`, drill-scheduled `-m 1200`.
+#:   * OPERATOR-run curls, in `docs/ops/registry-backup-dr.md` and
+#:     `docs/ops/669-post-flip-verification.md`: these carried NO `--max-time`
+#:     before this change, so for them the 10 s transport bound WAS the only
+#:     bound. An explicit `--max-time` was added to those commands with this
+#:     exemption; without it an operator command would now hang with nothing
+#:     printed instead of refusing legibly. Keep them in step — a new operator
+#:     curl for an internal route needs its own `--max-time`.
 #:
 #: ⚠️ This exemption is NOT a claim that internal routes are fast or safe to hang
 #: — it is that the transport bound is the wrong instrument for them. Their own
 #: timeout is the caller's, and the cron job's red run is the alarm.
+#:
+#: ⚠️ It also REMOVES the only cap on an unauthenticated body read. FastAPI
+#: parses a declared `body:` parameter before the handler body runs, so a route
+#: taking one buffered the body before `_check_internal` could reject the caller;
+#: the transport bound used to truncate that read at 10 s. The five body-taking
+#: internal routes therefore read their body via `_read_internal_json_body`
+#: AFTER the key check — see that helper. Do not reintroduce a `body:` parameter
+#: on an internal route.
 _TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX = "/v1/internal/"
 
 #: Analytics event name for a breach. Recorded through the EXISTING writer (no
@@ -16135,6 +16159,54 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
     return b"".join(chunks)
 
 
+async def _read_internal_json_body(request: Request, *, required: bool = False) -> dict:
+    """Read a `/v1/internal/` route's JSON body AFTER `_check_internal`.
+
+    AUTH ORDERING IS THE POINT. A FastAPI ``body: dict`` parameter is parsed in
+    ``get_request_handler`` (``await request.body()``) BEFORE any dependency or
+    handler body runs, so the entire body is buffered before `_check_internal`
+    can reject the caller. The transport wait bound used to truncate that read
+    at 10 s; `/v1/internal/` is now exempt from it (#4939), and there is no
+    body-size middleware on the hosted app, no Fly edge timeout, and
+    ``hard_limit = 200`` connections — so a declared body parameter would leave
+    an UNAUTHENTICATED caller able to hold connections and grow memory without
+    bound. Reading the capped body here, after the key check, gives these routes
+    the property the bodyless internal routes already have: not one byte is read
+    from an unauthenticated caller.
+
+    ``required`` mirrors the signature it replaces: ``body: dict`` (422 when the
+    body is absent) vs ``body: dict | None = None`` (absent → ``{}``, which every
+    such caller already normalised with ``body or {}``).
+
+    The body is parsed REGARDLESS of ``Content-Type``, on purpose. Gating on
+    ``content-type.startswith("application/json")`` was the first attempt and it
+    was a fail-open regression: `curl -d '{"bucket": "<mirror>"}'` without a
+    ``-H 'Content-Type: application/json'`` was treated as an absent body, so the
+    runbook's MIRROR check (docs/ops/registry-backup-dr.md) silently verified the
+    PRIMARY bucket and returned 200 — a loud 422 turned into a confident false
+    pass on a DR step. Parsing what is actually there also accepts the
+    ``application/*+json`` subtypes FastAPI accepts.
+    """
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    if not raw.strip():
+        if required:
+            raise HTTPException(status_code=422, detail="JSON body required")
+        return {}
+    try:
+        parsed = _json.loads(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail="Invalid JSON body") from e
+    if parsed is None:
+        # `body: dict` cannot coerce null (422); `body: dict | None` yields {}
+        # and every such caller did `body or {}` anyway.
+        if required:
+            raise HTTPException(status_code=422, detail="JSON object body required")
+        return {}
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail="JSON object body required")
+    return parsed
+
+
 async def _read_import_body(request: Request) -> bytes:
     """Read the raw import-artifact body under a HARD streaming cap (64 MiB).
 
@@ -25134,7 +25206,7 @@ async def backups_sweep(request: Request):
 
 
 @app.post("/v1/internal/backups/purge")
-async def backups_purge(request: Request, body: dict | None = None):
+async def backups_purge(request: Request):
     """#2304 — trash purge: physically erase every expired tombstone
     (custom graphs deleted > grace_days ago, plus legacy tombstones).
     Internal-key only. Optional ``{"grace_days": N}`` overrides the _TRASH_GRACE_DAYS
@@ -25145,6 +25217,7 @@ async def backups_purge(request: Request, body: dict | None = None):
     Cadence: operator-invoked today (runbook); the driver cron wiring lands
     with #2317's registry-cron.sh changes (coordination — same file)."""
     _check_internal(request)
+    body = await _read_internal_json_body(request)
     from tortoise.backup_sweep import run_graph_purge
 
     # #2823/#2340: dialect-aware control plane. `run_graph_purge` enumerates
@@ -25188,7 +25261,7 @@ async def backups_purge(request: Request, body: dict | None = None):
 
 
 @app.post("/v1/internal/backups/verify-lock")
-async def backups_verify_lock(request: Request, body: dict | None = None):
+async def backups_verify_lock(request: Request):
     """#2319 — live R2 bucket-lock drift check. Internal-key only.
 
     Reads the Cloudflare REST lock-rules configuration for the primary backup
@@ -25205,6 +25278,7 @@ async def backups_verify_lock(request: Request, body: dict | None = None):
     verification path. A lock-read failure never fails backups themselves.
     """
     _check_internal(request)
+    body = await _read_internal_json_body(request)
     cfg = _backup_config_safe()
     if cfg is None:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
@@ -25366,10 +25440,11 @@ async def backups_status(request: Request):
     }
 
 @app.post("/v1/internal/driver/heartbeat")
-async def driver_heartbeat(request: Request, body: dict):
+async def driver_heartbeat(request: Request):
     """Driver liveness — written through the app so R2 creds stay off GH for
     this leg; a stale heartbeat is only meaningful when the app is up."""
     _check_internal(request)
+    body = await _read_internal_json_body(request, required=True)
     storage = _backup_storage()
     storage.upload(
         _DRIVER_HEARTBEAT_KEY,
@@ -25407,7 +25482,7 @@ async def backups_simulate(request: Request):
 
 
 @app.post("/v1/internal/backups/re-baseline")
-async def backups_rebaseline(request: Request, body: dict):
+async def backups_rebaseline(request: Request):
     """Operator re-baseline: acknowledge a fired DATA_LOSS_CANDIDATE by
     re-persisting the current counts of the target graph (default unless
     ``body.graph_id`` names a custom graph) — closes the incident.
@@ -25419,7 +25494,7 @@ async def backups_rebaseline(request: Request, body: dict):
     key the sweep routes and the watcher uses).
     """
     _check_internal(request)
-    body = body or {}
+    body = await _read_internal_json_body(request, required=True)
     org_id = body.get("org_id", "")
     graph_id = body.get("graph_id", "default")
     if not org_id:
@@ -25688,7 +25763,7 @@ def _scheduled_drill(*, cfg, registry, db, storage) -> dict:
 
 
 @app.post("/v1/internal/backups/drill")
-async def backups_drill(request: Request, body: dict):
+async def backups_drill(request: Request):
     """Drill-only restore: scratch target, internal-key auth, zero production
     writes (drill:true skips the registry end-stamp; live-phase binds the
     scratch target). Cooldown ≥1h between drill accepts (in-memory). #2317:
@@ -25699,7 +25774,7 @@ async def backups_drill(request: Request, body: dict):
     cfg = _backup_config_safe()
     if cfg is None:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
-    body = body or {}
+    body = await _read_internal_json_body(request, required=True)
     org_id = body.get("org_id", "")
     backup_key = body.get("backup_key", "")
     if not org_id or not backup_key:
