@@ -1351,6 +1351,15 @@ surface.
   explaining the refusal), and the corrupt-ledger message now says explicitly
   that **no escalation page was sent and why**, so the gap is named rather than
   silent. Independent liveness for the pager itself is tortoise **#4573**.
+- **A sustained incident observed through a FLAP gets no escalation page.**
+  When a probe answers UP but the recovery-confirmation probe fails while an
+  incident is already open, the run leaves the incident open and exits GREEN
+  *before* the escalation leg, so no state advances and nothing is paged. That
+  early exit is deliberate (the open incident is the standing alert, and
+  changing when a flap counts as still-failing is a behavioural change with its
+  own design), so the run **names the gap** instead: it logs a warning saying
+  the escalation leg is not reached and **no escalation page is sent this
+  run**, so “no page” is never read as “nothing to page about”.
 - **This leg covers the PAGER, not the MONITOR.** If the workflow is disabled,
   the schedule is dropped, or the job never reaches the failing path, no
   escalation can fire and there is no run log to read — “the pager is dead” then

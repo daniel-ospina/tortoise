@@ -548,6 +548,10 @@ created_json()  { [ -f "$STUB_TMP/created.json" ] && cat "$STUB_TMP/created.json
 # The body PATCHes only (a close PATCH carries no body). The body is
 # multi-line, so slurp the whole log and take the LAST object that has one.
 patched_body()  { if [ -f "$STUB_TMP/patched.log" ]; then jq -r -s '[.[] | select(.body != null and .body != "")] | last | .body // ""' "$STUB_TMP/patched.log"; else echo ''; fi; }
+# The FIRST body PATCH. The escalation leg is WRITE-THEN-ACT: the attempt marker
+# rides the FIRST write and the confirmed outcome the LAST, so only a first-PATCH
+# read can see that the marker was durable BEFORE the send (F1).
+patched_body_first() { if [ -f "$STUB_TMP/patched.log" ]; then jq -r -s '[.[] | select(.body != null and .body != "")] | first | .body // ""' "$STUB_TMP/patched.log"; else echo ''; fi; }
 patched_all()   { [ -f "$STUB_TMP/patched.log" ] && cat "$STUB_TMP/patched.log" || echo ''; }
 comments_all()  { [ -f "$STUB_TMP/comments.log" ] && cat "$STUB_TMP/comments.log" || echo ''; }
 
@@ -904,6 +908,10 @@ run_watchdog
 assert_eq "$RC" "0" "flapping → exit 0"
 assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "flapping → incident left OPEN (no close)"
 assert_contains "$OUT" "recovery NOT confirmed" "flapping → logged as unconfirmed recovery"
+# F2: this early exit sits BEFORE the escalation leg, so a flapping service
+# keeps an open incident with zero leaving-GitHub signal. The exit semantics are
+# deliberately unchanged; the gap must be NAMED rather than silent.
+assert_contains "$OUT" "NO escalation page is sent this run" "flapping with an open incident → the missing escalation page is NAMED, not silent"
 
 # ── 41: the UP path must not stay GREEN when it cannot do its job ──────────
 reset_case
@@ -2172,9 +2180,10 @@ assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKE
 
 # Unit-call decide_escalation() through the script's own LIB_ONLY seam. The
 # function reads persisted STATE_* only, so a unit call drives every branch with
-# no probe, no issue and no network.
+# no probe, no issue and no network. WATCHDOG_NOW_EPOCH is set EXPLICITLY (never
+# inherited from an earlier case) so each helper is order-independent.
 esc_unit() { # <first_failure_ts> <down_runs> <escalate_ts> <escalate_state> <page_ok_ts> <now>
-  WATCHDOG_LIB_ONLY=1 bash -c '
+  WATCHDOG_NOW_EPOCH="$NOW" WATCHDOG_LIB_ONLY=1 bash -c '
     source "$0"
     normalize_escalation_knobs 10 2
     STATE_FIRST_FAILURE_TS="$1"; STATE_DOWN_RUNS="$2"; STATE_ESCALATE_TS="$3"
@@ -2183,9 +2192,11 @@ esc_unit() { # <first_failure_ts> <down_runs> <escalate_ts> <escalate_state> <pa
   ' "$WATCHDOG" "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
-# Unit-call parse_state() and print the escalation triple it derived.
+# Unit-call parse_state() and print the escalation triple it derived. parse_state
+# reads the clock (the future-stamp clamps), so WATCHDOG_NOW_EPOCH is pinned here
+# too — otherwise the assertion depends on whatever an earlier case exported.
 parse_esc() { # <body> -> "escalate_ts|escalate_state|page_ok_ts"
-  WATCHDOG_LIB_ONLY=1 bash -c '
+  WATCHDOG_NOW_EPOCH="$NOW" WATCHDOG_LIB_ONLY=1 bash -c '
     source "$0"
     parse_state "$1"
     printf "%s|%s|%s" "$STATE_ESCALATE_TS" "$STATE_ESCALATE_STATE" "$STATE_PAGE_OK_TS"
@@ -2194,11 +2205,20 @@ parse_esc() { # <body> -> "escalate_ts|escalate_state|page_ok_ts"
 
 # Unit-call the knob normalizer with an arbitrary sustained pair.
 knobs_unit() { # <s_min> <s_runs> -> "minutes/runs"
-  WATCHDOG_LIB_ONLY=1 bash -c '
+  WATCHDOG_NOW_EPOCH="$NOW" WATCHDOG_LIB_ONLY=1 bash -c '
     source "$0"
     normalize_escalation_knobs "$1" "$2"
     printf "%s/%s" "$ESCALATE_SUSTAINED_MINUTES" "$ESCALATE_MIN_RUNS"
   ' "$WATCHDOG" "$1" "$2"
+}
+
+# The knob normalizer's STDERR (the coercion warning). `2>&1 >/dev/null` puts
+# stderr on the captured pipe while discarding stdout.
+knobs_warn_unit() { # <s_min> <s_runs> -> stderr text
+  WATCHDOG_NOW_EPOCH="$NOW" WATCHDOG_LIB_ONLY=1 bash -c '
+    source "$0"
+    normalize_escalation_knobs "$1" "$2"
+  ' "$WATCHDOG" "$1" "$2" 2>&1 >/dev/null
 }
 
 block_unit()  { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; state_block down' "$WATCHDOG"; }
@@ -2225,7 +2245,18 @@ assert_eq "$(knobs_unit 10 2)" "30/3" "knobs: derived defaults 30 min / 3 runs a
 assert_eq "$(knobs_unit 20 4)" "60/5" "knobs: the defaults SCALE with the sustained pair (one declared relation, not two literals)"
 assert_eq "$(ESCALATE_SUSTAINED_MINUTES=1 ESCALATE_MIN_RUNS=1 knobs_unit 10 2)" "10/2" "knobs: an explicit escalation threshold BELOW the restart gate is clamped UP (a human must never page before the automated action)"
 assert_eq "$(ESCALATE_SUSTAINED_MINUTES=99 ESCALATE_MIN_RUNS=9 knobs_unit 10 2)" "99/9" "knobs: an explicit LOOSER threshold is honoured (clamping only ever tightens)"
-assert_eq "$(ESCALATE_ENABLED=banana knobs_unit 10 2)" "30/3" "knobs: a non-boolean kill switch fails CLOSED toward paging"
+# A NON-BOOLEAN kill switch must fail CLOSED toward paging. `banana` was a trap:
+# `to_int` runs FIRST and coerces any non-numeric value to the default 1, so
+# `banana` never reaches the `case` below — asserting on it left the whole case
+# block unpinned (deleting it kept the suite green, and a numeric
+# ESCALATE_ENABLED=2 then read as the fail-OPEN `off`). `2` is a value `to_int`
+# KEEPS, so it DOES reach the case.
+assert_eq "$(ESCALATE_ENABLED=2 knobs_unit 10 2)" "30/3" "knobs: a numeric non-boolean kill switch (2) leaves the derived thresholds alone"
+assert_eq "$(ESCALATE_ENABLED=2 esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: ESCALATE_ENABLED=2 still PAGES (fail CLOSED toward paging, never 'off')"
+assert_contains "$(ESCALATE_ENABLED=2 knobs_warn_unit 10 2)" "is not 0 or 1" "knobs: coercing a non-boolean kill switch is LOUD"
+# `banana` is not a boolean either, but to_int maps it to the default 1 before
+# the case — assert what that path actually does.
+assert_eq "$(ESCALATE_ENABLED=banana esc_unit "$((NOW - 7200))" 20 0 "" 0 "$NOW")" "page" "knobs: a non-numeric kill switch (banana → default 1) still pages"
 
 # ── unit: parse_state gates the stamp on its OUTCOME ───────────────────────
 assert_eq "$(parse_esc "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 escalate_state=sent escalate_ts=$((NOW - 600)) page_ok_ts=$((NOW - 300)) restarts= -->")" \
@@ -2289,6 +2320,12 @@ assert_contains "$OUT" "escalation outcome: page" "e2e(b): the leg decides to pa
 assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(b): EXACTLY ONE page for a sustained incident"
 assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "HUMAN NEEDED" "e2e(b): the page says a human is needed"
 assert_contains "$(patched_body)" "escalate_state=sent" "e2e(b): the delivery is recorded durably as CONFIRMED"
+# F1: the ATTEMPT marker must ride the FIRST write (write-then-act). Mutating
+# the pre-send `pending` to `sent` left every other escalation assertion green,
+# so a crashed run would read as delivered — pin the first PATCH directly.
+assert_not_empty "$(patched_body_first)" "e2e(b): a body PATCH was recorded (a derived empty body would vacate the next two checks)"
+assert_contains "$(patched_body_first)" "escalate_state=pending" "e2e(b): the FIRST body PATCH carries the attempt marker (durable BEFORE the send)"
+assert_not_contains "$(patched_body_first)" "escalate_state=sent" "e2e(b): …and the first write does NOT already claim delivery"
 assert_contains "$(patched_body)" "page_ok_ts=$NOW" "e2e(b): the confirmed-page stamp is persisted"
 assert_contains "$(patched_body)" "### Escalation" "e2e(b): the body carries an Escalation section for the operator"
 assert_contains "$(patched_body)" "A human was paged" "e2e(b): the section reports that a human WAS reached"
@@ -2506,6 +2543,25 @@ bleed_unit() { # -> "state|ts|page_ok" the CALLER still holds afterwards
   ' "$WATCHDOG" "$DOWN_TITLE_FIXTURE"
 }
 
+# Unit-call reseed_ledger_from_source() against the SAME paged SOURCE incident,
+# while the CALLER holds a DELIBERATELY DISTINCT escalation state. This helper
+# runs mid-run on a repeat DOWN run (immediately before the final body write), so
+# a missing snapshot/restore would overwrite the CURRENT incident's triple. The
+# return code is part of the readout: rc=0 proves the function actually READ the
+# source (so the assertion cannot pass by bailing out early).
+reseed_bleed_unit() { # <src-issue> -> "rc|state|ts|page_ok" the CALLER still holds
+  WATCHDOG_NOW_EPOCH="$NOW" WATCHDOG_LIB_ONLY=1 bash -c '
+    source "$0"
+    STATE_FIRST_FAILURE_TS=111; STATE_DOWN_RUNS=1; STATE_LAST_DOWN_TS=111
+    STATE_LAST_COMMENT_TS=0; STATE_CAP_NOTIFIED_TS=0
+    STATE_LEDGER_STATE="unreadable"; STATE_LEDGER_SRC="$1"
+    STATE_RESTARTS=""; STATE_RESTARTS_INVALID="0"; STATE_RESTARTS_RAW=""
+    STATE_ESCALATE_STATE="failed"; STATE_ESCALATE_TS=4444; STATE_PAGE_OK_TS=0
+    if reseed_ledger_from_source "$1" >/dev/null 2>&1; then rc=0; else rc=$?; fi
+    printf "%s|%s|%s|%s" "$rc" "$STATE_ESCALATE_STATE" "$STATE_ESCALATE_TS" "$STATE_PAGE_OK_TS"
+  ' "$WATCHDOG" "$1"
+}
+
 # ── unit: a SOURCE incident's page must NOT bleed into the CURRENT incident ──
 # Both helpers parse ANOTHER incident's body while the caller's state is live.
 # Omitting the escalation triple from their snapshot/restore let the source's
@@ -2521,6 +2577,11 @@ unset STUB_LEDGER_SEARCH_JSON
 # above cannot be passing for the wrong reason (e.g. a parse that read nothing).
 assert_eq "$(parse_esc "$PAGED_SRC_BODY")" "$((NOW - 600))|sent|$((NOW - 600))" \
   "bleed: parse_state DOES read those fields (the snapshot is load-bearing, not vacuous)"
+# F3: the SAME rule in reseed_ledger_from_source(). Removing ONLY its escalation
+# restore line left the suite green; the caller here holds a distinct triple, so
+# a missing restore is visible (it would come back 'sent|NOW-600|NOW-600').
+assert_eq "$(reseed_bleed_unit 777)" "0|failed|4444|0" \
+  "bleed: reseed_ledger_from_source does NOT adopt the SOURCE incident's escalation state (rc=0 proves the source WAS read)"
 
 # ── e2e(p): a NEW incident is never born stamped as already-paged ───────────
 # The end-to-end consequence: a new incident carried from a paged source must
@@ -2569,6 +2630,23 @@ export TELEGRAM_CHAT_ID="12345"
 run_watchdog
 assert_contains "$OUT" "escalation outcome: page" "e2e(r): a failed page is RETRIED on the next run, not throttled away"
 assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(r): …and the retry actually calls the channel"
+
+# ── e2e(v): a body left at `pending` RETRIES (the crash-between-PATCHes case) ─
+# The write then act contract is only SAFE because the READER treats the attempt
+# marker as "outcome unknown ⇒ retry". This drives that claim end-to-end: a body
+# whose last run died after writing `pending` (so escalate_ts is non-zero) must
+# decide `page`, never `wait_reminder` (`escalate_ts` is trusted only while
+# escalate_state=sent).
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 escalate_state=pending escalate_ts=$((NOW - 600)) page_ok_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: page" "e2e(v): a body left at 'pending' RETRIES the page (the marker can never mute the leg)"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(v): …and the retry actually calls the channel"
 
 # ── e2e(s): a FAILED human page suppresses nothing ──────────────────────────
 # HUMAN_PAGED_THIS_RUN must be 1 only on CONFIRMED delivery. Setting it
@@ -2629,6 +2707,27 @@ assert_not_contains "$OUT" "escalation outcome:" "e2e(u): the escalation leg is 
 assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(u): …while the pre-existing transition alert still goes out"
 assert_contains "$OUT" "no escalation page is sent" "e2e(u): the refusal NAMES that no human page is sent (documented, not silent)"
 
+# ── e2e(w): a sustained INCONCLUSIVE run must not be paged as a confirmed DOWN ─
+# On the no-egress path the incident's own heal note says the watchdog cannot
+# distinguish an app outage from its own network. A page claiming "<host> has
+# been DOWN" would state a diagnosis this run explicitly refuses to make. The
+# INCONCLUSIVE transition page is throttled here (cap_notified_ts is in-window),
+# so the ESCALATION leg's page is the one the channel actually receives.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 2400)) down_runs=5 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=$((NOW - 300)) restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="000"
+export STUB_CONTROL_CODES="000"
+export FLY_API_TOKEN="fly-token"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: page" "e2e(w): a sustained INCONCLUSIVE incident reaches the sustained page"
+assert_eq "$(count_calls 'CURL telegram')" "1" "e2e(w): exactly one page (the INCONCLUSIVE transition page was throttled)"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "has been DOWN" "e2e(w): …and it does NOT assert a confirmed DOWN diagnosis the probe cannot support"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "INCONCLUSIVE" "e2e(w): …it names the INCONCLUSIVE case instead"
+
 # ── unit: the `pending` note branch is reachable and renders ────────────────
 # The operator-facing prose for the crash-between-the-two-PATCHes case (the
 # at-least-once retry story). Deleting it left the suite green.
@@ -2646,26 +2745,28 @@ assert_not_contains "$PENDING_NOTE" "A human was paged" "note: …and does NOT c
 # failed shift shifts NOTHING → the loop re-read the same "$1" forever. The
 # spin was unreachable today (every caller passes a value) but one
 # argument-ordering change from live, and it would hang whatever run touched
-# it. `timeout` is not available here, so the WALL-CLOCK bound is a background
-# SIGKILL: the stub is launched directly (so the PID we kill IS the spinner,
-# not a wrapper), a killer subshell SIGKILLs it after <bound> seconds, and the
-# assertion fails on the resulting 137 instead of hanging the suite.
+# it. `timeout` is not available here, so the WALL-CLOCK bound is a poll of the
+# stub PID plus a direct SIGKILL: the stub is launched directly (so the PID we
+# kill IS the spinner, not a wrapper), and the assertion fails on the resulting
+# 137 instead of hanging the suite.
+# ⛔ Polled, NOT a `( sleep …; kill … ) &` killer subshell: killing that subshell
+# ORPHANS its `sleep` (reparented to PID 1), which then runs for the full bound —
+# three linger per suite run, and the comment claiming the reap prevented it was
+# false. Here the `sleep` is a foreground child of the polling loop, so nothing
+# can outlive the case.
 # Deliberately NOT called in $( ): a function invoked in a command substitution
 # runs in a SUBSHELL, so its GH_STUB_RC would never reach the caller (and `set
 # -u` would then abort the whole harness on the unbound read).
 gh_stub_bounded() { # <bound-seconds> <args...>; sets GH_STUB_RC, output → $STUB_TMP/ghstub.out
   local bound="$1"; shift
-  local out_f="$STUB_TMP/ghstub.out" pid killer
+  local out_f="$STUB_TMP/ghstub.out" pid i
   rm -f "$out_f"
   "$BIN/gh" "$@" </dev/null >"$out_f" 2>&1 &
   pid=$!
-  ( sleep "$bound"; kill -9 "$pid" 2>/dev/null ) &
-  killer=$!
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "$bound" ]; do sleep 1; i=$((i+1)); done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
   wait "$pid"; GH_STUB_RC=$?
-  # Reap the killer at once so its sleep cannot outlive the case (and later
-  # SIGKILL a recycled PID).
-  kill "$killer" 2>/dev/null || true
-  wait "$killer" 2>/dev/null || true
 }
 
 gh_stub_bounded 10 api /repos/o/r/issues --method POST

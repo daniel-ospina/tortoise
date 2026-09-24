@@ -384,10 +384,12 @@ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 # measured, whose 48 failing runs over 11 h 19 m were 14.1 min apart). So the
 # defaults are DERIVED from the SUSTAINED_* family — one declared relation
 # instead of two literal pairs free to drift: 3 x SUSTAINED_DOWN_MINUTES =
-# 30 min, and SUSTAINED_MIN_RUNS + 1 = 3 observed runs. At ~15 min/run, 3 runs
-# is ~45 min, so the RUN leg binds at the measured cadence and the wall-clock
-# leg binds at the nominal one; either way the page lands in the first ~30-45
-# min of an 11-hour incident instead of never.
+# 30 min, and SUSTAINED_MIN_RUNS + 1 = 3 observed runs. `down_runs` reaches 1 on
+# the run that sets the first-failure stamp, so the 3rd observed run is 2 probe
+# intervals later — ~30 min at the measured ~15 min/run, binding together with
+# the 30-minute floor. The range extends past that only when runs are spaced
+# slower than ~15 min (up to ~45 min at one run per ~22 min); either way the page
+# lands early in an 11-hour incident instead of never.
 #
 # OVERRIDES: PagerDuty's "acknowledgment pauses further notifications" — NOT
 # adopted, because the incident body is on a PUBLIC repo and this script's own
@@ -1760,7 +1762,7 @@ do_restart() {
 main() {
   local now kind kindlabel title marker issue decision heal_note comment_body
   local transition_kind restarted_ids rc n_loop kind_loop title_loop ledger_src stale_note="" is_prod=0 body_loop=""
-  local esc_decision esc_pending esc_text
+  local esc_decision esc_pending esc_text esc_subject esc_why
   # Cross-incident restart budget (see recent_restart_ledger): the ledger
   # carried from the previous incident, whether it was readable, and whether the
   # carried ledger was itself corrupt (which must stay fail-closed).
@@ -1913,6 +1915,14 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     done
     if [ "$any_open" = "1" ]; then
       note "recovery not confirmed and an incident is already open — leaving it open (the standing alert)"
+      # #3887: this early exit sits BEFORE the sustained-incident escalation leg,
+      # so a flapping service can hold an open incident for hours while that leg
+      # never runs — nothing is paged and the run is GREEN. Changing WHEN a flap
+      # counts as still-failing is a behavioural change that needs its own
+      # design, so this run NAMES the gap instead (mirroring the corrupt-ledger
+      # path) rather than leaving "no page" to be read as "nothing to page
+      # about". See runbook § *Known limits*.
+      warn "recovery not confirmed (flapping) and an incident is already open — the sustained-incident escalation leg is NOT reached on this path, so NO escalation page is sent this run; the open incident is the standing alert (runbook § Known limits)"
       exit 0
     fi
     warn "recovery NOT confirmed (${PROBE_VERDICT}, HTTP ${PROBE_CODE}) and NO incident is open — filing an incident for the observed failure"
@@ -2410,10 +2420,22 @@ ${heal_note}"
   # delivers nothing, so retrying is not a page storm — and silence is the one
   # outcome requirement 5 forbids), and fails this run naming the channel.
   if [ "$esc_pending" = "1" ]; then
-    if [ "$esc_decision" = "remind" ]; then
-      esc_text="🔁 STILL RUNNING for ~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min (reminder) — ${PROBE_HOST_LABEL} has been ${kind} since $(fmt_iso "$STATE_FIRST_FAILURE_TS"); ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+    # The page must not assert a DIAGNOSIS the probe cannot support (#3887
+    # review). On the INCONCLUSIVE (runner-egress) path the incident's own heal
+    # note says the watchdog cannot tell an app outage from its own network, so
+    # a page claiming "<host> has been DOWN" would state as fact what this run
+    # has explicitly refused to decide. Branch the subject on the actual case.
+    if [ "$restart_mode" = "disarmed:no_egress" ]; then
+      esc_subject="${PROBE_HOST_LABEL} probe has been FAILING — INCONCLUSIVE (the runner-side control probe ALSO failed, so an app outage and a runner network failure look identical)"
+      esc_why="A human must check: the watchdog cannot decide this from here, and nothing else will escalate it."
     else
-      esc_text="📟 HUMAN NEEDED — ${PROBE_HOST_LABEL} has been ${kind} for ~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min; ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. This class is one self-healing cannot close, so nothing else will escalate it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+      esc_subject="${PROBE_HOST_LABEL} has been ${kind}"
+      esc_why="This class is one self-healing cannot close, so nothing else will escalate it."
+    fi
+    if [ "$esc_decision" = "remind" ]; then
+      esc_text="🔁 STILL RUNNING for ~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min (reminder) — ${esc_subject} since $(fmt_iso "$STATE_FIRST_FAILURE_TS"); ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+    else
+      esc_text="📟 HUMAN NEEDED — ${esc_subject} for ~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min; ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. ${esc_why} Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
     fi
     if page_required "$esc_text"; then
       STATE_ESCALATE_STATE="sent"
