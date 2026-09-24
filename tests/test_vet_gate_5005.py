@@ -522,6 +522,64 @@ def test_immutable_slot_ref_does_not_raise():
     assert isinstance(new, dict)
 
 
+def test_padded_entity_name_is_stripped_when_reconciled():
+    """Cycle-4 regression: the spelling map stored the RAW name, but
+    ``execute_embed`` emits ``str(name).strip()`` and ``validate_layer1``
+    matches THAT exact string — so a padded entity name was rewritten verbatim
+    into the reference and TURNED A PASSING PAYLOAD INTO A 422."""
+    el = {"entities": [{"name": " pytest ", "kind": "core:tool"}],
+          "events": [],
+          "points": [{"content": "P", "pointKind": "statement",
+                      "about_entities": ["pytest"]}],
+          "operators": []}
+    out = vg.vet_candidates(
+        el, narrative="n",
+        arbiter=lambda c, s: {"verdicts": [
+            {"id": x["id"], "outcome": vg.DISCARD} for x in c
+            if x["section"] == "entities"]})
+    new, _warnings = vg.apply_vet(el, out["decisions"])
+    assert new["points"][0]["about_entities"] == ["pytest"]
+    payload, _res = _payload_of(new)
+    l1, _model = validate_payload_dict(payload)
+    assert l1.ok, l1.errors
+
+
+def test_over_long_content_is_pruned_not_re_minted():
+    """``execute_embed`` truncates content to 1000 chars before keying it, but
+    also registers the untruncated ref — so a removed >1000-char item must be
+    recognised under BOTH forms or the endpoint escapes the prune and the text
+    is re-materialised as a new Point."""
+    long = "x" * 1100
+    el = {"entities": [], "events": [],
+          "points": [{"content": long, "pointKind": "statement"},
+                     {"content": "keep", "pointKind": "statement"}],
+          "operators": []}
+    out = vg.vet_candidates(el, narrative="n", arbiter=_discard_matching(long))
+    vetted, _w = vg.apply_vet(el, out["decisions"])
+    union = {"entities": [], "events": [],
+             "points": [{"content": "keep", "pointKind": "statement"}],
+             "operators": [{"src": long, "dst": "keep", "op_type": "IMPL"},
+                           {"src": long[:1000], "dst": "keep",
+                            "op_type": "NAND"}]}
+    final, warnings = vg.apply_vet(
+        union, {}, prior=vg.removal_pool(el, vetted))
+    assert final["operators"] == []
+    assert any("pruned 2 operator" in w for w in warnings)
+    payload, _res = _payload_of(final)
+    assert all(len(p["content"]) < 1100 for p in payload["points"])
+
+
+def test_non_sequence_operators_does_not_raise():
+    """Cycle-4 P4: ``operators`` is a top-level ``embed_list`` key, so a
+    non-sequence value is a malformed section shape under the module's own
+    totality claim — the prune path must not raise."""
+    el = {"entities": [{"name": "A", "kind": "core:other"}],
+          "points": [{"content": "B", "pointKind": "statement"}],
+          "operators": 5}
+    new, _w = vg.apply_vet(el, {}, prior={"removed_texts": {"gone"}})
+    assert new["operators"] == 5          # malformed shape passes through
+
+
 def test_cross_pass_reference_restores_entity_and_payload_validates():
     """Verified defect (the strongest one): the Layer-1 guard is per-pass, so
     an entity the S2 pass removed and S4 later referenced reached
@@ -623,7 +681,8 @@ def test_functions_are_total_on_malformed_shapes():
     """The module's contract is fail-open on a bad shape, not an exception —
     a direct caller outside ``_run_vet_pass`` must not raise either."""
     for bad in (None, {"entities": 5}, {"points": "not a list"},
-                {"entities": [None, 7, "x"]}):
+                {"entities": [None, 7, "x"]}, {"operators": 5},
+                {"operators": "oops"}):
         out = vg.vet_candidates(bad, narrative="n")
         assert out["stats"]["candidates"] == 0
         assert vg.check_batch(bad, "one. two.")["candidates"] == 0

@@ -180,10 +180,34 @@ def _section_items(embed_list: object, section: str) -> Sequence[Any]:
     """
     if not isinstance(embed_list, Mapping):
         return ()
-    items = embed_list.get(section)
-    if isinstance(items, Sequence) and not isinstance(items, (str, bytes)):
-        return items
+    return _as_items(embed_list.get(section))
+
+
+def _as_items(value: object) -> Sequence[Any]:
+    """``value`` as an iterable item list, or ``()`` when it is not one."""
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return value
     return ()
+
+
+#: The embedder truncates point/event content AND minted endpoint refs to this
+#: many characters before keying them (``extractor_v2.py:3891,3966,4175``), but
+#: still resolves the untruncated ref — so an endpoint can match either form.
+_MAX_CONTENT = 1000
+
+
+def _norm_variants(text: object) -> set[str]:
+    """Normalized forms the embedder can key an endpoint on.
+
+    Both the FULL text and its :data:`_MAX_CONTENT`-char prefix: ``execute_embed``
+    keys point/event ids on the truncated content but also registers the
+    untruncated ref, so a removed item must be recognised under either — a >1000
+    character item otherwise escaped the prune and was re-minted (verified).
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return set()
+    return {_norm(raw), _norm(raw[:_MAX_CONTENT])}
 
 
 def _item_text(section: str, item: Mapping[str, Any]) -> str:
@@ -457,9 +481,7 @@ def _normalized_texts(embed_list: object) -> set[str]:
     """Normalized CONTENT of every point/event (the operator-endpoint surface)."""
     out: set[str] = set()
     for section, _index, item in _iter_items(embed_list):
-        txt = _norm(_item_content(section, item))
-        if txt:
-            out.add(txt)
+        out |= _norm_variants(_item_content(section, item))
     return out
 
 
@@ -492,13 +514,13 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     for key in ("src", "dst"):
         v = op.get(key)
         if v and str(v).strip():
-            out.add(_norm(v))
+            out |= _norm_variants(v)
     target = op.get("target") or op.get("target_edge")
     if isinstance(target, Mapping):
         for key in ("src", "dst"):
             v = target.get(key)
             if v and str(v).strip():
-                out.add(_norm(v))
+                out |= _norm_variants(v)
     return out
 
 
@@ -667,7 +689,11 @@ def apply_vet(embed_list: Mapping[str, Any],
                 name = _norm(item.get("name"))
                 if name and name in referenced:
                     downgraded += 1
-                    canonical[name] = str(item.get("name"))
+                    # STRIP: execute_embed emits ``str(name).strip()`` and
+                    # validate_layer1 matches that exact string, so a padded
+                    # entity name rewritten verbatim would CREATE the 422 the
+                    # reconciliation exists to prevent (verified).
+                    canonical[name] = str(item.get("name") or "").strip()
                     warnings.append(
                         f"vet: entity {str(item.get('name'))!r} was DISCARDed "
                         "but is referenced by a surviving candidate — kept "
@@ -677,9 +703,7 @@ def apply_vet(embed_list: Mapping[str, Any],
                 if name:
                     removed_entity_names.add(name)
             else:
-                txt = _norm(_item_content(section, item))
-                if txt:
-                    removed_context.add(txt)
+                removed_context |= _norm_variants(_item_content(section, item))
             warnings.append(
                 f"vet: discarded {section} "
                 f"{_item_text(section, item)[:80]!r}")
@@ -694,7 +718,9 @@ def apply_vet(embed_list: Mapping[str, Any],
     for name in sorted(to_restore):
         original = prior_entities.get(name)
         if original is not None and str(original.get("name") or ""):
-            canonical[name] = str(original["name"])
+            # STRIP, as above: the emitted name is stripped (see the downgrade
+            # branch for the verified failure this prevents).
+            canonical[name] = str(original["name"]).strip()
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
@@ -720,7 +746,7 @@ def apply_vet(embed_list: Mapping[str, Any],
     gone = (removed_context | prior_texts | removed_entity_names
             | set(prior_entities)) - surviving_texts - set(canonical)
     if gone:
-        ops = out.get("operators") or []
+        ops = _as_items(out.get("operators"))
         kept_ops: list[Any] = []
         pruned = 0
         for op in ops:
