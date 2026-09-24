@@ -289,8 +289,7 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
 
   // (3) the renderable ATTRIBUTION is returned for the two states whose key
   //     embeds a harness, and for any supported row with a recorded per-harness
-  //     FAILURE (3b); null for a supported row with neither, so a row that
-  //     names no harness never acquires the disclosure.
+  //     FAILURE (3b); null for a supported row with neither.
   assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
   assert.equal(harnessAttributionForHarness(st, 'claude'), HARNESS_ATTRIBUTION,
     'receipt state names a harness')
@@ -299,7 +298,7 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   // a row with no per-harness signal at all renders no state word and no
   // failure, so there is nothing to disclose.
   assert.equal(harnessAttributionForHarness(st, 'cursor'), null,
-    'install-pending with no failure names no harness')
+    'install-pending with no failure')
   assert.equal(harnessAttributionForHarness({ session_recording: true }, 'claude'), null)
   assert.equal(harnessAttributionForHarness(null, 'claude'), null)
   assert.equal(harnessAttributionForHarness({ session_recording: false }, 'claude'), null)
@@ -320,7 +319,7 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   // An UNSUPPORTED row renders the registry reason and NOTHING per-harness — no
   // pill and no failure line (main.jsx) — so the predicate must apply the same
   // support gate: neither a state key nor a recorded failure for an unsupported
-  // harness may produce a disclosure for a row that names no harness.
+  // harness may produce a disclosure.
   assert.equal(HARNESS_CAPTURE_SUPPORT['claude-web'], false)
   assert.equal(harnessAttributionForHarness(
     { session_recording: true, 'session_capture_last_error_claude-web': 'x' }, 'claude-web'),

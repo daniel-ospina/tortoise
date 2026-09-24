@@ -128,8 +128,8 @@ export function harnessAttributionForHarness(state, harness) {
 //               defect: the success screen promised a capture the server never
 //               saw while the same deployment's Settings contradicted it.
 //   'none'    — print no capture sentence at all: either the harness has no
-//               capture install path (HARNESS_CAPTURE_SUPPORT false — Cursor's
-//               spike verdict, the backfill-only leaves) or the team's
+//               capture install path (HARNESS_CAPTURE_SUPPORT false — Claude
+//               Web's spike verdict, the backfill-only leaves) or the team's
 //               recording off-switch is set. Saying nothing is the only
 //               honest option in both cases.
 //
