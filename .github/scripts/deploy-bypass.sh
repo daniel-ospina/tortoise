@@ -59,11 +59,17 @@
 # a quiet stale bypass. See docs/infra-runbook.md §8.2.
 set -uo pipefail
 
-# The canonical gate table — the FOUR bypassable deploy gates. `report` callers
+# The canonical gate table — the bypassable deploy gates. `report` callers
 # name a gate by its repo variable and the label/dispatch-input are looked up
 # here, so a rename cannot half-land; `expiry` iterates the same list; `audit`
-# reads the KIND to know what a set lane means. The Python guard in
-# tests/test_deploy_workflow.py pins these four names.
+# reads the KIND to know what a set lane means.
+#
+# THIS TABLE IS THE DECLARATION. The structural guard in
+# tests/test_deploy_workflow.py derives every workflow surface from it — the
+# `workflow_dispatch` inputs, each report `--key`, each audit `--state`, the
+# expiry workflow's env bindings and the lane conditions — and compares each by
+# SET EQUALITY with this table. A gate added here therefore FORCES its wiring;
+# a gate added to the workflow without a row here fails the same comparisons.
 #   <repo variable>|<workflow_dispatch input>|<human label>|<kind>
 #   kind=
 #     `if`      — a step/job-level `if:` skips the WHOLE gate. A set lane means
