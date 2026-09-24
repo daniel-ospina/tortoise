@@ -1097,10 +1097,17 @@ _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 def _inside_hex_digest(text: str, start: int, end: int) -> bool:
     """True when ``text[start:end]`` sits inside a hex DIGEST.
 
-    The run is expanded over `[0-9a-fA-F]` in both directions and is a digest
-    when it is at least `_HEX_RUN_MIN` long AND contains at least one letter. A
-    pure digit run is left alone (`#3061` is not hex), and `w3061` still matches
-    — `w` is not a hex digit, so its run is the bare `3061`, four characters."""
+    The run is expanded over `[0-9a-fA-F]` in both directions. It is a digest
+    only when all three hold: the run is at least `_HEX_RUN_MIN` long, it holds
+    at least one letter, and the matched number does NOT lead it.
+
+    The POSITION test is what keeps this fail-CLOSED, and review cycle 1 is why
+    it exists. `3061cafe` is `fix/3061-…` with the separator dropped — `cafe` is
+    a word and the number leads the run — so it is a reference, exactly as
+    `w3061` is (`w` is not a hex digit, leaving the bare run `3061`). Length
+    alone made that shape a digest and read a LIVE branch CLEAN. A number
+    embedded mid-run (`d6233ab6`, `a4356bcd`, a 64-hex review signature) is a
+    fragment: there the digits are incidental."""
     lo = start
     while lo > 0 and text[lo - 1] in _HEX_DIGITS:
         lo -= 1
@@ -1108,7 +1115,9 @@ def _inside_hex_digest(text: str, start: int, end: int) -> bool:
     while hi < len(text) and text[hi] in _HEX_DIGITS:
         hi += 1
     run = text[lo:hi]
-    return len(run) >= _HEX_RUN_MIN and any(c.isalpha() for c in run)
+    if len(run) < _HEX_RUN_MIN or not any(c.isalpha() for c in run):
+        return False
+    return lo != start
 
 
 def _pr_terminal_state(pr: dict) -> str | None:
@@ -1119,9 +1128,16 @@ def _pr_terminal_state(pr: dict) -> str | None:
     cannot name which happened; `mergedAt` is the field that names a merge. A
     rule keyed on `state == "merged"` would be dead code — REST never returns
     it — and the guard would silently never fire (#5052, the F10 trap)."""
+    state = (pr.get("state") or "").strip().lower()
+    # Liveness is decided by `state` alone where it speaks: an OPEN PR is never
+    # terminal, so a stray `mergedAt` on an open payload cannot downrank a live
+    # hit. (Hardening from review cycle 1; no real transport was observed to do
+    # this — every open PR genuinely carries `mergedAt: null`.)
+    if state in ("open", "opened"):
+        return None
     if pr.get("mergedAt") or pr.get("merged_at"):
         return "merged"
-    if (pr.get("state") or "").strip().lower() == "closed":
+    if state == "closed":
         return "closed"
     return None
 

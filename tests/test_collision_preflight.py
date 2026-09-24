@@ -652,6 +652,37 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertNotEqual(rc, 0, f"head={head!r}\n{out}")
                 self.assertIn("VERDICT: COLLISION", out)
 
+    def test_live_branch_whose_number_leads_a_hex_run_still_collides(self):
+        # REVIEW CYCLE 1 REPRODUCED A FAIL-OPEN BYPASS HERE. A shape-only guard
+        # (>= 8 hex chars containing a letter) swallowed `fix/3061cafe` as a
+        # digest while `w3061` matched: `cafe` is a word, and dropping the
+        # separator must not hide a LIVE branch naming #3061. The fix is
+        # POSITION — a number leading the run is a reference, a number embedded
+        # mid-run is a fragment — which is strictly more fail-closed, because
+        # the discarded case is now the blocking one.
+        for head in ("fix/3061cafe", "fix/3061abcd", "fix/3061beef"):
+            with self.subTest(head=head):
+                _git(self.repo, "branch", head)
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"{head}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("[local branches]", out)
+
+    def test_open_pr_with_a_stray_merged_timestamp_stays_a_hit(self):
+        # Hardening from review cycle 1: `state` is authoritative for liveness,
+        # so an OPEN PR is never terminal even if a payload carries a truthy
+        # `mergedAt`. No real transport does this (every open PR observed
+        # carries `mergedAt: null`), but the polarity must fail CLOSED.
+        self.gh_fixtures(open_prs=[{
+            "number": 9993, "title": "guard retrieval (#3061)", "body": "",
+            "headRefName": "fix/guard", "state": "open",
+            "mergedAt": "2026-09-23T03:45:47Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("immutable history", out)
+
     def test_bad_timeout_and_limit_seams_are_usage_not_collision(self):
         # #3619 / #4053. The old eager `float(os.environ[...])` / `int(...)` ran
         # at add_argument time, so a typo'd env value raised an uncaught
