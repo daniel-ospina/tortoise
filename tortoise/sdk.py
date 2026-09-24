@@ -2954,9 +2954,24 @@ class TortoiseSDK:
             # to remove. `creating` gates the text-hash attestation: only a
             # PointAdded/OperatorAdded vector was computed from the content
             # riding with it (see `stamp_journal_embedding`).
-            from .embeddings import stamp_journal_embedding
-            clean = stamp_journal_embedding(
-                clean, creating=type_ in ("PointAdded", "OperatorAdded"))
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # #5148 review: the seam MODULE is unreachable (a damaged
+                # partial install — `numpy` is a core dependency). The graph
+                # mutation has ALREADY happened by the time we get here, so
+                # raising would hand the caller an ImportError for a write
+                # that SUCCEEDED, and would then skip `log.append` below —
+                # the exact contract that call site honours ("a log-write
+                # failure must not crash the caller"). Skipping the stamp is
+                # safe: the key is already forced present by the `setdefault`
+                # above, so PRESENCE IS OWNERSHIP still holds and the replay
+                # cannot invent a vector. What is lost is only the
+                # NORMALISATION safety net and the text-hash attestation.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                clean = stamp_journal_embedding(
+                    clean, creating=type_ in ("PointAdded", "OperatorAdded"))
             # Operators may not store 'content' as a node property (#548);
             # _upsert_point_props requires it — synthesize a fallback.
             if "content" not in clean:

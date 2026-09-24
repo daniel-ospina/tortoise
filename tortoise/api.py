@@ -194,12 +194,21 @@ class EventAPI:
         # `TortoiseSDK._sanitize_props` — so this path is reachable only from a
         # direct `EventAPI` caller, which never gets an MCP/SDK guarantee.)
         if "embedding" in fields:
-            from .embeddings import stamp_journal_embedding
             # The key stays PRESENT in both branches: an explicit None is the
             # journal saying "this id has no vector", which the replay must
-            # honour by leaving it unset rather than re-encoding.
+            # honour by leaving it unset rather than re-encoding. Set it FIRST,
+            # so presence holds even when the seam below is unreachable.
             p["embedding"] = fields["embedding"]
-            stamp_journal_embedding(p, creating=False)
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # #5148 review: the same environment-fault lane as `_point` —
+                # an unreachable seam MODULE must not fail a write. Only the
+                # stamp's normalisation safety net is lost; the key is already
+                # present, so PRESENCE IS OWNERSHIP is intact.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                stamp_journal_embedding(p, creating=False)
         # #5004 round-7: the journal MARKERS are server-minted, and this is the
         # one producer that does not pass through `_sanitize_props` (an
         # internal ingest/mining/CLI seam). Allowing them through let a caller
