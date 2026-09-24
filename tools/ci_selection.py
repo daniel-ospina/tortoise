@@ -627,6 +627,19 @@ TOOL_CARVEOUTS = (
     # exact "proxy silent in the case it exists to cover" class this harness is
     # written to detect, so it must not apply to the harness itself.
     "tools/embedded_evidence.py",
+    # #2718/#4860: the eval-key isolation launcher owns
+    # tests/test_run_with_eval_keys.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows `tools/run-with-eval-keys.sh`, so a
+    # wrapper-only change (e.g. a fingerprint-format edit, or a change to the
+    # managed-key set) would come back as `changed=[]`, select() would take the
+    # docs-only return, and the wrapper's own guard suite would never run on
+    # the PR that changed the wrapper. No SOURCE_PATTERNS entry matches a `.sh`
+    # path, so it lands in the unknown-path branch -> FULL matrix (fail closed)
+    # — the safe default for the file that owns provider-key isolation.
+    # Pinned by
+    # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
+    "tools/run-with-eval-keys.sh",
 )
 
 
