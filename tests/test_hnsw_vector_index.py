@@ -204,14 +204,15 @@ class TestHnswAutoUpdate:
         This is the known caveat: CREATE the index first, then write nodes."""
         g = _graph
         # Node created BEFORE the index existed (simulate by using a label the
-        # index doesn't cover — Document has no vector index by default).
+        # index doesn't cover — Object has no vector index by default, ONTOLOGY
+        # §12.1b; the retired :Document label is no longer used, D10 #5026).
         g.query(
-            "CREATE (n:Document {id: $id, name: 'pre', embedding: vecf32($vec)})",
+            "CREATE (n:Object {id: $id, name: 'pre', embedding: vecf32($vec)})",
             params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
         )
-        _ensure_vector_index(g, "Document")
+        _ensure_vector_index(g, "Object")
         hits = g.query(
-            f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "  # noqa: F541
+            "CALL db.idx.vector.queryNodes('Object', 'embedding', 5, vecf32($vec)) "
             "YIELD node, score RETURN node.id",
             params={"vec": _vec([(0, 0.9)])},
         ).result_set
@@ -224,11 +225,11 @@ class TestHnswAutoUpdate:
         try:
             # A re-write makes it queryable.
             g.query(
-                "MATCH (n:Document {id: $id}) SET n.embedding = vecf32($vec)",
+                "MATCH (n:Object {id: $id}) SET n.embedding = vecf32($vec)",
                 params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
             )
             hits2 = g.query(
-                f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "  # noqa: F541
+                "CALL db.idx.vector.queryNodes('Object', 'embedding', 5, vecf32($vec)) "
                 "YIELD node, score RETURN node.id",
                 params={"vec": _vec([(0, 0.9)])},
             ).result_set
@@ -236,5 +237,5 @@ class TestHnswAutoUpdate:
                 f"re-write should make vector queryable, got {hits2} " \
                 f"(pre-index served={pre_served})"
         finally:
-            g.query("MATCH (n:Document {id: $id}) DETACH DELETE n",
+            g.query("MATCH (n:Object {id: $id}) DETACH DELETE n",
                     params={"id": "hnsw247_pre"})

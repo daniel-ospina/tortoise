@@ -960,8 +960,9 @@ class TestRunFtsQuery:
 
         assert result == []
 
-    def test_entity_type_document_uses_document_label(self):
-        """#193: entity_type='document' → queryNodes('Document') + node.id."""
+    def test_entity_type_document_uses_source_label_and_url(self):
+        """D10 (#5026): a document is a :Source, so entity_type='document'
+        queries queryNodes('Source') and returns node.url."""
         graph = SimpleMockGraph(result_set=[("doc-1", 0.9)])
 
         result = run_fts_query(graph, "test", entity_type="document")
@@ -969,8 +970,8 @@ class TestRunFtsQuery:
         assert len(result) == 1
         assert result[0][0] == "doc-1"
         cypher = graph.query_calls[0][0]
-        assert "queryNodes('Document'" in cypher
-        assert "node.id" in cypher
+        assert "queryNodes('Source'" in cypher
+        assert "node.url" in cypher
 
     def test_entity_type_object_uses_object_label(self):
         """#193: entity_type='object' → queryNodes('Object') + node.id."""
@@ -1456,7 +1457,9 @@ class TestFilterByTraversalPredicateEntityType:
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_fts_index_created():
-    """#125: Document._searchText FTS index exists after projection init."""
+    """#125 / D10: the document _searchText FTS index exists after projection
+    init. D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, so the FTS leg
+    rides the Source label (the :Document label is retired)."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
         _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
@@ -1464,24 +1467,28 @@ def test_document_fts_index_created():
     proj._ensure_indexes()
     # db.indexes() output: [label, properties, ...] — label is col 0, props col 1
     rows = proj.g.query("CALL db.indexes()").result_set
-    found = any(r[0] == "Document" and "_searchText" in r[1] for r in rows)
+    found = any(r[0] == "Source" and "_searchText" in r[1] for r in rows)
     proj.close()
-    assert found, f"Document _searchText FTS index missing: {rows[:3]}"
+    assert found, f"Source _searchText FTS index missing: {rows[:3]}"
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_backfill_document_search_text():
-    """#125: backfill sets _searchText=title on pre-existing Documents."""
+    """#125 / D10: backfill sets _searchText=title on pre-existing document
+    Sources. D10 (ONTOLOGY v3.15 §4.4): the document node is a :Source keyed
+    ``url``, so the fixture creates a doc Source and the backfill (which
+    targets Sources with ``documentKind IS NOT NULL``) picks it up."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
         _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
-    # Create a Document WITHOUT _searchText (simulating pre-125)
+    # Create a document Source WITHOUT _searchText (simulating pre-125)
     proj.g.query(
-        "CREATE (d:Document {id:'old-1', title:'Old Doc', documentKind:'transcript'})"
+        "CREATE (s:Source {url:'old-1', id:'old-1', title:'Old Doc', "
+        "documentKind:'transcript'})"
     )
     n = proj.backfill_document_search_text()
-    rows = proj.g.query("MATCH (d:Document {id:'old-1'}) RETURN d._searchText").result_set
+    rows = proj.g.query("MATCH (s:Source {url:'old-1'}) RETURN s._searchText").result_set
     proj.close()
     assert n >= 1, f"backfill returned {n}"
     assert rows and rows[0][0] == "Old Doc", rows
@@ -1489,7 +1496,10 @@ def test_backfill_document_search_text():
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_fts_search_by_topic():
-    """#125: Document FTS on _searchText returns sessions matching a topic."""
+    """#125 / D10: document FTS on _searchText returns docs matching a topic.
+    D10 (ONTOLOGY v3.15 §4.4): the document node is a :Source keyed ``url``,
+    so the fixture creates a doc Source; the ``document`` entity_type is still
+    the surface under test (a document is a Source, not a separate label)."""
     from tortoise.projection import FalkorProjection  # noqa: I001
     import tortoise.search_engine as se
     proj = FalkorProjection.from_uri(
@@ -1497,7 +1507,7 @@ def test_document_fts_search_by_topic():
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
     proj.g.query(
-        "CREATE (d:Document {id:'doc-t1', title:'Licensing Talk', "
+        "CREATE (s:Source {url:'doc-t1', id:'doc-t1', title:'Licensing Talk', "
         "documentKind:'transcript', _searchText:'Licensing Talk Compared AGPL licenses'})"
     )
     try:
@@ -1514,17 +1524,17 @@ def test_document_fts_search_by_topic():
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_structural_topic_any():
-    """#125: any() list filter matches topics on Document nodes."""
+    """#125 + D10 (#5026): any() list filter matches topics on document Sources."""
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(
         _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj.g.query(
-        "CREATE (d:Document {id:'doc-a', topics:['licensing','AGPL'], documentKind:'transcript'})"
+        "CREATE (d:Source {url:'doc-a', id:'doc-a', topics:['licensing','AGPL'], documentKind:'transcript'})"
     )
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE any(t IN d.topics WHERE t = 'licensing') RETURN d.id"
+            "MATCH (d:Source) WHERE any(t IN d.topics WHERE t = 'licensing') RETURN d.url"
         ).result_set
         assert any(r[0] == "doc-a" for r in rows), rows
     finally:

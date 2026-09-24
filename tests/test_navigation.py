@@ -337,8 +337,8 @@ def test_entity_anchored_cypher_injection():
     # semantic: already has WHERE → prepends
     assert "n.id = $entityId" in cypher["semantic"]
     assert "n:Subject OR n:Object" in cypher["semantic"]  # original filter preserved
-    # docIndex: variable is d
-    assert "d.id = $entityId" in cypher["docIndex"]
+    # docIndex: D10 — the label moved to :Source, so the variable is s
+    assert "s.id = $entityId" in cypher["docIndex"]
     print("✓ _entityAnchoredCypher injection")
 
 

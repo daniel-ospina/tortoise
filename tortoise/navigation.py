@@ -19,7 +19,7 @@ from typing import Any
 #: carry id but live in the registry graph / control plane).
 _ROOT_BRANCHES = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
-    ("Document", "id"), ("Source", "id"), ("Session", "id"),
+    ("Source", "id"), ("Session", "id"),
     ("Event", "eventId"),
 )
 

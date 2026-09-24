@@ -906,24 +906,25 @@ class TestSanitizeProps:
         assert "sourcePath" not in doc
 
     def test_create_document_links_extracted_from_source(self, sdk):
-        """#394: create_document wires Document → Source via extractedFrom."""
+        """#394 + D10: create_document wires the document Source → Source via
+        extractedFrom (a document is a :Source)."""
         doc = sdk.create_document(
             "Sourced", "planDoc", extractedFrom="https://docs.example.com/spec"
         )
         proj = sdk._get_proj()
         r = proj.g.query(
-            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s:Source {url:$url}) "
+            "MATCH (d:Source {url:$did})-[:extractedFrom]->(s:Source {url:$url}) "
             "RETURN count(*) > 0",
             params={"did": doc["id"], "url": "https://docs.example.com/spec"},
         ).result_set
         assert r[0][0] is True
 
     def test_create_document_no_extracted_from_no_edge(self, sdk):
-        """#394: without extractedFrom, no Document→Source edge is created."""
+        """#394 + D10: without extractedFrom, no extractedFrom edge is created."""
         doc = sdk.create_document("Unsourced", "planDoc")
         proj = sdk._get_proj()
         r = proj.g.query(
-            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s) RETURN count(s)",
+            "MATCH (d:Source {url:$did})-[:extractedFrom]->(s) RETURN count(s)",
             params={"did": doc["id"]},
         ).result_set
         assert r[0][0] == 0
@@ -950,10 +951,10 @@ class TestSanitizeProps:
             sdk.update_point(p["id"], source_path="/etc/passwd")
 
     def test_create_event_document_mint_safe_and_unsafe_ids(self, sdk):
-        # Safe basename id mints a Document
+        # Safe basename id mints a document Source (D10: a document is a :Source)
         sdk.create_event("ev1", "meeting", object="session-2026-08-07.md", objectType="Document")
         rows = sdk._get_proj().g.query(
-            "MATCH (d:Document {id:$id}) RETURN count(d)",
+            "MATCH (s:Source {url:$id}) RETURN count(s)",
             params={"id": "session-2026-08-07.md"},
         ).result_set
         assert rows[0][0] == 1

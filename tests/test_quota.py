@@ -365,9 +365,11 @@ class TestSessionsQuota:
 class TestDocumentsQuota:
     """#1726: the documents gate fires on /v1/index/docs ONLY, with the
     derived-constant cap (max_documents = max_points ×
-    _DOCUMENTS_FROM_POINTS_FACTOR — deliberately NOT a pricing.json field)
-    and the discriminator COALESCE(documentKind,'') != 'transcript' (NULL-
-    kind docs COUNT — no leak; session transcripts excluded)."""
+    _DOCUMENTS_FROM_POINTS_FACTOR — deliberately NOT a pricing.json field).
+    D10 (ONTOLOGY v3.15 §4.4): the count is over document-bearing :Source
+    nodes (documentKind IS NOT NULL AND <> 'transcript'); a Source with NO
+    documentKind (session/connector/provenance) is NOT metered, and session
+    transcripts are excluded."""
 
     def _tenant(self, tmp_path, reg_sdk):
         from tortoise.sdk import TortoiseSDK  # noqa: I001
@@ -377,22 +379,33 @@ class TestDocumentsQuota:
         return tid, TortoiseSDK(db, namespace=tid)
 
     def _seed_doc(self, tenant, i: int, kind: str | None) -> None:
+        """Seed a document-bearing :Source (D10: a document IS a :Source).
+
+        kind=None omits documentKind entirely (a session/connector/provenance
+        Source); kind='' mirrors the projection's frontmatter-less doc write
+        (``s.documentKind = coalesce($dk, ...)`` with ``$dk`` defaulting to
+        the empty string)."""
         if kind is None:
             tenant._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$t})",
-                params={"id": f"doc_{i}", "t": f"doc {i}"})
+                "CREATE (s:Source {url:$url, title:$t})",
+                params={"url": f"doc_{i}", "t": f"doc {i}"})
         else:
             tenant._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$t, documentKind:$k})",
-                params={"id": f"doc_{i}", "t": f"doc {i}", "k": kind})
+                "CREATE (s:Source {url:$url, title:$t, documentKind:$k})",
+                params={"url": f"doc_{i}", "t": f"doc {i}", "k": kind})
 
-    def test_null_kind_docs_count(self, reg_sdk, tmp_path):
-        """A NULL-kind Document COUNTS toward the documents resource — a
-        frontmatter-less docs-endpoint doc never leaks past the gate."""
+    def test_null_kind_not_counted_kindless_doc_counts(self, reg_sdk, tmp_path):
+        """D10: a :Source with NO documentKind (session/connector/provenance)
+        is NOT a document and must not be metered. A kindless docs-endpoint
+        doc — the projection writes documentKind='' for a frontmatter-less doc
+        — IS document-bearing and COUNTS, so it never leaks past the gate."""
         tid, tenant = self._tenant(tmp_path, reg_sdk)
         try:
             for i in range(3):
                 self._seed_doc(tenant, i, kind=None)
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0
+            for i in range(3, 6):
+                self._seed_doc(tenant, i, kind="")
             assert count_org_usage(tid, "documents", sdk=tenant) == 3
         finally:
             tenant.close()
@@ -433,6 +446,52 @@ class TestDocumentsQuota:
         try:
             self._seed_doc(tenant, 0, kind="brief")
             self._seed_doc(tenant, 1, kind="transcript")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_b3_legacy_documentcreated_path_cannot_escape_the_cap(
+            self, reg_sdk, tmp_path):
+        """Adversarial B3 (#5026/D10): a document created through the OLD
+        (DocumentCreated) path is a document-bearing :Source and IS metered —
+        it cannot escape the documents cap by being written off the index
+        path. The gate then refuses at the derived cap."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0
+            log = EventLog(str(tmp_path / "b3_events.jsonl"))
+            api = EventAPI(log, initiated_by="extractor",
+                           projection=tenant._get_proj())
+            api.add_document("doc/b3-legacy.md", "Legacy B3")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1, \
+                "legacy DocumentCreated doc escaped the :Source documents cap"
+            # derived cap 0*10 == 0 → the single legacy doc is OVER the cap
+            with pytest.raises(QuotaExceededError,
+                               match="documents limit reached"):
+                enforce_org_limit({"org_id": tid, "max_points": 0},
+                                  "documents", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_b4_provenance_source_not_over_counted(self, reg_sdk, tmp_path):
+        """Adversarial B4 (#5026/D10): an ordinary connector/provenance
+        :Source (sourceKind + contentHash, NO documentKind) is NOT metered by
+        the documents cap — a COALESCE-to-empty predicate would meter every
+        such node (the #1726 price change D10 forbids)."""
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            for i in range(4):
+                tenant._get_proj().g.query(
+                    "CREATE (s:Source {url:$url, sourceKind:'github', "
+                    "contentHash:'h', title:$t})",
+                    params={"url": f"https://gh/{i}", "t": f"repo {i}"})
+            assert count_org_usage(tid, "documents", sdk=tenant) == 0, \
+                "provenance Sources were over-counted as documents"
+            # one real document among them still counts exactly once
+            self._seed_doc(tenant, 9, kind="report")
             assert count_org_usage(tid, "documents", sdk=tenant) == 1
         finally:
             tenant.close()

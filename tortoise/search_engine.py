@@ -748,10 +748,14 @@ def run_fts_query(
         logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
         _record(ran=False, degraded=True, reason="breaker_open", count=0)
         return []
-    label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, so the FTS leg reads
+    # the Source label (`_searchText`) — there is no :Document index. The
+    # caller-facing entity_type stays "document".
+    # point→Point, event→Event, subject→Subject
+    label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -908,10 +912,16 @@ def run_vector_query(
 
     # Operators are Points with is_operator=true — match the Point label
     # (consistent with run_fts_query / run_structural_query). (#172)
-    label = "Point" if entity_type == "operator" else entity_type.capitalize()
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source — the vector leg
+    # reads the Source label, never a Document label. The caller-facing
+    # entity_type stays "document".
+    if entity_type == "document":
+        label = "Source"
+    else:
+        label = "Point" if entity_type == "operator" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -1173,7 +1183,9 @@ def run_structural_query(
         label_str = "Source"
         kind_field = "sourceKind"
     elif entity_type == "document":
-        label_str = "Document"
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source. The structural
+        # leg reads the Source label with the documentKind genre filter.
+        label_str = "Source"
         kind_field = "documentKind"
     elif entity_type == "object":
         label_str = "Object"

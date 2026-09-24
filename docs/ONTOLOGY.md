@@ -720,7 +720,7 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
-| `format` | string | — | `dc:format` | ⚠️ | Storage format (markdown, jsonl, yaml, cypher). Not yet in `_SOURCE_HANDLED` |
+| `format` | string | — | `dc:format` | ✅ | Storage format (markdown, jsonl, yaml, cypher). In `_SOURCE_HANDLED` since D10 (v3.15) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
 | `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
@@ -845,7 +845,7 @@ authoritative for the temporal slots. Event's transaction-time start is
 | responsibility | authoredBy | — | edge (§3.5) | — | — |
 | ownership | — | — | edge (§3.5) | — | — |
 | management | — | — | edge (§3.5) | — | — |
-| format | — | — | — | format | **⚠️ `format` belongs here** — `_SOURCE_HANDLED` does not yet carry it |
+| format | — | — | — | format | **✅ `format` belongs here** — moved into `_SOURCE_HANDLED` by D10 (v3.15) |
 | aboutEdges | ✅ | — | ✅ | ✅ | — |
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ❌ | — | — | ❌ | ❌ |

@@ -1838,34 +1838,39 @@ def live_proj():
 
 def test_upsert_document_capture_fields(live_proj):
     """#125: _upsert_document persists topics/summary/sessionId/eventId/
-    doc_status/_searchText + aboutSubject edges."""
+    needs_extraction/_searchText + aboutSubject edges. D10 (ONTOLOGY v3.15
+    §4.4): the document node is a :Source keyed ``url``; ``doc_status`` is
+    retired and ``needs_extraction`` is the extraction signal."""
     proj = live_proj
     proj.apply({"type": "SubjectAdded", "id": "agent-pi", "name": "agent-pi",
                 "subject_kind": "other"})
     proj.apply({"type": "DocumentCreated", "id": "test-doc-1",
                 "title": "Conv", "topics": ["licensing", "AGPL"],
                 "summary": "Compared licenses", "session_id": "sess-1",
-                "event_id": "evt-1", "doc_status": "captured",
+                "event_id": "evt-1", "needs_extraction": True,
+                "source_url": "corpus://test-doc-1",
                 "about_entities": ["agent-pi"]})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'test-doc-1'}) "
-        "RETURN d.topics, d.summary, d.sessionId, d.eventId, d.doc_status, d._searchText"
+        "MATCH (s:Source {url:'test-doc-1'}) "
+        "RETURN s.topics, s.summary, s.sessionId, s.eventId, s.needs_extraction, s._searchText"
     ).result_set
-    assert rows, "Document not created"
+    assert rows, "document Source not created"
     assert rows[0][0] == ["licensing", "AGPL"], rows[0][0]
     assert rows[0][1] == "Compared licenses"
     assert rows[0][2] == "sess-1"
     assert rows[0][3] == "evt-1"
-    assert rows[0][4] == "captured"
+    assert rows[0][4] is True
     assert "AGPL" in rows[0][5] and "Compared" in rows[0][5], rows[0][5]
     rows2 = proj.g.query(
-        "MATCH (d:Document {id:'test-doc-1'})-[:aboutSubject]->(s) RETURN s.name"
+        "MATCH (s:Source {url:'test-doc-1'})-[:aboutSubject]->(s2) RETURN s2.name"
     ).result_set
     assert len(rows2) == 1 and rows2[0][0] == "agent-pi", rows2
-    # #205: _upsert_document now creates references edge (Source → Document)
+    # #205: _upsert_document creates the references edge from the distinct
+    # corpus Source to the document Source (D10: two Source nodes, never a
+    # degenerate self-loop).
     rows3 = proj.g.query(
-        "MATCH (s:Source {url:'test-doc-1'})-[:references]->"
-        "(d:Document {id:'test-doc-1'}) RETURN count(*) > 0"
+        "MATCH (s:Source {url:'corpus://test-doc-1'})-[:references]->"
+        "(d:Source {url:'test-doc-1'}) RETURN count(*) > 0"
     ).result_set
     assert rows3[0][0] is True, "references edge not created by _upsert_document (#205)"
 
@@ -1875,14 +1880,14 @@ def test_upsert_document_partial_update_preserves_search_text(live_proj):
     proj = live_proj
     proj.apply({"type": "DocumentCreated", "id": "doc-p",
                 "title": "Full Title", "topics": ["alpha"], "summary": "Sum"})
-    rows = proj.g.query("MATCH (d:Document {id:'doc-p'}) RETURN d._searchText").result_set
+    rows = proj.g.query("MATCH (s:Source {url:'doc-p'}) RETURN s._searchText").result_set
     assert rows[0][0] and "alpha" in rows[0][0], rows
-    proj.apply({"type": "DocumentCreated", "id": "doc-p", "doc_status": "captured"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-p", "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-p'}) RETURN d._searchText, d.doc_status"
+        "MATCH (s:Source {url:'doc-p'}) RETURN s._searchText, s.needs_extraction"
     ).result_set
     assert "alpha" in rows[0][0], f"_searchText wiped on partial update: {rows[0][0]}"
-    assert rows[0][1] == "captured"
+    assert rows[0][1] is True
 
 
 def test_upsert_event_uses_dict_kind(live_proj):
@@ -1908,7 +1913,7 @@ def test_upsert_event_produces_document(live_proj):
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
         "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
     rows = proj.g.query(
-        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Document) RETURN d.id"
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) RETURN d.id"
     ).result_set
     assert rows and rows[0][0] == "doc-1", rows
     # No Object clone
@@ -1995,42 +2000,138 @@ def test_upsert_document_includes_source_path(live_proj):
     proj.apply({"type": "DocumentCreated", "id": "doc-sp",
                 "title": "With Source", "source_path": "/tmp/test.md"})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath"
+        "MATCH (s:Source {url:'doc-sp'}) RETURN s.sourcePath"
     ).result_set
     assert rows and rows[0][0] == "/tmp/test.md", rows
 
     # Partial update without source_path must preserve existing value
     proj.apply({"type": "DocumentCreated", "id": "doc-sp",
-                "doc_status": "archived"})
+                "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath, d.doc_status"
+        "MATCH (s:Source {url:'doc-sp'}) RETURN s.sourcePath, s.needs_extraction"
     ).result_set
     assert rows[0][0] == "/tmp/test.md", f"sourcePath wiped: {rows[0][0]}"
-    assert rows[0][1] == "archived"
+    assert rows[0][1] is True
 
 
-def test_upsert_document_preserves_doc_status_and_needs_extraction(live_proj):
-    """#133 P0: partial update via _upsert_document must NOT wipe
-    doc_status='captured' or needs_extraction=true (coalesce-null sentinel —
-    the add_document non-null-default bug class from #167)."""
+def test_upsert_document_preserves_needs_extraction_and_retires_doc_status(live_proj):
+    """#133 P0 + D10: a partial update via _upsert_document must NOT wipe
+    needs_extraction=true (coalesce-null sentinel — the add_document
+    non-null-default bug class from #167), and the retired ``doc_status`` must
+    never be written to the node (ONTOLOGY v3.15 §4.4 / adversarial B6)."""
     proj = live_proj
     proj.apply({"type": "DocumentCreated", "id": "doc-133",
                 "title": "Captured", "doc_status": "captured",
                 "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction"
+        "MATCH (s:Source {url:'doc-133'}) RETURN s.doc_status, s.needs_extraction"
     ).result_set
-    assert rows[0][0] == "captured", rows[0][0]
+    assert rows[0][0] is None, f"retired doc_status was written: {rows[0][0]}"
     assert rows[0][1] is True, rows[0][1]
 
-    # Partial update with neither field — must preserve both
+    # Partial update with neither field — must preserve needs_extraction and
+    # must never resurrect the retired doc_status
     proj.apply({"type": "DocumentCreated", "id": "doc-133", "title": "Renamed"})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction, d.title"
+        "MATCH (s:Source {url:'doc-133'}) RETURN s.doc_status, s.needs_extraction, s.title"
     ).result_set
-    assert rows[0][0] == "captured", f"doc_status wiped: {rows[0][0]}"
+    assert rows[0][0] is None, f"retired doc_status was written: {rows[0][0]}"
     assert rows[0][1] is True, f"needs_extraction wiped: {rows[0][1]}"
     assert rows[0][2] == "Renamed"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #5026 (D10) adversarial coverage — retiring the :Document graph label.
+# Declared threat surface (plan §threat): B1 label/key divergence ·
+# B2 derivable-set regression · B3 quota escape · B4 quota over-count ·
+# B5 resurrection residue · B6 retired-field re-write. B3/B4 live in
+# tests/test_quota.py; B5 in tests/test_pointsuperseded_rebuild.py
+# (test_about_document_title_keyed_resolution: the superseded old point
+# keeps zero aboutDocument incidence after rebuild).
+# ══════════════════════════════════════════════════════════════════════
+
+def test_5026_b1_aboutdocument_replay_key_is_url_never_title(live_proj):
+    """B1 (#5026): the label and the replay key move TOGETHER. A
+    title-keyed aboutDocument descriptor is un-replayable and must never be
+    emitted; a url-keyed one resolves to the document :Source. The replay
+    resolver is RESOLVE-ONLY — a miss must never mint a phantom Source."""
+    from tortoise.projection.edges import resolve_structural_target, stub_key
+
+    # emission guard: a target with no `url` yields no descriptor (skip)
+    assert stub_key("aboutDocument", {"title": "Spec"}) is None
+    assert stub_key("aboutDocument", {"url": "u", "title": "Spec"}) \
+        == ("Source", "u")
+
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/spec', title:'Spec', "
+        "documentKind:'report'})")
+    before = proj.g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
+    # a TITLE-keyed descriptor (the old :Document convention) does NOT resolve
+    assert resolve_structural_target(
+        proj.g, "Source", "Spec", "aboutDocument") is None
+    after = proj.g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
+    assert after == before, \
+        "title-keyed aboutDocument descriptor minted a phantom Source"
+    # the SAME node resolves by its identity key (url)
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/spec", "aboutDocument") is not None
+
+
+def test_5026_b1_live_aboutdocument_ignores_non_document_source(live_proj):
+    """B1 (#5026): a session/connector/provenance :Source (no documentKind)
+    is NEVER an aboutDocument target — the `documentKind IS NOT NULL` guard.
+    The fallback is a Subject stub, not a mis-pointed Source."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/prov', title:'ProvOnly', "
+        "sourceKind:'github'})")
+    proj.apply({"type": "DocumentCreated", "id": "doc-b1",
+                "title": "DocB1", "document_kind": "report",
+                "about_entities": ["ProvOnly"]})
+    bad = proj.g.query(
+        "MATCH (s:Source {url:'doc-b1'})-[:aboutDocument]->"
+        "(t:Source {url:'https://x/prov'}) RETURN count(*)").result_set[0][0]
+    assert bad == 0, "a provenance Source became an aboutDocument target"
+    good = proj.g.query(
+        "MATCH (s:Source {url:'doc-b1'})-[:aboutSubject]->"
+        "(sub:Subject {name:'ProvOnly'}) RETURN count(*)").result_set[0][0]
+    assert good == 1, "auto-detect fallback did not mint the Subject stub"
+
+
+def test_5026_b2_derivable_set_unchanged():
+    """B2 (#5026): aboutDocument stays in DERIVABLE_STRUCTURAL_RELS and
+    aboutSource stays out (it is not a real rel) — the target label moved to
+    Source, the REL name did not."""
+    from tortoise.projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS
+    assert "aboutDocument" in DERIVABLE_STRUCTURAL_RELS
+    assert "aboutSource" not in DERIVABLE_STRUCTURAL_RELS
+    assert STRUCTURAL_REL_LABELS["aboutDocument"] == "Source"
+    assert STRUCTURAL_REL_LABELS["extractedFrom"] == "Source"
+
+
+def test_5026_b6_retired_fields_cannot_reenter(live_proj):
+    """B6 (#5026): `content`/`doc_status`/`objectKind`/`status` cannot
+    reappear — neither via the fixed clause NOR the open passthrough. A
+    NON-retired key (`domain`) still rides the passthrough, so the deny-set
+    did not over-reach."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-b6", "title": "B6",
+                "document_kind": "report", "format": "markdown",
+                "content": "SECRET BODY", "doc_status": "captured",
+                "objectKind": "document", "status": "draft",
+                "domain": "legal"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6'}) RETURN s.content, s.doc_status, "
+        "s.objectKind, s.status").result_set[0]
+    assert rows[0] is None, f"retired `content` written: {rows[0]!r}"
+    assert rows[1] is None, f"retired `doc_status` written: {rows[1]!r}"
+    assert rows[2] is None, f"retired `objectKind` written: {rows[2]!r}"
+    assert rows[3] is None, f"retired `status` written: {rows[3]!r}"
+    ok = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6'}) RETURN s.domain, s.format").result_set[0]
+    assert ok[0] == "legal", f"non-retired passthrough key dropped: {ok[0]!r}"
+    assert ok[1] == "markdown", f"fixed-clause `format` dropped: {ok[1]!r}"
 
 
 # ── #214: Vocabulary edge cleanup ──────────────────────────────────────

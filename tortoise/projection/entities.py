@@ -422,12 +422,27 @@ class _EntityHandlers:
         # open-set passthrough (which would let a payload clobber the
         # canonical identity).
         "canonicalUrl", "urlAliases",
+        # D10 (ONTOLOGY v3.15 §4.4/§9.5 Q3): a document is a :Source, and
+        # `format` moves onto :Source. It belongs to the fixed clause so a
+        # caller-supplied `format` lands as a node property here instead of
+        # riding the open passthrough.
+        "format",
         # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
         # the MERGE clause, never persisted verbatim snake_case) and
         # `_searchText` (set by the write path, coalesce-on-create /
         # overwrite-on-hash-diff — §4.1 cycle-4 merge semantics).
         "source_path",
         "_searchText",
+    })
+    # D10 (ONTOLOGY v3.15 §4.4): the document write path now targets a :Source,
+    # so its passthrough skip-set is ``_SOURCE_HANDLED | _DOC_RETIRED``. This
+    # keeps every fixed-clause key off the passthrough AND denies the RETIRED
+    # fields — `content`, `doc_status`, `objectKind` — so they can never
+    # re-enter the graph through the open passthrough (adversarial class B6).
+    # The historical `_DOCUMENT_HANDLED` set is retained as the base so no
+    # previously-handled key becomes an accidental passthrough key.
+    _DOC_RETIRED: frozenset = _DOCUMENT_HANDLED | frozenset({
+        "needs_extraction",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
     # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
@@ -955,7 +970,7 @@ class _EntityHandlers:
         "aboutDocument", "aboutAction", "aboutSource",
     })
     _ENTITY_LINKED_LABELS: frozenset = frozenset({
-        "Session", "Point", "Document", "Event", "Object", "Subject",
+        "Session", "Point", "Event", "Object", "Subject",
         "Source",
     })
     # ONTOLOGY §3.2 triples — the field sets above are their projections, but
@@ -965,18 +980,17 @@ class _EntityHandlers:
     # pinned by the drift test.
     _ENTITY_LINKED_TRIPLES: frozenset = frozenset({
         ("aboutSubject", "Point", "Subject"),
-        ("aboutSubject", "Document", "Subject"),
         ("aboutSubject", "Event", "Subject"),
         ("aboutObject", "Point", "Object"),
-        ("aboutObject", "Document", "Object"),
         ("aboutObject", "Event", "Object"),
         ("aboutObject", "Session", "Object"),
         ("aboutEvent", "Point", "Event"),
-        ("aboutEvent", "Document", "Event"),
         ("aboutPoint", "Event", "Point"),
-        ("aboutDocument", "Event", "Document"),
+        # D10: aboutDocument targets a :Source; the Document-source triples are
+        # dropped (§3.2 does not permit a Source as an aboutSubject/Object/
+        # Event source). Mirrored EXACTLY from session_link.ENTITY_LINKED_TRIPLES.
+        ("aboutDocument", "Event", "Source"),
         ("aboutSource", "Point", "Source"),
-        ("aboutSource", "Document", "Source"),
         ("aboutSource", "Event", "Source"),
         ("aboutAction", "Point", "Point"),
     })
@@ -1809,7 +1823,18 @@ class _EntityHandlers:
         return _classify(result)
 
     def _upsert_document(self, ev: dict) -> None:
-        """MERGE Document node."""
+        """MERGE the document node as a ``:Source`` (D10, ONTOLOGY §4.4).
+
+        A document is a ``:Source`` keyed ``url = <document id>``; there is no
+        ``:Document`` graph label. Node TOPOLOGY is preserved: the document
+        node stays distinct from the corpus ``#205`` Source (``url =
+        source_url``), which keeps its ``references`` edge — the
+        index-completeness gate's ``edge`` clause depends on it, so collapsing
+        the two into one node would make the edge a dropped self-loop and every
+        doc unit permanently incomplete. `content`, `doc_status` and
+        `objectKind` are RETIRED and are never written (nor re-admissible via
+        the open passthrough).
+        """
         did = ev.get("id")
         if not did:
             return
@@ -1841,7 +1866,6 @@ class _EntityHandlers:
         summary = ev.get("summary")
         sid = ev.get("session_id")
         eid = ev.get("event_id")
-        ds = ev.get("doc_status")
         # #133: needs_extraction — explicit signal for --upgrade-all discovery.
         # coalesce-null sentinel: None default so partial updates preserve.
         nx = ev.get("needs_extraction")
@@ -1856,49 +1880,50 @@ class _EntityHandlers:
         # This one is a plain MERGE + SET list (no ON CREATE/ON MATCH), so the
         # conditional REMOVE rides in the SAME atomic query exactly as
         # _upsert_point_props does — emitted only when a new embedding is being
-        # written, so the ``ELSE d.embedding`` preserve branch is untouched.
-        embed_clear = "REMOVE d.embedding " if embedding is not None else ""
+        # written, so the ``ELSE s.embedding`` preserve branch is untouched.
+        # #5026/D10: the node is the document ``:Source`` (retired ``:Document``),
+        # so the REMOVE and the SET list both bind ``s``.
+        embed_clear = "REMOVE s.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (d:Document {id:$id}) " + embed_clear +
-            "SET d.title=coalesce($title, d.title), "
-            "    d.documentKind=coalesce($dk, d.documentKind), "
-            "    d.format=coalesce($fmt, d.format), "
-            "    d.content=coalesce($content, d.content), "
-            "    d.topics=coalesce($topics, d.topics, []), "
-            "    d.summary=coalesce($summary, d.summary, ''), "
-            "    d.sessionId=coalesce($sid, d.sessionId, ''), "
-            "    d.eventId=coalesce($eid, d.eventId, ''), "
-            "    d.doc_status=coalesce($ds, d.doc_status, 'draft'), "
-            "    d.needs_extraction=coalesce($nx, d.needs_extraction, false), "
-            "    d.sourcePath=coalesce($sp, d.sourcePath), "
-            "    d._searchText=coalesce($st, d._searchText, d.title), "
-            "    d.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE d.embedding END, "
-            "    d.updatedAt=$now",
+            "MERGE (s:Source {url:$id}) " + embed_clear +
+            "SET s.id=coalesce(s.id, $id), "
+            "    s.title=coalesce($title, s.title), "
+            "    s.documentKind=coalesce($dk, s.documentKind), "
+            "    s.format=coalesce($fmt, s.format), "
+            "    s.topics=coalesce($topics, s.topics, []), "
+            "    s.summary=coalesce($summary, s.summary, ''), "
+            "    s.sessionId=coalesce($sid, s.sessionId, ''), "
+            "    s.eventId=coalesce($eid, s.eventId, ''), "
+            "    s.needs_extraction=coalesce($nx, s.needs_extraction, false), "
+            "    s.sourcePath=coalesce($sp, s.sourcePath), "
+            "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
+            "    s._searchText=coalesce($st, s._searchText, s.title), "
+            "    s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END, "
+            "    s.updatedAt=$now",
             params={"id": did, "title": ev.get("title", did),
                     "dk": ev.get("document_kind", ""),
                     "fmt": ev.get("format", "markdown"),
-                    "content": ev.get("content"),
                     "topics": topics, "summary": summary, "sid": sid,
-                    "eid": eid, "ds": ds, "nx": nx, "st": st, "sp": sp,
+                    "eid": eid, "nx": nx, "st": st, "sp": sp,
                     "embedding": embedding,
                     "now": _now_iso()},
         )
         # #228: persist arbitrary caller-supplied props (before edge wiring
-        # so that extra props land on the Document node regardless of edge success)
+        # so that extra props land on the Source node regardless of edge
+        # success). D10 retired keys (content/doc_status/objectKind) are denied
+        # here — the fixed clause above already covers every other doc key.
         self._persist_extra_props(
-            "MATCH (n:Document {id: $id})", {"id": did},
-            ev, self._DOCUMENT_HANDLED,
+            "MATCH (n:Source {url: $id})", {"id": did},
+            ev, self._SOURCE_HANDLED | self._DOC_RETIRED,
         )
-        # #205 — wire references edge (Source → Document) for provenance chain.
-        # Epic #900 T3 (§4.1 route pin): under OQ-6 doc ids are `doc_<rel-path>`
-        # ≠ the corpus:// Source url, so the hard-coded did==did auto-wire would
-        # MERGE a PHANTOM Source (url=doc_<rel>, empty contentHash). The
-        # optional `source_url` ev-key override (default falls back to did —
-        # legacy ingest flow byte-identical) routes the #205 link onto the real
-        # Source the indexer created first. The override rides the journaled
-        # DocumentCreated event, so replay re-creates the edge onto the real
-        # Source (S13/T12 split: doc-unit references edges SURVIVE rebuild).
-        self.link_source_to_entity(ev.get("source_url") or did, did, "Document")
+        # #205 — wire references edge (Source → document Source) for provenance
+        # chain. D10: only when the corpus Source is DISTINCT from the document
+        # node; the legacy fallback (no source_url) would otherwise be a
+        # degenerate self-loop. The index path always passes the corpus
+        # `source_url`, so the index-completeness gate's `edge` clause holds.
+        ref = ev.get("source_url")
+        if ref and ref != did:
+            self.link_source_to_entity(ref, did, "Source")
         # #125 — aboutSubject edges when about_entities present (Task 1
         # self-contained: label-agnostic generalization lives in edges.py)
         about = ev.get("about_entities") or []
@@ -2032,19 +2057,21 @@ class _EntityHandlers:
         object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
         if obj:
             if object_type == "Document":
-                # #329: the minted Document id is tenant-influenced (event
+                # #329: the minted document id is tenant-influenced (event
                 # props passthrough) — validate it so it can never be a host
                 # path (the read side also fails closed via resolve_under_base).
                 from tortoise.security import validate_document_id
                 validate_document_id(str(obj))
+                # D10 (ONTOLOGY §4.4): a document is a :Source keyed by url.
                 self.g.query(
-                    "MERGE (d:Document {id:$id}) "
-                    "ON CREATE SET d.title=$id, d.documentKind='transcript'",
+                    "MERGE (s:Source {url:$id}) "
+                    "ON CREATE SET s.id=$id, s.title=$id, "
+                    "              s.documentKind='transcript'",
                     params={"id": obj},
                 )
                 self.g.query(
-                    "MATCH (d:Document {id:$id}), (e:Event {eventId:$eid}) "
-                    "MERGE (e)-[:produces]->(d)",
+                    "MATCH (s:Source {url:$id}), (e:Event {eventId:$eid}) "
+                    "MERGE (e)-[:produces]->(s)",
                     params={"id": obj, "eid": eid},
                 )
             else:
@@ -2431,6 +2458,7 @@ class _EntityHandlers:
             "              s.ingestedAt = $now, "
             "              s.version = 1, "
             "              s.externalId = $ext, "
+            "              s.format = coalesce($fmt, s.format), "
             "              s.sourcePath = coalesce($sp, s.sourcePath), "
             "              s._searchText = $st" + run_clause + " "
             # JOINT-E2E (epic #900 #1032): when the caller carries NO
@@ -2461,7 +2489,11 @@ class _EntityHandlers:
             "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                        THEN $st ELSE s._searchText END",
+            "                        THEN $st ELSE s._searchText END, "
+            # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
+            # supplying it must land on the node, overwriting an existing value
+            # (parity with the old open-passthrough write it replaces).
+            "           s.format = coalesce($fmt, s.format)",
             params={
                 "url": key, "id": sid or key,
                 "cu": canonical,
@@ -2471,6 +2503,7 @@ class _EntityHandlers:
                 "title": ev.get("title", key),
                 "now": _now_iso(),
                 "ext": ev.get("externalId", ""),
+                "fmt": ev.get("format"),
                 "sp": ev.get("source_path"),
                 "st": search_text,
                 **({"rid": merge_run_id} if merge_run_id is not None else {}),
