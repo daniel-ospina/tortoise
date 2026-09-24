@@ -8,8 +8,8 @@ REAL ``tests/test_collision_preflight.py`` against deliberately broken detectors
 and asserts the expected node IDs FAIL, then asserts those same nodes PASS
 against the unmutated tool (the fail-then-pass proof).
 
-Seven mutant directions
------------------------
+Eleven mutant directions
+------------------------
 ``M1`` — the over-blocking defect, verbatim: the committed pre-#4368 fixture
 ``tests/fixtures/collision_preflight_pre_4368.py.txt`` (frozen, NOT read from
 ``origin/main`` — see :func:`_build_m1_mutant`). Every *relaxation* class (the
@@ -46,6 +46,22 @@ under it.
 relaxation removed from ``scan_pr_surface``. The issue's own PR names the
 number in its branch, not its GitHub number, so without the relaxation it
 blocks the lane's own dispatch. The own-PR relaxation class must fail under it.
+
+``M8`` — fail-open deictic claim: the fixed detector with the pre-fix ``this``
+guard restored (``this`` accepted only before a work noun / punctuation / end).
+``Claiming this now.`` reads CLEAN again, the #4368/F1 defect.
+
+``M9`` — fail-open underscore separator: the fixed detector with the number
+separator's punctuation class narrowed back to ``[^\\w]``, so a markup-wrapped
+``Claiming: _#4027_`` stops matching (#4368/F2).
+
+``M10`` — over-blocking prose noun: the fixed detector with the bare ``claim``
+form given the wide number separator too, so ``a false claim, #4027 …``
+refuses a dispatch again (#4368/F4).
+
+``M11`` — fail-open number notations: the fixed detector recognising only the
+``#N`` notation again, so ``GH-N``, ``# N``, an issue URL and the bare-noun
+form stop matching (#4368/F3).
 
 Mechanics (hermetic: no network, no Docker, no FalkorDB)
 --------------------------------------------------------
@@ -113,9 +129,11 @@ M2_MUTANT = (
 M3_ANCHOR = (
     '_CLAIM_WORK_OBJECT_RE = (\n'
     '    r"(?:"\n'
-    '    r"this(?=(?:\\s+(?:" + _CLAIM_DEICTIC_NOUNS + r")s?\\b)|(?:\\s*[^\\w\\s])|$)|"\n'
-    '    r"it|#\\d+|"\n'
+    '    r"this\\b|"\n'
+    '    r"it|#\\s*\\d+|GH-\\d+|"\n'
+    '    r"https?://\\S*?/(?:issues|pull|pulls)/\\d+|"\n'
     '    r"the\\s+(?:" + _CLAIM_WORK_NOUNS + r")s?|"\n'
+    '    r"(?:" + _CLAIM_WORK_NOUNS + r")s?(?=\\s+#\\s*\\d)|"\n'
     '    r"ownership|responsibility"\n'
     '    r")"\n'
     ')\n'
@@ -141,15 +159,72 @@ M4_MUTANT = (
     '            pass\n'
 )
 
-# M5: narrow `_CLAIM_OBJECT_SEP` back to the adjacent-object form (fail-open:
+# M5: narrow the object separators back to the adjacent-object form (fail-open:
 # punctuation between the verb and its issue number stops being detected).
 M5_ANCHOR = (
-    '_CLAIM_OBJECT_SEP = r"(?:[^\\w]*(?=#\\d)|\\s+|[-/])"\n'
+    '_CLAIM_OBJECT_SEP_ING = r"(?:" + _CLAIM_NUMBER_SEP + r"|\\s+|[-/])"\n'
+    '_CLAIM_OBJECT_SEP_BARE = r"(?:" + _CLAIM_NUMBER_SEP_BARE + r"|\\s+|[-/])"\n'
 )
 M5_MARKER = "M5-MUTANT(#4368 punctuation)"
 M5_MUTANT = (
     f'# {M5_MARKER}: the object must be ADJACENT again (the fail-open defect).\n'
-    '_CLAIM_OBJECT_SEP = r"(?:\\s+|[-/]|(?=#\\d))"\n'
+    '_CLAIM_OBJECT_SEP_ING = r"(?:\\s+|[-/]|(?=#\\d))"\n'
+    '_CLAIM_OBJECT_SEP_BARE = r"(?:\\s+|[-/]|(?=#\\d))"\n'
+)
+
+# M8: restore the pre-fix `this` guard — the deictic object is accepted only
+# when a work noun / punctuation / end follows (fail-open: "Claiming this now."
+# reads CLEAN, the #4368/F1 defect).
+M8_ANCHOR = '    r"this\\b|"\n'
+M8_MARKER = "M8-MUTANT(#4368/F1 deictic)"
+M8_MUTANT = (
+    f'    # {M8_MARKER}: `this` is guarded by the FOLLOWING word again.\n'
+    '    r"this(?=(?:\\s+(?:" + _CLAIM_WORK_NOUNS + r"|one)s?\\b)|(?:\\s*[^\\w\\s])|$)|"\n'
+)
+
+# M9: put `_` back in the WORD class of the number separator (fail-open: a
+# markup-wrapped reference `Claiming: _#4027_` stops being detected, #4368/F2).
+M9_ANCHOR = (
+    '_CLAIM_NUMBER_SEP = (\n'
+    '    r"(?:"\n'
+    '    r"[^A-Za-z0-9]*"\n'
+    '    r"(?:<[A-Za-z/][^<>\\s]{0,31}>[^A-Za-z0-9]*)*"\n'
+    '    r"(?=#\\s*\\d)"\n'
+    '    r")"\n'
+    ')\n'
+)
+M9_MARKER = "M9-MUTANT(#4368/F2 underscore)"
+M9_MUTANT = (
+    f'_CLAIM_NUMBER_SEP = (  # {M9_MARKER}: `_` is a word char again.\n'
+    '    r"(?:"\n'
+    '    r"[^\\w]*"\n'
+    '    r"(?:<[A-Za-z/][^<>\\s]{0,31}>[^A-Za-z0-9]*)*"\n'
+    '    r"(?=#\\s*\\d)"\n'
+    '    r")"\n'
+    ')\n'
+)
+
+# M10: give the bare NOUN form the wide separator too (over-blocking: a prose
+# noun followed by a punctuated number refuses a dispatch again, #4368/F4).
+M10_ANCHOR = (
+    '_CLAIM_OBJECT_SEP_BARE = r"(?:" + _CLAIM_NUMBER_SEP_BARE + r"|\\s+|[-/])"\n'
+)
+M10_MARKER = "M10-MUTANT(#4368/F4 prose noun)"
+M10_MUTANT = (
+    f'# {M10_MARKER}: the bare NOUN form gets the wide separator again.\n'
+    '_CLAIM_OBJECT_SEP_BARE = r"(?:" + _CLAIM_NUMBER_SEP + r"|\\s+|[-/])"\n'
+)
+
+# M11: recognise only the `#N` notation again (fail-open: `GH-N`, `# N`, an
+# issue URL and the bare-noun form stop being detected, #4368/F3).
+M11_ANCHOR = (
+    '    r"it|#\\s*\\d+|GH-\\d+|"\n'
+    '    r"https?://\\S*?/(?:issues|pull|pulls)/\\d+|"\n'
+)
+M11_MARKER = "M11-MUTANT(#4368/F3 notations)"
+M11_MUTANT = (
+    f'    # {M11_MARKER}: only the `#N` notation is recognised again.\n'
+    '    r"it|#\\d+|"\n'
 )
 
 # M6: normalise only `refs/heads/` again (over-blocking: a lane's own PUSHED
@@ -183,6 +258,10 @@ M4 = "M4_fail_open(terse-weak-arm)"
 M5 = "M5_fail_open(claim-separator)"
 M6 = "M6_over_blocking(own-pushed-branch)"
 M7 = "M7_over_blocking(own-pr)"
+M8 = "M8_fail_open(deictic-adverbial)"
+M9 = "M9_fail_open(underscore-separator)"
+M10 = "M10_over_blocking(prose-noun-number)"
+M11 = "M11_fail_open(number-notations)"
 
 
 @dataclass(frozen=True)
@@ -198,7 +277,9 @@ COVERAGE: tuple[Coverage, ...] = (
     Coverage(
         "relaxation/claim arm: the prose NOUN no longer arms the gate",
         M1,
-        ("test_4368_prose_noun_does_not_arm_the_gate",),
+        ("test_4368_prose_noun_does_not_arm_the_gate",
+         "test_4368_deictic_object_with_adverbial_still_blocks",
+         "test_4368_prose_noun_with_punctuated_number_does_not_arm_the_gate"),
     ),
     Coverage(
         "relaxation/F3: the whole TERSE arm is weak (advisory, non-blocking)",
@@ -280,6 +361,27 @@ COVERAGE: tuple[Coverage, ...] = (
         "relaxation/own PR head branch (not just number==issue) is weak",
         M7,
         ("test_4375_own_pr_head_branch_is_weak_not_blocking",),
+    ),
+    # -- the #4368 false-CLEAN follow-ups (F1/F2/F4) + F3 notations ----------
+    Coverage(
+        "fail-open/claim arm: `Claiming this now.` (deictic + adverbial) blocks",
+        M8,
+        ("test_4368_deictic_object_with_adverbial_still_blocks",),
+    ),
+    Coverage(
+        "fail-open/claim number: `_`-emphasis separator still blocks",
+        M9,
+        ("test_4368_underscore_emphasis_between_verb_and_object_still_blocks",),
+    ),
+    Coverage(
+        "relaxation/prose NOUN + punctuated number does not arm the gate",
+        M10,
+        ("test_4368_prose_noun_with_punctuated_number_does_not_arm_the_gate",),
+    ),
+    Coverage(
+        "fail-open/claim number notations (`GH-N`, `# N`, URL, HTML) still block",
+        M11,
+        ("test_4368_other_number_notations_still_block",),
     ),
 )
 
@@ -450,6 +552,14 @@ class CollisionPreflightMutationTest(unittest.TestCase):
             fixed_text, M6_ANCHOR, M6_MUTANT, M6_MARKER, "M6")
         m7_text = _apply_mutation(
             fixed_text, M7_ANCHOR, M7_MUTANT, M7_MARKER, "M7")
+        m8_text = _apply_mutation(
+            fixed_text, M8_ANCHOR, M8_MUTANT, M8_MARKER, "M8")
+        m9_text = _apply_mutation(
+            fixed_text, M9_ANCHOR, M9_MUTANT, M9_MARKER, "M9")
+        m10_text = _apply_mutation(
+            fixed_text, M10_ANCHOR, M10_MUTANT, M10_MARKER, "M10")
+        m11_text = _apply_mutation(
+            fixed_text, M11_ANCHOR, M11_MUTANT, M11_MARKER, "M11")
 
         # 2. Materialize the trees. The FIXED tree must be byte-identical to
         #    the real tool, so the only variable between runs is the tool text.
@@ -465,6 +575,10 @@ class CollisionPreflightMutationTest(unittest.TestCase):
             M5: _make_tree(root / "m5", m5_text),
             M6: _make_tree(root / "m6", m6_text),
             M7: _make_tree(root / "m7", m7_text),
+            M8: _make_tree(root / "m8", m8_text),
+            M9: _make_tree(root / "m9", m9_text),
+            M10: _make_tree(root / "m10", m10_text),
+            M11: _make_tree(root / "m11", m11_text),
         }
 
         # 3. Every mutant must actually run.
@@ -526,7 +640,8 @@ class CollisionPreflightMutationTest(unittest.TestCase):
             module.COVERAGE = (*saved_coverage, fake)
             synthetic = _SyntheticRun({"test_never_fails_under_m1": False})
             type(self)._runs = {
-                d: synthetic for d in (M1, M2, M3, M4, M5, M6, M7)
+                d: synthetic for d in (M1, M2, M3, M4, M5, M6, M7,
+                                       M8, M9, M10, M11)
             }
             with self.assertRaises(AssertionError) as ctx:
                 self.test_every_declared_class_is_pinned_by_a_failing_node()
@@ -569,7 +684,9 @@ class CollisionPreflightMutationTest(unittest.TestCase):
         self.assertIn("VERDICT", self._m1_source)
         for direction, marker in ((M2, M2_MARKER), (M3, M3_MARKER),
                                   (M4, M4_MARKER), (M5, M5_MARKER),
-                                  (M6, M6_MARKER), (M7, M7_MARKER)):
+                                  (M6, M6_MARKER), (M7, M7_MARKER),
+                                  (M8, M8_MARKER), (M9, M9_MARKER),
+                                  (M10, M10_MARKER), (M11, M11_MARKER)):
             text = (self._runs[direction].tree / "tools" /
                     "collision_preflight.py").read_text()
             self.assertIn(marker, text,

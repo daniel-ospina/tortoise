@@ -1226,6 +1226,111 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("VERDICT: COLLISION", out)
                 self.assertIn("claim-style comment", out)
 
+    def test_4368_deictic_object_with_adverbial_still_blocks(self):
+        # #4368/F1. The deictic `this` must not be guarded by the word that
+        # FOLLOWS it. `_CLAIM_WORK_OBJECT_RE` accepted `this` only when a work
+        # noun, punctuation, or end-of-string followed, so "Claiming this
+        # now." — the most terse and most common handoff sentence in this
+        # workflow — read fully CLEAN (not even advisory: `_TERSE_CLAIM_RE`
+        # does not cover it). That is a FALSE CLEAN, the direction that
+        # duplicates work. What separates the readings is the DETERMINER before
+        # the verb: with one, `claim` is the NOUN ("a claim this strong");
+        # without one, `claim this <any word>` is the verb governing the
+        # deictic object.
+        for body in ("Claiming this now.", "Claiming this as mine.",
+                     "Claiming this for myself.", "Claiming this on lane W3.",
+                     "claim this now", "Claiming this.", "Claiming it now."):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("claim-style comment", out)
+        # The determiner reading stays CLEAN — the fix must not re-arm it.
+        for body in ("a claim this strong", "the claim this strong",
+                     "This is a false claim to users."):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+
+    def test_4368_underscore_emphasis_between_verb_and_object_still_blocks(self):
+        # #4368/F2. The number separator's punctuation class excluded `_`
+        # because Python's `\w` includes it, yet the VERB pattern already models
+        # `_` as markdown emphasis — so a markup-wrapped reference
+        # (`Claiming: _#4027_`) read CLEAN. One character-class hole in the
+        # tool's own declared rule: `_` is punctuation here.
+        for body in ("Claiming: _#3061_", "Claiming: __#3061__",
+                     "Claiming:_#3061", "Claiming _#3061_",
+                     "Claiming: *#3061*"):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+
+    def test_4368_prose_noun_with_punctuated_number_does_not_arm_the_gate(self):
+        # #4368/F4. The #4368 narrowing exists to stop a prose NOUN from
+        # refusing a dispatch. The widened number separator re-armed it for a
+        # NOUN followed by a number: "This is a false claim, #3061 is
+        # unrelated." collided on this branch and was CLEAN on the parent. A
+        # gate that always fires is a gate that gets worked around, and in this
+        # repo the mandated workflow posts evidence comments — an issue whose
+        # evidence reads "…claim, #N…" would become undispatchable. A bare
+        # `claim` is the NOUN form too, so it gets the wide separator only for
+        # a claim-scope marker; a gerund (`claiming`) keeps it.
+        for body in ("This is a false claim, #3061 is unrelated.",
+                     "This is a false claim, #4027 is unrelated.",
+                     "There is a claim. #3061 is closed."):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+        # ...but the punctuation that IS a claim still blocks.
+        for body in ("Claiming, #4027", "claim:#4027", "claim #4027"):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+
+    def test_4368_other_number_notations_still_block(self):
+        # #4368/F3 (residual). A genuine claim that carries the reference in
+        # another notation must still block. The machine-unambiguous notations
+        # are covered here; a BARE number with no `#`/`GH-`/URL marker
+        # ("Claiming 3061") is a DOCUMENTED residual — asserted CLEAN below so
+        # the residual is pinned rather than silently claimed as fixed.
+        for body in ("Claiming issue #3061", "Claiming GH-3061",
+                     "Claiming # 3061",
+                     "Claiming https://github.com/owner/repo/issues/3061",
+                     "Claiming: <b>#3061</b>"):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+        self.gh_fixtures(issue=self.issue_payload(comments=[
+            ("other-agent", "Claiming 3061"),
+        ]))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+
     # ── claim classification: a blocking verb arm + a weak terse arm ────────
 
     def test_classification_is_claim_re_without_tiers(self):

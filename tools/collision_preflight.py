@@ -375,52 +375,116 @@ _STRUCTURAL = {
 # governing a work object or a first-person/modal subject; a negated verb
 # ("I am not claiming this") is excluded.
 #
-# Work objects the verb may govern: deictic (`claim this`, `claiming this one`,
-# `claim it`), an issue number (`claim #4027`, attached `claiming#4027`), a
-# determined work noun (`the PR`, `the epic`, `the issue`, …),
-# `ownership`/`responsibility`, or an attached `-`/`/` joiner (`claim-this`).
-# `this` is guarded so an adjective phrase ("a claim this strong") is not read
-# as the deictic object. RESIDUAL (deliberate, fail-CLOSED): a prose noun
-# followed by a DETERMINED work object — "the claim the PR makes" — is
-# shape-identical to a verb phrase and still matches; deciding it needs the
-# determiner's antecedent, and a false COLLISION is the safe direction.
+# Work objects the verb may govern: deictic (`claim this`, `claiming this`,
+# `claim it`), an issue number (`claim #4027`, `claiming # 4027`, the attached
+# `claiming#4027`, `claiming GH-4027`, or a pasted issue URL), a determined
+# work noun (`the PR`, `the epic`, `the issue`, …), a bare work noun
+# immediately followed by an issue number (`claiming issue #4027`), or
+# `ownership`/`responsibility`.
+#
+# `this` is NOT guarded by the word that follows it. It was, to reject the
+# adjective phrase "a claim this strong", but keying on the following word
+# also rejected the verb phrase "Claiming this now." — the most terse and
+# most common handoff sentence in this workflow — and read it fully CLEAN,
+# which is strictly worse than a false refusal (#4368/F1). What separates the
+# two readings is the DETERMINER before the verb, not the word after `this`:
+# a singular count noun needs a determiner, so a determiner-free `claim this
+# <anything>` is the verb governing the deictic object. That check lives in
+# `_CLAIM_DETERMINER_LBEHINDS` below.
+# RESIDUAL (deliberate, fail-CLOSED): an ADJECTIVE between the determiner and
+# the noun — "a false claim this strong" — puts the determiner behind a
+# word the fixed-width lookbehind cannot skip, so that shape still reads as a
+# claim; a false COLLISION is the safe direction.
 _CLAIM_WORK_NOUNS = (
     r"pull\s+request|worktree|problem|feature|ticket|branch|defect|issue|"
     r"task|work|fix|bug|item|epic|pr|job"
 )
-_CLAIM_DEICTIC_NOUNS = _CLAIM_WORK_NOUNS + r"|one"
 _CLAIM_WORK_OBJECT_RE = (
     r"(?:"
-    r"this(?=(?:\s+(?:" + _CLAIM_DEICTIC_NOUNS + r")s?\b)|(?:\s*[^\w\s])|$)|"
-    r"it|#\d+|"
+    r"this\b|"
+    r"it|#\s*\d+|GH-\d+|"
+    r"https?://\S*?/(?:issues|pull|pulls)/\d+|"
     r"the\s+(?:" + _CLAIM_WORK_NOUNS + r")s?|"
+    r"(?:" + _CLAIM_WORK_NOUNS + r")s?(?=\s+#\s*\d)|"
     r"ownership|responsibility"
     r")"
 )
 # The verb, with markdown emphasis runs CONSUMED and a trailing assertion that
 # excludes `*`/`_` (so `**claim**` is not split) and further word characters
-# (so `claims` is not `claim`).
-_CLAIM_VERB_RE = r"[*_]{0,3}claim(?:ing)?[*_]{0,3}(?![A-Za-z0-9*_])"
-# What may separate the verb from its object. Adjacency is NOT what makes the
-# verb a verb: punctuation between a claim verb and the issue number it governs
-# is ordinary ("Claiming: #4027", "claiming — #4027", "claiming (#4027)"), so
-# before a NUMBER the separator may be any run of non-word characters —
-# including none, for the attached `claim#4027`. A number is the
-# machine-unambiguous work object (no prose reading puts a bare `#N` directly
-# after the noun "claim"), which is why the widening is safe here. Before a WORD
-# object the separator stays tight (whitespace, or an attached `-`/`/` joiner).
-# That is deliberate, not an oversight: punctuation before a determined work
-# noun is genuinely ambiguous — "a false claim, the PR was merged" is the NOUN
+# (so `claims` is not `claim`). Spelled twice — `ing` vs bare — because the
+# separator a NUMBER may carry depends on the form: a gerund is unambiguously
+# a verb, while the bare form is ALSO the NOUN form (see
+# `_CLAIM_OBJECT_SEP_BARE`).
+_CLAIM_VERB_BASE = r"[*_]{0,3}claim"
+_CLAIM_VERB_TAIL = r"[*_]{0,3}(?![A-Za-z0-9*_])"
+_CLAIM_VERB_RE = _CLAIM_VERB_BASE + r"(?:ing)?" + _CLAIM_VERB_TAIL
+_CLAIM_VERB_ING = _CLAIM_VERB_BASE + r"ing" + _CLAIM_VERB_TAIL
+_CLAIM_VERB_BARE = _CLAIM_VERB_BASE + _CLAIM_VERB_TAIL
+# Separator before an issue NUMBER. Adjacency is NOT what makes the verb a
+# verb: ordinary punctuation between a claim verb and the number it governs is
+# normal writing, and none at all for the attached "claim#4027". `_` counts as
+# PUNCTUATION here (#4368/F2): Python's `\w` includes it, yet the verb pattern
+# already models `_` as markdown emphasis, so a markup-wrapped reference must
+# not read CLEAN. A simple HTML tag run is punctuation too (a pasted rendered
+# comment, "Claiming: <b>#4027</b>").
+_CLAIM_NUMBER_SEP = (
+    r"(?:"
+    r"[^A-Za-z0-9]*"
+    r"(?:<[A-Za-z/][^<>\s]{0,31}>[^A-Za-z0-9]*)*"
+    r"(?=#\s*\d)"
+    r")"
+)
+# A bare `claim` is the NOUN form as well as the imperative, and a prose noun is
+# followed by CLAUSE punctuation: "a false claim, #4027 is unrelated" is exactly
+# that shape, so the widened separator must not re-arm it (#4368/F4 - this is
+# the false-refusal class the #4368 narrowing removes, and in this repo the
+# mandated workflow posts evidence comments, so those comments would make an
+# issue undispatchable). The bare form therefore gets the wide separator only
+# for the ATTACHED form (the number directly on the word) or for a claim-scope
+# marker (`:`, a bracket, a dash); a comma/period run alone is the NOUN reading.
+# The comma case that IS a claim - "Claiming, #4027" - is a gerund, and the
+# gerund keeps the wide separator.
+_CLAIM_SCOPE_PUNCT = r"[:([{<\u2013\u2014]"
+_CLAIM_NUMBER_SEP_BARE = (
+    r"(?:"
+    r"(?=#\s*\d)|"
+    r"[^A-Za-z0-9]*" + _CLAIM_SCOPE_PUNCT + r"[^A-Za-z0-9]*"
+    r"(?:<[A-Za-z/][^<>\s]{0,31}>[^A-Za-z0-9]*)*"
+    r"(?=#\s*\d)"
+    r")"
+)
+# What may separate the verb from its object. Before a WORD object the
+# separator stays tight (whitespace, or an attached `-`/`/` joiner). That is
+# deliberate, not an oversight: punctuation before a determined work noun is
+# genuinely ambiguous — "a false claim, the PR was merged" is the NOUN
 # followed by a new clause, not the verb governing an object — and avoiding
-# exactly that misreading is why the object requirement exists. Widening it
-# there would re-arm the bare noun the #4368 narrowing removed.
-_CLAIM_OBJECT_SEP = r"(?:[^\w]*(?=#\d)|\s+|[-/])"
+# exactly that misreading is why the object requirement exists.
+_CLAIM_OBJECT_SEP_ING = r"(?:" + _CLAIM_NUMBER_SEP + r"|\s+|[-/])"
+_CLAIM_OBJECT_SEP_BARE = r"(?:" + _CLAIM_NUMBER_SEP_BARE + r"|\s+|[-/])"
+
+# A determiner immediately before the claim verb marks the NOUN reading ("the
+# claim that X", "a claim, #N", "any claim this strong"), so the bare-verb arm
+# must not START there. A determiner-free `claim` is the verb, which is what
+# licenses reading the following `this` as its object. Fixed-width negative
+# lookbehinds, one per determiner - the same technique as the negators below.
+_CLAIM_DETERMINER_LBEHINDS = (
+    r"(?<!\ba )(?<!\ban )(?<!\bthe )(?<!\bthis )(?<!\bthat )"
+    r"(?<!\bthese )(?<!\bthose )(?<!\bany )(?<!\bno )(?<!\bmy )"
+    r"(?<!\bour )(?<!\byour )(?<!\btheir )(?<!\bits )(?<!\bhis )"
+    r"(?<!\bher )(?<!\bsuch )(?<!\beach )(?<!\bevery )"
+    r"(?<!\banother )(?<!\bone )(?<!\bwhich )(?<!\bwhose )"
+)
 
 # A negator adjacent to the claim verb means the claim was DECLINED, not made
 # ("I am not claiming this", "never claim this", "won't claim it", "without
 # claiming the issue"). Fixed-width negative lookbehinds, so each phrase is
 # explicit; a negated subject outside this set ("no lane is claiming this") is a
 # residual fail-CLOSED false positive.
+# The object is closed with a NON-ALNUM assertion, not `\b`: a markdown
+# emphasis run after the number (`_#4027_`, `__#4027__`) is punctuation, and
+# `_` is a word character to `\b`, so `\b` would reject the wrapped reference
+# that `_CLAIM_NUMBER_SEP` exists to accept (#4368/F2). Digits and letters are
+# still excluded, so `#3061` does not match inside `#30612`.
 _CLAIM_RE = re.compile(
     r"(?i)(?:"
     r"/claim\b|"
@@ -428,8 +492,13 @@ _CLAIM_RE = re.compile(
     r"(?<!\bno longer )(?<!\bnobody is )(?<!\bno one is )(?<!\bnone is )"
     r"(?:\b(?:i|we)(?:'?(?:ll|m|re))?\s+"
     r"(?:(?:will|would|can|could|am|are)\s+)?" + _CLAIM_VERB_RE + r"|"
-    r"(?<![A-Za-z0-9])" + _CLAIM_VERB_RE + _CLAIM_OBJECT_SEP
-    + _CLAIM_WORK_OBJECT_RE + r"\b"
+    + _CLAIM_DETERMINER_LBEHINDS
+    + r"(?:"
+    r"(?<![A-Za-z0-9])" + _CLAIM_VERB_ING + _CLAIM_OBJECT_SEP_ING
+    + _CLAIM_WORK_OBJECT_RE + r"(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9])" + _CLAIM_VERB_BARE + _CLAIM_OBJECT_SEP_BARE
+    + _CLAIM_WORK_OBJECT_RE + r"(?![A-Za-z0-9])"
+    r")"
     r")"
     r")"
 )
