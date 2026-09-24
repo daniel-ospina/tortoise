@@ -15,6 +15,9 @@ import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED } from './c
 import { wizardStageLabel } from './wizardFlow.js'
 import { setupGuide } from './setupGuide.js'
 import { stripComments } from './testSupport.js'
+// #4880/#4365: the live wizard prompt bodies moved from main.jsx into this
+// JSX-free module, so this ratchet asserts them through the RENDER.
+import { wizardPromptText } from './wizardPrompts.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -218,9 +221,11 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
 
   // Quote-aware strip, then excision of the ARCHIVED wizard block: dead code
-  // at LEGACY_WIZARD_ARCHIVED = false, but it must stay byte-identical for the
-  // A0 rollback path (main.jsx:2459-2462), so it is excluded from the scan
-  // rather than edited.
+  // at LEGACY_WIZARD_ARCHIVED = false, excluded from the vocab scan so its
+  // legacy copy cannot pollute the live-surface ratchet. #4335 intentionally
+  // edited its welcome plan-chooser fallback (marketing link → honest disabled
+  // CTA), so the slice's line-count canary below is kept in sync rather than
+  // the block being frozen.
   const strip = stripComments(src)
 
   // Scan-coverage self-test: the connector line is JSX TEXT whose tail
@@ -248,12 +253,14 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   assert.notEqual(markerAt, -1, 'excision marker not found after anchor — refusing a slice to the file edge')
   const end = markerAt + MARKER.length
   const lineStart = strip.lastIndexOf('\n', anchor) + 1
-  // raw main.jsx 6577..6854; the same slice is 279 split('\n') elements on the
-  // STRIPPED source (end is a stripped-source index — slice `strip`, not `src`)
+  // The same slice is 278 split('\n') elements on the STRIPPED source (end is a
+  // stripped-source index — slice `strip`, not `src`). Was 279 before #4335
+  // replaced the archived wizard's welcome plan-chooser fallback (a marketing
+  // "See pricing" link) with the honest disabled UpgradeCta — one line shorter.
   const E = strip.slice(lineStart, end)
   assert.match(E, /^ *\{LEGACY_WIZARD_ARCHIVED && welcomeOriented && \(/m)
   assert.ok(E.trimEnd().endsWith(')}'))
-  assert.equal(E.split('\n').length, 279)
+  assert.equal(E.split('\n').length, 278)
   assert.match(strip.slice(end), /^ *<\/>/)
 
   // Scan = the whole file, minus the archived block when the flag is off. Flip
@@ -310,11 +317,32 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   const POSITIVES = [
     [/card-label">\s*Memories</, 'the point_count card is labelled "Memories"'],
     [/file your first memory/i, 'live connect caption carries the anchor'],
-    [/file my first memory/i, 'live prompt bodies carry the anchor (not just the caption)'],
     [/two ways to add\s+memory/,
       'the live first-contact empty state glosses the anchor (#3832 D5 copy)'],
   ]
   for (const [re, label] of POSITIVES) assert.ok(re.test(scan), label)
+
+  // #4880/#4365: the live prompt bodies MOVED out of main.jsx into
+  // wizardPrompts.js. A ratchet that kept scanning only main.jsx would silently
+  // lose coverage of the file that now holds them, so the moved copy is
+  // ratcheted in its new home — and the anchor is asserted through the RENDER
+  // (what the agent actually receives), which is what the old
+  // `[/file my first memory/i, 'live prompt bodies…']` entry was reaching for
+  // through the source text.
+  const promptsSrc = readFileSync(join(__dirname, 'wizardPrompts.js'), 'utf8')
+  assert.deepEqual(promptsSrc.match(/\bpoints?\b/gi) ?? [], [],
+    'new "point" vocabulary in wizardPrompts.js — the live wizard copy')
+  const rendered = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web']
+    .flatMap((h) => [1, 2].map((s) => wizardPromptText(h, s, 'tk_test', 'included')))
+  assert.ok(rendered.some((p) => p.includes('tortoise_create_point')),
+    'precondition: a rendered prompt carries the create_point instruction')
+  for (const p of rendered) {
+    if (!p.includes('tortoise_create_point')) continue
+    assert.match(p, /file my first memory/i,
+      'rendered live prompt carries the anchor (not just the caption)')
+    assert.ok(!/\bpoints?\b/i.test(p),
+      `rendered live prompt drifted to "point" jargon: ${JSON.stringify(p)}`)
+  }
 
   // BINDING — the ratchet must read a STRIPPED view. Two things hold this in
   // place: (1) `scan`/`strip` are asserted to be provably not the raw source,

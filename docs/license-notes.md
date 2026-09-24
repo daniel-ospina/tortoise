@@ -165,7 +165,7 @@ so it is served at `https://app.premiselabs.co/skills/LICENSE`.
 
 **Residual — the notice does not travel inside an installed copy (partially closed, see below).**
 `install-tortoise-skills.sh` fetches only `$SKILLS_BASE/<name>/SKILL.md`; it
-never fetches `LICENSE`. A customer who runs the installer gets four skills
+never fetches `LICENSE`. A customer who runs the installer gets three skills
 with no licence notice on disk, so MIT's "included in all copies" condition is
 met for the *served tree* the directory licence covers, but not for the
 installed copy — the artifact most consumers actually receive. The installer
@@ -175,8 +175,12 @@ harness dir (a write-logic change, owned by #4327's lane); add the notice once
 **upstream** in the MIT repo's per-file content; or inject the notice into the
 **served output only** (a build-time rewrite of `dist/skills/*/SKILL.md`, which
 leaves the in-tree bytes — and so the
-onboarding byte-identity contract — untouched and reaches every installed copy,
-including `tortoise-onboarding`, which has no upstream counterpart). The
+onboarding byte-identity contract — untouched and reaches every installed copy
+— under #4365 that is the three reusable capabilities: `tortoise-onboarding` is
+now delivered as INSTRUCTIONS and is not installed by the current
+`SKILLS_VERSION=v3` installer. A copy an earlier v2 installer already put on
+disk is deliberately left in place by v3 (#4327 preservation), so that copy
+stays outside this notice-injection reach). The
 mechanism adopted for the *installer* half — the notice in the script's own
 header — does **not** close this residual: an installed `SKILL.md` still holds
 no notice of its own. Tracked on **#4398**, not absorbed here; the first
