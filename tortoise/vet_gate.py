@@ -504,15 +504,6 @@ def _content_texts(embed_list: object) -> set[str]:
     return out
 
 
-def _identity_texts(embed_list: object) -> set[str]:
-    """Normalized identity + content of every point/event — the embedder's MINT
-    surface (its #2552 pre-pass materializes whatever text an operator wrote)."""
-    out: set[str] = set()
-    for section, _index, item in _iter_items(embed_list):
-        out |= _item_text_variants(section, item)
-    return out
-
-
 def _survives(section: str, item: Mapping[str, Any],
               after: object) -> bool:
     """Whether ``item`` is still present in ``after`` (value equality).
@@ -521,10 +512,25 @@ def _survives(section: str, item: Mapping[str, Any],
     surface — the distinction the carry-forward pool rests on. Equality rather
     than identity: a list may be rebuilt around equal dicts, and a value-equal
     item is the same item for every purpose here.
+
+    Assumes JSON-shaped items (acyclic, from the extractor) — the shape both
+    ends of the comparison in fact have (``_run_vet_pass`` compares a list to
+    its own post-``apply_vet`` revision, which keeps survivors by identity). A
+    comparison that RAISES is treated as *survived*, the fail-open direction: a
+    wrong keep is noise, a wrong drop is memory loss. A non-reflexive value
+    (``float('nan')`` in a rebuilt list) is the one case that compares unequal
+    without raising and would read as a removal; it needs a hand-built list to
+    reach, since the extractor's lists do not carry NaN.
     """
-    return any(item == other
-               for other in _section_items(after, section)
-               if isinstance(other, Mapping))
+    for other in _section_items(after, section):
+        if not isinstance(other, Mapping):
+            continue
+        try:
+            if item == other:
+                return True
+        except Exception:  # an incomparable value is not a removal
+            return True
+    return False
 
 
 def _entity_map(embed_list: object) -> dict[str, Mapping[str, Any]]:
@@ -582,21 +588,18 @@ def removal_pool(before: object, after: object) -> dict:
     Derived by diff, not by re-reading the verdicts, so a *downgraded* discard
     (the Layer-1 guard) correctly contributes nothing to the pool.
 
-    **A removal is an absent ITEM, not a text missing from a surface.** An
-    earlier revision collected ``identity(before) - content(after)``, which is a
-    surface difference, not a removal diff: every surviving point/event carrying
-    a ``name`` contributed that name, because a name is in the identity surface
-    and not in the content surface. The union pass then pruned operators naming
-    a survivor — with ``TORTOISE_VET=1``, **no arbiter, and nothing discarded on
-    either pass**, an operator on a surviving point's name was silently dropped
-    and the warning claimed the endpoint "was discarded" (verified end-to-end
-    through ``extract_session_v2``). Only genuinely absent items contribute:
-    their identity *and* content enter ``removed_texts``, because the #2552 mint
-    materialises whatever an operator wrote.
+    **A removal is an absent ITEM, not a text missing from a surface.** Every
+    collected text is the identity *and* content of an item with no value-equal
+    counterpart in ``after``, because the #2552 mint materialises whichever form
+    an operator wrote. Deriving the set from a surface difference instead (the
+    shape this replaced) invents removals for every surviving item that carries
+    a ``name`` — a name is in the identity surface and not in the content
+    surface — which pruned operators naming a survivor.
 
-    An item dropped between ``before`` and ``after`` by merge-dedup counts as
-    removed, which is correct — it is absent from the list the embedder sees, so
-    an endpoint on it must not survive to be re-minted.
+    Whether a surviving item *shields* one of these texts is decided in
+    :func:`apply_vet`, on the RESOLUTION surface (content only, plus entity
+    names): a survivor's name does not resolve an endpoint, so it must not
+    shield one.
     """
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)

@@ -687,6 +687,23 @@ def test_removal_pool_carries_only_items_actually_absent():
     assert not any("discarded" in w for w in warnings)
 
 
+def test_an_incomparable_item_is_treated_as_survived():
+    """A comparison that RAISES must read as *survived* — the fail-open
+    direction the module's failure policy requires (a wrong keep is noise, a
+    wrong drop is memory loss)."""
+    class Bomb(dict):
+        def __eq__(self, other):
+            raise RecursionError("cyclic")
+
+    before = {"entities": [], "events": [],
+              "points": [Bomb({"content": "C", "pointKind": "statement"})],
+              "operators": []}
+    after = {"entities": [], "events": [],
+             "points": [Bomb({"content": "C", "pointKind": "statement"})],
+             "operators": []}
+    assert vg.removal_pool(before, after)["removed_texts"] == set()
+
+
 def test_a_genuinely_removed_item_still_fills_the_pool():
     """The other side of the same rule: an item that IS absent from ``after``
     contributes its identity AND its content — the #2552 mint materialises
