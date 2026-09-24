@@ -3156,6 +3156,17 @@ def _canon_token(t: str) -> str:
     """A token with every non-word character removed, so that one word's
     spellings agree across apostrophe codepoints."""
     return re.sub(r"[^\w]", "", t)
+
+
+def _apostrophe_free(t: str) -> str:
+    """A token with its apostrophes removed and everything else kept.
+
+    The right canonicalisation where the token is CONTENT: removing every
+    non-word character would also collapse "re-sign" onto "resign" and
+    "co-op" onto "coop", and an internal separator that changes the word is a
+    content substitution the ownership test has to see.
+    """
+    return t.replace("'", "")
 # Non-Latin scripts, by the codepoint block that identifies them.
 _SCRIPT_BLOCKS = (
     ("greek", 0x0370, 0x03FF),
@@ -3188,13 +3199,20 @@ def _guard_token_seq(content: str) -> list[str]:
     the positions the comparison is about.
     """
     text = _norm(content).translate(_APOSTROPHES)
-    # The apostrophe is KEPT.  It is the only signal that distinguishes a
-    # possessive from a plural, and it is what marks a clitic negator the
-    # marker list does not enumerate ("mustn't" is a negation, "mustnt" is not
-    # a word any list can be complete against).  Helpers that need the two
-    # spellings of one word to agree strip it themselves.
-    return [t for t in (_s.strip(_TOKEN_EDGE_PUNCT)
-                        for _s in text.split()) if t]
+    return [t for t in (_strip_edges(_s) for _s in text.split()) if t]
+
+
+def _strip_edges(t: str) -> str:
+    """Edge punctuation stripped, EXCEPT a LEADING separator that begins a
+    numeral: ".5", ",5" and ":30" are quantities, and stripping the separator
+    folded .5 into 5.  Leading only — a trailing full stop is punctuation, so
+    "5." and "5" stay one value.
+    """
+    stripped = t.strip(_TOKEN_EDGE_PUNCT)
+    lead = len(t) - len(t.lstrip(_TOKEN_EDGE_PUNCT))
+    if lead and stripped and t[lead:lead + 1].isdigit():
+        return t[:lead] + stripped
+    return stripped
 
 
 def _guard_tokens(content: str) -> set[str]:
@@ -3245,6 +3263,10 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
         # into "50", turning a different quantity into the same binding.  The
         # token is already normalised and a clock is already a placeholder.
         value = t if any(c.isdigit() for c in t) else None
+        if value is None and t in _CLOCK_UNITS:
+            # A meridiem _CLOCK_RE could not bind to an hour ("6 in the am")
+            # is still a value: dropping it let an am/pm difference fold.
+            value = "meridiem-" + t
         if value is None:
             v = _num_word_value(t)
             value = str(v) if v is not None else None
@@ -3320,7 +3342,7 @@ def _proper_nouns(content: str) -> frozenset[str]:
     capitalised by position rather than by being a name.
     """
     raw = [t.strip(_TOKEN_EDGE_PUNCT) for t in str(content or "").split()]
-    return frozenset(_canon_token(_norm(t))
+    return frozenset(_apostrophe_free(_norm(t))
                      for i, t in enumerate(raw)
                      if i and t and t[:1].isupper())
 
@@ -3342,7 +3364,7 @@ def _content_tokens(content: str) -> set[str]:
     """
     out: set[str] = set()
     for t in _guard_tokens(content):
-        t = _canon_token(t)
+        t = _apostrophe_free(t)
         if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
@@ -3374,8 +3396,9 @@ def _marker_scope(content: str) -> tuple[str, ...]:
     comparison does not, and the pair would fold (at the in-capture seam,
     that is a DELETE).
 
-    Values, clock units and date words are dropped: their own dimensions
-    compare them, and "ship at 3pm" must not read as a scope change.
+    Values and clock units are kept as placeholders and date words in
+    position: their own dimensions compare them, but a marker attached to a
+    different one of them is a different claim, and dropping them hid that.
     """
     out: list[str] = []
     for t in _guard_token_seq(_canonicalise_clocks(content)):
@@ -3390,7 +3413,11 @@ def _marker_scope(content: str) -> tuple[str, ...]:
             # mirror) — the difference a date-word set cannot see.
             out.append(t)
             continue
-        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS:
+        if t in _CONTENT_STOPWORDS:
+            continue
+        if t in _CLOCK_UNITS:
+            # Kept, as the value it is: a meridiem no clock form absorbed.
+            out.append("#meridiem-" + t)
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
             # A placeholder, so a marker attached to a different value is

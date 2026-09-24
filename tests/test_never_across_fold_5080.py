@@ -157,6 +157,18 @@ NEVER_ACROSS = [
     # ... while the modal is not a date at all, and the hedge change refuses
     # both decisions through the substitution rule.
     ("we may ship friday", "we can ship friday", "substituted_content"),
+    # A leading separator that begins a numeral is part of the quantity, and it
+    # was being stripped before the value comparison: ".5" folded into "5".
+    ("we shipped .5 tons", "we shipped 5 tons", "number"),
+    # A meridiem no clock form absorbed ("6 in the am") is still a value.
+    ("the meeting is at 6 in the am", "the meeting is at 6 in the pm",
+     "number"),
+    ("we work am shifts", "we work pm shifts", "number"),
+    # An internal separator that changes a word is a content substitution, and
+    # canonicalising it away collapsed the two sides onto one token.
+    ("we re-sign the contract", "we resign the contract",
+     "substituted_content"),
+    ("we run a co-op", "we run a coop", "substituted_content"),
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
@@ -318,6 +330,31 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the team meets weekly in main office",
                                "the team meets weekly")
         assert v2.fold_allowed("gym at 6pm", "workout at the gym at six pm")
+
+    def test_a_trailing_separator_is_not_part_of_the_quantity(self):
+        """A trailing full stop is punctuation, so "5." and "5" stay one value;
+        only a LEADING separator can begin a numeral."""
+        assert v2.distinguishing_difference("the answer is 5!",
+                                            "the answer is 5") is None
+        assert v2.distinguishing_difference("the answer is 5.",
+                                            "the answer is 5") is None
+        for lead in (".", ",", ":"):
+            a, b = f"the answer is {lead}5", "the answer is 5"
+            assert v2.distinguishing_difference(a, b) == "number"
+            assert not v2.fold_allowed(a, b)
+
+    def test_a_word_list_gap_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5139).
+
+        The marker lists are finite and a negator, condition or date word they
+        do not name reaches no dimension: "hardly", "rarely", "seldom",
+        "nobody", "lest", "as soon as", "tonight", "noon" all fold.  Closing
+        the class needs a model, not a longer list; a longer list only moves the
+        boundary of what is missed.
+        """
+        assert v2.fold_allowed("we hardly ship", "we ship")
+        assert v2.fold_allowed("we ship lest the build fails",
+                               "we ship the build fails")
 
     def test_an_ambiguous_month_is_a_date_only_in_a_date_position(self):
         """"may" is a month and the commonest modal, and neither blanket rule is
