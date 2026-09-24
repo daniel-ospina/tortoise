@@ -5947,7 +5947,10 @@ class FalkorProjection(
         for label, props in (("Subject", ("id", "name")),
                              ("Object", ("id", "name")),
                              ("Event", ("eventId",)),
-                             ("Source", ("id", "url"))):
+                             # canonicalUrl (#5012 S0b): the S0a canonical
+                             # identity S0b resolves against, so the resolver
+                             # is an index seek, not a label scan.
+                             ("Source", ("id", "url", "canonicalUrl"))):
             for prop in props:
                 try:
                     self.g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
