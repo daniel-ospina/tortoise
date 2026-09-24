@@ -626,11 +626,9 @@ _PS_TIMEOUT_S = 1.0
 # is strictly safer than signalling by the output of an unverified binary.
 _PS_BIN = "/bin/ps"
 
-# Both `ps` selections ask for UNLIMITED output width. A host's `ps` truncates
-# its LAST column to its output width — the terminal width when interactive, or
-# a non-tty default (80 columns) when stdout is a pipe, which is how
-# `capture_output=True` hands it to us — and the CI runner does exactly that
-# (the same truncation class fixed for the embedded reaper in #1365): the
+# Both `ps` selections ask for UNLIMITED output width. A host's `ps` can
+# truncate its LAST column, and the CI runner did exactly that (the same
+# truncation class fixed for the embedded reaper in #1365): the
 # `command` field is unbounded, so on a runner whose interpreter path alone is
 # ~49 characters a real driver's trailing `run-driver` marker is cut off, no
 # candidate matches, the driver is never signalled, and a healthy run abandons
@@ -1405,8 +1403,7 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None, str]:
 
     The selection takes `-ww` (unlimited width, see `_PS_UNLIMITED_WIDTH`). It
     is load-bearing here: `command` is the unbounded field, and a host that
-    truncates it to its output width (the terminal width, or a non-tty default
-    such as 80 columns) hides the marker of any driver whose
+    truncates it hides the marker of any driver whose
     command line is longer than that width — the CI runner's interpreter path
     alone is ~49 characters, so a trailing ``run-driver`` is past the cut. The
     enumerator then finds no candidate, the driver is never signalled, and a

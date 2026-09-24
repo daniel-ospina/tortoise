@@ -2987,7 +2987,7 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
     parent filter, the non-positive-pid refusal, the untruncated `ps` query — is
     pinned deterministically at the `ps`-OUTPUT seam below, because a venue
     whose `ps` renders the table differently (the CI runner truncates the last
-    column to its non-tty output width) must not decide whether this instrument
+    column) must not decide whether this instrument
     is correct. The marker is the LAST argv token on purpose: that is the position
     the venue truncation cuts, so this test also exercises the `-ww` fix on a
     real table rather than merely on a fake one."""
@@ -3092,12 +3092,15 @@ def test_the_enumerator_picks_the_marked_own_child_not_an_earlier_unmarked_one(
 
     The live-table test can only fail a "returned the first child" mutant when
     the venue's `ps` happens to expose both children in a stable order, so the
-    preference is pinned here instead, on a fake table: an unmarked own child is
-    listed FIRST, a marked own child SECOND, then an unmarked and a second
-    marked one. The enumerator must return the FIRST MARKED one. A mutant that
-    drops the marker guard — or returns the first parseable child — returns 1111
-    here; one that returns the last candidate (e.g. iterating the table in
-    reverse) returns 4444. Both are RED."""
+    preference is pinned here instead, on a fake table whose pids are
+    DELIBERATELY NON-MONOTONIC: an unmarked own child first, the marked child
+    the enumerator must return (pid 5000 — the MIDDLE of the marked pids, so no
+    pid-order coincidence yields it), then an unmarked child and two more marked
+    ones (2000, 9000). The enumerator must return the FIRST MARKED child in
+    table order. That one table reddens a mutant that drops the marker guard or
+    returns the first parseable child (1111), one that returns the last
+    candidate (9000), and one that iterates in pid order — sorted (2000) or
+    reverse-sorted (9000)."""
     import os
 
     import tools.ship_test_onboarding as mod
@@ -3106,16 +3109,18 @@ def test_the_enumerator_picks_the_marked_own_child_not_an_earlier_unmarked_one(
         if "pid=,ppid=,command=" in argv:
             return _PS(stdout=(
                 f"1111 {os.getpid()} python -c import time; time.sleep(30)\n"
-                f"2222 {os.getpid()} python -c import time; time.sleep(30) "
+                f"5000 {os.getpid()} python -c import time; time.sleep(30) "
                 f"run-driver\n"
                 f"3333 {os.getpid()} python -c import time; time.sleep(30)\n"
-                f"4444 {os.getpid()} python -c import time; time.sleep(30) "
+                f"2000 {os.getpid()} python -c import time; time.sleep(30) "
+                f"run-driver\n"
+                f"9000 {os.getpid()} python -c import time; time.sleep(30) "
                 f"run-driver\n"))
         return _PS(stdout=f"{os.getpid()} Thu Jan  1 00:00:00 2026\n")
 
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
     assert mod._driver_pid_and_starttime() == (
-        2222, mod._norm_start_time("Thu Jan  1 00:00:00 2026"),
+        5000, mod._norm_start_time("Thu Jan  1 00:00:00 2026"),
         mod.DRIVER_ENUM_FOUND)
 
 
@@ -3176,14 +3181,11 @@ def test_the_enumerator_rejects_a_pid_whose_identity_re_read_names_another_paren
 def test_both_ps_reads_ask_for_an_untruncated_field(monkeypatch) -> None:
     """The CI-only defect of #4956, pinned without a live process table.
 
-    `command` is the unbounded `ps` field, and a host truncates its LAST column
-    to its output width — the terminal width when interactive, or a non-tty
-    default (80 columns) when stdout is a pipe, which is how `capture_output`
-    hands it to the readers. The CI runner does, and the hostedtoolcache
-    interpreter path alone is ~49 characters, which puts a trailing
-    `run-driver` marker past the 80-column cut. The marker then disappears, the
-    enumerator finds no candidate, and a healthy run abandons with its Chromium
-    tree live. BOTH readers therefore ask for unlimited width: dropping `-ww`
+    `command` is the unbounded `ps` field, and a host can truncate its LAST
+    column: the CI runner did, and the hostedtoolcache interpreter path alone is
+    ~49 characters, which puts a trailing `run-driver` marker past the width the
+    runner cut at (80 columns). The marker then disappears, the enumerator finds
+    no candidate, and a healthy run abandons with its Chromium tree live. BOTH readers therefore ask for unlimited width: dropping `-ww`
     from the enumeration reddens this test, and dropping it from the identity
     read would let a truncated start time collapse two processes into one
     identity."""
