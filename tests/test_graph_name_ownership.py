@@ -37,6 +37,25 @@ from tests._embedded import (  # noqa: E402
     is_legacy_residue,
 )
 
+# The exact #3634 census cohort, held as a GOLDEN list. A loop over the live
+# tuple cannot detect its own shrinkage, so this pins the tuple's CONTENT: 18
+# of the 26 literals below are otherwise unpinned (the deny-safe test's approve
+# loop exercises one name per family), and each could be deleted with the suite
+# still green. Order matches the declaration in `tests/_embedded.py`.
+EXPECTED_RESIDUE_PREFIXES = (
+    "registry_test_",
+    "v10fix_c0", "v10fix_c1", "v10fix_c2", "v10fix_c3", "v10fix_c4",
+    "v10fix_c5", "v10fix_c6", "v10fix_c7", "v10fix_c8", "v10fix_c9",
+    "v10_smoke",
+    "ttm_a1", "ttm_a1_fresh1", "ttm_a1_fresh2", "ttm_a3",
+    "ttm_batch1", "ttm_batch2", "ttm_batch3", "ttm_batch4", "ttm_wave2",
+    "review_rw_probe",
+    "askshape_b6_live_1_33760_21",
+    "legbudget_25979_txrx",
+    "tt4524_probe",
+    "probe_d10_doc_fts",
+)
+
 
 def test_the_register_is_tied_to_the_real_symbols():
     """The register is only an index if it points at the LIVE objects.
@@ -77,6 +96,33 @@ def test_the_residue_predicate_is_deny_safe():
               "review_rw_probe", "askshape_b6_live_1_33760_21",
               "legbudget_25979_txrx", "tt4524_probe", "probe_d10_doc_fts"):
         assert is_legacy_residue(n, default_graph="tortoise_test_matrix"), n
+
+
+def test_the_residue_census_cohort_is_exact():
+    """The declared cohort equals the golden census, and every name approves.
+
+    A loop over the live tuple cannot detect its own shrinkage, so the set
+    equality below pins the CONTENT, and the per-name approve assertion pins
+    that each literal is actually reachable through `is_legacy_residue`.
+    """
+    assert set(_LEGACY_RESIDUE_PREFIXES) == set(EXPECTED_RESIDUE_PREFIXES)
+    for n in EXPECTED_RESIDUE_PREFIXES:
+        assert is_legacy_residue(n, default_graph=None), n
+
+
+def test_the_owned_and_production_refusals_fire_when_a_residue_prefix_overlaps(monkeypatch):
+    """The owned and literal-production refusals are load-bearing, not incidental.
+
+    `test_owned_name` is refused today because no residue prefix matches it,
+    and `tortoise` because no residue prefix matches it — neither because its
+    guard fired. Patch an OVERLAPPING prefix onto the module (importing the
+    module as an object so the patch is visible to `is_legacy_residue`) to pin
+    each guard itself.
+    """
+    monkeypatch.setattr(embedded, "_LEGACY_RESIDUE_PREFIXES", ("test_",))
+    assert not embedded.is_legacy_residue("test_owned_name", default_graph=None)
+    monkeypatch.setattr(embedded, "_LEGACY_RESIDUE_PREFIXES", ("tortoise",))
+    assert not embedded.is_legacy_residue("tortoise", default_graph=None)
 
 
 def test_the_tortoise_restored_guard_fires_when_a_residue_prefix_overlaps(monkeypatch):
@@ -143,10 +189,7 @@ _LEGACY_SWEEP_NAME = "_sweep_legacy_strays"
 def _calls_in(path: Path) -> list[int]:
     """Line numbers of every Call to the legacy sweep in ``path``.
 
-    A bare ``ast.Call`` has no parent link, so the enclosing definition cannot
-    be recovered from ``ast.walk`` alone. This mirrors
-    ``tests/test_write_ahead_mint.py``'s ``_collect_sites``: a RECURSIVE walk
-    over every child node. Matches both a bare ``Name``
+    A RECURSIVE walk over every child node that matches both a bare ``Name``
     (``_sweep_legacy_strays(...)``) and an ``Attribute``
     (``_embedded._sweep_legacy_strays(...)``). The walk recurses into lambda
     bodies, so an ``atexit.register(lambda: _sweep_legacy_strays(...))`` call

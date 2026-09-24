@@ -775,15 +775,17 @@ _SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
 #   product's own mint namespace — `org_` current since the #3543 rename,
 #   `team_` retained for graphs minted before it).
 _PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
-#   input: GRAPH.LIST, OPT-IN ONLY. THE EXACT #3634 CENSUS COHORT, not a stem
-#   set: every entry below (except the two noted) is a name verified present in
-#   the 1,745-name census (`/tmp/pi-5083-consolidation/graphs-6379.txt`), so a
-#   future name cannot be swept by accident. `registry_test_` is the single
-#   deliberate stem (723 census names — the epic CI-3 cohort);
-#   `review_rw_probe` covers the two census names `review_rw_probe` and
-#   `review_rw_probe2`. ADDING A STEM HERE IS A SAFETY DECISION, not a
-#   convenience: every entry authorises an irreversible DETACH DELETE +
-#   GRAPH.DELETE, so widen only with a census name in hand.
+#   input: GRAPH.LIST, OPT-IN ONLY. THE #3634 CENSUS COHORT, as recorded on
+#   issue #3634: each entry below is a name verified present in that census,
+#   except `registry_test_` — the ONE deliberate stem (723 census names, so a
+#   stem is required there — the epic CI-3 cohort). Reach is therefore bounded
+#   to the cohort PLUS any future name that extends one of its prefixes
+#   (`startswith`, so `v10fix_c1` also approves `v10fix_c10`), and several
+#   entries are themselves prefixes of longer census names (`ttm_a1` of
+#   `ttm_a1_fresh1/2`, `review_rw_probe` of `review_rw_probe2`). ADDING A STEM
+#   HERE IS A SAFETY DECISION, not a convenience: every entry authorises an
+#   irreversible DETACH DELETE + GRAPH.DELETE, so widen only with a census
+#   name in hand.
 _LEGACY_RESIDUE_PREFIXES = (
     "registry_test_",                # the epic CI-3 cohort — 723 census names
     "v10fix_c0", "v10fix_c1", "v10fix_c2", "v10fix_c3", "v10fix_c4",
