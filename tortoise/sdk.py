@@ -4674,12 +4674,23 @@ class TortoiseSDK:
             exact_hit_id,
         )
         canonical_by_hash: dict[str, str] = {}
+        # #4716 Part 1: payload point id → the graph id the commit actually
+        # resolved it to. On a content-hash hit below the payload id is NOT
+        # the id the graph holds (`resolved = hit_id`), so every operator /
+        # supersession ref naming the payload id must be rewritten through
+        # this map before it is applied — else it names nothing and the write
+        # is dropped (`operator write skipped (inputs missing?)`, the #4654
+        # silent edge loss). The invariant is the one the v1 builder
+        # `_stream_to_payload` already enforces (#1272) — this restores it on
+        # the v2 capture path.
+        capture_point_id_map: dict[str, str] = {}
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
             if not pid or not content:
                 skipped += 1
                 continue
+            payload_id = pid
             try:
                 # 1) in-capture fold: same content minted earlier this seam
                 #    run (extractor payload assembly normally folds these;
@@ -4760,6 +4771,10 @@ class TortoiseSDK:
                         **props,
                     )
                 pid = resolved
+                # #4716 Part 1: remember which graph id this payload id
+                # resolved to (identity on a fresh create) — the remap source
+                # for the operator / supersession refs below.
+                capture_point_id_map[payload_id] = pid
                 if dedup == DEDUP_NEW:
                     canonical_by_hash[_content_hash(content)] = pid
                     for name in (pt.get("about_entities") or []):
@@ -4997,20 +5012,70 @@ class TortoiseSDK:
         #    apply_payload_operators) ──
         ops = payload.get("operators", []) or []
         if ops:
-            from tortoise.commit_ops import _payload_point_content_by_id, apply_payload_operators
+            from tortoise.commit_ops import (
+                _payload_point_content_by_id,
+                apply_payload_operators,
+                remap_operator_endpoint_refs,
+            )
+            # #4716 Part 1: rewrite payload endpoint refs to the ids the commit
+            # resolved the points to BEFORE the operator write. A payload id
+            # that resolved to an existing graph node under a different id
+            # named nothing here and the write was swallowed as
+            # "inputs missing?" — the edge was silently lost (§ Defect B).
+            #
+            # ⛔ The MITIGATES reason is resolved from the SAME ref, and the
+            # remap moves it into graph-id space while `payload["points"]` is
+            # keyed by PAYLOAD id — so after a re-key the lookup missed and the
+            # mitigation's content degraded to "[MITIGATION] [MITIGATION]
+            # <graph-id>" (#4716 review P1, reproduced end-to-end). Hand the
+            # helper a map-aware resolver that still finds the payload point the
+            # pre-remap ref named (first payload id wins when several folded
+            # into one graph id — deterministic, and the fold guarantees equal
+            # normalized content anyway).
+            _capture_reverse_id_map: dict[str, str] = {}
+            for _payload_id, _resolved_id in capture_point_id_map.items():
+                _capture_reverse_id_map.setdefault(_resolved_id, _payload_id)
+            # A FOLDED (NOOP) endpoint's ref is the PRIOR's graph id and has no
+            # payload point at all — the extractor's noop record carries the
+            # canonical content precisely so the reason still resolves here
+            # (#4716 re-review; the same degradation pre-existed on the
+            # ordinary path, where a folded emitted point used as a MITIGATES
+            # `src` resolved to its bare id).
+            _folded_content_by_id = {
+                str(_n.get("point_id") or ""): str(_n.get("content") or "")
+                for _n in noops
+                if _n.get("point_id") and _n.get("content")}
+            ops = remap_operator_endpoint_refs(ops, capture_point_id_map)
             apply_payload_operators(
                 proj, self, ops,
-                point_content_by_id=lambda pid: _payload_point_content_by_id(
-                    payload, pid))
+                point_content_by_id=lambda pid: (
+                    _payload_point_content_by_id(
+                        payload, _capture_reverse_id_map.get(pid, pid))
+                    or _folded_content_by_id.get(pid, "")))
         # #2164: supersessions — client-derived records (the deterministic
         # channel for the Object status fold; §6b parity). pt_ → supersede()
         # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
         # entities exist (ordering contract). Warnings ride meta — never a
         # silent drop. Best-effort — never fail capture (hosted §6b rule).
         try:
-            from tortoise.commit_ops import apply_supersessions
-            apply_supersessions(proj, self, payload.get("supersessions") or [],
-                                session_id=session_id, warn=warnings.append)
+            from tortoise.commit_ops import (
+                apply_supersessions,
+                remap_supersession_point_refs,
+            )
+            # #4716 Part 1 (adjacent hole, answered by analysis): a
+            # supersession's `supersedes_by` is the NEW payload point's
+            # `pt_<sha>` id, so it shares the operators' two-id-space hole
+            # (`superseded` does NOT — the extractor resolved it against the
+            # S3 search, so it is already a real graph id). Remap ONLY
+            # `supersedes_by`: `superseded` is the record's lane discriminator
+            # downstream (`startswith("pt_")`), so running it through the map
+            # could silently flip a CORRECTS fold onto the entity lane.
+            apply_supersessions(
+                proj, self,
+                remap_supersession_point_refs(
+                    payload.get("supersessions") or [],
+                    capture_point_id_map),
+                session_id=session_id, warn=warnings.append)
         except Exception as exc:  # pragma: no cover - defensive outer bound
             _logger.warning("supersession apply failed: %s", exc, exc_info=True)
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
