@@ -6,8 +6,9 @@
 as *"we kept junk"*; S2.3 fails as *"we mislabelled it"*).
 
 **Why it must exist at all.** The only rejection in the live pipeline is
-``classify_consolidation`` (``extractor_v2.py:3994``), which runs **dead last**
-— inside ``execute_embed`` — against *graph priors*, and therefore answers
+``classify_consolidation`` (``tortoise/extractor_v2.py``, called from
+``execute_embed``), which runs **dead last** — inside ``execute_embed`` —
+against *graph priors*, and therefore answers
 *"is this a duplicate of something already stored?"*. That question structurally
 cannot answer *"should this candidate exist at all?"*, which needs no priors.
 This step is that seam.
@@ -109,7 +110,7 @@ verified to produce exactly that 422.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from typing import Any
 
 # ── The outcome vocabulary (O4) ─────────────────────────────────────────────
@@ -135,8 +136,9 @@ BATCH_OUTCOMES = frozenset({RENARRATE})
 #: module-level import here would cycle and silently fall back). The copy is
 #: kept non-silent by ``tests/test_vet_gate_5005.py::
 #: test_section_table_matches_extractor``, which fails the moment the two
-#: drift — without it a renamed text field would stop being covered with no
-#: warning at all.
+#: drift. The text rule itself is pinned SEPARATELY by
+#: ``test_text_field_matches_extractor_item_identity``: the column above cannot
+#: be pinned to ``_CLASSIFY_SECTIONS`` because that table carries no text field.
 SECTIONS: tuple[tuple[str, str, str, str], ...] = (
     ("entities", "name", "kind", "entity"),
     ("events", "content", "eventKind", "event"),
@@ -435,13 +437,27 @@ def _referenced_entity_names(embed_list: object,
     return names
 
 
+def _item_content(section: str, item: Mapping[str, Any]) -> str:
+    """The item's CONTENT — the surface ``execute_embed`` resolves operators on.
+
+    Deliberately different from :func:`_item_text` (which is the extractor's
+    candidate-identity rule, ``name or content``). A point/event id is
+    ``_content_id(...)`` over its ``content`` and ``_resolve`` looks up
+    ``point_ids[_norm(content)]``, so the operator prune MUST match on content:
+    an item carrying BOTH keys would otherwise record its name as "removed"
+    and leave an operator on its content unpruned, to be re-minted. Entities
+    carry no content and contribute nothing here.
+    """
+    if section == "entities" or not item.get("content"):
+        return ""
+    return str(item.get("content")).strip()
+
+
 def _normalized_texts(embed_list: object) -> set[str]:
-    """Normalized texts of every point/event in the list (not entities)."""
+    """Normalized CONTENT of every point/event (the operator-endpoint surface)."""
     out: set[str] = set()
     for section, _index, item in _iter_items(embed_list):
-        if section == "entities":
-            continue
-        txt = _norm(_item_text(section, item))
+        txt = _norm(_item_content(section, item))
         if txt:
             out.add(txt)
     return out
@@ -510,19 +526,20 @@ def removal_pool(before: object, after: object) -> dict:
 
 def _rewrite_entity_references(embed_list: Mapping[str, Any],
                                restored: Mapping[str, str]) -> None:
-    """Re-spell a reference to the restored entity's exact name.
+    """Re-spell a reference to the emitted entity's exact name.
 
     ``validate_layer1`` compares ``about_entities`` and slot names by EXACT
-    string, so restoring ``pytest`` does not satisfy a point naming ``PyTest``
-    — the session still 422s (verified). Rewriting is a KEEP action (fail-open):
-    the reference means the same entity; only its spelling is canonicalised.
+    string, so an entity named ``pytest`` does not satisfy a point naming
+    ``PyTest`` — the session still 422s (verified). Rewriting is a KEEP action
+    (fail-open): the reference means the same entity; only its spelling is
+    canonicalised. Immutable mappings are skipped rather than raising.
     """
     def _fix(value: Any) -> Any:
         return restored.get(_norm(value), value) if isinstance(value, str) \
             else value
 
     for _section, _index, item in _iter_items(embed_list):
-        if not isinstance(item, dict):
+        if not isinstance(item, MutableMapping):
             continue
         for key in ("about_entities",):
             refs = item.get(key)
@@ -536,7 +553,8 @@ def _rewrite_entity_references(embed_list: Mapping[str, Any],
                         or isinstance(slot_refs, (str, bytes)):
                     continue
                 for r in slot_refs:
-                    if isinstance(r, Mapping) and isinstance(r.get("name"), str):
+                    if isinstance(r, MutableMapping) \
+                            and isinstance(r.get("name"), str):
                         r["name"] = _fix(r["name"])
 
 
@@ -571,17 +589,20 @@ def apply_vet(embed_list: Mapping[str, Any],
        provides the endpoint** — discarding one of two identical-content items
        must not take the survivor's edge with it.
     4. **A referenced-but-missing entity is restored** from ``prior``, and the
-       reference's spelling is reconciled to the restored name. S4 runs between
+       reference's spelling is reconciled to the emitted name. S4 runs between
        the two passes and can reference an entity the S2 pass removed; that
        cross-pass reference is invisible to a per-pass guard and was verified
        to produce a Layer-1 422. ``validate_layer1`` compares ``about_entities``
-       and slot names by EXACT string, so restoring ``pytest`` while a point
-       names ``PyTest`` still 422s (verified) — the reference is rewritten to
-       the emitted spelling. Fail-open: keep, never drop.
+       and slot names by EXACT string, so an entity named ``pytest`` with a
+       point naming ``PyTest`` 422s — whether the entity was *restored* (S4's
+       reference arrived after the removal) or *downgraded to KEEP* by Rule 2
+       (the same-pass case). Both go through the same reconciliation. Fail-open:
+       keep, never drop.
 
     The function is **total** on a malformed section shape (a non-sequence
-    section, a non-mapping item, a non-iterable ``about_entities``) and on a
-    malformed ``prior``/``decisions`` map: no exception.
+    section, a non-mapping item, a non-iterable ``about_entities``, an immutable
+    ``Mapping`` slot ref) and on a malformed ``prior``/``decisions`` map: no
+    exception.
     """
     warnings: list[str] = []
     base: Mapping[str, Any] = embed_list if isinstance(embed_list, Mapping) \
@@ -601,15 +622,24 @@ def apply_vet(embed_list: Mapping[str, Any],
     discarded_ids = {iid for iid, d in decision_map.items()
                      if isinstance(d, Mapping)
                      and str(d.get("outcome") or "").upper() == DISCARD}
-    if not discarded_ids and not prior_entities:
+    if not discarded_ids and not prior_texts and not prior_entities:
         # Nothing to do — return a shallow copy whose contents are identical
         # to the input, so the flag-off / nothing-discarded paths are
         # byte-identical downstream (the same object is never mutated).
+        # ⚠️ ``prior_texts`` is part of the test: a prior that removed only
+        # points/events has an EMPTY ``removed_entities``, and early-returning
+        # on that alone skipped the operator prune (regression fixed in cycle 3).
         return dict(base), warnings
 
     referenced = _referenced_entity_names(base, discarded_ids)
     removed_entity_names: set[str] = set()
-    removed_context: set[str] = set()      # norm texts of removed events/points
+    removed_context: set[str] = set()      # norm CONTENT of removed points/events
+    # norm entity name -> the spelling that must win in a reference. Populated
+    # by BOTH a Layer-1 downgrade (the entity is kept) and a Rule-4 restore: in
+    # either case the entity is in the output, so a reference spelled differently
+    # must be reconciled or ``validate_layer1`` still 422s (see
+    # ``_rewrite_entity_references``).
+    canonical: dict[str, str] = {}
     # Start from a full copy so non-VET keys (operators, chain_notes,
     # link_before_create, …) are preserved — only the three candidate sections
     # are rewritten.
@@ -637,6 +667,7 @@ def apply_vet(embed_list: Mapping[str, Any],
                 name = _norm(item.get("name"))
                 if name and name in referenced:
                     downgraded += 1
+                    canonical[name] = str(item.get("name"))
                     warnings.append(
                         f"vet: entity {str(item.get('name'))!r} was DISCARDed "
                         "but is referenced by a surviving candidate — kept "
@@ -646,7 +677,7 @@ def apply_vet(embed_list: Mapping[str, Any],
                 if name:
                     removed_entity_names.add(name)
             else:
-                txt = _norm(item.get("content"))
+                txt = _norm(_item_content(section, item))
                 if txt:
                     removed_context.add(txt)
             warnings.append(
@@ -660,11 +691,10 @@ def apply_vet(embed_list: Mapping[str, Any],
     # it were discarded.
     present = set(_entity_map(out))
     to_restore = _referenced_entity_names(out, set()) - present
-    restored: dict[str, str] = {}
     for name in sorted(to_restore):
         original = prior_entities.get(name)
         if original is not None and str(original.get("name") or ""):
-            restored[name] = str(original["name"])
+            canonical[name] = str(original["name"])
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
@@ -678,8 +708,8 @@ def apply_vet(embed_list: Mapping[str, Any],
                 f"{name!r}, which no pass emitted — it cannot be restored "
                 "here; the payload will fail Layer-1 unless the extractor "
                 "emits it")
-    if restored:
-        _rewrite_entity_references(out, restored)
+    if canonical:
+        _rewrite_entity_references(out, canonical)
 
     # Operators: drop any whose endpoint referenced a removed point/event —
     # including items an EARLIER pass removed (they are absent from this list,
@@ -688,7 +718,7 @@ def apply_vet(embed_list: Mapping[str, Any],
     # endpoint, and pruning would lose its edge.
     surviving_texts = _normalized_texts(out)
     gone = (removed_context | prior_texts | removed_entity_names
-            | set(prior_entities)) - surviving_texts - set(restored)
+            | set(prior_entities)) - surviving_texts - set(canonical)
     if gone:
         ops = out.get("operators") or []
         kept_ops: list[Any] = []

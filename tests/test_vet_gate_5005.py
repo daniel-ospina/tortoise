@@ -426,6 +426,102 @@ def test_total_on_malformed_decisions_and_prior():
         vg.audit_candidates(el, bad)
 
 
+def test_prior_with_only_removed_texts_still_prunes():
+    """Regression (cycle 3): the early return tested `prior_entities` alone, so
+    a prior carrying ONLY removed points/events (``removed_entities == {}`` —
+    the common case) skipped the operator prune and left an operator to be
+    re-minted."""
+    el = {"entities": [], "events": [],
+          "points": [{"content": "keep", "pointKind": "statement"}],
+          "operators": [{"src": "C", "dst": "keep", "op_type": "IMPL"}]}
+    new, warnings = vg.apply_vet(
+        el, {}, prior={"removed_texts": {"c"}, "removed_entities": {}})
+    assert new["operators"] == []
+    assert any("pruned 1 operator" in w for w in warnings)
+
+
+def test_both_keys_item_records_content_for_the_prune():
+    """Regression (cycle 3): the pool used the candidate-identity text
+    (``name or content``) while ``execute_embed`` resolves endpoints on
+    CONTENT — so a discarded both-keys point recorded its NAME and an operator
+    on its content survived and was re-minted."""
+    el = {"entities": [], "events": [],
+          "points": [{"name": "N", "content": "C", "pointKind": "statement"},
+                     {"content": "keep", "pointKind": "statement"}],
+          "operators": []}
+    out = vg.vet_candidates(el, narrative="n",
+                            arbiter=_discard_matching("N"))
+    vetted, _w = vg.apply_vet(el, out["decisions"])
+    assert vg.removal_pool(el, vetted)["removed_texts"] == {"c"}
+    union = {"entities": [], "events": [],
+             "points": [{"content": "keep", "pointKind": "statement"}],
+             "operators": [{"src": "C", "dst": "keep", "op_type": "IMPL"}]}
+    final, _w = vg.apply_vet(
+        union, {}, prior=vg.removal_pool(el, vetted))
+    assert final["operators"] == []
+    payload, _res = _payload_of(final)
+    assert [p["content"] for p in payload["points"]] == ["keep"]
+
+
+def test_surviving_both_keys_item_still_provides_its_content():
+    """The converse of the previous test: a SURVIVING item carrying both keys
+    still provides its CONTENT as an endpoint, so the operator must NOT be
+    pruned on the name-based surviving set ("a wrong drop is memory loss")."""
+    el = {"entities": [], "events": [],
+          "points": [{"name": "Ndis", "content": "C",
+                      "pointKind": "statement"},
+                     {"name": "Nsur", "content": "C",
+                      "pointKind": "statement"},
+                     {"content": "D", "pointKind": "statement"}],
+          "operators": [{"src": "C", "dst": "D", "op_type": "IMPL"}]}
+    decisions = vg.vet_candidates(el, narrative="n")["decisions"]
+    first = next(i for i, d in decisions.items()
+                 if d["section"] == "points" and d["index"] == 0)
+    decisions[first] = {"outcome": vg.DISCARD}
+    new, _w = vg.apply_vet(el, decisions)
+    assert len(new["operators"]) == 1, (
+        "the surviving twin still provides the content endpoint")
+
+
+def test_downgraded_entity_reference_spelling_is_reconciled():
+    """Cycle-3 finding: the spelling fix covered only the RESTORE path. A
+    same-pass Layer-1 downgrade (the entity is kept) left the identical
+    exact-string mismatch, so 'kept (Layer-1 referential integrity)' was still a
+    422 when the reference was spelled differently."""
+    el = {"entities": [{"name": "pytest", "kind": "core:tool"}],
+          "events": [],
+          "points": [{"content": "P", "pointKind": "statement",
+                      "about_entities": ["PyTest"]}],
+          "operators": []}
+    out = vg.vet_candidates(
+        el, narrative="n",
+        arbiter=lambda c, s: {"verdicts": [
+            {"id": x["id"], "outcome": vg.DISCARD} for x in c
+            if x["section"] == "entities"]})
+    new, warnings = vg.apply_vet(el, out["decisions"])
+    assert [e["name"] for e in new["entities"]] == ["pytest"]
+    assert any("downgraded" in w for w in warnings)
+    assert new["points"][0]["about_entities"] == ["pytest"]
+    payload, _res = _payload_of(new)
+    l1, _model = validate_payload_dict(payload)
+    assert l1.ok, l1.errors
+
+
+def test_immutable_slot_ref_does_not_raise():
+    """Cycle-3 P4: an immutable ``Mapping`` slot ref must be skipped, not
+    raise, when the spelling reconciliation runs."""
+    from types import MappingProxyType
+    el = {"entities": [], "events": [],
+          "points": [{"content": "P", "pointKind": "statement",
+                      "slots": {"subject": [MappingProxyType(
+                          {"name": "PyTest", "kind": "core:other"})]}}],
+          "operators": []}
+    new, _w = vg.apply_vet(
+        el, {}, prior={"removed_entities": {
+            "pytest": {"name": "pytest", "kind": "core:tool"}}})
+    assert isinstance(new, dict)
+
+
 def test_cross_pass_reference_restores_entity_and_payload_validates():
     """Verified defect (the strongest one): the Layer-1 guard is per-pass, so
     an entity the S2 pass removed and S4 later referenced reached
