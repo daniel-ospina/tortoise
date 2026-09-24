@@ -543,6 +543,29 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     return texts
 
 
+#: The written turn prefix, and its inverse. A READER of a stored turn gets the
+#: role and the body separately (``hosted_api.get_session_detail`` returns
+#: ``role`` as its own field and the content with this prefix STRIPPED), so
+#: anything comparing a stored turn against a served one must go through the
+#: inverse — comparing the raw string never matches (#4675). One definition so
+#: the writer's format and the reader's split cannot drift.
+_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]+)\]\s*")
+
+
+def _capture_turn_role_text(stored: str) -> tuple[str, str]:
+    """``(role, body)`` for one stored turn text — the inverse of the writer.
+
+    Un-bracketed text reads as ``("unknown", text)``, matching what the server
+    serves for it; the ``\\s*`` is significant, because the writer always emits
+    exactly one space and a body that itself begins with whitespace would
+    otherwise compare unequal on the read side (``"[user]  hi"`` -> ``"hi"``).
+    """
+    match = _CAPTURE_ROLE_PREFIX.match(stored)
+    if match is None:
+        return "unknown", stored
+    return match.group(1), stored[match.end():]
+
+
 def _capture_turn_embeddings(
     turn_texts: list[str],
     expected_dim: int | None,
@@ -1998,13 +2021,27 @@ def _get_kind_expander():
 def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     """Attach promoted epistemic state (D8) to embedded-fallback hits — one
     batch fetch (#1353, E5 #1537). Additive, mirroring SearchResult.to_dict:
-    keys are set ONLY when the state is non-empty, so a graph with no
-    CORRECTS edges renders byte-identically to today. Decoration must never
-    break retrieval — a graph failure returns the hits undecorated."""
+    a key is added only when its state field is present — except for #4889's
+    ``subject_unavailable``, which is written when the state is *empty* on a
+    graph that cannot carry ``aboutSubject`` (the loud half of a read surface
+    that would otherwise be silently empty). Decoration must never break
+    retrieval — a graph failure returns the hits undecorated.
+
+    #4889: the degraded fallback is a Point-only surface that advertises the
+    same promoted-state fields as the primary path, so it owes the same
+    ``subject`` decoration AND the same fail-loud contract. Before this, a
+    fallback hit carried no ``subject`` at all even on a graph with a producer,
+    and no ``subject_unavailable`` when the binding was dead — the exact
+    silent-absence shape #4889 removes on the primary path.
+    """
     if not results:
         return results
     try:
-        from tortoise.search_engine import fetch_point_epistemic_state
+        from tortoise.search_engine import (
+            SUBJECT_BINDING_UNAVAILABLE,
+            fetch_point_epistemic_state,
+            subject_binding_available,
+        )
         state = fetch_point_epistemic_state(graph, [r["id"] for r in results])
     except Exception:
         _logger.warning("embedded fallback decoration failed — returning "
@@ -2022,6 +2059,17 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
                 r[key] = st[key]
+        # #4889: same additive subject field as SearchResult.to_dict.
+        if st.get("subject"):
+            r["subject"] = st["subject"]
+    # #4889: the same fail-loud marker as the primary path — only when the
+    # whole batch resolved no subject AND the graph cannot carry one for
+    # Points/Events. Fail-open (the probe returns True on any error), so a
+    # broken probe never fabricates an unavailability claim.
+    if not any(r.get("subject") for r in results) \
+            and not subject_binding_available(graph):
+        for r in results:
+            r["subject_unavailable"] = SUBJECT_BINDING_UNAVAILABLE
     return results
 
 
@@ -2133,6 +2181,71 @@ def _index_no_network_enabled() -> bool:
     delegates here), so the declared truthy contract has one place to assert.
     """
     return env_flag("TORTOISE_INDEX_NO_NETWORK", False)
+
+
+def _holds_role_available(graph) -> bool:
+    """True when this graph can carry ``holdsRole`` edges at all (#4889).
+
+    ``get_org_structure`` returns ``roles`` from a ``holdsRole`` traversal
+    whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``. That predicate has
+    **no producer anywhere in the tree** — every reference is an edge
+    allow-list, the read query itself, or an explicit
+    ``create_edge``/``create_entity`` caller. On a graph where it is absent the
+    empty ``roles`` list is structural, not a finding, so the method says so
+    instead of returning an unqualified empty result.
+
+    The probe counts the SAME shape the read traverses (``Subject`` source and
+    target), so a hand-written non-Subject ``holdsRole`` edge cannot suppress
+    the marker while ``roles`` stays permanently empty — the same asymmetry
+    ``search_engine._SUBJECT_SOURCE_SCOPED_PROBE`` fixes for ``aboutSubject``.
+    Bounded by ``_HOLDS_ROLE_PROBE_TIMEOUT_MS``.
+
+    Mirrors ``search_engine.subject_binding_available``: **fail-OPEN** — a probe
+    error returns True so a broken probe can never invent an unavailability
+    claim. Self-clears the moment a ``holdsRole`` edge of that shape exists.
+    """
+    try:
+        rows = graph.query(
+            _HOLDS_ROLE_SCOPED_PROBE,
+            timeout=_HOLDS_ROLE_PROBE_TIMEOUT_MS).result_set
+        if not rows or not rows[0]:
+            _logger.warning(
+                "holdsRole availability probe returned no row — assuming "
+                "available")
+            return True
+        count = rows[0][0]
+        if count is None:
+            _logger.warning(
+                "holdsRole availability probe returned a null count — "
+                "assuming available")
+            return True
+        return int(count) > 0
+    except Exception:  # fail-open, see docstring
+        _logger.warning(
+            "holdsRole availability probe failed — assuming available",
+            exc_info=True)
+        return True
+
+
+#: The exact ``holdsRole`` shape ``get_org_structure`` traverses. Scoping the
+#: probe to it is what keeps a non-Subject ``holdsRole`` edge from suppressing
+#: the marker on a graph where ``roles`` can never be populated.
+_HOLDS_ROLE_SCOPED_PROBE = (
+    "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)")
+
+#: Bound for the availability probe — the same 200 ms class as the search
+#: assembly's decoration bound. An unbounded count on a read path is the
+#: defect this probe must not reintroduce.
+_HOLDS_ROLE_PROBE_TIMEOUT_MS = 200
+
+
+#: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returns
+#: when the ``holdsRole`` leg has no producer on this graph.
+HOLDS_ROLE_UNAVAILABLE = (
+    "holdsRole has no producer anywhere in the tree — only an explicit "
+    "create_edge/create_entity caller — so 'roles' is structurally empty "
+    "rather than a finding about this Subject."
+)
 
 
 class TortoiseSDK:
@@ -4651,12 +4764,23 @@ class TortoiseSDK:
             exact_hit_id,
         )
         canonical_by_hash: dict[str, str] = {}
+        # #4716 Part 1: payload point id → the graph id the commit actually
+        # resolved it to. On a content-hash hit below the payload id is NOT
+        # the id the graph holds (`resolved = hit_id`), so every operator /
+        # supersession ref naming the payload id must be rewritten through
+        # this map before it is applied — else it names nothing and the write
+        # is dropped (`operator write skipped (inputs missing?)`, the #4654
+        # silent edge loss). The invariant is the one the v1 builder
+        # `_stream_to_payload` already enforces (#1272) — this restores it on
+        # the v2 capture path.
+        capture_point_id_map: dict[str, str] = {}
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
             if not pid or not content:
                 skipped += 1
                 continue
+            payload_id = pid
             try:
                 # 1) in-capture fold: same content minted earlier this seam
                 #    run (extractor payload assembly normally folds these;
@@ -4737,6 +4861,10 @@ class TortoiseSDK:
                         **props,
                     )
                 pid = resolved
+                # #4716 Part 1: remember which graph id this payload id
+                # resolved to (identity on a fresh create) — the remap source
+                # for the operator / supersession refs below.
+                capture_point_id_map[payload_id] = pid
                 if dedup == DEDUP_NEW:
                     canonical_by_hash[_content_hash(content)] = pid
                     for name in (pt.get("about_entities") or []):
@@ -4974,20 +5102,70 @@ class TortoiseSDK:
         #    apply_payload_operators) ──
         ops = payload.get("operators", []) or []
         if ops:
-            from tortoise.commit_ops import _payload_point_content_by_id, apply_payload_operators
+            from tortoise.commit_ops import (
+                _payload_point_content_by_id,
+                apply_payload_operators,
+                remap_operator_endpoint_refs,
+            )
+            # #4716 Part 1: rewrite payload endpoint refs to the ids the commit
+            # resolved the points to BEFORE the operator write. A payload id
+            # that resolved to an existing graph node under a different id
+            # named nothing here and the write was swallowed as
+            # "inputs missing?" — the edge was silently lost (§ Defect B).
+            #
+            # ⛔ The MITIGATES reason is resolved from the SAME ref, and the
+            # remap moves it into graph-id space while `payload["points"]` is
+            # keyed by PAYLOAD id — so after a re-key the lookup missed and the
+            # mitigation's content degraded to "[MITIGATION] [MITIGATION]
+            # <graph-id>" (#4716 review P1, reproduced end-to-end). Hand the
+            # helper a map-aware resolver that still finds the payload point the
+            # pre-remap ref named (first payload id wins when several folded
+            # into one graph id — deterministic, and the fold guarantees equal
+            # normalized content anyway).
+            _capture_reverse_id_map: dict[str, str] = {}
+            for _payload_id, _resolved_id in capture_point_id_map.items():
+                _capture_reverse_id_map.setdefault(_resolved_id, _payload_id)
+            # A FOLDED (NOOP) endpoint's ref is the PRIOR's graph id and has no
+            # payload point at all — the extractor's noop record carries the
+            # canonical content precisely so the reason still resolves here
+            # (#4716 re-review; the same degradation pre-existed on the
+            # ordinary path, where a folded emitted point used as a MITIGATES
+            # `src` resolved to its bare id).
+            _folded_content_by_id = {
+                str(_n.get("point_id") or ""): str(_n.get("content") or "")
+                for _n in noops
+                if _n.get("point_id") and _n.get("content")}
+            ops = remap_operator_endpoint_refs(ops, capture_point_id_map)
             apply_payload_operators(
                 proj, self, ops,
-                point_content_by_id=lambda pid: _payload_point_content_by_id(
-                    payload, pid))
+                point_content_by_id=lambda pid: (
+                    _payload_point_content_by_id(
+                        payload, _capture_reverse_id_map.get(pid, pid))
+                    or _folded_content_by_id.get(pid, "")))
         # #2164: supersessions — client-derived records (the deterministic
         # channel for the Object status fold; §6b parity). pt_ → supersede()
         # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
         # entities exist (ordering contract). Warnings ride meta — never a
         # silent drop. Best-effort — never fail capture (hosted §6b rule).
         try:
-            from tortoise.commit_ops import apply_supersessions
-            apply_supersessions(proj, self, payload.get("supersessions") or [],
-                                session_id=session_id, warn=warnings.append)
+            from tortoise.commit_ops import (
+                apply_supersessions,
+                remap_supersession_point_refs,
+            )
+            # #4716 Part 1 (adjacent hole, answered by analysis): a
+            # supersession's `supersedes_by` is the NEW payload point's
+            # `pt_<sha>` id, so it shares the operators' two-id-space hole
+            # (`superseded` does NOT — the extractor resolved it against the
+            # S3 search, so it is already a real graph id). Remap ONLY
+            # `supersedes_by`: `superseded` is the record's lane discriminator
+            # downstream (`startswith("pt_")`), so running it through the map
+            # could silently flip a CORRECTS fold onto the entity lane.
+            apply_supersessions(
+                proj, self,
+                remap_supersession_point_refs(
+                    payload.get("supersessions") or [],
+                    capture_point_id_map),
+                session_id=session_id, warn=warnings.append)
         except Exception as exc:  # pragma: no cover - defensive outer bound
             _logger.warning("supersession apply failed: %s", exc, exc_info=True)
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
@@ -13872,6 +14050,7 @@ class TortoiseSDK:
             fetch_point_epistemic_state, fallback_tfidf,
             SearchResult, SearchScores,
             search_provenance_enabled,
+            subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
             _recency_factors,
@@ -14560,6 +14739,21 @@ class TortoiseSDK:
                 captured_at=pt.get("captured_at", ""),
             )
             results.append(result)
+
+        # #4889: make a structurally-empty Subject layer loud instead of
+        # letting an absent ``subject`` key read as "these points have no
+        # subject". One probe, and ONLY when the whole batch resolved no
+        # subject — a mixed batch needs no marker (the field is working).
+        # Fail-open by construction: ``subject_binding_available`` returns
+        # True on any probe error, so a broken probe never fabricates an
+        # unavailability claim. This sits in the advertising surface only;
+        # ``fetch_point_epistemic_state`` itself stays single-query, so the
+        # shared assembly's query budget is untouched.
+        if (entity_type == "point" and results
+                and not any(r.subject for r in results)
+                and not subject_binding_available(graph)):
+            for r in results:
+                r.subject_unavailable = SUBJECT_BINDING_UNAVAILABLE
 
         # 9. Order results
         if order_by == "graph":
@@ -20834,7 +21028,21 @@ class TortoiseSDK:
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:
-        """Return organisational structure: members, roles, sub-orgs."""
+        """Return organisational structure: members, roles, sub-orgs.
+
+        #4889: ``roles`` is read from ``holdsRole``, which has no producer
+        anywhere in the tree (only an explicit ``create_edge``), so on a
+        graph that never wrote one the empty list is structural. The
+        additive ``unavailable`` map names the producer-less leg(s) — it is
+        emitted only while the predicate is absent, so the default shape
+        (and every graph that holds a ``holdsRole`` edge) is unchanged.
+
+        ``members`` is deliberately NOT marked: ``memberOf`` has a real
+        producer (``onboarding/seed.py::seed_onboarding_anchors``, reached
+        from hosted onboarding and the ``tortoise_onboarding_seed`` tool), so
+        an empty list there means no membership was filed — a finding, not a
+        gap.
+        """
         proj = self._get_proj()
         # Issue #327: labeled Subject start (id|name OR both indexed -> Index
         # Scan) then traverse outward; roles filters the source Subject p.
@@ -20848,10 +21056,17 @@ class TortoiseSDK:
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )
-        return {
+        out = {
             "members": [dict(row[0]) for row in members.result_set],
             "roles": [dict(row[0]) for row in roles.result_set],
         }
+        if not roles.result_set and not _holds_role_available(proj.g):
+            # Additive (#4889): the loud half of a producer-less read leg.
+            # Gated on ``roles`` being EMPTY so the marker's own claim
+            # ("'roles' is structurally empty") can never contradict a
+            # non-empty list under a concurrent edge delete.
+            out["unavailable"] = {"roles": HOLDS_ROLE_UNAVAILABLE}
+        return out
 
     def ulid(self) -> str:
         from .ids import ulid as _ulid

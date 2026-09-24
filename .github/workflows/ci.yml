@@ -288,6 +288,10 @@ jobs:
                   # registry-cron.sh still POST inline, so the substrate is not
                   # yet what EVERY monitor files through.
                   startswith(".github/scripts/auto-file-issue"),
+                  # #4759: the bypass reporter / expiry helper and the scheduled
+                  # check that ages every SKIP_* lane left set.
+                  startswith(".github/scripts/deploy-bypass"),
+                  isfile(".github/workflows/skip-bypass-expiry.yml"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
@@ -734,6 +738,23 @@ jobs:
       - name: Redislite orphan gate (#4740)
         run: bash .github/scripts/orphan-bound.test.sh
 
+  deploy-bypass-report:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4759: any monitor/deploy-gate surface (shared watchdog_scripts group)
+    # #4759: the bypass reporter / expiry helper's harness. Self-contained: no
+    # network, no gh — every input is an argument or an env binding, exactly as
+    # the workflow supplies them. It proves a bypass lands in
+    # $GITHUB_STEP_SUMMARY naming the gate, the lane that fired and BYPASSED
+    # (neuter the summary write and it goes red), that each job's end-of-job
+    # audit states every gate as bypassed or not, and that the expiry check ages
+    # a set lane, VIOLATES past the window, and treats a missing/invalid start
+    # date as a violation rather than silence. Mirrors deploy-health-gate above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy bypass report + expiry check (#4759)
+        run: bash .github/scripts/deploy-bypass.test.sh
+
   entrypoint-guards:
     needs: changes
     if: needs.changes.outputs.entrypoints == 'true'  # #2149: entrypoint.sh / its .ci-checks script only
@@ -883,7 +904,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+          node-version: '22'   # .ts type stripping + syntax detection is DEFAULT-ON from 22.18; the parity driver passes --experimental-strip-types (>= 22.7), test_pi_capture_hooks' `node --test` does not (#373 harness, #4714 parity test)
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the
