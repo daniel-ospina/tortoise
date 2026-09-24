@@ -30,7 +30,8 @@ green.
 
   The second form is emitted when the PR diff can be fetched from the REST
   API and the stale-sha guard has not degraded the record to the legacy
-  sha-only shape (see the arms in the producer-status note below).
+  sha-only shape (the `--force-stale` and head-fetch fail-open arms — see
+  "What the diff-match path does and does not verify" below).
   The `diff=<sha256>` segment is optional (added producer-side by #2982)
   and is part of the SIGNED text — it binds the review to the PR's three-dot
   diff, so a review stays tied to the reviewed artifact rather than only the
