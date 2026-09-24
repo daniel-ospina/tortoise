@@ -218,9 +218,11 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
 
   // Quote-aware strip, then excision of the ARCHIVED wizard block: dead code
-  // at LEGACY_WIZARD_ARCHIVED = false, but it must stay byte-identical for the
-  // A0 rollback path (main.jsx:2459-2462), so it is excluded from the scan
-  // rather than edited.
+  // at LEGACY_WIZARD_ARCHIVED = false, excluded from the vocab scan so its
+  // legacy copy cannot pollute the live-surface ratchet. #4335 intentionally
+  // edited its welcome plan-chooser fallback (marketing link → honest disabled
+  // CTA), so the slice's line-count canary below is kept in sync rather than
+  // the block being frozen.
   const strip = stripComments(src)
 
   // Scan-coverage self-test: the connector line is JSX TEXT whose tail
@@ -248,12 +250,14 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   assert.notEqual(markerAt, -1, 'excision marker not found after anchor — refusing a slice to the file edge')
   const end = markerAt + MARKER.length
   const lineStart = strip.lastIndexOf('\n', anchor) + 1
-  // raw main.jsx 6577..6854; the same slice is 279 split('\n') elements on the
-  // STRIPPED source (end is a stripped-source index — slice `strip`, not `src`)
+  // The same slice is 278 split('\n') elements on the STRIPPED source (end is a
+  // stripped-source index — slice `strip`, not `src`). Was 279 before #4335
+  // replaced the archived wizard's welcome plan-chooser fallback (a marketing
+  // "See pricing" link) with the honest disabled UpgradeCta — one line shorter.
   const E = strip.slice(lineStart, end)
   assert.match(E, /^ *\{LEGACY_WIZARD_ARCHIVED && welcomeOriented && \(/m)
   assert.ok(E.trimEnd().endsWith(')}'))
-  assert.equal(E.split('\n').length, 279)
+  assert.equal(E.split('\n').length, 278)
   assert.match(strip.slice(end), /^ *<\/>/)
 
   // Scan = the whole file, minus the archived block when the flag is off. Flip

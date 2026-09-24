@@ -380,13 +380,13 @@ html { scroll-padding-top: 24px; }
 .switch::after { border: 1px solid rgba(255,255,255,0.4); }
 /* #1148-ux review P4-1: busy state for the toggle */
 .switch[disabled] { opacity: 0.6; cursor: not-allowed; }
-/* #1894: an indexed docs switch is disabled but ON — never dim it to look
-   off (the docs source is terminal once indexed; a dimmed cyan switch reads
-   as "off" — the exact ambiguity this fix removes). Scoped to the docs
-   switch's terminal case via data-locked-on (set only when docsIndexed) so
-   the generic .switch[disabled] busy-dim (#1148-ux review P4-1) still
-   applies to other switches while their toggle is busy. */
-.switch[disabled][data-on='true'][data-locked-on] { opacity: 1; cursor: not-allowed; }
+/* #1894/#1924: a disabled-but-ON switch is never dimmed — a dimmed cyan
+   switch reads as "off" (the exact ambiguity #1894 removed). #1924 retired
+   the data-locked-on opt-in that scoped this to the (then-terminal) docs
+   switch: the docs switch is no longer terminal, so the only disabled-while-on
+   window left is a source's own busy PATCH, and dimming an ON switch there is
+   just as wrong. Scoped by state, not by component. */
+.switch[disabled][data-on='true'] { opacity: 1; cursor: not-allowed; }
 
 /* #1894: the docs indexed-state label — emphasized (non-dim) so an
    indexed source is unmistakably ON, with the last-indexed relative time. */

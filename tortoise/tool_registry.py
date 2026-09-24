@@ -236,7 +236,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "masking — another tenant's packs are never observable).",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="get_tenant_packs",  # pack_state helper, not an SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_state.get_tenant_packs)
     ),
     ToolDefinition(
         name="tortoise_pack_install",
@@ -250,7 +250,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "filesystem packs dir + tortoise pack CLI).",
         annotations=_rw(),  # C5 #2114 (re-review P2): MERGEs manifests/installs — a write
         http_policy=True,
-        sdk_method="upsert_tenant_manifest",  # pack_manifest_store helper
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_manifest_store.upsert_tenant_manifest)
         group="admin",
         hosted_only=True,
     ),
@@ -549,7 +549,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_delete_point",
         id="surface.delete_point",
         writes=True,
-        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.",
+        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. "
+                    "dry_run=True previews the blast radius (the point and every edge that "
+                    "would be removed) and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_point_wrapped",
@@ -558,7 +560,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_invalidate",
         id="surface.invalidate",
         writes=True,
-        description="Mark a Point outdated with a CORRECTS edge from the correcting Point.",
+        description="Mark a Point outdated with a CORRECTS edge from the correcting Point. "
+                    "dry_run=True previews the one-point transition + one edge and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="invalidate_point",
@@ -570,7 +573,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
                     "transfer_edges=True (default): full supersede — all edges move from "
                     "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer.",
+                    "+ CORRECTS edge only, no edge transfer. "
+                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="supersede",
@@ -594,7 +598,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         writes=True,
         description="Tombstone-retract a Point — status='retracted' (point stays "
                     "in graph, excluded from default surfaces). Terminal; cannot "
-                    "retract operators or already-terminal points.",
+                    "retract operators or already-terminal points. "
+                    "dry_run=True previews the status transition and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="retract_point",
@@ -608,7 +613,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "entity analysis; for a fast neighbor list use tortoise_list_topics.",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="entity_profile",  # navigation.entityProfile — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls navigation.entityProfile)
     ),
     ToolDefinition(
         name="tortoise_traverse",
@@ -810,7 +815,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Ask things like: 'where is the disagreement?' 'what supports claim X?'",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="analyze",  # analyze.analyze — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls analyze.analyze)
     ),
     # ── P1-3: Staleness Detection ─────────────────────────────────
     ToolDefinition(
@@ -1033,7 +1038,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_delete_entity",
         id="surface.delete_entity",
         writes=True,
-        description="Delete any entity by ID.",
+        description="Delete any entity by ID. DESTRUCTIVE — cannot be undone. "
+                    "dry_run=True previews the node(s) and every edge that would be "
+                    "removed and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_entity",
@@ -1066,7 +1073,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.delete",
         writes=True,
         description="Delete a Point or entity by id. DESTRUCTIVE — requires human "
-                    "confirmation. Cannot be undone.",
+                    "confirmation. Cannot be undone. dry_run=True previews the blast "
+                    "radius (which node resolves, and every edge that would go) and "
+                    "changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete",
