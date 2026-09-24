@@ -115,6 +115,26 @@ NEVER_ACROSS = [
     ("we ship at 6pm, not at 5pm", "we ship at 5pm, not at 6pm", "scope"),
     ("we ship today if the build passes",
      "we ship if the build passes today", "scope"),
+    # A clock the value dimension can now BIND, and one the scope sequence can
+    # now keep: the placeholder carries the meridiem, so 6 pm and 6 am are two
+    # operands rather than one hour.  Both fire, and the value binding is what
+    # the audit label reports.
+    ("we meet at 6 pm, not 6 am", "we meet at 6 am, not 6 pm", "scope"),
+    ("we meet at six pm, not six am", "we meet at six am, not six pm",
+     "scope"),
+    ("we start at 6pm and end at 9pm", "we start at 9pm and end at 6pm",
+     "number"),
+    ("we start at six pm and end at nine pm",
+     "we start at nine pm and end at six pm", "number"),
+    # ... and a DATE is bound the same way.
+    ("we ship on monday and receive on tuesday",
+     "we ship on tuesday and receive on monday", "date"),
+    ("we ship in march and receive in april",
+     "we ship in april and receive in march", "date"),
+    # A clitic with the apostrophe omitted: the shape rule needs a separator,
+    # so these are named in the marker list instead.
+    ("we mustnt ship the build", "we ship the build", "negation"),
+    ("we neednt retry the deploy", "we retry the deploy", "negation"),
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
@@ -191,8 +211,10 @@ class TestDistinguishingDifference:
 
     @pytest.mark.parametrize("apostrophe", [
         "\u2018", "\u2019", "\u201a", "\u201b", "\u00b4", "\u02bc",
-        "\u02b9", "\u02be", "\u02bf", "\u02c8", "\u055a", "\u05f3",
-        "\u2032", "\u2035", "\ua78c", "\uff02", "\uff07"])
+        "\u02b9", "\u02bb", "\u02bc", "\u02bd", "\u02be", "\u02bf",
+        "\u02c0", "\u02c1", "\u02c8", "\u02ca", "\u02cb", "\u02cc",
+        "\u02d0", "\u055a", "\u05f3", "\u2032", "\u2035", "\ua78c",
+        "\uff02", "\uff07"])
     def test_a_clitic_in_any_apostrophe_spelling_negates(self, apostrophe):
         """LLM output spells the clitic with every codepoint that looks like an
         apostrophe, and a negator the boundary cannot see is a negator it fails
@@ -216,8 +238,9 @@ class TestDistinguishingDifference:
         translate table is the one that runs.  A codepoint in the table and not
         in the test is an unverified guarantee."""
         assert set(v2._APOSTROPHES) == {
-            0x2018, 0x2019, 0x201A, 0x201B, 0x00B4, 0x02BC, 0x02B9, 0x02BE,
-            0x02BF, 0x02C8, 0x055A, 0x05F3, 0x2032, 0x2035, 0xA78C, 0xFF02,
+            0x2018, 0x2019, 0x201A, 0x201B, 0x00B4, 0x02BB, 0x02BC, 0x02BD,
+            0x02BE, 0x02BF, 0x02C0, 0x02C1, 0x02B9, 0x02C8, 0x02CA, 0x02CB,
+            0x02CC, 0x02D0, 0x055A, 0x05F3, 0x2032, 0x2035, 0xA78C, 0xFF02,
             0xFF07,
         }
 
@@ -273,6 +296,26 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the team meets weekly in main office",
                                "the team meets weekly")
         assert v2.fold_allowed("gym at 6pm", "workout at the gym at six pm")
+
+    def test_a_load_bearing_frame_connective_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5139).
+
+        `and` and `or` are conjunctions — the role that makes them frame words
+        and keeps a coordinating paraphrase foldable — and they are also
+        operators.  Swapping them changes what the claim asserts, and a set of
+        content tokens cannot tell the two uses apart.
+        """
+        assert v2.fold_allowed("we ship and test", "we ship or test")
+
+    def test_a_sentence_initial_name_is_a_known_limit(self):
+        """Documented residual, pinned with the uncapitalised name (#5134).
+
+        A name is caught by its capital, and a sentence-initial capital is
+        positional: treating it as name-shaped would refuse `Workout at the gym
+        at six pm` / `gym at 6pm`, whose first token is capitalised for the same
+        reason.
+        """
+        assert v2.fold_allowed("the plan was approved", "Alice approved the plan")
 
     def test_a_lowercase_name_on_one_side_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5134).
@@ -339,13 +382,17 @@ class TestDistinguishingDifference:
     def test_a_value_difference_does_not_mask_an_identity_one(self):
         """A pair differing in a number AND in its predicate is a rival claim.
 
-        The audit label is the value dimension because it is the first match,
-        so a decision made from that label alone would let the number
-        difference license superseding the predicate — the prior claim would
-        be quietly terminalized by a rival.
+        The number must not license superseding the predicate.  Both dimensions
+        are present; the label reports the identity one, because that is the
+        one that constrains the decision, and the decisions refuse on the set.
         """
         for prior, candidate in MASKED_IDENTITY:
-            assert v2.distinguishing_difference(prior, candidate) == "number"
+            assert v2.distinguishing_difference(prior, candidate) \
+                in v2._IDENTITY_DIMENSIONS
+            # the value difference is genuinely there too
+            assert (v2._value_signature(prior) != v2._value_signature(candidate)
+                    or v2._value_bindings(prior)
+                    != v2._value_bindings(candidate))
             assert not v2.fold_allowed(prior, candidate)
             assert not v2.supersede_allowed(prior, candidate)
 

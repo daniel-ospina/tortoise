@@ -3058,6 +3058,9 @@ _NEGATION_MARKERS = frozenset({
     "not", "no", "never", "none", "nor", "nothing", "without", "cannot",
     "cant", "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
     "wont", "wouldnt", "shouldnt", "couldnt", "hasnt", "havent", "aint",
+    # The apostrophe-omitted spellings `_CLITIC_RE` cannot see: with the
+    # separator gone the token is an ordinary word, so it has to be named.
+    "mustnt", "neednt", "shant", "mightnt", "oughtnt", "darent",
 })
 _CONDITION_MARKERS = frozenset({
     "if", "unless", "until", "when", "whenever", "provided", "assuming",
@@ -3130,7 +3133,9 @@ _APOSTROPHES = str.maketrans({
     "\u02bc": "'", "\u02b9": "'", "\u2032": "'", "\u2035": "'",
     "\uff07": "'", "\u00b4": "'", "\u02be": "'", "\u02bf": "'",
     "\u02c8": "'", "\u055a": "'", "\u05f3": "'", "\uff02": "'",
-    "\ua78c": "'",
+    "\ua78c": "'", "\u02bb": "'", "\u02bd": "'", "\u02c0": "'",
+    "\u02c1": "'", "\u02ca": "'", "\u02cb": "'", "\u02cc": "'",
+    "\u02d0": "'",
 })
 # Codepoint-agnostic fallbacks for the two things an apostrophe carries.  A
 # translate table cannot enumerate the apostrophe inventory (U+055A, U+02BE,
@@ -3193,6 +3198,22 @@ def _guard_tokens(content: str) -> set[str]:
     return set(_guard_token_seq(content))
 
 
+def _canonicalise_clocks(content: str) -> str:
+    """Every clock form replaced by one placeholder token.
+
+    "6pm", "six pm" and "6:00 pm" are one value, and the placeholder makes a
+    clock comparable to a number — so a clock can be BOUND to the noun beside
+    it and KEPT in a marker's scope.  Deleting it, which is what the value
+    comparison alone used to do, loses both: "we start at 6pm and end at 9pm"
+    and "we start at 9pm and end at 6pm" then carry one value signature.
+    """
+    def sub(m: re.Match) -> str:
+        sig = _value_signature(m.group(0))
+        return "clock" + (sig.replace(":", "") if sig else m.group(0))
+
+    return _CLOCK_RE.sub(sub, _norm(content))
+
+
 def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
     """Each value token paired with the content token BEFORE it, IN ORDER.
 
@@ -3214,8 +3235,8 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
     """
     out: list[tuple[str, str]] = []
     anchor = ""
-    for t in _guard_token_seq(_CLOCK_RE.sub(" ", _norm(content))):
-        value = t if any(c.isdigit() for c in t) else None
+    for t in _guard_token_seq(_canonicalise_clocks(content)):
+        value = _canon_token(t) if any(c.isdigit() for c in t) else None
         if value is None:
             v = _num_word_value(t)
             value = str(v) if v is not None else None
@@ -3248,17 +3269,21 @@ def _condition_markers(content: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _date_tokens(content: str) -> frozenset[str]:
-    """Date/scope words — month names, relative days, multi-word relative days.
+def _date_tokens(content: str) -> tuple[str, ...]:
+    """Date/scope words IN ORDER — month names, relative days, multi-word days.
 
     Deliberately WITHOUT digit-bearing tokens: those are the value dimension's
     job, and it normalises them ("6pm"/"six pm" are one value).  Including
     them here would read a value spelling change as a date change.
+
+    Ordered, not a set: a date is as bound to its verb as a number is to its
+    noun, and "we ship on monday and receive on tuesday" vs its mirror carries
+    one date set and two meanings.
     """
-    found = {t for t in _guard_tokens(content) if t in _DATE_WORDS}
+    out = [t for t in _guard_token_seq(content) if t in _DATE_WORDS]
     flat = _norm(content)
-    found.update(p for p in _DATE_PHRASES if p in flat)
-    return frozenset(found)
+    out.extend(p for p in _DATE_PHRASES if p in flat)
+    return tuple(out)
 
 
 def _proper_nouns(content: str) -> frozenset[str]:
@@ -3327,7 +3352,7 @@ def _marker_scope(content: str) -> tuple[str, ...]:
     compare them, and "ship at 3pm" must not read as a scope change.
     """
     out: list[str] = []
-    for t in _guard_token_seq(content):
+    for t in _guard_token_seq(_canonicalise_clocks(content)):
         if t in _NEGATION_MARKERS or _CLITIC_RE.search(t) \
                 or t in _CONDITION_MARKERS:
             out.append(_canon_token(t))
@@ -3434,19 +3459,25 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
             return "unreadable", _UNREADABLE
         identity = _identity_differences(a, b)
         dimension: str | None = None
-        sig_a, sig_b = _value_signature(a), _value_signature(b)
-        # Both halves are needed.  The signature normalises the clock and
-        # quantity forms ("6pm"/"six pm" are one value); the token set catches
-        # a differing number ANYWHERE in the claim, including the one that sits
-        # beside an equal signature — which comparing signatures alone misses,
-        # because it returns early once both sides carry one.
-        if sig_a != sig_b or _value_bindings(a) != _value_bindings(b):
-            dimension = "number"
-        elif _date_tokens(a) != _date_tokens(b):
-            dimension = "date"
-        elif identity:
+        # The identity dimensions come first, because they are the ones that
+        # constrain BOTH decisions; a value dimension is reported only when no
+        # identity dimension differs.  Reporting a value dimension for a pair
+        # that also substitutes content would tell a reader the pair is a value
+        # change when the case for refusing it is the substitution.
+        if identity:
             # Sorted so the reported label is deterministic across runs.
             dimension = sorted(identity)[0]
+        else:
+            sig_a, sig_b = _value_signature(a), _value_signature(b)
+            # Both halves are needed.  The signature normalises the clock and
+            # quantity forms ("6pm"/"six pm" are one value); the binding pairs
+            # each value with the content token beside it, which catches a
+            # differing number ANYWHERE in the claim — including one beside an
+            # equal signature, and two numbers permuted.
+            if sig_a != sig_b or _value_bindings(a) != _value_bindings(b):
+                dimension = "number"
+            elif _date_tokens(a) != _date_tokens(b):
+                dimension = "date"
         return dimension, identity
     except Exception:  # noqa: BLE001, RUF100
         return "unreadable", _UNREADABLE
@@ -3460,9 +3491,10 @@ def distinguishing_difference(a: str, b: str) -> str | None:
     them means the pair may not be folded into one claim: two claims differing
     in a distinguishing dimension are rival claims, not duplicates.
 
-    When a pair differs in more than one dimension this reports the first, for
-    audit; the DECISION belongs to ``fold_allowed`` / ``supersede_allowed``,
-    which consult the full identity set rather than this label.
+    When a pair differs in more than one dimension this reports the identity
+    one first, because that is what constrains the decision; the DECISION itself
+    belongs to ``fold_allowed`` / ``supersede_allowed``, which consult the full
+    identity set rather than this label.
     """
     return _boundary(a, b)[0]
 
