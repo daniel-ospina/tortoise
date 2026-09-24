@@ -5399,3 +5399,80 @@ def test_conftest_sweep_returns_build_end_sweep_report():
         "a literal bypasses the builder and the gate would read it unpinned "
         f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
     )
+
+
+def test_conftest_closes_embedded_clients_before_the_end_sweep():
+    """#1005 (epic #1647 E2E-7): the end-sweep must probe a CLIENT-CLOSED seam.
+
+    The sweep's `left` is read during fixture teardown. While this process's
+    own embedded clients are still open, every server they hold reads as a
+    live-client server and `reap()` declines it — so `left` counted the
+    suite's own client population (147 in the post-#4927 CI sample) while the
+    workflow's post-exit probe measured the residue (5). `COUNT <= left` was
+    then structurally incapable of failing on the leak it exists to catch.
+
+    The fix is an ORDERING property of two top-level calls in
+    `_redislite_hygiene`'s session-end teardown: `close_embedded_clients()`
+    (the existing idempotent seams atexit uses) must run BEFORE the
+    `end_result = _sweep(...)` assignment. Source order is execution order in
+    a straight-line teardown, so a line-number comparison proves the property
+    that a value-level AST pin cannot: a `_sweep()` that runs first reads an
+    inflated `left` no matter what it returns.
+
+    Reverting the conftest call (or re-ordering it after the sweep) fails
+    this test and the CI orphan gate silently loses its same-seam bound.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+
+    close_calls = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "close_embedded_clients"
+    ]
+    assert len(close_calls) == 1, (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() exactly once (the session-end, "
+        "before-the-sweep close); found "
+        f"{len(close_calls)} call(s) — the end-sweep would otherwise probe a "
+        "population that still includes this process's own clients (#1005)"
+    )
+    close_call = close_calls[0]
+
+    end_assigns = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "end_result"
+            for t in n.targets
+        )
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+        and n.value.func.id == "_sweep"
+    ]
+    assert len(end_assigns) == 1, (
+        "tests/conftest.py's _redislite_hygiene must run its session-end sweep "
+        f"as `end_result = _sweep(...)` exactly once; found {len(end_assigns)} "
+        "assignment(s) — the ordering pin needs the single session-end call "
+        "(#1005)"
+    )
+    end_assign = end_assigns[0]
+
+    assert close_call.lineno < end_assign.lineno, (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() BEFORE `end_result = _sweep(...)`: the "
+        "end-sweep's `left` is read during fixture teardown, and while this "
+        "process's own clients are open every server they hold is declined by "
+        "reap()'s live-client gate — so `left` measures the suite's own "
+        "clients, not the residue, and the gate's `COUNT <= left` comparison "
+        "is not same-seam (#1005). Reorder the close before the sweep."
+    )

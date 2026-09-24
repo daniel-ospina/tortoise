@@ -58,6 +58,11 @@
 #     → RED (case 31), so the control cannot be disabled by a shape change —
 #     and it is enforced on the `cleared: false` path at COUNT == 0 (case 46),
 #     where it is the remaining self-consistency control.
+#   * the SAME-SEAM control (#1005) `left <= before`: RED when the post-sweep
+#     reading exceeds the pre-sweep reading (case 53) — the sweep's two readings
+#     are not a monotone drain, so `left` is not a valid bound for COUNT —
+#     downgraded by a watchdog kill, and PASS at the `left == before` boundary
+#     (case 53), so the strict `-gt` cannot slide to `-ge`.
 #   * the deadline-aborted sweep report (`reaped: 0, cleared: false`, with the
 #     identity trivially satisfied and COUNT == left) → PASSES with the budget
 #     warning (case 35), while the healthy residue shape (`cleared: true`)
@@ -181,6 +186,8 @@ printf '{"sweep":{"reaped":0,"cleared":true,"left":0,"before":1}}' > "$WORK/iden
 printf '{"sweep":{"reaped":5,"cleared":false,"left":0,"before":5}}' > "$WORK/cleared_false_left_zero.json"
 printf '{"sweep":{"reaped":12,"cleared":true,"left":14,"before":26}}' > "$WORK/identity_ok.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":10}}' > "$WORK/identity_bad.json"
+printf '{"sweep":{"reaped":0,"cleared":true,"left":9,"before":5}}' > "$WORK/nonmonotone.json"
+printf '{"sweep":{"reaped":0,"cleared":true,"left":5,"before":5}}' > "$WORK/same_seam_boundary.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":2,"before":null}}' > "$WORK/before_null.json"
 printf '{"sweep":{"reaped":0,"cleared":true,"left":2,"before":0}}' > "$WORK/before_zero.json"
 printf '{"sweep":{"reaped":9,"cleared":true,"left":14}}' > "$WORK/nobefore.json"
@@ -267,20 +274,21 @@ assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "the warning path does not print a pass line either"
 
-echo "7. a COUNT BELOW left PASSES at rc=0 (the atexit race is normal)"
-# `left` is read during fixture teardown; redislite's atexit handler shuts its
-# last-client servers down after pytest fully exits, so the workflow probe
-# legitimately sees fewer. This is the direction that must never red.
+echo "7. a COUNT BELOW left PASSES at rc=0 (the NOSAVE window is normal)"
+# Since #1005 `left` is read AFTER conftest's in-process close, the same seam
+# as the workflow probe; the residual delta is the fire-and-forget NOSAVE
+# window (~0.05s per server), so the later probe legitimately sees fewer. This
+# is the direction that must never red.
 run_gate 13 0 report14.json
 assert_eq "$RC" "0" "exits 0 on COUNT < left"
-assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is reported VERBATIM — every field, separator and delta"
 assert_not_contains "$OUT" "::error::" "no red on the healthy atexit boundary"
 
 echo "8. a kill does NOT turn COUNT < left into a red either"
 run_gate 13 124 report14.json
 assert_eq "$RC" "0" "exits 0 on COUNT < left under rc=124"
-assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM under a kill too (the bound is unchanged)"
 assert_not_contains "$OUT" "::warning::" "no spurious warning for a below-bound count"
 
@@ -645,7 +653,7 @@ run_gate 0 0 false4740.json
 assert_eq "$RC" "0" "exits 0 when the workflow's own probe measured zero"
 assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=0 against left=5 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
   "the warning is VERBATIM at a measured zero — every field and word"
-assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=14 left=5 reaped=9, cleared=false; 5 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=14 left=5 reaped=9, cleared=false; 5 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM, interpolating this report's own cleared=false"
 assert_not_contains "$OUT" "cleared=true" \
   "the pass line reports the sweep's own cleared=false, never a hardcoded true"
@@ -658,7 +666,7 @@ run_gate 3 0 budget.json
 assert_eq "$RC" "0" "exits 0 at a non-zero count"
 assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=3 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
   "the warning is VERBATIM with COUNT=3 != left=14"
-assert_contains "$OUT" "orphaned redislite servers after suite: 3 (sweep before=23 left=14 reaped=9, cleared=false; 11 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 3 (sweep before=23 left=14 reaped=9, cleared=false; 11 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM at COUNT=3"
 assert_not_contains "$OUT" "::error::" "does not red"
 
@@ -667,13 +675,13 @@ run_gate 0 124 budget.json
 assert_eq "$RC" "0" "exits 0 at COUNT=0 under rc=124"
 assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=0 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
   "the warning at a measured zero is the same VERBATIM warning"
-assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=23 left=14 reaped=9, cleared=false; 14 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=23 left=14 reaped=9, cleared=false; 14 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM at a measured zero under a kill"
 run_gate 3 124 budget.json
 assert_eq "$RC" "0" "exits 0 at COUNT>0 under rc=124"
 assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=3 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
   "the same warning at COUNT>0 — the kill rc changes nothing"
-assert_contains "$OUT" "orphaned redislite servers after suite: 3 (sweep before=23 left=14 reaped=9, cleared=false; 11 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 3 (sweep before=23 left=14 reaped=9, cleared=false; 11 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the pass line is printed under a kill rc too"
 assert_not_contains "$OUT" "#1371" "no kill-aware branch remains on this arm"
 
@@ -743,7 +751,7 @@ run_gate 13 0 issue4989.json
 assert_eq "$RC" "0" "exits 0 — the reported false red is gone"
 assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=13 against left=159 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
   "emits the new warning VERBATIM at the reported fields"
-assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=168 left=159 reaped=9, cleared=false; 146 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=168 left=159 reaped=9, cleared=false; 146 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM at the reported fields"
 assert_not_contains "$OUT" "::error::" "the diagnostic is not a red"
 
@@ -772,10 +780,31 @@ assert_eq "$RC" "1" "exits 1 at COUNT=2 <= left=5, so only the identity can red"
 assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=40, reaped=0, left=5 (reaped + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
   "the identity red is VERBATIM at COUNT=2 (COUNT <= left isolates it)"
 
+echo "53. a post-sweep reading ABOVE the pre-sweep reading REDs (the same-seam control, #1005)"
+# before=5, left=9: the identity holds (0 + 9 >= 5) and COUNT == left == 9,
+# so only the same-seam control can red. The sweep's own two readings are not a
+# monotone drain, so `left` is not a valid residue for COUNT to bind to.
+run_gate 9 0 nonmonotone.json
+assert_eq "$RC" "1" "exits 1 when left > before"
+assert_contains "$OUT" "::error::redislite orphan gate: the sweep's post-sweep count exceeds its pre-sweep count — before=5, left=9 (left > before); the two readings are not a same-seam pair, so left is not a valid bound — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the same-seam red is VERBATIM at rc=0 (every field and separator)"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "does NOT fall through to the pass line (fail-open pin)"
+# A watchdog kill downgrades it, mirroring the accounting identity's polarity.
+run_gate 9 137 nonmonotone.json
+assert_eq "$RC" "0" "exits 0 under rc=137"
+assert_contains "$OUT" "::warning::" "emits a warning under a kill"
+assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
+# The boundary is strict: left == before is a valid same-seam pair and PASSES.
+run_gate 5 0 same_seam_boundary.json
+assert_eq "$RC" "0" "exits 0 at the left == before boundary"
+assert_contains "$OUT" "orphaned redislite servers after suite: 5 (sweep before=5 left=5 reaped=0, cleared=true) — within the sweep's own measurement" \
+  "the boundary pass line is VERBATIM"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=196
+expected_assertions=204
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
