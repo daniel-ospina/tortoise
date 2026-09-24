@@ -1098,6 +1098,7 @@ surfaces:
   - test_2952_write_path_determinism.py  # #2952 defect 1: fresh-create write path must not skew fulltext/recall_state scores (docker-lane; DB)
   - test_recall_gaps_subgraph.py
   - test_subgraph_pure.py  # #3011: subgraph traversal/ranking engine — seed policy, hop decay, hub damping, cap→dedupe (hermetic)
+  - test_fanout_cap.py  # #5010: the adopted per-entity fan-out cap (STORAGE-ARCHITECTURE §11.5) — the hub expansion is bounded per entity, the value has one home, a caller cannot raise it (tortoise/subgraph.py is the read-path expansion; tortoise/fanout.py is the shared declaration)
   - test_subgraph_render.py  # #3011: frozen serializer — block order, provenance, confidence, word budget (hermetic)
   - test_recall_state.py
   - test_source_credibility.py
@@ -2062,6 +2063,7 @@ durations:
   test_session_key.py: 0.1
   test_sparse.py: 0.1
   test_subgraph_pure.py: 0.1
+  test_fanout_cap.py: 0.2
   test_supplementary.py: 0.1
   test_user_identity_inventory.py: 0.1
   bench/test_roundrobin.py: 0.0
