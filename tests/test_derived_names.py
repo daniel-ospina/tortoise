@@ -197,10 +197,19 @@ def test_already_compliant_registry_name_is_not_double_prefixed(tmp_path):
 def test_shared_registry_name_is_never_prefixed(tmp_path):
     """AC2's fail-closed direction. `namespace="registry"` makes _get_proj
     force graph_name="registry_tortoise" (sdk.py:2519-2521) BEFORE our
-    override, so this is the real shared-name path — do not also assert a
-    separate `graph_name=None` leg, which is byte-identical to it."""
-    assert _registry_name_for(tmp_path, "registry", None) == "registry_control_plane"
-    assert _registry_name_for(tmp_path, "registry", "registry_tortoise") == "registry_control_plane"
+    override, so this is the real shared-name path.
+
+    No separate `graph_name=None` leg: in a test session the projection
+    redirect rewrites graph_name to `test_x_<hash>` inside `_get_proj()`
+    (sdk.py), so a `None` leg asserts redirect behaviour, not the shared-name
+    invariant — and without a test session it is byte-identical to the
+    `"registry_tortoise"` leg below, which already carries that path. The
+    `does not start with` assertion below keeps the invariant fail-closed and
+    lane-independent: it reds if someone prefixes the `elif ns`/`else`
+    branches that produce the shared name."""
+    name = _registry_name_for(tmp_path, "registry", "registry_tortoise")
+    assert name == "registry_control_plane"
+    assert not name.startswith(("test_", "tortoise_test_")), name
 
 
 def test_explicit_test_prefixed_name_honored_verbatim(uri_env):
