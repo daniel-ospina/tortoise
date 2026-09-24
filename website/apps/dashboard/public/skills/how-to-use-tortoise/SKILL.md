@@ -290,7 +290,7 @@ Before creating a new evidence point, search whether it already exists:
 These run against a local FalkorDB via the SDK — the self-hosted path. Hosted tenants run the identical pattern with the MCP tools (`tortoise_create_point` → `tortoise_create_operator` → `tortoise_compute_confidence`); the scripts are reference implementations of the flow, not a hosted requirement.
 
 ### `graph-scripts/file_pricing_decision.py`
-Compares Pro/Team pricing options ($29/$49/$79) using criteria (competitor positioning, conversion rate, ARPU) and findings (devtool sweetspot, OSS conversion rates). Wires IMPL to chosen options, NAND to rejected ones. EP computes per-option confidence.
+Compares Pro/Team pricing options ($29/$49/$79) using criteria (competitor positioning, conversion rate, ARPU) and findings (devtool sweetspot, OSS conversion rates). Wires IMPL to chosen options, NAND to rejected ones. EP computes per-option confidence. **⚠️ Superseded prices — this is a worked example of the flow, not our price list.** The decided tiers are **free $0 · solo $9 · pro $25 · team $149** in the tortoise repo's `product/pricing.json` (`owner_confirmed: 2026-08-07`).
 
 ### `graph-scripts/decide_licensing.py`
 Compares 3 license options (AGPLv3-dual, BSL+AGPL, SSPL) using 7 criteria and 20+ findings. Full pattern: criteria → options → findings → edges → compute_confidence → ranked output. Run as:

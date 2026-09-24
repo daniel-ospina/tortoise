@@ -66,6 +66,7 @@ import warnings
 import weakref
 from typing import Any
 
+from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
@@ -523,6 +524,17 @@ def _classify_later_enabled() -> bool:
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
     review FIX B) and goes through the declared truthy contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
+
+
+def _vet_enabled() -> bool:
+    """#5005: the call-time S2.2 VET toggle.
+
+    Unset/0 → the gate is entirely off-path: the VET passes do not run, the
+    list is untouched, and the only result delta is the additive ``vet``
+    evidence key — matching the ``TORTOISE_CLASSIFY_LATER`` precedent
+    (``#1695`` Task 5), so the rate effect is measurable before it is trusted.
+    Value matching goes through the declared truthy contract (#4097)."""
+    return is_truthy(os.environ.get("TORTOISE_VET"))
 
 
 def _default_kind_classifier(model):
@@ -1888,15 +1900,22 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
     rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
+        # #4511: the callee returns ``SearchResult.to_dict()`` rows, which key
+        # the kind as ``point_kind`` — never ``kind``. Reading the wrong key
+        # left every row's OUTPUT ``kind`` empty (points and the object/subject
+        # legs alike), blanking the S4 prompt's kind column. The OUTPUT key
+        # the renderer and link-before-create read stays ``kind``; only the
+        # SOURCE key is corrected.
+        row_kind = r.get("point_kind", "")
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
-                        "kind": r.get("kind", "")})
+                        "kind": row_kind})
         elif entity_type == "point" and _is_turn_echo_row(session_id, r):
             # #2552: this capture's transcript echo — never a memory prior.
             continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
-                        "kind": r.get("kind", "")})
+                        "kind": row_kind})
         if limit > 0 and len(out) >= limit:
             break
     return out
@@ -3114,6 +3133,31 @@ def classify_consolidation(point: dict, priors: list[dict], *,
     return DecisionRecord("ADD", evidence="no prior match")
 
 
+def _prior_row_content(priors: list[dict], prior_id: str, fallback: str) -> str:
+    """#4716: the canonical prior point's content for a folded endpoint.
+
+    A NOOP fold maps a ref to the PRIOR's graph id and emits no payload point.
+    The commit layer resolves a MITIGATES reason from a ref, so a folded
+    record must carry the content the ref now names — otherwise the dampener's
+    reason degrades to the bare id (a fabricated '[MITIGATION] <graph-id>'
+    claim). ``fallback`` is the candidate ref text itself (correct for the
+    ``identical`` arm, where the two are equal under normalization).
+
+    Fail-closed on an empty ``prior_id``: ``classify_consolidation`` returns
+    ``prior_id=""`` when the matched prior row carries no id, so without this
+    guard an absent id would match the FIRST id-less row and return another
+    point's content. (Unreachable from the production path — ``search_graph``
+    drops id-less rows — but the contract must be total for direct
+    ``execute_embed`` callers.)
+    """
+    if not prior_id:
+        return fallback
+    for row in priors or []:
+        if str(row.get("id") or "") == prior_id:
+            return str(row.get("content") or "") or fallback
+    return fallback
+
+
 def _find_point_match(points: list[dict], content: str, *,
                        about_entities: list[str] | None = None,
                        when: str | None = None) -> tuple[str, str]:
@@ -3740,7 +3784,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         ``target_edge`` IMPL is materialized when the model did not separately
         emit it. So the drop now fires only on a genuinely unresolvable ref
         (empty, a ref naming an emitted ENTITY — the prompt forbids entity
-        endpoints, so no claim Point is fabricated for one — or the
+        endpoints, so no claim Point is fabricated for one — whether the
+        entity was EMITTED this session or only present in the S3 index's
+        entity rows, #4716 — or the
         degenerate self-edge), not on the prompt's "CREATE the point first"
         instruction being skipped by the model. A minted endpoint no
         surviving operator references is pruned again.
@@ -3860,6 +3906,26 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # EMITTED ENTITY is forbidden by the OPERATOR REFERENCING hard rule, so it
     # must never be materialized as a claim Point (see `_mint_endpoint`).
     emitted_entity_names = {_norm(name) for name, _ in emitted_entity_keys}
+    # #4716 Part 2 (Defect A / #4656 gap 1) — the mint's entity guard also
+    # consults the S3 index's entity rows, not just this session's payload
+    # entities: an Object that already exists in the graph but was NOT
+    # re-emitted this session is still an entity reference, and materializing
+    # a claim Point out of a participant name is the exact fabrication the
+    # OPERATOR REFERENCING rule forbids. `idx["entities"]` was in scope and
+    # unread by the mint before #4716 — every prior `idx[…]` use was
+    # `_index_search`'s own construction, the event loop's `idx["events"]`
+    # dedup, or `classify_consolidation`'s `idx["points"]` prior set. (Named
+    # by symbol, never by line: a numeric citation into this file re-stales on
+    # every edit — the #4648/#4954 drift class.)
+    #
+    # ⚠️ The surface is the S3 candidate window (`search_graph` defaults
+    # top-3/query, ≤15 queries), NOT an authority on the graph's contents — a
+    # bounded heuristic, empty on a degraded/non-real backend. An Object
+    # outside it is still mintable; closing that needs an authoritative
+    # query-independent entity lookup, which is deliberately out of #4716's
+    # scope (see the issue's "the candidate set cannot carry correctness").
+    graph_entity_names = {_norm(str(e.get("name") or ""))
+                          for e in idx["entities"] if e.get("name")}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -4001,6 +4067,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "point_id": pid, "session_ref": session_id,
                 "overlap": decision.overlap,
                 "evidence": decision.evidence,
+                "content": _prior_row_content(idx["points"], pid, content),
                 "reason": decision.reason})   # "identical" | "paraphrase"
             point_ids[n] = pid
             link_before_create.append({
@@ -4101,14 +4168,6 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "found": True,
             "note": f"superseded by new point {pid} — CORRECTS fold"})
 
-    # source-turn map over the emitted payload points — the NAND-direction
-    # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
-    turn_by_point: dict[str, int] = {}
-    for _pt in payload_points:
-        t = _pt.get("source_turn_id")
-        if type(t) is int:
-            turn_by_point[_pt["id"]] = t
-
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
     # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes
     # MITIGATES against the COMPLETE edge set so order-independence holds
@@ -4159,7 +4218,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         n = _norm(content)
         if n in point_ids:
             return point_ids[n]
-        if n in emitted_entity_names:
+        if n in emitted_entity_names or n in graph_entity_names:
             # The hard rule is explicit — "NEVER use an entity name as an
             # operator endpoint — entities are wired through
             # about_entities". Minting one would fabricate a degenerate claim
@@ -4169,20 +4228,125 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # warning, while a MITIGATES ``target_edge`` endpoint drops in pass
             # 2 with "MITIGATES target edge not emitted" (that operator's own
             # src/dst still resolve). Either way it is the pre-#2552
-            # behaviour, which is correct HERE.
+            # behaviour, which is correct HERE. #4716: the guard reads BOTH the
+            # emitted payload entities and the graph index's entity rows.
             warnings.append(
                 f"operator endpoint NOT minted (#2552 mint-before-wire): "
-                f"{where} named the emitted ENTITY {content[:60]!r} — the "
+                f"{where} named the ENTITY {content[:60]!r} — the "
                 "OPERATOR REFERENCING rule forbids entity endpoints, so no "
                 "claim Point is fabricated for it")
             return ""
+        # ── #4716 Part 2 (Defect A): the mint is not a side door around the
+        # consolidation rule the ordinary point path already implements ~100
+        # lines above. Apply the E7 classifier against the S3 priors before
+        # creating anything: a minted endpoint whose content already exists
+        # in-graph folds to the canonical id (NOOP — no second Point, no
+        # ORPHAN), which is what lets a PARAPHRASE endpoint reach the belief
+        # instead of a content-hash copy (a commit-time content-hash lookup
+        # cannot see a paraphrase — #4652).
+        #
+        # ⚠️ Inputs are DEGRADED relative to the ordinary path, so the decision
+        # surface is not identical (code-review P2): a minted ref carries no
+        # about_entities/tier, so `entity_mentions=None` leaves the entity gate
+        # UNDETERMINED-True (the documented never-block-on-absent-data posture)
+        # and the `sig_equal and (tier_a or mentions)` arm is UNREACHABLE — a
+        # paraphrase can fold only via the raw token-overlap band
+        # (`ov >= NOOP_MIN_OVERLAP`) or the ambiguous-high-overlap band. The
+        # exact/normalized-content arm (step 1) is unaffected, and that is the
+        # #4652 fold. Two refs that paraphrase each other INSIDE one payload
+        # cannot fold either: priors are `idx["points"]` (S3 priors), not the
+        # just-minted `payload_points`.
+        #
+        # The mint cannot express UPDATE: it hardcodes `reason="NEW"` and emits
+        # no supersession record (an E5 REVISES needs the ordinary path's
+        # supersessions entry, not merely a quote/turn — Part 3 below gives the
+        # mint both), so an UPDATE-classified ref is created as a new statement
+        # Point with a warning naming the decision. DELETE cannot occur at all:
+        # `classify_consolidation` documents and implements "DELETE is NEVER
+        # produced from content alone" (D5 — only explicit retractions), so
+        # only UPDATE is checked.
+        _decision = classify_consolidation(
+            {"content": content, "about_entities": [], "search_keys": [],
+             "when": None, "tier": ""},
+            idx["points"], entity_mentions=None, current_date=session_date)
+        if _decision.decision == "NOOP":
+            pid = _decision.prior_id or _content_id("pt", content)
+            noops.append({
+                "point_id": pid, "session_ref": session_id,
+                "overlap": _decision.overlap,
+                "evidence": _decision.evidence,
+                "content": _prior_row_content(idx["points"], pid, content),
+                "reason": _decision.reason})
+            point_ids[n] = pid
+            _full = _norm(ref)
+            if _full != n:
+                point_ids.setdefault(_full, pid)
+            link_before_create.append({
+                "searched_for": f"point '{content[:60]}'", "found": True,
+                "note": f"duplicate of existing {pid} "
+                        f"({_decision.reason}) — folded (no new point)"})
+            warnings.append(
+                f"operator endpoint folded (#4716 mint-vs-E7): {where} named "
+                f"{content[:60]!r}, whose content already exists in-graph as "
+                f"{pid} ({_decision.reason}) — no second Point; the operator "
+                "wires to the canonical id")
+            return pid
+        if _decision.decision == "UPDATE":
+            warnings.append(
+                f"operator endpoint minted as ADD (#4716 mint-vs-E7): {where} "
+                f"matched an existing point with consolidation decision "
+                f"{_decision.decision} ({_decision.evidence}), but a minted "
+                "endpoint hardcodes reason=NEW and emits no supersession "
+                "record, so an E5 REVISES fold is not expressible — it is "
+                "created as a new statement Point (the commit layer re-"
+                "resolves its id)")
         pid = _content_id("pt", content)
-        payload_points.append({
+        pt_entry: dict = {
             "id": pid, "content": content, "pointKind": "statement",
             "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
             "about_entities": [], "source_ref": "session.md", "quote": "",
             "search_keys": [], "status": "draft",
-        })
+        }
+        # ── #4716 Part 3 (Defect C / #4656 gap 2): give the minted endpoint a
+        # REAL source turn so a NAND whose endpoints were minted can be
+        # direction-canonicalized (#909) — `turn_by_point` is built AFTER this
+        # pre-pass (it was built before the mint, so a minted endpoint could
+        # never be in the map). The model's own reference text is the quote
+        # candidate; `_resolve_source_turn` anchors it against the transcript
+        # (verbatim first, then the >=0.6 token-overlap band).
+        #
+        # ⛔ The quote is kept ONLY on a VERBATIM anchor (code-review P2, three
+        # reviewers): the overlap band is not proof the text is in the turn,
+        # and `quote` is trusted as a verbatim excerpt downstream
+        # (`retrieval._is_own_source` keys on `source_turn_id` equality alone;
+        # `_same_fact` collapses on `source_turn_id` + quote overlap). On the
+        # band route the turn is still recorded (that is what the NAND
+        # canonicalizer needs) and the quote is left EMPTY — the pre-#4716
+        # shape for the quote, never a fabricated excerpt. With no anchor at
+        # all, neither field is set and the mint says so in its own words: the
+        # probe is run against a SCRATCH warnings list so the generic
+        # "has no resolvable source turn" text (which describes an EMITTED
+        # point losing its E3 anchor — not what happened) never reaches the
+        # payload's warnings.
+        if edus:
+            _probe = {"content": content, "quote": content[:200]}
+            _scratch: list[str] = []
+            _turn = _resolve_source_turn(_probe, edus, warnings=_scratch)
+            if _turn is None:
+                warnings.append(
+                    f"minted endpoint ({where}) has no transcript anchor — "
+                    "left unquoted (no source_turn_id)")
+            else:
+                _turn_text = next(
+                    (str(e.get("text") or "") for e in edus
+                     if e.get("index") == _turn), "")
+                _anchor = re.sub(r"\s+", " ", content[:200].strip().lower())
+                _verbatim = bool(_anchor) and re.sub(
+                    r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
+                pt_entry["source_turn_id"] = _turn
+                if _verbatim:
+                    pt_entry["quote"] = content[:200]
+        payload_points.append(pt_entry)
         point_ids[n] = pid
         # `_resolve` probes the UNTRUNCATED ref, so register that key too when
         # truncation changed it — otherwise a >1000-char ref mints a Point the
@@ -4215,6 +4379,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     _ref = str(_target.get(_side, "") or "")
                     if _ref and not _resolve(_ref):
                         _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
+
+    # source-turn map over the emitted payload points — the NAND-direction
+    # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
+    # #4716 Part 3: built AFTER the mint pre-pass above, so a minted endpoint
+    # that Part 3 anchored to a real turn participates in canonicalization
+    # (building it before the mint meant a minted endpoint could never be in
+    # the map).
+    turn_by_point: dict[str, int] = {}
+    for _pt in payload_points:
+        t = _pt.get("source_turn_id")
+        if type(t) is int:
+            turn_by_point[_pt["id"]] = t
 
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
@@ -4637,13 +4813,60 @@ def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
             for i, t in enumerate(conversation) if t.get("content")]
 
 
+def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
+                  prior: dict | None = None
+                  ) -> tuple[dict, dict, list[str], dict]:
+    """One S2.2 VET pass (#5005) — never raises.
+
+    Returns ``(new_embed_list, stats, warnings, pool)``. On ANY failure the
+    input list is returned UNCHANGED with a warning: fail-open is the step's
+    stated failure policy (§4.2) — a wrong keep is noise, a wrong drop is
+    memory loss. `apply_vet` removes only explicit ``DISCARD`` outcomes, so the
+    no-arbiter path is a no-op on the list.
+
+    ``prior`` is the earlier pass's ``removal_pool`` (S2 → union). It is
+    **required for correctness, not cosmetic**: S4 runs between the two passes
+    and can reference an item the S2 pass removed, which a per-pass guard
+    cannot see. The returned ``pool`` is this pass's removals, to hand to the
+    next one.
+    """
+    if not embed_list:
+        return embed_list, {}, [], {}
+    try:
+        out = _vet_gate.vet_candidates(embed_list, narrative=narrative,
+                                       arbiter=arbiter)
+        new_list, apply_warnings = _vet_gate.apply_vet(
+            embed_list, out["decisions"], prior=prior)
+        stats = {
+            "stats": out["stats"],
+            "batch": out["batch"],
+            # the raw decisions ride the result so a discard is auditable and
+            # its counterfactual is recoverable (no silent discard).
+            "decisions": out["decisions"],
+        }
+        pool = _vet_gate.removal_pool(embed_list, new_list)
+        return (new_list, stats, list(out["warnings"]) + list(apply_warnings),
+                pool)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        return embed_list, {}, [
+            f"vet failed ({type(e).__name__}: {e}) — candidates kept "
+            "(fail-open)"], {}
+
+
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
                        session_date: str | None = None,
-                       kind_classifier=None) -> dict:
+                       kind_classifier=None,
+                       vet_arbiter=None) -> dict:
     """The v2 production entry: conversation → S1 (chunked+compiled) → S2 →
     S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
+
+    ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
+    decision-only model that answers *"should this candidate exist at all?"*.
+    None + ``TORTOISE_VET`` unset → VET is entirely off-path. When the flag is
+    on and no arbiter is injected, VET runs its mechanical Level-2 batch checks
+    and keeps every candidate (fail-open). See ``tortoise/vet_gate.py``.
 
     ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
     None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the
@@ -4713,6 +4936,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             classify_later = False
             errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_later_init_failed")
+    # #5005: S2.2 VET — off unless TORTOISE_VET (or an injected arbiter).
+    vet_enabled = vet_arbiter is not None or _vet_enabled()
+    vet_warnings: list[str] = []
     edus = _edus_from_conversation(conversation)
     if not edus:
         return {"session_id": session_id, "story_arc": "", "embed_list": {},
@@ -4730,6 +4956,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                                    "s2": {}, "union": {},
                                    "restamp_overrides": 0,
                                    "slot_rekeys": 0},
+                "vet": {"enabled": vet_enabled, "s2": {}, "union": {}},
                 "chain_enforcer": {"notes": [], "stats": {
                     "items_checked": 0, "violations": 0,
                     "rewired": 0, "warned": 0}}}
@@ -4785,6 +5012,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats, "s2")
         _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── S2.2 VET (#5005): the adversarial selection gate. Runs BEFORE the
+    # resolve/embed tail on every arm, and before the classify pass only under
+    # TORTOISE_CLASSIFY_LATER (with the flag off, S2.1 emits kinds inline — so
+    # the never-classified guarantee holds only on the classify-later arm).
+    # Fail-open: _run_vet_pass returns the list unchanged on any failure.
+    # Note the rebinding: with the flag on, ``result["s2_embed"]`` (set at the
+    # end of this function, commented "S2 raw (pre-S4)") is this pass's OUTPUT —
+    # the S2 embedding after VET, still pre-S4. With the flag off it is
+    # unchanged, which is the pre-existing behaviour.
+    vet_s2_stats: dict = {}
+    vet_s2_pool: dict = {}
+    if vet_enabled and embed_list:
+        embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
+            embed_list, story, arbiter=vet_arbiter)
+        vet_warnings.extend(_w)
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
     # domain items the core-only S2 emitted as "unclassified" get their
@@ -4858,6 +5101,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats, "s4")
         _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── S2.2 VET — post-S4 union pass (#5005), the authoritative one. S4 is a
+    # second extraction pass (the live ``run_s4`` gap-filler — distinct from
+    # the design's REMOVED "S4 — granularity review"; see the G5 record in the
+    # module docstring), so VET runs again on the union to gate what S4 added.
+    # ``vet_s2_pool`` carries the S2 pass's removals forward: without it, an
+    # operator S4 re-added against an S2-discarded item would be re-minted by
+    # execute_embed, and an entity S4 started referencing would 422 the
+    # session. The union list is re-vetted wholesale rather
+    # than as a delta because merge_embed_lists rewrites/reorders it — the S2
+    # verdict ids (which are positional) do not describe the union's items.
+    vet_union_stats: dict = {}
+    if vet_enabled and complete_list:
+        complete_list, vet_union_stats, _w, _ = _run_vet_pass(
+            complete_list, story, arbiter=vet_arbiter, prior=vet_s2_pool)
+        vet_warnings.extend(_w)
 
     # ── classify-later post-merge pass (#1695 Task 5): E4 + kind-preservation
     # re-stamp → classify(union, kind-missing only) → slot re-key. The S2
@@ -5017,6 +5276,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         "restamp_overrides": restamp_overrides,
         "slot_rekeys": slot_rekeys,
     }
+    # #5005: the S2.2 VET evidence surface (additive — an empty block when the
+    # flag is off). The off-path delta is exactly this key: the embed list and
+    # every downstream payload byte are unchanged when the flag is off.
+    result["vet"] = {
+        "enabled": vet_enabled,
+        "s2": vet_s2_stats,
+        "union": vet_union_stats,
+    }
+    if vet_warnings:
+        result["warnings"] = vet_warnings + (result.get("warnings") or [])
     if classify_later:
         # the unclassified terminal is resolved at write (execute_embed's
         # sentinel repair) — count it in the census. The UNION pass

@@ -67,7 +67,33 @@ on:
       - 'uv.lock'
   workflow_dispatch:
     inputs:
-      # #1719 (Task 7): DB-health verification bypass for incident-fix deploys.
+      # ══ #4759 — the bypass convention for ALL FOUR skip-* inputs below ══════
+      # Each bypassable deploy gate has TWO lanes: this dispatch input (per run)
+      # and a `SKIP_*` repo variable (persistent — the ONLY lane on a push run,
+      # where the `inputs` context is null).
+      #
+      #   input                       repo variable                  gate
+      #   skip-db-health-gate         SKIP_DB_HEALTH_GATE            DB health verification
+      #   skip-pack-smoke             SKIP_PACK_SMOKE                pack-catalog smoke
+      #   skip-fly-machines-guard     SKIP_FLY_MACHINES_GUARD        Fly machine guard
+      #   skip-fly-secret-provenance  SKIP_FLY_SECRET_PROVENANCE     Fly secret provenance
+      #
+      # Every bypass renders through ONE reporter (.github/scripts/deploy-bypass.sh
+      # `report`), so the four cannot be reported differently: it keeps the
+      # `::warning::` AND appends a uniform block to `$GITHUB_STEP_SUMMARY` naming
+      # the gate, the lane that fired, and BYPASSED. Each deploy job ends with a
+      # `Deploy gate audit` step (`if: always()`) stating every gate in that job
+      # as bypassed or not — so a green run cannot be read as "every gate passed"
+      # while one was skipped.
+      #
+      # THE WINDOW IS MACHINE-CHECKED. A persistent bypass also sets a dated
+      # companion variable `SKIP_<VAR>_SET_AT` (YYYY-MM-DD, UTC). The scheduled
+      # workflow `skip-bypass-expiry` (daily) ages every set lane and goes RED
+      # past `WINDOW_DAYS` (default 7, in deploy-bypass.sh) or when the date is
+      # missing/invalid — and the deploy-time report calls the same state OVERDUE
+      # in the run summary. A bypass can therefore no longer be left set
+      # silently. docs/infra-runbook.md §8.2.
+      #
       # Defaults FALSE — re-armed by #4605 (2026-09-22, UTC). This input was
       # 'true' ONLY as the RC3 FalkorDB-restore mitigation, a dated
       # incident-window state with its own exit condition ("flip to false once
@@ -192,14 +218,36 @@ jobs:
     # the run red.
     if: ${{ needs.packaging-smoke.result == 'success' || needs.packaging-smoke.result == 'skipped' }}
     steps:
-      - name: Warn when pack smoke bypassed (#1929)
-        # Auditability — a bypassed pack gate must never be silent (mirrors
-        # the skip-db-health-gate warning convention, which since #4538 lives
-        # in the post-deploy-verify job, not in this one).
-        if: ${{ inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true' }}
-        run: |
-          echo "::warning::pack-catalog smoke BYPASSED (skip-pack-smoke) — the hosted image ships without a pack gate"
+      # checkout FIRST (#4759). The bypass report below runs the shared reporter,
+      # which lives in the repo, so it needs the checkout. Nothing is lost by the
+      # reorder: the end-of-job `Deploy gate audit` step (`if: always()`) derives
+      # this gate's bypass from its LANE, so it still reports the skip even if an
+      # earlier step in this job fails.
       - uses: actions/checkout@v4
+      - name: Bypass report — pack smoke (#1929, #4759)
+        # Auditability — a bypassed pack gate must never be silent. #4759 made
+        # this UNIFORM across all four gates and moved it into the run SUMMARY:
+        # the ::warning:: is preserved, and the block the reporter appends below
+        # states the gate, the lane that fired, and BYPASSED — so a reader of the
+        # summary can tell "gate passed" from "gate skipped" without opening a
+        # step log. The window start (`SKIP_PACK_SMOKE_SET_AT`) is read too: a
+        # bypass left set past the window is called out OVERDUE.
+        if: ${{ inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true' }}
+        env:
+          # #4334 discipline: the values are bound in env and read as QUOTED
+          # shell variables — never interpolated into the run text, where a
+          # value's quotes/`$(…)` would be parsed as shell syntax.
+          BYPASS_INPUT_FIRED: ${{ inputs.skip-pack-smoke || false }}
+          BYPASS_VARIABLE_FIRED: ${{ vars.SKIP_PACK_SMOKE == 'true' }}
+          SKIP_PACK_SMOKE_SET_AT: ${{ vars.SKIP_PACK_SMOKE_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+        run: |
+          bash .github/scripts/deploy-bypass.sh report \
+            --key SKIP_PACK_SMOKE \
+            --input-fired "$BYPASS_INPUT_FIRED" \
+            --variable-fired "$BYPASS_VARIABLE_FIRED" \
+            --set-at "$SKIP_PACK_SMOKE_SET_AT" \
+            --effect "the hosted image ships without a pack gate (the whole packaging-smoke job is skipped)"
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: '3.12'
@@ -415,7 +463,15 @@ jobs:
             exit 2
           fi
           if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-secret-provenance || vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}" = "true" ]; then
-            echo "::warning::Fly secret provenance BYPASSED (skip-fly-secret-provenance) — an undeclared or stale secret declaration will NOT block this deploy. Clear the input/var after the incident, and declare the secret in .github/scripts/fly-managed-secrets.txt." >&2
+            # #4759: uniform reporting — the ::warning:: plus a run-SUMMARY block
+            # (gate, lane, BYPASSED, window). Never silent was the old contract;
+            # visible-without-the-log is the new one.
+            bash .github/scripts/deploy-bypass.sh report \
+              --key SKIP_FLY_SECRET_PROVENANCE \
+              --input-fired "${{ inputs.skip-fly-secret-provenance || false }}" \
+              --variable-fired "${{ vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}" \
+              --set-at "$SKIP_FLY_SECRET_PROVENANCE_SET_AT" \
+              --effect "an undeclared or stale secret declaration will NOT block this deploy"
             exit 0
           fi
           exit "$RC"
@@ -463,6 +519,9 @@ jobs:
           TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          # #4759: the bypass report's window start and its per-job audit marker.
+          SKIP_FLY_SECRET_PROVENANCE_SET_AT: ${{ vars.SKIP_FLY_SECRET_PROVENANCE_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
       # Migration drift gate (#1095): fail-closed check that repo migrations
       # are not ahead of prod before shipping app code. The #1001 P0 (code
       # reading teams.suspended_at/flagged_at whose migration never reached
@@ -500,13 +559,22 @@ jobs:
             exit 2
           fi
           if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
-            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (docs/infra-runbook.md §8 — the SKIP_* bypass convention)." >&2
+            # #4759: uniform reporting — the ::warning:: plus a run-SUMMARY block.
+            bash .github/scripts/deploy-bypass.sh report \
+              --key SKIP_FLY_MACHINES_GUARD \
+              --input-fired "${{ inputs.skip-fly-machines-guard || false }}" \
+              --variable-fired "${{ vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" \
+              --set-at "$SKIP_FLY_MACHINES_GUARD_SET_AT" \
+              --effect "orphan/crash-loop machines will NOT block this deploy"
             exit 0
           fi
           exit "$RC"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq
+          # #4759: the bypass report's window start and its per-job audit marker.
+          SKIP_FLY_MACHINES_GUARD_SET_AT: ${{ vars.SKIP_FLY_MACHINES_GUARD_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         # #4334: every secret is bound in `env:` and referenced as a QUOTED
         # shell variable; the flyctl argv is a bash ARRAY (`"${ARGS[@]}"`).
@@ -722,6 +790,29 @@ jobs:
           exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}
+      - name: Deploy gate audit — deploy-api (#4759)
+        # The authoritative "was anything skipped" statement for this job, and it
+        # runs even when an earlier step failed (`if: always()`) — so a reader
+        # never has to infer a pass from the ABSENCE of a bypass block. Each of
+        # the job's three bypassable gates is stated as bypassed or not: the
+        # `if`-gate (pack smoke) from its LANE, the two wrapper gates (Fly
+        # machines / provenance) from the lane plus the marker the report step
+        # writes when it applies the skip. The lines state the BYPASS only —
+        # whether a gate's step executed is the job's colour and its step list.
+        if: always()
+        env:
+          PACK_SMOKE_IN: ${{ inputs.skip-pack-smoke || false }}
+          PACK_SMOKE_VAR: ${{ vars.SKIP_PACK_SMOKE == 'true' }}
+          FLY_MACHINES_IN: ${{ inputs.skip-fly-machines-guard || false }}
+          FLY_MACHINES_VAR: ${{ vars.SKIP_FLY_MACHINES_GUARD == 'true' }}
+          PROVENANCE_IN: ${{ inputs.skip-fly-secret-provenance || false }}
+          PROVENANCE_VAR: ${{ vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+        run: |
+          bash .github/scripts/deploy-bypass.sh audit --job deploy-api \
+            --state "SKIP_PACK_SMOKE=$PACK_SMOKE_IN/$PACK_SMOKE_VAR" \
+            --state "SKIP_FLY_MACHINES_GUARD=$FLY_MACHINES_IN/$FLY_MACHINES_VAR" \
+            --state "SKIP_FLY_SECRET_PROVENANCE=$PROVENANCE_IN/$PROVENANCE_VAR"
 
   # ── Post-deploy verification (own job; #4538 decision, option b) ──────────
   #
@@ -800,7 +891,36 @@ jobs:
         if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
         run: bash .github/scripts/deploy-health-gate.sh
         shell: bash
-      - name: Warn when DB health verification bypassed
+      - name: Bypass report — DB health verification (#1719, #4759)
+        # #4759: uniform reporting. The old step said SKIPPED only in this step's
+        # log, so a reader of the run SUMMARY saw a green/skipped step and could
+        # not tell the gate apart from one that passed. This keeps the
+        # ::warning:: and appends the same summary block every other bypass
+        # emits — gate, lane that fired, BYPASSED, and the window state from
+        # SKIP_DB_HEALTH_GATE_SET_AT (OVERDUE / NOT RECORDED when it should be).
         if: ${{ inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true' }}
+        env:
+          # #4334 discipline: env-bound, read as quoted shell variables.
+          BYPASS_INPUT_FIRED: ${{ inputs.skip-db-health-gate || false }}
+          BYPASS_VARIABLE_FIRED: ${{ vars.SKIP_DB_HEALTH_GATE == 'true' }}
+          SKIP_DB_HEALTH_GATE_SET_AT: ${{ vars.SKIP_DB_HEALTH_GATE_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
         run: |
-          echo "::warning::DB health verification SKIPPED (skip-db-health-gate input or SKIP_DB_HEALTH_GATE repo variable). Clear it once the data plane is healthy."
+          bash .github/scripts/deploy-bypass.sh report \
+            --key SKIP_DB_HEALTH_GATE \
+            --input-fired "$BYPASS_INPUT_FIRED" \
+            --variable-fired "$BYPASS_VARIABLE_FIRED" \
+            --set-at "$SKIP_DB_HEALTH_GATE_SET_AT" \
+            --effect "the release health check does not run, so a live release with a dead graph DB plane is not detected here"
+      - name: Deploy gate audit — post-deploy-verify (#4759)
+        # This job's only bypassable gate, stated as bypassed or not even when an
+        # earlier step failed — so "no bypass block" is never the reader's only
+        # evidence.
+        if: always()
+        env:
+          DB_HEALTH_IN: ${{ inputs.skip-db-health-gate || false }}
+          DB_HEALTH_VAR: ${{ vars.SKIP_DB_HEALTH_GATE == 'true' }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+        run: |
+          bash .github/scripts/deploy-bypass.sh audit --job post-deploy-verify \
+            --state "SKIP_DB_HEALTH_GATE=$DB_HEALTH_IN/$DB_HEALTH_VAR"

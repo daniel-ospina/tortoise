@@ -39,6 +39,9 @@ Usage
     # local/self-host target (loopback) needs no --allow-prod
     python tools/ship_test_onboarding.py --auth-url http://127.0.0.1:8788
 
+    # inspect a FAILED run's org instead of reaping it (explicit residue)
+    python tools/ship_test_onboarding.py --keep-org --auth-url http://127.0.0.1:8788
+
     # guard self-check: prove the connection-claim probe discriminates
     # (RED on a lying UI, GREEN on a behaviour-identical reformat)
     python tools/ship_test_onboarding.py --mutation-selfcheck
@@ -72,7 +75,45 @@ guard: the
 record's ``reason`` field carries the same split (``instrument_error`` vs
 ``server_did_not_observe``), so a deploy job can branch on it without parsing
 prose. The observation
-directory always holds ``observation.json`` + step screenshots, pass or fail.
+directory always holds ``observation.json`` + step screenshots, pass or fail —
+with deliberate exceptions (#4875), each asserted by name in the fast suite: an
+abort that predates the observation itself (an ``--out`` that cannot be created,
+a driver that will not start) raises before any writer exists and therefore
+writes nothing, and a walk body that raises before it settles writes no
+pre-teardown copy at all (its exception propagates past the authoritative
+write). The exception list is exhaustive.
+
+**Browser teardown (#4907).** The run owns the Playwright driver's lifecycle
+(``start()`` + an explicit teardown) rather than inheriting it, and the browser
+teardown is BOUNDED (``TEARDOWN_BOUND_S``): a watchdog signals only the run's
+own driver child — enumerated as a direct child with its start time, re-checked
+before signalling, reaped after — which is what releases a close blocked
+against an unresponsive driver. The outcome is recorded in ``observation.json``
+as the ``browser_teardown`` block (``not_run`` / ``clean`` / ``close_error`` /
+``watchdog_kill`` / ``driver_absent`` / ``abandoned``), and it is written
+atomically twice — but only for a run whose walk settled into the pre-teardown
+write: a complete pre-teardown copy whose outcome is ``not_run`` (so a run
+killed inside the window still leaves a diagnostic) and the authoritative copy
+after the teardown. That is a qualification, not a universal: a walk body that
+raises before it settles writes no pre-teardown copy, and its exception
+propagates past the authoritative write. A run killed inside the window with
+the driver unresponsive still orphans that driver and its Chromium children —
+no in-process code runs after the kill — which is disclosed as **#4928**, not
+claimed closed.
+
+**Teardown (#4319).** Every per-deploy run creates a real production org
+(``Ship Test <epoch>-<hex4>``); the run **reaps it by default**, and the outcome is
+recorded in ``observation.json`` as the ``teardown`` block. The org is proven to
+be this run's by a **differential proof of creation** — the walked session's own
+org list is read before the wizard can create anything and again at teardown, so
+this run's orgs are exactly the set difference — never by its name, which a
+fixed ``--org-name`` or a reused account could match on an org this run did not
+create. Deletion goes through the same-origin ``/api/v1`` BFF proxy as the
+session's owner, and ``deleted`` is only recorded after a readable re-read shows
+the org gone (a 2xx is not proof). ``--keep-org`` opts out and leaves an
+explicit, countable residue. **Teardown never changes the verdict or the exit
+code** — a cleanup fault is residue, not a product finding, and it is printed
+loudly on stderr (the ``#4291`` guard, both directions).
 
 The record carries the timestamp, the **deployed SHA** (the deployment's own
 revision, read from the public ``GET /v1/version`` — ``commit_sha`` baked into
@@ -89,10 +130,15 @@ what keep the probe itself honest.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -346,6 +392,20 @@ def exit_code_for(reason: str) -> int:
     return EXIT_FAILED
 
 
+def run_exit_code(obs: Observation) -> int:
+    """The exit code THIS run earned — the ONE definition, shared by `main` and
+    by the teardown's last resort.
+
+    `exit_code_for(obs.reason)` alone is NOT it: a PASSED run has an empty reason
+    (`failure_reason` returns "" for `passed`), which `exit_code_for` scores as a
+    failure. Both callers go through here, so a cleanup fault cannot move the
+    exit code (#4319).
+    """
+    if obs.verdict == "passed":
+        return EXIT_PASSED
+    return exit_code_for(obs.reason)
+
+
 def verdict_for(neg: Verdict, observed_after: bool, pos: Verdict, *,
                 session_state: str, skip_agent_write: bool = False) -> str:
     """Assemble the walk's verdict from its measured halves.
@@ -518,6 +578,72 @@ class Step:
     extra: dict = field(default_factory=dict)
 
 
+# ── the BROWSER teardown's own record and bound (#4907) ──────────────────────
+# DISTINCT from the org reaper above: `obs.teardown` is the ORG teardown's outcome
+# (it drives the residue warning and ~40 existing assertions), while this is the
+# BROWSER teardown's. The vocabulary is CLOSED, and `not_run` is what the
+# pre-teardown document carries: a run killed inside the bounded window still
+# lands a complete, parsable artifact that says the teardown never finished.
+#
+# A `pw.stop()` failure is `close_error`, alongside a context/browser close that
+# raises. `close_error` therefore means "a close the run attempted did not
+# complete", whichever closer it was — the `closes` list names it.
+BROWSER_TEARDOWN_NOT_RUN = "not_run"
+BROWSER_TEARDOWN_CLEAN = "clean"
+BROWSER_TEARDOWN_CLOSE_ERROR = "close_error"
+BROWSER_TEARDOWN_WATCHDOG_KILL = "watchdog_kill"
+BROWSER_TEARDOWN_DRIVER_ABSENT = "driver_absent"
+# The ladder was spent and a close was STILL blocked, with no enumerated child to
+# release it: the run terminated itself rather than hang forever. Distinct from
+# `driver_absent` (no child, but the close returned) — this one means the
+# process's own exit was the bound.
+BROWSER_TEARDOWN_ABANDONED = "abandoned"
+BROWSER_TEARDOWN_OUTCOMES = (
+    BROWSER_TEARDOWN_NOT_RUN, BROWSER_TEARDOWN_CLEAN, BROWSER_TEARDOWN_CLOSE_ERROR,
+    BROWSER_TEARDOWN_WATCHDOG_KILL, BROWSER_TEARDOWN_DRIVER_ABSENT,
+    BROWSER_TEARDOWN_ABANDONED,
+)
+
+# The teardown budget, in seconds. The watchdog's rungs are timed off it and the
+# teardown returns by it; the pin (`0 < TEARDOWN_BOUND_S <= 60`) lives in the
+# test that owns the constant, because an inflated bound is not a bound. The
+# first rung is B/2, so the budget must clear twice the healthy teardown
+# (~2.6 s measured): at 30 s the graceful window is ~6x the healthy path, so a
+# healthy run never reaches a rung, while a close that never returns is still
+# hard-bounded.
+TEARDOWN_BOUND_S = 30.0
+
+# The `ps` reads the watchdog makes are bounded too, so a wedged `ps` cannot
+# spend the teardown's slack. This is the intended absolute cap; the effective
+# bound is `_ps_timeout()`, which also caps it at the ladder's own slack (B/4).
+_PS_TIMEOUT_S = 1.0
+
+# The process reader is an ABSOLUTE path, never a PATH lookup: this instrument
+# runs with an operator-controlled environment, and a PATH-planted `ps` would
+# decide which pid the watchdog signals. When the absolute binary is absent the
+# reader refuses (no pid is enumerated, so nothing is signalled) rather than
+# falling back — a refusal leaves a bounded run with a recorded outcome, which
+# is strictly safer than signalling by the output of an unverified binary.
+_PS_BIN = "/bin/ps"
+
+# Both `ps` selections ask for UNLIMITED output width. A host's `ps` can
+# truncate its LAST column, and the CI runner did exactly that (the same
+# truncation class fixed for the embedded reaper in #1365): the
+# `command` field is unbounded, so on a runner whose interpreter path alone is
+# ~49 characters a real driver's trailing `run-driver` marker is cut off, no
+# candidate matches, the driver is never signalled, and a healthy run abandons
+# with its Chromium tree live. `ppid=,lstart=` is short enough not to be cut at
+# 80 columns, but a truncated start time would collapse two different processes
+# into one identity — the pid reuse the atomic read exists to defeat — so the
+# reader takes `-ww` too and neither read depends on the venue's width.
+_PS_UNLIMITED_WIDTH = "-ww"
+
+
+def _browser_teardown_record() -> dict:
+    """The pre-teardown document's shape: `not_run`, no closes, no detail."""
+    return {"outcome": BROWSER_TEARDOWN_NOT_RUN, "closes": [], "detail": ""}
+
+
 @dataclass
 class Observation:
     started_at: str
@@ -536,6 +662,15 @@ class Observation:
     # How the run authenticated (`state`, `detail`, `mechanism`) — the evidence
     # for the guard's central distinction, recorded rather than narrated.
     session: dict = field(default_factory=dict)
+    # The run's own cleanup outcome (#4319): a JSON-only summary whose `status`
+    # is one of the TEARDOWN_* constants. Declared HERE because the atomic writer
+    # serializes with `dataclasses.asdict`, which emits declared fields only —
+    # an undeclared attribute is silently dropped from the artifact.
+    teardown: dict = field(default_factory=dict)
+    # The BROWSER teardown's outcome (#4907). Declared for the same reason as
+    # `teardown` — `asdict` emits declared fields only — and pinned to the closed
+    # vocabulary above. `not_run` until a teardown actually completes.
+    browser_teardown: dict = field(default_factory=_browser_teardown_record)
     # The failure CLASS (#4291). Empty iff `verdict == "passed"`. A run whose
     # class is `instrument_error` measured nothing about the product and exits 3.
     reason: str = ""
@@ -682,6 +817,28 @@ UNUSABLE_SESSION_STATES = (SESSION_NOT_SIGNED_IN, SESSION_STORE_UNAVAILABLE,
 
 SESSION_MECHANISM = "browser cookie jar → app-origin /api/session → /api/v1 BFF proxy"
 
+# The product's own org-name rule, kept in sync with the server
+# (`supabase/functions/tenant-provision`: ORG_NAME_RE) and the client
+# (`website/apps/dashboard/src/wizardFlow.js::orgNameError`). Both sides TRIM
+# first, so this is matched with `fullmatch` against a STRIPPED value — a
+# `$`-anchored `match` accepts `"Foo\n"`, and a raw `"Foo "` would be stored as
+# `"Foo"`, after which teardown would look for a name that cannot exist and
+# leave the created org unreapable. Teardown matches the name this run WROTE, so
+# a name the product would rewrite or refuse is rejected up front (exit 2)
+# instead of surfacing later as a `name_mismatch`.
+#
+# DELIBERATELY STRICTER THAN THE PRODUCT AT EXACTLY ONE CODE POINT: Python's
+# `str.strip()` and JS's `String.prototype.trim()` disagree on U+FEFF (JS trims
+# a BOM, Python does not). `"--org-name \ufeffFoo"` is therefore refused here
+# though the product would accept it as `"Foo"`. That is the fail-closed
+# direction — no org is created, so there is no residue and nothing left
+# unreapable — and DROPPING the strictness would be the unsafe direction, so it
+# is recorded rather than papered over with a hand-rolled, drift-prone
+# WhiteSpace set. The other direction ("Foo\x85", "Foo\x1c": Python trims,
+# JS does not) is harmless, because the instrument types the STRIPPED value and
+# the product re-trims what it is given.
+ORG_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}")
+
 
 def bff_session(ctx, base_url: str) -> tuple[str, str]:
     """Resolve the walk's session on the app origin, as the app itself does.
@@ -714,9 +871,18 @@ def bff_api(ctx, base_url: str, method: str, path: str,
     this is the honest way to read the server's truth for this user.
     """
     url = base_url.rstrip("/") + BFF_API_PREFIX + path
+    verb = method.upper()
+    if verb not in ("GET", "POST", "DELETE"):
+        # Fail closed. This used to send ANY non-GET as a POST, so a caller
+        # asking for DELETE was silently downgraded into a POST against the
+        # same path — a wrong-method request the caller still read as a
+        # DELETE. An unknown verb is a bug, not something to guess at.
+        raise ValueError(f"bff_api: unsupported method {method!r}")
     try:
-        if method.upper() == "GET":
+        if verb == "GET":
             resp = ctx.request.get(url)
+        elif verb == "DELETE":
+            resp = ctx.request.delete(url)
         else:
             resp = ctx.request.post(url, data=body if body is not None else {})
     except Exception:
@@ -768,6 +934,226 @@ def read_projection(ctx, base_url: str) -> tuple[int, dict | None]:
     report `passed` for a lying UI — a false pass. One identity, one read.
     """
     return read_projection_via_bff(ctx, base_url)
+
+
+# ── the run's own cleanup (#4319) ───────────────────────────────────────────
+# Every per-deploy run creates a REAL production org (`Ship Test <epoch>-<hex4>`) and,
+# before this, nothing removed it. The instrument now reaps the org it created —
+# as its owner, through the SAME walked session and the SAME origin's BFF proxy
+# it already uses — and records the outcome in the observation.
+#
+# The identity of "the org this run created" is NOT the name. A name match is
+# evidence of a name: a fixed `--org-name`, a reused account, or the provisioning
+# lane's own upsert could each put this run's name on an org this run never
+# created, and the instrument would delete a third party's org. The proof is
+# DIFFERENTIAL: the walked session's own org list is read once BEFORE the wizard
+# can create anything (`before`) and once at teardown (`after`), so this run's
+# orgs are exactly `after - before`. That set must be exactly one org — the name
+# is then a second, independent check, never the identity itself.
+TEARDOWN_DELETED = "deleted"
+TEARDOWN_SKIPPED_NO_ORG = "skipped_no_org"
+TEARDOWN_NOT_LISTED = "not_listed"
+TEARDOWN_NOT_ATTEMPTED = "not_attempted"
+TEARDOWN_KEPT = "kept_by_flag"
+TEARDOWN_NOT_REACHED = "not_reached"
+TEARDOWN_BASELINE_UNAVAILABLE = "baseline_unavailable"
+TEARDOWN_LIST_UNREADABLE = "list_unreadable"
+TEARDOWN_AMBIGUOUS = "ambiguous"
+TEARDOWN_NAME_MISMATCH = "name_mismatch"
+TEARDOWN_HTTP_REFUSED = "http_refused"
+TEARDOWN_NOT_CONFIRMED = "not_confirmed"
+TEARDOWN_FAILED = "failed"
+
+# The states that mean a live org MAY remain in the target tenant, and so get the
+# loud stderr residue warning. `deleted` / `skipped_no_org` / `not_reached` are
+# clean — warning on those would be a false alarm, and a false residue alarm is
+# the #4291 conflation in reverse.
+TEARDOWN_RESIDUE_STATES = (
+    TEARDOWN_NOT_LISTED, TEARDOWN_NOT_ATTEMPTED, TEARDOWN_KEPT,
+    TEARDOWN_BASELINE_UNAVAILABLE, TEARDOWN_LIST_UNREADABLE, TEARDOWN_AMBIGUOUS,
+    TEARDOWN_NAME_MISMATCH, TEARDOWN_HTTP_REFUSED, TEARDOWN_NOT_CONFIRMED,
+    TEARDOWN_FAILED,
+)
+
+
+@dataclass
+class Teardown:
+    """Cleanup state for one run.
+
+    Deliberately NOT serialized — it holds a live request channel. What lands in
+    the artifact is the JSON-only summary built by `_run_teardown`.
+    """
+
+    org_name: str = ""          # the ONE name this run wrote into the wizard
+    base_url: str = ""
+    keep: bool = False
+    ctx: object = None          # the browser context, once one exists
+    # The Browser object, once one was launched (#4907). `browser` used to be a
+    # `_walk` local; the ONE teardown site now lives in `run_walk`, so it must be
+    # reachable from there. `Teardown` is never serialized (`asdict` is used only
+    # on `Verdict` and `Observation`), so holding a live object here is safe.
+    browser: object = None
+    # The browser teardown's one-shot guard (#4907). Distinct from `done`, which
+    # is the ORG reaper's.
+    browser_done: bool = False
+    # True ONLY after a RECOGNIZED baseline read. A fresh account's correct
+    # baseline is a readable EMPTY list; "no baseline" is not "empty", it is
+    # "unproven", and an unproven identity must never delete anything.
+    enabled: bool = False
+    # True once the baseline read was ATTEMPTED. Distinguishes "the list was
+    # unreadable" (a real, attributable residue risk) from "the run exited
+    # before it ever looked" (which cannot have created anything and must not
+    # raise a residue alarm).
+    baseline_attempted: bool = False
+    reason: str = ""
+    before: dict = field(default_factory=dict)   # org_id -> org_name
+    # Set immediately BEFORE the create click: a click that raises after
+    # dispatching the create must still leave this run's residue visible here.
+    create_attempted: bool = False
+    done: bool = False
+    # True once `_walk` settled into a written pre-teardown document. An
+    # unfinalized record (a `BaseException` escaping `_walk`) means `main`
+    # returns `EXIT_INSTRUMENT_ERROR`, so the teardown's last resort must exit
+    # the same way rather than scoring the default record as a product code.
+    finalized: bool = False
+
+
+def _org_rows(body: object) -> list | None:
+    """The org rows of a GET /api/v1/organizations body, or None if unrecognized.
+
+    The live endpoint answers with a BARE list of rows carrying `org_id`. Any
+    other shape — a dict with an unexpected key, a list of non-dicts, a row with
+    no `org_id` — is NOT recognized. That matters in both directions: a shape
+    drift parsed as "no orgs" would silently switch the identity proof off on
+    the baseline side and silently confirm a deletion on the verify side.
+    Unrecognized ⇒ None ⇒ every caller fails closed.
+    """
+    rows = body.get("organizations") if isinstance(body, dict) else body
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("org_id"):
+            return None
+    return rows
+
+
+def _upstream_status(body: object) -> int | None:
+    """The proxy's own `upstream_status` (an upstream 429 arrives as a 503)."""
+    if isinstance(body, dict) and isinstance(body.get("upstream_status"), int):
+        return body["upstream_status"]
+    return None
+
+
+def read_org_ids(ctx, base_url: str) -> tuple[int, dict | None, int | None]:
+    """The walked session's own orgs as ``{org_id: org_name}``.
+
+    Returns ``(status, ids_or_None, upstream_status)``. ``None`` ids means the
+    answer was not a recognizable org list, or the read failed — callers treat
+    both as "not readable" (fail closed), never as "no orgs".
+    """
+    status, body = bff_api(ctx, base_url, "GET", "/organizations")
+    if status != 200:
+        return status, None, _upstream_status(body)
+    rows = _org_rows(body)
+    if rows is None:
+        return status, None, None
+    return status, {str(r["org_id"]): str(r.get("org_name") or "") for r in rows}, None
+
+
+def _run_teardown(obs: Observation, td: Teardown) -> None:
+    """Reap the org THIS run created, and record what happened. Never raises.
+
+    The ordering IS the safety argument: prove the org is this run's
+    (differential), delete it as its owner through the same origin, then VERIFY
+    THE ARTIFACT — a 2xx is not proof, so `deleted` is recorded only after a
+    READABLE re-read shows the org gone from the walked session's own list.
+    """
+    if td.done:
+        # One-shot: the ORG teardown is reached from more than one exit, and a
+        # second pass would find the org already gone and overwrite recorded
+        # evidence with a clean-looking status.
+        return
+    td.done = True
+
+    if td.keep:
+        obs.teardown = {"status": TEARDOWN_KEPT, "org_name": td.org_name,
+                        "detail": "--keep-org: the residue is deliberate and countable"}
+        return
+    if td.ctx is None or not td.baseline_attempted:
+        # No baseline was ever READ. Nothing in this run can be attributed to
+        # it, and the org is only created by the wizard click that comes AFTER
+        # the baseline — so claiming "the org list was unreadable" here would be
+        # a residue alarm for a run that never got far enough to create one.
+        obs.teardown = {
+            "status": TEARDOWN_NOT_REACHED,
+            "detail": ("the walk never reached a browser context" if td.ctx is None
+                       else "the walk exited before the cleanup baseline was read")}
+        return
+    if not td.enabled:
+        obs.teardown = {"status": TEARDOWN_BASELINE_UNAVAILABLE,
+                        "org_name": td.org_name, "detail": td.reason}
+        return
+
+    status, after, upstream = read_org_ids(td.ctx, td.base_url)
+    if after is None:
+        obs.teardown = {"status": TEARDOWN_LIST_UNREADABLE, "org_name": td.org_name,
+                        "http_status": status, "upstream_status": upstream}
+        return
+
+    created = {oid: name for oid, name in after.items() if oid not in td.before}
+    if not created:
+        if td.create_attempted:
+            # An empty candidate set AFTER a recorded create attempt is not
+            # "nothing to do": the create may have landed on a list that has not
+            # caught up yet. Suspect residue, never a clean bill of health.
+            obs.teardown = {"status": TEARDOWN_NOT_LISTED, "org_name": td.org_name,
+                            "before_count": len(td.before), "after_count": len(after)}
+        else:
+            obs.teardown = {"status": TEARDOWN_SKIPPED_NO_ORG,
+                            "org_name": td.org_name}
+        return
+    if len(created) > 1:
+        obs.teardown = {"status": TEARDOWN_AMBIGUOUS, "org_name": td.org_name,
+                        "created_ids": sorted(created)}
+        return
+    if not td.create_attempted:
+        # The set difference alone is NOT an identity proof: an org that joined
+        # this session's own list without this run EVER asking for one is not
+        # this run's to delete. (It appeared after the baseline, so it is in the
+        # same disposable account — but "same account" is not "created by this
+        # run".) Refuse, and say so as residue rather than as a clean bill.
+        obs.teardown = {"status": TEARDOWN_NOT_ATTEMPTED, "org_name": td.org_name,
+                        "created_ids": sorted(created)}
+        return
+
+    org_id, listed_name = next(iter(created.items()))
+    if listed_name != td.org_name:
+        obs.teardown = {"status": TEARDOWN_NAME_MISMATCH, "org_id": org_id,
+                        "listed_name": listed_name, "org_name": td.org_name}
+        return
+
+    status, body = bff_api(td.ctx, td.base_url, "DELETE", f"/organizations/{org_id}")
+    upstream = _upstream_status(body)
+    if status not in (200, 202):
+        obs.teardown = {"status": TEARDOWN_HTTP_REFUSED, "org_id": org_id,
+                        "http_status": status, "upstream_status": upstream,
+                        "detail": scrub(json.dumps(body), 200)}
+        return
+
+    # VERIFY THE ARTIFACT, not the send. The confirm read is authoritative, and
+    # an UNREADABLE confirm is NOT a confirmation.
+    v_status, verify, v_upstream = read_org_ids(td.ctx, td.base_url)
+    if verify is None or org_id in verify:
+        obs.teardown = {"status": TEARDOWN_NOT_CONFIRMED, "org_id": org_id,
+                        "delete_status": status, "verify_status": v_status,
+                        "verify_upstream_status": v_upstream}
+        return
+
+    fields = body if isinstance(body, dict) else {}
+    obs.teardown = {"status": TEARDOWN_DELETED, "org_id": org_id,
+                    "org_name": listed_name, "delete_status": status,
+                    "grace_hours": fields.get("grace_hours"),
+                    "hard_delete_after": fields.get("hard_delete_after")}
 
 
 def mcp_call(api_url: str, key: str, method: str, params: dict | None = None,
@@ -888,32 +1274,365 @@ def observe_agent_write(api_url: str, key: str, *, content: str) -> dict:
     return out
 
 
+# ── the teardown seams ──────────────────────────────────────────────────────
+# Module-level indirection points for the teardown's process-facing reads and
+# writes. The production bodies below are the only ones that touch the OS; the
+# bound is exercised by a fake harness that spawns no real Playwright driver, so
+# every one of them is replaceable. A test can then RECORD what the teardown
+# asked for (which pid, which signal, which rung) rather than infer it.
+TEARDOWN_DRIVER_MARKERS = ("run-driver", "playwright")
+
+
+def _norm_start_time(text: str) -> str:
+    """Collapse whitespace so `lstart` renderings of one process compare equal.
+
+    ``ps`` renders ``lstart`` as ``%c``, whose day-of-month field is SPACE-padded
+    (``Thu Jan  1 00:00:00 2026``) and whose token COUNT is LOCALE-DEPENDENT
+    (``LC_ALL=ja_JP.UTF-8`` renders four tokens, ``LC_ALL=ru_RU.UTF-8`` six).
+    Both the enumeration and the TOCTOU re-check take their start time from
+    `_child_identity` and pass it through this ONE normal form, so the two
+    compare like with like BY CONSTRUCTION, whatever the locale. Neither read
+    reconstructs the time from a positional slice, which is what made the token
+    count load-bearing.
+    """
+    return " ".join(str(text).split())
+
+
+def _ps_timeout() -> float:
+    """The `ps` read's own bound: never more than the ladder's slack.
+
+    The last rung is at 3B/4, so a re-read bounded by B/4 cannot push the
+    abandon past the bound.
+    """
+    return min(_PS_TIMEOUT_S, TEARDOWN_BOUND_S / 4)
+
+
+def _ps_binary() -> str | None:
+    """The absolute ``ps``, or ``None`` when it is absent.
+
+    ``None`` is a deliberate refusal: no pid is enumerated, so no signal is sent.
+    Falling back to a PATH ``ps`` would let a planted binary choose the pid the
+    watchdog kills.
+    """
+    if os.path.isabs(_PS_BIN) and os.path.exists(_PS_BIN):
+        return _PS_BIN
+    return None
+
+
+# Why the enumerator returned no driver. The OUTCOME vocabulary stays the closed
+# six above (`driver_absent` is the outcome for both "not found" reasons); this
+# names WHICH nothing it was, so `browser_teardown.detail` can name it instead
+# of reporting an enumerated-but-unverifiable child as "no child was
+# enumerated".
+DRIVER_ENUM_FOUND = "found"
+DRIVER_ENUM_NO_CANDIDATE = "no_candidate"
+DRIVER_ENUM_IDENTITY_UNREADABLE = "identity_unreadable"
+
+
+def _child_identity(pid: int) -> tuple[int, str] | None:
+    """One process's whole identity, read ATOMICALLY: ``(ppid, start_time)``.
+
+    ONE `ps` selection returns both fields, so the pid and the start time can
+    never come from two different processes: a pid reused between two separate
+    reads would otherwise yield the SUCCESSOR's start time, the watchdog's
+    re-check would re-read that same value and pass, and ``os.kill`` would
+    SIGKILL a process that is not this run's child — the exact false positive the
+    start time exists to prevent.
+
+    ``ppid`` is the FIRST whitespace-delimited field; the start time is the REST
+    of the line, normalised — never a positional token slice, because ``lstart``
+    renders as ``%c`` whose token COUNT is locale-dependent (four in ``ja_JP``,
+    six in ``ru_RU``).
+
+    ``None`` means the identity could not be read at all this time — ``ps`` was
+    absent or timed out, the process exited, or the output was unrecognizable. A
+    partial identity is never returned.
+
+    The read takes `-ww` (unlimited width, see `_PS_UNLIMITED_WIDTH`): a start
+    time truncated at the venue's column width would make two different
+    processes compare equal, which is the pid reuse this atomic read exists to
+    defeat — and the re-check compares the SAME reader, so it would agree with
+    the truncated value rather than catch it.
+    """
+    ps = _ps_binary()
+    if ps is None:
+        return None
+    try:
+        out = subprocess.run([ps, _PS_UNLIMITED_WIDTH, "-o", "ppid=,lstart=",
+                              "-p", str(pid)],
+                             capture_output=True, text=True,
+                             timeout=_ps_timeout()).stdout
+    except Exception:
+        return None
+    parts = out.split(None, 1)
+    if len(parts) < 2:
+        return None
+    try:
+        ppid = int(parts[0])
+    except ValueError:
+        return None
+    start = _norm_start_time(parts[1])
+    if not start:
+        return None
+    return ppid, start
+
+
+def _driver_pid_and_starttime() -> tuple[int | None, str | None, str]:
+    """This run's OWN Playwright driver child: ``(pid, start_time, status)``.
+
+    Enumerated once, at teardown start, as a direct child of THIS process: the
+    sync API spawns the driver as a direct child, and E8 measured that killing it
+    takes the whole Chromium tree with it.
+
+    ``command`` is the LAST field of the `ps` selection and the driver marker is
+    matched ANYWHERE in the command field (a substring test, not a whole-field
+    one), so the start time is NOT reconstructed from the enumeration line. Each
+    candidate that passes the parent/marker filter is then identified by
+    `_child_identity` — the SAME reader the TOCTOU re-check calls — and accepted
+    only when that read reports THIS process as its parent. So the value the
+    watchdog compares against is the value this enumerator returned, BY
+    CONSTRUCTION, in ONE read.
+
+    ``status`` is one of the ``DRIVER_ENUM_*`` constants. It distinguishes "no
+    candidate was found" from "a marker-matching child was enumerated but its
+    identity could not be read (or no longer verified as this process's child)":
+    the OUTCOME vocabulary is unaffected — both are `driver_absent` — but the
+    record's `detail` must not call the second one "no child was enumerated".
+    The identity read is retried ONCE before giving up, because a single `ps`
+    timeout is not evidence about the child.
+
+    The selection takes `-ww` (unlimited width, see `_PS_UNLIMITED_WIDTH`). It
+    is load-bearing here: `command` is the unbounded field, and a host that
+    truncates it hides the marker of any driver whose
+    command line is longer than that width — the CI runner's interpreter path
+    alone is ~49 characters, so a trailing ``run-driver`` is past the cut. The
+    enumerator then finds no candidate, the driver is never signalled, and a
+    healthy run abandons with its Chromium tree live (the same truncation class
+    as the embedded reaper's #1365).
+
+    A non-positive pid is never returned: ``os.kill(-1, SIGKILL)`` signals every
+    process this uid may signal, so a misread pid must never become the signal
+    target.
+    """
+    me = os.getpid()
+    ps = _ps_binary()
+    if ps is None:
+        return None, None, DRIVER_ENUM_NO_CANDIDATE
+    try:
+        out = subprocess.run([ps, _PS_UNLIMITED_WIDTH, "-axo",
+                              "pid=,ppid=,command="],
+                             capture_output=True, text=True,
+                             timeout=_ps_timeout()).stdout
+    except Exception:
+        return None, None, DRIVER_ENUM_NO_CANDIDATE
+    unverified = False
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if pid <= 0 or ppid != me:
+            continue
+        if not any(marker in parts[2] for marker in TEARDOWN_DRIVER_MARKERS):
+            continue
+        identity = _child_identity(pid)
+        if identity is None:
+            identity = _child_identity(pid)      # one retry, then give up
+        if identity is None or identity[0] != me:
+            # The marker-matching child could not be verified as this run's child
+            # (it exited, `ps` failed, or the pid was reused between the
+            # enumeration and the identity read). It must NOT be signalled — and
+            # it must NOT be reported as "no candidate found" either.
+            unverified = True
+            continue
+        return pid, identity[1], DRIVER_ENUM_FOUND
+    if unverified:
+        return None, None, DRIVER_ENUM_IDENTITY_UNREADABLE
+    return None, None, DRIVER_ENUM_NO_CANDIDATE
+
+
+def _send_signal(pid: int, signum: int) -> None:
+    os.kill(pid, signum)
+
+
+def _reap(pid: int) -> None:
+    """Reap a signalled child, so the kill leaves no zombie."""
+    with contextlib.suppress(ChildProcessError, OSError):
+        os.waitpid(pid, os.WNOHANG)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _ladder(bound: float) -> list[tuple[float, int]]:
+    """The watchdog's rungs, as DATA: ``(delay_seconds, signal)``, in order.
+
+    PURE, so the ARITHMETIC is provable in CI without a browser and without a
+    clock (`mutation_selfcheck` exercises it). The shape is deliberate: a
+    graceful SIGTERM at half the budget leaves a teardown that can still finish
+    half the bound to do it, and SIGKILL at three quarters leaves a quarter as
+    slack before the bound expires. The kill is what releases a close blocked on
+    an unresponsive driver (E11), so the rungs have to be inside the bound.
+    """
+    return [(bound / 2, signal.SIGTERM), (3 * bound / 4, signal.SIGKILL)]
+
+
+def _ladder_is_sound(ladder: list[tuple[float, int]], bound: float) -> bool:
+    """The ladder's contract as a PREDICATE, so a mutant is a value.
+
+    Exactly two rungs; delays strictly increasing and strictly inside the bound;
+    SIGTERM before SIGKILL; at most one of each; and a bound that is actually a
+    bound (``0 < bound <= 60``).
+    """
+    if not (0 < bound <= 60) or len(ladder) != 2:
+        return False
+    (d1, s1), (d2, s2) = ladder
+    return s1 == signal.SIGTERM and s2 == signal.SIGKILL and 0 < d1 < d2 < bound
+
+
+_SIGNAL_LABELS = {signal.SIGTERM: "SIGTERM", signal.SIGKILL: "SIGKILL"}
+
+
+def _wait_until(deadline: float, done: threading.Event) -> bool:
+    """Wait for ``deadline`` unless ``done`` is set first.
+
+    True iff the deadline arrived while the teardown was still running. Polled
+    with a bounded sleep so a healthy run is released in milliseconds rather than
+    waiting out the bound: the whole reason the watchdog does not cost every run
+    its budget.
+    """
+    while not done.is_set():
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return True
+        done.wait(min(0.05, remaining))
+    return False
+
+
 # ── the live walk ───────────────────────────────────────────────────────────
 def run_walk(args) -> Observation:
+    """The run, top to bottom: prep → driver → walk → bounded teardown → write.
+
+    THE PINNED SHAPE. `run_walk` owns the lifecycle and the write; `_walk` owns
+    the browser-scoped body. The teardown is entered exactly ONCE, as a statement
+    of the only `finally` around the `_walk` call, so it runs for every `_walk`
+    return and for an exception out of it. `_finish` is the ONE authoritative
+    write+print site and runs AFTER that teardown, so stdout and the file agree.
+
+    Two aborts deliberately sit OUTSIDE the `try` and write NO artifact (#4875):
+    `shots.mkdir` raising (an `--out` that cannot be created) and
+    `sync_playwright().start()` raising. The playwright IMPORT guard is not one of
+    them — it returns through `_start_driver` and still writes.
+    """
     out_dir = Path(args.out)
     shots = out_dir / "screenshots"
+    # #4875 abort (1/2): raises before any writer exists, so NO artifact is
+    # written. The module's "the directory always holds observation.json"
+    # promise does not extend to an abort that predates the observation.
     shots.mkdir(parents=True, exist_ok=True)
 
+    email, password = _run_credentials(args)
+    obs, td = _build_observation(args, email, password)
+    # #4875 abort (2/2): a driver that will not START raises out of here, before
+    # any writer exists. Distinct from the import guard below.
+    obs, pw = _start_driver(obs, out_dir, td)
+    if pw is not None:
+        try:
+            obs = _walk(pw, args, obs, td, out_dir, shots, email, password)
+        finally:
+            # THE ONE TEARDOWN SITE, entered exactly once. On a walk that SETTLED
+            # it runs after the pre-teardown document has been written by
+            # `_finalize`, so a run killed inside it leaves a complete artifact
+            # whose `browser_teardown.outcome` is `not_run`; a walk body that
+            # raised before it settled wrote no such copy.
+            _teardown_browser(pw, td, obs, out_dir)
+    # THE ONE AUTHORITATIVE WRITE+PRINT SITE: after the teardown, for every
+    # returning path. A `_walk` exception propagates past it (the `finally` has
+    # already torn the browser down), which is the killed-inside-the-window case.
+    _finish(obs, out_dir)
+    return obs
+
+
+def _run_credentials(args) -> tuple[str, str]:
+    """The disposable identity this run signs up — computed ONCE, here.
+
+    One computation, so the address the wizard is typed and the address the
+    artifact records cannot drift.
+    """
     email = args.email or f"ship-test-{int(time.time())}-{uuid.uuid4().hex[:6]}@premiselabs.co"
     password = args.password or f"ShipTest-{uuid.uuid4().hex[:10]}-Aa1!"
+    return email, password
 
+
+def _build_observation(args, email, password) -> tuple[Observation, Teardown]:
+    """The record and the run's cleanup state, built BEFORE the driver exists.
+
+    Both are built here because every exit funnels through them, including the
+    ones that predate a browser context. The org NAME is computed once here and
+    is BOTH what the wizard is told and what teardown compares against, so the
+    two cannot drift.
+
+    ``email``/``password`` are the identity `_run_credentials` computed for this
+    run, taken as parameters so the record and the walk share ONE computation;
+    this function does not re-derive them.
+    """
     obs = Observation(started_at=_now(), target={
         "dashboard": args.base_url, "auth": args.auth_url, "api": args.api_url})
-    # FAIL-CLOSED DEFAULT (#4291). Until a path has PROVEN that it measured the
-    # product, a run says nothing about the product. Every product-facing exit
-    # below sets its own reason explicitly; anything that aborts earlier (no
-    # playwright driver, a browser that will not launch, an unexpected
-    # exception) keeps this class — an instrument fault with exit 3, never a
-    # product finding with exit 1.
-    obs.reason = REASON_INSTRUMENT_ERROR
+    td = Teardown(org_name=args.org_name
+                  or f"Ship Test {int(time.time())}-{uuid.uuid4().hex[:4]}",
+                  base_url=args.base_url, keep=args.keep_org)
+    return obs, td
 
+
+def _start_driver(obs, out_dir, td) -> tuple[Observation, object | None]:
+    """Import and start the driver, or record the fail-closed import-guard exit.
+
+    FAIL-CLOSED DEFAULT (#4291). Until a path has PROVEN that it measured the
+    product, the run says nothing about the product; the default is set HERE,
+    before the import, so it precedes everything that can abort. Every
+    product-facing exit in `_walk` sets its own reason explicitly.
+
+    A MISSING driver returns `(obs, None)` — it does not raise — after recording
+    the ORG teardown through `_run_teardown_safely` (`not_reached`: no browser
+    context ever existed). The caller's single `_finish` then writes the
+    artifact, so this path costs no second writer.
+
+    `sync_playwright().start()` RAISING is a different thing and is deliberately
+    NOT caught: it propagates out of `run_walk` before any writer exists, so that
+    abort writes no artifact at all (#4875). The import must stay in its own
+    narrow `try` for the two to remain distinguishable.
+    """
+    obs.reason = REASON_INSTRUMENT_ERROR
     try:
         # Lazy so the core (judge/probe/CLI) stays importable without playwright —
         # but GUARDED, so a missing driver still yields a recorded observation.
         from playwright.sync_api import sync_playwright
     except Exception as exc:
         obs.verdict = f"failed: playwright unavailable: {type(exc).__name__}: {exc}"
-        return _finish(obs, out_dir)
+        _run_teardown_safely(obs, td)
+        return obs, None
+    return obs, sync_playwright().start()
+
+
+def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
+    """The browser-scoped body of the walk: launch → signup → judge.
+
+    Every `return` here exits through `_finalize`, which runs the ORG teardown
+    and writes the PRE-TEARDOWN document (complete, with
+    `browser_teardown.outcome == "not_run"`).
+
+    The browser's own lifecycle is deliberately NOT here: the bounded teardown
+    lives in `run_walk`'s `finally`, the only site that runs for every `_walk`
+    return AND for an exception out of this function. `td.browser` is set at
+    launch so that site can close what this function opened.
+    """
+    browser = None
+    ctx = None
+    page = None
 
     def shot(page, name: str) -> str:
         p = shots / f"{len(obs.steps):02d}-{name}.png"
@@ -923,290 +1642,541 @@ def run_walk(args) -> Observation:
         except Exception as exc:  # a screenshot must never fail the walk
             return f"[screenshot failed: {exc}]"
 
-    with sync_playwright() as pw:
-        browser = None
-        ctx = None
-        page = None
-        try:
-            # The deploy anchors and the browser launch live INSIDE this guard:
-            # an unreachable target or a launch failure must still write an
-            # observation (the module contract), not abort with a traceback.
-            obs.deploy_sha = deployed_sha(args.api_url)
-            obs.bundle = deployed_bundle(args.base_url)
-            obs.sha = _git_sha()
-            browser = pw.chromium.launch(headless=not args.headed)
-            # CLEAN BROWSER: no storage state, no pre-seeded session, no beta-gate
-            # flag — exactly what a new user arrives with.
-            ctx = browser.new_context(viewport={"width": 1440, "height": 900},
-                                      locale="en-US")
-            page = ctx.new_page()
-            signup_responses: list[dict] = []
+    try:
+        # The deploy anchors and the browser launch live INSIDE this guard:
+        # an unreachable target or a launch failure must still write an
+        # observation (the module contract), not abort with a traceback.
+        obs.deploy_sha = deployed_sha(args.api_url)
+        obs.bundle = deployed_bundle(args.base_url)
+        obs.sha = _git_sha()
+        browser = pw.chromium.launch(headless=not args.headed)
+        td.browser = browser    # for the one teardown site in run_walk
+        # CLEAN BROWSER: no storage state, no pre-seeded session, no beta-gate
+        # flag — exactly what a new user arrives with.
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900},
+                                  locale="en-US")
+        td.ctx = ctx
+        page = ctx.new_page()
+        signup_responses: list[dict] = []
 
-            def _on_response(resp):
-                if "/signup" in resp.url or "auth/v1/signup" in resp.url or "token" in resp.url:
-                    signup_responses.append({"url": resp.url, "status": resp.status})
+        def _on_response(resp):
+            if "/signup" in resp.url or "auth/v1/signup" in resp.url or "token" in resp.url:
+                signup_responses.append({"url": resp.url, "status": resp.status})
 
-            page.on("response", _on_response)
-            # 1 ── the front door
-            page.goto(args.auth_url.rstrip("/") + "/auth",
-                      wait_until="domcontentloaded", timeout=args.timeout)
-            page.wait_for_timeout(args.settle_ms)
-            probe = front_door_probe(page)
-            obs.assertions["front_door_reachable"] = bool(probe.get("hittable"))
-            obs.add(name="front-door", url=page.url,
-                    ok=bool(probe.get("hittable")),
-                    detail=json.dumps(probe),
-                    screenshot=shot(page, "front-door"), extra=probe)
-            if not probe.get("hittable"):
-                # A PRODUCT finding: this ran before any session was resolved,
-                # and the CTA is genuinely unhittable in a clean browser.
-                obs.verdict = "failed: signup CTA not hittable in a clean browser"
-                obs.reason = failure_reason(obs.verdict, session_state="")
-                return _finish(obs, out_dir)
+        page.on("response", _on_response)
+        # 1 ── the front door
+        page.goto(args.auth_url.rstrip("/") + "/auth",
+                  wait_until="domcontentloaded", timeout=args.timeout)
+        page.wait_for_timeout(args.settle_ms)
+        probe = front_door_probe(page)
+        obs.assertions["front_door_reachable"] = bool(probe.get("hittable"))
+        obs.add(name="front-door", url=page.url,
+                ok=bool(probe.get("hittable")),
+                detail=json.dumps(probe),
+                screenshot=shot(page, "front-door"), extra=probe)
+        if not probe.get("hittable"):
+            # A PRODUCT finding: this ran before any session was resolved,
+            # and the CTA is genuinely unhittable in a clean browser.
+            obs.verdict = "failed: signup CTA not hittable in a clean browser"
+            obs.reason = failure_reason(obs.verdict, session_state="")
+            return _finalize(obs, out_dir, td)
 
-            # 2 ── signup
-            page.click("#btn-email", timeout=args.timeout)
-            page.wait_for_timeout(500)
-            page.fill("#email", email)
-            page.fill("#password", password)
-            obs.add(name="signup-form", url=page.url, detail=f"email={email}",
-                    screenshot=shot(page, "signup-form"),
-                    extra={"email": email})
-            page.click('#email-modal button[type="submit"], #btn-submit', timeout=args.timeout)
-            page.wait_for_timeout(3000)
+        # 2 ── signup
+        page.click("#btn-email", timeout=args.timeout)
+        page.wait_for_timeout(500)
+        page.fill("#email", email)
+        page.fill("#password", password)
+        obs.add(name="signup-form", url=page.url, detail=f"email={email}",
+                screenshot=shot(page, "signup-form"),
+                extra={"email": email})
+        page.click('#email-modal button[type="submit"], #btn-submit', timeout=args.timeout)
+        page.wait_for_timeout(3000)
 
-            # 3 ── ride the landing into the product (dashboard or wizard)
-            deadline = time.time() + args.timeout / 1000
-            while time.time() < deadline:
-                if "app." in page.url or args.base_url.rstrip("/") in page.url:
-                    break
-                page.wait_for_timeout(1000)
-            obs.add(name="landing-after-signup", url=page.url,
-                    detail=json.dumps(signup_responses[-3:]),
-                    screenshot=shot(page, "landing"),
-                    extra={"body": recorded_body(page)})
-            # 3b ── the session (#4291). Resolved through the app origin's own
-            # `/api/session` with the BROWSER's cookie jar. The poll is for the
-            # seam's own settle, not for a token: there is no readable token any
-            # more, by design (`__Host-session` is HttpOnly and host-only).
-            session_state, session_detail = "", ""
-            for _ in range(15):
-                session_state, session_detail = bff_session(ctx, args.base_url)
-                if session_state != SESSION_NOT_SIGNED_IN:
-                    break  # signed in — or a fault that polling cannot improve
-                page.wait_for_timeout(1000)
-            obs.session = {
-                "state": session_state, "detail": session_detail,
-                "mechanism": ("browser cookie jar → /api/session → /api/v1 BFF proxy; "
-                              "agent key from the explicit --agent-key flag"
-                              if args.agent_key else SESSION_MECHANISM)}
-            obs.add(name="session", url=page.url,
-                    ok=session_state == SESSION_SIGNED_IN,
-                    detail=f"{session_state}: {session_detail}",
-                    screenshot=shot(page, "session"))
-            if session_state != SESSION_SIGNED_IN:
-                # LOUD and EARLY: a walk that is not signed in is not measuring
-                # the product, so it must not continue and "measure" a negative
-                # on a signed-out page, nor blame the server for an observation
-                # it never got the chance to make (#4291).
-                obs.verdict = instrument_error_verdict(session_state, session_detail)
-                return _finish(obs, out_dir)
+        # 3 ── ride the landing into the product (dashboard or wizard)
+        deadline = time.time() + args.timeout / 1000
+        while time.time() < deadline:
+            if "app." in page.url or args.base_url.rstrip("/") in page.url:
+                break
+            page.wait_for_timeout(1000)
+        obs.add(name="landing-after-signup", url=page.url,
+                detail=json.dumps(signup_responses[-3:]),
+                screenshot=shot(page, "landing"),
+                extra={"body": recorded_body(page)})
+        # 3b ── the session (#4291). Resolved through the app origin's own
+        # `/api/session` with the BROWSER's cookie jar. The poll is for the
+        # seam's own settle, not for a token: there is no readable token any
+        # more, by design (`__Host-session` is HttpOnly and host-only).
+        session_state, session_detail = "", ""
+        for _ in range(15):
+            session_state, session_detail = bff_session(ctx, args.base_url)
+            if session_state != SESSION_NOT_SIGNED_IN:
+                break  # signed in — or a fault that polling cannot improve
+            page.wait_for_timeout(1000)
+        obs.session = {
+            "state": session_state, "detail": session_detail,
+            "mechanism": ("browser cookie jar → /api/session → /api/v1 BFF proxy; "
+                          "agent key from the explicit --agent-key flag"
+                          if args.agent_key else SESSION_MECHANISM)}
+        obs.add(name="session", url=page.url,
+                ok=session_state == SESSION_SIGNED_IN,
+                detail=f"{session_state}: {session_detail}",
+                screenshot=shot(page, "session"))
+        if session_state != SESSION_SIGNED_IN:
+            # LOUD and EARLY: a walk that is not signed in is not measuring
+            # the product, so it must not continue and "measure" a negative
+            # on a signed-out page, nor blame the server for an observation
+            # it never got the chance to make (#4291).
+            obs.verdict = instrument_error_verdict(session_state, session_detail)
+            return _finalize(obs, out_dir, td)
 
-            # 4 ── open the wizard and walk it to the final screen (best effort)
-            # A first-timer's step 1 is org-create (an input + a button); the
-            # generic label loop below cannot advance it.
-            org_input = page.locator('input[aria-label="Organization name"]')
-            if org_input.count() and org_input.first.is_visible():
-                org_input.first.fill(args.org_name or f"Ship Test {int(time.time())}")
-                page.locator('button:has-text("Create Organization")').first.click(timeout=args.timeout)
-                page.wait_for_timeout(4000)
-            # Wait for the product shell to settle before clicking: a "walk"
-            # that checks for buttons before React mounts records nothing.
-            labels = ("Continue setup", "Continue →", "For my internal setup",
-                      "I've set it up — Continue →", "Skip for now")
-            for _ in range(20):
-                if (any(page.locator(f'button:has-text("{lbl}")').count() for lbl in labels)
-                        or page.locator("button.setup-header").count()):
-                    break
-                page.wait_for_timeout(1000)
-            for _ in range(10):
-                clicked = False
-                for label in labels:
-                    btn = page.locator(f'button:has-text("{label}")')
-                    if btn.count() and btn.first.is_visible():
-                        try:
-                            btn.first.click(timeout=4000)
-                            clicked = True
-                            page.wait_for_timeout(1500)
-                            break
-                        except Exception:
-                            continue
-                if not clicked:
-                    setup = page.locator("button.setup-header")
-                    if setup.count() and setup.first.is_visible():
-                        try:
-                            setup.first.click(timeout=4000)
-                            page.wait_for_timeout(1500)
-                            clicked = True
-                        except Exception:
-                            pass
-                if not clicked:
-                    break
-            obs.add(name="wizard-final", url=page.url,
-                    detail=f"session {session_state}",
-                    screenshot=shot(page, "wizard-final"), extra={"body": recorded_body(page)})
+        # 3c ── the cleanup BASELINE (#4319). Read the walked session's own
+        # org list BEFORE the wizard can create anything: this run's orgs are
+        # exactly `after - before`, which is a proof of CREATION, while a
+        # name is not (a fixed --org-name or a reused account could match an
+        # org this run never created). An unreadable baseline leaves teardown
+        # DISABLED — it fails closed (residue) rather than deleting on an
+        # unproven identity.
+        b_status, before_ids, b_upstream = read_org_ids(ctx, args.base_url)
+        td.baseline_attempted = True
+        if before_ids is None:
+            td.reason = (f"baseline GET /api/v1/organizations -> {b_status}"
+                         + (f" (upstream {b_upstream})" if b_upstream else ""))
+        else:
+            td.enabled = True
+            td.before = before_ids
 
-            # 5 ── the NEGATIVE direction: read the screen + the server truth
-            # The negative is only MEASURED if the walk reached a surface that
-            # carries a decidable claim. A page with no connection surface is
-            # not an honest negative — it is an unmeasured one, and must not be
-            # credited as a pass (the vacuous-pin class #3806 exists to prevent).
-            projection_status, projection = read_projection(ctx, args.base_url)
-            if not projection_readable(projection_status, projection):
-                # The instrument's OWN read of the server's truth failed. It
-                # cannot judge a screen it could not check, and it must not
-                # claim a product finding it cannot support (the #4291 class):
-                # a transient 503 here would otherwise be reported as the client
-                # "claiming a connection while the server state was unreadable".
-                obs.add(name="server-read", ok=False, ui="",
-                        detail=f"GET /api/v1/onboarding/state -> {projection_status}",
-                        screenshot=shot(page, "server-read"))
-                obs.verdict = instrument_error_verdict(
-                    "projection_unreadable",
-                    f"GET /api/v1/onboarding/state -> {projection_status}")
-                return _finish(obs, out_dir)
-            ui = read_connection_surface(page)
-            # The UNTRUNCATED body feeds the sweep: scrub()'s cap is for the
-            # recorded artifact only. `connection_verdict` picks the surface's
-            # own vocabulary and applies the all-page smuggle promotion.
-            raw = page_body(page)
-            surface = connection_surface_kind(page)
-            page_claims = claims_connection(raw)
-            obs.assertions["walk_completed"] = ui != ABSENT
-            neg = connection_verdict(ui, surface, projection, raw)
-            ui = neg.ui
-            if ui == ABSENT:
-                obs.add(name="before-observation", url=page.url, ui=ui, ok=False,
-                        observed=neg.observed,
-                        detail="no connection surface reached — the negative direction was not measured",
-                        screenshot=shot(page, "before-observation"),
-                        extra={"projection": projection, "rule": neg.rule, "body": scrub(raw)})
-                obs.verdict = INCOMPLETE_NO_SURFACE
-                obs.reason = failure_reason(obs.verdict,
-                                           session_state=session_state)
-                return _finish(obs, out_dir)
-            obs.add(name="before-observation", url=page.url, ui=ui,
-                    observed=neg.observed, ok=neg.ok, detail=neg.detail,
+        # 4 ── open the wizard and walk it to the final screen (best effort)
+        # A first-timer's step 1 is org-create (an input + a button); the
+        # generic label loop below cannot advance it.
+        org_input = page.locator('input[aria-label="Organization name"]')
+        if org_input.count() and org_input.first.is_visible():
+            org_input.first.fill(td.org_name)
+            # Set BEFORE the click: the click dispatches the create, and a
+            # click that raises after dispatching it must still leave this
+            # run's residue visible (an empty candidate set then reads as
+            # SUSPECT, not as "nothing to do").
+            td.create_attempted = True
+            page.locator('button:has-text("Create Organization")').first.click(timeout=args.timeout)
+            page.wait_for_timeout(4000)
+        # Wait for the product shell to settle before clicking: a "walk"
+        # that checks for buttons before React mounts records nothing.
+        labels = ("Continue setup", "Continue →", "For my internal setup",
+                  "I've set it up — Continue →", "Skip for now")
+        for _ in range(20):
+            if (any(page.locator(f'button:has-text("{lbl}")').count() for lbl in labels)
+                    or page.locator("button.setup-header").count()):
+                break
+            page.wait_for_timeout(1000)
+        for _ in range(10):
+            clicked = False
+            for label in labels:
+                btn = page.locator(f'button:has-text("{label}")')
+                if btn.count() and btn.first.is_visible():
+                    try:
+                        btn.first.click(timeout=4000)
+                        clicked = True
+                        page.wait_for_timeout(1500)
+                        break
+                    except Exception:
+                        continue
+            if not clicked:
+                setup = page.locator("button.setup-header")
+                if setup.count() and setup.first.is_visible():
+                    try:
+                        setup.first.click(timeout=4000)
+                        page.wait_for_timeout(1500)
+                        clicked = True
+                    except Exception:
+                        pass
+            if not clicked:
+                break
+        obs.add(name="wizard-final", url=page.url,
+                detail=f"session {session_state}",
+                screenshot=shot(page, "wizard-final"), extra={"body": recorded_body(page)})
+
+        # 5 ── the NEGATIVE direction: read the screen + the server truth
+        # The negative is only MEASURED if the walk reached a surface that
+        # carries a decidable claim. A page with no connection surface is
+        # not an honest negative — it is an unmeasured one, and must not be
+        # credited as a pass (the vacuous-pin class #3806 exists to prevent).
+        projection_status, projection = read_projection(ctx, args.base_url)
+        if not projection_readable(projection_status, projection):
+            # The instrument's OWN read of the server's truth failed. It
+            # cannot judge a screen it could not check, and it must not
+            # claim a product finding it cannot support (the #4291 class):
+            # a transient 503 here would otherwise be reported as the client
+            # "claiming a connection while the server state was unreadable".
+            obs.add(name="server-read", ok=False, ui="",
+                    detail=f"GET /api/v1/onboarding/state -> {projection_status}",
+                    screenshot=shot(page, "server-read"))
+            obs.verdict = instrument_error_verdict(
+                "projection_unreadable",
+                f"GET /api/v1/onboarding/state -> {projection_status}")
+            return _finalize(obs, out_dir, td)
+        ui = read_connection_surface(page)
+        # The UNTRUNCATED body feeds the sweep: scrub()'s cap is for the
+        # recorded artifact only. `connection_verdict` picks the surface's
+        # own vocabulary and applies the all-page smuggle promotion.
+        raw = page_body(page)
+        surface = connection_surface_kind(page)
+        page_claims = claims_connection(raw)
+        obs.assertions["walk_completed"] = ui != ABSENT
+        neg = connection_verdict(ui, surface, projection, raw)
+        ui = neg.ui
+        if ui == ABSENT:
+            obs.add(name="before-observation", url=page.url, ui=ui, ok=False,
+                    observed=neg.observed,
+                    detail="no connection surface reached — the negative direction was not measured",
                     screenshot=shot(page, "before-observation"),
-                    extra={"projection": projection, "rule": neg.rule,
-                           "projection_status": projection_status,
-                           "page_claims_connection": page_claims, "body": scrub(raw)})
-            obs.assertions["no_claim_before_observation"] = neg.ok
-            if not neg.ok:
-                obs.verdict = f"failed: {neg.detail}"
-                obs.reason = failure_reason(obs.verdict, session_state=session_state)
-                return _finish(obs, out_dir)
-
-            # 6 ── the server observes a real agent write (MCP, not a client claim)
-            # The session is PROVEN signed-in by here, so the key is either the
-            # explicitly-supplied one or one minted through the BFF — never a
-            # silent substitution, and never skipped for want of a credential.
-            observed_after = False
-            if not args.skip_agent_write:
-                if args.agent_key:
-                    key, key_detail = args.agent_key, "key from the explicit --agent-key flag"
-                else:
-                    key, key_detail = _mint_or_read_key(page, ctx, args.base_url)
-                if key:
-                    result = observe_agent_write(
-                        args.api_url, key,
-                        content=f"ship-test #3806 observation {uuid.uuid4().hex[:8]}")
-                    obs.add(name="agent-write", ui="", observed=False,
-                            ok=bool(result.get("ok")),
-                            detail=f"MCP tortoise_create_point ({key_detail})",
-                            extra={"mcp": result})
-                    if not result.get("ok"):
-                        # The WRITE failed — a bad / wrong-org / graph-bound key,
-                        # or an MCP outage. That is an instrument fault, and it
-                        # must not be reported as "the server did not observe"
-                        # (the #4291 class, one layer down).
-                        obs.verdict = instrument_error_verdict(
-                            "agent_write_failed", key_detail)
-                        return _finish(obs, out_dir)
-                    # poll the server's projection until it records the edge.
-                    # `saw_200` is tracked SEPARATELY from the LAST read's
-                    # status: a transient 503 on the final poll must not turn a
-                    # demonstrably-never-observed write into an instrument
-                    # fault. The class is decided by whether the server's truth
-                    # was EVER readable, not by which read happened to be last.
-                    saw_readable = False
-                    for _ in range(20):
-                        projection_status, projection = read_projection(ctx, args.base_url)
-                        saw_readable = saw_readable or projection_readable(
-                            projection_status, projection)
-                        if server_observed(projection):
-                            break
-                        page.wait_for_timeout(1000)
-                    if not saw_readable:
-                        # The server's own truth was NEVER readable (a degraded
-                        # session store answers 503 here). Nothing was measured.
-                        obs.verdict = instrument_error_verdict(
-                            "projection_unreadable",
-                            f"GET /api/v1/onboarding/state -> {projection_status}")
-                        return _finish(obs, out_dir)
-                    observed_after = server_observed(projection)
-                    # `ok` stays the WRITE's outcome (that is what the step is
-                    # named for); whether the server observed it is `observed`.
-                    obs.steps[-1].observed = observed_after
-                    obs.steps[-1].extra["projection"] = projection
-                    obs.steps[-1].extra["projection_status"] = projection_status
-                    obs.steps[-1].extra["poll_readable"] = saw_readable
-                else:
-                    obs.add(name="agent-write", ok=False, detail=key_detail)
-                    obs.verdict = instrument_error_verdict("no_agent_key", key_detail)
-                    return _finish(obs, out_dir)
-
-            # 7 ── the POSITIVE direction: reload and read the Overview again
-            page.goto(args.base_url.rstrip("/") + "/",
-                      wait_until="domcontentloaded", timeout=args.timeout)
-            page.wait_for_timeout(args.settle_ms)
-            projection_status, projection = read_projection(ctx, args.base_url)
-            if not projection_readable(projection_status, projection):
-                obs.verdict = instrument_error_verdict(
-                    "projection_unreadable",
-                    f"GET /api/v1/onboarding/state -> {projection_status}")
-                return _finish(obs, out_dir)
-            ui = read_connection_surface(page)
-            pos = connection_verdict(ui, connection_surface_kind(page), projection,
-                                     page_body(page))
-            ui = pos.ui
-            obs.add(name="after-observation", url=page.url, ui=ui,
-                    observed=pos.observed, ok=pos.ok and pos.observed, detail=pos.detail,
-                    screenshot=shot(page, "after-observation"),
-                    extra={"projection": projection, "rule": pos.rule,
-                           "projection_status": projection_status,
-                           "body": recorded_body(page)})
-            # The positive half is only PROVEN when the server observation
-            # happened AND the screen shows it. `verdict_for` encodes exactly
-            # that: `passed` requires pos.observed, never merely pos.ok (a
-            # hidden connection resolves to a judge-OK honest-negative).
-            obs.assertions["shown_when_observed"] = bool(pos.ok and pos.observed)
-            obs.verdict = verdict_for(neg, observed_after, pos,
-                                      session_state=session_state,
-                                      skip_agent_write=args.skip_agent_write)
+                    extra={"projection": projection, "rule": neg.rule, "body": scrub(raw)})
+            obs.verdict = INCOMPLETE_NO_SURFACE
+            obs.reason = failure_reason(obs.verdict,
+                                       session_state=session_state)
+            return _finalize(obs, out_dir, td)
+        obs.add(name="before-observation", url=page.url, ui=ui,
+                observed=neg.observed, ok=neg.ok, detail=neg.detail,
+                screenshot=shot(page, "before-observation"),
+                extra={"projection": projection, "rule": neg.rule,
+                       "projection_status": projection_status,
+                       "page_claims_connection": page_claims, "body": scrub(raw)})
+        obs.assertions["no_claim_before_observation"] = neg.ok
+        if not neg.ok:
+            obs.verdict = f"failed: {neg.detail}"
             obs.reason = failure_reason(obs.verdict, session_state=session_state)
-            return _finish(obs, out_dir)
-        except Exception as exc:
-            obs.add(name="error", url=page.url if page else "",
-                    ok=False, detail=f"{type(exc).__name__}: {exc}",
-                    screenshot=shot(page, "error") if page else "")
-            obs.verdict = f"failed: {type(exc).__name__}: {exc}"
-            return _finish(obs, out_dir)
+            return _finalize(obs, out_dir, td)
+
+        # 6 ── the server observes a real agent write (MCP, not a client claim)
+        # The session is PROVEN signed-in by here, so the key is either the
+        # explicitly-supplied one or one minted through the BFF — never a
+        # silent substitution, and never skipped for want of a credential.
+        observed_after = False
+        if not args.skip_agent_write:
+            if args.agent_key:
+                key, key_detail = args.agent_key, "key from the explicit --agent-key flag"
+            else:
+                key, key_detail = _mint_or_read_key(page, ctx, args.base_url)
+            if key:
+                result = observe_agent_write(
+                    args.api_url, key,
+                    content=f"ship-test #3806 observation {uuid.uuid4().hex[:8]}")
+                obs.add(name="agent-write", ui="", observed=False,
+                        ok=bool(result.get("ok")),
+                        detail=f"MCP tortoise_create_point ({key_detail})",
+                        extra={"mcp": result})
+                if not result.get("ok"):
+                    # The WRITE failed — a bad / wrong-org / graph-bound key,
+                    # or an MCP outage. That is an instrument fault, and it
+                    # must not be reported as "the server did not observe"
+                    # (the #4291 class, one layer down).
+                    obs.verdict = instrument_error_verdict(
+                        "agent_write_failed", key_detail)
+                    return _finalize(obs, out_dir, td)
+                # poll the server's projection until it records the edge.
+                # `saw_200` is tracked SEPARATELY from the LAST read's
+                # status: a transient 503 on the final poll must not turn a
+                # demonstrably-never-observed write into an instrument
+                # fault. The class is decided by whether the server's truth
+                # was EVER readable, not by which read happened to be last.
+                saw_readable = False
+                for _ in range(20):
+                    projection_status, projection = read_projection(ctx, args.base_url)
+                    saw_readable = saw_readable or projection_readable(
+                        projection_status, projection)
+                    if server_observed(projection):
+                        break
+                    page.wait_for_timeout(1000)
+                if not saw_readable:
+                    # The server's own truth was NEVER readable (a degraded
+                    # session store answers 503 here). Nothing was measured.
+                    obs.verdict = instrument_error_verdict(
+                        "projection_unreadable",
+                        f"GET /api/v1/onboarding/state -> {projection_status}")
+                    return _finalize(obs, out_dir, td)
+                observed_after = server_observed(projection)
+                # `ok` stays the WRITE's outcome (that is what the step is
+                # named for); whether the server observed it is `observed`.
+                obs.steps[-1].observed = observed_after
+                obs.steps[-1].extra["projection"] = projection
+                obs.steps[-1].extra["projection_status"] = projection_status
+                obs.steps[-1].extra["poll_readable"] = saw_readable
+            else:
+                obs.add(name="agent-write", ok=False, detail=key_detail)
+                obs.verdict = instrument_error_verdict("no_agent_key", key_detail)
+                return _finalize(obs, out_dir, td)
+
+        # 7 ── the POSITIVE direction: reload and read the Overview again
+        page.goto(args.base_url.rstrip("/") + "/",
+                  wait_until="domcontentloaded", timeout=args.timeout)
+        page.wait_for_timeout(args.settle_ms)
+        projection_status, projection = read_projection(ctx, args.base_url)
+        if not projection_readable(projection_status, projection):
+            obs.verdict = instrument_error_verdict(
+                "projection_unreadable",
+                f"GET /api/v1/onboarding/state -> {projection_status}")
+            return _finalize(obs, out_dir, td)
+        ui = read_connection_surface(page)
+        pos = connection_verdict(ui, connection_surface_kind(page), projection,
+                                 page_body(page))
+        ui = pos.ui
+        obs.add(name="after-observation", url=page.url, ui=ui,
+                observed=pos.observed, ok=pos.ok and pos.observed, detail=pos.detail,
+                screenshot=shot(page, "after-observation"),
+                extra={"projection": projection, "rule": pos.rule,
+                       "projection_status": projection_status,
+                       "body": recorded_body(page)})
+        # The positive half is only PROVEN when the server observation
+        # happened AND the screen shows it. `verdict_for` encodes exactly
+        # that: `passed` requires pos.observed, never merely pos.ok (a
+        # hidden connection resolves to a judge-OK honest-negative).
+        obs.assertions["shown_when_observed"] = bool(pos.ok and pos.observed)
+        obs.verdict = verdict_for(neg, observed_after, pos,
+                                  session_state=session_state,
+                                  skip_agent_write=args.skip_agent_write)
+        obs.reason = failure_reason(obs.verdict, session_state=session_state)
+        return _finalize(obs, out_dir, td)
+    except Exception as exc:
+        obs.add(name="error", url=page.url if page else "",
+                ok=False, detail=f"{type(exc).__name__}: {exc}",
+                screenshot=shot(page, "error") if page else "")
+        obs.verdict = f"failed: {type(exc).__name__}: {exc}"
+        return _finalize(obs, out_dir, td)
+
+
+def _close_all(pw, td, closes: list) -> bool:
+    """Close the context, the browser and the driver, recording each step.
+
+    Every closer runs even after one fails, and no failure may skip the rest:
+    the browser is what reaps the Chromium tree (E8), so a context close that
+    raises must not stop the browser close. Returns True if any closer failed.
+    """
+    failed = False
+    for name, closer in (("context", td.ctx), ("browser", td.browser)):
+        if closer is None:
+            continue
+        try:
+            closer.close()
+            closes.append({"name": name, "how": "closed", "detail": ""})
+        except BaseException as exc:
+            failed = True
+            closes.append({"name": name, "how": "close_error",
+                           "detail": scrub(f"{type(exc).__name__}: {exc}")})
+    try:
+        pw.stop()
+        closes.append({"name": "playwright", "how": "closed", "detail": ""})
+    except BaseException as exc:
+        failed = True
+        closes.append({"name": "playwright", "how": "close_error",
+                       "detail": scrub(f"{type(exc).__name__}: {exc}")})
+    return failed
+
+
+def _teardown_browser(pw, td, obs, out_dir) -> None:
+    """Close the browser this run owns, BOUNDED. The ONE teardown site's body.
+
+    Close the context → close the browser → `pw.stop()`, recording each step into
+    `obs.browser_teardown`, with a watchdog armed for the whole of it. The closes
+    are unbounded in the API (`Browser.close()` is a timeout-less `send`) and
+    cannot be interrupted, so the BOUND comes from outside them: a thread takes
+    the `_ladder` rungs on the clock seam and signals the run's OWN Playwright
+    driver child, which is what releases a blocked close (E11).
+
+    The bound does NOT depend on a child being enumerable: when the ladder is
+    spent and a close is still blocked, `_abandon` writes the record and exits
+    the process with the run's own exit code. That last resort is what makes the
+    bound hold where no child was enumerated, since a signal is the only thing
+    that releases a wedged close.
+
+    The budget starts BEFORE the enumerator runs, so a slow `ps` cannot spend the
+    teardown's own slack, and the rung's own re-read is bounded by the ladder's
+    slack (`_ps_timeout`) so it cannot push the abandon past the bound.
+
+    The watchdog touches NO Playwright object — only `os.kill` through the signal
+    seam and a record — so the sync API's thread-affinity rule is not violated.
+
+    Safety, by construction: the pid is enumerated ONCE, as a direct child of
+    this process, together with its parent pid and start time — read as ONE
+    identity in a single `ps` call, and re-read as that same whole value
+    immediately before every rung (a bare pid is racy against reuse, and a start
+    time read separately can belong to the process that reused the pid). With no
+    child enumerated the watchdog signals nothing, and the outcome is
+    `driver_absent` if the close then returns. Only after a signal is the child
+    reaped. Each failure is RECORDED and cannot change the verdict or the exit
+    code: cleanup is not the product (#4319's rule, applied to the browser).
+
+    One-shot by construction — `run_walk` spells the call exactly once — plus this
+    guard, so a re-entry cannot close the same objects or arm a second watchdog.
+    """
+    if td.browser_done:
+        return
+    td.browser_done = True
+    record = obs.browser_teardown
+    closes = record["closes"]
+
+    started = _monotonic()
+    bound = TEARDOWN_BOUND_S
+    driver_pid, driver_start, enum_status = _driver_pid_and_starttime()
+    me = os.getpid()
+    signals: list[tuple[int, int]] = []
+    refused_reuse: list[bool] = []
+    signal_failed: list[bool] = []
+    fired = threading.Event()
+    done = threading.Event()
+
+    def _watchdog() -> None:
+        try:
+            for delay, signum in _ladder(bound):
+                if not _wait_until(started + delay, done):
+                    return                 # the closes finished before this rung
+                fired.set()
+                if driver_pid is None:
+                    continue               # nothing of ours to signal
+                # The identity is re-read as ONE value — parent pid AND start
+                # time from a single `ps` — so a pid reused since the enumeration
+                # cannot present its successor's start time and pass.
+                try:
+                    identity = _child_identity(driver_pid)
+                except BaseException:
+                    identity = None
+                if identity is None or identity != (me, driver_start):
+                    refused_reuse.append(True)
+                    continue               # the pid is no longer our child
+                try:
+                    _send_signal(driver_pid, signum)
+                except BaseException:
+                    # A failing signal seam must not kill this thread: the run is
+                    # still bounded by the last resort in the `finally` below.
+                    signal_failed.append(True)
+                    continue
+                signals.append((driver_pid, signum))
+                with contextlib.suppress(BaseException):
+                    _reap(driver_pid)
         finally:
-            if ctx is not None:
-                ctx.close()
-            if browser is not None:
-                browser.close()
+            # THE LAST RESORT: every rung is spent (or unusable) and the teardown
+            # is still blocked.
+            if not done.is_set():
+                _abandon(obs, record, driver_pid, out_dir,
+                         enum_status=enum_status, finalized=td.finalized)
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
+    try:
+        failed = _close_all(pw, td, closes)
+    finally:
+        done.set()
+        # A healthy run must not wait out the bound: `done` releases the ladder's
+        # own wait, so this join returns in milliseconds.
+        watchdog.join(timeout=1.0)
+
+    if failed:
+        # An attempted close that RAISED is `close_error` — the specific,
+        # actionable record — and must never be masked by a rung having fired (or
+        # by the watchdog having signalled) on the way.
+        record["outcome"] = BROWSER_TEARDOWN_CLOSE_ERROR
+        record["detail"] = "; ".join(c["detail"] for c in closes
+                                      if c["how"] == "close_error")
+    elif signals:
+        record["outcome"] = BROWSER_TEARDOWN_WATCHDOG_KILL
+        record["detail"] = ("the driver did not release the close; signalled "
+                            + ", ".join(f"{p} {_SIGNAL_LABELS.get(s, s)}"
+                                        for p, s in signals))
+    elif fired.is_set():
+        record["outcome"] = BROWSER_TEARDOWN_DRIVER_ABSENT
+        if driver_pid is None:
+            if enum_status == DRIVER_ENUM_IDENTITY_UNREADABLE:
+                record["detail"] = ("the teardown needed the watchdog; an "
+                                    "enumerated driver child's identity could not "
+                                    "be read as this run's child, so nothing was "
+                                    "signalled")
+            else:
+                record["detail"] = ("the teardown needed the watchdog, and no driver "
+                                    "child was enumerated to signal")
+        elif refused_reuse:
+            record["detail"] = (f"the teardown needed the watchdog; the enumerated "
+                                f"driver child {driver_pid} was refused by the "
+                                f"identity re-check, so nothing was signalled")
+        elif signal_failed:
+            record["detail"] = (f"the teardown needed the watchdog; signalling the "
+                                f"enumerated driver child {driver_pid} failed, so "
+                                f"nothing was delivered")
+        else:
+            record["detail"] = (f"the teardown needed the watchdog; no signal was "
+                                f"sent for the enumerated driver child "
+                                f"{driver_pid}")
+    else:
+        record["outcome"] = BROWSER_TEARDOWN_CLEAN
+    if record["detail"]:
+        record["detail"] = scrub(record["detail"])
+
+
+def _exit_now(code: int) -> None:
+    """Terminate the process without unwinding. A SEAM, so a test can observe it.
+
+    `os._exit`, not `sys.exit`: the main thread is blocked in a C-level wait, so
+    an exception-based exit could not run from this thread. This is the only exit
+    that works while another thread is stuck.
+    """
+    os._exit(code)
+
+
+def _abandon(obs, record, driver_pid, out_dir, *,
+             enum_status: str = DRIVER_ENUM_NO_CANDIDATE,
+             finalized: bool = True) -> None:
+    """The ladder is spent and a close is still blocked: end the run, bounded.
+
+    Called from the watchdog thread with the main thread stuck in a timeout-less
+    `close()`. Nothing here touches a Playwright object.
+
+    The exit code is the run's OWN, computed exactly as `_finish` would, because
+    a cleanup fault must never move the verdict (#4319). An UNFINALIZED run — one
+    where a `BaseException` escaped `_walk` before it settled — exits
+    `EXIT_INSTRUMENT_ERROR`, which is what `main` returns for it. When the walk
+    settled the pre-teardown document is already on disk; the authoritative one
+    is written here (when the write succeeds), so a run that had to abandon its
+    teardown still says what it measured and why the browser was not released.
+
+    Because this runs on the watchdog thread while the main thread is blocked in
+    a timeout-less `close()`, the finalization and the exit below are the LAST
+    chance the process has to end itself: nothing there may raise past the exit.
+    """
+    record["outcome"] = BROWSER_TEARDOWN_ABANDONED
+    if driver_pid is not None:
+        why = f"driver child {driver_pid} had not released the close"
+    elif enum_status == DRIVER_ENUM_IDENTITY_UNREADABLE:
+        why = ("an enumerated driver child's identity could not be read as this "
+               "run's child")
+    else:
+        why = "no driver child enumerated to release it"
+    record["detail"] = scrub(
+        "the ladder was spent with the teardown still blocked and " + why
+        + "; the run terminated itself so it could not hang forever")
+    if not obs.reason:
+        obs.reason = failure_reason(
+            obs.verdict, session_state=(obs.session or {}).get("state", ""))
+    wrote = False
+    try:
+        _write_observation(obs, out_dir)
+        wrote = True
+    except BaseException:
+        pass
+    try:
+        # THE SHARED PRINT PATH, with the write's outcome so the `observation →`
+        # line cannot name an artifact that is not there. It also carries the
+        # non-clean cleanup warnings (the residue alert and the browser-teardown
+        # alert), which `_finish` prints too — this is the ONLY exit an
+        # abandoned run will take, so those warnings must live here as well.
+        _print_summary(obs, out_dir / "observation.json",
+                       artifact_written=wrote)
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except BaseException:
+        # A closed CI log pipe (`BrokenPipeError`) or a malformed step detail
+        # (`TypeError`) must not kill this thread and skip the exit below.
+        pass
+    finally:
+        # THE EXIT IS UNCONDITIONAL. The main thread is blocked in a timeout-less
+        # `close()`, so this is the only thing that bounds the run; a `finally`
+        # makes it unreachable-by-any-exception, not merely intended.
+        _exit_now(run_exit_code(obs) if finalized else EXIT_INSTRUMENT_ERROR)
 
 
 def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
@@ -1238,13 +2208,85 @@ def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
                   f"{scrub(json.dumps(body), 200)}")
 
 
-def _finish(obs: Observation, out_dir: Path) -> Observation:
-    if not obs.reason:
-        obs.reason = failure_reason(
-            obs.verdict, session_state=(obs.session or {}).get("state", ""))
+def _write_observation(obs: Observation, out_dir: Path) -> Path:
+    """Serialize the observation ATOMICALLY: ``mkstemp`` + ``os.replace``.
+
+    A run whose walk settled into the pre-teardown write writes the document
+    TWICE — once pre-teardown (the `not_run` fallback, so a run killed inside the
+    bounded window still leaves a complete, parsable artifact) and once after it
+    (authoritative); a walk body that raises before it settles writes neither,
+    because its exception propagates past the authoritative write. A
+    truncate-in-place write lets a reader see a half-written file between the
+    two; an atomic replace cannot. Deliberately PRINT-FREE: the verdict is
+    printed once, by `_finish`, so the two writes cannot produce two verdict
+    lines.
+
+    The temp is created with ``tempfile.mkstemp`` — an unguessable name, opened
+    ``O_EXCL`` — and the destination leaf is refused when it is a symlink, so a
+    link planted at a predictable temp name (or at the artifact path) is never
+    followed. ``Path.write_text`` follows a symlink (``O_CREAT|O_TRUNC``), the
+    #4098 class also documented in ``tools/branch_reaper.py`` and
+    ``tools/embedded_evidence.py``.
+    """
     path = out_dir / "observation.json"
-    path.write_text(json.dumps(asdict(obs), indent=2) + "\n")
-    print(f"[ship-test] {obs.verdict}")
+    if path.is_symlink():
+        raise OSError(f"refusing to write through a symlinked observation: {path}")
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                    prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(asdict(obs), indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave the tmp behind for the NEXT run to trip over (or for a
+        # reader to mistake for the artifact). The repo's convention for the
+        # atomic-write pair, e.g. tools/embedded_evidence.py (~#4585).
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return path
+
+
+def _warn_side_effects(obs: Observation) -> None:
+    """The non-clean cleanup warnings: LOUD on stderr, never verdict-affecting.
+
+    Called from the SHARED print path, so a run that ABANDONED its teardown —
+    which never reaches `_finish` — still warns about the org it may have left
+    live and the browser it could not release. Both obey #4319: cleanup is not
+    the product, so neither changes the verdict or the exit code.
+    """
+    outcome = obs.browser_teardown.get("outcome")
+    if outcome not in (BROWSER_TEARDOWN_NOT_RUN, BROWSER_TEARDOWN_CLEAN):
+        print(f"[ship-test] BROWSER TEARDOWN — {outcome}: the browser this run owned "
+              f"was not released cleanly"
+              f" ({obs.browser_teardown.get('detail') or 'no detail'})."
+              f" That is a CLEANUP fault: it does not change the verdict"
+              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
+    if obs.teardown.get("status") in TEARDOWN_RESIDUE_STATES:
+        print(f"[ship-test] RESIDUE — teardown {obs.teardown.get('status')}:"
+              f" this run may have left a live org behind in the target tenant."
+              f" That is a CLEANUP fault: it does not change the verdict"
+              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
+
+
+def _print_summary(obs: Observation, path: Path, *,
+                   artifact_written: bool = True) -> None:
+    """The run's authoritative stdout summary — the ONE print path.
+
+    Shared by `_finish` (the normal exit) and `_abandon` (the bounded last
+    resort), so a run that had to end its own teardown still prints the verdict
+    line, the per-step summary, the reason/exit line, the ``observation → path``
+    line a CI job keys on, and the non-clean cleanup warnings. The verdict is
+    scrubbed: it can carry free text assembled from an exception message.
+
+    ``artifact_written`` is what makes the ``observation → path`` line HONEST:
+    `_abandon` may have failed to write, and naming an artifact that does not
+    exist while stderr contradicts it is exactly the disagreement this path
+    exists to avoid. When it is false the line says the artifact was NOT written,
+    on both streams.
+    """
+    print(f"[ship-test] {scrub(obs.verdict)}")
     for s in obs.steps:
         mark = "PASS" if s.ok else ("FAIL" if s.ok is False else "--")
         print(f"  {mark:4} {s.name:24} ui={s.ui or '-':14} "
@@ -1253,7 +2295,16 @@ def _finish(obs: Observation, out_dir: Path) -> Observation:
     print(f"[ship-test] session: {obs.session or '(not reached)'}")
     print(f"[ship-test] deployed sha: {obs.deploy_sha or '(unreadable)'}  "
           f"bundle: {obs.bundle or '(unreadable)'}  instrument: {obs.sha or '(unknown)'}")
-    print(f"[ship-test] observation → {path}")
+    if obs.teardown:
+        print(f"[ship-test] teardown: {obs.teardown}")
+    if artifact_written:
+        print(f"[ship-test] observation → {path}")
+    else:
+        print(f"[ship-test] observation NOT WRITTEN → {path}")
+        print(f"[ship-test] WARNING — the observation artifact could NOT be "
+              f"written ({path}), so this run's own record is incomplete.",
+              file=sys.stderr)
+    _warn_side_effects(obs)
     if obs.reason == REASON_INSTRUMENT_ERROR:
         # LOUD, on stderr, with the exit code: a run that could not exercise
         # the product must never be mistaken for a measurement of it.
@@ -1264,6 +2315,63 @@ def _finish(obs: Observation, out_dir: Path) -> Observation:
               f"be exit {EXIT_FAILED})", file=sys.stderr)
     elif obs.reason:
         print(f"[ship-test] reason: {obs.reason} (exit {exit_code_for(obs.reason)})")
+
+
+def _finish(obs: Observation, out_dir: Path) -> Observation:
+    """The ONE authoritative write+print site.
+
+    The write comes FIRST, so stdout and the file are produced from the same
+    finalized record and cannot disagree; the verdict line and the non-clean
+    cleanup warnings are printed exactly once, by the shared print path, after
+    the bounded teardown has run.
+    """
+    if not obs.reason:
+        obs.reason = failure_reason(
+            obs.verdict, session_state=(obs.session or {}).get("state", ""))
+    path = _write_observation(obs, out_dir)
+    _print_summary(obs, path)
+    return obs
+
+
+def _run_teardown_safely(obs: Observation, td: Teardown | None) -> None:
+    """Run the ORG teardown, never raising.
+
+    Extracted so the import-guard exit in `_start_driver` and `_finalize` share
+    one body: a failed cleanup is residue, never a product finding, and never a
+    reason to lose the artifact (the #4291 conflation, both directions).
+    """
+    if td is None:
+        return
+    try:
+        _run_teardown(obs, td)
+    except Exception as exc:
+        obs.teardown = {"status": TEARDOWN_FAILED,
+                        "detail": f"{type(exc).__name__}: {exc}"}
+
+
+def _finalize(obs: Observation, out_dir: Path,
+              td: Teardown | None = None) -> Observation:
+    """`_walk`'s SINGLE exit: the ORG teardown, then the PRE-TEARDOWN write.
+
+    Every `return` in `_walk` funnels through here, so the artifact carries the
+    org-teardown outcome on every path where a browser context existed (i.e. where
+    an org could have been created) — and it is COMPLETE and PARSABLE before the
+    bounded browser teardown starts, with `browser_teardown.outcome == "not_run"`.
+    A run killed inside that window therefore still leaves a diagnostic (#4907);
+    the authoritative value replaces it in `run_walk`'s single `_finish`.
+
+    Deliberately does NOT print and does NOT call `_finish`: the authoritative
+    write and the ONE verdict print belong to `run_walk`, after the teardown.
+    """
+    _run_teardown_safely(obs, td)
+    _write_observation(obs, out_dir)
+    if td is not None:
+        # The run SETTLED into a written pre-teardown document. An unfinalized
+        # record means `_walk` escaped via a `BaseException`; `main` returns
+        # `EXIT_INSTRUMENT_ERROR` for it, and the teardown's last resort must
+        # exit the same way rather than scoring the default record as a product
+        # code.
+        td.finalized = True
     return obs
 
 
@@ -1383,6 +2491,33 @@ def mutation_selfcheck() -> int:
           "a signed-in run that observed nothing")
     if not ok:
         failures.append("product finding is not distinct from the instrument error")
+    # #4907: the teardown bound's ARITHMETIC, as values. The CI half proves the
+    # ladder; that the watchdog USES it (rather than hardcoding the same delays)
+    # is proven by the fast suite's clock-seam assertions. No browser either way.
+    real_ladder = _ladder(TEARDOWN_BOUND_S)
+    ok = _ladder_is_sound(real_ladder, TEARDOWN_BOUND_S)
+    print(f"  {'ok ' if ok else 'BAD'} ladder {real_ladder}  "
+          "the rungs sit strictly inside the bound")
+    if not ok:
+        failures.append("the teardown ladder's rungs are not inside the bound")
+    for name, mutant in (
+            ("reversed (SIGKILL first)",
+             [(3 * TEARDOWN_BOUND_S / 4, signal.SIGKILL),
+              (TEARDOWN_BOUND_S / 2, signal.SIGTERM)]),
+            ("a rung outside the bound",
+             [(TEARDOWN_BOUND_S / 2, signal.SIGTERM),
+              (TEARDOWN_BOUND_S + 1, signal.SIGKILL)]),
+            ("three rungs", [*real_ladder, (TEARDOWN_BOUND_S, signal.SIGKILL)]),
+            ("the same signal twice",
+             [(TEARDOWN_BOUND_S / 2, signal.SIGTERM),
+              (3 * TEARDOWN_BOUND_S / 4, signal.SIGTERM)]),
+            ("a bound that is not one",
+             [(0.0, signal.SIGTERM), (0.0, signal.SIGKILL)])):
+        sound = _ladder_is_sound(mutant, TEARDOWN_BOUND_S)
+        print(f"  {'ok ' if not sound else 'BAD'} {'GREEN' if not sound else 'RED':5} "
+              f"(want RED)  ladder mutant: {name}")
+        if sound:
+            failures.append(f"ladder mutant read as sound: {name}")
     if failures:
         print(f"[mutation-selfcheck] FAILED: {len(failures)} case(s): {failures}")
         return 1
@@ -1431,6 +2566,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "judged against a different identity's projection.")
     p.add_argument("--allow-prod", action="store_true",
                    default=os.environ.get("SHIP_TEST_ALLOW_PROD") == "1")
+    p.add_argument("--keep-org", action="store_true", default=False,
+                   help="do NOT reap the org this run created. Teardown is ON by "
+                        "default (#4319): the run deletes the org it created "
+                        "through the walked session's own BFF proxy, once its "
+                        "identity is PROVEN by a before/after diff of that "
+                        "session's own org list. Use this only to inspect a "
+                        "FAILED run's org — it leaves an explicit, countable "
+                        "residue. CLI-only, deliberately NOT env-settable: one "
+                        "ambient variable must never be able to turn teardown off "
+                        "for every run.")
     p.add_argument("--mutation-selfcheck", action="store_true")
     return p
 
@@ -1444,6 +2589,19 @@ def main(argv: list[str] | None = None) -> int:
         print("ship-test: non-loopback target — pass --allow-prod (or "
               "SHIP_TEST_ALLOW_PROD=1) to observe a live deployment", file=sys.stderr)
         return EXIT_USAGE
+    if args.org_name is not None:
+        # Validate what the PRODUCT will actually store: both the wizard and
+        # tenant-provision trim first.
+        org_name = args.org_name.strip()
+        if org_name and not ORG_NAME_RE.fullmatch(org_name):
+            print("ship-test: invalid --org-name — the product accepts letters, "
+                  "numbers, space, dash and underscore, starting with a letter or "
+                  "number, at most 64 characters (the rule both the wizard and "
+                  "tenant-provision apply). A name outside that rule is rewritten "
+                  "or refused server-side, which would make the org this run "
+                  "created unreapable.", file=sys.stderr)
+            return EXIT_USAGE
+        args.org_name = org_name or None
     try:
         obs = run_walk(args)
     except Exception as exc:
@@ -1454,9 +2612,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ship-test: INSTRUMENT ERROR — run aborted: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_INSTRUMENT_ERROR
-    if obs.verdict == "passed":
-        return EXIT_PASSED
-    return exit_code_for(obs.reason)
+    return run_exit_code(obs)
 
 
 if __name__ == "__main__":
