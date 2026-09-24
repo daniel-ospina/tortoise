@@ -1,8 +1,10 @@
 /**
  * blog-api — typed functions over supabase-js for the Tortoise blog CMS.
  *
- * All reads/writes ride the USER's PKCE session (RLS: blog_posts admin_all
- * policy gates on is_admin() membership — migration 20260827000001).
+ * The `supabase`-backed blog_posts reads/writes ride the legacy `sb-tortoise-auth-token`
+ * session cookie via `src/lib/supabase.ts` — a RETAINED legacy surface (#4178), not the BFF
+ * session; the `/blog/api/*` calls below ride the BFF session instead
+ * (RLS: blog_posts admin_all policy gates on is_admin() membership — migration 20260827000001).
  * No service-role keys client-side.
  *
  * Status model (plan W4): draft → published → archived (terminal);
@@ -315,8 +317,10 @@ export async function purgePostCache(slug: string): Promise<void> {
   if (existing) return existing;
   const run = (async () => {
     try {
-      // #3501: no token to attach — the HttpOnly session cookie rides along on
-      // same-origin requests. Attaching a bearer token here was the exposure.
+      // #3501/#4171: no token to attach — the HttpOnly `__Host-session` cookie
+      // rides along on this same-origin request, and the app-origin /blog/api
+      // proxy attaches the server-minted credential upstream. Attaching a bearer
+      // token here was the exposure.
       await fetch('/blog/api/purge', {
         method: 'POST',
         credentials: 'same-origin',
@@ -334,7 +338,8 @@ export async function purgePostCache(slug: string): Promise<void> {
 }
 
 // ── AI generation (#1861 generate-seo, #1863 generate-cover) ─────────────
-// Server-side only (admin-gated); the editor sends the user's access token.
+// Server-side only (admin-gated /blog/api/*, reached through the app-origin
+// same-origin proxy #4171 — the browser never holds the credential).
 // Fail-open for the caller: generation errors surface as thrown errors the
 // editor catches (toast) — generation never blocks save.
 

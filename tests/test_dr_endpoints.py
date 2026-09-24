@@ -6,11 +6,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import tempfile
 from typing import ClassVar
 from uuid import uuid4
 
 import pytest
+import redis
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
@@ -144,6 +146,18 @@ def _reset_graph(db, graph_name: str) -> None:
     the count depend on what a previous test left behind.
     """
     db.select_graph(graph_name).query("MATCH (n) DETACH DELETE n")
+
+
+def _held_proj_db():
+    """A data-plane `db` handle whose SDK is HELD for the session.
+
+    `ha_mod._make_sdk(namespace=None)` returns a FRESH SDK per call; capturing
+    only its `.db` lets the SDK be collected (close-on-GC) and the handle go
+    dead mid-test — the same hazard `_SEED_SDKS` documents for seeds. Hold it.
+    """
+    sdk = ha_mod._make_sdk(namespace=None)
+    _SEED_SDKS.append(sdk)
+    return sdk._get_proj().db
 
 
 def _seed_team(org_id: str = "team_x", nodes: int = 2) -> None:
@@ -429,7 +443,7 @@ class TestDrSweep:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: cp)
         # Seed the DATA plane (FalkorDB stays the graph store in both lanes).
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         for tid in ("team_s1", "team_s2"):
             _reset_graph(db, f"org_{tid}")
             g = db.select_graph(f"org_{tid}")
@@ -845,6 +859,133 @@ class TestDrRebaseline:
         assert r.json()["node_count"] == 3
         state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
         assert state["node_count"] == 3
+
+    def test_rebaseline_excludes_projection_bookkeeping_marker(
+            self, client, dr_env, mem_storage):
+        """#4233 — re-baseline's node_count is ``dump_graph``'s node set, not
+        a raw ``MATCH (n)``.
+
+        A projection opened ON the org graph (the export seam does this via
+        ``_make_sdk(graph_name=...)``) MERGEs its internal
+        ``:Meta {key:'point_fts_v2'}`` index-guard marker into that graph
+        (#1541). Counting it made a 3-point graph re-baseline to 4 — the flake
+        that red'd the required check on unrelated PRs.
+
+        RED (mutation): count ``MATCH (n) RETURN count(n)`` again — the
+        assertion below reads 4 == 3 (verified).
+        """
+        _seed_team("team_x", nodes=3)
+        # The projection's index guard (`FalkorProjection._ensure_indexes`,
+        # #1541) MERGEs this marker into whatever graph it is opened on — the
+        # sweep / export / re-baseline seams all open one. A test session
+        # redirects an SDK's graph NAME (Epic #1647 D-1=A), so inject the
+        # identical node directly into the raw org graph the DR seams address
+        # by name — the marker node is what matters, not how it got there.
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        db = sdk._get_proj().db
+        db.select_graph("org_team_x").query(
+            "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+        assert int(db.select_graph("org_team_x").query(
+            "MATCH (m:Meta {key:'point_fts_v2'}) RETURN count(m)"
+        ).result_set[0][0]) == 1, "probe did not write the bookkeeping marker"
+        assert int(db.select_graph("org_team_x").query(
+            "MATCH (n) RETURN count(n)").result_set[0][0]) == 4, (
+            "the marker must be present for this guard to be non-vacuous"
+        )
+
+        mem_storage.upload(
+            "ops/teams/team_x/state.json",
+            json.dumps({"node_count": 10}).encode(),
+        )
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["node_count"] == 3, r.text
+        state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
+        assert state["node_count"] == 3
+
+    def test_count_data_nodes_matches_the_dump_node_set(self, client):
+        """#4233 — ``count_data_nodes`` and ``dump_graph`` count the SAME nodes.
+
+        The count is re-expressed as a cap-immune server-side aggregate, so it
+        must stay semantically identical to ``_is_export_skip_node`` at every
+        boundary: each label-wide skip class, each key-scoped Meta marker, a
+        Meta with a NON-skip key (DATA), and — the subtle one — a Meta with NO
+        ``key`` (also DATA: Cypher three-valued logic would otherwise drop it
+        from the aggregate while ``dump_graph`` keeps it).
+
+        RED (mutation): drop ``n.key IS NOT NULL`` (or any skip class) from the
+        aggregate — the parity assertion below fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+        from tortoise.hosted_api import (
+            _EXPORT_SKIP_LABELS,
+            _EXPORT_SKIP_META_KEYS,
+            _is_export_skip_node,
+        )
+
+        db = _held_proj_db()
+        g = db.select_graph("org_settle_source")
+        g.query("MATCH (n) DETACH DELETE n")
+        g.query("CREATE (p:Point {id:'data-1'})")           # content
+        g.query("CREATE (m:Meta {key:'calibration_milestone'})")  # DATA
+        g.query("CREATE (m:Meta {v:true})")                 # no key — DATA
+        g.query("CREATE (m:Meta)")                          # no key — DATA
+        for label in sorted(_EXPORT_SKIP_LABELS):            # skipped
+            g.query(f"CREATE (n:{label} {{x:1}})")
+        for key in sorted(_EXPORT_SKIP_META_KEYS):           # skipped
+            g.query("CREATE (m:Meta {key:$k})", params={"k": key})
+
+        expected = sum(
+            1 for labels, props in g.query(
+                "MATCH (n) RETURN labels(n), properties(n)").result_set
+            if not _is_export_skip_node(
+                [str(l) for l in (labels or [])],  # noqa: E741
+                dict(props or {}))
+        )
+        assert hb.count_data_nodes(db, "org_settle_source") == expected
+        assert expected == 4, expected  # 1 Point + 3 content Meta nodes
+
+    def test_count_data_nodes_query_is_a_single_row_aggregate(self, client):
+        """#4233 — cap immunity, pinned STRUCTURALLY (no server-global mutation).
+
+        ``RESULTSET_SIZE`` truncates the ROWS a read returns; an aggregate
+        always returns exactly ONE row regardless of graph size. So asserting
+        the count query's row shape pins cap-immunity WITHOUT lowering a
+        server-global setting on a shared test server.
+
+        RED (mutation): change ``_COUNT_DATA_NODES_QUERY`` to a non-aggregate
+        ``MATCH (n) RETURN …`` — it returns N rows and the row-count assertion
+        fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+        from tortoise.hosted_api import (
+            _EXPORT_SKIP_LABELS,
+            _EXPORT_SKIP_META_KEYS,
+        )
+
+        db = _held_proj_db()
+        g = db.select_graph("org_settle_source")
+        g.query("MATCH (n) DETACH DELETE n")
+        for i in range(6):
+            g.query("CREATE (p:Point {id:$id})", params={"id": f"p-{i}"})
+        g.query("CREATE (m:Meta {key:'point_fts_v2'})")  # content-neutral marker
+
+        params = {
+            "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+            "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+        }
+        rows = g.query(hb._COUNT_DATA_NODES_QUERY, params=params).result_set
+        assert len(rows) == 1, rows  # an aggregate — immune to the row cap
+        assert int(rows[0][0]) == 6
+        # The same graph read WITHOUT an aggregate returns many rows — the
+        # shape RESULTSET_SIZE would truncate, which this query must never be.
+        assert len(g.query(
+            "MATCH (n) RETURN labels(n), properties(n)").result_set) == 7
+        assert hb.count_data_nodes(db, "org_settle_source") == 6
 
 
 class TestDrDrill:
@@ -1523,6 +1664,48 @@ class TestDrDrillScheduled:
         assert _has_open(fake.calls, ha_mod._DRILL_FAILED_KIND)
         assert not _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
 
+    def test_rto_breach_incident_names_the_copy_overrun(self, client, dr_env,
+                                                        mem_storage,
+                                                        monkeypatch):
+        """#4233 — an RTO breach caused by an overrun copy NAMES it in the
+        incident payload, not only in the drill record.
+
+        The unattended scheduled drill alerts from the incident; a flag that
+        never reaches it leaves the breach unattributed for the operator who
+        only sees alerts.
+
+        RED (mutation): drop the ``copy_read_bound_overrun`` entry from the
+        RTO-breach incident payload — this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+        monkeypatch.setattr(ha_mod, "_DRILL_RTO_S", 0.0)  # any duration breaches
+
+        def copy_then_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        _seed_team("team_x", nodes=1)
+        _default_drill_key(client, mem_storage)
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "drill_ok" and body["within_rto"] is False
+        opened = [c for c in fake.calls
+                  if c[0] == "open" and c[1] == ha_mod._DRILL_FAILED_KIND]
+        assert opened, fake.calls
+        assert opened[-1][3].get("copy_read_bound_overrun") is True, opened[-1]
+
     def test_respects_shared_cooldown(self, client, dr_env, mem_storage,
                                       monkeypatch):
         import time as _time
@@ -1637,3 +1820,739 @@ class TestBackupsSurfaceUnits:
         assert _sub({"org_id": "team_x", "graph_id": "default"}) == "team_x"
         # team-level kinds have no graph_id
         assert _sub({"kind": "NO_ELIGIBLE_TEAMS", "org_id": ""}) == ""
+
+
+class TestRestoreSwapReadBound:
+    """#3813 — the restore swap's GRAPH.COPY is a long SERVER-SIDE operation
+    (FalkorDB forks a child that encodes the whole graph; the caller stays
+    blocked for the entire copy), so its read bound belongs to the restore and
+    NOT to an ordinary request.
+
+    Every assertion is on the OBSERVABLE the caller gets — HTTP status + detail,
+    and which graphs do or do not exist afterwards — never on the bound
+    constant.
+    """
+
+    #: Server-side delay injected into the copy. Must outlive the ordinary read
+    #: bound AND the ordinary client's bounded retry (1 retry × bound + jitter),
+    #: so the mutated (ordinary-bound) run cannot slip through on a retry.
+    _SLOW_COPY_S = 4.0
+
+    def test_swap_copy_outliving_the_ordinary_bound_completes(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC1 — a copy whose server-side work outlives the ordinary request
+        read bound still completes, and the live graph holds the RESTORED
+        content.
+
+        RED (mutation): drop ``kwargs["socket_timeout"]`` from
+        ``hosted_backup._restore_copy_client`` so the copy runs on the ordinary
+        client — the 4s hold then dies at the 1s ordinary bound and this fails
+        with ``RestoreCopyTimeoutError`` at 1s instead of returning. The
+        ordinary client's 1 retry cannot rescue it: 2 × 1s + jitter still < 4s.
+
+        Legitimate form that stays green: the swap keeps its OWN explicit,
+        generous, finite bound while #2850's ordinary bound stays at 1s for
+        every other operation.
+        """
+        import tortoise.hosted_backup as hb
+
+        # Ordinary requests keep #2850's fail-fast bound; the copy under test is
+        # deliberately slower than it, while the swap's own bound is not. (60 is
+        # the floor — the largest bound a *legal* ordinary configuration can
+        # reach — so this is the tightest still-generous swap bound.)
+        monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "1")
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_TIMEOUT_S", "60")
+
+        delay = self._SLOW_COPY_S
+        calls: list[tuple[str, str]] = []
+
+        def slow_copy(redis_client, src_name, dst_name):
+            # Record the seam so the assertion below can prove the restore
+            # actually routed its copy through here — a regression that reverts
+            # the copy step to ``Graph.copy`` would otherwise leave this green.
+            calls.append((src_name, dst_name))
+            # The property under test is WHICH read bound governs this client,
+            # not how the bytes move. A blocking server-side read on the SAME
+            # client is the deterministic hold: the server does not answer
+            # until it elapses, exactly like a GRAPH.COPY that outlives the
+            # bound. Applied to the SWAP copy (whose source is the verified
+            # temp graph) — the pre-restore copy is the same code path.
+            #
+            # The promotion itself is deliberately fork-free. A real GRAPH.COPY
+            # forks a server child whose embedded-lane lifecycle is unreliable
+            # (observed: the child hangs, wedging the server's module-fork slot
+            # and turning every later copy into "could not fork" — the companion
+            # defect to #3813, filed separately). Letting this guard depend on
+            # that fork would make it a probe for the OTHER defect instead of
+            # this one. The two timeout guards below inject at the same seam but
+            # replace the copy with a mock that raises immediately: they cover
+            # timeout CLASSIFICATION, not a real copy's read bound. This guard
+            # likewise does not exercise a real long GRAPH.COPY — by design.
+            if "_restore_" in src_name:
+                redis_client.execute_command(
+                    "BLPOP", "_restore_swap_bound_probe", str(float(delay)))
+            from falkordb import Graph
+            dump = hb.dump_graph(Graph(redis_client, src_name))
+            hb.restore_graph(Graph(redis_client, dst_name), dump)
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", slow_copy)
+
+        # A stale live graph plus a payload built from a seeded source graph,
+        # then the swap driven directly so the LIVE graph's content is
+        # observable afterwards (the drill endpoint deletes its scratch target
+        # on success, which would hide it).
+        db = _held_proj_db()
+        source = db.select_graph("org_swap_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        for i in range(2):
+            source.query(
+                "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
+                params={"id": f"pt-{i}", "c": f"c{i}"},
+            )
+        payload = hb.dump_graph(source)
+        target = db.select_graph("org_swap_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query(
+            "CREATE (p:Point {id:'stale', content:'old', pointKind:'claim'})")
+
+        hb._restore_into_temp_verify_swap(
+            db, payload, live_name="org_swap_target")
+
+        # The seam WAS reached, and the delayed (swap) branch taken: otherwise
+        # "the bound is generous" would be satisfied vacuously by a regression
+        # that reverts the copy step to ``Graph.copy`` (which never comes here).
+        assert calls, "restore never reached the _issue_graph_copy seam"
+        assert any("_restore_" in src for src, _ in calls), calls
+
+        # The live graph now holds the RESTORED content (not 200-shaped
+        # nothing).
+        rows = db.select_graph("org_swap_target").query(
+            "MATCH (n:Point) RETURN n.id ORDER BY n.id").result_set
+        assert [r[0] for r in rows] == ["pt-0", "pt-1"]
+
+    def test_masked_read_timeout_is_reported_as_a_timeout(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC2 — a read timeout during GRAPH.COPY is reported as a TIMEOUT: the
+        503 detail says so, names the verified temp graph as intact, and says
+        the destination was NOT restored. It is never reported as a dead
+        connection.
+
+        The injected error is the EXACT shape the embedded lane produced:
+        redis-py closes the socket on a read timeout and then seeks in the
+        now-closed parser buffer, so ``redis.exceptions.TimeoutError: Timeout
+        reading from socket`` arrives chained behind ``ValueError: I/O
+        operation on closed file``.
+
+        RED (mutation): make ``_is_client_read_timeout`` blind to the masked
+        form (or drop the ``except RestoreCopyTimeoutError`` branch) — the
+        detail then reads "Restore swap failed …: I/O operation on closed
+        file" and this fails on the timeout assertions.
+        """
+        import tortoise.hosted_backup as hb
+
+        # #4233: the settle poll now confirms a reported timeout against the
+        # copy's OUTCOME. Shrink it so this classification guard does not wait
+        # the full read bound; the destination never materialises here, so the
+        # timeout verdict is unchanged.
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.1")
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+
+        def masked_timeout(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError(
+                    "Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", masked_timeout)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+                        json={"org_id": "team_x", "backup_key": key})
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert "timed out" in detail.lower(), detail
+        assert "not restored" in detail.lower(), detail
+        assert "i/o operation on closed file" not in detail.lower(), detail
+        assert "restore swap failed" not in detail.lower(), detail
+        # The verified temp graph is intact AND identifiable, and it is NOT the
+        # live target (a timer-out must never be reported as a swap).
+        m = re.search(r"(\w+_restore_\w+)", detail)
+        assert m, detail
+        temp_name = m.group(1)
+        target_name = temp_name.split("_restore_")[0]
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        graphs = sdk._get_proj().db.list_graphs()
+        assert temp_name in graphs, (temp_name, graphs)
+        assert target_name not in graphs, (target_name, graphs)
+
+    def test_restore_timeout_is_never_reaped_as_a_wedge(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC3 (#3813 x #3845) — a restore COPY TIMEOUT is never classified as
+        a fork-slot wedge, even when the wedge EVIDENCE is on.
+
+        Both branches are live on the restore path and their inputs are
+        independent: the copy can raise its own ``RestoreCopyTimeoutError``
+        while our daemon is genuinely carrying a lingering module-fork child.
+        On that overlap the TIMEOUT must win — reaping the child and re-issuing
+        the copy would start a SECOND server-side fork while the first may
+        still be running (the reason the branch exists at all, #3813).
+
+        Both wedge signals are forced ON here. On a plain docker-lane run
+        ``fork_slot_is_wedged`` is always False and the #3845 guards inject a
+        ``ResponseError`` — never a ``RestoreCopyTimeoutError`` — so round 1's
+        suite left this branch unpinned (dropping the guard kept it green).
+        Forcing the signals is what makes the assertion non-vacuous.
+
+        RED (mutation): replace the guard with ``if False and isinstance(...)``
+        — the forced wedge signals then match, ``recover_fork_slot`` runs, and
+        this fails on the call-count and on the status/detail.
+        """
+        import tortoise.hosted_backup as hb
+        from tortoise.fork_slot import ForkSlotRecovery
+
+        # #4233: keep the OUTCOME settle poll short — the destination never
+        # materialises, so the TIMEOUT verdict under test is unchanged.
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.1")
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+
+        # The masked shape the embedded lane produced: the redis client read
+        # timeout chained behind the parser's ValueError.
+        def masked_timeout(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError(
+                    "Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", masked_timeout)
+        # Force BOTH wedge-evidence signals ON: a wedge classifier that is
+        # consulted AT ALL would call this copy a wedge. Reaching either one is
+        # the bug under test.
+        monkeypatch.setattr(hb, "is_fork_refusal", lambda exc: True)
+        monkeypatch.setattr(hb, "fork_slot_is_wedged", lambda *a, **kw: True)
+
+        recoveries: list = []
+
+        def spy_recover(*args, **kwargs):
+            recoveries.append(args)
+            return ForkSlotRecovery(
+                wedged=True, recovered=True, killed_pids=[4242],
+                detail="reaped 1 hung child")
+
+        monkeypatch.setattr(hb, "recover_fork_slot", spy_recover)
+
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+                        json={"org_id": "team_x", "backup_key": key})
+
+        # The TIMEOUT is the verdict — never a wedge.
+        assert r.status_code == 503, r.text
+        body = r.text.lower()
+        detail = r.json()["detail"]
+        assert "timed out" in detail.lower(), detail
+        assert "not restored" in detail.lower(), detail
+        assert "wedge" not in body, detail
+        assert "fork slot" not in body, detail
+        # The wedge recovery was NEVER invoked: no child was reaped, and no
+        # second server-side fork was issued while the first may still run.
+        assert recoveries == [], recoveries
+
+    def test_dead_connection_is_reported_differently_from_a_timeout(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC2 (mirror) — a genuinely unusable connection is NOT reported as a
+        timeout. Same status (503), different detail: the two verdicts are
+        distinguishable from outside, on the observable alone.
+
+        RED (mutation): make ``_is_client_read_timeout`` return True
+        unconditionally (classify every copy failure as a timeout) — the detail
+        then claims a timeout for a dead connection and this fails.
+        """
+        import tortoise.hosted_backup as hb
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+
+        def dead_connection(redis_client, src_name, dst_name):
+            raise redis.exceptions.ConnectionError("Connection reset by peer")
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", dead_connection)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+                        json={"org_id": "team_x", "backup_key": key})
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert "restore swap failed" in detail.lower(), detail
+        assert "timed out" not in detail.lower(), detail
+        # ... and the verified temp graph is still recoverable.
+        m = re.search(r"(\w+_restore_\w+)", detail)
+        assert m, detail
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        assert m.group(1) in sdk._get_proj().db.list_graphs(), detail
+
+    def test_ordinary_operations_keep_failing_fast_with_their_own_bound(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#2850 intact — the fix must NOT be "give every DB call a longer
+        bound". Only the restore's copies get a generous read bound; an
+        ORDINARY operation on the SAME connection after a restore still fails
+        fast on the ordinary request bound (that is the whole point of #2850:
+        a stalled call must not park a thread / the event loop).
+
+        RED (mutation): widen the ordinary bound instead of decoupling the
+        swap — e.g. raise ``projection._DB_TIMEOUT_MIN_S`` above the configured
+        ordinary bound so ``_socket_timeouts()`` falls back to its (larger)
+        default. The ordinary probe below then stops failing fast and this
+        fails with ``DID NOT RAISE Exception`` (verified).
+        """
+        import time
+
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "1")
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_TIMEOUT_S", "60")
+
+        calls: list[tuple[str, str]] = []
+
+        def slow_copy(redis_client, src_name, dst_name):
+            # Record the seam so the assertion below can prove the restore
+            # actually routed its copy through here (see the AC1 guard above).
+            calls.append((src_name, dst_name))
+            # Fork-free (see the AC1 guard) — this guard is about the ORDINARY
+            # client, not about GRAPH.COPY's embedded-lane fork.
+            if "_restore_" in src_name:
+                redis_client.execute_command("BLPOP", "_bound_probe", "2.0")
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", slow_copy)
+
+        db = _held_proj_db()
+        source = db.select_graph("org_bound_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        source.query(
+            "CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
+        payload = hb.dump_graph(source)
+        target = db.select_graph("org_bound_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query(
+            "CREATE (p:Point {id:'stale', content:'old', pointKind:'claim'})")
+        hb._restore_into_temp_verify_swap(db, payload, live_name="org_bound_target")
+
+        # The seam WAS reached (see the AC1 guard) — a mutation that reverts the
+        # restore copy to ``Graph.copy`` would otherwise leave this green while
+        # the delayed swap copy silently stopped exercising the bound.
+        assert calls, "restore never reached the _issue_graph_copy seam"
+        assert any("_restore_" in src for src, _ in calls), calls
+
+        # ... and the ORDINARY client is untouched by the restore: an ordinary
+        # operation outliving the configured 1s ordinary bound still fails fast.
+        # (The observable ceiling is the ordinary client's own bounded retry —
+        # 1 attempt + _EMBEDDED_RETRY_COUNT(1) x 1s + jitter ~= 2.1s — which is
+        # still far short of the 4s hold the server was told to wait.)
+        ordinary = getattr(db, "connection", None) or getattr(db, "client", None)
+        started = time.monotonic()
+        with pytest.raises(Exception) as ei:
+            ordinary.execute_command("BLPOP", "_ordinary_bound_probe", "4.0")
+        elapsed = time.monotonic() - started
+        assert elapsed < 3.0, (
+            f"an ordinary operation waited {elapsed:.1f}s — the ordinary read "
+            f"bound (#2850) was widened by the restore"
+        )
+        # ... and it failed AS a timeout, not as some other error.
+        assert hb._is_client_read_timeout(ei.value), ei.value
+
+    def test_read_bound_expiry_is_resolved_by_the_copys_outcome(
+            self, client, monkeypatch):
+        """#4233 — the read bound is a HYPOTHESIS, not a verdict.
+
+        When the client read timeout fires but the server-side copy actually
+        COMPLETED, the restore must succeed: the settle poll confirms the
+        destination matches the source's node and edge counts instead of
+        reporting a timeout
+        that never happened. This is the contended-runner flake. The source
+        carries an EDGE as well, so the edge half of the parity check is
+        non-trivial.
+
+        The injected seam does the real (fork-free) copy and THEN raises the
+        exact masked read-timeout shape the embedded lane produced — the
+        server-side work finished even though the client's read did not.
+
+        RED (mutation): drop the ``_await_restore_copy_settled`` branch (fail
+        on the timeout immediately) — the restore then raises
+        ``RestoreCopyTimeoutError`` and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+
+        def copy_then_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
+
+        db = _held_proj_db()
+        source = db.select_graph("org_settle_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        for i in range(2):
+            source.query(
+                "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
+                params={"id": f"pt-{i}", "c": f"c{i}"},
+            )
+        source.query(
+            "MATCH (a:Point {id:'pt-0'}), (b:Point {id:'pt-1'}) "
+            "CREATE (a)-[:LINKED]->(b)")
+        payload = hb.dump_graph(source)
+        assert payload["edge_count"] == 1, payload["edge_count"]
+        target = db.select_graph("org_settle_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query(
+            "CREATE (p:Point {id:'stale', content:'old', pointKind:'claim'})")
+
+        result = hb._restore_into_temp_verify_swap(
+            db, payload, live_name="org_settle_target")
+
+        rows = db.select_graph("org_settle_target").query(
+            "MATCH (n:Point) RETURN n.id ORDER BY n.id").result_set
+        assert [r[0] for r in rows] == ["pt-0", "pt-1"]
+        # #4233: the overrun is surfaced on the result, so an RTO breach
+        # caused by it is attributable (the #3845 fork_slot precedent).
+        assert result.get("copy_read_bound_overrun") is True
+
+    def test_pre_restore_copy_overrun_is_surfaced(self, client, monkeypatch):
+        """#4233 — the PRE-RESTORE safety copy's overrun is surfaced too.
+
+        A restore runs TWO bounded copies, so the flag must not be satisfiable
+        only by the swap. Overrun ONLY the pre-restore copy (its destination is
+        the ``_pre_restore_`` scratch graph) and assert the flag is set while
+        the swap copy completes normally.
+
+        RED (mutation): pass ``settled=None`` for the pre-restore copy — the
+        flag is then absent and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+        seen: list[str] = []
+
+        def pre_only_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            seen.append(dst_name)
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            if "_pre_restore_" not in dst_name:
+                return  # the swap copy completes cleanly
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", pre_only_timeout)
+        db = _held_proj_db()
+        source = db.select_graph("org_settle_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        source.query("CREATE (p:Point {id:'pt-0'})")
+        payload = hb.dump_graph(source)
+        target = db.select_graph("org_settle_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query("CREATE (p:Point {id:'stale'})")  # live_nodes > 0
+
+        result = hb._restore_into_temp_verify_swap(
+            db, payload, live_name="org_settle_target")
+
+        # the pre-restore copy actually ran, and it is the one that overran
+        assert any("_pre_restore_" in d for d in seen), seen
+        assert result.get("copy_read_bound_overrun") is True
+        rows = db.select_graph("org_settle_target").query(
+            "MATCH (n:Point) RETURN n.id").result_set
+        assert [r[0] for r in rows] == ["pt-0"]
+
+    def test_drill_record_carries_the_copy_overrun(self, client, dr_env,
+                                                   mem_storage, monkeypatch):
+        """#4233 — the overrun is attributed from the PERSISTED drill record.
+
+        Returning the flag from ``_restore_into_temp_verify_swap`` is not
+        enough: an unattended scheduled drill is reviewed from its persisted
+        record, so the record must carry it — otherwise the attribution the
+        flag exists for never reaches an operator.
+
+        RED (mutation): drop the ``copy_read_bound_overrun`` entry from
+        ``_drill_execute``'s ``detail`` — the record assertions below fail
+        (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+
+        def copy_then_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x", "backup_key": key},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["copy_read_bound_overrun"] is True, body
+        assert body["record"]["detail"]["copy_read_bound_overrun"] is True
+        rec = json.loads(mem_storage.download(ha_mod._DRILL_RECORD_KEY))
+        assert rec["detail"]["copy_read_bound_overrun"] is True
+
+    def test_read_bound_expiry_without_the_copy_is_still_a_timeout(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#4233 (mirror, and the settle branch's mutation check).
+
+        The settle poll must NOT blanket-accept a timeout. A client read
+        timeout with NO completed destination is still reported as a timeout:
+        the restore 503s, names the verified temp graph intact, and says the
+        live graph was NOT restored. Force the genuinely broken copy (the
+        timeout fires and the destination never materializes) and the restore
+        must still red.
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.5")
+
+        def timeout_only(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x", "backup_key": key},
+        )
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert "timed out" in detail.lower(), detail
+        assert "not restored" in detail.lower(), detail
+
+    def test_restore_copy_settled_requires_count_parity(self, client):
+        """#4233 — the settle predicate is node/edge COUNT parity, not existence.
+
+        A destination that merely EXISTS (a stale graph, a torn install) must
+        never be accepted as the copy's outcome. Node AND edge counts are
+        compared.
+
+        RED (mutation): reduce ``_restore_copy_settled`` to an existence
+        check — the wrong-content assertions below then read True (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        db = _held_proj_db()
+        src = db.select_graph("org_settle_source")
+        src.query("MATCH (n) DETACH DELETE n")
+        for i in range(2):
+            src.query("CREATE (p:Point {id:$id})", params={"id": f"pt-{i}"})
+        src.query(
+            "MATCH (a:Point {id:'pt-0'}), (b:Point {id:'pt-1'}) "
+            "CREATE (a)-[:LINKED]->(b)")
+
+        dst = db.select_graph("org_settle_target")
+        dst.query("MATCH (n) DETACH DELETE n")
+        # exists — but the wrong NODE count
+        dst.query("CREATE (p:Point {id:'only'})")
+        assert hb._restore_copy_settled(
+            db, "org_settle_source", "org_settle_target") is False
+        # node parity — but the wrong EDGE count
+        dst.query("CREATE (p:Point {id:'second'})")
+        assert hb._restore_copy_settled(
+            db, "org_settle_source", "org_settle_target") is False
+        # exact parity
+        dst.query(
+            "MATCH (a:Point {id:'only'}), (b:Point {id:'second'}) "
+            "CREATE (a)-[:LINKED]->(b)")
+        assert hb._restore_copy_settled(
+            db, "org_settle_source", "org_settle_target") is True
+
+    def test_preexisting_destination_is_never_settled(self, client,
+                                                      monkeypatch):
+        """#4233 — a destination that already existed when the copy was issued
+        is never accepted as the copy's outcome.
+
+        The swap's live-delete is best-effort. If it failed, a destination
+        holding matching counts would otherwise read as a successful restore
+        of a graph the copy never wrote. Fail-closed.
+
+        RED (mutation): make ``_graph_present`` return False unconditionally —
+        the pre-seeded destination is then accepted and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.5")
+        db = _held_proj_db()
+        # Source and destination hold the SAME content, and the destination is
+        # NOT deleted — exactly the failed-live-delete shape.
+        for name in ("org_settle_source", "org_settle_target"):
+            g = db.select_graph(name)
+            g.query("MATCH (n) DETACH DELETE n")
+            g.query("CREATE (p:Point {id:'pt-0'})")
+
+        def timeout_only(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+        with pytest.raises(hb.RestoreCopyTimeoutError):
+            hb._graph_copy_with_restore_bound(
+                db, "org_settle_source", "org_settle_target",
+                role="test swap", intact_name="test intact")
+
+    def test_settle_never_creates_a_missing_destination(self, client,
+                                                        monkeypatch):
+        """#4233 — a failed settle leaves an ABSENT destination absent.
+
+        `_restore_copy_settled` reads `GRAPH.LIST` FIRST because a Cypher read
+        on a missing graph CREATES an empty one — on the swap's freshly deleted
+        live graph that would be the wipe-then-empty class. A copy that times
+        out and never lands must leave the destination absent.
+
+        RED (mutation): drop the `dst_name not in names` guard from
+        `_restore_copy_settled` — the probe read creates `org_settle_target`
+        and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.5")
+        db = _held_proj_db()
+        src = db.select_graph("org_settle_source")
+        src.query("MATCH (n) DETACH DELETE n")
+        src.query("CREATE (p:Point {id:'pt-0'})")
+        if "org_settle_target" in db.list_graphs():
+            db.select_graph("org_settle_target").delete()
+
+        def timeout_only(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+        with pytest.raises(hb.RestoreCopyTimeoutError):
+            hb._graph_copy_with_restore_bound(
+                db, "org_settle_source", "org_settle_target",
+                role="test swap", intact_name="test intact")
+        assert "org_settle_target" not in db.list_graphs()
+
+    def test_graph_present_fails_closed(self):
+        """#4233 — an unreadable listing must never authorize a settle.
+
+        ``_graph_present`` is the guard that refuses to treat a pre-existing
+        destination as the copy's output, so a probe failure must read
+        PRESENT, not absent.
+
+        RED (mutation): return False on the except branch — this fails.
+        """
+        import tortoise.hosted_backup as hb
+
+        class _Broken:
+            @staticmethod
+            def list_graphs():
+                raise RuntimeError("listing unavailable")
+
+        assert hb._graph_present(_Broken(), "org_settle_target") is True
+
+    def test_settle_accepts_a_copy_that_lands_during_the_poll(self, client,
+                                                              monkeypatch):
+        """#4233 — the settle is a POLL, not a single check.
+
+        The contended-runner shape is a copy that lands DURING the settle
+        window, after the read bound expired. A destination that materializes
+        on a LATER poll must still be accepted; collapsing the loop to one
+        check would miss it.
+
+        Deterministic — no sleep, no thread: the first poll makes the
+        destination appear and reports a miss (as if the copy had not landed
+        yet); the second poll sees the real state.
+
+        RED (mutation): replace ``_await_restore_copy_settled``'s loop with a
+        single ``_restore_copy_settled`` call — the first call reports the miss
+        and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "3")
+        db = _held_proj_db()
+        src = db.select_graph("org_settle_source")
+        src.query("MATCH (n) DETACH DELETE n")
+        src.query("CREATE (p:Point {id:'pt-0'})")
+        if "org_settle_target" in db.list_graphs():
+            db.select_graph("org_settle_target").delete()
+
+        def timeout_only(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+        real_settled = hb._restore_copy_settled
+        polls: list[int] = []
+
+        def land_on_second_poll(db_, src_name, dst_name):
+            polls.append(len(polls))
+            if len(polls) == 1:
+                # the copy lands only now — after the read bound, during the
+                # settle window — and this poll still reports the miss.
+                hb.restore_graph(db_.select_graph(dst_name),
+                                 hb.dump_graph(db_.select_graph(src_name)))
+                return False
+            return real_settled(db_, src_name, dst_name)
+
+        monkeypatch.setattr(hb, "_restore_copy_settled", land_on_second_poll)
+        hb._graph_copy_with_restore_bound(
+            db, "org_settle_source", "org_settle_target",
+            role="test swap", intact_name="test intact")
+
+        assert len(polls) >= 2, polls  # the loop really polled more than once
+        assert "org_settle_target" in db.list_graphs()
+
+    def test_restore_swap_settle_bound_resolution(self, monkeypatch):
+        """#4233 — the settle knob's resolution, pinned.
+
+        Empty/non-numeric/non-finite/non-positive all fall back to the READ
+        bound (a settle of 0 is not a disable switch); a positive value is
+        clamped to [0.05, 3600]. This is also what keeps the other guards from
+        silently waiting the 120s read bound if the env var stops being read.
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_TIMEOUT_S", "120")
+        for raw, expected in [
+            (None, 120.0), ("", 120.0), ("abc", 120.0), ("nan", 120.0),
+            ("inf", 120.0), ("0", 120.0), ("-1", 120.0),
+            ("0.001", 0.05), ("2", 2.0), ("9999", 3600.0),
+        ]:
+            if raw is None:
+                monkeypatch.delenv("TORTOISE_RESTORE_SWAP_SETTLE_S",
+                                   raising=False)
+            else:
+                monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", raw)
+            assert hb._restore_swap_settle_s() == expected, raw

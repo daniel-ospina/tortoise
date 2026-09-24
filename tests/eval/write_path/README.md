@@ -57,9 +57,9 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   operator who spoke it).  Emitted gold ids (`wp01_quarry_debug_u_01`,
   `..._h_01`) are **globally unique** — session-stem prefixed — so the W2-b
   runner can aggregate across sessions without bare-id collisions.
-* `planted_operators` — **(issue #2514, layer-2 gold)** optional sealed
-  section naming the operator EDGES the extractor must wire between planted
-  claims: `{id, expected_kind (SUPERSEDE|NEGATE|MITIGATES|SUPPORTS),
+* `planted_operators` — **(issue #2514, layer-2 gold; grown by #2552)** optional
+  sealed section naming the operator EDGES the extractor must wire between
+  planted claims: `{id, expected_kind (SUPERSEDE|NEGATE|MITIGATES|SUPPORTS),
   from: {verbatim_anchor, planted_turn, session_id?}, to: {verbatim_anchor,
   planted_turn, session_id?}, relation_turn, reason}`.  `session_id` defaults
   to the gold's own session; the SUPERSEDE is planted CROSS-SESSION
@@ -67,6 +67,31 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   the superseded claim already exists in-graph.  Ontology ambiguity for
   SUPERSEDE + MITIGATES is flagged, not resolved (scoping note
   `docs/scoping/2026-09-07-2514-operator-corpus.md`, findings F1/F2).
+
+  **#2552 measurement power:** the section grew **4 → 15 edges**, now carried
+  by ALL SEVEN sessions (wp01 2, wp02 1, wp03 3, wp04 3, wp05 2, wp06 1,
+  wp07 3 · SUPPORTS 4 / MITIGATES 8 / NEGATE 2 / SUPERSEDE 1).  The 4-edge
+  denominator swung **0, 1, 1, 1, 2 / 4 on IDENTICAL code** — it could not
+  separate a fix from LLM variance, which is why the issue never closed.
+  `generate_corpus.MIN_PLANTED_OPERATOR_KINDS` is the authority for the
+  floors — one entry per kind (SUPPORTS 4 / MITIGATES 8 / NEGATE 2 /
+  SUPERSEDE 1), enforced on every fresh render and on the committed corpus
+  (`_operator_floor_issues`, one contract, two adapters).
+  `MIN_PLANTED_OPERATOR_EDGES` and `REQUIRED_OPERATOR_KINDS` are **derived**
+  from it, so the three cannot describe different corpora.
+
+  ⛔ **A test or lane needing a DENOMINATOR must use
+  `corpus.planted_operator_count()`** — the ACTUAL gold-derived count. The
+  floor is a **lower bound** (a sum of minimums), so comparing an audit's
+  `planted` against it stops tying the audit to the corpus and would accept a
+  silent per-session shrink that still clears every floor.  Pinning a literal
+  (the original `== 4`, and a later private `15`) is the same defect class in
+  its other direction: it reddens every lane the moment the gold grows.
+
+  Known limitation: SUPERSEDE and
+  NEGATE remain thin (1 and 2 instances), and the corpus plants only the
+  kinds the write path already supports — it measures recall, not the F1/F2
+  ontology mapping.
 * `salient_units` — 1:1 with `planted_units`, carrying **point-level**
   `survival` semantics (the unit of analysis is the POINT — the
   research-brief/plan write-path unit assumption; NOT eval-spec §5's
@@ -155,8 +180,9 @@ Floors (issue targets): ≥ 4 fictional sessions, ≥ 60 planted salient units
 with verbatim anchors — chosen so E2E-2's percentage-based assertions
 (macro ≥ target / strict ≥ target) have stable denominators. Current corpus:
 7 sessions / 90 units.  Issue-#2514 operator floor: all four planted-operator
-kinds (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS) are planted ≥ 1× (4 edges total;
-the corpus-level grades live on every run's `operator_audit` — see below).
+kinds (SUPERSEDE/NEGATE/MITIGATES/SUPPORTS) are planted ≥ 1× — grown by #2552
+to **15 edges** (`generate_corpus.MIN_PLANTED_OPERATOR_EDGES`; the corpus-level
+grades live on every run's `operator_audit` — see below).
 
 All people, companies, and systems are fictional (Peregrine Systems, quarry /
 lumen / ember / aurora, Halcyon Retail, Bluepeak Logistics, and the named
@@ -177,13 +203,44 @@ IMPL/NAND/MITIGATES nodes touching the session's memory points;
 mitigation Points on operators).  Kind → graph-form mapping + the ontology
 findings live in the scoping note.  The audit is NOT a `METRIC_VALUES` member
 (no baseline re-bless of the metric vocabulary): the m2 echo lane has no
-relation extraction, so its 0/4 is structural, and the operator bar is a
-product-lane (llm) bar — same posture split as the standing leakage bar.  On
-this branch the corpus-blessed baselines re-pin the extended corpus:
-`baselines/m2.json` was re-measured by a real deterministic replay (leakage
-11 → 15 structural; receipt `w2b-m2-lane-2514-corpus-2026-09-07.json`);
-`baselines/main.json` carries its published llm numbers forward with an
-explicit not-re-measured justification.  A sealed llm run (corpus-bless +
-protocol-bless v1→v2, with the first real operator-edge numbers) is REQUIRED
-before the llm lane is comparable again — see the scoping note's "Sealed run
-required to activate".
+relation extraction — its cue-word heuristic matches only a few planted edges
+(the measured corpus reads 2/15 `edge_correct`) — so its number is structural,
+and the operator bar is a product-lane (llm) bar — same posture split as the
+standing leakage bar.
+
+### ⛔ Three lanes, three different questions (#2552)
+
+The audit denominator is ``corpus.planted_operator_count()`` — **15** planted
+edges today.  It is DERIVED, never a literal: a lane or test that needs the
+number calls the helper (see the rule above).  Do not read one lane's number as
+another's:
+
+| Lane | What it grades | How to run |
+|---|---|---|
+| **WIRE** (`test_write_path_operator_lane.py`) | capture → `create_operator` → retrievable memory → grader, on a **gold-derived emission** that MONKEYPATCHES `extract_session_v2` | `pytest tests/eval/write_path/test_write_path_operator_lane.py` |
+| **FOLD** (same file, `test_fold_lane_mints_every_planted_operator_endpoint`) | `execute_embed` — the operator-FORMING step — fed the gold's endpoints with NO endpoint points emitted | same file |
+| **PRODUCT** (llm lane) | the real model end to end | `runner run` with a provider key |
+
+A green WIRE lane is the correct write-path result and is **never** evidence
+that the behavioural half of #2552 is fixed: it bypasses `execute_embed`
+entirely.  The FOLD lane measures the fold deterministically — it is the lane
+that resolves a fix from variance.
+
+### Baseline re-pin for this corpus change
+
+`baselines/m2.json` was re-measured by a real deterministic replay on the
+expanded gold; `baselines/main.json` carries its published llm numbers
+forward with an explicit not-re-measured justification (operator gold is
+GOLD-ONLY — fixtures, planted units and anchors are untouched, so the gated
+metrics remain measured on the same corpus content).  A sealed llm run
+(corpus-bless + protocol-bless v1→v2, with the first comparable operator-edge
+numbers on the 15-edge denominator) is REQUIRED before the llm lane is
+comparable again — see the scoping note's "Sealed run required to activate".
+
+> ⚠️ **Start the llm lane through `tools/run-with-eval-keys.sh`** (#2718 /
+> #4860): this runner reads provider keys from the process env and never loads
+> the repo `.env`, so an ambient shell key is what gets billed. That is how the
+> 2026-09-23 sealed run billed an exhausted fleet key and 403'd 7/7 while
+> `.env` held a healthy evals key. The wrapper strips the ambient provider
+> keys, loads `.env` with override, and prints the source + fingerprint of
+> every key it set — paste that into the receipt.

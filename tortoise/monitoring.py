@@ -17,10 +17,13 @@ import socket
 import socketserver
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 from prometheus_client import Counter, Histogram, generate_latest
+
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +61,35 @@ PROBE_TIMEOUT = 1.5
 # Bounding (1)+(2) with PROBE_TIMEOUT made a large, fully-reachable graph time
 # out during SETUP and report ``db.ok=false`` / ``status=degraded`` /
 # ``graph_size=0`` — the onboarding gate lie (#2202's symptom class). This is
-# the default cold-start allowance. It is opt-in: the platform liveness gate
-# (/health, selfhost /health, the standalone serve_health server) keeps the
-# tight 1.5s bound for BOTH phases (it is a fast-degrade gate, #1384), while
-# the on-demand MCP health tool — whose only job is to answer "is the served
-# graph reachable?" — passes it. Both phases stay bounded (the worker is
+# the default cold-start allowance. It is opt-in, because it deepens the total
+# to ``setup_timeout + PROBE_TIMEOUT``: only a caller that can afford it may
+# pass it.
+#
+# WHO MAY SPEND IT — the deciding line is whether the probe IS the request's
+# answer, not request-path vs background (#2988/#3243):
+#   * the on-demand MCP health tool passes it: the probe IS the answer (its only
+#     job is "is the served graph reachable?"), so the deep budget is correct;
+#   * NEVER a request-path liveness GATE (a `/health` handler that probes
+#     inline) — there the fast <1.5 s degrade contract must hold;
+#   * a BACKGROUND liveness REFRESHER passes it. The selfhost ``/health``
+#     coordinator does (#2988): its request path reads an in-memory snapshot and
+#     cannot be slowed by the allowance, so the deep budget buys a correct
+#     verdict for a cold large graph at zero gate latency (#3243);
+#   * a REQUEST-PATH liveness probe must NOT. The standalone ``serve_health``
+#     ``/health`` handler keeps ``setup_timeout=None``, because there the
+#     allowance *is* a slower gate — exactly the trade #3243's notes forbid.
+#     The same reasoning keeps the hosted ``/health/ready`` coordinator on the
+#     tight bound, since its request path waits on the verdict.
+#
+# The selfhost liveness coordinator is currently the ONLY background spender
+# of this allowance. The hosted ``/health`` coordinator (``hosted_api.
+# _HEALTH_PROBE``) also reads in-memory, but deliberately keeps
+# ``setup_timeout=None``/``DB_PROBE_HARD_TIMEOUT``: its probe reuses ONE cached
+# connection (``hosted_api._probe_sdk``), so the cold start is paid at most once
+# and its tight bound is already coherent — extending the allowance there is a
+# separate decision owned by the hosted health lineage (#3070/#3062), not a
+# consequence of this rule. Do not "fix" it by analogy.
+# Both phases stay bounded (the worker is
 # abandoned on overrun); the caller is never blocked past its budget.
 PROBE_SETUP_TIMEOUT = 20.0
 
@@ -90,7 +117,11 @@ PROBE_SETUP_TIMEOUT_MAX = 300.0
 
 
 def probe_setup_timeout() -> float:
-    """Resolve the #3143 cold-start allowance for the MCP health tool.
+    """Resolve the #3143 cold-start allowance.
+
+    Spent by the on-demand MCP health tool, and — off the request path only —
+    by the selfhost liveness coordinator's refresher (#2988/#3243; see
+    ``PROBE_SETUP_TIMEOUT`` for the request-path-vs-background rule).
 
     Read at CALL time, not import time, for two reasons:
 
@@ -316,6 +347,81 @@ PROBE_DB_BOUND_MARGIN_S = 0.5
 PROBE_HARD_TIMEOUT = (PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
                       + PROBE_DB_BOUND_MARGIN_S)
 
+#: How often a background health refresher re-probes, keeping an in-memory
+#: ``db`` field fresh WITHOUT the request path doing any I/O (#2850 hosted,
+#: #2988 selfhost). ONE spelling for both surfaces: the refresh period is a
+#: property of the shared health contract, not of one app, so the two cannot
+#: drift apart or disagree about what ``TORTOISE_HEALTH_PROBE_INTERVAL``
+#: means. (It moved here from ``hosted_api`` when the selfhost liveness
+#: coordinator landed — #3286's one-mechanism-per-requirement discipline,
+#: applied to the refresher period as well as to its executor.)
+#: Must stay below ``PROBE_STALE_AFTER`` (30s) or a healthy DB would read as
+#: degraded between refreshes.
+HEALTH_PROBE_REFRESH_S = 10.0
+#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
+#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
+#: probe daemon thread and issuing a DB round trip — the same busy-loop the
+#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
+HEALTH_PROBE_MIN_INTERVAL_S = 0.5
+
+
+def health_probe_interval() -> float:
+    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
+
+    Shared by the hosted and selfhost liveness coordinators (see
+    ``HEALTH_PROBE_REFRESH_S``).
+
+    Clamped to half the probe staleness window (review P2): a period longer
+    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
+    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
+    outage. Half the window leaves a full refresh of margin.
+
+    NON-FINITE values are rejected and fall back to the default (round-2
+    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
+    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
+    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
+    returns almost immediately — a busy loop hammering the DB probe and the
+    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
+    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
+
+    A finite but SUB-FLOOR period is rejected the same way (round-3 review
+    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
+    """
+    try:
+        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
+    except (TypeError, ValueError):
+        return HEALTH_PROBE_REFRESH_S
+    if not math.isfinite(v):
+        logger.error(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
+            "to the default %.0fs; a nan period busy-loops the probe and an "
+            "infinite one leaves a healthy DB reading stale forever",
+            v, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    if v <= 0:
+        return HEALTH_PROBE_REFRESH_S
+    # Round-3 review P2: a finite but tiny period busy-loops the probe just
+    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
+    # daemon thread and issuing a DB round trip. The clamp below is
+    # one-sided, so a floor is required too.
+    if v < HEALTH_PROBE_MIN_INTERVAL_S:
+        logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
+            "falling back to the default %.0fs; a sub-floor period "
+            "busy-loops the probe and duplicates the DB round trip",
+            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    cap = PROBE_STALE_AFTER / 2.0
+    if v > cap:
+        logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
+            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
+            "would report a healthy DB as degraded and fail the deploy gate",
+            v, PROBE_STALE_AFTER, cap)
+        return cap
+    return v
+
+
 #: Default period for the event-retention sweep (seconds). Shared by the
 #: hosted retention loop and the SDK lazy purge so both fall back identically.
 EVENT_RETENTION_INTERVAL_DEFAULT_S = 3600
@@ -359,6 +465,27 @@ REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endp
 REQUEST_LATENCY = Histogram("tortoise_request_latency_seconds", "Request latency")
 ERROR_COUNT = Counter("tortoise_errors_total", "Total errors")
 TEAM_COST = Counter("tortoise_team_cost_cents", "Cost by team", ["team"])
+# #3820: the analytics write path's terminal outcome, one label child per
+# member of `hosted_api._ANALYTICS_OUTCOMES`. The single writer is
+# `record_analytics_outcome` — the write path never touches the counter
+# directly, so the label vocabulary stays in one place (#501/#3677 house shape
+# for a hot path: `Counter` labelled by outcome, as `REQUEST_COUNT`/
+# `ERROR_COUNT` are labelled by endpoint).
+ANALYTICS_OUTCOME_COUNT = Counter(
+    "tortoise_analytics_events_total",
+    "Analytics writes by terminal outcome (#3820)",
+    ["outcome"],
+)
+# #3498 item 1: event-loop LAG = how late each heartbeat tick actually fired
+# relative to its requested interval. The heartbeat (below) already proves the
+# loop is SCHEDULING; this histogram records HOW FAR off schedule it is, so a
+# residual on-loop stall is measurable rather than only visible as a stale
+# timestamp. Buckets span sub-millisecond jitter to a multi-second freeze.
+LOOP_LAG = Histogram(
+    "tortoise_event_loop_lag_seconds",
+    "Event-loop scheduling lag per heartbeat tick (#3498)",
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
 
 
 def register(sdk) -> None:
@@ -379,6 +506,35 @@ def record_error() -> None:
 def record_cost(team: str, cents: int) -> None:
     """Track LLM/tool cost for a team. cents is integer (avoids float drift)."""
     TEAM_COST.labels(team=team).inc(cents)
+
+
+def record_analytics_outcome(outcome: str) -> None:
+    """Count one analytics write by its terminal outcome (#3820).
+
+    ``outcome`` is a member of ``hosted_api._ANALYTICS_OUTCOMES``; the caller
+    owns that vocabulary and increments this AFTER the sink leg resolved, so a
+    write cannot be counted as delivered before it was.
+    """
+    ANALYTICS_OUTCOME_COUNT.labels(outcome=outcome).inc()
+
+
+def analytics_outcome_counts() -> dict[str, int]:
+    """In-process snapshot of ``ANALYTICS_OUTCOME_COUNT``, keyed by outcome.
+
+    ``/metrics`` carries the Prometheus text form of the same counter; this is
+    the readable form, for tests and for any operator-facing surface that has
+    no scrape (today nothing scrapes it in production — see #3820's audit:
+    ``serve_health`` is not a ``fly.toml`` process).
+    """
+    counts: dict[str, int] = {}
+    for family in ANALYTICS_OUTCOME_COUNT.collect():
+        for sample in family.samples:
+            if not sample.name.endswith("_total"):
+                continue
+            outcome = sample.labels.get("outcome")
+            if outcome is not None:
+                counts[outcome] = int(sample.value)
+    return counts
 
 
 def _is_transient_connect_error(exc: BaseException) -> bool:
@@ -403,8 +559,19 @@ def _is_transient_connect_error(exc: BaseException) -> bool:
     return type(exc).__name__ == "ConnectionError"
 
 
+class _WorkerBacklogFull(concurrent.futures.TimeoutError):
+    """A worker's bounded backlog refused a submission.
+
+    Subclass of ``concurrent.futures.TimeoutError`` so the historical
+    ``run_on_daemon_worker`` contract (a saturated backlog surfaces as
+    ``concurrent.futures.TimeoutError``) is unchanged, while
+    ``run_control_plane_call`` can tell a REFUSED submission apart from a
+    builtin ``TimeoutError`` raised by the callable itself (#3498 review).
+    """
+
+
 class _SingleSlotWorker:
-    """ONE process-lifetime daemon thread running submitted callables serially.
+    """ONE (or more) process-lifetime daemon threads running submitted callables.
 
     #2850: ``_probe_once`` used to build a NEW ``ThreadPoolExecutor`` on every
     probe and abandon its worker on timeout (``shutdown(wait=False)``). A
@@ -421,6 +588,14 @@ class _SingleSlotWorker:
     wedged probe must never block interpreter/uvicorn shutdown — Fly SIGTERMs
     the machine and ``concurrent.futures.thread._python_exit`` would join the
     stuck worker forever.
+
+    #3498: ``workers`` > 1 turns this into a BOUNDED MULTI-WORKER pool — N
+    daemon threads draining the SAME bounded queue. The single-slot default is
+    unchanged, so probe behaviour is bit-identical. The multi-worker shape
+    exists for the control-plane/auth offload seam: a 2–6-round-trip-per-
+    request auth path on ONE slot would serialise auth to roughly one
+    concurrent request, which is why this defect is not fixed by routing auth
+    onto the existing single-slot probe worker.
     """
 
     #: Bounded backlog: a wedged probe must not let submissions grow the
@@ -428,14 +603,37 @@ class _SingleSlotWorker:
     #: ``PROBE_TIMEOUT`` reports degraded) instead of buffering forever.
     MAX_BACKLOG = 32
 
-    def __init__(self, name: str) -> None:
-        self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=self.MAX_BACKLOG)
-        self._thread = threading.Thread(target=self._loop, name=name, daemon=True)
-        self._thread.start()
+    def __init__(self, name: str, workers: int = 1,
+                 max_backlog: int | None = None) -> None:
+        if workers < 1:
+            raise ValueError(f"workers must be >= 1 (got {workers!r})")
+        self._name = name
+        self._max_backlog = self.MAX_BACKLOG if max_backlog is None else max_backlog
+        self._queue: queue.Queue[tuple | None] = queue.Queue(maxsize=self._max_backlog)
+        # ``workers == 1`` keeps the historical thread name EXACTLY (ops
+        # recipes and tests match on it); a pool suffixes each thread with its
+        # index so a trace can tell the pool members apart.
+        self._threads = [
+            threading.Thread(
+                target=self._loop,
+                name=name if workers == 1 else f"{name}-{i}",
+                daemon=True,
+            )
+            for i in range(workers)
+        ]
+        for thread in self._threads:
+            thread.start()
 
     @property
     def alive(self) -> bool:
-        return self._thread.is_alive()
+        # ``any`` (not ``all``): one pool member dying must not be reported as
+        # a dead pool while its siblings are still draining work. A fully dead
+        # pool still reads not-alive and is recreated by ``daemon_worker``.
+        return any(t.is_alive() for t in self._threads)
+
+    @property
+    def workers(self) -> int:
+        return len(self._threads)
 
     def _loop(self) -> None:
         while True:
@@ -462,8 +660,8 @@ class _SingleSlotWorker:
             self._queue.put_nowait((fn, future))
         except queue.Full:
             future.set_exception(
-                concurrent.futures.TimeoutError(
-                    f"probe worker backlog full ({self.MAX_BACKLOG}) — worker wedged"))
+                _WorkerBacklogFull(
+                    f"{self._name} backlog full ({self._max_backlog}) — worker wedged"))
         return future
 
 
@@ -502,8 +700,13 @@ _DAEMON_WORKERS: dict[str, _SingleSlotWorker] = {}
 _DAEMON_WORKERS_LOCK = threading.Lock()
 
 
-def daemon_worker(name: str) -> _SingleSlotWorker:
-    """Process-wide named single-slot DAEMON worker (lazily started).
+def daemon_worker(name: str, *, workers: int = 1,
+                  max_backlog: int | None = None) -> _SingleSlotWorker:
+    """Process-wide named DAEMON worker pool (lazily started).
+
+    ``workers=1`` (the default) is the historical single-slot worker; a larger
+    ``workers`` builds the bounded multi-worker pool #3498 needs for the
+    control-plane seam.
 
     #2850: ``asyncio.to_thread`` submits to the loop's DEFAULT executor, whose
     workers are NON-daemon — and ``asyncio.run`` calls
@@ -518,21 +721,307 @@ def daemon_worker(name: str) -> _SingleSlotWorker:
     with _DAEMON_WORKERS_LOCK:
         worker = _DAEMON_WORKERS.get(name)
         if worker is None or not worker.alive:
-            worker = _SingleSlotWorker(name)
+            worker = _SingleSlotWorker(name, workers=workers,
+                                       max_backlog=max_backlog)
             _DAEMON_WORKERS[name] = worker
         return worker
 
 
-async def run_on_daemon_worker(fn, *, name: str):
+async def _await_future(future, *, timeout: float | None):
+    """Await a concurrent Future, optionally bounded.
+
+    Shared by ``run_on_daemon_worker`` and ``run_control_plane_call`` so the
+    wrap/cancel/bound semantics have ONE implementation (#3498 review — the
+    two offload await paths must not drift).
+    """
+    awaitable = asyncio.wrap_future(future)
+    if timeout is None:
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout)
+
+
+async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
     """Await blocking ``fn`` on a named daemon worker — never the shared pool.
 
     Cancellation is prompt: cancelling the task wakes it at the ``await``
     immediately; the (daemon) worker thread is abandoned, so shutdown is never
     blocked behind a wedged call. A saturated worker backlog raises
     ``concurrent.futures.TimeoutError`` to the caller (fail fast).
+
+    ``timeout`` (#3498) is an OPTIONAL explicit WAIT BOUND on the submission.
+    ``None`` (the default) preserves the historical unbounded await for the
+    probe lane. When given, a worker that has not completed within the bound
+    raises ``TimeoutError`` to the caller and the (daemon) thread is
+    ABANDONED — ``wait_for`` cancels the awaitable, not the thread (CPython
+    #87185), which is why the outer bound must remain above the probe's own
+    inner bound (see the probe-bound ordering tests).
     """
     future = daemon_worker(name).submit(fn)
-    return await asyncio.wrap_future(future)
+    return await _await_future(future, timeout=timeout)
+
+
+# ── #3498: bounded multi-worker CONTROL-PLANE offload seam ────────────────
+#
+# The auth/session path (``tortoise/supabase_control.py`` — 0 ``async def``
+# across ~100 functions, ``httpx.Client`` transport) is SYNCHRONOUS by
+# construction, so every async handler that needs it bridges to a blocking
+# API. ``asyncio.to_thread`` submits to the loop's SHARED default executor
+# (``min(32, cpu+4)`` = 6 workers on the 2-vCPU production machine) which
+# ``/health``'s DB probe and the abuse hooks also use — the #3060 lesson.
+# The existing ``run_on_daemon_worker`` is dedicated but SINGLE-SLOT, so a
+# 2–6-round-trip-per-request auth path on it would collapse auth concurrency
+# to roughly one request and convert a stall into fail-fast 503s.
+#
+# This seam is the third option: a DEDICATED, MULTI-WORKER, BOUNDED pool with
+# an explicit wait bound and a fail-closed error. It is separate from the
+# probe workers (its own name) so the /health probe budget and the auth path
+# can never starve each other.
+#
+# #3498 review P1: it is ALSO split into named pools. Best-effort work
+# (``update_last_used``, the analytics emit, the GitHub repo count) must not
+# occupy the auth slots — a telemetry burst or a hung display-only GitHub call
+# parking every auth worker is the same total-auth-outage blast radius this
+# issue is about. ``best_effort=True`` protects the CALLER; the separate pool
+# protects the AUTH CALLERS sharing capacity. #3669 adds a THIRD pool for the
+# attacker-reachable OAuth client-resolution lane (see
+# ``CONTROL_PLANE_OAUTH_WORKER_NAME``).
+CONTROL_PLANE_WORKER_NAME = "tortoise-control-plane"
+
+#: The best-effort pool's name — never shares slots with ``auth``.
+CONTROL_PLANE_TELEMETRY_WORKER_NAME = "tortoise-telemetry"
+
+#: Pool size. The calls are network-bound (PostgREST), so a small multiple of
+#: the loop's parallelism is what removes the serialisation a single slot
+#: would impose. Deliberately modest: on the 2-vCPU production machine a large
+#: pool buys no throughput, only parked threads.
+CONTROL_PLANE_WORKERS = 8
+
+#: Best-effort pool size — smaller: it is off the critical path.
+CONTROL_PLANE_TELEMETRY_WORKERS = 4
+
+#: Bounded backlog. A saturated queue means the pool is wedged; submissions
+#: fail fast (mapped to a 503) instead of buffering without bound.
+CONTROL_PLANE_BACKLOG = 128
+
+#: Best-effort backlog — larger, because best-effort submissions that are
+#: refused are simply dropped (never a user-visible failure).
+CONTROL_PLANE_TELEMETRY_BACKLOG = 256
+
+#: #3669: a THIRD pool, for the OAuth client-resolution lane. A CIMD fetch is
+#: attacker-reachable (an unauthenticated ``client_id`` URL), so sharing the
+#: ``auth`` pool would let a fetch flood occupy every auth slot — the same
+#: isolation argument that split ``telemetry`` out (#3498 review P1), applied
+#: to a new attacker class. Sized ABOVE ``cimd.MAX_IN_FLIGHT_FETCHES`` so the
+#: CIMD in-flight cap is the binding constraint on FETCHES (defence in depth),
+#: with the remaining workers carrying the token grants and registry reads.
+#: NOTE the token grants share this pool and are awaited with no offload wait
+#: bound, so N concurrent grants can occupy N workers; a resolution submitted
+#: while the pool is saturated waits on the shared backlog and fails closed at
+#: its own bound. That read-lane pressure is accepted (bounded by the backlog
+#: and the grant's httpx phase timeouts), not hidden.
+CONTROL_PLANE_OAUTH_WORKER_NAME = "tortoise-oauth"
+CONTROL_PLANE_OAUTH_WORKERS = 8
+CONTROL_PLANE_OAUTH_BACKLOG = 64
+
+#: #3773: a FOURTH pool, for the DATA-PLANE (FalkorDB) offload. The write
+#: handlers' per-request graph helpers (``_data_sdk``'s connect / embedded
+#: anchor probe, ``_check_org_limit``'s count query) ran inline on the loop
+#: immediately before an already off-loaded write, so a blocked loop still
+#: stalled every concurrent request for their duration. They reuse this seam's
+#: bounded multi-worker pool, wait bound and fail-closed error, on a pool of
+#: their OWN: a burst of graph writes must never park a single auth slot (the
+#: #3498 review P1 isolation argument, applied to the data plane).
+#:
+#: Occupancy disclosure (the #3669-cycle-2 "not hidden" rule): each WRITE
+#: consumes TWO sequential submissions here (the quota count, then the SDK
+#: open); the REST ``/v1/events`` and ``/v1/dream`` handlers' SDK open also
+#: submits here. The write-triggered ``_dream_worker`` does NOT (it builds
+#: inside the ``_DREAM_EXECUTOR`` item). The graph-bound ``_data_sdk`` path
+#: reaches a blocking CONTROL-plane PostgREST read (``_assert_graph_owned`` ->
+#: ``get_control_plane().query("graphs")``), so a control-plane stall parks a
+#: graph slot here and a bound miss on that read reports ``graph_unavailable``.
+#: Routing the ownership probe through the control-plane pool is a follow-up;
+#: the shared-capacity shape is accepted.
+CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
+CONTROL_PLANE_GRAPH_WORKERS = 8
+CONTROL_PLANE_GRAPH_BACKLOG = 128
+
+#: Margin added to the projection cold-start allowance for the DATA-PLANE graph
+#: lane (#3773). The bound is resolved at CALL time (``graph_offload_timeout_s``)
+#: from ``probe_setup_timeout()``, NOT from the frozen import-time default: an
+#: operator who raises ``TORTOISE_PROBE_SETUP_TIMEOUT`` for a large/cold graph
+#: must not make the graph lane fall BELOW the allowance it is meant to cover
+#: (which would 503-retry a merely-cold first write — the #3143 false-degrade
+#: class). The ordering is pinned by a test against the RESOLVED value.
+CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S = 10.0
+
+
+def graph_offload_timeout_s() -> float:
+    """#3773: the DATA-PLANE graph lane's wait bound, resolved at CALL time.
+
+    ``_data_sdk``'s embedded anchor probe and ``_check_org_limit``'s count query
+    can each open a COLD projection (connect + version probe +
+    ``_ensure_indexes()`` — ~28 sequential round trips), which the probe lane
+    already budgets via ``probe_setup_timeout()``. The graph lane's bound is
+    that resolved allowance PLUS a margin, so a cold first write is never
+    abandoned and 503'd. Still bounded and fail-fast for a genuinely wedged
+    graph.
+    """
+    return probe_setup_timeout() + CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S
+
+#: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
+#: round-trip's several phases but below the edge/proxy budget, so a
+#: black-holed PostgREST call fails the ONE request closed instead of holding
+#: a slot (and the loop's await) indefinitely. Resolved at CALL time so it
+#: stays monkeypatchable.
+#: COMPOSITE NOTE (#3498 review): a single request can chain several offloads
+#: (``_session_user_org`` alone issues three), and the bound is PER CALL, so
+#: the worst case is N x bound. It is bounded and fail-fast — the FIRST leg
+#: that misses the bound ends the request with the structured 503 — but if the
+#: proxy budget is ever tightened, lower this rather than deriving a shared
+#: per-request deadline.
+CONTROL_PLANE_OFFLOAD_TIMEOUT_S = 10.0
+
+#: Bounded per-call ``(op, duration_s)`` record for the offload seam.
+_CP_OFFLOAD_RECORDS: deque[tuple[str, float]] = deque(maxlen=512)
+#: Bounded per-call ``(duration_s, thread_name)`` record for the CONTROL-PLANE
+#: CLIENT itself (#3498 item 2 — the falsifier). Recorded at the httpx choke
+#: point in ``supabase_control.SupabaseControlPlane``, so a call that ran on
+#: ``MainThread`` shows up as ``MainThread`` — i.e. it never left the loop.
+_CP_CLIENT_RECORDS: deque[tuple[float, str]] = deque(maxlen=512)
+_CP_RECORDS_LOCK = threading.Lock()
+
+
+class ControlPlaneOffloadError(RuntimeError):
+    """A control-plane offload did not complete inside its bound.
+
+    Fail-closed: raised when the bounded pool's wait expires (the daemon
+    worker is abandoned) or its backlog is full. The hosted seam maps this to
+    the repo-standard 503 ``control_plane_unavailable`` — never a hang and
+    never a silent pass-through.
+    """
+
+
+def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
+    """Lazy process-wide multi-worker pool for the control-plane seam.
+
+    ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
+    is a SEPARATE pool for best-effort work, so telemetry can never park the
+    auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
+    for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
+    flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
+    DATA-PLANE pool for the write handlers' graph helpers, kept off auth
+    capacity for the same isolation reason. The graph pool's callables SET
+    ContextVars (the #2600 actor bind), so it must be reached ONLY through the
+    hosted ``_graph_offload`` wrapper, which runs them under a copy of the
+    caller's context — a bare ``run_control_plane_call(..., pool="graph")``
+    would write into the process-lifetime pool thread's own context and leak
+    that value into the NEXT request the worker serves.
+
+    An UNKNOWN selector raises rather than falling back to auth: the pool
+    choice is the only thing keeping best-effort or attacker-reachable work
+    off the auth-critical capacity, so a typo must fail closed, not silently
+    revert the split.
+    """
+    if pool == "graph":
+        return daemon_worker(CONTROL_PLANE_GRAPH_WORKER_NAME,
+                             workers=CONTROL_PLANE_GRAPH_WORKERS,
+                             max_backlog=CONTROL_PLANE_GRAPH_BACKLOG)
+    if pool == "oauth":
+        return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
+                             workers=CONTROL_PLANE_OAUTH_WORKERS,
+                             max_backlog=CONTROL_PLANE_OAUTH_BACKLOG)
+    if pool == "telemetry":
+        return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
+                             workers=CONTROL_PLANE_TELEMETRY_WORKERS,
+                             max_backlog=CONTROL_PLANE_TELEMETRY_BACKLOG)
+    if pool == "auth":
+        return daemon_worker(CONTROL_PLANE_WORKER_NAME,
+                             workers=CONTROL_PLANE_WORKERS,
+                             max_backlog=CONTROL_PLANE_BACKLOG)
+    raise ValueError(f"unknown control-plane pool {pool!r}")
+
+
+def record_control_plane_offload(op: str, duration_s: float) -> None:
+    """Record ONE offloaded control-plane resolution ``(op, duration)``."""
+    with _CP_RECORDS_LOCK:
+        _CP_OFFLOAD_RECORDS.append((op, duration_s))
+
+
+def control_plane_offload_records() -> list[tuple[str, float]]:
+    """Snapshot of the bounded offload records (oldest first)."""
+    with _CP_RECORDS_LOCK:
+        return list(_CP_OFFLOAD_RECORDS)
+
+
+def record_control_plane_client_call(duration_s: float, thread_name: str) -> None:
+    """Record ONE control-plane HTTP call as ``(duration, thread name)``.
+
+    Called at the ``SupabaseControlPlane`` transport choke point (#3498 item
+    2). ``thread_name`` is what makes the record a FALSIFIER: a call recorded
+    as ``MainThread`` ran on the event loop, i.e. was never offloaded.
+    """
+    with _CP_RECORDS_LOCK:
+        _CP_CLIENT_RECORDS.append((duration_s, thread_name))
+
+
+def control_plane_client_records() -> list[tuple[float, str]]:
+    """Snapshot of the bounded control-plane client records (oldest first)."""
+    with _CP_RECORDS_LOCK:
+        return list(_CP_CLIENT_RECORDS)
+
+
+def reset_control_plane_records() -> None:
+    """Clear both record buffers (test/ops seam)."""
+    with _CP_RECORDS_LOCK:
+        _CP_OFFLOAD_RECORDS.clear()
+        _CP_CLIENT_RECORDS.clear()
+
+
+async def run_control_plane_call(fn, *, op: str,
+                                 timeout: float | None = None,
+                                 pool: str = "auth"):
+    """Offload ONE blocking control-plane helper to a bounded pool.
+
+    The unit of offload is the RESOLUTION, not an individual HTTP call:
+    ``resolve_api_key`` is up to 8 dependent round-trips and
+    ``_orgs_row_fail_soft`` up to 6, and both are sequential and dependent
+    (the ladder's next rung depends on the previous rung's error). Offloading
+    per round-trip would pay N thread hops and interleave unrelated requests
+    into the ladder; offloading the helper pays ONE hop and keeps the ladder's
+    ordering intact inside one thread.
+
+    ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
+    resolutions, ``"telemetry"`` for best-effort work that must never consume
+    auth capacity, ``"oauth"`` (#3669) for the attacker-reachable OAuth
+    client-resolution lane, or ``"graph"`` (#3773) for the DATA-PLANE graph
+    helpers — a separate pool for the same isolation reason.
+
+    Fail-closed: a missed bound or a saturated backlog raises
+    :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by
+    ``fn`` ITSELF is a DOMAIN error and propagates unchanged — the three cases
+    are disambiguated by inspecting the future, not conflated (#3498 review).
+    """
+    bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
+    future = control_plane_worker(pool).submit(fn)
+    started = time.monotonic()
+    try:
+        result = await _await_future(future, timeout=bound)
+    except TimeoutError as exc:
+        # Distinguish the three sources of TimeoutError that meet here:
+        #   1. `fn` raised it              -> a domain error, propagate
+        #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
+        #   3. `wait_for`'s bound expired  -> fail closed
+        future_exc = (future.exception()
+                      if future.done() and not future.cancelled() else None)
+        if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
+            raise
+        reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
+                  else f"exceeded its {bound}s bound")
+        raise ControlPlaneOffloadError(
+            f"control-plane call {op!r} {reason}") from exc
+    record_control_plane_offload(op, time.monotonic() - started)
+    return result
 
 
 def _probe_once(sdk, timeout=None,
@@ -724,7 +1213,10 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     allowance that bears the ``sdk._get_proj()`` cost (connect + a
     size-dependent ``_ensure_indexes()``) ON TOP of the ``PROBE_TIMEOUT``
     reachability budget. The platform liveness gate passes nothing and keeps
-    the single shared budget; only the MCP ``tortoise_health`` tool opts in.
+    the single shared budget; the callers that opt in are the MCP
+    ``tortoise_health`` tool and the selfhost liveness coordinator's refresher
+    (``selfhost._probe_db``, #2988 — off the request path, which is what makes
+    spending the allowance there free).
 
     #1565: a single TRANSIENT connection-level failure (embedded redislite
     # server mid-startup / momentarily unreachable under parallel load —
@@ -741,10 +1233,11 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
     the single ``PROBE_TIMEOUT`` budget, so the platform liveness gate keeps
-    its tight fast-degrade bound (#1384). Only callers that opt in (the MCP
-    ``tortoise_health`` tool) pay a separate allowance for a large graph's
-    cold-start instead of being reported unreachable for it. In that explicit
-    shape the reachability budget is NOT spent waiting for the single #3062
+    its tight fast-degrade bound (#1384). The callers that opt in — the MCP
+    ``tortoise_health`` tool, and the selfhost liveness coordinator's refresher
+    (``selfhost._probe_db``, #2988) — pay a separate allowance for a large
+    graph's cold-start instead of being reported unreachable for it. In that
+    explicit shape the reachability budget is NOT spent waiting for the single #3062
     worker slot — a query queued behind another probe's cold-start is charged
     to the leftover of the allowance instead, so congestion cannot fake the
     degraded/0 report this change exists to remove (review P1).
@@ -885,9 +1378,11 @@ class HealthProbe:
         """Resolve the self-heal gate to a float (round-4 review P2).
 
         ``refresh_budget`` may be a float (tests, fixed coordinators) or a
-        zero-arg callable that returns one (``_HEALTH_PROBE`` wires it to
-        ``_health_probe_interval()`` so the gate always equals the refresher's
-        ACTUAL, operator-resolved period rather than the import-time default).
+        zero-arg callable that returns one (the selfhost ``_HEALTH_PROBE``
+        wires it to ``monitoring.health_probe_interval`` — the shared resolver
+        since #2988, re-exported by ``hosted_api`` as ``_health_probe_interval``
+        — so the gate always equals the refresher's ACTUAL, operator-resolved
+        period rather than the import-time default).
         A callable that raises falls back to ``PROBE_STALE_AFTER`` — the gate
         must never break an unauthenticated ``/health`` read.
         """
@@ -1196,13 +1691,66 @@ def loop_is_stale(threshold: float | None = None) -> bool:
 
 
 def loop_heartbeat_info() -> dict:
-    """Observability payload shared by /health and the /healthz listener."""
+    """Observability payload shared by /health and the /healthz listener.
+
+    #3498 item 1: carries the loop-lag baseline (max / p99 / sample count over
+    the bounded window) beside the staleness signal, so the effect of the
+    control-plane offload seam is measurable instead of inferred.
+    """
     age = loop_heartbeat_age()
+    lag = loop_lag_stats()
     return {
         "loop_age_ms": None if age is None else round(age * 1000, 1),
         "loop_ticks": heartbeat_read()[1],
         "loop_stale": True if age is None else age > LOOP_STALE_AFTER,
+        "loop_lag_max_ms": lag["max_ms"],
+        "loop_lag_p99_ms": lag["p99_ms"],
+        "loop_lag_samples": lag["samples"],
     }
+
+
+# ── #3498 item 1: continuous loop-lag baseline ────────────────────────────
+# The heartbeat answers "did the loop tick?". This records the COMPLEMENTARY
+# quantity — the lag of each tick — so the effect of the control-plane offload
+# seam is measurable (max + p99) instead of inferred from a stale timestamp.
+# A blocked loop shows up as a tick that fired far later than its interval.
+_LOOP_LAG_SAMPLES: deque[float] = deque(maxlen=4096)
+_LOOP_LAG_LOCK = threading.Lock()
+
+
+def record_loop_lag(lag_s: float) -> None:
+    """Record ONE tick's scheduling lag (seconds, clamped at 0)."""
+    value = max(0.0, float(lag_s))
+    with _LOOP_LAG_LOCK:
+        _LOOP_LAG_SAMPLES.append(value)
+        LOOP_LAG.observe(value)
+
+
+def loop_lag_stats() -> dict:
+    """``{samples, max_ms, p99_ms, mean_ms}`` over the bounded window.
+
+    ``None`` percentiles when no tick has been sampled yet — never 0.0, which
+    would read as "perfectly on time" for a loop that never ran.
+    """
+    with _LOOP_LAG_LOCK:
+        samples = sorted(_LOOP_LAG_SAMPLES)
+    if not samples:
+        return {"samples": 0, "max_ms": None, "p99_ms": None, "mean_ms": None}
+    count = len(samples)
+    # nearest-rank p99: the smallest value at or above the 99th percentile.
+    idx = min(count - 1, max(0, math.ceil(0.99 * count) - 1))
+    return {
+        "samples": count,
+        "max_ms": round(samples[-1] * 1000, 3),
+        "p99_ms": round(samples[idx] * 1000, 3),
+        "mean_ms": round(sum(samples) / count * 1000, 3),
+    }
+
+
+def reset_loop_lag() -> None:
+    """Clear the loop-lag window (test/ops seam)."""
+    with _LOOP_LAG_LOCK:
+        _LOOP_LAG_SAMPLES.clear()
 
 
 async def loop_heartbeat_task(interval: float = LOOP_HEARTBEAT_INTERVAL) -> None:
@@ -1212,10 +1760,16 @@ async def loop_heartbeat_task(interval: float = LOOP_HEARTBEAT_INTERVAL) -> None
     synchronous DB call on the loop, a CPU-bound encode, a deadlock — this
     task stops being scheduled and the timestamp goes stale, which is exactly
     the signal ``/healthz`` (port 9090) and the stall watchdog read.
+
+    #3498: each tick also records its own LAG (actual elapsed minus the
+    requested interval) into the bounded ``LOOP_LAG`` histogram/window, so the
+    loop-lag baseline is sampled continuously and available as max/p99.
     """
     while True:
         heartbeat_record()
+        started = time.monotonic()
         await asyncio.sleep(interval)
+        record_loop_lag(time.monotonic() - started - interval)
 
 
 def _reset_heartbeat() -> None:
@@ -1620,9 +2174,9 @@ def _healthz_required() -> bool:
 
     The previous exact ``== "1"`` match made ``true``/``yes``/``on`` silently
     do nothing — a deploy-time contract believed to be enforced and not.
+    #4097: resolved through the declared truthy contract.
     """
-    return (os.environ.get("TORTOISE_HEALTHZ_REQUIRED", "").strip().lower()
-            in ("1", "true", "yes", "on"))
+    return is_truthy(os.environ.get("TORTOISE_HEALTHZ_REQUIRED"))
 
 
 def resolve_healthz_target(port: int | None = None, bind: str | None = None,

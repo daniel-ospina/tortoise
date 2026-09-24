@@ -2,7 +2,9 @@
 
 Covers the issue's verification checklist:
 - event emitted per call (exactly one, incl. the middleware re-dispatch guard)
-- all 4 status categories produced (ok / validation_error / auth_error / exec_error)
+- the 4 status categories produced here (ok / validation_error / auth_error /
+  exec_error; the emission also carries timeout / cancelled / refused — see
+  ``_emit_mcp_tool_call_telemetry``)
 - validation vs exec error classification (pydantic → validation_error with
   '<error_type>:<field>' kind; everything else → exec_error with class name)
 - latency present and measured around the tool execution
@@ -292,6 +294,10 @@ class TestRealWritePath:
         # Force the local JSONL fallback (no Supabase configured).
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        # #3820 (cycle-2 P1): the canonical key name too — `SUPABASE_SERVICE_KEY`
+        # is LEGACY, and an ambient production `SUPABASE_SERVICE_ROLE_KEY` would
+        # otherwise make this "no Supabase" premise false.
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         fallback = tmp_path / "analytics_fallback.jsonl"
         monkeypatch.setattr(hosted_api, "_ANALYTICS_FALLBACK_PATH", str(fallback))
 
@@ -318,6 +324,15 @@ class TestOverhead:
     wrapper's own cost (perf_counter, dict build, branch) plus the tool body —
     the tool body is a trivial echo, so p95 of the total approximates the
     wrapper+dispatch overhead budget.
+
+    ⚠️ This is an ABSOLUTE p95 budget for a quiet CI host. It is NOT the same
+    quantity as the F2 guard in ``tests/test_transport_wait_bound.py::
+    test_mcp_wait_bound_fast_path_overhead_is_bounded``, which measures the
+    seam's INCREMENTAL (delta) median against the unwrapped ``_original_call_tool``
+    and deliberately does not assert p95. Neither substitutes for the other, and
+    on a heavily loaded box the absolute budget is not reproducible: at load ~150
+    the unwrapped ``origin/main`` baseline alone measures 7.6–16.5 ms p95, so a
+    failure here on a shared host is machine load, not necessarily a regression.
     """
 
     pytestmark = pytest.mark.asyncio

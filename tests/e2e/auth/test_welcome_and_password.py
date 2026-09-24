@@ -4,18 +4,21 @@
 WHY THESE EXIST
 ---------------
 `welcome.html` used to decide in the browser whether a visitor was signed in, via
-a hard gate calling `readValidSession()`. Under the BFF there is no JS-readable
-session, so that returned null on EVERY load and bounced signed-in users to /auth
-— the #3485 loop, reproduced for every user.
+a hard gate calling `readValidSession()`. That function reads the legacy
+parent-domain `sb-tortoise-auth-token` cookie — after first migrating any legacy
+localStorage session into it — and a BFF login writes only the HttpOnly
+`__Host-session`, so a browser holding no legacy session read as signed OUT and
+was bounced to /auth: the #3485 loop.
 
 The fix is that the server decides. These tests pin that decision, because the
-failure mode (a client that cannot see the session, bouncing anyway) is invisible
+failure mode (a client with no session it can see, bouncing anyway) is invisible
 to every other test in the suite: the unit tests all passed while /welcome was
 broken.
 
 They also pin the reset flow, which could not survive the migration untouched:
 the form used to call `supabaseClient.auth.updateUser()` from the browser, which
-can never work when the browser holds no session.
+can never work when the BFF session cookie is HttpOnly and the page has no
+client-readable BFF credential.
 """
 from __future__ import annotations
 
@@ -34,7 +37,14 @@ import pytest
 from bff_test_helpers import pick_free_port, require_toolchain, stop
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-WEBSITE_DIR = REPO_ROOT / "website"
+# The BFF moved to the DASHBOARD Pages project (issue #4054) — FROM
+# `website/functions/` (the `premise-labs` project) TO
+# `website/apps/dashboard/functions/` (the `tortoise-dashboard` project). A
+# Pages project's `functions/` directory must sit beside the site directory, so
+# `wrangler pages dev .` now runs from `website/apps/dashboard`, not `website/`.
+# Running from the old root logs "No Functions. Shimming..." and every /welcome
+# + /auth/* route 404s.
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 APP_PORT = int(os.environ.get("AUTH_WP_APP_PORT", "8997"))
@@ -77,7 +87,7 @@ def stack():
 
     app = subprocess.Popen(
         [
-            shutil.which("wrangler"), "pages", "dev", ".",
+            shutil.which("wrangler"), "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
             "-b", f"SUPABASE_URL={MOCK_URL}",
@@ -90,7 +100,7 @@ def stack():
             # change from SCOPE.md §6.
             "-b", f"APP_ORIGIN={APP}",
         ],
-        cwd=str(WEBSITE_DIR),
+        cwd=str(DASHBOARD_DIR),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
     if not _wait(APP_PORT):
@@ -155,7 +165,8 @@ def test_anonymous_welcome_redirects_to_auth(stack):
     """Genuinely signed out -> /auth. This is a 302 from the SERVER.
 
     It must not be a rendered page that then decides — that was the old design,
-    and the client could not see the session, so it always decided "signed out".
+    and a browser holding no legacy session had no credential the client could see,
+    so the client gate decided "signed out".
     """
     status, _, headers = _req("/welcome")
     assert status == 302, f"anonymous /welcome must redirect, got {status}"
@@ -167,8 +178,9 @@ def test_anonymous_welcome_redirects_to_auth(stack):
 def test_signed_in_welcome_redirects_to_the_app(stack):
     """Signed in -> straight to the app. NOT back to /auth.
 
-    This is the #3485 regression test: the old client gate sent a signed-in user
-    to /auth on every load, because it could never observe the session.
+    This is the #3485 regression test: the old client gate sent a browser holding
+    no legacy session to /auth on every load, because it could never observe the
+    BFF session.
     """
     cookie = _session_cookie()
     status, _, headers = _req("/welcome", cookie=cookie)
@@ -179,7 +191,19 @@ def test_signed_in_welcome_redirects_to_the_app(stack):
 
 
 def test_reset_landing_serves_the_panel(stack):
-    """?reset=1 with a valid session is the ONE rendered case."""
+    """?reset=1 with a valid session is the ONE rendered case.
+
+    #4054: `functions/welcome.ts` serves this with `env.ASSETS.fetch(request)`,
+    so the asset must exist in THIS project. `welcome.html` (the only file
+    containing `#reset-panel`) was moved to `website/apps/dashboard/public/`
+    with the rest of the auth surface, so the panel now resolves on the app
+    origin.
+
+    This asserts against the BUILT root (`dist/`) because that is what gets
+    deployed — see `tests/e2e/auth/conftest.py`. Against the source root the
+    page is not at `/welcome` at all and Pages answers with the SPA shell, which
+    would make this assertion silently check `index.html`.
+    """
     cookie = _session_cookie()
     status, body, _ = _req("/welcome?reset=1", cookie=cookie)
     assert status == 200, f"reset landing must render, got {status}"

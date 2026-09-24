@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -24,6 +25,7 @@ def sdk():
     sdk.create_point("goal", "G1")  # no context
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── taxonomy ────────────────────────────────────────────────────────

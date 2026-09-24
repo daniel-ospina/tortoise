@@ -11,6 +11,7 @@ Runnable with:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -29,6 +30,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, content: str = "test content", **kw):
@@ -45,10 +47,44 @@ def _props(sdk: TortoiseSDK, pid: str) -> dict:
     return dict(row[0][0])
 
 
+# ── #4096: fixture hygiene — the temp tree is reclaimed on teardown ───────
+
+def test_sdk_fixture_reclaims_its_temp_tree():
+    """The ``sdk`` fixture must remove the tree it mkdtemp's (#4096).
+
+    Drives the fixture's own generator the way pytest does — one ``next()`` for
+    setup, a second for teardown — so the assertion is deterministic and needs no
+    cross-test ordering. Fails on the pre-#4096 fixture, whose finalizer only
+    closed the SDK and left ``tortoise_validity_test_*`` behind (5,725 of them
+    were live on the dev box).
+    """
+    gen = sdk.__wrapped__()
+    live = next(gen)
+    tree = os.path.dirname(live._db_path)
+    assert os.path.isdir(tree), "fixture did not create its temp tree"
+    with pytest.raises(StopIteration):
+        next(gen)  # run the fixture's teardown
+    assert not os.path.exists(tree), f"fixture left its temp tree behind: {tree}"
+
+
 # ── T1: supersede_point stamps the window (contiguity + fallback matrix) ──
 
-def test_supersede_explicit_valid_from_wins(sdk):
-    """The valid_from kwarg is the window-end source (contiguity)."""
+def test_supersede_valid_from_is_the_sole_source_when_successor_is_undated(sdk):
+    """The ``valid_from`` kwarg is the window-END source — and the SOLE source,
+    because this successor carries no stored ``validFrom``.
+
+    ⚠️ This scenario produces an OVERLAP, not contiguity: an undated successor
+    has an open window start, so ``_covers`` treats it as covering every
+    instant and the predecessor's kwarg-written ``validTo`` cannot meet it
+    (ONTOLOGY.md §4.7; the undated-successor overlap is tracked as #3945 —
+    NOT #3985, which is the separate falsey-but-present no-kwarg residual).
+    Contiguity from the kwarg is
+    demonstrated by ``test_supersede_successor_valid_from_contiguity``, where
+    the successor IS dated.
+
+    Name pinned to that condition: the kwarg is refused when it DISAGREES with
+    a stored ``validFrom`` (see the disagreement tests below), so "explicit
+    valid_from wins" is no longer an unconditional claim (ONTOLOGY.md §4.7)."""
     old = _make_point(sdk, content="gym at 6pm")
     new = _make_point(sdk, content="gym at 5pm")
     result = sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
@@ -111,14 +147,342 @@ def test_supersede_undated_legacy_pair_still_supersedes(sdk):
     assert _props(sdk, old["id"]).get("validTo")  # from createdAt/now fallback
 
 
-def test_supersede_successor_created_at_valid_from_contiguity(sdk):
+def test_supersede_successor_valid_from_contiguity(sdk):
     """Contiguity: old.validTo == successor.validFrom — no gap between
-    windows (Graphiti semantics)."""
+    windows (Graphiti semantics).
+
+    (Name corrected: this exercises a successor that carries an explicit
+    ``validFrom``; the ``createdAt`` fallback is the branch that produces an
+    OVERLAP, and is covered by
+    ``test_supersede_fallback_to_successor_created_at``.)"""
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
     sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
     assert _props(sdk, new["id"])["validFrom"] == "2026-06-10"
+
+
+def test_supersede_disagreeing_valid_from_refused(sdk):
+    """A ``valid_from`` kwarg that disagrees with the successor's STORED
+    ``validFrom`` is refused BEFORE any mutation.
+
+    Trusting the kwarg verbatim let it pick the predecessor's window end,
+    which broke chain contiguity silently in BOTH directions:
+      * EARLIER kwarg → GAP: neither window covers the instants strictly
+        between them — the predecessor's end is the kwarg instant (inclusive)
+        and the successor's start is the stored one — so the uncovered region
+        is ``(kwarg, stored)`` and ``restore_point_at`` reports honest absence
+        for instants that fall in it;
+      * LATER kwarg → OVERLAP: both windows cover ``[stored, kwarg]`` (both
+        ends inclusive), so every instant inside it reads ``ambiguous``.
+
+    Fail-closed: the refusal is raised in the resolution block (after the
+    lifecycle guards, before the PointSuperseded emit and every write), so
+    the graph is left untouched and the agreeing path still works."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
+
+    # (a) kwarg EARLIER than the stored value → would GAP (06-05, 06-10)
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-05")
+    # (b) kwarg LATER than the stored value → would OVERLAP [06-10, 06-20]
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-20")
+
+    # Fail-closed: no mutation on either refusal.
+    op = _props(sdk, old["id"])
+    assert op.get("status") != "superseded"
+    assert not op.get("outdated")
+    assert "validTo" not in op
+    assert "expiredAt" not in op
+    # ...and fail-closed across the EVENT JOURNAL too: `_emit_event` runs
+    # append-before-mutation, so if the guard ever moved after the
+    # PointSuperseded emit a refusal would journal a phantom supersession that
+    # mutated nothing. The graph-state assertions above cannot see that.
+    from tortoise.event_store import read_after
+    assert read_after(sdk._get_proj(), 0, types=["PointSuperseded"]) == []
+    assert sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$n})-[:CORRECTS]->(b:Point {id:$o}) RETURN a.id",
+        params={"n": new["id"], "o": old["id"]}).result_set == []
+
+    # The agreeing kwarg still works (documented resolution order preserved)
+    # and the chain it writes is CONTIGUOUS — the gap instant resolves to the
+    # predecessor, the post-transition instant resolves to the successor with
+    # no ambiguity.
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
+    at_gap = sdk.restore_point_at(new["id"], "2026-06-07")
+    assert at_gap["found"] is True
+    assert at_gap["valid_point"]["id"] == old["id"]
+    at_overlap = sdk.restore_point_at(new["id"], "2026-06-15")
+    assert at_overlap["found"] is True
+    assert at_overlap.get("ambiguous") is not True
+    assert at_overlap["valid_point"]["id"] == new["id"]
+
+
+def test_supersede_valid_from_format_difference_is_agreement(sdk):
+    """Instant-level, not string-level, comparison via ``_created_sort_key``
+    — the same mixed-format primitive ``restore_point_at``'s ``_covers``
+    uses to decide coverage. A format-only difference ("…Z" vs "…+00:00")
+    names the same instant and must not be refused."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00Z")
+    sdk.supersede_point(old["id"], new["id"],
+                        valid_from="2026-06-10T00:00:00+00:00")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10T00:00:00+00:00"
+
+
+def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
+    """A disagreement ACROSS formats (date-only kwarg vs offset-aware stored
+    value) is still caught — the guard is not a raw string compare.
+
+    The two dates are a full day apart, deliberately: a date-only value parses
+    as LOCAL midnight, so a same-day pair would compare equal on a UTC host and
+    unequal elsewhere — a host-timezone-dependent assertion is not a test.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-09")
+
+
+def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
+    """The contract is the same INSTANT, not the same calendar day.
+
+    The two literals the GUARD COMPARES — the kwarg and the successor's stored
+    ``validFrom`` — carry an explicit time and offset, so nothing depends on the
+    host timezone. (The predecessors' date-only ``validFrom`` above is never
+    passed to the guard; date-only parses as LOCAL midnight, the #3982
+    behaviour, so it is deliberately kept out of the comparison.) Four
+    properties:
+
+      * same day, different instant → REFUSED. Without this, a guard weakened
+        to CALENDAR-DAY equality (``epoch // 86400``) would accept it. The
+        direction of the disagreement decides the damage: an EARLIER kwarg
+        leaves a GAP between the predecessor's end and the successor's start,
+        a LATER one an OVERLAP — see case (a) and the parent
+        ``test_supersede_disagreeing_valid_from_refused`` for both.
+      * sub-second disagreement → REFUSED (case (c), 0.8 s apart). This case
+        refuses a difference below one second, which the coarsest weakened
+        guards would accept: a tolerance-based equality
+        (``abs(kwarg - stored) < 1.0``) or whole-second truncation
+        (``int(x)``) treats these two instants as equal, so it fails here.
+      * disagreement of ONE MICROSECOND → also REFUSED (case (e)), and a zero
+        difference with a DIFFERENT fractional encoding → accepted (case (f)).
+        Together they pin exactness rather than a tolerance down to the 1 µs
+        ISO floor: case (c) alone leaves tolerances below 0.8 s alive, and
+        case (e) kills those of 1 µs or more. The floor BELOW 1 µs — which
+        ISO literals cannot express, since ``datetime.fromisoformat`` truncates
+        beyond 6 fractional digits — is pinned by
+        ``test_supersede_valid_from_below_microsecond_disagreement_refused``.
+      * same instant, DIFFERENT offset encodings (an explicit non-zero offset
+        on the kwarg, ``+00:00`` on the stored successor) → ACCEPTED, and the
+        value the caller passed is what gets persisted (``str(valid_from)``,
+        not the stored form). A raw string comparison would refuse both, so
+        cases (b) and (d) pin instant-level — not string-level — agreement.
+    """
+    # (a) same day, 12 hours EARLIER → refused (would leave a GAP)
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T12:00:00+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"],
+                            valid_from="2026-06-10T00:00:00+00:00")
+    op = _props(sdk, old["id"])
+    assert op.get("status") != "superseded"
+    assert "validTo" not in op
+
+    # (b) same instant, -04:00 encoding → accepted, caller's text persisted
+    sdk.supersede_point(old["id"], new["id"],
+                        valid_from="2026-06-10T08:00:00-04:00")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10T08:00:00-04:00"
+
+    # (c) 0.8 s LATER, same offset → refused (would OVERLAP by 0.8 s)
+    old2 = _make_point(sdk, content="claim v3", validFrom="2026-06-01")
+    new2 = _make_point(sdk, content="claim v4",
+                       validFrom="2026-06-10T12:00:00.100000+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old2["id"], new2["id"],
+                            valid_from="2026-06-10T12:00:00.900000+00:00")
+    assert "validTo" not in _props(sdk, old2["id"])
+
+    # (d) same instant, fractional seconds AND a non-zero offset → accepted
+    sdk.supersede_point(old2["id"], new2["id"],
+                        valid_from="2026-06-10T08:00:00.100000-04:00")
+    assert (_props(sdk, old2["id"])["validTo"]
+            == "2026-06-10T08:00:00.100000-04:00")
+
+    # (e) ONE MICROSECOND later → refused (exactness, not a tolerance)
+    old3 = _make_point(sdk, content="claim v5", validFrom="2026-06-01")
+    new3 = _make_point(sdk, content="claim v6",
+                       validFrom="2026-06-10T12:00:00.000001+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old3["id"], new3["id"],
+                            valid_from="2026-06-10T12:00:00+00:00")
+    assert "validTo" not in _props(sdk, old3["id"])
+
+    # (f) zero difference, DIFFERENT fractional encoding (`.000000` vs none) →
+    # accepted; both key to the same float instant
+    old4 = _make_point(sdk, content="claim v7", validFrom="2026-06-01")
+    new4 = _make_point(sdk, content="claim v8",
+                       validFrom="2026-06-10T12:00:00.000000+00:00")
+    sdk.supersede_point(old4["id"], new4["id"],
+                        valid_from="2026-06-10T12:00:00+00:00")
+    assert _props(sdk, old4["id"])["validTo"] == "2026-06-10T12:00:00+00:00"
+
+
+def test_supersede_valid_from_below_microsecond_disagreement_refused(sdk):
+    """Pins the comparison BELOW the microsecond floor that ISO pairs cannot
+    reach.
+
+    An ISO-8601 literal pair is limited to microsecond resolution —
+    ``datetime.fromisoformat`` truncates beyond 6 fractional digits — so the
+    smallest separation an ISO case can construct is one microsecond (float
+    delta 9.5367431640625e-07 s). A tolerance-based equality therefore survives
+    every ISO case in this file: replacing the guard's
+    ``k_kwarg[1] == k_stored[1]`` with ``abs(k_kwarg[1] - k_stored[1]) < 1e-9``
+    leaves the whole file green without this case.
+
+    The stored start is consequently a NUMERIC epoch, ``validFrom=5e-10``
+    (keyed ``(0, 5e-10)``), compared against an ISO kwarg at the epoch
+    (``"1970-01-01T00:00:00+00:00"`` → ``(0, 0.0)``). The real guard refuses it
+    (``5e-10 != 0.0``); a sub-nanosecond tolerance accepts it.
+    """
+    old = _make_point(sdk, content="claim v9", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v10", validFrom=5e-10)
+    assert _props(sdk, new["id"])["validFrom"] == 5e-10
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"],
+                            valid_from="1970-01-01T00:00:00+00:00")
+    # fail-closed: nothing written
+    assert "validTo" not in _props(sdk, old["id"])
+
+
+def test_supersede_numeric_epoch_kwarg_refused(sdk):
+    """The guard keys the value the write PERSISTS (``str(valid_from)``), not
+    the caller's object.
+
+    A numeric-epoch kwarg names the same instant as the stored value, but the
+    ``str()`` that lands in ``validTo`` is UNPARSEABLE to ``_created_sort_key``
+    (its ISO branch needs a ``-`` or ``T``) — so ``_covers`` cannot order the
+    predecessor's window end and it silently becomes unbounded, i.e. the exact
+    OVERLAP this guard exists to prevent. Keying the caller's object instead
+    would accept it and corrupt the chain.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00+00:00")
+    # 2026-06-10T00:00:00Z as an epoch — the same instant, unserializable form
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from=1781049600.0)
+    # fail-closed: nothing written
+    assert "validTo" not in _props(sdk, old["id"])
+
+
+def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
+    """The guard's PRESENCE predicate is the read path's, not the resolution
+    branch's truthiness.
+
+    ``_covers`` gates on ``vf is not None``, so a falsey-but-present stored
+    ``validFrom`` is a real window start there: ``0`` keys as the parseable
+    epoch-0 instant and ``""`` keys as an unparseable start that covers no
+    PARSEABLE instant (an unparseable query instant, by contrast, is covered —
+    see the bullet below). The two forms fail DIFFERENTLY, and both are refused:
+
+      * ``0`` — trusting the kwarg wrote a predecessor ``validTo`` INSIDE the
+        successor's ``[epoch-0, ∞)`` window ⇒ ``ambiguous`` (the overlap this
+        guard exists to prevent).
+      * ``""`` — the read path treats the start as present but unorderable, so
+        the successor covers no PARSEABLE query instant (every such instant
+        lands in the predecessor's window end instead), and trusting the kwarg
+        leaves the successor unreachable for those queries rather than
+        visibly overlapping. An unparseable query instant, by contrast, keys
+        as ``(1, <text>)`` and IS covered by it. Refused fail-closed because
+        the write path and ``_covers`` would silently diverge on it — not
+        because of an overlap.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    # epoch-0: present AND parseable to the read path
+    new_zero = _make_point(sdk, content="claim v2", validFrom=0)
+    assert _props(sdk, new_zero["id"])["validFrom"] == 0
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new_zero["id"],
+                            valid_from="2026-06-10")
+    assert "validTo" not in _props(sdk, old["id"])
+    # empty string: present but unparseable ⇒ not orderable by _covers
+    new_empty = _make_point(sdk, content="claim v3", validFrom="")
+    assert _props(sdk, new_empty["id"])["validFrom"] == ""
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new_empty["id"],
+                            valid_from="2026-06-14")
+    assert "validTo" not in _props(sdk, old["id"])
+
+
+def test_supersede_unparseable_valid_from_refused(sdk):
+    """An unparseable kwarg cannot be shown to name the stored instant, and
+    ``_covers`` cannot order it — refused rather than written.
+
+    This covers the MIXED pair (unparseable kwarg vs a parseable stored start).
+    The BOTH-unparseable pair is covered by
+    ``test_supersede_both_sides_unparseable_refused``."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="not-a-date")
+    assert "validTo" not in _props(sdk, old["id"])
+
+
+def test_supersede_numeric_stored_valid_from_agrees_with_iso_kwarg(sdk):
+    """The guard keys the STORED value AS STORED, matching ``_covers``.
+
+    A numeric epoch is a supported stored form (``_created_sort_key`` documents
+    it and seeded corpora carry it), and it keys RAW as ``(0, float)``. Passing
+    it through ``str()`` first — a natural-looking edit — would key it as
+    unparseable ``(1, text)`` (no ``-``/``T``), so the guard would REFUSE an
+    instant ``_covers`` orders fine, and the write path would stop matching the
+    read path's contiguity boundary. Every other test pairs a numeric stored
+    value only with a STRING kwarg, which refuses for an unrelated reason — so
+    this hole is invisible without the agreeing case below.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom=1781049600.0)
+    assert _props(sdk, new["id"])["validFrom"] == 1781049600.0
+    # numeric stored + ISO kwarg naming the SAME instant → accepted
+    sdk.supersede_point(old["id"], new["id"],
+                        valid_from="2026-06-10T00:00:00+00:00")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10T00:00:00+00:00"
+
+    # numeric stored + NUMERIC kwarg of the same epoch → still refused: the
+    # value the write persists is `str(1781049600.0)`, which `_covers` cannot
+    # order, so the agreeing key is not enough (see the conjunct test).
+    old2 = _make_point(sdk, content="claim v3", validFrom="2026-06-01")
+    new2 = _make_point(sdk, content="claim v4", validFrom=1781049600.0)
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old2["id"], new2["id"], valid_from=1781049600.0)
+    assert "validTo" not in _props(sdk, old2["id"])
+
+
+def test_supersede_both_sides_unparseable_refused(sdk):
+    """The guard requires BOTH sides to be parseable — not merely equal.
+
+    Byte-identical unparseable values are still refused: a key of ``(1, text)``
+    is an *unorderable* start wherever it sits, so writing one would leave the
+    predecessor's window without an orderable end. This pins the guard's
+    parseability conjunct (``k_kwarg[0] == 0 and k_stored[0] == 0``), which is
+    otherwise load-bearing but invisible: the mixed-pair tests still fail under a
+    guard that drops it, because a parseable key's payload is a ``float`` and an
+    unparseable one's is a ``str``, so ``float == str`` is False anyway.
+    """
+    for bad in ("", "not-a-date"):
+        old = _make_point(sdk, content=f"claim v1 {bad!r}",
+                          validFrom="2026-06-01")
+        new = _make_point(sdk, content=f"claim v2 {bad!r}", validFrom=bad)
+        with pytest.raises(ValueError, match="disagrees"):
+            sdk.supersede_point(old["id"], new["id"], valid_from=bad)
+        assert "validTo" not in _props(sdk, old["id"])
 
 
 def test_invalidate_point_stamps_withdrawal(sdk):
@@ -249,6 +613,67 @@ def test_restore_ambiguous_overlapping_windows(sdk):
     assert len(out["candidates"]) == 2
     assert {c["id"] for c in out["candidates"]} == {a["id"], b["id"]}
     assert "valid_point" not in out
+
+
+def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
+    """Pins the READ-path premise the write-path guard is built on: ``_covers``
+    gates on presence (``vf is not None``), NOT on truthiness.
+
+    Both halves below bypass the guard by hand-planting the stamps, so they
+    measure `restore_point_at` rather than `supersede_point`:
+
+      * successor ``validFrom = 0`` — the parseable epoch-0 instant ⇒ its
+        window is ``[epoch-0, ∞)``. An instant inside the predecessor's window
+        is covered by BOTH ⇒ ``ambiguous``. This half pins that a
+        falsey-but-present start is a real WINDOW BOUND (so the guard is
+        necessary for this form), and that trusting the kwarg here produces a
+        visible overlap — it does NOT discriminate presence from truthiness
+        (a truthiness predicate would drop the start, leave the window
+        ``(-∞, ∞)``, and still return ``ambiguous``); part (b) does.
+      * successor ``validFrom = ""`` — unparseable to ``_created_sort_key``
+        (``(1, "")``) and never ordered below a parseable key ⇒ the successor
+        covers no PARSEABLE query instant (``2026-06-15`` lands in the
+        predecessor instead). Presence still bites: under a truthiness
+        predicate ``""`` would be skipped and the successor WOULD cover that
+        parseable instant too, flipping the verdict to ``ambiguous``. An
+        unparseable query instant is covered either way — it keys as
+        ``(1, <text>)``, which ``(1, "")`` is never greater than.
+    """
+    # (a) validFrom = 0 → a real window start ⇒ overlap ⇒ ambiguous
+    old = _make_point(sdk, content="zero v1", validFrom="2026-06-01")
+    new_zero = _make_point(sdk, content="zero v2", validFrom=0)
+    sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$n}), (b:Point {id:$o}) CREATE (a)-[:CORRECTS]->(b)",
+        params={"n": new_zero["id"], "o": old["id"]})
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='superseded', n.outdated=true, "
+        "n.validTo='2026-06-20'",
+        params={"id": old["id"]})
+    out = sdk.restore_point_at(new_zero["id"], "2026-06-15")
+    assert out.get("ambiguous") is True
+    assert len(out["candidates"]) == 2
+
+    # (b) validFrom = "" → present but unorderable ⇒ covers no PARSEABLE instant
+    old2 = _make_point(sdk, content="empty v1", validFrom="2026-06-01")
+    new_empty = _make_point(sdk, content="empty v2", validFrom="")
+    sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$n}), (b:Point {id:$o}) CREATE (a)-[:CORRECTS]->(b)",
+        params={"n": new_empty["id"], "o": old2["id"]})
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='superseded', n.outdated=true, "
+        "n.validTo='2026-06-20'",
+        params={"id": old2["id"]})
+    out2 = sdk.restore_point_at(new_empty["id"], "2026-06-15")
+    assert out2.get("ambiguous") is not True
+    assert out2["found"] is True
+    assert out2["valid_point"]["id"] == old2["id"]
+    # … but only for PARSEABLE instants: an unparseable query keys as
+    # `(1, <text>)`, which the successor's `(1, "")` is NOT greater than, so
+    # the `""` successor itself DOES cover it.
+    out2b = sdk.restore_point_at(new_empty["id"], "zzz")
+    assert out2b.get("ambiguous") is not True
+    assert out2b["found"] is True
+    assert out2b["valid_point"]["id"] == new_empty["id"]
 
 
 def test_restore_missing_point(sdk):

@@ -117,7 +117,7 @@ test('#3782: an UNOBSERVED harness resolves to install-pending, not a future pro
     'nothing observed must NOT be reported as a future capture (#3782)')
   // (3) no capture install path at all (capability false) → no sentence
   assert.equal(
-    captureClaimForHarness({ session_recording: true, install_probe_claude: 't' }, 'cursor'),
+    captureClaimForHarness({ session_recording: true, install_probe_claude: 't' }, 'claude-desktop'),
     'none',
     'a harness with no install path prints no capture sentence')
 })
@@ -132,10 +132,15 @@ test('#3428: an unknown projection prints NO capture sentence (fail-honest)', ()
 })
 
 test('#3428: a harness with no capture install path prints NO capture sentence', () => {
-  // HARNESS_CAPTURE_SUPPORT false (Cursor's spike verdict, the backfill-only
-  // leaves) ⇒ 'none' EVEN with a stray receipt: capability decides whether any
+  // HARNESS_CAPTURE_SUPPORT false (the backfill-only leaves, the cloud-hosted
+  // surfaces) ⇒ 'none' EVEN with a stray receipt: capability decides whether any
   // capture sentence may be printed at all.
-  for (const h of ['cursor', 'codex', 'claude-desktop', 'claude-web', 'chatgpt']) {
+  // #3818: codex LEFT this loop — it now has a capture seam
+  // (tortoise/codex-hooks/session-end.sh).  #3819: cursor LEFT it too
+  // (tortoise/cursor-hooks/session-end.sh).  Both are asserted as
+  // capture-capable in their own tests below.  They are NOT members of this
+  // 'none' set any more.
+  for (const h of ['claude-desktop', 'claude-web', 'chatgpt']) {
     assert.equal(
       captureClaimForHarness({ session_recording: true, [`session_capture_receipt_${h}`]: 't' }, h),
       'none', `${h} must print no capture sentence`)
@@ -144,9 +149,59 @@ test('#3428: a harness with no capture install path prints NO capture sentence',
   assert.equal(captureClaimForHarness({ session_recording: true }, 'codexDesktop'), 'none')
 })
 
+test('#3818: codex is capture-capable — the tense follows the RECEIPT, never the flag alone', () => {
+  // #3818 wired tortoise/codex-hooks/session-end.sh into HARNESS_CAPTURE_SEAM,
+  // so HARNESS_CAPTURE_SUPPORT.codex derives true and codex joins the
+  // claude/pi class: it MAY print a capture sentence. The #3428/#3782 invariant
+  // is unchanged on BOTH sides of that flag — capability is a PRECONDITION,
+  // never a claim, so with NOTHING observed codex can not reach the
+  // present-tense sentence, and only an observed receipt unlocks it.
+  //
+  // boundary (capability true, no receipt): NO present-tense claim
+  assert.equal(
+    captureClaimForHarness({ session_recording: true }, 'codex'),
+    'install-pending',
+    'codex with no receipt must NOT claim a present-tense capture (#3428/#3782)')
+  // an observed probe states the future — still not the present tense
+  assert.equal(captureClaimForHarness({ session_recording: true, install_probe_codex: 't' }, 'codex'), 'future')
+  // a receipt for a DIFFERENT harness must not leak the tense across harnesses
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, session_capture_receipt_claude: 't' }, 'codex'),
+    'install-pending')
+  // an observed codex receipt is what unlocks the present-tense sentence
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, session_capture_receipt_codex: '2026-09-17T00:00:00Z' }, 'codex'),
+    'present')
+})
+
 test('#3428: the recording off-switch silences the claim entirely', () => {
   const off = { session_recording: false, session_capture_receipt_claude: 't' }
   assert.equal(captureClaimForHarness(off, 'claude'), 'none')
+})
+
+test('#3819: cursor is capture-capable — the tense follows the RECEIPT, never the flag alone', () => {
+  // #3819 wired tortoise/cursor-hooks/session-end.sh into HARNESS_CAPTURE_SEAM,
+  // so HARNESS_CAPTURE_SUPPORT.cursor derives true and cursor joins the
+  // claude/pi/codex class: it MAY print a capture sentence. The #3428/#3782
+  // invariant is unchanged on BOTH sides of that flag — capability is a
+  // PRECONDITION, never a claim, so with NOTHING observed cursor can not reach
+  // the present-tense sentence, and only an observed receipt unlocks it.
+  //
+  // boundary (capability true, no receipt): NO present-tense claim
+  assert.equal(
+    captureClaimForHarness({ session_recording: true }, 'cursor'),
+    'install-pending',
+    'cursor with no receipt must NOT claim a present-tense capture (#3428/#3782)')
+  // an observed probe states the future — still not the present tense
+  assert.equal(captureClaimForHarness({ session_recording: true, install_probe_cursor: 't' }, 'cursor'), 'future')
+  // a receipt for a DIFFERENT harness must not leak the tense across harnesses
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, session_capture_receipt_codex: 't' }, 'cursor'),
+    'install-pending')
+  // an observed cursor receipt is what unlocks the present-tense sentence
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, session_capture_receipt_cursor: '2026-09-18T00:00:00Z' }, 'cursor'),
+    'present')
 })
 
 test('#3428 / #3575 boundary: Pi cannot reach the present-tense claim today', () => {

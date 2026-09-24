@@ -538,8 +538,9 @@ class TestS3BatchEnrichment:
 
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                # the REAL callee row shape (#4511): ``point_kind``, not ``kind``
                 return [{"id": "pt-1", "content": "flash is the path",
-                         "kind": "statement"}]
+                         "point_kind": "statement"}]
 
         res = v2.search_graph(MockSDK(), {"points": []}, "story")
         assert res["degraded"] is False

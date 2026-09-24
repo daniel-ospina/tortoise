@@ -20,14 +20,27 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Iterable
+from datetime import UTC
 from typing import Any
 
 # ── canonical vocabulary ─────────────────────────────────────
 
 # Display order = definition order (the Setup-guide card renders in this
-# order; the completion gate is order-independent).
+# order; the completion gate is order-independent). "connection-written" is
+# canonical but NOT a card row (CARD_STEPS is the counted, completion-
+# relevant subset — like capture-disclosed).
 STEP_IDS: tuple[str, ...] = (
     "team-named",            # satisfied at org-create (name REQUIRED)
+    # #3451: the MCP-config WRITE — the one step no server can verify. A
+    # self-installing harness writes the config onto the user's disk and then
+    # hands off to a restart (§3); the server cannot observe that file. This
+    # id records the CLIENT's act (an agent-credential checkpoint), never a
+    # server observation, and is in NO completion gate — completion is
+    # unchanged (#3913). It exists so "config written, restart pending" is
+    # distinguishable from "the write never happened": see
+    # ``restart_pending`` (the condition is DERIVED from this edge, never a
+    # second stored field).
+    "connection-written",
     "harness-connected",     # W2: agent harness connected
     "first-points-filed",    # W3 seed: org-anchor Subject filed
     "decide-completed",      # W3 decide (real decide protocol)
@@ -39,13 +52,13 @@ ONBOARDING_STEPS: frozenset[str] = frozenset(STEP_IDS)
 # Card COUNTED subset (⊆ canonical): the rows the Setup-guide card counts
 # toward N-of-M. capture-disclosed is canonical but NEVER a counted row —
 # "capture-disclosed before decide must NOT render '4 of 4'" (#2001 pin).
-# decide-completed and catalog-presented are fork-exclusive display rows
-# (self shows decide; build shows catalog) — per-fork M = 3, never 4.
+# decide-completed is the self-fork display row; the build fork renders only
+# harness-connected + first-points-filed (#3913 — the build gate is no longer
+# catalog-based). Per-fork M = 3 (self) / 2 (build), never 4.
 CARD_STEPS: tuple[str, ...] = (
     "harness-connected",
     "first-points-filed",
     "decide-completed",
-    "catalog-presented",
 )
 
 STATUS_ACTIVE = "active"
@@ -86,11 +99,16 @@ PER_KEY_SEMANTICS.update({
 })
 
 # gate definitions (epic plan §2 WF-4, scope pin 12) — compact-first
+# #3913 (owner ruling 2026-09-20): the build fork completes on the two acts
+# the server OBSERVES — a harness reached the server (harness-connected) and
+# a first point was filed (first-points-filed). `catalog-presented` is no
+# longer required (the id stays accepted on the checkpoint allowlist so
+# existing orgs' completed_steps remain valid — no data migration).
 _GATE_SELF: frozenset[str] = frozenset({
     "team-named", "harness-connected", "first-points-filed", "decide-completed",
 })
 _GATE_BUILD: frozenset[str] = frozenset({
-    "harness-connected", "first-points-filed", "catalog-presented",
+    "harness-connected", "first-points-filed",
 })
 _GATE_COMPACT: frozenset[str] = frozenset({
     "harness-connected", "first-points-filed",
@@ -99,6 +117,23 @@ _GATES: dict[str, frozenset[str]] = {
     FORK_SELF: _GATE_SELF,
     FORK_BUILD: _GATE_BUILD,
 }
+
+# Steps that are NOT evidence of agent onboarding work, and therefore do NOT
+# terminate the grandfathered-window guard (``resolve_wire_completion``,
+# ``recompute_completion``, ``_legacy_grandfathered``):
+#
+# - ``team-named`` is auto-satisfied at org-create (name REQUIRED) — never an
+#   agent act.
+# - ``connection-written`` (#3451) records a CLIENT-side config WRITE that the
+#   server cannot observe. #3913 rests completion on the acts the server
+#   OBSERVES, so a trace of a local file write must not close a completion the
+#   wire still grants — it says nothing about whether a harness ever connected.
+#   Without this exclusion, the §3 checkpoint alone would flip a legitimately
+#   grandfathered org to incomplete before the restart was even attempted.
+#
+# The window closes on the first SERVER-OBSERVED agent step.
+_NON_AGENT_STEPS: frozenset[str] = frozenset(
+    {"team-named", "connection-written"})
 
 # edge labels / node labels
 ONBOARDING_NODE_LABEL = "OnboardingState"
@@ -120,6 +155,34 @@ _NODE_DEFAULTS: dict[str, Any] = {
 def validate_step_id(step_id: str) -> bool:
     """True iff step_id is a canonical onboarding step."""
     return isinstance(step_id, str) and step_id in ONBOARDING_STEPS
+
+
+def restart_pending(completed_steps: Iterable[str]) -> bool:
+    """#3451: the config was WRITTEN and the harness is not yet verified.
+
+    DERIVED from the recorded step set — deliberately NOT a second stored
+    field (no ``restart_pending`` FLOW key, no jsonb key): the projection the
+    resuming agent already reads carries the condition. Both directions are
+    load-bearing:
+
+    - ``["team-named"]`` — the write never happened → False. An abandoned
+      install is NEVER reported as waiting for a restart.
+    - ``["team-named", "connection-written"]`` → True. The config is in
+      place; only the restart verification is outstanding, so §1 hands the
+      user a relaunch instead of re-walking §2–§3.
+    - ``"harness-connected"`` present → False. Verified; nothing is pending.
+
+    The parameter is a KNOWN step collection. A caller that does not know the
+    set (a graph-down read serves the literal ``'unavailable'``) must not call
+    this and report its ``False`` as fact — the projection serves
+    ``'unavailable'`` there instead.
+    """
+    if not isinstance(completed_steps, (list, tuple, set, frozenset)):
+        # A graph-down 'unavailable' marker is not a step set — fail to
+        # "not pending" only for a real collection, never by string scan.
+        return False
+    done = set(completed_steps)
+    return "connection-written" in done and "harness-connected" not in done
 
 
 def completion_gate_satisfied(completed_steps: Iterable[str],
@@ -189,17 +252,18 @@ def resolve_wire_completion(node_status: str | None,
 
     1. node.status == 'complete' → True (server-owned, gate-written).
     2. Grandfathered-window guard: node present but NOT complete, ZERO
-       AGENT step edges (the org-named edge is auto-satisfied at init and
-       never counts), and jsonb onboarding_complete=true → True — kills the
-       poisoned-false window for orgs completing via the legacy wizard
-       during the T2→T7 carve-out. One-directional and self-terminating:
-       the FIRST agent step edge flips control to the node.
+       AGENT step edges (``_NON_AGENT_STEPS`` — the org-named edge is
+       auto-satisfied at init and ``connection-written`` is a client-only
+       trace, so neither counts), and jsonb onboarding_complete=true → True —
+       kills the poisoned-false window for orgs completing via the legacy
+       wizard during the T2→T7 carve-out. One-directional and self-terminating:
+       the FIRST server-observed agent step edge flips control to the node.
     3. Otherwise → False (a node-present org without gate-complete status
        is never re-onboarded via the flag; accept-and-drop makes the jsonb
        writer inert post-W1)."""
     if node_status == STATUS_COMPLETE:
         return True
-    agent_steps = [s for s in completed_steps if s != "team-named"]
+    agent_steps = [s for s in completed_steps if s not in _NON_AGENT_STEPS]
     return bool(raw_complete and not agent_steps)
 
 
@@ -669,7 +733,7 @@ def recompute_completion(graph: Any, org_id: str,
     if node.get("status") == STATUS_COMPLETE:
         return "unchanged-already-complete"
     steps = completed_steps(graph, org_id)
-    agent_steps = [s for s in steps if s != "team-named"]
+    agent_steps = [s for s in steps if s not in _NON_AGENT_STEPS]
     if legacy_complete and not agent_steps:
         write_status(graph, org_id, STATUS_COMPLETE)
         return "complete-grandfathered"
@@ -679,3 +743,387 @@ def recompute_completion(graph: Any, org_id: str,
         write_status(graph, org_id, STATUS_COMPLETE)
         return "complete-gate"
     return "unchanged"
+
+
+# ── #3912: false-completion remediation (the audited exceptions) ─────
+#
+# #3784 made the WRITER fail-closed: a `decide-completed` edge is filed only
+# when the server OBSERVED a decision-shaped write. That fix is FORWARD-ONLY.
+# An org that received the edge before it — the old
+# `mcp_server._maybe_onboarding_auto_complete` filed one on ANY successful
+# point write and wrote `status = complete` directly — keeps both facts
+# forever: `COMPLETED_STEP` edges are first-write-wins (never removed) and
+# `status` is monotonic (complete never regresses). This section is the
+# remediation path, and the ONLY place in the state machine where a
+# completion fact may be REMOVED or the server-owned status may move
+# BACKWARDS.
+#
+# It is EVIDENCE-GATED and FAIL-CLOSED: a repair requires positive proof that
+# the org never evidenced a decision. Everything that could evidence one is
+# treated as "a decision may have happened", so a true completion is never
+# touched — and an unreadable graph is reported as unconfirmable, never
+# declared decision-free.
+#
+# ⚠️ WHAT THE EVIDENCE TEST CAN AND CANNOT PROVE. It proves *no decision
+# evidence SURVIVES in this graph*. It cannot prove a decision was never made:
+# `tortoise_delete_point` can have removed the only decision Point, and
+# `COMPLETED_STEP` edges carry no timestamp, so the two are indistinguishable
+# after the fact. A false positive is therefore possible in exactly that case,
+# and it is why the gate is deliberately generous (any option/criterion/
+# evidence/humanApproval Point, any `*:decision` Event). Operators running
+# `--apply` on a store where decision Points are deleted should treat that as
+# the known residual.
+
+# pointKinds that evidence a decision having been made. The decide protocols
+# ship TWO shapes (#3916): `tortoise_file_decision` / `onboarding/SKILL.md`
+# §5 write `decision` (+ option/evidence); `skills/tortoise-decide` runs an EP
+# option → criterion → evidence set with NO `decision` point. This set is
+# deliberately GENEROUS over both — every member means "do not repair".
+# `pack_registry.DECISION_POINT_KINDS` is NOT reused: it is a storage-ROUTING
+# set (#3916) and would drag in plan/vision/strategy/goal.
+DECISION_EVIDENCE_POINT_KINDS: frozenset[str] = frozenset({
+    "decision", "humanApproval",   # explicit decision points
+    "option", "criterion",         # the EP decide protocols (#3916)
+    "evidence",                    # both protocols' supporting findings
+})
+
+# Event kinds that evidence a decision having been made — the audit stream
+# carries decision events independently of the Point set (`team_7a3b…` holds
+# 155 of them with one decision Point). Matched on the LOCAL name: the
+# extractor vocabulary is namespaced (`core:decision`, extractor_v2.py) and
+# the prefix is only stripped on some writers, so an exact `== "decision"`
+# test would miss namespaced decision events (fail-closed, but narrower than
+# the safety net it claims to be).
+DECISION_EVIDENCE_EVENT_KINDS: frozenset[str] = frozenset({"decision"})
+
+
+def _event_kind_is_decision(kind: str) -> bool:
+    return kind.rsplit(":", 1)[-1] in DECISION_EVIDENCE_EVENT_KINDS
+
+
+REPAIR_REASON_FALSE_DECIDE = "false-decide-completed (#3912)"
+
+
+def _utcnow_iso() -> str:
+    from datetime import datetime
+    return datetime.now(UTC).isoformat()
+
+
+def decision_evidence(graph: Any, org_id: str) -> dict[str, Any]:
+    """Positive evidence that this graph observed a decision (read-only).
+
+    Deliberately over-inclusive (see DECISION_EVIDENCE_POINT_KINDS) so the
+    falseness gate can never repair a completion a decision may have earned.
+    Raises on a graph error — callers must treat that as UNCONFIRMABLE, not
+    as decision-free (fail-closed)."""
+    point_kinds: dict[str, int] = {}
+    res = _run(graph, "MATCH (p:Point) RETURN p.pointKind, count(*)")
+    for kind, count in res.result_set:
+        if kind is not None:
+            point_kinds[kind] = count
+    event_kinds: dict[str, int] = {}
+    res = _run(graph, "MATCH (e:Event) RETURN e.eventKind, count(*)")
+    for kind, count in res.result_set:
+        if kind is not None:
+            event_kinds[kind] = count
+    decision_points = sum(
+        c for k, c in point_kinds.items() if k in DECISION_EVIDENCE_POINT_KINDS)
+    decision_events = sum(
+        c for k, c in event_kinds.items() if _event_kind_is_decision(k))
+    return {
+        "point_kinds": point_kinds,
+        "event_kinds": event_kinds,
+        "decision_points": decision_points,
+        "decision_events": decision_events,
+        "decision_evidenced": bool(decision_points or decision_events),
+    }
+
+
+def find_false_decide_completion(graph: Any, org_id: str,
+                                 *, legacy_complete: bool | None = None,
+                                 ) -> dict[str, Any]:
+    """The #3912 falseness test for ONE graph (read-only, never writes).
+
+    A `decide-completed` edge is FALSE when the graph holds it and holds no
+    decision evidence at all. Verdicts:
+
+    - ``absent``    — no OnboardingState node (nothing to repair)
+    - ``no-edge``   — the node has no decide edge (nothing to repair)
+    - ``true``      — the edge is backed by decision evidence: NEVER touch
+    - ``false``     — the completion is not earned: the edge stands alone
+                      with no decision behind it, OR a previous repair removed
+                      the edge (its stamp is set) and neither the fork-aware
+                      gate nor the grandfathered branch grants the status
+                      (``half_repaired``)
+    - ``unconfirmable`` — no edge, but a `status: complete` that the gate and
+                      the grandfathered branch both deny and NO repair stamp
+                      to attribute it to. Never silently repaired, and never
+                      silently GREEN (the guard exits red) — a lost edge the
+                      repair did not cause is a human decision
+
+    The half-repaired branch is what makes the repair RETRY-SAFE: without it a
+    crash between the edge removal and the status regression would leave the
+    org served complete (status-driven) with no edge left to point at, and the
+    guard would report GREEN over it. The removal stamp is written BEFORE the
+    delete (write-ahead), so our own interrupted repair is always stamp-bearing.
+
+    ``legacy_complete`` is the jsonb mirror when the caller can read it
+    (``None`` = unknown = fail-closed); it takes part in the falseness test so
+    the guard and the repair CONVERGE — a node the repair deliberately left
+    complete because the grandfathered branch covers it is not re-reported as a
+    repair target forever.
+    """
+    node = read_onboarding_node(graph, org_id)
+    if node is None:
+        return {"org_id": org_id, "node_present": False, "verdict": "absent",
+                "false": False, "has_decide_edge": False, "half_repaired": False,
+                "status": None, "completed_steps": [], "evidence": None}
+    steps = completed_steps(graph, org_id)
+    has_edge = "decide-completed" in steps
+    half_repaired = False
+    if has_edge:
+        evidence = decision_evidence(graph, org_id)
+        verdict = "true" if evidence["decision_evidenced"] else "false"
+    else:
+        # Decision evidence is consulted FIRST here too: an org that really
+        # decided but lost the edge is NOT a repair target and must not sit
+        # RED forever (its own evidence proves the completion). NOTE: the
+        # evidence set is deliberately GENEROUS (see
+        # DECISION_EVIDENCE_POINT_KINDS), so an incidental `evidence`/`option`
+        # Point that is not itself a decision also clears the guard here. That
+        # is the fail-closed direction for a READ-only signal (we would rather
+        # not accuse than accuse wrongly); the price is that such an org is
+        # silently GREEN rather than RED, and it is the deliberate trade.
+        evidence = decision_evidence(graph, org_id)
+        # A `status: complete` that neither the fork-aware gate nor the
+        # grandfathered branch grants is not a completion. The stamp is what
+        # ATTRIBUTES it: write-ahead ordering means our own interrupted repair
+        # always has one, so a stamped node is ours to finish — an unstamped
+        # one is not (a lost edge we did not cause is a human decision).
+        false_completion = bool(
+            not evidence["decision_evidenced"]
+            and node.get("status") == STATUS_COMPLETE
+            and not _compact_unknown(node, steps)
+            and not _gate_satisfied(node, steps)
+            and not _legacy_grandfathered(legacy_complete, steps))
+        half_repaired = bool(false_completion
+                             and node.get("decide_completed_removed_at"))
+        if half_repaired:
+            verdict = "false"
+        elif false_completion:
+            verdict = "unconfirmable"
+        else:
+            verdict = "no-edge"
+    return {
+        "org_id": org_id,
+        "node_present": True,
+        "verdict": verdict,
+        "false": verdict == "false",
+        "has_decide_edge": has_edge,
+        "half_repaired": half_repaired,
+        "status": node.get("status"),
+        "fork": node.get("fork"),
+        "completed_steps": sorted(steps),
+        "evidence": evidence,
+    }
+
+
+def _gate_satisfied(node: dict[str, Any], steps: list[str]) -> bool:
+    """The fork-aware completion gate for an already-read node."""
+    return completion_gate_satisfied(
+        steps, node.get("fork"), bool(node.get("compact")),
+        fork_unsure_at=bool(node.get("fork_unsure_at")))
+
+
+def _compact_unknown(node: dict[str, Any], steps: list[str]) -> bool:
+    """True when a MISSING `compact` property could explain the completion.
+
+    The wire gate reads a missing `compact` as False (non-compact), which is
+    the safe READ default — but the repair must not turn that read default into
+    a REGRESSION: two create-on-write seams (`write_fork`,
+    `write_fork_unsure_at`) create the node without it, so a genuinely compact
+    org reached through one of them would be read as non-compact and have its
+    legitimate completion regressed.
+
+    The suppression is valid ONLY when the COMPACT gate is actually satisfied —
+    that is the completion a missing flag could be hiding. When the compact
+    gate is unsatisfied too, an absent flag explains nothing, so the node must
+    not be excused (it falls through to `unconfirmable` / RED rather than
+    silently GREEN).
+    """
+    if "compact" in node and node.get("compact") is not None:
+        return False
+    return completion_gate_satisfied(
+        steps, node.get("fork"), True,
+        fork_unsure_at=bool(node.get("fork_unsure_at")))
+
+
+def _prune_orphan_decide_step(graph: Any, org_id: str) -> None:
+    """Drop the `decide-completed` OnboardingStep node when nothing refers to
+    it. Idempotent, and called on the repair RETRY as well as the removal — a
+    crash between the edge DELETE and the prune would otherwise leave the node
+    behind forever."""
+    _run(graph,
+         f"MATCH (s:{ONBOARDING_STEP_LABEL} "
+         "{org_id: $org_id, step_id: 'decide-completed'}) "
+         f"OPTIONAL MATCH (x)-[e:{COMPLETED_STEP_EDGE}]->(s) "
+         "WITH s, count(e) AS refs WHERE refs = 0 DELETE s",
+         {"org_id": org_id})
+
+
+def _legacy_grandfathered(legacy_complete: bool | None,
+                          steps: list[str]) -> bool:
+    """`resolve_wire_completion`'s grandfathered branch, mirrored read-only.
+
+    THAT branch is a second, independent way an org can be legitimately
+    complete without a decision: node present, status != complete, ZERO AGENT
+    step edges, and the legacy jsonb flag true. It lives in jsonb, which this
+    graph-only module cannot read — so ``None`` means UNKNOWN and is treated
+    as *possibly complete*— the fail-closed direction. Unknown is never the
+    same as false: we would rather leave a status alone than regress a
+    completion the wire still grants.
+    """
+    agent_steps = [s for s in steps if s not in _NON_AGENT_STEPS]
+    return (legacy_complete is not False) and not agent_steps
+
+
+def remove_decide_completed_edge(graph: Any, org_id: str, *,
+                                 reason: str, at: str | None = None) -> bool:
+    """#3912 AUDITED EXCEPTION — delete an unearned `decide-completed` edge.
+
+    `COMPLETED_STEP` edges are first-write-wins: the normal state machine has
+    NO removal path, by design. This is its single sanctioned use. It also
+    prunes the OnboardingStep node when the edge was its last referrer, and
+    stamps the removal on the OnboardingState node so the repair is
+    INSPECTABLE (a later reader can tell a repaired org from one that simply
+    never reached the step).
+
+    Only `decide-completed` is removable — the #3912 defect — never an
+    arbitrary step. Returns True when an edge was actually deleted.
+
+    ORDER MATTERS: the removal stamp is written BEFORE the edge is deleted.
+    Every `_run` is a separate autocommitted round trip, so the stamp is the
+    write-ahead intent — if the process dies after the delete, the stamp is
+    already there and (a) ``find_false_decide_completion`` still sees the node
+    as a repair target, and (b) the retry finishes the status regression.
+    Stamping last would leave a node with no edge, no stamp and
+    ``status: complete`` — invisible to the guard and permanently false.
+    """
+    at = at or _utcnow_iso()
+    with _org_lock(org_id):
+        res = _run(graph,
+                   f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}})"
+                   f"-[e:{COMPLETED_STEP_EDGE}]->"
+                   f"(s:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: $org_id, step_id: 'decide-completed'}) "
+                   "RETURN count(e)",
+                   {"org_id": org_id})
+        removed = bool(res.result_set and res.result_set[0][0])
+        if not removed:
+            return False
+        # Write-ahead intent BEFORE the destructive write.
+        _run(graph,
+             f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+             "SET n.decide_completed_removed_at = $at, "
+             "    n.decide_completed_removed_reason = $reason",
+             {"org_id": org_id, "at": at, "reason": reason})
+        _run(graph,
+             f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}})"
+             f"-[e:{COMPLETED_STEP_EDGE}]->"
+             f"(s:{ONBOARDING_STEP_LABEL} "
+             "{org_id: $org_id, step_id: 'decide-completed'}) "
+             "DELETE e",
+             {"org_id": org_id})
+        _prune_orphan_decide_step(graph, org_id)
+    return True
+
+
+def regress_status(graph: Any, org_id: str, *, reason: str,
+                   at: str | None = None,
+                   to: str = STATUS_ACTIVE) -> bool:
+    """#3912 AUDITED EXCEPTION — move a server-owned status BACKWARDS.
+
+    `write_status` is MONOTONIC by design: a grandfathered/first-FLOW-write
+    org is never re-onboarded, so `complete` never regresses. A status that
+    was earned by a FALSE edge, though, is not a completion at all — leaving
+    it stands the served verdict false even after the edge is removed
+    (`resolve_wire_completion` returns True on `status == complete` alone).
+
+    This is the single sanctioned regression path. It is reachable ONLY for a
+    node a repair has already stamped (``decide_completed_removed_at`` must be
+    set), so it cannot be used as a free-standing status reset, and it only
+    ever moves `complete → active` (the `WHERE` clause makes a second call a
+    no-op). Returns True when the status actually moved.
+    """
+    if to != STATUS_ACTIVE:
+        raise ValueError("regress_status may only target 'active'")
+    at = at or _utcnow_iso()
+    with _org_lock(org_id):
+        res = _run(graph,
+                   f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+                   "WHERE n.status = $complete "
+                   "  AND n.decide_completed_removed_at IS NOT NULL "
+                   "SET n.status = $to, "
+                   "    n.status_regressed_at = $at, "
+                   "    n.status_regressed_from = $complete, "
+                   "    n.status_regressed_reason = $reason "
+                   "RETURN n.status",
+                   {"org_id": org_id, "to": to, "complete": STATUS_COMPLETE,
+                    "at": at, "reason": reason})
+        return bool(res.result_set)
+
+
+def repair_false_decide_completion(graph: Any, org_id: str, *, apply: bool = False,
+                                   at: str | None = None,
+                                   legacy_complete: bool | None = None,
+                                   reason: str = REPAIR_REASON_FALSE_DECIDE,
+                                   ) -> dict[str, Any]:
+    """#3912 — the ONE remediation entry point for a single org graph.
+
+    Re-runs the falseness test itself and REFUSES anything that is not
+    ``false`` (a true completion, an absent node, a missing edge), so a
+    caller cannot repair by request. ``apply=False`` (the default) is a
+    read-only dry run. Returns the finding + the action taken.
+
+    THE STATUS IS REGRESSED ONLY WHEN THE ORG IS NO LONGER COMPLETE WITHOUT
+    THE EDGE. `decide-completed` is required by the SELF gate but NOT by the
+    reduced gates — the compact and (post-#3913) build gates are both
+    `{harness-connected, first-points-filed}` — and the pre-#3784 writer filed
+    the edge on EVERY org, so a legitimately complete compact/build org can
+    carry a spurious decide edge. Removing that edge is correct; regressing
+    its status is not. After the removal the
+    canonical fork-aware gate (and the legacy grandfathered branch — see
+    ``_legacy_grandfathered``) is re-evaluated, and the status is left alone
+    when either still grants completion. A half-repaired node (edge gone,
+    status still complete) is reported ``false`` by
+    ``find_false_decide_completion``, so re-running finishes it.
+
+    ``legacy_complete`` is the jsonb mirror (`hosted_api._get_onboarding_state`)
+    when the caller can read it; ``None`` = unknown = fail-closed.
+
+    A graph read that raises propagates: an unconfirmable org is never
+    reported as repaired.
+    """
+    finding = find_false_decide_completion(
+        graph, org_id, legacy_complete=legacy_complete)
+    if finding["verdict"] != "false":
+        return {**finding, "action": f"skipped-{finding['verdict']}"}
+    if not apply:
+        return {**finding, "action": "would-repair"}
+    removed = False
+    if finding["has_decide_edge"]:
+        removed = remove_decide_completed_edge(graph, org_id, reason=reason,
+                                               at=at)
+    node_after = read_onboarding_node(graph, org_id)
+    steps_after = completed_steps(graph, org_id) if node_after else []
+    _prune_orphan_decide_step(graph, org_id)  # finish an interrupted prune
+    gate_ok = node_after is not None and _gate_satisfied(node_after, steps_after)
+    still_complete = bool(
+        gate_ok or _legacy_grandfathered(legacy_complete, steps_after)
+        or (node_after is not None
+            and _compact_unknown(node_after, steps_after)))
+    regressed = False if still_complete else regress_status(
+        graph, org_id, reason=reason, at=at)
+    return {**finding, "action": "repaired", "edge_removed": removed,
+            "status_regressed": regressed,
+            "still_complete_without_the_edge": still_complete}

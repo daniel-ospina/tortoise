@@ -8,7 +8,7 @@ by the capture loop with the deterministic id ``f"{session_id}_t{i}"`` and a
 ``(:Session)-[:CONTAINS]->(:Point)`` edge — but with NO ``sessionId`` prop and
 NO ``eventId``. ``annotate_ask_hits`` only joined ``Event.eventId`` and
 ``Point.sessionId`` (both empty for turn Points), and ``_render_block`` read
-only ``lme_session_index`` (absent on the product lane) — so the one surviving
+only ``lme_session_index`` (absent on the ask lane) — so the one surviving
 identity (the id prefix / the CONTAINS edge) was never read.
 
 These tests assert on the VALUE the surface CARRIES — never a grep of source
@@ -30,10 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_hosted_api import client as _hosted_client_fixture
 
 from tortoise import retrieval
-from tortoise.sdk import (
-    TortoiseSDK,
+from tortoise.ask_lane import (
     _reset_ask_reader_cache_for_tests,
+    run_ask_lane,
 )
+from tortoise.sdk import TortoiseSDK
 
 #: A real captured-session id (UUID shape); the captures in the measured
 #: defect looked exactly like this — the id survives only as the prefix of
@@ -118,15 +119,17 @@ def _seed_captured_session(sdk: TortoiseSDK, session_id: str,
 
 
 def _install_fake_reader(monkeypatch) -> _FakeReader:
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as ask_lane_mod
 
     fake = _FakeReader()
-    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
+    monkeypatch.setattr(ask_lane_mod, "_default_ask_reader_factory", lambda: fake)
     return fake
 
 
 def _ask(sdk: TortoiseSDK, question: str) -> dict:
-    return sdk.ask(question, question_date="2026-08-29")
+    # #3849: the ask pipeline is EVAL-ONLY — the surface under test is the
+    # lane entry point, not a (removed) SDK method.
+    return run_ask_lane(sdk, question, question_date="2026-08-29")
 
 
 # ── 1. The ask response NAMES the retrieved session ────────────────────────
@@ -360,7 +363,9 @@ def test_ask_lane_annotation_does_not_touch_the_dedup_pool():
     """POOL SAFETY: the derived identity must NOT be attached as the
     ``session_id`` key on ask-lane hits, because that key IS the ask lane's
     ``dedup_pool`` bucket key — attaching it re-buckets the pool and changes
-    which hits fit the 8k/32KiB reader window (measured: the eval lane's
+    which hits fit the resolved ask-lane reader window (default
+    200/200/16000/derived since #4105; 8k/32KiB before it) (measured: the
+    eval lane's
     ``:Session`` ids are internal ``lme:{qid}:sNN`` values, so the join would
     re-bucket every dataset hit). The identity rides read-only instead.
     """
@@ -531,14 +536,16 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     (the pool ``assemble_context`` was handed), so the test cannot pass
     vacuously on an empty pool.
 
-    ❌ MUTATION KILLED: ``_distinct_session_ids(hits)`` in ``ask()`` instead of
+    ❌ MUTATION KILLED: ``_distinct_session_ids(hits)`` in ``run_ask_lane()``
+    instead of
     ``_distinct_session_ids(assembled)`` → ``['<A>', '<B>']``, RED.
     """
     sdk = _new_sdk()
     _seed_captured_session(sdk, SID_A, TURNS_A)
     _seed_captured_session(sdk, SID_B, TURNS_B)
 
-    # ``assemble_context`` is a function-local import inside ``ask()``, so the
+    # ``assemble_context`` is a function-local import inside
+    # ``run_ask_lane()``, so the
     # seam to patch is the retrieval module attribute it rebinds from.
     real_assemble = retrieval.assemble_context
     captured: dict = {}

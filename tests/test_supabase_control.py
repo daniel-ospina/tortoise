@@ -358,17 +358,18 @@ class TestResolveApiKey:
         # points counter counts graph nodes → graph_size_cap (#310 GAP-B)
         assert team["max_points"] == 500000
         assert team["max_api_keys"] > 0
-        assert team["max_sessions"] == 1000
+        # #4010: sessions are unlimited for every tier — always None.
+        assert team["max_sessions"] is None
 
     def test_free_tier_quota_falls_back_to_pricing(self, fake):
         """0006 teams has no max_api_keys/max_sessions columns → pricing
-        defaults (mirrors registry path)."""
+        resolves max_api_keys; max_sessions is unlimited (#4010)."""
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team["max_users"] == 1
         assert team["max_graphs"] == 1
         assert team["max_points"] == 10000
-        assert team["max_sessions"] == 1000
+        assert team["max_sessions"] is None
         assert team["max_api_keys"] > 0
 
     def test_max_points_override_honored_over_graph_size_cap(self, fake):
@@ -594,6 +595,14 @@ class TestResolveApiKeyFailSoft:
             fake.missing_columns = {"organizations": {"dashboard_key_login"}}
             team = asyncio.run(_session_user_org(request, user))
             assert team["dashboard_key_login"] is True
+            # #4010: the session-lane resolver, like every other limit
+            # builder, must carry `max_sessions` — present with None
+            # (unlimited). A missing key is fail-closed at the sessions gate
+            # (#310 GAP-B), so this is a contract assertion, not a nicety.
+            assert "max_sessions" in team, (
+                "_session_user_org dropped max_sessions — a sessions-gated "
+                "write through this dict would 500 (#4010)")
+            assert team["max_sessions"] is None
         finally:
             monkeypatch.undo()
 
@@ -683,6 +692,32 @@ class TestResolveApiKeyFailSoft:
         row = _orgs_row_fail_soft(fake, "team-free-001", select=_QUOTA_SELECT,
                                    additive_tiers=[])
         assert row["deleted_at"] is None
+
+    def test_org_billing_state_reads_the_row_and_fails_soft(self, fake):
+        """#4640: the forward twin of org_id_for_stripe_customer — the portal
+        read and the checkout guard both consume it. Absent row → {}; a
+        pre-0012 schema degrades the additive columns to None while the 0006
+        base ``stripe_customer_id`` survives."""
+        from tortoise.supabase_control import org_billing_state
+
+        fake.tables["organizations"][0].update({
+            "stripe_customer_id": "cus_4640",
+            "subscription_status": "active",
+            "customer_email": "owner@example.com",
+        })
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] == "active"
+        assert state["customer_email"] == "owner@example.com"
+        # absent row → no customer anywhere
+        assert org_billing_state(fake, "no-such-org") == {}
+        # pre-0012 drift: the additive tier drops, the base column survives
+        fake.missing_columns = {"organizations": {
+            "subscription_status", "customer_email"}}
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] is None
+        assert state["customer_email"] is None
 
     def test_resolve_api_key_carries_suspension_state(self, fake):
         """O/I/T target 2: with the columns PRESENT, suspension state still
@@ -1457,6 +1492,104 @@ class TestGithubCredentials:
                                      token_enc="x", org="acme")
 
 
+# ── Real-client request encoding (#3686 review) ─────────────────────────────
+
+class TestRealQueryParamEncoding:
+    """#3686 review: ``query`` builds its query string in a dict keyed by
+    COLUMN, so two conditions on the SAME column overwrote each other —
+    ``created_at gt since`` was silently DROPPED when a ``created_at lt until``
+    followed, and the analytics read lost its lower bound while still reporting
+    a confident count. ``FakeControlPlane`` applies ``filters`` as a list, so no
+    fake-based test could ever catch it; these assert the transmitted params."""
+
+    @staticmethod
+    def _capturing_cp():
+        from tortoise.supabase_control import SupabaseControlPlane
+        cp = SupabaseControlPlane(url="https://x.supabase.co", service_key="k")
+        seen: dict = {}
+
+        class _Resp:
+            status_code = 200
+            content = b"[]"
+
+            def json(self):
+                return []
+
+        class _HTTP:
+            def get(self, url, params=None, headers=None, **kw):
+                seen["params"] = dict(params or {})
+                seen["url"] = url
+                return _Resp()
+
+        cp._http = _HTTP()
+        return cp, seen
+
+    def test_two_conditions_on_one_column_both_survive(self):
+        cp, seen = self._capturing_cp()
+        cp.query("analytics_events",
+                 filters=[("org_id", "eq", "o1"),
+                          ("created_at", "gt", "2026-09-01T00:00:00+00:00"),
+                          ("created_at", "lt", "2026-10-01T00:00:00+00:00")])
+        p = seen["params"]
+        assert p["org_id"] == "eq.o1", p
+        # Collapsed into one AND group — neither bound is left as a bare key.
+        assert "created_at" not in p, p
+        assert p["and"] == (
+            "(created_at.gt.2026-09-01T00:00:00+00:00,"
+            "created_at.lt.2026-10-01T00:00:00+00:00)"), p
+
+    def test_single_condition_columns_keep_the_flat_form(self):
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "eq", 1), ("b", "neq", 2)])
+        assert seen["params"]["a"] == "eq.1", seen["params"]
+        assert seen["params"]["b"] == "neq.2", seen["params"]
+        assert "and" not in seen["params"], seen["params"]
+
+    def test_is_null_and_multi_column_groups_coexist(self):
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "is", None),
+                               ("c", "gt", 1), ("c", "lt", 9),
+                               ("d", "eq", "z")])
+        p = seen["params"]
+        assert p["a"] == "is.null", p
+        assert p["d"] == "eq.z", p
+        assert p["and"] == "(c.gt.1,c.lt.9)", p
+
+    def test_unsupported_op_still_raises(self):
+        cp, _ = self._capturing_cp()
+        with pytest.raises(ValueError):
+            cp.query("t", filters=[("a", "wat", 1)])
+
+    def test_reserved_chars_in_a_grouped_value_are_quoted(self):
+        """A ``,`` or ``)`` inside a grouped value is PostgREST SYNTAX, not data:
+        ``a.gt.x,y`` is two conditions and ``a.gt.x)`` closes the group. Values
+        are quoted when they carry a reserved character (re-review P2)."""
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "gt", "x,y"), ("a", "lt", "z)")])
+        assert seen["params"]["and"] == '(a.gt."x,y",a.lt."z)")', seen["params"]
+
+    def test_an_embedded_quote_is_escaped(self):
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "eq", 'he said "hi"'), ("a", "neq", 1)])
+        assert seen["params"]["and"] == '(a.eq."he said \\"hi\\"",a.neq.1)', seen["params"]
+
+    def test_a_SINGLE_condition_on_and_is_refused(self):
+        """Cycle 3 widened the guard from multi-condition-only to every count.
+        Without this case the narrower form passes the suite (review cycle 4
+        mutation-verified), because the multi-condition test is rejected by
+        BOTH forms."""
+        cp, _ = self._capturing_cp()
+        with pytest.raises(ValueError, match="collides"):
+            cp.query("t", filters=[("and", "eq", "x")])
+
+    def test_a_grouped_column_named_and_is_refused(self):
+        """``and`` is the logic-tree key itself; grouping onto it would silently
+        drop the flat ``and=`` condition."""
+        cp, _ = self._capturing_cp()
+        with pytest.raises(ValueError, match="collides"):
+            cp.query("t", filters=[("and", "gt", 1), ("and", "lt", 2)])
+
+
 # ── Fake adapter semantics (query dialect parity) ───────────────────────────
 
 class TestFakeControlPlane:
@@ -1470,6 +1603,22 @@ class TestFakeControlPlane:
         assert cp.query("t", filters=[("b", "is", None)]) == [{"a": 1, "b": None}]
         assert cp.query("t", filters=[("a", "eq", 1)], select=["a"]) == [
             {"a": 1}, {"a": 1}]
+
+    def test_neq_excludes_null_like_sql(self):
+        """#4140: PostgREST `neq`/`<>` has SQL three-valued semantics — a
+        NULL column is NOT `<> value` (it is NULL → excluded). The Pythonic
+        `r.get(col) != value` would KEEP the NULL row, which is how a
+        `created_via=neq.bootstrap` filter could silently over-exempt a
+        legacy NULL durable key. Pinned directly so a revert of the
+        NULL-excluding semantics reddens here."""
+        cp = FakeControlPlane({"t": [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"},
+        ]})
+        # b == NULL never matches `b <> 'x'` (SQL: NULL <> 'x' is NULL)
+        assert cp.query("t", filters=[("b", "neq", "x")]) == []
+        assert cp.query("t", filters=[("a", "neq", 1)]) == [{"a": 2, "b": "x"}]
+        # ...and `col <> NULL` matches NOTHING (SQL: every comparison is NULL)
+        assert cp.query("t", filters=[("b", "neq", None)]) == []
 
     def test_gt_lt_filters_null_excluding(self):
         """#765 dialect: gt/lt mirror SQL NULL semantics — a NULL column
@@ -1486,6 +1635,82 @@ class TestFakeControlPlane:
             {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
         assert cp.query("t", filters=[("b", "lt", "z")]) == [
             {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+
+    def test_gte_lte_filters_null_excluding(self):
+        """`gte` matters: the activation scorecard's analytics leg reads its
+        window with `gte since` / `lt until`, so the real client and this fake
+        must agree on the operator. Before this test the fake RAISED
+        ``unsupported filter op 'gte'`` — a trap for the next test that wires
+        the two together (review cycle 6, F8)."""
+        cp = FakeControlPlane({"t": [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"}, {"a": 3, "b": "y"},
+        ]})
+        # Boundary is INCLUSIVE for gte, EXCLUSIVE for lt.
+        assert cp.query("t", filters=[("a", "gte", 2)]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("a", "gt", 2)]) == [{"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("a", "lte", 2)]) == [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"}]
+        # NULL never matches an ordered comparison.
+        assert cp.query("t", filters=[("b", "gte", "a")]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("b", "lte", "z")]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        # ...and the window the scorecard actually issues.
+        rows = [{"c": "2026-09-15T00:00:00+00:00"},
+                {"c": "2026-09-16T00:00:00+00:00"},
+                {"c": "2026-09-17T00:00:00+00:00"}]
+        cp2 = FakeControlPlane({"e": rows})
+        assert cp2.query("e", filters=[
+            ("c", "gte", "2026-09-16T00:00:00+00:00"),
+            ("c", "lt", "2026-09-17T00:00:00+00:00")]) == [
+            {"c": "2026-09-16T00:00:00+00:00"}]
+
+    def test_matches_helper_agrees_with_the_get_path(self):
+        """`_matches` (the PATCH/DELETE path) must mirror the GET semantics.
+
+        This test used to be named for an agreement it never checked: it issued
+        no GET at all. It now runs the SAME filter set through both paths, over
+        a fixture that includes a NULL-valued row, and asserts the two select
+        the same rows — which is the property the name claims (review cycle 7,
+        P3-1/P3-2). The NULL row matters: `gte` over NULL must be "no match"
+        (SQL semantics), not a TypeError.
+        """
+        rows = [
+            {"c": "2026-09-15T00:00:00+00:00", "n": 1},
+            {"c": "2026-09-16T00:00:00+00:00", "n": 2},
+            {"c": "2026-09-17T00:00:00+00:00", "n": 3},
+            {"c": None, "n": 4},
+        ]
+        window = [("c", "gte", "2026-09-16T00:00:00+00:00"),
+                  ("c", "lt", "2026-09-17T00:00:00+00:00")]
+
+        get_cp = FakeControlPlane({"e": [dict(r) for r in rows]})
+        got_get = get_cp.query("e", filters=window)
+
+        patch_cp = FakeControlPlane({"e": [dict(r) for r in rows]})
+        patch_cp.query("e", method="PATCH", json_body={"seen": True},
+                       filters=window)
+        got_patch = [r for r in patch_cp.tables["e"] if r.get("seen")]
+
+        assert got_get == [{"c": "2026-09-16T00:00:00+00:00", "n": 2}], got_get
+        # The two paths must AGREE — this is the assertion the name promised.
+        assert [r["n"] for r in got_get] == [r["n"] for r in got_patch], (
+            got_get, got_patch)
+        # ...and neither may match the NULL row (SQL: NULL never compares).
+        assert 4 not in [r["n"] for r in got_get], got_get
+        assert 4 not in [r["n"] for r in got_patch], got_patch
+
+    def test_matches_gte_excludes_a_null_row(self):
+        """Isolated so the NULL rule on the PATCH/DELETE path is pinned on its
+        own: removing it raised TypeError instead of excluding the row, and the
+        whole `TestFakeControlPlane` class still passed (review cycle 7, P3-1)."""
+        cp = FakeControlPlane({"e": [{"c": None, "n": 1},
+                                     {"c": "2026-09-16T00:00:00+00:00", "n": 2}]})
+        cp.query("e", method="PATCH", json_body={"seen": True},
+                 filters=[("c", "gte", "2026-09-16T00:00:00+00:00")])
+        marked = [r["n"] for r in cp.tables["e"] if r.get("seen")]
+        assert marked == [2], cp.tables["e"]
 
     def test_patch_and_post(self):
         cp = FakeControlPlane({"t": [{"id": "k1", "x": None}]})
@@ -1997,27 +2222,38 @@ class TestPerRequestTimeout:
 class TestMeteringSeam:
     """metering_records read/increment via the seam (the registry path is
     deleted post-flip; these cover the Supabase branches the reviewer noted
-    had zero direct tests)."""
+    had zero direct tests).
+
+    #3825: the ledger key is the WINDOW START (``period_start``), a
+    ``timestamptz`` — not a ``'YYYY-MM'`` month label. The literals below are
+    ISO-8601 UTC instants, exactly the shape ``metering._current_period``
+    hands the seam.
+    """
+
+    #: ``[start, end)`` for the window these tests write to.
+    W1 = ("2026-08-01T00:00:00+00:00", "2026-09-01T00:00:00+00:00")
 
     def test_metering_get_absent_is_zero(self):
         from tortoise.supabase_control import metering_get  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         fake = FakeControlPlane({"metering_records": []})
-        assert metering_get(fake, "team-1", "2026-08") == 0
+        assert metering_get(fake, "team-1", self.W1[0]) == 0
 
     def test_metering_increment_creates_and_reads_back(self):
         from tortoise.supabase_control import metering_get, metering_increment  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
+        start, end = self.W1
         fake = FakeControlPlane({"metering_records": []})
-        n = metering_increment(fake, "team-1", "2026-08", 3)
+        n = metering_increment(fake, "team-1", start, end, 3)
         assert n == 3
-        assert metering_get(fake, "team-1", "2026-08") == 3
+        assert metering_get(fake, "team-1", start) == 3
         # increment again → 5
-        assert metering_increment(fake, "team-1", "2026-08", 2) == 5
-        # different period isolated
-        assert metering_get(fake, "team-1", "2026-07") == 0
+        assert metering_increment(fake, "team-1", start, end, 2) == 5
+        # a different WINDOW is isolated — the key is the window start, not the
+        # month label
+        assert metering_get(fake, "team-1", "2026-07-01T00:00:00+00:00") == 0
 
     def test_metering_rpc_called_with_args(self):
         """The atomic increment goes through the RPC path (not GET-PATCH)."""
@@ -2031,30 +2267,37 @@ class TestMeteringSeam:
 
             def rpc(self, fn, body):
                 self.rpc_calls.append((fn, body))
-                # emulate the SQL function: upsert + increment
+                # emulate the SQL function: upsert + increment on the WINDOW
+                # START (#3825), the real PK
                 rows = self.tables["metering_records"]
                 row = next((r for r in rows
                             if r["org_id"] == body["p_org_id"]
-                            and r["period"] == body["p_period"]), None)
+                            and r.get("period_start")
+                            == body["p_period_start"]), None)
                 if row:
                     row["write_ops"] += body["p_n"]
                 else:
                     rows.append({"org_id": body["p_org_id"],
-                                 "period": body["p_period"],
+                                 "period_start": body["p_period_start"],
+                                 "period_end": body["p_period_end"],
                                  "write_ops": body["p_n"]})
                 return None  # PostgREST minimal — no echo
 
         spy = _Spy()
-        assert metering_increment(spy, "team-1", "2026-08", 2) == 2
-        assert metering_increment(spy, "team-1", "2026-08", 4) == 6
+        start, end = self.W1
+        assert metering_increment(spy, "team-1", start, end, 2) == 2
+        assert metering_increment(spy, "team-1", start, end, 4) == 6
         # #953: the RPC body carries p_nodes_written (epic #909 W-4 commit
-        # cost driver; default 0 on plain increments).
+        # cost driver; default 0 on plain increments). #3825: the month label
+        # is replaced by the half-open WINDOW.
         assert spy.rpc_calls == [
             ("metering_increment", {"p_org_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 2,
+                                    "p_period_start": start,
+                                    "p_period_end": end, "p_n": 2,
                                     "p_nodes_written": 0}),
             ("metering_increment", {"p_org_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 4,
+                                    "p_period_start": start,
+                                    "p_period_end": end, "p_n": 4,
                                     "p_nodes_written": 0}),
         ]
 
@@ -2073,10 +2316,12 @@ class TestMeteringSeam:
                 return None
 
         spy = _Spy()
-        metering_increment(spy, "team-1", "2026-08", 3, nodes_written=5)
+        start, end = self.W1
+        metering_increment(spy, "team-1", start, end, 3, nodes_written=5)
         assert spy.rpc_calls == [
             ("metering_increment", {"p_org_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 3,
+                                    "p_period_start": start,
+                                    "p_period_end": end, "p_n": 3,
                                     "p_nodes_written": 5}),
         ]
 
@@ -2108,7 +2353,7 @@ class TestMeteringSeam:
                 return super().query(table, *args, **kwargs)
 
         fake = _ReadbackFails()
-        n = metering_increment(fake, "team-1", "2026-08", 3)
+        n = metering_increment(fake, "team-1", self.W1[0], self.W1[1], 3)
         assert n == 3
         # the atomic increment really did land server-side
         assert fake.tables["metering_records"][0]["write_ops"] == 3
@@ -2122,7 +2367,8 @@ class TestMeteringSeam:
         from tests.fake_control_plane import ErrorControlPlane
 
         with pytest.raises(RuntimeError):
-            metering_increment(ErrorControlPlane(), "team-1", "2026-08", 1)
+            metering_increment(ErrorControlPlane(), "team-1", self.W1[0],
+                               self.W1[1], 1)
 
 
 # ── resolve_org_limits Supabase mode (PR #911 review P2) ───────────────────
@@ -2153,6 +2399,14 @@ class TestResolveTeamLimitsSupabase:
         assert limits["tier"] == "free"
         assert limits["max_users"] == 1
         assert limits["max_points"] == 10000
+        # #4010: the Supabase branch must carry EVERY resource key and
+        # sessions has no cap at all. (This branch is the one the registry-
+        # forced contract test in tests/test_issue_4010_sessions_unlimited.py
+        # cannot reach — it is the resolver the guard used to miss.)
+        from tortoise.quota import _RESOURCE_LIMIT_KEYS
+        missing = [k for k in _RESOURCE_LIMIT_KEYS.values() if k not in limits]
+        assert not missing, f"Supabase resolve_org_limits is missing {missing}"
+        assert limits["max_sessions"] is None
 
     def test_supabase_mode_preserves_none_as_unlimited(self, monkeypatch):
         """NULL max_users/max_graphs = UNLIMITED (registry parity, PR #911
@@ -3319,3 +3573,32 @@ class TestOnboardingEmailMarker:
         assert team.get("subscription_status") == "active"   # billing tier intact
         assert team.get("suspended_at") == "2026-09-01T00:00:00+00:00"
         assert any("additive" in r.message for r in caplog.records)
+
+
+# ── The abuse enforcement consumer of the same-column grouping (#3686) ─────
+
+def test_rule_event_between_passes_both_bounds_to_the_control_plane():
+    """The abuse enforcement path must hand BOTH `created_at` bounds to the
+    client. Before the same-column grouping fix in #3686 the second condition
+    overwrote the first in the flat PostgREST query string, so `continuity` was
+    essentially always True and the enforcement outcome changed silently. This
+    pins the CONSUMER's side of the fix (the wire grouping itself is pinned by
+    `TestRealQueryParamEncoding`), so a future edit cannot drop a bound again.
+    """
+    from datetime import UTC, datetime
+
+    from tortoise.abuse import SupabaseAbuseStore
+
+    seen: list[list] = []
+
+    class _CapturingCP:
+        def query(self, table, **kw):
+            seen.append(kw.get("filters"))
+            return []
+
+    store = SupabaseAbuseStore(_CapturingCP())
+    after = datetime(2026, 9, 1, tzinfo=UTC)
+    before = datetime(2026, 9, 2, tzinfo=UTC)
+    assert store.rule_event_between("org-x", "point_create", after, before) is False
+    conds = [c for c in seen[0] if c[0] == "created_at"]
+    assert [op for _, op, _ in conds] == ["gt", "lte"], seen[0]

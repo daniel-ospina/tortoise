@@ -158,12 +158,19 @@ if _OriginalFalkorDB is not None:
                 # resolves the INNER redislite client — the wrapper itself
                 # has no socket_file (redislite's FalkorDB keeps its server
                 # on self.client).
-                from tortoise.embedded_lifecycle import owner_socket_of, record_owner
+                from tortoise.embedded_lifecycle import owner_socket_of
                 # Capture the socket path NOW: redislite mutates the inner
                 # client during close(), so re-deriving it at release time
                 # can yield None and silently strand the record.
                 self._t_socket_file = owner_socket_of(self)
-                record_owner(self._t_socket_file)
+                # #4487: the owner RECORD itself is written by the
+                # `RedisMixin.__init__` patch in embedded_lifecycle — which
+                # covers RAW redislite constructions too, not just this
+                # guarded one. Do NOT also call `record_owner` here: the
+                # record is refcounted per (process, socket path), so two
+                # writers for one client would leave the record (with a LIVE
+                # pid) pinning the server after close() released only one
+                # claim — a fail-closed leak the reaper could never clear.
             # #1371: route the atexit seam through the fast-close wrapper
             # (ephemeral test servers) so interpreter exit does not spend
             # 3-4s per leaked server on redislite's response-waiting close.
@@ -179,7 +186,11 @@ if _OriginalFalkorDB is not None:
             apply (non-ephemeral path, flag unset, other clients connected,
             or the socket is unreachable).
             """
-            if atexit_fast_close(getattr(self, "client", self)):
+            # #4214: `at_exit=True` — this registration is the `atexit`
+            # seam only, so a spent exit budget stops the cascade instead of
+            # letting it block `Py_FinalizeEx`.
+            if atexit_fast_close(getattr(self, "client", self),
+                                 at_exit=True):
                 self._t_closed = True
                 # #3599: the fast path bypasses close()/_t_close — release
                 # the owner record here so a normal exit never leaves a

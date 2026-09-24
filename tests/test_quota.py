@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -54,11 +55,12 @@ class TestResolveTeamLimits:
         tid = _find_org_id(reg_sdk)
         limits = resolve_org_limits(tid)
         # team_create writes max_api_keys from pricing.json free tier (=2),
-        # but NOT max_points / max_sessions — defaults apply (points from
-        # pricing max_graph_nodes=10000; sessions flat 1000 per #310).
+        # but NOT max_points — the pricing default applies (max_graph_nodes
+        # = 10000). max_sessions has no default at all: it is UNLIMITED per
+        # #4010 (present-but-None).
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
-        assert limits["max_sessions"] == 1000
+        assert limits["max_sessions"] is None
         assert limits["max_users"] == 1
         assert limits["max_graphs"] == 1
 
@@ -234,7 +236,10 @@ class TestNonePreservation:
         assert limits["max_users"] == 2
 
     def test_team_limits_from_node_explicit_zero(self):
-        """P1: explicit 0 is preserved, not conflated with missing."""
+        """P1: explicit 0 is preserved, not conflated with missing.
+
+        #4010: max_sessions is the exception — sessions have no cap, so a
+        stored 0 is NOT honoured (it would be a zero-session cap)."""
         from tortoise.hosted_api import _org_limits_from_node
         node = {"id": "t3", "tier": "free",
                 "max_points": 0, "max_api_keys": 0, "max_sessions": 0}
@@ -243,8 +248,9 @@ class TestNonePreservation:
             f"Explicit 0 should be 0, got {limits['max_points']!r}")
         assert limits["max_api_keys"] == 0, (
             f"Explicit 0 should be 0, got {limits['max_api_keys']!r}")
-        assert limits["max_sessions"] == 0, (
-            f"Explicit 0 should be 0, got {limits['max_sessions']!r}")
+        assert limits["max_sessions"] is None, (
+            f"sessions are unlimited (#4010) — a stored 0 must not cap them, "
+            f"got {limits['max_sessions']!r}")
 
     def test_team_limits_from_node_free_tier_defaults(self):
         """Missing fields on free-tier node → pricing-aligned defaults."""
@@ -253,7 +259,7 @@ class TestNonePreservation:
         limits = _org_limits_from_node(node)
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
-        assert limits["max_sessions"] == 1000
+        assert limits["max_sessions"] is None  # unlimited (#4010)
 
 
 # ── #947 (epic #909 slice 2): sessions branch + is_episodic + constants ──
@@ -262,19 +268,21 @@ class TestSessionsQuota:
     """#947 P0: the sessions branch counts Session nodes, NOT all nodes.
 
     Pre-fix ``_count_resource("sessions")`` fell through to ``MATCH (n)`` —
-    ~25 nodes per captured session → false 402 after ~40 captures. The
-    fixture follows conftest.provision_test_user's convention (direct
-    max_sessions write on the Team node — no tier gives 40, DE2E-7).
+    ~25 nodes per captured session → false 402 after ~40 captures. #4010: the
+    stored ``t.max_sessions`` is no longer honoured as a cap (sessions are
+    unlimited for every tier), so the same fixture that used to gate the 41st
+    capture now stores it — the #947 count property is unchanged.
     """
 
-    def test_sessions_count_returns_session_nodes_and_41st_402(
+    def test_sessions_count_returns_session_nodes_and_41st_lands(
             self, reg_sdk, tmp_path):
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
         tid = _find_org_id(reg_sdk)
         # Inject max_sessions=40 on the Team node (provision_test_user
-        # convention — direct write, DE2E-7 quota fixture).
+        # convention — direct write, DE2E-7 quota fixture). #4010: a direct
+        # stored write is deliberately NOT honoured as a cap.
         reg_sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_sessions=40",
             params={"id": tid},
@@ -300,12 +308,16 @@ class TestSessionsQuota:
             assert all_nodes > 40, (
                 f"expected >40 total nodes ({all_nodes}) — the fixture must "
                 "distinguish sessions from the pre-fix all-nodes count")
-            # Resolver picks the injected limit up
+            # #4010: the stored 40 is NOT honoured — the resolver yields None.
             limits = resolve_org_limits(tid)
-            assert limits["max_sessions"] == 40
-            # 41st session → 402-equivalent (DE2E-7)
-            with pytest.raises(QuotaExceededError, match="sessions limit reached"):
-                enforce_org_limit(limits, "sessions", sdk=tenant)
+            assert limits["max_sessions"] is None, (
+                "a stored max_sessions=40 was honoured as a cap — the #4010 "
+                "trap is open")
+            enforce_org_limit(limits, "sessions", sdk=tenant)  # no raise
+            # 41st session is STORED, not refused (was a 402 before #4010).
+            tenant.capture_session(
+                [{"role": "user", "content": "okay"}], session_id="s40")
+            assert count_org_usage(tid, "sessions", sdk=tenant) == 41
         finally:
             tenant.close()
 
@@ -644,3 +656,194 @@ class TestBudgetConstants:
         # prevents wiring the wrong 50, plan §4.4).
         assert MAX_PAYLOAD_POINTS == MAX_VALUE_POINTS_PER_SESSION["ceiling"]  # noqa: SIM300
         assert MAX_PAYLOAD_POINTS == 50  # explicit value, not derived
+
+
+# ── The ask-lane bounded-execution cluster (#1987 P2, retained by #3849) ───
+# Moved here from tests/test_ask_api.py, which #3849 deleted with the REST
+# surface. `run_ask_bounded` and the exec-floor semantics it implements are
+# RETAINED in tortoise/quota.py (documented RETIRED-but-not-purged pending
+# #3849 §7 D5) — so the guarantee stays pinned rather than going untested
+# with the file that happened to host it. It needs no REST surface: it
+# drives `run_ask_bounded` directly.
+
+def test_ask_exec_floor_guarantees_execution(monkeypatch):
+    """#1987 P2: a queued ask released before the queue-wait cap gets a real
+    execution window (completes) rather than a near-zero remaining budget; a
+    request released past the cap 504s at acquire WITHOUT starting the call
+    (no wasted model call)."""
+    import asyncio
+
+    import tortoise.quota as quota_mod
+
+    monkeypatch.setattr(quota_mod, "_ASK_TIMEOUT_S", 3.0)
+    monkeypatch.setattr(quota_mod, "_ASK_EXEC_FLOOR_S", 1.0)
+
+    calls = {"n": 0}
+
+    def _fn():
+        calls["n"] += 1
+        return "ok"
+
+    async def _queue_and_release(release_at: float):
+        loop = asyncio.get_running_loop()
+        sem = quota_mod._ask_state_for_loop(loop)["sem"]
+        # hold all 8 global slots → the ask queues behind the semaphore
+        for _ in range(quota_mod._ASK_GLOBAL_SEMAPHORE_SIZE):
+            await sem.acquire()
+        task = asyncio.ensure_future(quota_mod.run_ask_bounded(_fn, None))
+        await asyncio.sleep(release_at)
+        for _ in range(quota_mod._ASK_GLOBAL_SEMAPHORE_SIZE):
+            sem.release()
+        return await task
+
+    # released at ~1.5s (< the 2.0s queue-wait cap) → acquires, remaining
+    # ~1.5s >= the 1.0s execution floor → completes (no bogus 504)
+    assert asyncio.run(_queue_and_release(1.5)) == "ok"
+    assert calls["n"] == 1
+
+    # control: released at ~2.5s (> the 2.0s cap) → 504 at acquire, the call
+    # never starts (no wasted model call)
+    calls["n"] = 0
+    with pytest.raises(quota_mod.AskBoundedTimeoutError):
+        asyncio.run(_queue_and_release(2.5))
+    assert calls["n"] == 0
+
+
+# ── #4355: the single-slot predicate must agree with the count, both lanes ──
+
+class TestApiKeySlotParity:
+    """`api_key_occupies_slot` is NOT a fourth count — it is the api_keys cap
+    predicate applied to ONE id, and the rotate primitive credits a slot on the
+    strength of it. The credit is only sound if the predicate accepts EXACTLY
+    the rows `_count_resource(org, 'api_keys')` charges for. These tests pin
+    that identity on both lanes over the whole state space that matters:
+    live-durable, live-bootstrap (cap-exempt), revoked, expired, and the
+    legacy NULL `created_via` (durable, must count — fail-closed).
+    """
+
+    def test_registry_lane_count_equals_accepted_ids(self, reg_sdk):
+        from tortoise.quota import _count_resource, api_key_occupies_slot
+
+        tid = _find_org_id(reg_sdk)
+        reg = reg_sdk._get_registry()
+        now = datetime.now(UTC)
+        states = {
+            "live-durable": {"revoked_at": None, "created_via": "dashboard",
+                             "expires_at": None},
+            "live-bootstrap": {"revoked_at": None, "created_via": "bootstrap",
+                               "expires_at": (now + timedelta(hours=24)).isoformat()},
+            "live-legacy-null": {"revoked_at": None, "created_via": None,
+                                 "expires_at": None},
+            "revoked": {"revoked_at": now.isoformat(), "created_via": "dashboard",
+                        "expires_at": None},
+            "expired": {"revoked_at": None, "created_via": "dashboard",
+                        "expires_at": (now - timedelta(days=1)).isoformat()},
+            "expired-bootstrap": {"revoked_at": None, "created_via": "bootstrap",
+                                  "expires_at": (now - timedelta(days=1)).isoformat()},
+        }
+        for name, s in states.items():
+            reg.query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$h, "
+                "key_prefix:$kp, created_by:'u1', created_at:$ca, "
+                "revoked_at:$ra, expires_at:$ea, created_via:$cv})",
+                params={"id": f"k-{name}", "tid": tid, "h": f"h-{name}",
+                        "kp": f"p-{name}", "ca": now.isoformat(),
+                        "ra": s["revoked_at"], "ea": s["expires_at"],
+                        "cv": s["created_via"]},
+            )
+
+        count = _count_resource(tid, "api_keys", sdk=reg_sdk)
+        accepted = [k for k in states if api_key_occupies_slot(tid, f"k-{k}",
+                                                              sdk=reg_sdk)]
+        assert count == len(accepted), (
+            f"count={count} but the slot predicate accepts {accepted}"
+        )
+        assert set(accepted) == {"live-durable", "live-legacy-null"}, (
+            "the predicate must charge live durable + live legacy-NULL rows "
+            f"and nothing else, got {accepted}"
+        )
+
+    def test_registry_lane_unknown_and_empty_ids_are_false(self, reg_sdk):
+        from tortoise.quota import api_key_occupies_slot
+
+        tid = _find_org_id(reg_sdk)
+        assert api_key_occupies_slot(tid, "no-such-key", sdk=reg_sdk) is False
+        assert api_key_occupies_slot("", "k", sdk=reg_sdk) is False
+        assert api_key_occupies_slot(tid, "", sdk=reg_sdk) is False
+
+    def test_supabase_lane_count_equals_accepted_ids(self, monkeypatch):
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.quota import _count_resource, api_key_occupies_slot
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://slot-parity.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        now = datetime.now(UTC)
+        tid = "team-slot-parity"
+        rows = [
+            {"id": "k-live-durable", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": None, "expires_at": None},
+            {"id": "k-live-bootstrap", "org_id": tid, "created_via": "bootstrap",
+             "revoked_at": None,
+             "expires_at": (now + timedelta(hours=24)).isoformat()},
+            {"id": "k-live-legacy-null", "org_id": tid, "created_via": None,
+             "revoked_at": None, "expires_at": None},
+            {"id": "k-revoked", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": now.isoformat(), "expires_at": None},
+            {"id": "k-expired", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": None,
+             "expires_at": (now - timedelta(days=1)).isoformat()},
+        ]
+        fake.seed("api_keys", rows)
+
+        count = _count_resource(tid, "api_keys")
+        accepted = [r["id"] for r in rows if api_key_occupies_slot(tid, r["id"])]
+        assert count == len(accepted), (
+            f"count={count} but the slot predicate accepts {accepted}"
+        )
+        assert set(accepted) == {"k-live-durable", "k-live-legacy-null"}, accepted
+
+    def test_credit_widens_the_gate_by_exactly_one(self, reg_sdk):
+        """`enforce_org_limit(slot_credit=1)` moves the boundary by exactly
+        one slot — it is a credit, not an exemption: at 2/2 the plain gate
+        refuses, the credited gate admits, and a THIRD live key makes the
+        credited gate refuse again.”"""
+        from tortoise.quota import _count_resource
+
+        tid = _find_org_id(reg_sdk)
+        reg = reg_sdk._get_registry()
+        limits = {"org_id": tid, "max_api_keys": 2}  # free tier
+
+        def _seed(kid: str) -> None:
+            reg.query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$h, "
+                "key_prefix:$kp, created_by:'u1', created_at:$ca, "
+                "revoked_at:NULL, expires_at:NULL, created_via:'dashboard'})",
+                params={"id": kid, "tid": tid, "h": f"h-{kid}",
+                        "kp": f"p-{kid}", "ca": datetime.now(UTC).isoformat()},
+            )
+
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk)          # 0/2
+        _seed("slot-1")
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk)          # 1/2
+        assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 1
+        _seed("slot-2")
+        with pytest.raises(QuotaExceededError):                       # 2/2 → over
+            enforce_org_limit(limits, "api_keys", sdk=reg_sdk)
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk,
+                          slot_credit=1)                              # 2-1 → ok
+        assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 2
+        _seed("slot-3")
+        with pytest.raises(QuotaExceededError):                       # 3-1 → over
+            enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=1)
+        # The credit is applied LITERALLY (`count - slot_credit >= limit`) — it
+        # is not clamped, so ONLY the caller's occupancy proof bounds it at 1.
+        # Over-crediting admits (the free-slot hazard); under-crediting
+        # over-tightens (fail-closed). Pinned here so the shape cannot drift
+        # silently; the guard itself is the single caller + test_rotate_key's
+        # revoked/expired/bootstrap refusals.
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=4)

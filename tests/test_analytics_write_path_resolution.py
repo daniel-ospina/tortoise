@@ -111,6 +111,12 @@ def _fallback_at(monkeypatch, tmp_path):
     return fallback
 
 
+# #3820 (cycle-2 P1): the alert-leg isolation this file used to carry inline
+# (`_never_reach_a_real_alert_channel`) is now the shared autouse fixture
+# `tests/conftest.py::_analytics_alert_isolation`, so it covers every test in
+# the suite — not just this file.
+
+
 # ── WRITE path: hosted_api._track_analytics_event ──────────────────────────
 
 
@@ -213,6 +219,13 @@ def test_write_path_needs_a_key_not_just_a_url(monkeypatch, tmp_path):
     load-bearing.
 
     Mutation that reds this test: ``if url and key:`` -> ``if url:``.
+
+    #3820 (P1-2): this shape is a HALF-configured sink, so it is now classified
+    as a ``fallback`` DEGRADATION with reason ``supabase_env_incomplete`` —
+    never ``unconfigured``, which would have made the alert blind to exactly
+    this case. The alert assertion for that classification lives in
+    ``tests/test_analytics_fallback_alert.py::test_t13_half_configured_env_is_a_
+    degradation``.
     """
     from tortoise import hosted_api as ha
 

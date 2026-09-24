@@ -97,6 +97,7 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
     """
     from tortoise.embedded_reaper import (
         _PROC_INFO_CACHE,
+        SOCKET_MARKER,
         _active_client_count,
         _batch_process_info,
         _classify_dir,
@@ -114,13 +115,14 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
         orphans: list[dict] = []
         protected = 0
         unclassified = 0
+        unattributed = 0
         for pid in pids:
             try:
                 sock_dir = _socket_dir_from_cmdline(pid)
                 if not sock_dir:
                     unclassified += 1
                     continue
-                socket_path = f"{sock_dir}/redis.socket"
+                socket_path = f"{sock_dir}/{SOCKET_MARKER}"
                 rec = _classify_dir(sock_dir, socket_path, known_pid=pid)
                 if rec is None:
                     unclassified += 1
@@ -132,6 +134,27 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
                 no_live_owner = (owners is not None and owners[0] == 0
                                  and not rec.get("path_based"))
                 dir_missing = bool(_socket_dir_missing(socket_path))
+                # #3767: a server with NO tortoise ownership instrument is NOT
+                # attributable to us — reap() requires the #1557/#1642 FIX 3
+                # confirmation window for it in every mode, so it is not a
+                # reapable orphan on this sweep. Bucketed SEPARATELY (not as
+                # 'protected') so the census never reports the invariant
+                # satisfied for a class the reaper will not fast-kill.
+                #
+                # ORDER MATTERS (#3767 review P1): the unattributed bucket is
+                # gated on the dir being PRESENT. A MISSING socket dir is
+                # attributable by the live pid's OWN argv — the arm
+                # `_has_ownership_claim` (b) admits it by — and
+                # `_owner_record_dir_present` necessarily reads False for it
+                # (its listdir raises OSError). Testing `unattributed` first
+                # would move the whole #1005 socketless leak class ("hundreds
+                # observed on the dev box") out of the dir-missing bucket and
+                # out of the exit code, i.e. the census could exit 0 while
+                # that leak grows — the exact fail-open this tool exists to
+                # prevent.
+                if rec.get("unattributed") and not dir_missing:
+                    unattributed += 1
+                    continue
                 # #3599 review cycle 2: an owner record is not the only way a
                 # server can be busy — mirror reap()'s CLIENT LIST gate, or
                 # the census reports a server that reap() would refuse (a
@@ -150,9 +173,20 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
             except Exception:  # per-record isolation — never fail the census
                 unclassified += 1
         stale_dirs = []
+        census_truncated = False
         if deep:
-            from tortoise.embedded_reaper import _find_socket_dirs, _registry_for
-            for d in _find_socket_dirs(__import__("tempfile").gettempdir()):
+            import time as _time
+
+            from tortoise.embedded_reaper import (
+                SOCKET_WALK_TIMEOUT,
+                _registry_for,
+                _scan_socket_dirs,
+            )
+            scan = _scan_socket_dirs(
+                __import__("tempfile").gettempdir(), full_scan=True,
+                deadline=_time.monotonic() + SOCKET_WALK_TIMEOUT)
+            census_truncated = not scan.complete
+            for d in scan.dirs:
                 try:
                     reg = _registry_for(d)
                     if reg is None:
@@ -171,8 +205,21 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
         "orphan_details": orphans,
         "protected": protected,
         "unclassified": unclassified,
+        # #3767: live embedded servers with a PRESENT socket dir and no
+        # tortoise ownership instrument (`<socket_dir>/.tortoise-owners`).
+        # They are NOT fast-reapable — reap() requires the orphan-confirmation
+        # window for them — so they are neither orphans nor 'protected user
+        # data'; the census surfaces them explicitly. A server whose socket
+        # dir is MISSING keeps its `socket-dir-missing` orphan bucket above:
+        # it is attributed by the live pid's own argv, and counting it here
+        # would hide the #1005 socketless leak class from the exit code.
+        "unattributed": unattributed,
         "stale_socket_dirs": len(stale_dirs),
         "stale_socket_dir_sample": stale_dirs[:10],
+        # #4068: --deep is a detect-only full scan; if its bounded deadline
+        # expired the counts are a PARTIAL view, and a census must never
+        # report a truncated scan as a complete one.
+        "census_truncated": census_truncated,
     }
 
 
@@ -186,8 +233,10 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"Exit 1 when the orphan count exceeds this "
                              f"(default {DEFAULT_MAX_ORPHANS})")
     parser.add_argument("--deep", action="store_true",
-                        help="Also run the reaper's time-budgeted tempdir "
-                             "stale-socket walk (bounded, but not free)")
+                        help="Also run an unscoped, time-budgeted tempdir "
+                             "stale-socket scan (detect-only; bounded, but "
+                             "not free). A truncated scan is reported as "
+                             "census_truncated and warns on stderr")
     parser.add_argument("--jobs", type=int, default=8,
                         help="Reserved for parity with the reaper (default 8)")
     args = parser.parse_args(argv)
@@ -200,6 +249,13 @@ def main(argv: list[str] | None = None) -> int:
 
     result["max_orphans"] = args.max_orphans
     result["within_budget"] = result["orphans"] <= args.max_orphans
+    if result.get("census_truncated", False):
+        # Warn, do not change the exit contract: a truncated --deep scan is
+        # a partial view, not an inconclusive census ("stale_socket_dirs"
+        # never feeds within_budget/inconclusive).
+        print("embedded_orphans: WARNING — the --deep tempdir scan hit its "
+              "budget and returned a PARTIAL view; stale_socket_dirs is a "
+              "lower bound", file=sys.stderr)
     # A census whose every server was unclassifiable learned nothing about
     # the invariant — reporting exit 0 there is the fail-open this tool
     # exists to prevent (#3599 review).
@@ -212,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[embedded-orphans] live embedded servers: "
               f"{result['live_servers']} | orphans: {result['orphans']} "
               f"(budget {args.max_orphans}) | protected: "
-              f"{result['protected']} | unclassified: "
+              f"{result['protected']} | unattributed: "
+              f"{result.get('unattributed', 0)} | unclassified: "
               f"{result['unclassified']}"
               + (f" | stale socket dirs: {result['stale_socket_dirs']}"
                  if args.deep else ""))

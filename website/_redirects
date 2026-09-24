@@ -7,26 +7,41 @@
 #    resolves identically to the canonical URL.
 # 2) /index.html is the raw asset behind BOTH host roots — 301 to "/" so the
 #    middleware root rewrite (company page / product page) owns the URL.
-# 3) AUTH CONSOLIDATION: there is ONE auth page — /auth (served by the
-#    middleware from the signup.html asset, see functions/_middleware.ts).
+# 3) AUTH CONSOLIDATION: there is ONE auth page — /auth (301'd to the app
+#    origin, app.premiselabs.co, where the `tortoise-dashboard` project owns
+#    the BFF and the signup.html asset — see functions/_middleware.ts).
 #    The legacy /signin URLs (and .html / trailing-slash variants) 301 to
 #    /auth so the whole funnel (login buttons, dashboard/welcome redirects,
 #    OAuth + recovery links, marketing CTAs) converges on a single screen.
-#    /signup and its variants remain a redirect-free legacy alias of the
-#    same page (canonical /auth consolidates for SEO).
+#    /signup and its variants 301 straight to the app origin (the asset moved
+#    there in #4054); the extensionless and .html forms are pinned because the
+#    middleware only 301s them on the exact company host.
 
-# /auth is owned by the middleware on every host (rewrites to /signup,
-# preserving the query string). /signup stays a redirect-free alias of the
-# same page. /signin and its variants 301 to /auth — the old standalone
-# login screen is gone. Trailing-slash variants are pinned 301s (the file's
-# standardization contract; Pages' built-in 308s are not relied on):
-/auth/   /auth  301
-/signup/  /signup  301
+# /auth and the /auth/* subtree are owned by the middleware on every host (#4054
+# for the page, #4346 for the endpoints): the page is a grandfathered 301 →
+# app.premiselabs.co, the subtree is a 302 (SCOPE.md §12/F12 — a NEW branch for
+# the moved surface is 302, never a 301). The middleware runs BEFORE this file,
+# so a `/auth/` rule here would be unreachable; it is deliberately absent rather
+# than left as a contradicting second copy. /signup, /welcome and /invite-accept
+# moved with the BFF to the app origin and 301 there. /signin and its variants
+# 301 to /auth — the old standalone login screen is gone. Trailing-slash variants
+# are pinned 301s (the file's standardization contract; Pages' built-in 308s are
+# not relied on):
+/signup  https://app.premiselabs.co/signup  301
+/signup/  https://app.premiselabs.co/signup  301
+/signup.html  https://app.premiselabs.co/signup  301
 /signin   /auth  301
 /signin/  /auth  301
 /signin.html  /auth  301
+/welcome  https://app.premiselabs.co/welcome  301
+/welcome/  https://app.premiselabs.co/welcome  301
+/welcome.html  https://app.premiselabs.co/welcome  301
+/invite-accept  https://app.premiselabs.co/invite-accept  301
+/invite-accept/  https://app.premiselabs.co/invite-accept  301
+/invite-accept.html  https://app.premiselabs.co/invite-accept  301
 
 # Trailing-slash → canonical
+/contact/  /contact  301
 /privacy/  /privacy  301
 /tos/      /tos      301
 /license/  /license  301
@@ -36,13 +51,12 @@
 /docs/     /docs     301
 /faq/      /faq      301
 /self-hosted/  /self-hosted  301
-/welcome/  /welcome  301
-/invite-accept/  /invite-accept  301
 
 # Raw index asset → host root (middleware rewrites / per host)
 /index.html  /  301
 
 # .html extension duplicates (non-auth only)
+/contact.html  /contact  301
 /docs.html  /docs          301
 /faq.html   /faq           301
 /self-hosted.html  /self-hosted  301

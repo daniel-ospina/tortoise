@@ -72,7 +72,7 @@ TEST_TEAM = {
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 
@@ -559,13 +559,23 @@ class TestHealthEndpoints:
         import tortoise.hosted_api as ha_mod
         import tortoise.monitoring as monitoring
 
-        # (a) registered, and OUTERMOST. Starlette's add_middleware INSERTS at
+        # (a) registered, and second-outermost: WaitBoundMiddleware (#3834) is
+        # registered last and so wraps it. Starlette's add_middleware INSERTS at
         # index 0, so the LAST-registered middleware is first in the list.
         classes = [m.cls for m in ha_mod.app.user_middleware]
         assert ha_mod.InFlightMiddleware in classes, (
             "InFlightMiddleware is not installed — the idle gate always reads 0")
-        assert classes[0] is ha_mod.InFlightMiddleware, (
-            f"the gauge must wrap everything (registered last): {classes!r}")
+        # #3834: WaitBoundMiddleware is now registered LAST (outermost), so the
+        # gauge sits immediately inside it. That order is REQUIRED, not
+        # incidental: the bound ABANDONS (never cancels) a breached handler, and
+        # the gauge must keep counting that handler until it genuinely finishes.
+        # Reversing the two would release the gauge at the 10 s refusal while the
+        # abandoned work still runs — the exact #2850 mis-read. The gauge still
+        # wraps every handler and every short-circuiting middleware.
+        assert classes[0] is ha_mod.WaitBoundMiddleware, (
+            f"the wait bound must be outermost (registered last): {classes!r}")
+        assert classes[1] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap every handler (registered second-outermost): {classes!r}")
 
         # (b) a REAL request through the module-level app: the gauge is >= 1
         # WHILE the handler runs, and released afterwards. ``/health`` is read
@@ -615,7 +625,7 @@ class TestHealthEndpoints:
         for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
-            with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+            with caplog.at_level(logging.ERROR, logger="tortoise.monitoring"):
                 period = _REAL_HEALTH_PROBE_INTERVAL()
             assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
             assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
@@ -633,7 +643,7 @@ class TestHealthEndpoints:
         for raw in ("1e-9", "0.001", "0.49"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
-            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            with caplog.at_level(logging.WARNING, logger="tortoise.monitoring"):
                 period = _REAL_HEALTH_PROBE_INTERVAL()
             assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
             assert any(r.levelno >= logging.WARNING for r in caplog.records), raw
@@ -936,7 +946,8 @@ class TestBootOrder:
 
 class TestVersionEndpoint:
     """GET /v1/version — public version/sha surface so clients (and the
-    onboarding skill) can detect an outdated server before authenticating.
+    onboarding instructions — not a skill, #4365) can detect an outdated
+    server before authenticating.
     """
 
     def test_version_returns_package_version(self, client):
@@ -1749,12 +1760,16 @@ class TestRevokedKeysDoNotConsumeCap2481:
     """#2481 (REGISTRY lane) — revoked keys are audit tombstones, never
     max_api_keys budget consumers. The reported bug: after revoking a key
     a team could not mint a replacement while only revoked tombstones
-    remained. Audit result: every cap seam counts via quota._count_resource
-    with the predicate `revoked_at IS NULL AND (expires_at IS NULL OR > now)`
-    — revoked rows never count. These tests PIN that: revoke-then-mint
-    succeeds at cap, a pre-existing tombstone stack alone can never 402
-    (legacy mint) or 409 (scoped mint), and only a true ACTIVE overage
-    still 402s/409s (active-key semantics unchanged)."""
+    remained. Audit result: the standalone mint gates all count via
+    quota._count_resource with the predicate `revoked_at IS NULL AND
+    (expires_at IS NULL OR > now) AND (created_via IS NULL OR <>
+    'bootstrap')` (#2426 expiry; #4140/R13 bootstrap) — revoked rows never
+    count. (The recovery-mint lanes carry their OWN predicates with the
+    same exclusions; #4140's rule is one LOGICAL predicate, not one literal
+    string.) These tests PIN that: revoke-then-mint succeeds at cap, a
+    pre-existing tombstone stack alone can never 402 (legacy mint) or 409
+    (scoped mint), and only a true ACTIVE overage still 402s/409s
+    (active-key semantics unchanged)."""
 
     def test_revoke_then_mint_succeeds_at_cap(self, client):
         """Team at max (2 active) revokes one key → the revoked row must
@@ -1800,6 +1815,214 @@ class TestRevokedKeysDoNotConsumeCap2481:
         assert client.delete(
             f"/v1/team/keys/{s.json()['id']}").status_code == 200
         assert client.post("/v1/team/keys").status_code == 200
+
+
+class TestBootstrapKeysCapExempt4140:
+    """#4140 / R13 (REGISTRY lane) — bootstrap (24h session) keys are
+    cap-EXEMPT: they never consume a ``max_api_keys`` slot on the standalone
+    mint gate, while every DURABLE credential (provisioned / recovery / NULL
+    legacy created_via) still does. The bug: ``quota._count_resource
+    ("api_keys")`` counted bootstrap nodes, so a free org (allowance 2) with
+    one session key could mint only one durable key before 402.
+
+    The exemption is NULL-TOLERANT — a legacy node with no ``created_via``
+    is DURABLE and must count (the over-exemption direction this predicate
+    must fail closed on)."""
+
+    @staticmethod
+    def _seed(kid, *, created_via="provisioned", expires_at=None,
+              revoked_at=None):
+        from datetime import UTC, datetime
+
+        import tortoise.hosted_api as ha_mod
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', "
+            "key_prefix:$kp, created_by:$cb, created_at:$now, "
+            "created_via:$cv, expires_at:$ea, revoked_at:$ra})",
+            params={"id": kid, "tid": TEST_ORG_ID, "kp": f"tt{kid[:8]}",
+                    "cb": _U1, "now": datetime.now(UTC).isoformat(),
+                    "cv": created_via, "ea": expires_at, "ra": revoked_at},
+        )
+
+    def test_count_excludes_live_bootstrap(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        self._seed("d1", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_count_includes_every_durable_class(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        self._seed("p", created_via="provisioned")
+        self._seed("r", created_via="recovery")
+        self._seed("n", created_via=None)          # legacy NULL → durable
+        self._seed("other", created_via="agent_signup")
+        # near-miss literals are NOT the exact exemption
+        self._seed("cap", created_via="Bootstrap")
+        self._seed("sp", created_via="bootstrap ")
+        self._seed("boot", created_via="bootstrap", expires_at=future)
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 6
+
+    def test_count_excludes_expired_and_revoked_durable(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        self._seed("expired", created_via="provisioned", expires_at=past)
+        self._seed("revoked", created_via="provisioned", revoked_at=past)
+        self._seed("live", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_standalone_mint_gate_ignores_bootstrap_and_blocks_at_cap(
+            self, client):
+        """Boundary: with free max_api_keys=2, two live bootstrap nodes
+        occupy NO slot (both durable mints land); the third durable mint
+        402s (legacy mint)."""
+        from datetime import UTC, datetime, timedelta
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        assert client.post("/v1/team/keys", json={"name": "d1"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d2"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d3"}).status_code == 402
+        # the scoped-mint 409 gate reads the SAME count → same boundary
+        assert client.post(
+            "/v1/team/keys", json={"scopes": ["graphs:read"]}).status_code == 409
+
+    def test_null_legacy_durable_still_consumes_a_slot(self, client):
+        """Over-exemption guard: a node with NULL created_via is DURABLE —
+        two of them fill the free cap and the next mint 402s. This is the
+        direction the predicate must fail closed on."""
+        self._seed("n1", created_via=None)
+        self._seed("n2", created_via=None)
+        assert client.post("/v1/team/keys").status_code == 402
+
+
+class TestKeyAllowance3874:
+    """#3874: /v1/team exposes the org's API-key allowance BEFORE the cap,
+    from the same source the mint gate enforces — the pre-cap read and the
+    at-cap 402 must agree, so a future change to one cannot silently desync
+    the other.
+
+    EXECUTES the real path: the allowance is read from a live GET /v1/team on
+    the REAL registry key-auth lane (not the dependency-override stub, which
+    would just echo whatever the test injected), then keys are minted through
+    POST /v1/team/keys until the gate refuses.
+    """
+
+    def test_pre_cap_allowance_equals_at_cap_refusal(self, client):
+        import re
+
+        import tortoise.hosted_api as ha_mod
+
+        # A stored allowance that differs from BOTH the free-tier pricing
+        # default and the TEST_TEAM stub (2) — so a surface that ignores the
+        # stored limit, or falls back to a hardcode, cannot pass.
+        stored = 4
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_api_keys = $n",
+            params={"id": TEST_ORG_ID, "n": stored},
+        )
+
+        # Mint the auth credential under the override — the override only
+        # supplies the org DICT; the mint gate already reads the stored limit.
+        boot = client.post("/v1/team/keys")
+        assert boot.status_code == 200, boot.text
+        token = boot.json()["key"]
+
+        # Drop the override → the REAL registry key-auth lane resolves /v1/team
+        # (the override would otherwise return TEST_TEAM's injected value).
+        app.dependency_overrides.pop(get_current_org, None)
+        try:
+            h = {"Authorization": f"Bearer {token}"}
+
+            # (a) PRE-CAP: the allowance is readable before any cap is hit.
+            body = client.get("/v1/team", headers=h).json()
+            allowance = body["max_api_keys"]
+            assert allowance == stored, (
+                "pre-cap surface did not expose the org's stored allowance: "
+                f"{allowance!r} != {stored!r}")
+
+            # (b) The mint gate's OWN resolver agrees with the exposed field.
+            gate_limit = ha_mod._org_node_sync_limits(TEST_ORG_ID)["max_api_keys"]
+            assert gate_limit == allowance, (
+                "the exposed allowance and the mint gate's resolver disagree: "
+                f"{allowance!r} != {gate_limit!r}")
+
+            # (c) Every mint below the advertised allowance succeeds — the
+            # number is the enforced bound, not merely echoed (the boot key
+            # already occupies one slot).
+            for i in range(stored - 1):
+                r = client.post("/v1/team/keys", headers=h,
+                                json={"name": f"fill-{i}"})
+                assert r.status_code == 200, (
+                    f"mint {i + 2}/{stored} refused below the advertised "
+                    f"allowance: {r.status_code} {r.text}")
+
+            # (d) AT-CAP: the refusal names the SAME allowance (the dashboard
+            # parses this number for its at-cap notice).
+            r = client.post("/v1/team/keys", headers=h)
+            assert r.status_code == 402, r.text
+            m = re.search(r"limit reached \((\d+)\)", r.json()["detail"])
+            assert m is not None, r.text
+            assert int(m.group(1)) == allowance, (
+                f"pre-cap allowance {allowance} != at-cap refusal {m.group(1)} "
+                "— the two surfaces desynced")
+        finally:
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM)
+
+    def test_session_lane_allowance_comes_from_the_gate_resolver(
+            self, monkeypatch):
+        """#3874: the SESSION lane (the lane the dashboard's /v1/team call
+        actually uses — Supabase mode) must take its max_api_keys from the
+        MINT GATE's own resolver, not a precedence copied into the session
+        lane. If it keeps a second source, a future stored allowance could
+        be enforced by the gate while the pre-cap surface advertises the
+        tier default (the exact desync the issue forbids).
+
+        Pinned sharply by substituting the gate resolver: a session lane
+        with its own source would return the tier default (2), not 9.
+        """
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://3874.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-3874")
+        # Abuse telemetry must not fire — best-effort, but keep it inert.
+        monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
+        fake = FakeControlPlane()
+        fake.seed("organizations", [{"id": TEST_ORG_ID, "tier": "free",
+                                     "name": "3874 Org"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEST_ORG_ID, "role": "owner",
+            "status": "active"}])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        # The gate's resolver is the ONE allowance source. Substituting it
+        # must flow straight through the session lane.
+        monkeypatch.setattr(ha_mod, "_org_node_sync_limits",
+                            lambda _org_id: {"max_api_keys": 9})
+
+        request = Request({
+            "type": "http", "method": "GET", "path": "/v1/team",
+            "query_string": b"", "headers": Headers({}).raw,
+        })
+        team = asyncio.run(ha_mod._session_user_org(request, {"user_id": _U1}))
+        assert team["org_id"] == TEST_ORG_ID, team
+        assert team["max_api_keys"] == 9, (
+            "the session lane must read the allowance from the mint gate's "
+            f"resolver, got {team['max_api_keys']!r}")
 
 
 class TestKeysList:
@@ -2964,6 +3187,29 @@ class TestSessionDetail:
         assert "content" in ep
         assert "kind" in ep
 
+    def test_detail_exposes_the_session_source_node(self, client):
+        """#3809: the detail carries the session's graph Source node
+        (``session:<id>``, sourceKind ``agentSession``) so
+        ``tortoise session verify`` can prove the "in the graph as a source"
+        link over the REST surface rather than inferring it from turn points.
+
+        Mutation: drop the ``source`` query/field from ``get_session_detail`` —
+        the key is absent and this REDs."""
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            "session_id": "detail-source-test",
+        })
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+        body = client.get(f"/v1/sessions/{sid}").json()
+        assert "source" in body, body
+        assert body["source"] is not None, body
+        assert body["source"]["url"] == f"session:{sid}"
+        assert body["source"]["sourceKind"] == "agentSession"
+
     def test_detail_cross_team_isolation(self, client):
         """Session from a different namespace is not found (404).
 
@@ -3218,6 +3464,43 @@ class TestInternalProvision:
         assert gn.startswith("org_")
         assert gn in _read_journal_file(str(journal)), \
             "tenant_provision mint must be journaled (#1686)"
+
+    def test_provision_does_not_journal_a_graph_it_did_not_mint(
+            self, internal_client, monkeypatch, tmp_path):
+        """#7795 review P2-3: `provision_tenant` takes a CALLER-SUPPLIED
+        `org_id` (`body.get("org_id")`) with no existence guard, so an
+        unconditional journal append would hand the session sweep a graph
+        THIS call did not create — a live tenant graph for DETACH+DELETE.
+        The append is existence-guarded (mirroring
+        `_eager_provision_org_graph`): a provision whose graph already
+        carries a `TeamMeta` mints nothing and must NOT journal it."""
+        from tests._embedded import _read_journal_file
+
+        journal = tmp_path / "provision_preexisting.graphs.jsonl"
+        monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+        payload = {
+            "org_id": "provisioned-team-preexisting",
+            "org_name": "Provisioned Team Preexisting",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-pe",
+        }
+        # First call mints the graph (and journals it — pinned by the test
+        # above).
+        r1 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r1.status_code == 200, r1.text
+        gn = r1.json()["graph_name"]
+        assert gn in _read_journal_file(str(journal))
+        # Reset the RECORD only: the graph (and its TeamMeta) still exists,
+        # so the second call mints nothing and must not re-journal it.
+        journal.write_text("")
+        r2 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["graph_name"] == gn
+        assert gn not in _read_journal_file(str(journal)), \
+            "the graph pre-existed this call — journaling it would hand the " \
+            "sweep a tenant graph this call did not mint (#7795 P2-3)"
 
     def test_provision_missing_fields_returns_400(self, internal_client):
         r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
@@ -3983,7 +4266,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_count(_limits, _resource, sdk=None):
+        def _fail_count(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaCheckError("simulated count query failure")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
@@ -4001,7 +4284,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_exceeded(_limits, _resource, sdk=None):
+        def _fail_exceeded(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaExceededError("Team points limit reached (1000)")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)
@@ -4486,6 +4769,94 @@ class TestBackupStorageSeam:
 
         monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "s3-ish")
         with pytest.raises(RuntimeError, match="unknown"):
+            _ha._backup_storage()
+
+    def test_r2_mode_returns_shared_singleton(self, monkeypatch):
+        """#3968 — the R2 path is a process-wide singleton too.
+
+        N successive `_backup_storage()` calls must construct ONE `R2Storage`
+        (and therefore one boto3 client via `_s3()`), not N. This is the
+        indicator the issue names: the #3820 process-start-UNKNOWN resolve
+        retries one read per delivered write, and each retry used to pay a full
+        client construction."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        real = _ha.R2Storage
+        built: list = []
+
+        def _spy(*a, **k):
+            store = real(*a, **k)
+            built.append(store)
+            return store
+
+        monkeypatch.setattr(_ha, "R2Storage", _spy)
+        stores = [_ha._backup_storage() for _ in range(5)]
+
+        assert len(built) == 1, (
+            "N calls must construct the R2 store ONCE (#3968); "
+            f"built {len(built)}"
+        )
+        assert all(s is stores[0] for s in stores), "callers must share one store"
+        assert isinstance(stores[0], real)
+
+    def test_r2_mode_rebuilds_when_config_changes(self, monkeypatch):
+        """Credential freshness — the cache key is the resolved R2 config.
+
+        A changed `R2_*` env (a rotation, or a test's monkeypatch) must rebuild
+        rather than serve a store pinned to the old credentials."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt-a")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        a = _ha._backup_storage()
+        b = _ha._backup_storage()
+        assert a is b, "an unchanged config must reuse the cached store"
+
+        monkeypatch.setenv("R2_BUCKET", "bkt-b")
+        c = _ha._backup_storage()
+        assert c is not a, "a changed R2 config must NOT serve the cached store"
+        assert (a._bucket, c._bucket) == ("bkt-a", "bkt-b")
+
+        # R2_ACCOUNT_ID changes the DERIVED endpoint, so it must invalidate too.
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct-2")
+        d = _ha._backup_storage()
+        assert d is not c, "a changed R2_ACCOUNT_ID (→ endpoint) must invalidate the cache"
+        assert d._endpoint == "https://acct-2.r2.cloudflarestorage.com"
+
+    def test_r2_mode_fail_closed_survives_a_populated_cache(self, monkeypatch):
+        """A cached store must never mask a now-incomplete config.
+
+        The key is compared before any cache return, so removing an `R2_*` var
+        still raises the fail-closed RuntimeError — the cache cannot outlive
+        the config that justified it."""
+        from tortoise import hosted_api as _ha
+
+        monkeypatch.delenv("TORTOISE_BACKUP_STORAGE", raising=False)
+        monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+        monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+        monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+        monkeypatch.setenv("R2_BUCKET", "bkt")
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE", None)
+        monkeypatch.setattr(_ha, "_R2_BACKUP_STORE_CONFIG", None)
+
+        assert _ha._backup_storage() is not None  # cache now populated
+
+        monkeypatch.delenv("R2_ACCOUNT_ID", raising=False)
+        with pytest.raises(RuntimeError, match="R2 not configured"):
             _ha._backup_storage()
 
 
@@ -9141,3 +9512,103 @@ class TestFirstContactPrewarm:
         assert "Retry-After" in exposed, (
             "a browser client cannot read Retry-After without "
             f"Access-Control-Expose-Headers (got {exposed!r})")
+
+
+# ── #4625: the capture path must not compute the projection it discards ──────
+#
+# `_update_onboarding_state` computes the merged projection as its RETURN VALUE
+# (the GET/PATCH writer-echo contract). That projection is not free: it reaches
+# `_registry_existing_graphs()` up to twice (two when the org graph exists,
+# which is the per-capture case), and in URI mode each probe builds a fresh
+# `_make_sdk(namespace="registry")` and opens a NEW FalkorDB connection — TCP +
+# TLS handshake + `Is_Sentinel`'s INFO + `list_graphs` — executed ON the event
+# loop.
+#
+# An AGENT capture — the fleet case — calls the router TWICE (the receipt
+# write, then the last-error clear) and discards both returns: four synchronous
+# TLS handshakes per capture. (A no-harness session-JWT capture makes one call,
+# since it has no last-error key.) With ~46 lanes capturing per turn that stalls the
+# loop for seconds at a time, every read in flight blows the 10s transport
+# bound, and the agent's `tools/list` returns 504 with an EMPTY toolbelt.
+# Reproduced live by py-spy: loop thread in `do_handshake (ssl.py:1319)` <-
+# `_registry_existing_graphs` <- `_get_onboarding_projection` <-
+# `_record_capture_last_error` <- `_capture_session_impl` <- `capture_session`.
+#
+# These tests pin the write-only contract and the echo the GET/PATCH callers
+# depend on. They fail if `_echo=False` stops being honoured (i.e. if the
+# projection is computed again on the discard path).
+
+
+class TestCapturePathSkipsDiscardedProjection:
+    """#4625 — write-only onboarding writes must not compute the echo."""
+
+    @staticmethod
+    def _spy(monkeypatch):
+        """Replace the projection + jsonb legs; record what ACTUALLY ran."""
+        proj_calls: list[str] = []
+        writes: list[tuple] = []
+
+        def _spy_projection(org_id):
+            proj_calls.append(org_id)
+            return {}
+
+        def _spy_write(org_id, state):
+            writes.append((org_id, dict(state)))
+
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_projection", _spy_projection)
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_state", lambda org_id: {})
+        monkeypatch.setattr(_ha_mod, "_write_onboarding_state", _spy_write)
+        return proj_calls, writes
+
+    def test_write_only_skips_the_projection(self, monkeypatch):
+        _ha = _ha_mod
+        proj_calls, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._update_onboarding_state("org-4625", _echo=False, **{key: "boom"})
+
+        # Non-vacuous: the write must still have happened.
+        assert writes, "the write must still happen when the echo is skipped"
+        assert proj_calls == [], (
+            "the write-only path computed the onboarding projection — that is "
+            "the #4625 event-loop stall (two fresh FalkorDB TLS handshakes)")
+
+    def test_default_still_returns_the_echo(self, monkeypatch):
+        """GET/PATCH writer-echo contract must be unchanged."""
+        _ha = _ha_mod
+        proj_calls, _writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None
+
+        reversed_echo = _ha._update_onboarding_state("org-4625", **{key: "boom"})
+
+        assert proj_calls == ["org-4625"], (
+            "the default path must still compute the echo")
+        assert isinstance(reversed_echo, dict)
+        # overlay: the just-written field wins over the projection's value
+        assert reversed_echo.get(key) == "boom"
+
+    def test_record_capture_last_error_is_write_only(self, monkeypatch):
+        """The per-capture hot path — called on 2xx AND non-2xx.
+
+        Asserts the WRITE, not just the absence of a projection call: an
+        early return inside ``_record_capture_last_error`` (e.g. an
+        unresolvable harness key) would satisfy ``proj_calls == []``
+        vacuously and pin nothing.
+        """
+        _ha = _ha_mod
+        proj_calls, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._record_capture_last_error("org-4625", "codex", "capture boom")
+
+        assert writes, (
+            "_record_capture_last_error never reached the write — the absence "
+            "of a projection call would then prove nothing")
+        assert writes[0][1].get(key) == "capture boom", (
+            "the last-error detail must be written")
+        assert proj_calls == [], (
+            "_record_capture_last_error computed the projection it discards — "
+            "this is the per-capture hot path across the fleet")
