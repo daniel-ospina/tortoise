@@ -267,6 +267,10 @@ surfaces:
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
+  # D10: the document-source gold fixture + the proof the `documents` cap
+  # predicate is not vacuous (#5100, #5013). Sits with the quota surface
+  # because the predicate under test IS the `documents` cap.
+  - test_document_source_gold.py
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
