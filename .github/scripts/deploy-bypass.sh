@@ -28,12 +28,20 @@
 #             daily failure is the reminder, and every deploy's `report` block
 #             repeats the same age.
 #
-# ⛔ THIS SCRIPT NEVER DECIDES A GATE. It is not on any gate's exit path — do
-#    not "integrate" it into check-fly-machines-guard.py, check-fly-secret-drift.py
-#    or deploy-health-gate.sh. It only OBSERVES that a bypass happened. Its only
-#    non-zero exits are `expiry`'s violation and a wiring bug in `report`
-#    (a report claiming a bypass with NO lane fired) — neither is ever wired to
-#    a deploy.
+# ⛔ THIS SCRIPT NEVER DECIDES A GATE. It does not translate any gate's exit
+#    code and is not on any gate's exit path — do not "integrate" it into
+#    check-fly-machines-guard.py, check-fly-secret-drift.py or
+#    deploy-health-gate.sh. It only OBSERVES that a bypass happened. But `report`
+#    IS invoked inside deploy steps (as the whole `run:` body of the pack-smoke
+#    and DB-health steps, and under `set -e` inside both Fly-guard steps), so a
+#    `report` failure DOES fail its own step and can fail the job. That is
+#    deliberate and fail-closed: a reporter that cannot certify a bypass must
+#    not be indistinguishable from one that did. Its non-zero exits are
+#    `report`'s no-lane-set wiring bug (1) and `die()`'s bad-invocation paths —
+#    unknown key/subcommand/argument, malformed `--state`, non-integer
+#    `--window-days`, non-date `--today` (64). `expiry`'s violation (1) is the
+#    only other one, and it runs in a SEPARATE scheduled workflow, so it never
+#    blocks a deploy.
 #
 # ⛔ exit 2 IS NOT OURS TO TOUCH. The could-not-determine class stays
 #    unbypassable (#1896/#4126); a bypass translates exit 1 only, and that
@@ -207,7 +215,7 @@ cmd_report() {
 
   [ -n "$window" ] || window="${DEPLOY_BYPASS_WINDOW_DAYS:-$WINDOW_DAYS_DEFAULT}"
   case "$window" in
-    # A report must never fail a deploy, so a bad window falls back to the
+    # A bad window must not be what fails a deploy, so it falls back to the
     # default rather than erroring (the workflow passes no --window-days).
     ''|*[!0-9]*) window="$WINDOW_DAYS_DEFAULT" ;;
   esac

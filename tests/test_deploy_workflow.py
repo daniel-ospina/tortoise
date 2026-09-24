@@ -109,14 +109,28 @@ def _region(text: str, start: str, end: str) -> str:
 
 
 def _steps() -> dict[str, dict]:
-    """The workflow's named steps, keyed by name."""
+    """The workflow's named steps, keyed by name.
+
+    A duplicate name is a hard error, never a silent overwrite. Two steps that
+    share a name collapse to one here, so a guard that iterates this mapping
+    inspects only the survivor — the `deploy-api` and `post-deploy-verify`
+    audits were both `Deploy gate audit (#4759)`, which hid the `deploy-api`
+    audit from every guard and made one of them vacuous (#4802 review). Keying
+    by name is kept because callers look steps up by name; the raise is what
+    makes that safe.
+    """
     doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
     steps: dict[str, dict] = {}
-    for job in doc["jobs"].values():
+    for job_name, job in doc["jobs"].items():
         for step in job.get("steps", []):
             name = step.get("name")
-            if name:
-                steps[name] = step
+            if not name:
+                continue
+            assert name not in steps, (
+                f"duplicate step name {name!r} (also in job {job_name!r}) — "
+                "rename the steps, or a name-keyed guard silently inspects only one"
+            )
+            steps[name] = step
     return steps
 
 
@@ -538,17 +552,24 @@ def test_bypass_visibility_is_a_run_summary_write():
         "(the run summary), not only echo it to the log"
     )
     # Each report/audit step must leave the summary to the helper, and must bind
-    # the per-job audit marker the helper records a fired bypass into.
-    for name, step in _steps().items():
-        run = step.get("run") or ""
-        if "deploy-bypass.sh" not in run:
-            continue
-        assert "GITHUB_STEP_SUMMARY" not in run, (
-            f"step {name!r} must leave $GITHUB_STEP_SUMMARY to the helper"
-        )
-        assert "DEPLOY_BYPASS_MARKER" in (step.get("env") or {}), (
-            f"step {name!r} must bind DEPLOY_BYPASS_MARKER for the per-job audit"
-        )
+    # the per-job audit marker the helper records a fired bypass into. Iterate
+    # the jobs directly (as ``test_deploy_jobs_audit_every_bypassable_gate``
+    # does) so EVERY such step in EVERY job is examined — a name-keyed mapping
+    # would drop one of two same-named steps (#4802 review).
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    for job_name, job in doc["jobs"].items():
+        for step in job.get("steps", []):
+            run = step.get("run") or ""
+            if "deploy-bypass.sh" not in run:
+                continue
+            name = step.get("name") or f"unnamed step in job {job_name!r}"
+            assert "GITHUB_STEP_SUMMARY" not in run, (
+                f"step {name!r} must leave $GITHUB_STEP_SUMMARY to the helper"
+            )
+            assert "DEPLOY_BYPASS_MARKER" in (step.get("env") or {}), (
+                f"step {name!r} in job {job_name!r} must bind "
+                "DEPLOY_BYPASS_MARKER for the per-job audit"
+            )
 
 
 def test_deploy_jobs_audit_every_bypassable_gate():

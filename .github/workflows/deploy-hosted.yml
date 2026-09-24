@@ -790,7 +790,7 @@ jobs:
           exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}
-      - name: Deploy gate audit (#4759)
+      - name: Deploy gate audit — deploy-api (#4759)
         # The authoritative "was anything skipped" statement for this job, and it
         # runs even when an earlier step failed (`if: always()`) — so a reader
         # never has to infer a pass from the ABSENCE of a bypass block. Each of
@@ -912,7 +912,7 @@ jobs:
             --variable-fired "$BYPASS_VARIABLE_FIRED" \
             --set-at "$SKIP_DB_HEALTH_GATE_SET_AT" \
             --effect "the release health check does not run, so a live release with a dead graph DB plane is not detected here"
-      - name: Deploy gate audit (#4759)
+      - name: Deploy gate audit — post-deploy-verify (#4759)
         # This job's only bypassable gate, stated as bypassed or not even when an
         # earlier step failed — so "no bypass block" is never the reader's only
         # evidence.
