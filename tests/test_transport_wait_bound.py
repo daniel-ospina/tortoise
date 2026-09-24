@@ -377,7 +377,8 @@ def test_the_two_readings_stay_two_constants():
     PREFIX is 'a class the ruling never reached'. Folding the prefix into the set
     would silently make the set's exactness test — and the reasoning it pins —
     meaningless, so they are asserted separately."""
-    assert ha._TRANSPORT_WAIT_BOUND_EXEMPT == frozenset({("POST", "/v1/context")})
+    expected_exact = frozenset({("POST", "/v1/context")})
+    assert expected_exact == ha._TRANSPORT_WAIT_BOUND_EXEMPT
     assert ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX == "/v1/internal/"
 
 
