@@ -73,10 +73,9 @@ export function captureStatusLabelForHarness(state, harness) {
 // gate):
 //   * a per-harness STATE key was observed (`active` / `waiting`) and the row
 //     renders a state word for it;
-//   * a per-harness FAILURE was recorded (`session_capture_last_error_<h>`),
-//     which renders even on rows the state word never reaches — an
-//     `install-pending` row after a failed first capture has no receipt and no
-//     probe.
+//   * a per-harness FAILURE was recorded (`session_capture_last_error_<h>`) —
+//     an `install-pending` row after a failed first capture has no receipt and
+//     no probe.
 // Both legs live under the SAME support gate as the render sites in main.jsx
 // (the pill AND the failure line), so the predicate cannot outlive the facts it
 // describes: an unsupported row renders the registry reason and never acquires

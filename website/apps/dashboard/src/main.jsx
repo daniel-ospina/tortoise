@@ -10355,8 +10355,8 @@ function MemorySources(props) {
                       qualifies. Moving the region to the head keeps the snippet
                       out while covering the name and the disclosure, which a
                       pill-scoped region cannot do.
-                      review P2-3: unsupported harnesses render the REASON only,
-                      no pill and no failure line (no install path exists for
+                      review P2-3: unsupported harnesses render the REASON,
+                      with no pill and no failure line (no install path exists for
                       `claude-web`, `claude-desktop` or `chatgpt` — a per-harness
                       claim would contradict the reason; `cursor` gained a seam
                       in #4110). That guard is what

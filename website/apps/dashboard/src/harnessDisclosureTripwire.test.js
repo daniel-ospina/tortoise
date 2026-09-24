@@ -71,7 +71,7 @@ test('#3700: the row renders the harness disclosure from the helper', () => {
     /\{\s*harnessAttribution\(h\)\s*&&\s*\(\s*<span\s+className="dim\s+small"\s*>\s*·\s*(?:\{\s*['"] ['"]\s*\}\s*)?\{\s*harnessAttribution\(h\)\s*\}\s*<\/span>\s*\)\s*\}/,
     'the head must render the helper\'s VALUE as the guarded consequent of its own return, so a literal, a re-derived test, or an `&& (false && …)` around the fragment fails')
   assert.match(head, /captureStatusLabelForHarness\(\s*state\s*,\s*h\s*,?\s*\)/,
-    'the state word must come from the shared label helper')
+    'the state word\'s source must be the shared label helper')
 })
 
 test('#3700: main.jsx renders the helper, never the copy constant', () => {
@@ -87,10 +87,8 @@ test('#3700 / #4896: the row reads its facts through the module bindings', () =>
   // The assertions above pin the render's SHAPE; these pin its SOURCE. The
   // executed suite calls the module helper and never sees main.jsx's binding.
   //
-  // Each binding must END at the helper call — `…(state, h) && null` discards the
-  // value while matching a bare prefix — and must not be re-declared: a second
-  // declaration shadows the pinned binding. Each of these shapes was applied and
-  // turned this file RED.
+  // Each binding must come from its helper call, and must not be re-declared: a
+  // second declaration shadows the pinned binding.
   for (const [name, call] of [
     ['harnessAttribution', 'harnessAttributionForHarness'],
     ['lastError', 'captureErrorForHarness'],
@@ -98,7 +96,7 @@ test('#3700 / #4896: the row reads its facts through the module bindings', () =>
     assert.match(
       code,
       new RegExp(`const\\s+${name}\\s*=\\s*\\(h\\)\\s*=>\\s*${call}\\(\\s*state\\s*,\\s*h\\s*,?\\s*\\)\\s*(?:;|\\n|$)`),
-      `${name} must come from ${call}(state, h) and nothing else`)
+      `${name} must come from ${call}(state, h)`)
     assert.equal(
       (code.match(new RegExp(`const\\s+${name}\\s*=`, 'g')) || []).length, 1,
       `${name} must be declared once — any second declaration shadows the pinned binding`)
@@ -112,13 +110,13 @@ test('#3700 / #4896: the failure line renders only on a supported row', () => {
   // where the card states the capability is unavailable — a per-harness claim
   // (and, since #3700, a disclosure the predicate would not have produced).
   // Pinned here: the support gate the row derives and the failure line's use of
-  // it, plus that the alert renders the helper's value unchanged. The sentence
-  // itself is pinned by the binding test above and by the executed assertion on
+  // it, plus that the alert renders the helper's value. The sentence itself is
+  // pinned by the binding test above and by the executed assertion on
   // `HARNESS_CAPTURE_LAST_ATTEMPT`, which fails if a caveat is added to the copy.
   assert.match(code, /const\s+supported\s*=\s*!!HARNESS_CAPTURE_SUPPORT\[h\]/,
     'the row\'s support gate must be the DOUBLE negation of HARNESS_CAPTURE_SUPPORT[h] — never hard-coded, and never a single `!` (the inverted gate)')
   assert.match(code, /\{\s*supported\s*&&\s*lastError\(h\)\s*&&/,
     'the failure line must sit inside the capture-support guard — with no leading `!`')
   assert.match(code, /role="alert"[\s\S]{0,160}\{\s*lastError\(h\)\s*\}/,
-    'the alert must render the helper\'s sentence unchanged (no caveat at the call site)')
+    'the alert must render the helper\'s value')
 })

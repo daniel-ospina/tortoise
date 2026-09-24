@@ -250,8 +250,7 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
 // main.jsx calls them — this file cannot see main.jsx's call sites at all, so
 // deleting a render site would leave it green. That call site is pinned
 // separately, by `harnessDisclosureTripwire.test.js` (the render is the whole
-// point of the fix, and no execution-based test in this repo can reach it —
-// there is no DOM test infrastructure and the e2e suite never opens Settings).
+// point of the fix, and the e2e suite never opens Settings).
 //
 // NAMED MUTATIONS that reinstate the defect — each must RED this test:
 //   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
@@ -287,26 +286,25 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   assert.ok(!captureStatusLabelForHarness(st, 'pi').includes(HARNESS_ATTRIBUTION),
     'the attribution must not be baked into a state word')
 
-  // (3) the renderable ATTRIBUTION is returned for the two states whose key
-  //     embeds a harness, and for any supported row with a recorded per-harness
-  //     FAILURE (3b); null for a supported row with neither.
+  // (3) the renderable ATTRIBUTION is returned for a SUPPORTED row in either of
+  //     the two states whose key embeds a harness, and for any supported row with
+  //     a recorded per-harness FAILURE (3b); null otherwise.
   assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
   assert.equal(harnessAttributionForHarness(st, 'claude'), HARNESS_ATTRIBUTION,
     'receipt state names a harness')
   assert.equal(harnessAttributionForHarness(st, 'pi'), HARNESS_ATTRIBUTION,
     'probe state names a harness')
-  // a row with no per-harness signal at all renders no state word and no
-  // failure, so there is nothing to disclose.
+  // a row with no per-harness signal at all records no failure, so there is
+  // nothing to disclose.
   assert.equal(harnessAttributionForHarness(st, 'cursor'), null,
     'install-pending with no failure')
   assert.equal(harnessAttributionForHarness({ session_recording: true }, 'claude'), null)
   assert.equal(harnessAttributionForHarness(null, 'claude'), null)
   assert.equal(harnessAttributionForHarness({ session_recording: false }, 'claude'), null)
 
-  // (3b) the FAILURE line renders on rows the STATE WORD never reaches — a first
-  //      capture that failed leaves an `install-pending` row with a recorded
-  //      per-harness error (codex/cursor can never reach `waiting`:
-  //      `install_probe_<h>` is registered for claude/pi only) — so those
+  // (3b) a first capture that failed leaves an `install-pending` row with a
+  //      recorded per-harness error (codex/cursor can never reach `waiting`:
+  //      `install_probe_<h>` is registered for claude/pi only), so those
   //      SUPPORTED rows must disclose the harness too: the earlier
   //      "state ∈ {active, waiting}" predicate left this surface live.
   const failRow = { session_recording: true, session_capture_last_error_codex: 'Upgrade your plan.' }
