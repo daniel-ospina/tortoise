@@ -27,9 +27,7 @@ import { dirname, join } from 'node:path'
 import { stripComments } from './testSupport.js'
 
 const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
-// Every scan below reads comment-stripped source, so a render moved into a JSX
-// `{/* … */}` comment cannot satisfy the positive assertions and prose naming a
-// constant cannot trip the negative ones.
+// Every scan below reads comment-stripped source.
 const code = stripComments(mainJsx)
 
 // The harness-status card's head — from its class attribute to that div's own
@@ -75,12 +73,12 @@ test('#3700: the row renders the harness disclosure from the helper', () => {
 })
 
 test('#3700: main.jsx renders the helper, never the copy constant', () => {
-  // The one production definition of the attribution lives in harnesses.js.
+  // The attribution's definition lives in harnesses.js.
   // These assertions fail if main.jsx names either constant in code.
   assert.doesNotMatch(code, /HARNESS_ATTRIBUTION/,
     'main.jsx must not reference HARNESS_ATTRIBUTION directly')
   assert.doesNotMatch(code, /HARNESS_CAPTURE_STATUS_LABEL/,
-    'main.jsx must not index the raw label table (the helper is the only path)')
+    'main.jsx must not index the raw label table')
 })
 
 test('#3700 / #4896: the row reads its facts through the module bindings', () => {

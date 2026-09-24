@@ -11061,8 +11061,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # #3809: the helpers below derive the key name from ``tortoise.capture_receipts``
 # — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
 # so both this server and ``tortoise session verify`` derive the same name.
-# Two spots in this file re-spell the keys inline (``_reconcile_capture_receipts``
-# / ``_capture_server_owned_keys`` — #4893).
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,

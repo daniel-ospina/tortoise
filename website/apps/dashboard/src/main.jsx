@@ -1457,8 +1457,7 @@ function claimIntentInFlight() {
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
   // #3700: the PLAIN per-harness status word (the attribution is rendered
   // separately by `harnessAttribution` below) — the done screen's
-  // `install-pending` sentence is its single consumer here, and it reads the
-  // ONE shared label table through the helper, never the raw table. (The
+  // `install-pending` sentence reads it through the shared label helper. (The
   // Settings pill calls the helper directly; the `present` / `future`
   // sentences are literal prose that names no harness.)
   const harnessCaptureStatusLabel = captureStatusLabelForHarness(onboarding, wizardHarness)
@@ -10043,9 +10042,8 @@ function MemorySources(props) {
 
   const status = (h) => captureStatusForHarness(state, h)
   const lastError = (h) => captureErrorForHarness(state, h)
-  // #3700: the per-row harness attribution — rendered beside the harness name,
-  // once per row. Never inside the `role="alert"` failure sentence (see
-  // captureStatus.js).
+  // #3700: the per-row harness attribution — rendered beside the harness name.
+  // Never inside the `role="alert"` failure sentence (see captureStatus.js).
   const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
 
   return (
@@ -10306,19 +10304,17 @@ function MemorySources(props) {
                       state pill: its hazard was the multi-line snippet, and the
                       #3700 disclosure must be announced with the state it
                       qualifies. Moving the region to the head keeps the snippet
-                      out while covering the name and the disclosure, which a
-                      pill-scoped region cannot do.
+                      out while covering the name and the disclosure.
                       review P2-3: unsupported harnesses render the REASON,
-                      with no pill and no failure line (no install path exists for
-                      `claude-web`, `claude-desktop` or `chatgpt` — a per-harness
-                      claim would contradict the reason; `cursor` gained a seam
-                      in #4110). That guard is what
+                      with no pill and no failure line (an unsupported harness
+                      has no install path, so a per-harness claim would
+                      contradict the reason). That guard is what
                       `harnessAttributionForHarness` mirrors, so an unsupported
                       row makes no per-harness claim and needs no disclosure.
                       #3700: the row NAMES a harness whose value is a caller
                       declaration, so the disclosure (`harnessAttribution`) sits
                       in the same group as the name — one flex item, so
-                      `space-between` still puts only the pill on the right —
+                      `space-between` separates the name group from the pill —
                       and the state word stays plain; the attribution is what
                       keeps the row from reading as a server-observed harness. */}
                   <div className="harness-status-head" aria-live="polite">

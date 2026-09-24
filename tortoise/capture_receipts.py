@@ -18,18 +18,13 @@ state keys (never client state):
   detail (the per-harness failure sub-line). Same conclusion, different
   resolution: the REST capture resolves the harness ``stored or claimed``,
   while the MCP capture (``tortoise/mcp_server.py``) records the request's own
-  ``harness`` without checking it against the Session's stored harness — so the
-  harness in this key is a caller declaration on both writers.
+  ``harness`` without checking it against the Session's stored harness.
 
 The hosted API (``tortoise/hosted_api.py``) imports both keys from THIS module,
 and the CLI's ``tortoise session verify`` (#3809) imports ``capture_receipt_key``
-(it reads no last-error key). The hosted API is not a single-importer: its
-``_reconcile_capture_receipts`` re-spells the receipt keys against the Session's
-harness buckets, and its ``_capture_server_owned_keys`` re-spells both keys to
-define the server-owned set (filed as #4893), so this module is the one
-DEFINITION while the hosted API is a second spelling in those two spots. One
-function, two importers remains the target; until #4893 lands, neither copy may be
-changed alone.
+(it reads no last-error key). The hosted API also spells the per-harness keys
+itself in places (see #4893), so a change to a key name must not assume this
+module is the only place it appears.
 """
 from __future__ import annotations
 

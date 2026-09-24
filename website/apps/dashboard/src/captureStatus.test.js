@@ -269,8 +269,8 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
     install_probe_pi: '2026-09-23T00:00:00Z',
   }
 
-  // (1) the state VOCABULARY is unchanged — this is the API the derivation,
-  //     the panel, and every sibling test read.
+  // (1) the state VOCABULARY is unchanged — this is the API the derivation
+  //     and the panel read.
   assert.equal(captureStatusForHarness(st, 'claude'), 'active')
   assert.equal(captureStatusForHarness(st, 'pi'), 'waiting')
 
@@ -303,8 +303,7 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
   assert.equal(harnessAttributionForHarness({ session_recording: false }, 'claude'), null)
 
   // (3b) a first capture that failed leaves an `install-pending` row with a
-  //      recorded per-harness error (codex/cursor can never reach `waiting`:
-  //      `install_probe_<h>` is registered for claude/pi only), so those
+  //      recorded per-harness error, so those
   //      SUPPORTED rows must disclose the harness too: the earlier
   //      "state ∈ {active, waiting}" predicate left this surface live.
   const failRow = { session_recording: true, session_capture_last_error_codex: 'Upgrade your plan.' }
@@ -326,7 +325,7 @@ test('#3700: the per-harness attribution is disclosed on the row, not baked into
     { session_recording: true, 'session_capture_receipt_claude-web': 't' }, 'claude-web'), null)
 
   // (4) the sibling FAILURE sub-line reads a key whose harness is a CALLER
-  //     declaration on EVERY writer of it — the REST capture resolves it
+  //     declaration — the REST capture resolves it
   //     `stored or claimed`, the MCP capture records the request's own harness
   //     (#4898) — so it is the same defect class. It renders inside a
   //     `role="alert"` live region, so it carries the failure ALONE and must be

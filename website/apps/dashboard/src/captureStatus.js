@@ -35,8 +35,7 @@ export const CAPTURE_STATES = Object.freeze(['off', 'install-pending', 'waiting'
 // not) and `install_probe_<h>` (`body.harness` on the probe POST) — and no
 // credential→harness binding exists. What the server OBSERVES is that a
 // credential reached it; the harness attribution is a self-report. These state
-// words stay plain; the attribution is rendered once per row by
-// `harnessAttributionForHarness` below.
+// words stay plain.
 export function captureStatusForHarness(state, harness) {
   if (!state) return 'off'
   if (!state.session_recording) return 'off'
@@ -46,21 +45,10 @@ export function captureStatusForHarness(state, harness) {
 }
 
 // #3700: the RENDERED per-harness status word — the state vocabulary above
-// (the stable API the derivation and its tests read) mapped through the ONE
-// shared label table in harnesses.js. The words are deliberately PLAIN: the
-// attribution belongs to the harness, not to the state, so it is rendered once
-// per row by `harnessAttributionForHarness` beside the harness name rather than
-// baked into a state word (where it reads as though the STATE were
-// agent-reported).
-//
-// Call sites go through this helper, never index HARNESS_CAPTURE_STATUS_LABEL
-// directly: main.jsx no longer imports the raw table, so re-indexing it there
-// is a `no-undef` error — one mapping point a new state cannot bypass, rather
-// than a second place that has to agree. That pin covers the call sites in
-// main.jsx only — the table stays exported (the harness registry's own test
-// asserts it), so a NEW module could still import it directly; that is
-// convention, not enforcement, and the honest statement of it matters more than
-// a stronger claim the mechanism does not back.
+// (the stable API the derivation and its tests read) mapped through the shared
+// label table in harnesses.js. The words are deliberately PLAIN: the
+// attribution belongs to the harness, not to the state, so it is not baked into
+// a state word (where it would read as though the STATE were agent-reported).
 export function captureStatusLabelForHarness(state, harness) {
   return HARNESS_CAPTURE_STATUS_LABEL[captureStatusForHarness(state, harness)]
 }
@@ -77,10 +65,7 @@ export function captureStatusLabelForHarness(state, harness) {
 //     an `install-pending` row after a failed first capture has no receipt and
 //     no probe.
 // Both legs live under the SAME support gate as the render sites in main.jsx
-// (the pill AND the failure line), so the predicate cannot outlive the facts it
-// describes: an unsupported row renders the registry reason and never acquires
-// the disclosure.
-// Returns `HARNESS_ATTRIBUTION` in exactly those cases and null otherwise.
+// (the pill AND the failure line).
 //
 // Call sites render it as a dim fragment beside the harness name, inside the
 // head's polite live region — never inside the `role="alert"` failure sentence,
@@ -131,15 +116,6 @@ export function harnessAttributionForHarness(state, harness) {
 //               Web's spike verdict, the backfill-only leaves) or the team's
 //               recording off-switch is set. Saying nothing is the only
 //               honest option in both cases.
-//
-// Per-harness consequence today: none. The Pi gap this paragraph used to record
-// is closed — #3575 was resolved by the in-repo Pi capture seam
-// (`HARNESS_CAPTURE_SEAM.pi`), so `session_capture_receipt_pi` is producible and
-// Pi can legitimately reach 'present'. The capability flag stays DERIVED from
-// that seam (never asserted), which is what makes a `true` with no install step
-// unreachable here; the general "flag true, no installed seam" class is pinned
-// by `harnesses.test.js` and `tests/test_harness_mcp_config.py`, not by this
-// lane.
 export function captureClaimForHarness(state, harness) {
   if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'
   const status = captureStatusForHarness(state, harness)
@@ -160,10 +136,10 @@ export function lastErrorForHarness(state, harness) {
 
 // #3700: the per-harness FAILURE sub-line — the sibling of the status pill, and
 // the same defect class: the harness in `session_capture_last_error_<h>` is a
-// CALLER declaration on every writer of that key — the REST capture resolves it
-// `stored or claimed` (tortoise/hosted_api.py), and the MCP capture records the
-// request's own `harness` (tortoise/mcp_server.py). It must not render as the
-// harness whose attempt failed.
+// CALLER declaration — the REST capture resolves it `stored or claimed`
+// (tortoise/hosted_api.py), and the MCP capture records the request's own
+// `harness` (tortoise/mcp_server.py). It must not render as the harness whose
+// attempt failed.
 // This owns the state read and the null guard and delegates the WORDING to
 // `HARNESS_CAPTURE_LAST_ATTEMPT` (harnesses.js), so no copy is authored here.
 // The sentence carries NO attribution: it renders inside a `role="alert"` live

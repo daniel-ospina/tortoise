@@ -980,21 +980,14 @@ input::placeholder, textarea::placeholder {
 }
 .harness-status.current { border-color: rgba(6, 182, 212, 0.5); }
 .harness-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-/* #3700: the harness name and its disclosure are ONE flex item, so the row's
-   `space-between` still separates only {name + disclosure} from the state pill.
-   BOTH levels wrap: the disclosure stacks under the name inside this group, and
-   the pill drops onto its own line, so the row no longer grows with the
-   disclosure and the group can never collapse onto (and paint over) its own
-   children. The pill is `white-space: nowrap` and ~215px wide, which puts this
-   card's min-content floor at ~241px (the pill plus this rule's padding and
-   border) — more than the ~192px the layout offers the card at a 320px viewport
-   (`.app`'s padding, `.toggle-row`'s padding and the switch take the rest), so a
-   small PRE-EXISTING overflow remains at that width with or without the
-   disclosure. This change reduces it rather than removing it. */
+/* #3700: the harness name and its disclosure are one flex group, so the row's
+   `space-between` separates the name group from the state pill. Both levels
+   wrap: the disclosure stacks under the name inside this group, and the pill
+   drops onto its own line, so the row no longer grows with the disclosure. A
+   pre-existing horizontal overflow at narrow viewports remains. */
 .harness-status-name { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
-/* #3700: the disclosure fragment itself must not break — wrapped at its `·` it
-   reads as an orphaned bullet above the sentence it belongs to (measured at a
-   320px viewport, the narrowest supported). It wraps as ONE unit instead. */
+/* #3700: the disclosure fragment must not break — wrapped at its `·` it reads
+   as an orphaned bullet above the sentence it belongs to. */
 .harness-status-name .dim.small { white-space: nowrap; }
 .harness-status-head strong { font-size: 13px; }
 .capture-state {
