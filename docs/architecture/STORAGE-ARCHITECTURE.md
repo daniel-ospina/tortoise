@@ -11,7 +11,9 @@ aboutObjects: STORAGE-ARCHITECTURE.md, records ledger, vector index, raw storage
 
 # Storage Architecture — the physical layout of the record
 
-**Status:** design, agreed in outline 2026-09-23. **Scope:** where Tortoise's data physically lives, and what that costs. This document is written in the vocabulary of `docs/ONTOLOGY.md` (v3.14) — it does not introduce new layers.
+**Status:** design, agreed in outline 2026-09-23. **Scope:** where Tortoise's data physically lives, and what that costs. This document is written in the vocabulary of `docs/ONTOLOGY.md` (v3.15) — it does not introduce new layers.
+
+**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference in this document is pinned to commit **`c79ba1cf2`**. Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number.
 
 **Related:** `#4333` (this workstream) · `#3998` (two-store) · `#3885` (raw storage modes) · `#3895` (restore drill) · `#4894` (extractor v4) · `#4240` (edge durability) · `#4614` (quota cliff) · `#4889` (Subject layer) · `#1026` (pack slots) · `#4899` (the gate). **Full issue map: §13.**
 
@@ -19,7 +21,7 @@ aboutObjects: STORAGE-ARCHITECTURE.md, records ledger, vector index, raw storage
 
 ## 1. The problem
 
-One user's graph reached **25,000 quota nodes in 3 active days** — **140 MB of resident memory at $73/GB/month ≈ $9.98/month for a single user, and every further GB costs another $73/month in perpetuity.** The product's constraint is a **$19 price with <$9 total cost per user**, and the graph keeps growing with tenure.
+One user's graph reached **25,000 quota nodes in 3–4 active days** - **140 MB of resident memory at $73/GB/month ≈ $9.98/month for a single user, and every further GB costs another $73/month in perpetuity.** The product's constraint is a **$19 price with <$9 total cost per user**, and the graph keeps growing with tenure.
 
 > ⚠️ **FIGURE CORRECTED 2026-09-23.** An earlier draft said *"~6 GB ≈ ~$460/month"*. The $460 implied a **6.3 GB horizon that was never stated** and mixed a growth rate with a total. **The correct statement is the RATE: at ~1 GB/month of growth, each month of tenure adds $73/month to the bill, permanently** — which is worse than a one-off figure, because it recurs. **The $10 at 140 MB and the $73-per-GB rate are the measured numbers; any longer horizon must state its own multiple.**
 
@@ -70,7 +72,7 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 **⚠️ Also measured: `GRAPH.MEMORY USAGE` is a sampling-based ESTIMATE**, not an exact allocation — it takes `SAMPLES` (default 100, up to 10,000) and *"averages them to estimate"*. It does report a real breakdown (`indices_sz_mb`, `amortized_node_attributes_by_label_sz_mb`, `label_matrices_sz_mb`, …), and it does **not** include per-graph/Redis-key overhead. **So 140 MB is a good number, not an exact one — quote it as an estimate.**
 
 ### 2.2 Why this is still the right call to defer
-**The volume is ours to fix, and fixing it is worth more than the engine choice.** Our own measurement: **44 MB of indices + 51.6 MB of embeddings + 16 MB of text**, over a graph that is **62% junk entities and ~20,000 episodic turns**. **Writing less noise reduces the RAM footprint directly on the engine we already have** — no migration, no new ops, and it also improves search and connections (which is the actual goal).
+**The volume is ours to fix, and fixing it is worth more than the engine choice.** Our own measurement: **45 MB of indices + 51.6 MB of embeddings + 16 MB of text**, over a graph that is **62% junk entities and ~20,000 episodic turns**. **Writing less noise reduces the RAM footprint directly on the engine we already have** — no migration, no new ops, and it also improves search and connections (which is the actual goal).
 
 **⇒ The order is: fix the writing, then re-measure, then decide about the engine — with users in hand.**
 
@@ -101,7 +103,7 @@ and §4.2:
 
 | layer | what it holds | ontology types | store |
 |---|---|---|---|
-| **The truth** | provenance, the episodic timeline, and the graph's own change journal | `Source`, `Document`, `Event`, `GraphEvent` | **Postgres, on disk** |
+| **The truth** | provenance, the episodic timeline, and the graph's own change journal | `Source`, `Event`, `GraphEvent` (a document is a `:Source`, §4.4) | **Postgres, on disk** |
 | **The derived layer** | the Semantic, Epistemic and Procedural layers — all of it a fold over the truth | `Subject`, `Object` (+`.status`), `Point` (+EP confidence), operators, edges | **Postgres; RAM-cached** |
 | **Artifacts** | large binary objects (recordings, attachments) | referenced by a `Source` | **object storage** |
 
@@ -111,7 +113,7 @@ and §4.2:
 
 ### Why these four are truth — the test is PER-WRITE, not per-class
 **⚠️ CORRECTED 2026-09-23 after review. An earlier draft stated the test as *"append-only — rows are added, never updated"*. That test is FALSE for two of the four types it places in the truth layer**, and it put one class in both layers:
-- `Source.updatedAt` is **set ON MATCH** by `_upsert_source`; `Source.reliability` is a **derived** query-time cache written onto the node (`#398`, `sdk.py:20567` `_write_reliability_cache`).
+- `Source.updatedAt` is **set ON MATCH** by `_upsert_source`; `Source.reliability` is a **derived** query-time cache written onto the node (`#398`, `sdk.py:20667` `_write_reliability_cache`).
 - `Document.updatedAt` is set, and `doc_status` transitions **`captured`→`extracted`**. **⚠️ `doc_status` is RETIRED under D10/v3.15 (Q3)** — liveness is a READ, not a stored field, and this flip is **one of only two unjournalled raw-`SET` writes in the system** (`ingest.py:262-266`). The statement above describes the code **as it stands today**, not the target.
 - **`Document ⊂ Object`** (`ONTOLOGY.md` §1/§4.4/§6 — `objectKind: document`), so the class appeared in **both** layers. **⚠️ SUPERSEDED (v3.15/D10): a document is a `:Source`, not an Object subclass** — see §9.3/§9.5. This bullet records the state that motivated the change.
 
@@ -135,7 +137,7 @@ The mechanical form of the same test: **is this write carried by the journal?** 
 4. it is **never the only home**;
 5. it is **recomputed on rebuild, never restored**.
 
-**`Source.reliability` already satisfies all five** — `ONTOLOGY.md` calls it a *"documented cache, never authoritative"* (`#398`). **`Document` needs placing explicitly**: its **existence is truth** (a connector discovered it); its `doc_status` is a **mutable field on a truth row** — and ⚠️ its `captured`→`extracted` flip is currently an **unjournalled raw Cypher write** (`ingest.py:262-266`, `hosted_api.py:10864`), which is a **journal-completeness gap**, filed alongside `#4240`.
+**`Source.reliability` already satisfies all five** — `ONTOLOGY.md` calls it a *"documented cache, never authoritative"* (`#398`). **`Document` needs placing explicitly**: its **existence is truth** (a connector discovered it); its `doc_status` is a **mutable field on a truth row** — and ⚠️ its `captured`→`extracted` flip is currently an **unjournalled raw Cypher write** (`ingest.py:262-266`, `hosted_api.py:10929`), which is a **journal-completeness gap**, filed alongside `#4240`.
 
 #### ⚠️ The truth set is larger than these four — and the invariant is false today
 **The truth set is these four types ∪ the preserved config classes** (`_config_classes()`; see `#4641`, `#4653`). So the invariant is:
@@ -241,7 +243,7 @@ The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(
 
 **⭐ AND ITS CONSEQUENCE FOR THE VECTOR INDEX — corrected 2026-09-23.** *"Rows scoped by tenant"* and *"the index is partitioned by tenant"* are **different physical designs**, and only the second bounds the working set:
 - **With RLS row-scoping alone there is ONE index over ALL tenants**, and the tenant predicate arrives as a **policy-injected value — not a plan-time constant** — so the planner cannot match it to a per-tenant partial index and **will not prune**. The working set stays *all* data.
-- **The mechanism that works is declarative partitioning (`PARTITION BY` tenant) + partition pruning**, or binding the tenant key as a **literal on the connection**. **Verify with `EXPLAIN` — measurement M2 (§15).**
+- **The mechanism that works is declarative partitioning (`PARTITION BY` tenant) + partition pruning**, or binding the tenant key as a **literal on the connection**. **Verify with `EXPLAIN`.** ⚠️ **No measurement covers this yet — §15's M1 measures FalkorDB query latency on the live graph, which is a different system and cannot answer a Postgres partition-pruning question.** *(A prior version of this line cited M2, which is the invoice.)*
 - ⚠️ **Bypass rule, to state explicitly:** RLS is bypassed by the **table owner** and by **`service_role`**. Say which role the app connects as, and why.
 
 **⇒ The decision itself does not change. §12.2b's "partition the index per tenant" is a physical layout added on top of it — and without it, lever 1's *"pure win"* claim is false.**
@@ -267,8 +269,8 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 
 | line | why it is missing and why it matters |
 |---|---|
-| **the journal** | §3 requires the journal to carry the **full derived payload** — creations as snapshots, mutations as deltas. **It grows at or near the rate of the derived layer**, and it is **not in this table at all.** See **M5 (§15)**. |
-| **egress + IOPS** | a cold, disk-resident design **reads from disk on every cache miss.** The cost moves from *storage* to *requests* — and egress is the line that punishes a read-heavy pattern. **Not modelled.** See **M3/M6 (§15)**. |
+| **the journal** | §3 requires the journal to carry the **full derived payload** — creations as snapshots, mutations as deltas. **It grows at or near the rate of the derived layer**, and it is **not in this table at all.** ⚠️ **No measurement of the journal's growth exists yet (§15 lists none).** |
+| **egress + IOPS** | a cold, disk-resident design **reads from disk on every cache miss.** The cost moves from *storage* to *requests* — and egress is the line that punishes a read-heavy pattern. **Not modelled.** ⚠️ **No measurement covers egress or IOPS yet (§15 lists none).** |
 
 **⇒ The table answers *"what does the DATA cost?"*. It does not answer *"what does the SYSTEM cost?"* — and §6 is the section that says so. Do not quote this table as a total.**
 
@@ -289,7 +291,7 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 
 | lever | magnitude | owner |
 |---|---|---|
-| **disk-resident storage** (this document) | **~580× on the storage line** — ⚠️ the blended *total-cost* figure is **uncomputed**; it needs the compute and IOPS lines, which are M2/M3 work | `#4333` |
+| **disk-resident storage** (this document) | **~580× on the storage line** — ⚠️ the blended *total-cost* figure is **uncomputed**; it needs the compute and IOPS lines, and **neither has a measurement yet** (M2 is *needed*, not done — §15) | `#4333` |
 | **writing less** — the selection gate | **~10×** ⚠️ see §6.1 | `#4894` / extraction |
 
 **Neither alone reaches 100×, and the two multiply.** A storage migration presented as a 100× fix would still be comparing one cost line to another.
@@ -299,7 +301,7 @@ The extraction document states no target and no aggregate reduction; the number 
 
 **⇒ Two consequences the storage plan depends on:**
 - **The mechanical half is ~2×, not 10×.** The headline depends entirely on the salience gate.
-- **⚠️ Volume with no recall floor is gameable** — you can always hit a node target by writing nothing. **Any reduction target must be paired with a retention floor** (a measured share of durable claims kept), or the metric is meaningless. See §15.
+- **⚠️ Volume with no recall floor is gameable** — you can always hit a node target by writing nothing. **Any reduction target must be paired with a retention floor** (a measured share of durable claims kept), or the metric is meaningless. ⚠️ **No retention-floor measurement exists yet (§15 lists none).**
 
 ---
 
@@ -661,7 +663,7 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 | — `Source` · matrices · edges · misc | ~13 | 9% |
 
 **Stored vector properties ≈ 50 MB** (`Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB at 1.5 KB each), **plus the HNSW portion of the 45 MB index total.**
-⚠️ **Correcting an earlier draft that said *"95.6 MB of 140 MB (~68%)"*.** That figure **added the whole 44 MB index** — but the index total also contains **every fulltext index we have** (`Point.content`, `Point.search_keys`, `Object.name`, `Event.subject/name`, `Subject.name`, `Document._searchText`). **The honest answer is a range, not a point: the vector class is somewhere around half the graph, and the precise split needs an index-level breakdown we do not have.** *(What is certain and measured: `Point`, `Object` and `Event` attributes are 72 MB of which the bulk is 1.5 KB embeddings; `indices_sz_mb` is 45.)*
+⚠️ **Correcting an earlier draft that said *"95.6 MB of 140 MB (~68%)"*.** That figure **added the whole index total** — but the index total also contains **every fulltext index we have** (`Point.content`, `Point.search_keys`, `Object.name`, `Event.subject/name`, `Subject.name`, `Document._searchText`). **The honest answer is a range, not a point: the vector class is somewhere around half the graph, and the precise split needs an index-level breakdown we do not have.** *(What is certain and measured: `Point`, `Object` and `Event` attributes are 72 MB of which the bulk is 1.5 KB embeddings; `indices_sz_mb` is 45.)*
 
 **⇒ Therefore "what earns an embedding" is the largest lever on our bill that requires no engine change and no migration.** That is §12.2's subject. **And see §12.1d — the latency half of this debate is now ANSWERED with our own measurements, so the only open question is cost.**
 
@@ -673,11 +675,11 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 | | size | does it scale with the text? |
 |---|---|---|
 | the summary **text** | a few KB | ✅ yes |
-| its **vector** | **1.50 KB** | ⛔ **no — fixed width** |
+| its **vector** | **1.50 KB** stored | ⛔ **no — fixed width** |
 
-**A 3 KB summary → a 1.5 KB vector. A 50 KB transcript → the same 1.5 KB vector.** A 384-dim float32 embedding is a fixed-width row: **it is a pointer, not a payload.** So *"vectorise the summary"* does **not** move the summary into the graph — **D1 is untouched, the text stays in Supabase, and vectorising it changes nothing about the RAM problem.**
+**A 3 KB summary → a 1.50 KB vector. A 50 KB transcript → the same 1.50 KB vector.** A 384-dim float32 embedding is a fixed-width row: **it is a pointer, not a payload.** So *"vectorise the summary"* does **not** move the summary into the graph — **D1 is untouched, the text stays in Supabase, and vectorising it changes nothing about the RAM problem.**
 
-**Cost of a vector for every Source we have: 2,193 × 2.05 KB ≈ 4.4 MB — about 3% of the 140 MB.**
+**Cost of a vector for every Source we have: 2,193 × 2.05 KB ≈ 4.4 MB — about 3% of the 140 MB.** *(2.05 KB is the **resident** figure: 1.50 KB of payload plus its share of HNSW index overhead. The 1.50 KB above is the **stored** row.)*
 
 **⇒ But the instinct points at the real heavyweight, and it is not the summaries — it is the vectors we ALREADY store.** See §12.1b, and the open decision at §12.1c.
 
@@ -729,9 +731,9 @@ On Postgres, giving **each tenant its own index partition** looks like a pure wi
 footprint_per_vector ≈ 1.1 × (4d + 8M) bytes
 d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 ```
-**Our measured reality: 33,580 embeddings ≈ 51.6 MB of vectors, plus a 44 MB index.** Today's graph carries **1.34 embeddings per node** (25,000 nodes, 33,580 embeddings) — so **each extra node costs roughly 1.34 vectors of RAM on top of its own**. That ratio, not the node count, is what drives the bill.
+**Our measured reality: 33,580 embeddings ≈ 51.6 MB of vectors, plus a 45 MB index.** Today's graph carries **1.34 embeddings per node** (25,000 nodes, 33,580 embeddings) — so **each extra node costs roughly 1.34 vectors of RAM on top of its own**. That ratio, not the node count, is what drives the bill.
 
-**⚠️ The single most valuable number to stop guessing:** *(caveat kept from the earlier draft)* **2.5M** appears in this document with **two different meanings** — §5's *"product total"* and an earlier §12.1's *"one tenant"*. They are **~1,000× apart**. **Any figure quoting 2.5M must state which reading it uses, and it is exactly the kind of silent scale flip that produced the 7 TB scare.** ⚠️ **This needs resolving with the owner — it is the scale the product is planned against, and it is currently ambiguous in our own documents.**
+**⚠️ The single most valuable number to stop guessing:** *(caveat kept from the earlier draft)* **`2.5M` has ONE meaning in this document: the product total.** An earlier draft used it a second time for *"one tenant"*, which read ~1,000× smaller — the silent scale flip behind the 7 TB scare. **That second usage is deleted, so any occurrence here means the product total.** If a second meaning is ever needed, give it its own symbol rather than reusing this one.
 
 ✅ **MEASURED 2026-09-24 — M1 is done. See §12.1d: 1.49 ms network floor, 2.74 ms indexed vector search, 1.55–1.75 ms traversals. Our retrieval layer is single-digit milliseconds and latency is not a constraint.**
 
@@ -752,7 +754,7 @@ d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 | `Document` | ⛔ **NONE** | `_searchText` |
 | `Session` / `GraphEvent` | ⛔ **NONE** | — |
 
-**⇒ 12,653 embeddings — `:Object` 7,859 and `:Event` 4,798, i.e. 38% of every vector we store — are stored and paid for with no index behind them.** ≈**19 MB, 13.5% of the graph.** `Object`'s node attributes are **13 MB, of which ~11.8 MB is embeddings — the label is mostly vectors.**
+**⇒ 12,657 embeddings — `:Object` 7,859 and `:Event` 4,798, i.e. 38% of every vector we store — are stored and paid for with no index behind them.** ≈**19 MB, 13.5% of the graph.** `Object`'s node attributes are **13 MB, of which ~11.8 MB is embeddings — the label is mostly vectors.**
 
 **⭐ And they are still queryable — by full scan, silently.** Measured through the app's own path (`run_vector_query(..., entity_type=…)`, 14 runs, 4 discarded as warmup):
 
@@ -1082,18 +1084,18 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
   | # | site | what it reads for | kind |
   |---|---|---|---|
-  | 1 | `sdk.py:6311` — MCP tool **`tortoise_belief_timeline`** | walks decision → Object named by topic | traversal |
+  | 1 | `sdk.py:6397` — SDK **`belief_timeline`** (`mcp_server.py:3126` exposes it) | walks decision → Object named by topic | traversal |
   | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** | finds seed claims via Object | traversal |
   | 3 | `extractor_v2.py:1934` | the classifier's "same entity?" gate | traversal |
   | 4 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | traversal, **2-hop** |
 
-  Plus `sdk.py:14720` (C2 key expansion) — **OFF by default** (`sdk.py:13677`). And **23 test files assert the edge.**
+  Plus `sdk.py:14744` (`_entity_key_expansion_pass`) — **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`). And **23 test files assert the edge.**
 
   **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break two public surfaces.
 
   **But the structural door stays open:** a full-repo search found **zero** `aboutObject` edges carrying **any property** (`rg -n 'aboutObject \{'` → 0 matches / 1,842 files). Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
 
-  **⚠️ `#4240` is half-right, and the true half is the sharper argument.** Capture-path edges **are** journaled (`EntityLinked`, `#3664`; replayed by `projection/entities.py:785+`). **Indexer-path edges are NOT** — `_connect_issue_objects` (`sdk.py:20054`) calls `create_about_edge` with no journal write, and `test_index_restore.py:373-403` asserts `count(*) == 0` after rebuild. **So the finding is not "this edge saves no storage" but "this edge class is internally inconsistent about durability"** — a cleanup question, arguably more urgent than stored-vs-derived.
+  **⚠️ `#4240` is half-right, and the true half is the sharper argument.** Capture-path edges **are** journaled (`EntityLinked`, `#3664`; replayed by `projection/entities.py:785+`). **Indexer-path edges are NOT** - `_connect_issue_objects` (`sdk.py:20154`) calls `create_about_edge` with no journal write, and `test_index_restore.py:373-403` asserts `count(*) == 0` after rebuild. **So the finding is not "this edge saves no storage" but "this edge class is internally inconsistent about durability"** - a cleanup question, arguably more urgent than stored-vs-derived.
 
   **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** We have neither today.
 
@@ -1101,7 +1103,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
   **✅ OWNER RULING 2026-09-23: KEEP the stored edges — and the stored-vs-derived question is DEFERRED to post-launch, not left open.** *"we haven't launched yet, so unanswerable. keep them for now, we optimise with users."* **The unknown above is unanswerable before launch — there is no usage to count.** So: **keep the stored edges; revisit once there are users and real call data.** ⚠️ **The deferral costs only storage — ~3 MB, per §11.1 — so deferring is genuinely cheap, and it is the right call: it buys the option back for the price of nothing.**
 - **Fan-out caps** — nothing in our write path bounds how many edges one entity accumulates (`config/ci-surfaces.yml` at **123**, `durations map` at 111, `the admin-merge rail` at 70, `cal-trigger.py` at 64, `the plan doc` at 63). Hindsight caps at **200** and drops the arm under budget pressure. ✅ **ADOPTED — initial value 200** (owner, 2026-09-23). ⚠️ **§11.5 is the specific record;** an earlier draft of this bullet said *"adopted in principle; no value set yet"*, which **contradicted** it. For the record: it is a **guard rail, not an optimisation** — it binds nothing today (worst hub is 123) and is refined with real usage.
-- ⭐ **NEW (2026-09-24) — the unindexed embeddings (V3, §12.1b).** **MEASURED ON THE LIVE GRAPH AND FILED: `#4997`.** `CALL db.indexes()` confirms **exactly one vector index — `Point.embedding`**; `Object`, `Event`, `Source`, `Subject`, `Document` have **none**. **12,653 stored vectors (`:Object` 7,859 + `:Event` 4,798), ≈19 MB, 13.5% of the graph, are paid for and unindexed** — and they full-scan at **16.96 ms vs 4.97 ms** while `leg_trace.reason` still reports **`ok`**. **The mechanism is a drift, not an oversight:** `#172` made the *query* label-generic; `_ensure_indexes()` still hardcodes `'Point'`. **Two readings, one ruling: stop storing them, or make index creation label-generic.** **This is the one candidate that is a *defect* rather than a design question.**
+- ⭐ **NEW (2026-09-24) — the unindexed embeddings (V3, §12.1b).** **MEASURED ON THE LIVE GRAPH AND FILED: `#4997`.** `CALL db.indexes()` confirms **exactly one vector index — `Point.embedding`**; `Object`, `Event`, `Source`, `Subject`, `Document` have **none**. **12,657 stored vectors (`:Object` 7,859 + `:Event` 4,798), ≈19 MB, 13.5% of the graph, are paid for and unindexed** — and they full-scan at **16.96 ms vs 4.97 ms** while `leg_trace.reason` still reports **`ok`**. **The mechanism is a drift, not an oversight:** `#172` made the *query* label-generic; `_ensure_indexes()` still hardcodes `'Point'`. **Two readings, one ruling: stop storing them, or make index creation label-generic.** **This is the one candidate that is a *defect* rather than a design question.**
 
 ---
 

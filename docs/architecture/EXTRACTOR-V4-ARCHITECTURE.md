@@ -12,6 +12,8 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, extractor pipeline, S2.2 VET, entity
 # Extractor v4 — Architecture
 
 **Status:** design in progress, 2026-09-23. **Home:** `#4894` (write-path redesign). **Predecessor:** `#1509` (extractor v3, approved 2026-08-20, never built).
+
+**⚠️ Code citations — revision pin.** Every `file.py:NNNN` reference here is pinned to commit **`c79ba1cf2`**. Line numbers drift as the code moves; **the symbol name is authoritative and the line number is a convenience.** Verify against the symbol, not the number.
 **Related:** `docs/architecture/STORAGE-ARCHITECTURE.md` · `#1026` (pack slots) · `#2281` (ask/answer over distilled knowledge) · `#2730` (entity attachment) · `#4333` (volume/economics) · `#4240` (edge durability) · `#4911` (secret redaction) · `#4899` (the gate). **Full issue map: §15.**
 
 ---
@@ -19,7 +21,7 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, extractor pipeline, S2.2 VET, entity
 ## 1. Why v4 exists
 
 ### The measured problem
-Production graph: **~25,000 quota nodes in 4 active days** (~27 per emitting session). Composition: **14,851 statements (59.5%)**, **7,863 Objects (31.5%)**, 2,233 operators (8.9%).
+Production graph: **~25,000 quota nodes in 3–4 active days** (~27 per emitting session). Composition: **14,851 statements (59.5%)**, **7,863 Objects (31.5%)**, 2,233 operators (8.9%). **⚠️ Node counts move continuously — the Object figure is a snapshot and does not match every other figure in these documents; each one is date-stamped at its source.**
 
 **The mechanism, found by audit (50 real instances, `#4894` comment 2026-09-23):** the extractor mints **an entity for the grammatical subject of each statement.**
 
@@ -298,6 +300,12 @@ S6  COMMIT     create entities + connections + metadata/lifecycle
 ### S0 — READ  *(mechanical — no LLM)*
 **In:** **a SOURCE** — a document, a code file, a meeting transcript, or a conversation. **Out:** the common shape the rest of the pipeline consumes, plus the field→type MAPPING that source type declares.
 
+Normalises the shape **and applies the declared field→type mapping** (§3). Passes the mapping forward so later steps know what is already typed versus what must be inferred.
+
+**✅ Confirmed mechanical (owner asked, 2026-09-23).** The live code does this in plain Python **before any model call**: `_edus_from_conversation(conversation)` segments the input into units, and `chunk_transcript(edus, target=chunk_size)` splits it for processing. **The first LLM call in the entire pipeline is S1** (`run_s1(...)`). So S0 is **parsing + mapping** — it must never be handed to a model, and it is exactly why structured sources (a GitHub PR) are cheap and exact while transcripts are not (§3).
+
+#### ⭐ D10 and the version model — what the extractor must respect
+
 **⭐ CORRECTED 2026-09-24 (owner): a document is a SOURCE, not a graph node.** *"I am suggesting making them sources so our entity layer can be extracted from them… That way our entity layer becomes a proper abstraction over documents, code, meeting transcripts (all sources) — that's the reasoning/knowledge layer."*
 
 **⇒ S0's input is a source FILE, uniformly, whatever it is.** ⚠️ **CORRECTED 2026-09-24 — an earlier version of this line said *"There is no `:Document` node in the graph to read from, and none is created"*. THAT IS FALSE ABOUT THE CODE.** The `:Document` label **exists, is written and is read**: `projection/entities.py:1527` (`_upsert_document`) emits `MERGE (d:Document {id:$id})` at `:1572`/`:1740`; `ingest.py:188/266/307/412` `MATCH (d:Document …)`; **and `quota.py:524` counts `MATCH (d:Document)` as a COUNTED quota resource (`#1726`).** `docs/ONTOLOGY.md` §4.4 still declares *"Graph label is `:Document`"*.
@@ -334,10 +342,6 @@ S6  COMMIT     create entities + connections + metadata/lifecycle
 **⭐ The policy is B — mark stale now, supersede on re-inference (owner).** A re-fetched source's entities are **marked stale immediately** and **superseded only when re-inference produces their successors**. **Not A (immediate supersession)**: A withdraws the belief *before* producing its successor, so between the source changing and re-inference running the graph asserts **nothing** about a subject it previously had a position on — strictly worse than a stale-but-present belief. **`stale ≠ wrong`:** supersession is **additive**, never a delete.
 
 **⚠️ Interval-closing is part of the WRITE, not a later repair.** An unclosed `validTo` reads as *"still true"* indefinitely — the field names this as **the #1 production bug** in temporal knowledge graphs, and it is exactly what T6 produces today. **And document-level alone would not answer the owner's question**: if you supersede only the document, the **facts are untouched** — *"what did we believe before?"* is a question about **facts**, which is why the version belongs on the **link**. Tracked: `#5038` · `#5024` · `#5025` · `#5026`.
-**In:** whatever arrived. **Out:** one common shape + the source mapping that produced it.
-Normalises the shape **and applies the declared field→type mapping** (§3). Passes the mapping forward so later steps know what is already typed versus what must be inferred.
-
-**✅ Confirmed mechanical (owner asked, 2026-09-23).** The live code does this in plain Python **before any model call**: `_edus_from_conversation(conversation)` segments the input into units, and `chunk_transcript(edus, target=chunk_size)` splits it for processing. **The first LLM call in the entire pipeline is S1** (`run_s1(...)`). So S0 is **parsing + mapping** — it must never be handed to a model, and it is exactly why structured sources (a GitHub PR) are cheap and exact while transcripts are not (§3).
 
 ### S1 — NARRATE
 **In:** the common shape. **Out:** a **connected narrative**.
@@ -378,9 +382,11 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 **What D4 never justified is extraction consuming the lookup.** Its only reason was *"so extraction emits attach-to-A instead of create-A"* — and **that reason is now unnecessary, because S3 resolves authoritatively.**
 
-**⇒ D4 is NARROWED, not reversed:** one entity-keyed neighbourhood lookup, **after** extraction, consumed by **the judgment** (salience) **and by S3** (resolution). **Extraction no longer consumes it.** This follows from D4's own stated reason — the extraction consumer was never covered by it.
+**⇒ D4 is NARROWED, not reversed:** one entity-keyed neighbourhood lookup, **after** extraction, consumed by **the judgment** (salience) **and by S3** (resolution). **Extraction no longer consumes it.**
 
-**⚠️ OWNER CONFIRMATION PENDING — and the STATUS must be stated ONE WAY (reviewer B2.20).** An earlier draft said *"Owner decision required. Nothing has been changed in the architecture pending this"* **while §9 recorded it as *"DECIDED, narrowed — confirmation pending"* — and the architecture HAS changed** (S1.5 deleted, the lookup relocated, S3 declared sole authority). **The accurate status: the design CHANGED; the narrowing is PROPOSED and awaiting the owner's confirmation.** ✅ **Recorded as such in §9 (D4).**
+**✅ STATUS: `DECIDED (narrowed)` — the owner ruled.** The narrowing is in force: the lookup sits **after** extraction, and it is consumed by the salience judgment and by S3 only. **Extraction does not consume it.** *(An earlier version of this line said the narrowing was still proposed and awaiting confirmation; §9's D4 row says `DECIDED (narrowed)`, which is correct — §16.2 records that this two-ways status was itself a defect.)* This follows from D4's own stated reason — the extraction consumer was never covered by it.
+
+> **✅ Superseded and deleted (reviewer B2.20, then §16.2).** This line used to say the narrowing was *"PROPOSED and awaiting the owner's confirmation"* while §9 recorded D4 as `DECIDED (narrowed)` — a two-ways status the second review cycle flagged. **The owner has since ruled: D4 is `DECIDED (narrowed)`.** There is no pending confirmation, and no third phrasing.
 
 > ✅ **Note — `#4511` is CLOSED, and it no longer gates anything.** It was the blocker *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup has since moved into S3 (§4.2), so `#4511` is now simply a fixed bug, not a dependency of this design.** ⚠️ **Still unmeasured (§14):** whether giving extraction the neighbourhood ever reduced what it created — the question that justified the old ordering, and the one the new ordering makes moot.
 
@@ -429,7 +435,9 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
 **Mechanism (proposed):** if the batch verdict is poor — *e.g. VET discarded almost everything, or the keep-rate is below a threshold* — **re-narrate ONCE with the pack's `memory_granularity` emphasised, then re-extract.** ⚠️ **Bounded: once, then accept.** A model-call loop can oscillate — the second narrative can be worse than the first, and nothing in the design currently prevents that. **A retry, not a loop.**
 
-**Outputs:** `KEEP` · `DISCARD` · `MERGE-INTO-EXISTING` · `SPLIT` *(for a fused item — extraction may then split it from the raw, which it already has)* · **`RENARRATE`** *(batch-level only)*.
+**Outputs:** `KEEP` · `DISCARD` · `SPLIT` *(for a fused item — extraction may then split it from the raw, which it already has)* · **`RENARRATE`** *(batch-level only)*.
+
+⚠️ **`MERGE-INTO-EXISTING` is deliberately NOT a VET output.** VET runs **before** S3 (§4.2), and S3 is **the single authority on whether a candidate is new or an existing node**. A VET stage that emitted `MERGE-INTO-EXISTING` would be deciding new-vs-existing itself — the VET/S3 circular dependency §16.2 identifies. **Merging is S3's decision, made after the gate; VET may only keep, discard, split, or ask for a re-narration.**
 
 **⚠️ Unmeasured, and it needs the small-sample-first method:** *whether re-narrating actually improves yield*, and *what keep-rate counts as "poor"*. Both are thresholds that must be set by hand on tens of real sessions with the owner correcting the rule — **not chosen in advance.**
 
@@ -517,7 +525,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 |---|---|---|---|
 | **D-a** | **source** | **URL only** | ⚠️ **URL-keyed only** — a content-hash is a provenance anchor (`#4005`), **not a dedup key** |
 | **D-b** | **within-batch exact** | `:3967-3969` | ✅ |
-| **D-c** | **vs store, raw content hash** | `sdk.py:12375` | ✅ |
+| **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
 | **D-d** | **semantic** | `:3021+` | ✅ |
 
 **⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent, and it is the largest single volume lever available.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one — and since **S0 is already mechanical and free**, this costs nothing to add.
@@ -666,13 +674,13 @@ Points X, Y, Z   ← the reasons. Carry "why".
 
 | what | where (code) | live count |
 |---|---|---|
-| `sdk.supersede(old_id, new_id)` / `supersede_point` | `sdk.py:5409` / `:5427` | — |
+| `sdk.supersede(old_id, new_id)` / `supersede_point` | `sdk.py:5509` / `:5527` | — |
 | `apply_supersessions` — *"the ONE consumer-side discipline"* (`producer side: extractor_v2._supersession_records`) | `commit_ops.py:299` | — |
 | `CORRECTS` edge — `(new:Point)-[:CORRECTS]->(old:Point)` | `subgraph.py:28` | **74** |
 | `Object.status='superseded'` + `supersededBy` (a **fold**, not a field) | `projection/entities.py:1497` | **32 of 7,867 Objects (0.4%)** |
 | superseded `Point`s | — | **74** |
 
-**⇒ The mechanism fires ~32 times against 7,867 Objects.** It is not missing — **nothing detects the change.** That is the finding, and it is the same gap §5 names: **the extractor must produce the supersession record, and today it almost never does.** Building a supersession system is not the work; **wiring detection into extraction is.**
+**⇒ The mechanism fires ~32 times against 7,867 Objects (a later snapshot than the 7,863 at §1).** It is not missing — **nothing detects the change.** That is the finding, and it is the same gap §5 names: **the extractor must produce the supersession record, and today it almost never does.** Building a supersession system is not the work; **wiring detection into extraction is.**
 
 **Two forms exist and they are different, deliberately:**
 - **Point-level:** the `CORRECTS` edge. ⚠️ For **Points there is no `superseded_by` property** — `subgraph.py:28` records that it is **derived by following `CORRECTS`**. (`Object`s *do* carry `supersededBy` as a fold cache.)
@@ -1002,7 +1010,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | §5 lifecycle events | `#4240` | lifecycle is **appended Events + folded status** — which is why the missing journal is a durability bug |
 | §7 atomicity + §7 state values | **`#2453`** (LANDED) · `#2820` · `#4432` | the `STATE_VALUE_CARVE_OUT` must survive any filter; `'extraction emits statement only'` is contradicted by the live rule extractor. ⚠️ **The former "`#1509` (E2, E3)" citation was wrong — `#1509` has no §9 and no E2**; **E2 is `#1534`'s slot** (CLOSED) |
 | §8 already in code | `#1026` · `#2714` | packs already declare `chains`/`nearMisses`/`subclassOf`/`sourceTypes` — **the work is enforcement, not design** |
-| §9 decisions D1–D8 | `#4917` | the handoff record |
+| §9 decisions D1–D13 | `#4917` | the handoff record |
 | §10–§12 research | `#2730` · `#4333` | the Hindsight checks |
 | §13 connections & relevance | **`#2730`** · **`#1026`** · `#4240` | cross-batch connection is **mechanical** in the nearest comparable; entity edges were **deleted** at 53% of link rows |
 | §14 not established | `#4894` | the small-sample-first measurement list |
@@ -1040,7 +1048,7 @@ Each open decision was run through the mandated sequence: **contradiction test f
 
 | category | count | disposition |
 |---|---|---|
-| **P0 — a false load-bearing claim, or two documents that contradict each other** | **6** | **All 6 corrected in place** (A1 vector-index model · A2 truth/derived test · A3 `#2453` landed · A4 VET/S3 circular dependency · A5 the 10× cannot reproduce itself · A6 *"an Object is a name"*). **Each correction is marked `⚠️ CORRECTED` at the point of correction, with the old text's error named.** |
+| **P0 — a false load-bearing claim, or two documents that contradict each other** | **6** | **All 6 corrected in place — A4 only after §16.2 caught it** (A1 vector-index model · A2 truth/derived test · A3 `#2453` landed · A4 VET/S3 circular dependency — `MERGE-INTO-EXISTING` removed from VET's outputs, restoring S3 as the sole authority · A5 the 10× cannot reproduce itself · A6 *"an Object is a name"*). **The corrections are marked in place — most with `⚠️ CORRECTED`, some with the error named directly in the row (A1 *"REWRITTEN TWICE"*, A3 *"THIS ROW WAS WRONG"*, A6 *"DO NOT WRITE"*).** |
 | **P1 — code-evidence, citation, or arithmetic defects** | **34** | **All corrected.** Arithmetic recomputed (B1.1 §1, B1.2/B1.3/B1.5/B1.19, §5's table); citations fixed or the claim deleted (B1.16 `#1509 §9`/`E2`, B1.18 `MITIGATES`, B2.9 `llm_tail`, B2.18 `#3011`); **B2.1's constraint 4 kept visible with the evidence that falsifies it**, so it cannot be re-derived. |
 | **P2 — completeness gaps** | **18** | **Recorded, not silently dropped** — this document's §4.3 (G1–G5) + `STORAGE-ARCHITECTURE.md` §5.1/§14/§15. |
 | **Genuinely a decision, not a correction** | **6** | ⛔ **Escalated to the owner — §16.3. These are NOT applied and NOT decided.** |
@@ -1055,8 +1063,8 @@ Each open decision was run through the mandated sequence: **contradiction test f
 | *"`#3011`'s thresholds were embellished 3 of 3; REMOVED"* | the frozen doc **carries all three** (`H1 ≥15`, `H2 ≥10`, `H3 −5`) | **cycle-1 B2.18** — conflated *"also in H4 / also in the falsifiers"* with *"not in H1/H3"* |
 | *"the lookup does not need kinds → constraint 4 evaporates"* | `_find_existing_entity` **uses `kind` as its exact-match key** | **cycle-1 B2.1** — read the query builder and called it the lookup |
 | *"there is no `:Document` node and none is created"* | `:Document` is written, read, **and quota-counted** (`quota.py:524`, `#1726`) | not from cycle 1 — a **lane inference** from "D30 puts raw outside the graph" |
-| *"All 6 P0s corrected in place"* | **A4 is not corrected** — `MERGE-INTO-EXISTING` is still in VET's outputs, so the VET/S3 circularity stands | **cycle-1 A4's disposition was claimed, not verified** |
-| *"the narrowing is PROPOSED… ✅ Recorded as such in §9 (D4)"* | §9 D4 says **`DECIDED (narrowed)`** | **cycle-1 B2.20** — the "fix" replaced one two-ways status with another |
+| *"All 6 P0s corrected in place"* | **at the time, A4 was NOT corrected** — `MERGE-INTO-EXISTING` was still in VET's outputs, so the VET/S3 circularity stood | **cycle-1 A4's disposition was claimed, not verified** · **✅ NOW FIXED** — `MERGE-INTO-EXISTING` is removed from VET's outputs (§S2.2) and §16.1 is corrected |
+| *"the narrowing is PROPOSED… ✅ Recorded as such in §9 (D4)"* | §9 D4 says **`DECIDED (narrowed)`** | **cycle-1 B2.20** — the "fix" replaced one two-ways status with another · **✅ NOW FIXED** — the ⚠️ pending line is deleted and §S3 states `DECIDED (narrowed)` |
 
 **⇒ THE MECHANISM, STATED PLAINLY: a review finding is a CLAIM, not a fact.** Applying one is a **change to the artifact**, and it must be verified against the same primary source the finding cites — **otherwise the review becomes a propagation vector for its own errors**, and the `⚠️ CORRECTED` marker makes the wrong text *more* credible than the right text it replaced. **That is exactly what happened here: the doc's markers became evidence for the wrong reading.**
 
