@@ -1580,35 +1580,43 @@ def test_part_c2_reasons_and_sources_are_read() -> None:
 
     The finding *is* the reason, and the Source is the claim that the method exists at
     that line: a reason that drifts from its finding, or a Source pointing at the wrong
-    line, is a false claim nothing else in the suite can see. The line numbers are
-    checked against a fresh AST walk; the reasons are pinned literally.
+    line, is a false claim nothing else in the suite can see.
+
+    The REASONS are pinned literally, and the NAME SET is pinned by equality. The LINE
+    NUMBERS are deliberately NOT pinned here. `public_methods_independently()` below
+    re-derives them from a fresh AST walk, so a literal asserts a value the walk already
+    derives and adds no coverage; its only unique firing mode was a stale-value alarm. It
+    reds whenever `sdk.py` grows above a cited method — every rename in the surface
+    migration does exactly that — which is not a defect and is what regeneration is for
+    (#4648). Pinning a derived value twice only creates a second place to go stale.
     """
     section = _section("C2 — rows with NO doc backing")
     rows = re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| `sdk\.py:(\d+)` \| (.*) \|$",
                       section, re.M)
     parsed = {n: (int(ln), reason) for n, ln, reason in rows}
-    assert parsed == {
+    assert {n: reason for n, (_ln, reason) in parsed.items()} == {
         "org_create": (
-            15685,
             "No target method creates an organisation account. The tenancy block reads "
             "one (`get_organisation_account`) and files account *closure* as a console "
-            "operation, but no row covers creation.",
+            "operation, but no row covers creation."
         ),
         "compute_reputation": (
-            20672,
             "The canonical `stabilize_beliefs` group lists it, but that group's beta "
             "target is `refresh_confidence` — “Recompute confidence after changes”. "
             "Reputation scoring is not confidence recomputation, and no other target "
-            "absorbs it.",
+            "absorbs it."
         ),
         "record_calibration": (
-            20922,
             "Same group, same mismatch: `refresh_confidence` recomputes confidence; "
-            "recording a calibration milestone is a different operation and has no target.",
+            "recording a calibration milestone is a different operation and has no target."
         ),
-    }, f"C2's rows changed:\n  {parsed}"
+    }, f"C2's rows changed (names or reasons):\n  {parsed}"
     truth = public_methods_independently()
-    wrong = {n: (ln, truth[n]) for n, (ln, _) in parsed.items() if ln != truth[n]}
+    wrong = {
+        n: (ln, truth.get(n))
+        for n, (ln, _) in parsed.items()
+        if n not in truth or ln != truth[n]
+    }
     assert not wrong, f"C2 cites the wrong `sdk.py` line: {wrong}"
 
 
