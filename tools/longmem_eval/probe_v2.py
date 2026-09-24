@@ -38,9 +38,19 @@ refuses rather than touching the network/DB.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/probe_v2.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/longmem_eval/probe_v2.py`"
+    )
+
 import argparse
 import re
-import sys
 from typing import Any
 
 from .measure_temporal import (

@@ -27,7 +27,18 @@ Run after verifying FalkorDB is up and TORTOISE_DB_URI is set:
   cd "$(dirname "$0")/.."
   python3 scripts/file_pricing_decision.py
 """
-import os, sys  # noqa: E401, I001
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/file_pricing_decision.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/file_pricing_decision.py`"
+    )
+
+import os  # noqa: I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.sdk import TortoiseSDK  # noqa: I001

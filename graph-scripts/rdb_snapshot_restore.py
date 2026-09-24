@@ -48,11 +48,21 @@ Exit codes: 0 = ok, 1 = operational failure, 2 = usage error.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/rdb_snapshot_restore.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/rdb_snapshot_restore.py`"
+    )
+
 import argparse
 import json
 import os
 import subprocess
-import sys
 import time
 from datetime import datetime, timezone
 

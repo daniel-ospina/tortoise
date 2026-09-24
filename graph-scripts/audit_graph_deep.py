@@ -4,10 +4,20 @@
 HISTORICAL ONE-SHOT — queries the removed context field (see #49);
 connection now env-based (TORTOISE_DB_URI).
 """
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/audit_graph_deep.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/audit_graph_deep.py`"
+    )
+
 from falkordb import FalkorDB  # noqa: I001
 from collections import defaultdict  # noqa: F401
 import os
-import sys
 
 # Repo-root import (matches the sibling graph-scripts).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

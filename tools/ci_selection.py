@@ -36,13 +36,23 @@ Also:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_selection.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_selection.py`"
+    )
+
 import argparse
 import ast
 import json
 import math
 import os
 import re
-import sys
 from pathlib import Path
 
 SELECTION_FN_VERSION = "1.3.0"
