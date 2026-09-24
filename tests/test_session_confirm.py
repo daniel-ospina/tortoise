@@ -303,3 +303,39 @@ def test_session_extracted_is_total_over_odd_values():
     assert session_extracted({"extracted": "3"}) == 0
     assert session_extracted({"extracted": None}) == 0
     assert session_extracted(None) == 0
+
+
+def test_the_no_receipt_set_is_independent_of_the_retry_classifier():
+    """The two rules answer DIFFERENT questions and both answers must hold.
+
+    #4614 made 402 `retry` (a quota refusal is transient: its `est` is computed
+    from the INCOMING capture, so the identical capture succeeds once a node is
+    freed), so the only copy is KEPT in the spool. #4675's Task-15 acceptance
+    line names 402 in the no-receipt set (a refusal must still exit 1 with no
+    local receipt).
+
+    Nothing in the classifier expresses the second, so the receipt gates must
+    name the set themselves — deriving it from `classify_failure` is the defect
+    this pins: 402 stopped being excluded the moment it became `retry`, and a
+    durable 402 would then mint a receipt for a refusal.
+
+    MUTATION THAT REDS THIS: replace `_NO_RECEIPT_REFUSAL_STATUSES` with the
+    retry-classifier (any expression of the form `status not in ... and
+    classify_failure(...) == "retry"` alone), or drop 402 from the set.
+    """
+    from tortoise.__main__ import _NO_RECEIPT_REFUSAL_STATUSES
+    from tortoise.capture_spool import classify_failure
+
+    # (1) The classifier's answer, which governs the SPOOL: keep the only copy.
+    assert classify_failure(402) == "retry"
+    # (2) The recorded rule's answer, which governs the RECEIPT: exit 1, none.
+    assert 402 in _NO_RECEIPT_REFUSAL_STATUSES
+    # Both are true at once — that is the point, not a contradiction.
+    assert classify_failure(402) == "retry" and 402 in _NO_RECEIPT_REFUSAL_STATUSES
+
+    # The recorded set is EXACTLY the rule's three statuses: 403/402/503. A
+    # transient status outside it (429, 5xx, a network failure) must stay
+    # confirmable, or #4675's own fix is lost.
+    assert sorted(_NO_RECEIPT_REFUSAL_STATUSES) == [402, 403, 503]
+    for status in (429, 500, 502, 504, None):
+        assert status not in _NO_RECEIPT_REFUSAL_STATUSES, status
