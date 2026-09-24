@@ -20,6 +20,14 @@ itself and the expansion gate could never go red.
 `cut` is run by a human, once, with an explicit --commit. `render`, `check` and
 `guard` are safe to run anywhere, including CI.
 
+WHAT `check` DOES NOT PROVE — APPROVAL IS NOT MACHINE-CARRIED
+    `check` verifies CONSISTENCY between the declaration and the frozen baseline.
+    It cannot prove that Daniel approved an expansion: a change that updates the
+    registry and the baseline together satisfies every property here. The approval
+    carrier is the #4282 mandate — ask Daniel FIRST, before the re-cut — and his
+    review. A green run is not consent. (The repository ruleset the #3863 scope doc
+    proposed as the carrier was REJECTED on #4282 as over-engineering.)
+
 THE BASELINE IS VERIFIED AGAINST THE CODE, NOT AGAINST ITSELF
     `check` re-derives the whole baseline with the SAME function `cut` writes
     (`build_doc`) and fails on any difference outside the keys whose value is not a
@@ -169,7 +177,11 @@ def _read_manifest(path: Path | None = None) -> dict:
 #     READS (the rendered `Used by` / `Recomm.` columns) while every gate stays green. That
 #     is a documented residual — the columns are not a function of the code — FILED, not hidden.
 #   * `approval` is the owner's reference: a PR number and a principal. The gate checks its
-#     SHAPE only; the consent carrier is a repository ruleset, per the #3863 scope doc.
+#     SHAPE only — it cannot verify that the review it names exists. The consent carrier is
+#     the #4282 mandate (approval from Daniel FIRST; see tortoise/tool_registry.py,
+#     tortoise/sdk.py and CONTRIBUTING.md) and Daniel's review, NOT a machine control. The
+#     repository ruleset proposed by the #3863 scope doc was REJECTED by the owner on #4282
+#     as over-engineering — do not re-introduce one here as the carrier.
 #   * `exemption` is a HUMAN RECORDING too — an owner-approved flag that a row's
 #     reachability is deliberately excused (`tools/surface-guard.py` reads it). It was
 #     missing from this list while `build_doc` emits `exemption: False` for every row, so
@@ -958,11 +970,52 @@ def _display(path: Path) -> str:
         return str(path)
 
 
+def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
+    """Every row in `doc` carrying a non-null `approval`, as (name, approval).
+
+    `approval` is NON_DERIVABLE: it records an OWNER decision about a row, and no re-cut can
+    reproduce it. This is precisely the list a re-cut destroys.
+    """
+    found: list[tuple[str, str]] = []
+    for row in doc.get("rows", []):
+        name = row.get("name") or row.get("key") or row.get("tool") or "?"
+        approval = row.get("approval")
+        if approval:
+            found.append((str(name), str(approval)))
+    return found
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
     try:
         doc = build_doc(args.commit)
     except SurfaceEvidenceUnreadable as exc:
         return _refuse(exc)
+
+    # FAIL CLOSED ON A SILENT APPROVAL WIPE (#4598). `build_doc` writes `approval: null` on
+    # every row, and CONTRIBUTING.md makes that reset the CONTROL: a re-cut forces the owner to
+    # re-approve the baseline, so a changed `served_from` cannot ride an old approval into
+    # `approved`. That control is KEPT — what is removed here is only its SILENCE. On
+    # 2026-09-23 a re-cut landed on `main` through PR #4043 and carried six recorded owner
+    # approvals to zero, and nothing went red: `approval` is NON_DERIVABLE, so no derived
+    # property compares it and no check can see the loss. Refusing here costs one flag; not
+    # refusing costs an owner decision, with no artifact left to recover it from.
+    #
+    # A MALFORMED baseline must NOT block this: `cut` is the repair tool. An unreadable existing
+    # manifest means there is no enumerable approval set, so there is nothing to refuse for.
+    try:
+        existing = _read_manifest()
+    except Exception:  # a broken baseline is repaired BY this command
+        existing = {}
+    doomed = _recorded_approvals(existing)
+    if doomed and not getattr(args, "allow_approval_reset", False):
+        print(f"::error::cut would reset {len(doomed)} recorded approval(s) to null")
+        print(f"REFUSED {_display(MANIFEST_FILE)} carries {len(doomed)} recorded approval(s) "
+              f"that a re-cut would destroy:")
+        for name, approval in doomed:
+            print(f"  {name}: {approval}")
+        print("  Re-record them after the cut (CONTRIBUTING.md, step 4), or pass "
+              "--allow-approval-reset to drop them deliberately.")
+        return 1
 
     MANIFEST_FILE.write_text(
         yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False),
@@ -983,7 +1036,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
     print(f"  keyword distribution: {doc['counts']['keyword_distribution']}")
     print(f"  distinct declared bindings: "
           f"{len({r['sdk_method'] for r in doc['rows'] if r.get('sdk_method')})}")
-    print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
+    if doomed:
+        # Named, not summarised: the operator asked for this, and the rows are the loss.
+        print(f"  DROPPED {len(doomed)} recorded approval(s) (--allow-approval-reset):")
+        for name, approval in doomed:
+            print(f"    {name}: {approval}")
+    else:
+        print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
     return 0
 
 
@@ -994,7 +1053,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     document. Families are emitted in rank order; inside a family, rows are
     ordered by job keyword and then by cluster, so a group of near-duplicates
     lands on consecutive lines and can be judged as a group rather than hunted
-    for across 99 rows.
+    for across the whole list.
     """
     try:
         doc = _read_manifest()
@@ -1062,6 +1121,20 @@ def cmd_render(args: argparse.Namespace) -> int:
     add(f"Cut at `{doc['cut_at_commit'][:9]}`. **{len(tools)} MCP tools · {len(sdk)} SDK methods.**")
     add("")
     add("Generated from `config/surface-manifest.yml`. **Do not edit this file** — change the manifest.")
+    add("")
+    add("## ⛔ Changing this surface needs Daniel's approval")
+    add("")
+    add("**You may not add, remove, or rename an MCP tool or a public SDK method without approval")
+    add("from Daniel.** The surface is the contract every agent and customer integration is built")
+    add("on, so a change materially affects customer outcomes. Ask Daniel first — repo `AGENTS.md`")
+    add("→ \"USER QUESTIONS\" / \"DECISION RELAY\" — then follow `CONTRIBUTING.md` ('The MCP tool")
+    add("surface and public SDK methods cannot grow by accident').")
+    add("")
+    add("**The gates are drift controls, not approval gates.** `tools/surface-guard.py` and")
+    add("`tools/surface_manifest.py check` compare the live declaration against this baseline; a")
+    add("change that updates the registry and this baseline together **passes both**. They catch an")
+    add("*unrecorded* change — they cannot tell an approved addition from an unapproved one.")
+    add("Daniel's review is what carries the approval.")
     add("")
     add("## How to read this")
     add("")
@@ -1217,9 +1290,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     add(f"**But these {len(tools)} lines are not all the same kind of statement, and the difference matters:**")
     add("")
     add(f"- **{len([r for r in tools if r.get('basis') == 'decided'])} rows execute a decision Tortoise has already made.** The declaration itself")
-    add("  names one tool canonical and the other a duplicate; it marks the deprecated ones and names")
-    add("  their replacement; it asserts an SDK method that does not exist. Correcting these follows from")
-    add("  what we already decided to be. **These are recommendations in the strong sense.**")
+    add("  names one tool canonical and the other a duplicate. Correcting these follows from what we")
+    add("  already decided to be. **These are recommendations in the strong sense.**")
     add(f"- **{len([r for r in tools if r.get('basis') == 'observed'])} rows only describe what is being done** — called, referenced, or not.")
     add("  Usage is not a decision, and it does not get to decide what we are. A tool nobody calls may")
     add("  be exactly what we decided Tortoise is, for a user we have not reached yet; a tool everyone")
@@ -1285,7 +1357,14 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("**This says we use them; it does not say we should.** Which of these we keep is a statement")
     add("about what Tortoise is, and that is yours to make, not a reading of our own logs.")
     add("")
-    add("**Net effect if you accept the three concrete actions and none of the judgement calls:**")
+    # The count of CONCRETE-ACTION sections that actually RENDER — Cut (kills),
+    # Fold in (merges), Correct (fixes). It was hardcoded to "three", which went
+    # false the moment a bucket emptied and left the sentence referring to
+    # actions the document does not contain.
+    _n_actions = sum(1 for _bucket in (kills, merges, fixes) if _bucket)
+    _action_word = {0: "no", 1: "the one", 2: "the two", 3: "the three"}[_n_actions]
+    add(f"**Net effect if you accept {_action_word} concrete "
+        f"action{'s' if _n_actions != 1 else ''} and none of the judgement calls:**")
     add(f"{len(tools)} tool names → **{len(tools) - len(kills) - len(merges)}**. Nothing an agent can")
     add("call disappears — the folded names are the same capability under a name the code already")
     add("designates as canonical.")
@@ -1293,8 +1372,13 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("## On the numbers alone")
     add("")
     dead = [r for r in tools if "WHICH DOES NOT EXIST" in (r.get("dependency") or "")]
-    add(f"- **{len(dead)} entries declare an SDK method that does not exist:** "
-        + ", ".join(f"`{r['name']}`" for r in dead) + ".")
+    if dead:
+        add(f"- **{len(dead)} entries declare an SDK method that does not exist:** "
+            + ", ".join(f"`{r['name']}`" for r in dead) + ".")
+    else:
+        # Guard the empty case: `", ".join([])` is `""`, which rendered a
+        # dangling sentence tail — "...does not exist:** ." (#4583).
+        add("- **0 entries declare an SDK method that does not exist.**")
     _ncf = classes.get("no-caller-found", [])
     _rest = [r for r in _ncf if "tenant-rest" in (r.get("dependency") or "")]
     add(f"- **{len(_ncf)} SDK methods are reached by no agent path** — no MCP tool, no CLI verb, no "
@@ -1341,10 +1425,12 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("of the gap is real scope, not fat. Tool search adds a hop and a failure mode: an agent that does")
     add("not know a capability exists may not think to look for it, and \"the tool existed but was not")
     add("advertised\" is a worse failure than a long list. And the fix is not obviously worth its cost —")
-    # Computed, not hardcoded: this is the count of rows that REMOVE a name (`kill` +
-    # `merge`). It was the literal 25 — the number of `decided` rows, which also includes
-    # the 5 `fix-declaration` rows that clear a dead `sdk_method` string and remove no tool
-    # name — so the sentence overstated the shrink by five against its own 99 → 79 figure.
+    # Computed, not hardcoded: only the `kill` + `merge` rows REMOVE a name. The
+    # `fix-declaration` rows correct a dead `sdk_method` string and take no name off the
+    # surface, so counting every `decided` row would overstate the shrink. Both this
+    # count and the "→ N" figure above are derived from the rows, never literals — an
+    # earlier hardcoded version went stale the moment 4035 repaired the declarations and
+    # the `fix-declaration` bucket emptied.
     _name_removing = [r for r in tools if r.get("recommendation") in ("kill", "merge")]
     add(f"the {len(_name_removing)} rows above remove names where the declaration already says a name is redundant, which")
     add("shrinks the surface without inventing a discovery mechanism.")
@@ -1634,6 +1720,11 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_cut = sub.add_parser("cut", help="declare->manifest, once, by a human")
     p_cut.add_argument("--commit", help="the commit to cut the baseline at")
+    p_cut.add_argument(
+        "--allow-approval-reset",
+        action="store_true",
+        help="permit dropping recorded per-row approvals (default: refuse and name every row)",
+    )
     p_cut.set_defaults(func=cmd_cut)
     sub.add_parser("render").set_defaults(func=cmd_render)
     sub.add_parser("check").set_defaults(func=cmd_check)

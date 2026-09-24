@@ -58,11 +58,16 @@ aliases land.
    with no leading `_`). That alone makes it public — which is the point: it is now *caught*,
    not absorbed.
 2. **Re-render**: `uv run python tools/sdk_surface.py`.
-3. **Get it approved**: `uv run python tools/surface-guard.py` will now be RED. A new public
-   method is an unapproved endpoint (#3863), so add its `sdk:` row to
-   `config/surface-manifest.yml` and set `approval` on that row to the PR number and the
-   approving principal's handle. That step is a human decision, by design — this declaration
-   records identity; the manifest records approval.
+3. **Get it approved — from Daniel, FIRST.** You may not add or remove a public SDK method
+   without human approval (the #4282 mandate): the surface is the contract every agent and
+   customer integration is built on, so a change materially affects customer outcomes. Ask
+   Daniel (repo `AGENTS.md` → "USER QUESTIONS" / "DECISION RELAY") before you write the code
+   or re-cut anything. Only then add the method's `sdk:` row to `config/surface-manifest.yml`
+   and set `approval` on that row to the PR number and Daniel's handle. This declaration
+   records *identity*; the manifest records *approval*. `uv run python tools/surface-guard.py`
+   is RED until that row exists — but a green guard is a CONSISTENCY result, not consent: a
+   change that updates the class and the manifest together passes it, so it cannot tell an
+   approved addition from an unapproved one. Daniel's review is what carries the approval.
 4. **Verify**: `uv run python tools/surface-guard.py` and
    `uv run pytest tests/test_sdk_surface.py tests/test_surface_manifest.py -q`.
 

@@ -887,14 +887,16 @@ class TestS3:
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3):
                 self.calls.append((query, entity_type))
+                # the REAL callee row shape: ``SearchResult.to_dict()`` keys
+                # the kind as ``point_kind`` (#4511) — never ``kind``.
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
-                             "kind": "core:plan"}]
+                             "point_kind": "core:plan"}]
                 if entity_type == "event":
                     return [{"id": "ev-1", "content": "owner paused solar tier",
-                             "kind": "core:decision"}]
+                             "point_kind": "core:decision"}]
                 return [{"id": "pt-1", "content": "flash is the path",
-                         "kind": "statement"}]
+                         "point_kind": "statement"}]
 
         sdk = MockSDK()
         res = v2.search_graph(sdk, S2_FIXTURE, "The story. First para.")
@@ -906,6 +908,67 @@ class TestS3:
         # both object and event queries were run
         types = {t for _, t in sdk.calls}
         assert "object" in types and "event" in types
+
+    def test_fts_rows_reads_the_callee_point_kind_not_the_fictional_kind(self):
+        """#4511: the callee returns ``SearchResult.to_dict()`` rows, keyed
+        ``point_kind`` — so ``_fts_rows`` must source its OUTPUT ``kind`` from
+        ``point_kind``, on every leg.
+
+        On the real backend every S3 prior used to carry ``kind: ""`` (the read
+        was ``r.get("kind")``, a key the callee never emits), blanking the S4
+        prompt's kind column and hiding the ``pointKind == "event"`` turn
+        marker from any consumer. The mock models the REAL row shape; a revert
+        to ``r.get("kind")`` empties every assertion below, and a reader that
+        keyed on the fictional ``kind`` would never see these values at all.
+        """
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                return {
+                    "point": [{"id": "pt-1", "content": "flash is the path",
+                               "point_kind": "statement"}],
+                    "object": [{"id": "obj-1", "content": "single-flash pipeline",
+                                "point_kind": "core:plan"}],
+                    "subject": [{"id": "sub-1", "content": "the team",
+                                 "point_kind": "core:team"}],
+                    "event": [{"id": "ev-1", "content": "owner paused solar tier",
+                               "point_kind": "core:decision"}],
+                }[entity_type]
+
+        sdk = MockSDK()
+        # the point leg keeps the OUTPUT key ``kind``, now sourced from the
+        # callee's ``point_kind``
+        assert v2._fts_rows(sdk, "point", "q") == [
+            {"id": "pt-1", "content": "flash is the path", "kind": "statement"}]
+        # the object/subject legs (named ``name``, kinded the same way)
+        assert v2._fts_rows(sdk, "object", "q") == [
+            {"id": "obj-1", "name": "single-flash pipeline",
+             "kind": "core:plan"}]
+        assert v2._fts_rows(sdk, "subject", "q") == [
+            {"id": "sub-1", "name": "the team", "kind": "core:team"}]
+        assert v2._fts_rows(sdk, "event", "q") == [
+            {"id": "ev-1", "content": "owner paused solar tier",
+             "kind": "core:decision"}]
+
+    def test_s3_render_carries_a_populated_kind_column(self, monkeypatch):
+        """#4511 end-to-end: the S4 prompt's kind column carries the real kind.
+
+        ``_render_search_results`` reads the ``kind`` OUTPUT key (populated from
+        the callee's ``point_kind``), so a prior-kind regression is visible in
+        the text the model actually receives — not merely in the row dicts."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type == "object":
+                    return [{"id": "obj-1", "content": "single-flash pipeline",
+                             "point_kind": "core:plan"}]
+                return []
+
+        rendered = v2._render_search_results(
+            v2.search_graph(MockSDK(), S2_FIXTURE, "STORY"))
+        assert "EXISTING ENTITIES" in rendered
+        assert "- obj-1 | single-flash pipeline | core:plan" in rendered
 
     def test_turn_echo_is_never_an_s3_prior(self, monkeypatch):
         """#2552: a capture's own turn echoes are transcript, not memory.
@@ -1506,6 +1569,25 @@ class TestS5:
         queries = v2._derive_queries(embed, "story")
         assert sum(len(q) for q in queries.values()) >= 2
 
+    def test_empty_candidate_kind_is_not_a_name_only_exact_match(self):
+        """#4511 boundary: the candidate rows now carry a REAL kind, so an
+        empty NEW-entity kind no longer "exact"-matches by NAME ALONE.
+
+        Before #4511 every S3 entity row's ``kind`` was ``""``; a new entity
+        with no kind then compared ``"" == ""`` and matched ANY same-named row
+        regardless of namespace. With the kind populated, ``""`` matches only a
+        genuinely kindless row and the bare-form fallback finds nothing here —
+        the correct reading of "exact kind match first" (phase-2 resolution
+        recovers such a name; this predicate must not guess)."""
+        existing = [{"id": "obj-9", "name": "cleaning-pass tier",
+                     "kind": "core:plan"}]
+        # a populated candidate kind matches exactly, as before
+        assert v2._find_existing_entity(existing, "cleaning-pass tier",
+                                        "core:plan")[1] == "exact"
+        # an empty candidate kind is NOT a name-only match against a kinded row
+        assert v2._find_existing_entity(existing, "cleaning-pass tier",
+                                        "") == (None, "none")
+
     def test_bare_kind_link_before_create_matches(self):
         """Review fix: model emits bare 'plan'; backend stores 'core:plan' —
         kind-form normalization must make link-before-create match."""
@@ -1712,15 +1794,47 @@ class TestS5:
                                                       "content": "x"}])
         assert "supersessions" in out2
 
-    def test_unresolved_operator_dropped(self):
+    def test_unresolved_operator_endpoint_is_minted(self):
+        """#2552 mint-before-wire: the S2/S4 OPERATOR REFERENCING hard rule
+        tells the model that "If an endpoint of an IMPL/NAND/MITIGATES
+        relation has no point yet, CREATE the point first and reference it".
+        The seam enforced only the REFERENCE half — an endpoint naming a claim
+        the model did not also emit was dropped, so a non-compliant emission
+        lost the EDGE silently. Measured on the #2514 corpus: 2 of 4 planted
+        edges failed at the endpoint stage before any kind question arose.
+
+        Now the endpoint is materialized as a statement Point carrying the
+        model's OWN reference text (nothing invented) and the operator wires.
+        """
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"].append({"src": "not a real content",
                                    "dst": "also not", "op_type": "IMPL"})
         result = v2.execute_embed(embed, {}, session_id="s1")
-        assert len(result["payload"]["operators"]) == 2  # dropped
-        assert any("did not resolve" in w for w in result["warnings"])
+        # Pass 1 emits IMPL/NAND in input order; pass 2 appends MITIGATES —
+        # so the appended IMPL is index 1 and the fixture's MITIGATES is last.
+        assert [o["op_type"] for o in result["payload"]["operators"]] == \
+            ["IMPL", "IMPL", "MITIGATES"]
+        minted = {p["content"]: p for p in result["payload"]["points"]}
+        assert minted["not a real content"]["pointKind"] == "statement"
+        assert minted["also not"]["pointKind"] == "statement"
+        op = result["payload"]["operators"][1]
+        assert op["src"] == minted["not a real content"]["id"]
+        assert op["dst"] == minted["also not"]["id"]
+        assert not any("did not resolve" in w for w in result["warnings"])
+        assert any("endpoint minted" in w for w in result["warnings"])
+        assert result["stats"]["operator_endpoints_minted"] == 2
 
-    def test_mitigates_unresolved_target_dropped(self):
+    def test_mitigates_unminted_target_endpoints_minted_and_impl_materialized(self):
+        """#2552, the measured `wp07_op_03 MITIGATES -> edge_missing` case.
+
+        The OUTPUT_CONTRACT declares a MITIGATES as ONE operator entry
+        carrying its ``target_edge`` — it never asks the model to ALSO repeat
+        that IMPL as its own operator entry, and `commit_ops`
+        (`apply_payload_operators`) resolves the mitigation against the
+        payload's IMPL set. A contract-compliant MITIGATES was therefore
+        ALWAYS dropped. Now the declared target IMPL is materialized (the
+        model asserted the edge by naming it) and the dampener has a target.
+        """
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"] = [
             {"src": "single-flash with granularity is the working path",
@@ -1728,9 +1842,162 @@ class TestS5:
              "target_edge": {"src": "ghost", "dst": "ghost2", "op_type": "IMPL"},
              "strength": 0.3}]
         result = v2.execute_embed(embed, {}, session_id="s1")
-        assert result["payload"]["operators"] == []
-        assert any("MITIGATES target edge not emitted" in w
-                   for w in result["warnings"])
+        types = [o["op_type"] for o in result["payload"]["operators"]]
+        assert types == ["IMPL", "MITIGATES"]
+        ids = {p["content"]: p["id"] for p in result["payload"]["points"]}
+        assert "ghost" in ids and "ghost2" in ids
+        assert result["payload"]["operators"][0] == {
+            "src": ids["ghost"], "dst": ids["ghost2"], "op_type": "IMPL",
+            "direction": "unidirectional"}
+        assert not any("target edge not emitted" in w for w in result["warnings"])
+        assert result["stats"]["operator_endpoints_minted"] == 2
+
+    def test_minted_endpoint_is_deduped_and_invents_nothing(self):
+        """#2552: two operators naming the SAME unminted endpoint mint ONE
+        Point (content-addressed dedup, same id space as the write path), and
+        the minted Point fabricates no provenance — no quote, no source turn,
+        no entities. Content is exactly the model's own reference text.
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = []
+        embed["events"] = []
+        embed["operators"] = [
+            {"src": "the missing claim", "dst": "the other missing claim",
+             "op_type": "IMPL"},
+            {"src": "the missing claim", "dst": "a third missing claim",
+             "op_type": "NAND"},
+        ]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        pts = r["payload"]["points"]
+        contents = [p["content"] for p in pts]
+        assert contents.count("the missing claim") == 1
+        assert sorted(contents) == ["a third missing claim",
+                                    "the missing claim",
+                                    "the other missing claim"]
+        for p in pts:
+            assert p["pointKind"] == "statement"
+            assert p["quote"] == ""
+            assert "source_turn_id" not in p
+            assert p["about_entities"] == []
+            assert p["id"] == v2._content_id("pt", p["content"])
+        assert r["stats"]["operator_endpoints_minted"] == 3  # not 4 — deduped
+        # Two operators, three distinct endpoints, all wired.
+        assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL", "NAND"]
+
+    def test_entity_named_operator_endpoint_is_never_minted(self):
+        """#2552 code-review (P2): the OPERATOR REFERENCING hard rule is
+        explicit — "NEVER use an entity name as an operator endpoint —
+        entities are wired through about_entities". Minting an entity-named
+        ref would fabricate a degenerate claim Point out of a participant
+        name, so the ref is NOT minted and the operator drops with its
+        ordinary warning (the pre-#2552 behaviour, correct HERE).
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["operators"] = [
+            {"src": "cleaning-pass tier",          # an EMITTED entity name
+             "dst": "The owner paused the solar cleaning tier",
+             "op_type": "IMPL"}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert not any(p["content"] == "cleaning-pass tier"
+                       for p in r["payload"]["points"])
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+        assert any("did not resolve" in w for w in r["warnings"])
+
+    def test_over_long_operator_endpoint_ref_still_resolves(self):
+        """#2552 code-review (P2): `_mint_endpoint` truncates content at 1000
+        chars while `_resolve` probes the UNTRUNCATED ref. Without also
+        registering the full-ref key the mint is invisible to the operator
+        pass — the edge still drops AND the minted Point is orphaned, which is
+        exactly the outcome the pre-pass exists to prevent.
+        """
+        long_ref = "long endpoint claim " + ("x" * 1500)
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["operators"] = [
+            {"src": long_ref,
+             "dst": "The owner paused the solar cleaning tier",
+             "op_type": "IMPL"}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ops = [o for o in r["payload"]["operators"] if o["op_type"] == "IMPL"]
+        assert len(ops) == 1
+        assert not any("did not resolve" in w for w in r["warnings"])
+        assert r["stats"]["operator_endpoints_minted"] == 1
+        minted = [p for p in r["payload"]["points"] if p["id"] == ops[0]["src"]]
+        assert len(minted) == 1
+        assert len(minted[0]["content"]) == 1000
+
+    def test_minted_endpoint_is_pruned_when_its_operator_drops(self):
+        """#2552 code-review (P2): the mint runs BEFORE the operator is known
+        to survive. A MITIGATES that declares no target edge is still dropped
+        loudly — its minted endpoints must go with it, or the payload commits
+        claim Points no operator references (an unsupported assertion in the
+        memory layer, worse than the edge loss the mint exists to fix).
+        """
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = []
+        embed["events"] = []
+        embed["operators"] = [
+            {"src": "orphan claim alpha", "dst": "orphan claim beta",
+             "op_type": "MITIGATES", "strength": 0.3}]
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == []
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert any("pruned" in w for w in r["warnings"])
+        assert any("target edge not emitted" in w for w in r["warnings"])
+
+    def test_planted_supports_lane_no_longer_reports_to_content_missing(self):
+        """#2552 measured case (wp06 op_01 SUPPORTS -> `to_content_missing`).
+
+        The model names the planted claim as an operator endpoint but does not
+        also emit it as a point. Through ``execute_embed`` ALONE — the real
+        fold the product lane runs, with no gold-derived monkeypatch — the
+        edge must survive AND the minted Point must carry the planted anchor,
+        or the corpus grader can only ever report `to_content_missing`.
+        """
+        obs = ("two workers grabbed the same batch twice from the ingest queue "
+               "and each marked its own copy complete")
+        claim = "nothing prevents two workers from claiming one batch"
+        embed = {
+            "entities": [], "events": [],
+            "points": [{"content": obs, "pointKind": "statement"}],
+            "operators": [{"src": obs, "dst": claim, "op_type": "IMPL"}],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert claim in ids  # the endpoint the grader anchors on now exists
+        assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL"]
+        assert r["payload"]["operators"][0]["src"] == ids[obs]
+        assert r["payload"]["operators"][0]["dst"] == ids[claim]
+
+    def test_planted_mitigates_lane_no_longer_reports_edge_missing(self):
+        """#2552 measured case (wp07 op_03 MITIGATES -> `edge_missing`): both
+        endpoints were present and NO edge was emitted. A MITIGATES naming an
+        action claim + a risk claim with its declared target_edge, and no
+        separately-emitted IMPL, must now reach the write path as the
+        IMPL + MITIGATES pair the payload contract requires.
+        """
+        action = "a lagging region's renewal cannot clobber a live lease"
+        risk = "clock skew between regions can make lease expiry unsafe"
+        embed = {
+            "entities": [], "events": [],
+            "points": [{"content": action, "pointKind": "statement"},
+                       {"content": risk, "pointKind": "statement"}],
+            "operators": [{"src": action, "dst": risk, "op_type": "MITIGATES",
+                           "strength": 0.4,
+                           "target": {"src": risk, "dst": action,
+                                      "op_type": "IMPL"}}],
+        }
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert [o["op_type"] for o in r["payload"]["operators"]] == \
+            ["IMPL", "MITIGATES"]
+        mit = r["payload"]["operators"][1]
+        assert mit["src"] == ids[action] and mit["dst"] == ids[risk]
+        assert mit["target"] == {"src": ids[risk], "dst": ids[action],
+                                 "op_type": "IMPL"}
+        assert r["stats"]["operator_endpoints_minted"] == 0
 
     def test_tier_a_point_passes_through_with_quote(self):
         """E2 (D4/D6): a Tier-A embed point yields a payload point with
@@ -5141,13 +5408,17 @@ class TestOperatorSemantics2552:
         assert not any("MITIGATES target edge not emitted" in w for w in r["warnings"])
 
     def test_mitigates_without_target_edge_drops_loudly_not_fabricated(self):
-        """op_03 honesty: a MITIGATES whose target edge was not emitted is
-        dropped with a warning (the write path has nothing to dampen) —
-        the deterministic fold never fabricates a target operator."""
+        """op_03 honesty, narrowed by #2552: a MITIGATES that DECLARES no
+        target edge at all is dropped with a warning — the fold never invents
+        a target operator out of nothing. (A MITIGATES that declares a target
+        edge whose endpoints are unminted is a different case: #2552 mints the
+        endpoints and materializes the DECLARED edge — see
+        test_mitigates_unminted_target_endpoints_minted_and_impl_materialized.
+        The distinction is declaration: nothing declared is never invented.)
+        """
         risk = "clock skew between regions can make lease expiry unsafe"
         action = ("the skew-tolerant grace period is in place so a lagging "
                   "region's renewal cannot clobber a live lease")
-        obs = "the region clock drifted eleven seconds"
         embed = {
             "entities": [], "events": [],
             "points": [
@@ -5156,13 +5427,13 @@ class TestOperatorSemantics2552:
             ],
             "operators": [
                 {"src": action, "dst": risk, "op_type": "MITIGATES",
-                 "target_edge": {"src": obs, "dst": risk, "op_type": "IMPL"},
                  "strength": 0.3},
             ],
         }
         r = v2.execute_embed(embed, {}, session_id="s1")
         assert r["payload"]["operators"] == []
         assert any("MITIGATES target edge not emitted" in w for w in r["warnings"])
+        assert r["stats"]["operator_endpoints_minted"] == 0
 
     def test_decision_reversal_point_supersedes_folds_corrects_record(self):
         """op_04: the direct decision-reversal path — a NEW point whose
