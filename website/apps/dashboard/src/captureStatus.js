@@ -111,11 +111,9 @@ export function harnessAttributionForHarness(state, harness) {
 //               never a promise. Collapsing this into 'future' is the #3782
 //               defect: the success screen promised a capture the server never
 //               saw while the same deployment's Settings contradicted it.
-//   'none'    — print no capture sentence at all: either the harness has no
-//               capture install path (HARNESS_CAPTURE_SUPPORT false — Claude
-//               Web's spike verdict, the backfill-only leaves) or the team's
-//               recording off-switch is set. Saying nothing is the only
-//               honest option in both cases.
+//   'none'    — print no capture sentence at all: the harness has no capture
+//               install path, or the resolved status is `off` (the team's
+//               recording off-switch, or no projection loaded yet).
 export function captureClaimForHarness(state, harness) {
   if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'
   const status = captureStatusForHarness(state, harness)

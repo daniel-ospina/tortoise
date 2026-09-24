@@ -10318,7 +10318,7 @@ function MemorySources(props) {
                       and the state word stays plain; the attribution is what
                       keeps the row from reading as a server-observed harness. */}
                   <div className="harness-status-head" aria-live="polite">
-                    <span className="harness-status-name">
+                    <span className="harness-status-name" id={`harness-note-${h}`}>
                       <strong>{HARNESS_NAMES[h]}</strong>
                       {harnessAttribution(h) && (
                         <span className="dim small">· {harnessAttribution(h)}</span>
@@ -10330,7 +10330,9 @@ function MemorySources(props) {
                   {supported && st === 'install-pending' && sessionsOn && (
                     <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
                   )}
-                  {supported && lastError(h) && <p className="error small" role="alert">{lastError(h)}</p>}
+                  {/* #3700: the alert's description is the row's name group
+                      (name + disclosure). */}
+                  {supported && lastError(h) && <p className="error small" role="alert" aria-describedby={`harness-note-${h}`}>{lastError(h)}</p>}
                 </div>
               )
             })}

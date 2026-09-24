@@ -11058,9 +11058,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
 #
-# #3809: the helpers below derive the key name from ``tortoise.capture_receipts``
-# — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
-# so both this server and ``tortoise session verify`` derive the same name.
+# #3809: the key names come from ``tortoise.capture_receipts`` — imported above
+# as ``_capture_receipt_key`` / ``_capture_last_error_key`` — so this server and
+# ``tortoise session verify`` derive the same name.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,

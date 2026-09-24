@@ -2,8 +2,8 @@
 // (CI-run via dashboard-js-tests).
 //
 // #3700's deliverable is a DISCLOSURE the user can see: the harness a per-harness
-// row names is the caller's own declaration (`body.harness`), not something
-// Tortoise verified. captureStatus.test.js executes the DECISIONS behind it.
+// row names is a caller declaration, not something Tortoise verified.
+// captureStatus.test.js executes the DECISIONS behind it.
 // The RENDER is outside that suite's reach: it imports captureStatus.js and
 // harnesses.js, not main.jsx, and this
 // package's test runtime is `node --test` with no DOM or React renderer. The

@@ -248,9 +248,8 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
 // beside the harness name, `captureErrorForHarness` for the failure line) rather
 // than scanning source. It pins each helper's DECISION; it cannot pin that
 // main.jsx calls them — this file cannot see main.jsx's call sites at all, so
-// deleting a render site would leave it green. That call site is pinned
-// separately, by `harnessDisclosureTripwire.test.js` (the render is the whole
-// point of the fix, and the e2e suite never opens Settings).
+// deleting a render site would leave it green. (The render is the whole point
+// of the fix, and the e2e suite never opens Settings.)
 //
 // NAMED MUTATIONS that reinstate the defect — each must RED this test:
 //   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
