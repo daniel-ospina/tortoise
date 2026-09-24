@@ -185,7 +185,7 @@ DEFAULT_BATCH_SIZE = 50
 
 # #1642 FIX 3 (#1427): a live server is only "orphan-confirmed" when its
 # 0-client CLIENT LIST state has persisted across sweeps for at least this
-# long. The cron cadence (10-15 min) makes this natural: sweep 1 records the
+# long. The cron cadence (20 min) makes this natural: sweep 1 records the
 # zero-client observation, a later sweep confirms. The wait distinguishes a
 # genuine orphan from a concurrent suite's between-tests idle server, which
 # also sits at 0 clients (#1557 — redislite servers all daemonize to ppid=1,
@@ -1789,6 +1789,14 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     #1005 guarantee: a concurrent suite's between-tests idle server is
     never disturbed.
     """
+    # #4438 review P2: `jobs` reaches `ThreadPoolExecutor(max_workers=...)`
+    # below, where `min(jobs, len(...))` makes a non-positive `--jobs`
+    # (0 or -1) a hard crash (`max_workers must be greater than 0`). The
+    # documented CLI flag must be safe on its own — the same standard as
+    # `_parse_timeout` — so clamp here too, for direct callers.
+    if jobs < 1:
+        logger.warning("jobs=%r must be >= 1 — using 1", jobs)
+        jobs = 1
     acted = []
     killed = 0
     stale_removed = 0  # #1383: stale removals budgeted separately from kills
@@ -2516,19 +2524,36 @@ class _ReaperLock:
 
 
 def _parse_timeout(cli_value: str | None) -> int:
-    """Timeout resolution: CLI --timeout > TORTOISE_REAPER_TIMEOUT env > 120."""
+    """Timeout resolution: CLI --timeout > TORTOISE_REAPER_TIMEOUT env > 120.
+
+    A resolved value < 1 is refused and falls back to the default:
+    `signal.alarm(0)` CANCELS the alarm, so `--timeout 0` would run the sweep
+    unbounded while holding `_ReaperLock` — every later fire then exits
+    `already running`. (The installer guards its own `REAPER_TIMEOUT`, but the
+    documented CLI/env flag must be safe on its own.)
+    """
     if cli_value is not None:
         try:
-            return int(float(cli_value))
+            value = int(float(cli_value))
         except ValueError:
             logger.warning("invalid --timeout %r — using default", cli_value)
+        else:
+            if value >= 1:
+                return value
+            logger.warning("--timeout %r must be >= 1 — using default",
+                           cli_value)
     env = os.environ.get("TORTOISE_REAPER_TIMEOUT", "")
     if env:
         try:
-            return int(float(env))
+            value = int(float(env))
         except ValueError:
             logger.warning(
                 "TORTOISE_REAPER_TIMEOUT=%r invalid — using default", env)
+        else:
+            if value >= 1:
+                return value
+            logger.warning(
+                "TORTOISE_REAPER_TIMEOUT=%r must be >= 1 — using default", env)
     return TIMEOUT_DEFAULT
 
 
@@ -2712,8 +2737,9 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     skipped), so the suite-end sweep can never run past pytest-timeout no
     matter how large the discovered backlog is.
 
-    jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
-    cost at hundreds of leaked servers — issue #1005); kills stay serial
+    jobs>1 parallelizes the per-candidate CLIENT LIST probes (a
+    parallelizable cost at hundreds of leaked servers — issue #1005); kills
+    stay serial
     with pacing. sigterm_timeout threads into reap()/_kill(): the suite-end
     sweep (conftest) lowers it to 3.0 so a server ignoring SIGTERM gets
     SIGKILL quickly — the default 10s wait × many servers compounds past
@@ -2732,6 +2758,12 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # finished scan. The returned list is a `_ScanAwareList` carrying
     # `.complete` (False = at least one bounded scan returned a partial set).
     """
+    # #4438 review P2: a non-positive `--jobs` (0 or -1) would reach reap()'s
+    # `ThreadPoolExecutor(min(jobs, len(records)))` as 0 and crash with
+    # `max_workers must be greater than 0`. Clamp before anything uses it.
+    if jobs < 1:
+        logger.warning("jobs=%r must be >= 1 — using 1", jobs)
+        jobs = 1
     records = _as_scan_aware(discover(jobs=jobs, full_scan=full_scan))
     discovery_complete = records.complete
     # #1383: reapable classes are candidate (live orphan -> kill) and
@@ -2750,7 +2782,8 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     resolved = [phase1_probe(r) for r in reapables]
     acted = reap(resolved, dry_run=dry_run, batch_size=batch_size,
                  kill_pacing=kill_pacing, only_safe=only_safe,
-                 sigterm_timeout=sigterm_timeout, deadline=deadline)
+                 sigterm_timeout=sigterm_timeout, jobs=jobs,
+                 deadline=deadline)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
         quarantine = _sweep_quarantine_dirs(dry_run=dry_run)

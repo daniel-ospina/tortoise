@@ -523,7 +523,7 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # iteration at batch 200 with kill_pacing 0.4 takes ~80s
                     # of pacing, so a multi-hundred backlog can run past the
                     # 30s soft budget (review P2; it still terminates). The
-                    # cron sweeps every 10 min make up the difference.
+                    # cron sweeps every 20 min make up the difference.
                     # #4740 review 9: the raw composition — the pre-sweep
                     # probe (`before`), the sweep, the post-sweep probe
                     # (`left`) and their arrangement into the report — lives in
