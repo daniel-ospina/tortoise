@@ -276,6 +276,10 @@ jobs:
                   # asserted /health/ready once after polling the strictly
                   # weaker db.ok, reddening healthy deploys.
                   startswith(".github/scripts/deploy-health-gate"),
+                  # #4759: the bypass reporter / expiry helper and the scheduled
+                  # check that ages every SKIP_* lane left set.
+                  startswith(".github/scripts/deploy-bypass"),
+                  isfile(".github/workflows/skip-bypass-expiry.yml"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
@@ -712,6 +716,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Redislite orphan gate (#4740)
         run: bash .github/scripts/orphan-bound.test.sh
+
+  deploy-bypass-report:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4759: any monitor/deploy-gate surface (shared watchdog_scripts group)
+    # #4759: the bypass reporter / expiry helper's harness. Self-contained: no
+    # network, no gh — every input is an argument or an env binding, exactly as
+    # the workflow supplies them. It proves a bypass lands in
+    # $GITHUB_STEP_SUMMARY naming the gate, the lane that fired and BYPASSED
+    # (neuter the summary write and it goes red), that each job's end-of-job
+    # audit states every gate as bypassed or not, and that the expiry check ages
+    # a set lane, VIOLATES past the window, and treats a missing/invalid start
+    # date as a violation rather than silence. Mirrors deploy-health-gate above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy bypass report + expiry check (#4759)
+        run: bash .github/scripts/deploy-bypass.test.sh
 
   entrypoint-guards:
     needs: changes

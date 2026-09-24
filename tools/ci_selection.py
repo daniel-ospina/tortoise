@@ -134,6 +134,10 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/welcome.html",
                    "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
+                   # #2409: the public contact form's page. Registered here for the
+                   # same reason as the rest of this tuple — a PR touching only
+                   # this page must still select the guard that holds it.
+                   "website/contact.html",
                    "website/index.html",
                    "website/privacy.html",
                    # #3485: the shared cross-subdomain session bridge is a
@@ -412,6 +416,16 @@ SOURCE_PATTERNS = {
             # CORE_ALSO: many core-registered tests (test_backup_sweep.py,
             # test_backup_multigraph_e2e.py, test_backup_watcher.py,
             # test_alert_store.py) also pin it.
+            # #4367: email_notify.py OWNS `_build_invite_link` (and the invite
+            # sender itself). `tests/test_email_integration_resend.py` —
+            # registered in `api` — is the guard that pins the invite-link
+            # contract and replays the recorded accept-page cassette, and
+            # `test_email_notify.py` (also `api`) pins the sender. Without this
+            # entry an email_notify.py-only change matched no pattern, fell
+            # through to `core`, and NEITHER guard ran on the PR that can break
+            # them — the regression was caught only post-merge, on push to
+            # main. Same silent-drop shape as the #2938/#3154 entries above.
+            "tortoise/email_notify.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py

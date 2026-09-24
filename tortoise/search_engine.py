@@ -362,6 +362,12 @@ class SearchResult:
     valid_to: str = ""
     expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
+    # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
+    # when the whole batch resolved no subject AND the graph has no
+    # ``aboutSubject`` producer at all — so it says "this field cannot be
+    # populated here", never "these points happen to have none". Empty ⇒
+    # absent from the wire (additive, byte-identical default).
+    subject_unavailable: str = ""
     # A5 (#2070): stored evidence mark (``has_answer`` — written by the
     # eval ingest / fixture seeding; the product extractor does not write it
     # yet, so production hits are False). Carried so the ask lane's
@@ -419,6 +425,10 @@ class SearchResult:
             d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
+        # #4889: loud counterpart to the absent ``subject`` key above — only
+        # set when the Subject layer's producer is missing entirely.
+        if self.subject_unavailable:
+            d["subject_unavailable"] = self.subject_unavailable
         # A5 (#2070): additive evidence mark — emitted ONLY when known
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
@@ -2150,6 +2160,90 @@ def get_relationships_bounded(
         logger.warning("Bounded relationship query failed", exc_info=True)
 
     return rels
+
+
+#: #4889 — the fail-loud reason for a structurally-empty ``SearchResult.subject``.
+#:
+#: ``subject`` is read from ``aboutSubject`` edges. When the graph has no
+#: ``aboutSubject`` producer reachable, the field is silently *absent* on every
+#: hit — indistinguishable from "this point has no subject". Measured
+#: read-only 2026-09-23: the whole edge inventory of the dogfood graph
+#: (37,535 Points) holds **0** ``aboutSubject`` edges and **1** ``:Subject``
+#: node, because the capture entity spine stores SUBJECT-kind entities as
+#: ``:Object`` (issue #4934) and the only document-path Subject writer is
+#: behind the opt-in ``--semantic-extract`` flag (issue #4938).
+#: Tracked producers: #1370, #1509. The marker self-clears as soon as any
+#: ``aboutSubject`` edge exists on the graph.
+SUBJECT_BINDING_UNAVAILABLE = (
+    "aboutSubject has no reachable producer for Points or Events on this "
+    "graph, so 'subject' is structurally empty rather than unknown: the "
+    "capture entity spine writes SUBJECT-kind entities as :Object (#4934), "
+    "and the document extractor's Subject writer is opt-in (#4938). "
+    "Tracked producers: #1370, #1509."
+)
+
+
+#: The ``aboutSubject`` shapes ``fetch_point_epistemic_state`` actually reads:
+#: a Point's own edge, or its source Event's edge (the ≤1-hop fallback). The
+#: availability probe must be scoped to these — an ``Object``-sourced
+#: ``aboutSubject`` edge (the GitHub connector writes
+#: ``(o:Object)-[:aboutSubject]->(s:Subject)``) can never resolve the advertised
+#: Point field, so an unscoped count would report "available" on a graph where
+#: every Point hit still carries no subject.
+#:
+#: Written as a UNION ALL of two label-anchored counts, NOT the single
+#: ``MATCH (n) … WHERE n:Point OR n:Event`` form: FalkorDB does not push a
+#: disjunctive label test into the scan, so that form compiles to an ``All Node
+#: Scan`` over the whole graph (~5.9 ms at 9k nodes) while this one is
+#: Subject-anchored (~0.5 ms). Each leg aggregates without a grouping key, so
+#: each yields exactly one integer row (0 when it matches nothing) and the probe
+#: SUMS them.
+_SUBJECT_SOURCE_SCOPED_PROBE = (
+    "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c "
+    "UNION ALL "
+    "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c")
+
+
+def subject_binding_available(graph) -> bool:
+    """True when this graph can carry ``aboutSubject`` edges at all (#4889).
+
+    Counts the Point- and Event-sourced ``aboutSubject`` edges
+    ``fetch_point_epistemic_state`` reads, so an Object-sourced edge (the
+    GitHub connector's shape) cannot make the marker lie (see
+    ``_SUBJECT_SOURCE_SCOPED_PROBE``). The query is label-anchored and BOUNDED
+    (``_DECORATION_TIMEOUT_MS``, the same bound the state fetch uses) — an
+    unbounded full-graph scan on the hot search path is the defect this probe
+    must not reintroduce.
+
+    **Fail-OPEN**: a probe error, an empty result, or a non-integer row
+    returns True. A broken probe must never invent an unavailability claim, so
+    the failure direction that withholds the marker is the safe one.
+    """
+    try:
+        rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE,
+                           timeout=_DECORATION_TIMEOUT_MS).result_set
+        if not rows:
+            # Each UNION ALL leg aggregates without a grouping key, so the
+            # probe always yields rows; an empty result is anomalous and must
+            # not be read as "no edges".
+            logger.warning(
+                "aboutSubject availability probe returned no rows — assuming "
+                "available")
+            return True
+        total = 0
+        for row in rows:
+            if not row or row[0] is None:
+                logger.warning(
+                    "aboutSubject availability probe returned an anomalous "
+                    "row (%r) — assuming available", row)
+                return True
+            total += int(row[0])
+        return total > 0
+    except Exception:  # fail-open, see docstring
+        logger.warning(
+            "aboutSubject availability probe failed — assuming available",
+            exc_info=True)
+        return True
 
 
 def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:

@@ -557,6 +557,34 @@ def test_org_node_seam_reads_off_main_thread(monkeypatch):
     )
 
 
+def test_session_recording_gate_reads_off_main_thread(monkeypatch):
+    """#4625 leg 12: the capture's recording gate must not run on the loop.
+
+    ``_session_recording_allowed`` resolves ``_get_onboarding_state`` — a
+    blocking PostgREST read in hosted mode (plus a graph override probe) — so
+    calling it inline from ``_capture_session_impl`` parked the single event
+    loop for the round trip. ``_session_recording_allowed_off_loop`` offloads
+    the whole resolution; the stub records the thread of every control-plane
+    HTTP call.
+
+    The stored state is ``session_recording: False`` with NO ``graph_id``, so
+    the resolution short-circuits to the team layer after the PostgREST read —
+    the graph override probe (which this test does not stub) is never reached,
+    keeping the assertion about the one read this leg is named for.
+    """
+    _cp, transport = _stub_control_plane(
+        monkeypatch, [{"onboarding_state": {"session_recording": False}}])
+
+    allowed, layer = asyncio.run(
+        ha._session_recording_allowed_off_loop({"org_id": "org-4625"}))
+
+    assert (allowed, layer) == (False, "team")
+    assert transport.threads, "the control-plane transport was never called"
+    assert all(name != "MainThread" for name in transport.threads), (
+        f"the recording gate read ran on the event loop: {transport.threads}"
+    )
+
+
 def test_invite_info_supabase_lane_reads_off_main_thread(monkeypatch):
     """#3718: the hosted (Supabase) lane of the public invite-info handler.
 

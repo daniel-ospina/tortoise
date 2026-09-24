@@ -1952,6 +1952,103 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             "a skipped need is not a failure (docs-only PRs skip the matrix)")
 
 
+def test_required_gate_excludes_the_long_legs():
+    """The required check's transitive `needs:` closure IS the merge-path
+    critical path (a job's `if:` is evaluated only AFTER its `needs` complete).
+
+    This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
+    (strict up-to-date protection + `gh pr merge --auto --merge`, see
+    commit-workflow `04-merge-deploy.md`), so `python-ci-gate` going green is
+    what releases the merge — the workflow run does not have to finish. When
+    the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
+    ~30m on a green run, against a ~20m main-merge cadence) the head went
+    BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
+    must NOT depend on the >15m legs — directly OR transitively — and those legs
+    must still EXIST: they move out of the gate, they are not deleted, and they
+    keep running pre-merge (advisory) and post-merge on main.
+
+    The TRANSITIVE half is load-bearing, not pedantry: an earlier version of
+    this change left the push-only `canary-streak` in `needs:`, and because
+    `canary-streak` `needs: test`, the *skipped* job still held the aggregate
+    for the whole ~30m `test` leg on every PR (run 35960027173: the gate was
+    not scheduled while `test (a)` ran, though every short leg had completed).
+    A direct-`needs` assertion cannot see that shape.
+
+    Keeping them running on the PR lane (rather than skipping them there) is
+    deliberate and belongs to the same contract: the `--admin` rail requires
+    the PR lane to EXECUTE every test shard main's lane executes
+    (`scripts/admin-merge.sh` lane parity, tortoise #4263/#4457) — a `skipped`
+    shard is not coverage — so a push-only leg would make every `--admin` merge
+    refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
+    """
+    workflow = _load_python_ci()
+    jobs = workflow["jobs"]
+
+    def _needs(name: str) -> list[str]:
+        n = jobs[name].get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
+
+    direct = list(_needs("python-ci-gate"))
+    closure, frontier = set(direct), list(direct)
+    while frontier:
+        for parent in _needs(frontier.pop()):
+            if parent not in closure:
+                closure.add(parent)
+                frontier.append(parent)
+
+    for leg in ("test", "test-slow", "test-carve-out"):
+        assert leg in jobs, (
+            f"{leg} must still RUN — the latency fix removes it from the "
+            "required aggregate, it does not delete the leg")
+        assert leg not in closure, (
+            f"{leg} is a >15m leg reachable from `python-ci-gate` through "
+            "`needs:` — directly or transitively — which re-adds the ~30m "
+            "merge-path latency this change removes. A skipped intermediate "
+            "job does NOT break the chain: its own `needs:` still hold the "
+            "aggregate (the `canary-streak` → `test` shape).")
+    assert "manifest-integrity" in closure, (
+        "the required aggregate must still include the manifest drift gate, "
+        "or a drift stops blocking merges (#2656)")
+
+    # `leg in jobs` alone only proves the leg is DEFINED. The fix's disclosure
+    # leans on the legs still EXECUTING (advisory on PRs, detection on main), so
+    # pin that too: both triggers must remain, and no leg may be silenced.
+    triggers = workflow.get("on", workflow.get(True)) or {}
+    assert "push" in triggers and "pull_request" in triggers, (
+        "the long legs must still run on push (post-merge detection on main) "
+        "AND on pull requests (advisory pre-merge) — dropping either trigger "
+        "silently deletes a leg the disclosure depends on")
+    for leg in ("test", "test-slow", "test-carve-out"):
+        spec = jobs[leg]
+        assert spec.get("steps"), (
+            f"{leg} must still have steps — an empty job would 'run' nothing")
+        assert not spec.get("continue-on-error"), (
+            f"{leg} must not be continue-on-error — its failure must stay "
+            "visible, or the post-merge detection is silent")
+        assert spec.get("if") not in ("false", False), (
+            f"{leg} must not be unconditionally disabled")
+        # NOT push-only: the workflow's own comment cites the `--admin` rail's
+        # lane parity as the reason these legs are not skipped on PRs, so a
+        # per-leg `github.event_name` filter is the exact regression to refuse.
+        # And job-level `continue-on-error` is not enough — a silenced STEP
+        # inside the job produces the same missing signal.
+        assert "github.event_name" not in str(spec.get("if") or ""), (
+            f"{leg} must not carry an event filter (e.g. push-only): a "
+            "`skipped` shard is not coverage, and the `--admin` rail's lane "
+            "parity (`ADMIN_MERGE_LANE_PARITY=require`) refuses a merge when "
+            "the PR lane did not execute a shard main's lane executes "
+            "(#4263/#4457)")
+        pytest_steps = [s for s in spec.get("steps", [])
+                        if "pytest" in (s.get("run") or "")]
+        assert pytest_steps, f"{leg} must still RUN pytest"
+        silenced = [s.get("name") for s in pytest_steps
+                    if s.get("continue-on-error")]
+        assert not silenced, (
+            f"{leg}'s pytest step(s) must not be continue-on-error — that "
+            "silences the signal the disclosure says is still produced: "
+            f"{silenced}")
+
+
 # ── #2938: surface audit (report-only) ───────────────────────────────────
 # The audit must resolve what the rejected mechanical derivation could not:
 # package-level imports, `tortoise/api.py` (absent from SOURCE_PATTERNS),
