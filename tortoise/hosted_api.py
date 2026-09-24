@@ -2211,15 +2211,58 @@ app.add_middleware(InFlightMiddleware)
 # ``asyncio.wait_for(..., timeout=SLO_MS * 8 / 1000.0)`` call inside it, and the
 # p95 budget is ``tortoise.volunteer.SLO_MS``. That fallback-instead-of-error is
 # a RECORDED DECISION, not an oversight, and a uniform bound would silently
-# reverse it. The exemption is intentional — do not "fix" it by making the
-# bounds uniform.
+# reverse it.
 #
-#: The one deliberate exemption, METHOD-scoped: the ruling exempts
+# OVERRIDES: uniform per-route timeout bounds — there are now TWO deliberate
+# departures, and this line names both so a reader holding only one of them
+# cannot mistake it for the complete list: (1) the `POST /v1/context` exact
+# exemption above, and (2) the `/v1/internal/` PREFIX exemption below. Both are
+# intentional — do not "fix" them by making the bounds uniform.
+#
+#: The exact-match exemptions, METHOD-scoped: the ruling exempts
 #: `POST /v1/context` because that handler's fail-open ceiling is a recorded
 #: decision. `GET /v1/context` (`session_context`, a different handler with no
 #: recorded fallback) is NOT exempt — exempting it would widen the ruling past
 #: its record.
 _TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
+
+#: The PREFIX exemption — a CLASS, not another instance of the one above, and
+#: deliberately kept separate so the two readings stay distinguishable.
+#:
+#: `/v1/internal/` is the ruling's own SCOPE, not a widening of it. #3834 is an
+#: owner decision about **what a user experiences** ("should a *user's* first
+#: request wait until it can be served"; the budget is "derived from clients'
+#: own startup patience"). Every route under this prefix is an operator/cron
+#: endpoint behind `_check_internal` (`FASTAPI_INTERNAL_KEY`) with no user and no
+#: user-patience budget to derive from. A user-patience bound does not bound
+#: anything a user waits on here; it only makes a 600 s batch job fail at 10 s,
+#: which is exactly what left the DR sweep refusing on every hourly run for 12
+#: days while the archives aged (#4939).
+#:
+#: WHO publishes the replacement patience, by class — the two differ, and the
+#: record must not flatter the weaker one:
+#:   * CRON callers, in `registry-cron.sh`: sweep `-m 600`, purge `-m 300`,
+#:     reconcile `-m 120`, drill `-m 900`, drill-scheduled `-m 1200`.
+#:   * OPERATOR-run curls, in `docs/ops/registry-backup-dr.md` and
+#:     `docs/ops/669-post-flip-verification.md`: these carried NO `--max-time`
+#:     before this change, so for them the 10 s transport bound WAS the only
+#:     bound. An explicit `--max-time` was added to those commands with this
+#:     exemption; without it an operator command would now hang with nothing
+#:     printed instead of refusing legibly. Keep them in step — a new operator
+#:     curl for an internal route needs its own `--max-time`.
+#:
+#: ⚠️ This exemption is NOT a claim that internal routes are fast or safe to hang
+#: — it is that the transport bound is the wrong instrument for them. Their own
+#: timeout is the caller's, and the cron job's red run is the alarm.
+#:
+#: ⚠️ It also REMOVES the only cap on an unauthenticated body read. FastAPI
+#: parses a declared `body:` parameter before the handler body runs, so a route
+#: taking one buffered the body before `_check_internal` could reject the caller;
+#: the transport bound used to truncate that read at 10 s. The five body-taking
+#: internal routes therefore read their body via `_read_internal_json_body`
+#: AFTER the key check — see that helper. Do not reintroduce a `body:` parameter
+#: on an internal route.
+_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX = "/v1/internal/"
 
 #: Analytics event name for a breach. Recorded through the EXISTING writer (no
 #: new table, no new metric endpoint). The `org_id` comes from
@@ -2403,8 +2446,8 @@ def _track_wait_bound_request(task) -> None:
 
 
 class WaitBoundMiddleware:
-    """The transport-level wait bound (#3834) — one bound, every route but the
-    one recorded exemption.
+    """The transport-level wait bound (#3834) — one bound, every USER-facing route
+    but the recorded exemptions.
 
     Pure ASGI and OUTERMOST (registered last): it must see the request before
     any middleware can short-circuit it. It is deliberately NOT wrapping-free
@@ -2465,6 +2508,11 @@ class WaitBoundMiddleware:
 
         route_path = get_route_path(scope)
         if (scope.get("method", ""), route_path) in _TRANSPORT_WAIT_BOUND_EXEMPT:
+            await self.app(scope, receive, send)
+            return
+        if route_path.startswith(_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX):
+            # #4939: a class the #3834 ruling never reached — internal operator /
+            # cron endpoints, which publish their own patience. See the constant.
             await self.app(scope, receive, send)
             return
 
@@ -9544,6 +9592,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # and the LLM extraction is SKIPPED (M2/v2-minted points are not
     # deterministically keyed — not in scope). The receipt still lands on the
     # 2xx (converges to one Session, one receipt — T1-P3/T1-P12).
+    # #1920: a SHORTER payload is NOT the identical re-POST pinned above — the
+    # turn ids past the new window are hard-deleted (and journaled) by
+    # ``sdk._write_capture_turns``, so the Session's episodic CONTAINS members
+    # track the LAST capture's window instead of the longest one ever posted.
     # (session_existed was probed above, before the quota gates.)
     proj.g.query(
         f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
@@ -9626,7 +9678,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
     await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
-        windowed, now=now, turn_embs=_turn_embs)
+        windowed, now=now, turn_embs=_turn_embs,
+        session_existed=session_existed)
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -10192,7 +10245,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     receipt_key = _capture_receipt_key(capture_harness)
     if _session_alive():
         try:
-            _update_onboarding_state(org["org_id"], **{
+            # #4625: write-only — the return is discarded here, and this is
+            # the per-capture hot path (see ``_update_onboarding_state``).
+            _update_onboarding_state(org["org_id"], _echo=False, **{
                 receipt_key: now,
             })
             _record_capture_last_error(org["org_id"], capture_harness, None)
@@ -10221,8 +10276,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 if bucket_empty:
                     cleared = False
                     with suppress(Exception):
+                        # #4625: write-only — this return is discarded, and
+                        # this is the same per-capture hot path as the
+                        # receipt write above.
                         _update_onboarding_state(
-                            org["org_id"], **{receipt_key: None})
+                            org["org_id"], _echo=False,
+                            **{receipt_key: None})
                         cleared = True
                     if cleared:
                         extraction_warnings.append(
@@ -10572,7 +10631,10 @@ def _record_capture_last_error(org_id: str, harness: str | None,
         # GRAPH_NOT_FOUND) — the dashboard sub-line is text; a Python repr
         # would leak structure. Stringify to the message.
         detail = str(detail.get("message") or detail)
-    _update_onboarding_state(org_id, **{key: detail})
+    # #4625: write-only — this caller discards the echo, and computing it
+    # costs two fresh FalkorDB connections on the event loop (see
+    # ``_update_onboarding_state``).
+    _update_onboarding_state(org_id, _echo=False, **{key: detail})
 
 
 # ── #1727 Slice 2 (Task 14, T2-P1): POST /v1/sessions/install-probe ────────
@@ -10636,7 +10698,9 @@ async def session_install_probe(body: InstallProbeRequest,
     _reject_graph_bound_org_surface(org, "install probe")
     key = f"install_probe_{body.harness}"
     try:
-        _update_onboarding_state(org["org_id"], **{key: now})
+        # #4625: write-only — the return is discarded, and #4625 names this
+        # endpoint alongside the capture path.
+        _update_onboarding_state(org["org_id"], _echo=False, **{key: now})
     except Exception:
         _logger.exception(
             "install-probe state write failed (team=%s harness=%s)",
@@ -16100,6 +16164,54 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
     return b"".join(chunks)
 
 
+async def _read_internal_json_body(request: Request, *, required: bool = False) -> dict:
+    """Read a `/v1/internal/` route's JSON body AFTER `_check_internal`.
+
+    AUTH ORDERING IS THE POINT. A FastAPI ``body: dict`` parameter is parsed in
+    ``get_request_handler`` (``await request.body()``) BEFORE any dependency or
+    handler body runs, so the entire body is buffered before `_check_internal`
+    can reject the caller. The transport wait bound used to truncate that read
+    at 10 s; `/v1/internal/` is now exempt from it (#4939), and there is no
+    body-size middleware on the hosted app, no Fly edge timeout, and
+    ``hard_limit = 200`` connections — so a declared body parameter would leave
+    an UNAUTHENTICATED caller able to hold connections and grow memory without
+    bound. Reading the capped body here, after the key check, gives these routes
+    the property the bodyless internal routes already have: not one byte is read
+    from an unauthenticated caller.
+
+    ``required`` mirrors the signature it replaces: ``body: dict`` (422 when the
+    body is absent) vs ``body: dict | None = None`` (absent → ``{}``, which every
+    such caller already normalised with ``body or {}``).
+
+    The body is parsed REGARDLESS of ``Content-Type``, on purpose. Gating on
+    ``content-type.startswith("application/json")`` was the first attempt and it
+    was a fail-open regression: `curl -d '{"bucket": "<mirror>"}'` without a
+    ``-H 'Content-Type: application/json'`` was treated as an absent body, so the
+    runbook's MIRROR check (docs/ops/registry-backup-dr.md) silently verified the
+    PRIMARY bucket and returned 200 — a loud 422 turned into a confident false
+    pass on a DR step. Parsing what is actually there also accepts the
+    ``application/*+json`` subtypes FastAPI accepts.
+    """
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    if not raw.strip():
+        if required:
+            raise HTTPException(status_code=422, detail="JSON body required")
+        return {}
+    try:
+        parsed = _json.loads(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail="Invalid JSON body") from e
+    if parsed is None:
+        # `body: dict` cannot coerce null (422); `body: dict | None` yields {}
+        # and every such caller did `body or {}` anyway.
+        if required:
+            raise HTTPException(status_code=422, detail="JSON object body required")
+        return {}
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail="JSON object body required")
+    return parsed
+
+
 async def _read_import_body(request: Request) -> bytes:
     """Read the raw import-artifact body under a HARD streaming cap (64 MiB).
 
@@ -19941,7 +20053,8 @@ def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
             pass  # telemetry must never break the write path (R19)
 
 
-def _update_onboarding_state(org_id: str, **fields) -> dict:
+def _update_onboarding_state(org_id: str, _echo: bool = True,
+                             **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
     infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
@@ -19950,6 +20063,18 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     never default-to-FLOW) and the drop is REPORTED (raised instead under
     strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
+
+    ``_echo=False`` is the WRITE-ONLY contract for callers that DISCARD that
+    return (#4625): the writes above still happen; only the projection read is
+    skipped, so it cannot change what was written. It exists because the
+    projection is not free — ``_get_onboarding_projection`` probes the
+    registry UP TO TWICE (one probe when the org graph is ABSENT, which
+    returns early in ``_get_onboarding_projection``; two when it is present),
+    and in URI mode each probe builds a fresh registry SDK and
+    opens a NEW FalkorDB connection (TCP + TLS handshake + ``INFO`` +
+    ``list_graphs``), synchronously, on the event loop. Returns ``{}`` when
+    skipped: a caller that discards the value cannot tell the difference.
+    Callers that need the echo (GET/PATCH) keep the default.
 
     NOTE: this router's step-edge branch is NOT on the PATCH catalog path —
     `patch_onboarding_state` pops `catalog_presented` and writes the edge +
@@ -20003,6 +20128,39 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     # Org row (no-op jsonb write) must not silently flip the client's
     # just-ACKed value (test-seam + pre-existing echo semantics). The
     # overlay is never FLOW — operational keys only.
+    #
+    # #4625: the echo is NOT free, and callers that DISCARD it must say so.
+    # ``_get_onboarding_projection`` reaches ``_registry_existing_graphs()``
+    # UP TO TWICE (one probe when the org graph is absent — it returns early
+    # there; two when present, the per-capture case), and in URI mode each
+    # probe builds a fresh
+    # ``_make_sdk(namespace="registry")`` and opens a NEW FalkorDB connection
+    # (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` + ``list_graphs``).
+    # An AGENT capture (the fleet case) calls this router twice — the receipt
+    # write, then the last-error clear — and discards both returns, so the
+    # discarded reads alone open four fresh connections per capture. (A
+    # no-harness capture — a session-JWT/dashboard caller — writes the bare
+    # receipt but has no last-error key, so it makes one call, two
+    # connections.) All of it runs synchronously ON the event loop, which stalls
+    # every read in flight and drives the transport-bound 504s. Measured by
+    # py-spy on the live machine: the loop thread sitting in
+    # ``do_handshake (ssl.py:1319)`` <- ``_registry_existing_graphs`` <-
+    # ``_get_onboarding_projection`` <- ``_record_capture_last_error`` <-
+    # ``_capture_session_impl``.
+    #
+    # Scope: #4625 names "the capture path and install-probe", and exactly the
+    # sites on those two endpoints pass ``_echo=False``. The onboarding, demo,
+    # GitHub-callback and indexing callers also discard the echo, but they are
+    # NOT per-capture — they keep the default so this stays bounded to the
+    # frequency the issue is about.
+    #
+    # ``_echo=False`` is the write-only contract for those callers. The
+    # projection is a strictly read-only graph leg (see
+    # ``_get_onboarding_projection``), so skipping it cannot change what was
+    # written; it changes only what is computed. Default True keeps every
+    # GET/PATCH writer-echo caller byte-identical.
+    if not _echo:
+        return {}
     echo = _get_onboarding_projection(org_id)
     if jsonb_fields:
         echo.update(jsonb_fields)
@@ -25053,7 +25211,7 @@ async def backups_sweep(request: Request):
 
 
 @app.post("/v1/internal/backups/purge")
-async def backups_purge(request: Request, body: dict | None = None):
+async def backups_purge(request: Request):
     """#2304 — trash purge: physically erase every expired tombstone
     (custom graphs deleted > grace_days ago, plus legacy tombstones).
     Internal-key only. Optional ``{"grace_days": N}`` overrides the _TRASH_GRACE_DAYS
@@ -25064,6 +25222,7 @@ async def backups_purge(request: Request, body: dict | None = None):
     Cadence: operator-invoked today (runbook); the driver cron wiring lands
     with #2317's registry-cron.sh changes (coordination — same file)."""
     _check_internal(request)
+    body = await _read_internal_json_body(request)
     from tortoise.backup_sweep import run_graph_purge
 
     # #2823/#2340: dialect-aware control plane. `run_graph_purge` enumerates
@@ -25107,7 +25266,7 @@ async def backups_purge(request: Request, body: dict | None = None):
 
 
 @app.post("/v1/internal/backups/verify-lock")
-async def backups_verify_lock(request: Request, body: dict | None = None):
+async def backups_verify_lock(request: Request):
     """#2319 — live R2 bucket-lock drift check. Internal-key only.
 
     Reads the Cloudflare REST lock-rules configuration for the primary backup
@@ -25124,6 +25283,7 @@ async def backups_verify_lock(request: Request, body: dict | None = None):
     verification path. A lock-read failure never fails backups themselves.
     """
     _check_internal(request)
+    body = await _read_internal_json_body(request)
     cfg = _backup_config_safe()
     if cfg is None:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
@@ -25285,10 +25445,11 @@ async def backups_status(request: Request):
     }
 
 @app.post("/v1/internal/driver/heartbeat")
-async def driver_heartbeat(request: Request, body: dict):
+async def driver_heartbeat(request: Request):
     """Driver liveness — written through the app so R2 creds stay off GH for
     this leg; a stale heartbeat is only meaningful when the app is up."""
     _check_internal(request)
+    body = await _read_internal_json_body(request, required=True)
     storage = _backup_storage()
     storage.upload(
         _DRIVER_HEARTBEAT_KEY,
@@ -25326,7 +25487,7 @@ async def backups_simulate(request: Request):
 
 
 @app.post("/v1/internal/backups/re-baseline")
-async def backups_rebaseline(request: Request, body: dict):
+async def backups_rebaseline(request: Request):
     """Operator re-baseline: acknowledge a fired DATA_LOSS_CANDIDATE by
     re-persisting the current counts of the target graph (default unless
     ``body.graph_id`` names a custom graph) — closes the incident.
@@ -25338,7 +25499,7 @@ async def backups_rebaseline(request: Request, body: dict):
     key the sweep routes and the watcher uses).
     """
     _check_internal(request)
-    body = body or {}
+    body = await _read_internal_json_body(request, required=True)
     org_id = body.get("org_id", "")
     graph_id = body.get("graph_id", "default")
     if not org_id:
@@ -25607,7 +25768,7 @@ def _scheduled_drill(*, cfg, registry, db, storage) -> dict:
 
 
 @app.post("/v1/internal/backups/drill")
-async def backups_drill(request: Request, body: dict):
+async def backups_drill(request: Request):
     """Drill-only restore: scratch target, internal-key auth, zero production
     writes (drill:true skips the registry end-stamp; live-phase binds the
     scratch target). Cooldown ≥1h between drill accepts (in-memory). #2317:
@@ -25618,7 +25779,7 @@ async def backups_drill(request: Request, body: dict):
     cfg = _backup_config_safe()
     if cfg is None:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
-    body = body or {}
+    body = await _read_internal_json_body(request, required=True)
     org_id = body.get("org_id", "")
     backup_key = body.get("backup_key", "")
     if not org_id or not backup_key:
