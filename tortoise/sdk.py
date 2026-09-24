@@ -665,6 +665,18 @@ _TURN_WRITE_CYPHER = (
     # stale-vector decision (#4194) is sound on a matched node and on a
     # just-created one (prior_ch NULL => nothing to preserve).
     "WITH t, turn, t.content_hash AS prior_ch "
+    # #4524: the vector write below is a SILENT no-op on the embedded engine
+    # when the property already holds a VectorF32 (#4457) — which defeats the
+    # rotation self-heal this statement exists to provide (see the comment
+    # above _TURN_WRITE_CYPHER's callers). Clear it in the SAME statement, so
+    # the clear and the write cannot be separated by a later failure, and ONLY
+    # when a new vector is being written. This guard is mutually exclusive
+    # with the two ELSE limbs below (those run only when turn.emb IS NULL), so
+    # nothing that should be preserved is cleared — and an UNCONDITIONAL clear
+    # would let those limbs store NULL, destroying a live vector instead of
+    # refreshing it.
+    "FOREACH (_ IN CASE WHEN turn.emb IS NOT NULL THEN [1] ELSE [] END | "
+    "    REMOVE t.embedding) "
     "SET t.content=turn.c, t.pointKind=turn.k, t.is_operator=false, "
     "    t.speaker=turn.speaker, t.is_episodic=true, "
     "    t.status=coalesce(t.status, turn.s), "
