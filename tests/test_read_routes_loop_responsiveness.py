@@ -789,3 +789,126 @@ def test_residual_names_still_exist():
     assert not ghosts, (
         f"{ghosts} are declared residual but no longer defined in "
         f"hosted_api.py — the residual list has rotted (#3718)")
+
+
+# ── #4625 leg 62: the capture read leg, narrowed out of the residual ────────
+#
+# ``_capture_session_impl`` is a declared residual BODY
+# (``_KNOWN_INLINE_HELPER_RESIDUAL``), so ``test_graph_io_is_offloaded`` cannot
+# see a FIXED leg regress inside it — that allowlist is exactly why the capture
+# read legs could regrow with this guard green (#4625 work order §3). The pins
+# below are per-CALLEE, so they can. Leg 12 (the control-plane/onboarding
+# helper) is pinned the same way in ``test_health_ready_nonblocking.py``.
+
+
+def _async_body_named(name: str) -> ast.AsyncFunctionDef:
+    tree = ast.parse(HOSTED_API.read_text())
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+
+
+def _inline_calls_to(node: ast.AsyncFunctionDef,
+                     names: frozenset[str]) -> list[str]:
+    """Callee names from ``names`` called in ``node`` NOT behind an offload.
+
+    Same boundary semantics as ``_has_inline_graph_io``: a nested def handed to
+    an offload boundary as a callable reference runs in the worker and is
+    skipped; a nested def INVOKED on the loop is scanned.
+    """
+    nested_names = {
+        sub.name for sub in ast.walk(node)
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and sub is not node
+    }
+    on_loop_nested = _nested_defs_invoked_on_loop(node, nested_names)
+    found: list[str] = []
+
+    def visit(current: ast.AST) -> None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef)):
+            if getattr(current, "name", None) in on_loop_nested:
+                for stmt in current.body:
+                    visit(stmt)
+            return
+        if isinstance(current, ast.Call):
+            if _callee_name(current.func) in _OFFLOAD_BOUNDARY_CALLEES:
+                for child in _offload_boundary_eager_children(current):
+                    visit(child)
+                return
+            name = _callee_name(current.func)
+            if name in names:
+                found.append(name)
+        for child in ast.iter_child_nodes(current):
+            visit(child)
+
+    for stmt in getattr(node, "body", []):
+        visit(stmt)
+    return found
+
+
+def test_capture_session_leg62_probe_is_offloaded():
+    """#4625 leg 62: the capture's graph attach must not run inline.
+
+    * ``_get_proj`` — the projection attach must be gone from the loop (it now
+      rides the off-loop wrapper);
+    * ``_capture_session_probe_off_loop`` must be the one caller doing it;
+    * exactly ONE inline ``_data_sdk`` may remain: the leg-72
+      (``count_org_usage``) site, which is a DECLARED residual because the
+      required #4282 collision pre-flight returned COLLISION, so that leg is
+      skipped in this unit.
+    """
+    node = _async_body_named("_capture_session_impl")
+    callees = _inline_calls_to(node, frozenset({
+        "_data_sdk", "_get_proj", "_capture_session_probe_off_loop",
+    }))
+    assert callees.count("_capture_session_probe_off_loop") == 1, (
+        "#4625 leg 62: `_capture_session_impl` must open the SDK/projection "
+        "through `_capture_session_probe_off_loop`"
+    )
+    assert callees.count("_get_proj") == 0, (
+        "#4625 leg 62 regressed: `_capture_session_impl` attaches the "
+        "projection inline — it must ride the off-loop wrapper"
+    )
+    assert callees.count("_data_sdk") == 1, (
+        "#4625: `_capture_session_impl` has "
+        f"{callees.count('_data_sdk')} inline `_data_sdk` call(s); the leg-62 "
+        "open must use `_data_sdk_offloaded` and the ONE remaining site is the "
+        "declared leg-72 residual (count_org_usage)"
+    )
+
+
+def test_capture_session_probe_attaches_off_the_loop(monkeypatch):
+    """#4625 leg 62: the wrapper's attach runs off the event loop.
+
+    The direct mechanism check — ``_get_proj``'s own view of the loop (a worker
+    thread has no running loop). Every ``_get_proj`` in this flow must be
+    off-loop: the SDK-open hand-off AND the probe hand-off. Reverting either
+    puts one back on ``MainThread`` and fails here.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    seen: list[str] = []
+    real_get_proj = TortoiseSDK._get_proj
+
+    def _probe(sdk_self, *args, **kwargs):
+        seen.append(threading.current_thread().name)
+        return real_get_proj(sdk_self, *args, **kwargs)
+
+    monkeypatch.setattr(TortoiseSDK, "_get_proj", _probe)
+
+    sdk, _proj, row = asyncio.run(
+        ha_mod._capture_session_probe_off_loop(
+            {"org_id": TEST_ORG_ID}, "read-loop-4625-session"))
+    try:
+        assert seen, (
+            "the projection attach was never reached — this run proves nothing "
+            "(#4625 leg 62)"
+        )
+        assert all(name != "MainThread" for name in seen), (
+            f"the capture probe attached the projection on the event loop: "
+            f"{seen} — one slow attach freezes every concurrent request "
+            f"(#4625 leg 62)"
+        )
+        assert row is not None
+    finally:
+        sdk.close()
