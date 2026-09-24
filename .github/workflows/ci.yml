@@ -34,7 +34,9 @@ jobs:
       python: ${{ steps.gate.outputs.python }}
       drift: ${{ steps.gate.outputs.drift }}
       driver_scripts: ${{ steps.gate.outputs.driver_scripts }}
+      ai_review_gate: ${{ steps.gate.outputs.ai_review_gate }}
       watchdog_scripts: ${{ steps.gate.outputs.watchdog_scripts }}
+      orphan_bound_scripts: ${{ steps.gate.outputs.orphan_bound_scripts }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -282,6 +284,23 @@ jobs:
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
               ),
+              # orphan_bound_scripts (#4740): the redislite orphan gate's harness
+              # — extracted from python-ci.yml so the bound it enforces (read
+              # from the conftest session-end sweep's own report, never a
+              # hand-picked constant) is testable. Gated on that gate's surface
+              # only.
+              "orphan_bound_scripts": any_file(
+                  startswith(".github/scripts/orphan-bound"),
+                  isfile(".github/workflows/python-ci.yml"),
+                  isfile(".github/workflows/ci.yml"),
+                  # #4740: tests/conftest.py defines the JSON contract the gate
+                  # parses (the session-end sweep's report) — a conftest-only
+                  # contract change must re-run the harness. The report field
+                  # set and its builder live in tortoise/embedded_reaper.py
+                  # (conftest imports them), so that module is a trigger too.
+                  isfile("tests/conftest.py"),
+                  isfile("tortoise/embedded_reaper.py"),
+              ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on
               # the suite + the harness module/fixtures it imports + every
@@ -339,6 +358,16 @@ jobs:
                   # changes the served bundle — it too used to surface only
                   # through the committed dist rebuild.
                   isfile("product/pricing.json"),
+                  isfile(".github/workflows/ci.yml"),
+              ),
+              # ai-review-gate-tests (#2982): the signed-review merge gate's
+              # shell harness. Gated on the workflow, the harness, and ci.yml
+              # itself so a change to either side of the gate always exercises
+              # its evidence-acceptance logic. Security-relevant: a regression
+              # here silently accepts unsigned/stale evidence.
+              "ai_review_gate": any_file(
+                  isfile(".github/workflows/ai-review-gate.yml"),
+                  isfile(".github/scripts/ai-review-gate.test.sh"),
                   isfile(".github/workflows/ci.yml"),
               ),
           }
@@ -585,6 +614,33 @@ jobs:
       - name: Backup driver state taxonomy (#2796)
         run: bash .github/scripts/registry-cron.test.sh
 
+  ai-review-gate-tests:
+    needs: changes
+    if: needs.changes.outputs.ai_review_gate == 'true'  # #2982: gate workflow/harness only
+    # #2982: the ai-review-gate's evidence-validation shell logic runs inline
+    # in the workflow (that workflow has no checkout step, so it cannot
+    # reference a repo script). This
+    # harness extracts that run block and drives it with fabricated signed
+    # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
+    # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
+    # PR-body source. It ALSO asserts the non-runtime invariants the required
+    # job depends on: no if:/needs:/continue-on-error:, trigger stays
+    # pull_request_target with no paths: filter, permissions keep
+    # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
+    # network, no secrets.
+    #
+    # ⚠️ This job is NOT a required status check: a red harness does not block a
+    # merge, so a regression here can land and then silently make the REQUIRED
+    # `ai-review-gate` check pass without evaluating evidence. Tracked in #3091
+    # (add this job to branch protection, or move the harness into an
+    # always-run required job). The `if:` above is a complete per-surface guard:
+    # it fires on any change to the gate workflow, this harness, or ci.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: AI review gate shell harness (#2982)
+        run: bash .github/scripts/ai-review-gate.test.sh
+
   availability-watchdog:
     needs: changes
     if: needs.changes.outputs.watchdog_scripts == 'true'  # #2850: monitor-script surfaces only
@@ -636,6 +692,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Deploy health gate poll (#4545)
         run: bash .github/scripts/deploy-health-gate.test.sh
+
+  orphan-bound-gate:
+    needs: changes
+    if: needs.changes.outputs.orphan_bound_scripts == 'true'  # #4740: orphan-gate surface only
+    # #4740: the redislite orphan gate's harness. Self-contained: writes hygiene
+    # fixtures to a temp dir, no network, no CI runner. It pins that the gate's
+    # bound is READ from the conftest session-end sweep's report (two different
+    # `left` values both pass, so no fixed bound can satisfy both), that a
+    # disagreement between the workflow's count and the sweep's own measurement
+    # reds, that a violation of the sweep's accounting identity
+    # (`reaped + left < before`) reds, that `cleared: false` is keyed on the
+    # measured COUNT (a zero count passes with a warning, a non-zero count
+    # reds), that an 18+ digit number exits 2 as a usage error rather than
+    # reaching the pass line, and that a red verdict never falls through to a
+    # pass line.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Redislite orphan gate (#4740)
+        run: bash .github/scripts/orphan-bound.test.sh
 
   entrypoint-guards:
     needs: changes

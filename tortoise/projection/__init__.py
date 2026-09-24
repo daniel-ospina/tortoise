@@ -1843,11 +1843,16 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
 # A node is owned by its (graph label, id) pair. Both the rebuild survivor
 # anchor (``last_recreate_seq``) and the replay fold (``_fold_entity_mutation``
 # → ``_delete_entity_by_id``) key on that pair, so a delete can never be
-# suppressed by — or match — a node of another kind. This table is the ONLY
-# source of the label→id-property mapping; a journal ``label`` is NEVER
-# interpolated into the Cypher label position (it must be a member of
-# ``_CANONICAL_ENTITY_LABELS``, else the fold falls back to the legacy id-wide
-# delete). Mirrored by the live writer ``sdk._delete_entity``.
+# suppressed by — or match — a node of another kind. For MUTATION and DELETE
+# this table is the only declaration; the label→key mapping for RESOLUTION is a
+# deliberate SUPERSET declared separately at ``_RESOLVE_BRANCHES`` (which adds
+# ("Source", "url") for url-only ingestion stubs) and mirrored again in
+# ``navigation._ROOT_BRANCHES`` — so do NOT read this as the only label→key
+# table in the codebase, only as the authority for mutation/delete. A journal
+# ``label`` is NEVER interpolated into the Cypher label position (it must be a
+# member of ``_CANONICAL_ENTITY_LABELS``, else the fold falls back to the legacy
+# id-wide delete). Mirrored by the live writers ``sdk._delete_entity`` and
+# ``sdk._update_entity``.
 _CANONICAL_ENTITY_ID_PROPS: tuple[tuple[str, str], ...] = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
     ("Document", "id"), ("Source", "id"), ("Event", "eventId"),
@@ -1858,6 +1863,78 @@ _ENTITY_ID_PROP: dict[str, str] = {
     label: prop for label, prop in _CANONICAL_ENTITY_ID_PROPS}
 _NON_POINT_ENTITY_LABELS: frozenset[str] = (
     _CANONICAL_ENTITY_LABELS - {"Point"})
+
+# ── EntityMutated op vocabulary (#3299 / #3312 / #3377) ────────────────────
+# THE one declaration. tortoise/live.py's #2901 lesson applies verbatim: a
+# hand-written subset at a call site is how a value gets silently omitted from
+# a reader filter (`outdated` was dropped from three of them that way). The
+# producer imports this, both folds classify against it, and
+# tests/test_unjournaled_mutation_class.py derives the relationship so that an
+# op added without a fold arm REDs instead of shipping.
+_ENTITY_MUTATION_OPS: tuple[str, ...] = (
+    "delete", "rename", "restatus", "revise",       # fold arms exist
+    "retract", "supersede",                          # recorded on #3299 — no arm yet
+)
+# FOLD capability, not producer reach: the `rename` arm is implemented and must
+# stay so, but the PRODUCER deliberately does not emit `rename` yet — see
+# `sdk._update_entity`'s `name` branch. The arm applies `state`, so a raw/legacy
+# or future `rename` record folds ONLY if it carries the new name as
+# `state["name"]`; a record carrying just a top-level `name` unfolds and is
+# reported as a fold miss. #3377 returned to
+# open; #4769 lands rename journalling WITH the structural sweep-ordering fix.
+_ENTITY_MUTATION_IMPLEMENTED_OPS: frozenset[str] = frozenset(
+    {"delete", "rename", "restatus", "revise"})
+# The ops that carry a `state` payload (everything implemented except delete).
+_ENTITY_MUTATION_STATE_OPS: frozenset[str] = frozenset(
+    {"rename", "restatus", "revise"})
+# HAND-MAINTAINED, not derived from the set difference: a derived set would
+# auto-absorb an op added to ``_ENTITY_MUTATION_OPS`` with no classification,
+# leaving the derivation test green on exactly the addition it exists to catch.
+_ENTITY_MUTATION_PENDING_OPS: frozenset[str] = frozenset(
+    {"retract", "supersede"})
+
+
+def classify_entity_mutation_op(props: dict) -> str:
+    """The write's PRIMARY INTENT → its ``EntityMutated`` ``op`` value.
+
+    Precedence ``name`` > ``status`` > other. ``state`` always carries the
+    write's full applied map, so a mixed write loses nothing by the labelling —
+    a consumer wanting EVERY status transition must read ``state["status"]``
+    and must NOT filter on ``op``.
+
+    Lives here (not in ``sdk``) so the producer cannot invent a name; its return
+    set is AST-asserted equal to ``_ENTITY_MUTATION_STATE_OPS`` by the test
+    suite.
+    """
+    if "name" in props:
+        return "rename"
+    if "status" in props:
+        return "restatus"
+    return "revise"
+
+
+def _warn_entity_mutation_fold_miss(op: str, rid, label, event_id) -> None:
+    """The state-op fold-miss signal — the non-folded set for C1.
+
+    Emitted INSIDE the fold, not at a call site: ``apply()`` discards the
+    returned count, and ``rebuild(log)`` / ``recover_from_log`` / ``restore``'s
+    JSONL fallback all fold through it, so a call-site-only warning would leave
+    the non-folded-set assertion vacuous on three of the four replay engines.
+
+    Deliberately NOT used for ``op="delete"``: a delete matching 0 rows is
+    legitimately idempotent (a retried delete; restore's fallback replaying onto
+    a non-empty graph) and the existing pass-1b warning already covers the
+    rebuild_all case. Widening it would turn the lane's own evidence into a
+    false positive on valid journals.
+
+    ``event_id`` is carried: it is the only handle that locates the diverging
+    journal line.
+    """
+    logger.warning(
+        "rebuild: EntityMutated %s fold matched no entity (event_id=%s id=%r "
+        "label=%r) — the journal claims a mutation whose entity never "
+        "re-existed on this replay (post-wipe divergence or out-of-order "
+        "journal)", op, event_id, rid, label)
 
 
 def _owns_point(label: object) -> bool:
@@ -1972,6 +2049,20 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             rid = ev.get("id")
             if isinstance(rid, str) and _owns_point(ev.get("label")):
                 points.pop(rid, None)
+        elif ev.get("op") in _ENTITY_MUTATION_STATE_OPS:
+            # Explicit no-op: this projection indexes POINTS only, so the five
+            # canonical labels these ops mutate are outside its model. Named
+            # here (not a silent fall-through) so the absence is a decision a
+            # reader can see, matching the graph fold's contract.
+            pass
+        elif ev.get("op") in _ENTITY_MUTATION_PENDING_OPS:
+            logger.warning(
+                "in-memory fold: EntityMutated op %r is recorded (#3299) but "
+                "has no fold arm yet — no fold applied", ev.get("op"))
+        else:
+            logger.warning(
+                "in-memory fold: unknown EntityMutated op %r — no fold applied",
+                ev.get("op"))
     elif t == "ConfidenceChanged":
         # #2884 D3: the EP/dream belief-state write-back — parity with the
         # graph folds (`FalkorProjection.apply` / `rebuild_all`).
@@ -4031,6 +4122,35 @@ class FalkorProjection(
                         journal_hash_write.add(p["id"])
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
+        # #4743 review P1 — journal order across the deferral boundary.
+        # `EntityMutated` STATE folds run INLINE below, but `ObjectSuperseded`
+        # folds are DEFERRED to the sweep after pass 1b (deliberately: the fold
+        # is an unconditional `SET o.status='superseded'` and must run after
+        # every Object-creation event). Without journal order being consulted
+        # here, the deferred sweep wins over a LATER state op on the same
+        # Object: live=`archived` → rebuild_all=`superseded`, i.e. exactly the
+        # revert this lane exists to remove — while `apply()`/`rebuild()` fold
+        # both inline in journal order and land on `archived`, so the engines
+        # disagree. Record the ORDERED state folds per (label, id) and the last
+        # ObjectSuperseded per key, both by journal `seq`, then replay ONLY the
+        # state ops the sweep actually clobbered (a supersede AFTER them must
+        # still win — that is live truth).
+        #
+        # The list matters, not just the terminal event: the sweep clobbers the
+        # WHOLE inline history for the keys it writes, so `sup → status=archived
+        # → name=New` leaves `status` clobbered even though the LAST state op is
+        # the rename — replaying only that one would silently drop the status
+        # (round 2 of this review found exactly that).
+        #
+        # The supersede seq is keyed by BOTH id and name: `_fold_object_superseded`
+        # falls back to matching by NAME for legacy id-less records (#2164
+        # ISSUE-B), so an id-keyed map alone would treat such a journal as
+        # clobber-free and could re-fold a state op over the supersede.
+        # DEFENSIVE ONLY — a review round-2 repro of that regression could not be
+        # reproduced in this worktree (the name-only fold did not apply here at
+        # all), so this half is reasoned, not empirically pinned, and has no test.
+        _state_folds: dict = {}
+        _supersede_seq: dict = {}
         # #3664: EntityLinked records are deferred to a trailing sweep that
         # runs after PASS 2 (see the sweep before pass 2b). The deferral is
         # for the SOURCE endpoint: the TARGET is already created by pass-1b
@@ -4251,6 +4371,9 @@ class FalkorProjection(
                         anchor = last_recreate_seq_any.get(rid)
                 if anchor is not None and seq <= anchor:
                     continue
+                if ev.get("op") in _ENTITY_MUTATION_STATE_OPS and isinstance(rid, str):
+                    _state_folds.setdefault((ev.get("label"), rid), []).append(
+                        (seq, ev))
                 matched = self._fold_entity_mutation(ev)
                 if matched == 0 and ev.get("op") == "delete":
                     # Fold-miss signal (the journal claims a delete whose
@@ -4431,6 +4554,13 @@ class FalkorProjection(
                 # registration is irrelevant and later re-creations are
                 # re-folded correctly.
                 supersede_folds.append(ev)
+                _sid, _sname = ev.get("id"), ev.get("name")
+                if isinstance(_sid, str):
+                    _supersede_seq[("id", _sid)] = max(
+                        seq, _supersede_seq.get(("id", _sid), -1))
+                if isinstance(_sname, str):
+                    _supersede_seq[("name", _sname)] = max(
+                        seq, _supersede_seq.get(("name", _sname), -1))
             elif t == "PointSuperseded":
                 # #2423 pass-1b rebuild parity: the POINT-side analog of
                 # #2164 (ObjectSuperseded above) — apply() has no supersede
@@ -4571,6 +4701,55 @@ class FalkorProjection(
                     "unjournaled capture SDK, legacy unjournaled Object, or "
                     "delete race)",
                     ev.get("event_id"), ev.get("supersedes_by"))
+
+        # #4743 review P1: undo the deferral's clobber, in journal order. The
+        # inline state folds above were overwritten by `ObjectSuperseded` folds
+        # the sweep applied UNCONDITIONALLY afterwards — correct only when the
+        # supersede really came later. Replay every state op that the journal
+        # puts AFTER the last supersede matching this object, in seq order, so
+        # `rebuild_all` agrees with `apply()`/`rebuild()` and with live.
+        #
+        # A supersede is skipped outright when none matched (the `-1` default of
+        # round 1 made "no supersede" indistinguishable from "supersede at seq
+        # −1", so every state op was re-folded — harmless in the graph but it
+        # double-reported every fold-miss warning).
+        for (_ujm_label, _ujm_id), _ujm_events in _state_folds.items():
+            if _ujm_label != "Object":
+                # `_fold_object_superseded` is the only non-Point deferred fold
+                # that writes a property a state op also writes; the point
+                # sweeps below are :Point-scoped and no producer emits an
+                # `EntityMutated` state op for a Point (`_update_entity`'s Point
+                # branch emits PointRevised instead).
+                continue
+            _sup = _supersede_seq.get(("id", _ujm_id))
+            _rows = self.g.query(
+                "MATCH (o:Object {id:$i}) RETURN o.name",
+                params={"i": _ujm_id},
+            ).result_set
+            _nm = _rows[0][0] if _rows else None
+            if not _rows:
+                # The object is GONE by this point in the replay — a journalled
+                # `delete` op, or a supersede-then-delete journal. There is then
+                # nothing for the sweep to have clobbered and nothing to
+                # restore, so re-folding here can only MANUFACTURE a fold-miss
+                # warning for a mutation the INLINE pass-1b fold already applied
+                # correctly (round-6 finding: create -> supersede ->
+                # update(status) -> delete warned "fold matched no entity ...
+                # post-wipe divergence or out-of-order journal", both causes
+                # false). The warning is this lane's non-folded-set EVIDENCE —
+                # `_fold_entity_mutation` exempts `op="delete"` precisely so a
+                # valid journal cannot produce a false positive — so it must not
+                # be emitted for a replay that was in fact correct.
+                continue
+            if isinstance(_nm, str):
+                _nseq = _supersede_seq.get(("name", _nm))
+                if _nseq is not None and (_sup is None or _nseq > _sup):
+                    _sup = _nseq
+            if _sup is None:
+                continue
+            for _seq, _ev in _ujm_events:
+                if _seq > _sup:
+                    self._fold_entity_mutation(_ev)
 
         # ── Pass 1b fold sweep (points): cross-family re-stamp survivors ──
         # PointSuperseded replays (#2423 — status/validity/CORRECTS) +
@@ -6508,14 +6687,76 @@ class FalkorProjection(
         kind-scoped folds), while a record can no longer destroy a foreign-kind
         node that merely shares the id.
 
-        Returns the affected node count (0 for an unknown op or an
-        already-absent entity) — the fold-miss signal, so a rebuild can warn
-        when the journal claims a delete whose entity never re-existed.
+        Returns the affected node count (0 for an unknown op, an unimplemented
+        op, or an already-absent entity).
+
+        THE NON-FOLDED-SET CONTRACT: a mutation the journal claims and this
+        fold cannot replay is a WARNING, never a silent 0 — that silence is
+        this class's own defect. Three distinct messages, so a future extender
+        is not told its sanctioned op is "unknown":
+          * state op matching no entity → fold-miss (post-wipe divergence or an
+            out-of-order journal);
+          * a recorded-but-unimplemented op (``_ENTITY_MUTATION_PENDING_OPS``)
+            → names itself as recorded with no arm yet;
+          * anything outside the vocabulary → "unknown".
+        Each carries ``event_id`` — the only handle that locates the line.
+
+        The warning is emitted HERE, not at a call site: ``apply()`` discards
+        the returned count, and ``rebuild_all`` / ``recover_from_log`` /
+        ``restore``'s JSONL fallback all reach this method, so a call-site-only
+        warning would be invisible on three of the four replay engines.
+
+        ``op="delete"`` matching no entity is DELIBERATELY exempt: a
+        retried/replayed delete is legitimately idempotent (pass-1b already
+        warns for the ``rebuild_all`` case), and warning here would turn valid
+        journals into false positives.
         """
-        if ev.get("op") != "delete":
-            # Future ops (retract/revise/rename/restatus) replay here; an
-            # unknown op is a no-op rather than a crash so a newer journal
-            # record cannot break an older rebuild.
+        op = ev.get("op")
+        rid = ev.get("id")
+        label = ev.get("label")
+
+        if op in _ENTITY_MUTATION_STATE_OPS:
+            # #3312/#3377: replay the mutation from its applied property map.
+            # The clause is the SAME `SET n += $s` the live write ran, on the
+            # SAME map — so live and replay cannot disagree on removals or on
+            # value typing (a `properties(n)` snapshot would: a removed key is
+            # absent from it, and a VectorF32 comes back as a plain list).
+            if not isinstance(rid, str):
+                return 0                                   # #331 parity
+            if not (isinstance(label, str) and label in _CANONICAL_ENTITY_LABELS):
+                # The label is NEVER interpolated from the journal — only an
+                # allowlisted member reaches the Cypher label position.
+                _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
+                return 0
+            state = ev.get("state")
+            if not isinstance(state, dict):
+                _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
+                return 0
+            prop = _ENTITY_ID_PROP[label]
+            r = self.g.query(
+                f"MATCH (n:{label} {{{prop}:$id}}) SET n += $s RETURN count(n)",
+                params={"id": rid, "s": state},
+            )
+            matched = r.result_set[0][0] if r.result_set else 0
+            if not matched:
+                _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
+            return matched or 0
+
+        if op != "delete":
+            # Outside the recorded vocabulary, or recorded-but-unimplemented
+            # (`retract`/`supersede`). LOUD: a silently dropped mutation is
+            # exactly this class's defect. The two are distinguished so a
+            # future extender is not told its sanctioned op is "unknown".
+            if op in _ENTITY_MUTATION_PENDING_OPS:
+                logger.warning(
+                    "rebuild: EntityMutated op %r is recorded (#3299) but has no "
+                    "fold arm yet (event_id=%s id=%r label=%r) — its mutation is "
+                    "NOT replayed", op, ev.get("event_id"), rid, label)
+            else:
+                logger.warning(
+                    "rebuild: unknown EntityMutated op %r (event_id=%s id=%r "
+                    "label=%r) — no fold applied; the record's mutation is LOST "
+                    "on replay", op, ev.get("event_id"), rid, label)
             return 0
         rid = ev.get("id")
         if not isinstance(rid, str):

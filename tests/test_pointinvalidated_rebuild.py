@@ -360,9 +360,16 @@ def test_id_reuse_drops_pre_recreation_invalidate_fold(sup):
     """invalidate(A,B) → [raw producer hard-deletes + re-creates A] →
     invalidate(A,C). Only the POST-recreate fold is live-truth — rebuild must
     drop the pre-recreate fold entirely (no ghost CORRECTS B→A, no older
-    stamps) and fold the post-recreate one verbatim. Uses the RAW hard-delete
-    lane (NOT SDK delete_point — that emits PointRetracted, which tombstones
-    the fresh incarnation pre-sweep and breaks the id-reuse premise)."""
+    stamps) and fold the post-recreate one verbatim.
+
+    Uses the RAW hard-delete lane rather than ``sdk.delete_point``. The original
+    reason — "delete_point emits PointRetracted, which tombstones the fresh
+    incarnation pre-sweep and breaks the id-reuse premise" — NO LONGER HOLDS:
+    since #3300, ``delete_point`` journals a JSONL ``EntityMutated op="delete"``
+    that the fold replays as a HARD delete, so ``delete_point`` would no longer
+    tombstone the fresh incarnation. The raw lane is kept because this test
+    exercises the raw producer's own delete/recreate interleaving, which is the
+    sequence under test — not because the SDK door is unusable."""
     _, events, sdk = sup
     a = sdk.create_point("statement", "A v1", status="live")["id"]
     b = sdk.create_point("statement", "B (v1 corrector)", status="live")["id"]

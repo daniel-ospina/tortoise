@@ -110,6 +110,11 @@ EXTRACTION_DEGRADE_MIN_COUNT = 10
 #: lane) — this is the additive population-split readout.
 EXTRACTION_HEALTH_DEGRADED_FRACTION = 0.25
 
+#: #2873: how many DISTINCT extractor warnings the run-level readout keeps as
+#: a sample (mirrors the ingest lane's ``WARNING_SAMPLE_CAP``). The count is
+#: exact; only the sample is bounded.
+EXTRACTOR_WARNING_SAMPLE_CAP = 20
+
 
 #: #1747: eval-failure classes that are transient-safe — the retry budget
 #: was BURNED (``retries_exhausted``), so the question failed, but the cause
@@ -1661,6 +1666,63 @@ def build_report(
             for o in _clean
         ],
     }
+    # ── #2873: the extractor-warning census readout ──────────────────────
+    # DIAGNOSTIC-ONLY — never a gate limb (``integrity.valid`` and every
+    # grading path are untouched). The v2 ingest lane folds each session's
+    # extractor ``out["warnings"]`` into ``ingest.warnings`` ({count,
+    # distinct, sample}); this rolls those per-question dicts up to the run
+    # so a run that emitted extraction warnings is never byte-identical in
+    # the report to a clean one. ``count`` is exact and per-QUESTION
+    # (deduplicated by qid — duplicate checkpoint entries for one question,
+    # the #1747 concurrent-merge overlap, take the MAX count and are never
+    # double-counted); ``sample`` is a first-N-distinct window over the
+    # per-question samples (each bounded by the ingest lane's
+    # WARNING_SAMPLE_CAP), so it is a sample, not a complete distinct set.
+    # Legacy/non-v2 outcomes carry no ``ingest.warnings`` and contribute
+    # zero. Malformed stats fail CLOSED (a non-numeric ``count`` reads 0, a
+    # non-list ``sample`` contributes nothing) so a tampered checkpoint can
+    # never take down report assembly — the ``_outcome_shape_ok`` posture.
+    _warn_by_qid: dict[Any, int] = {}
+    _warn_seen: set[str] = set()
+    _warn_sample: list[str] = []
+    for o in outcomes:
+        if not isinstance(o, dict):
+            continue
+        _ing = o.get("ingest")
+        _w = _ing.get("warnings") if isinstance(_ing, dict) else None
+        if not isinstance(_w, dict):
+            continue
+        _key = _qid_key(o)
+        _warn_by_qid[_key] = max(
+            _warn_by_qid.get(_key, 0), _bounded_int(_w.get("count")))
+        _sample = _w.get("sample")
+        if not isinstance(_sample, list):
+            continue
+        for _ws in _sample:
+            _s = str(_ws)
+            if _s not in _warn_seen:
+                _warn_seen.add(_s)
+                if len(_warn_sample) < EXTRACTOR_WARNING_SAMPLE_CAP:
+                    _warn_sample.append(_s)
+    _warn_count = sum(_warn_by_qid.values())
+    _warn_questions = sum(1 for v in _warn_by_qid.values() if v)
+    extractor_warnings: dict[str, Any] = {
+        "count": _warn_count,
+        "questions_with_warnings": _warn_questions,
+        "sample": _warn_sample,
+        "criterion": (
+            "#2873 extractor-warning census (DIAGNOSTIC — never a gate limb, "
+            "never a veto source): the total number of warnings the v2 "
+            "extractor emitted across the run, counted PER QUESTION "
+            "(deduplicated by qid — duplicate checkpoint entries for one "
+            "question take the MAX, never a double-count) plus the first "
+            f"{EXTRACTOR_WARNING_SAMPLE_CAP} distinct warning strings "
+            "observed (a first-N window over each question's own bounded "
+            "sample — a sample, not a complete distinct set). A run with "
+            "count > 0 is no longer indistinguishable in the report from a "
+            "clean run; an extraction-quality regression that surfaces only "
+            "as a warning is now visible to the harness."),
+    }
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -1726,6 +1788,9 @@ def build_report(
         # #2408 (Task 2): the S4 re-emit-tax census readout — DIAGNOSTIC
         # only (never a gate limb; integrity.valid untouched).
         "s4_reemit": s4_reemit,
+        # #2873: the extractor-warning census readout — DIAGNOSTIC only
+        # (never a gate limb; integrity.valid untouched).
+        "extractor_warnings": extractor_warnings,
         # #1900/#1937: whole-run gated-outcome count (gate-red union per
         # outcome — the watchdog's ``_n_gated_total`` at report time, from
         # the outcomes list so resumed runs count prior-session outcomes

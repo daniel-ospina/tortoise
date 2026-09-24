@@ -65,6 +65,12 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
+  # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
+  # tortoise/hosted_api.py-only change would otherwise never run this file — which
+  # holds two uniquely-hosted_api pins (test_alert_store_from_forwards_the_writer,
+  # test_analytics_store_delegates_to_the_incident_seam).
+  - test_operator_alert.py
   - test_onboarding_email_http.py
   # #2006 (W11): the onboarding funnel-event guard. Load-bearing HERE: four of
   # the five emission sites live in tortoise/hosted_api.py, which selects the
@@ -488,6 +494,10 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
+  # change); this `core` entry is the fallback arm, since core is only added when nothing
+  # else matched.
+  - test_operator_alert.py
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
@@ -940,6 +950,7 @@ surfaces:
   - test_trash_lock.py             # #2470 restore lock timeout (fake CP)
   - test_trash_grace.py            # #2465 trash recovery-window grace (supabase lane, fake CP)
   - test_tripwire.py
+  - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
@@ -1339,6 +1350,7 @@ tier1:
 - test_weights.py
 - test_writer_inventory.py
 slow_files:
+- eval/retrieval/test_integration.py
 - test_about_edges.py
 - test_backfill_sources.py
 - test_billing.py
@@ -1428,7 +1440,7 @@ push_extra: []
 durations:
 # #3400: per-file wall time (seconds) from main's junit.xml artifacts
 # (run 34725816431, head 2e09f9e) — the fast-file pool of that run, 498/500
-# of the pool at measurement time (502/520 after main grew it). Consumed by split_fast_gate (LPT) for BOTH the
+# of the pool at measurement time. Consumed by split_fast_gate (LPT) for BOTH the
 # tier-2 --split path and the full-matrix push halves (#3400). The prior
 # map held 15 hand-entered entries for 500 fast files, so 97% packed at the
 # flat 2.0s default and the 'duration-aware' pack was effectively
@@ -1564,6 +1576,7 @@ durations:
   test_onboarding_telemetry_w11.py: 2.0
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
+  test_unjournaled_mutation_class.py: 100.0  # #4743: locally measured (46 tests, live FalkorDB); refresh from CI junit — the file builds a projection per row.
   test_write_verb.py: 35.7
   test_index_restore.py: 35.2
   test_capture_session.py: 31.2
@@ -2111,6 +2124,14 @@ durations:
   test_onboarding_auto_complete.py: 0.0
   test_onboarding_seed.py: 0.0
   test_onboarding_variants.py: 0.0
+  # #3981: new file (round-4 registration). No CI junit measurement yet, so enter
+  # at the flat 2.0s default per the #3400/#4221 convention — an unmeasured fast
+  # file drops durations coverage to 89.9% (545/606), under the 90% floor, exactly
+  # the #4348/#3949 trap; the conservative default restores it. No local
+  # measurement is used: registration was taken at host load >200, which is not a
+  # representative number (the repo's conftest import dominates under load).
+  # Refresh from the first post-merge main run that includes it.
+  test_operator_alert.py: 2.0
   test_operator_source_unit.py: 0.0
   test_pair_label_runner.py: 0.0
   test_pipeline_cli.py: 0.0
@@ -2167,3 +2188,117 @@ durations:
   test_session_reinjection.py: 0.0        # true CI junit sum 2.864 (20 tests)
   test_session_reinjection_rules.py: 0.0  # true CI junit sum 0.802 (38 tests)
   test_backups_v1_alias.py: 0.01
+  bench/test_smoke_embedded.py: 30.7
+  test_about_edges.py: 8.3
+  test_backfill_sources.py: 1.0
+  test_billing.py: 15.6
+  test_cli_context.py: 9.3
+  test_config.py: 4.1
+  test_control_plane.py: 5.1
+  test_cross_tenant_read_isolation.py: 2.6
+  test_dream.py: 3.5
+  test_embedded_concurrency.py: 125.6
+  test_embedded_durability_claim.py: 0.5
+  test_embedded_lifecycle.py: 87.7
+  test_enumeration_surfaces.py: 1.2
+  test_ep_sources.py: 5.3
+  test_eval_extraction_health.py: 0.1
+  test_eval_ingest_retry.py: 16.1
+  test_eval_resume_retry_failed.py: 4.2
+  test_event_provenance.py: 2.3
+  test_flip_gate.py: 6.7
+  test_fork_safety_3845.py: 6.1
+  test_fork_slot_wedge_3845.py: 2.1
+  test_graph_integrity_gate.py: 9.2
+  test_graphcopy_boolean_index_3154.py: 0.6
+  test_guard.py: 30.4
+  test_hard_reject.py: 0.7
+  test_hosted_api.py: 114.6
+  test_hosted_backup.py: 14.4
+  test_index_cli.py: 29.2
+  test_index_directory.py: 8.4
+  test_indexes.py: 0.9
+  test_ingest.py: 1.2
+  test_ingest_bundle.py: 8.7
+  test_ingest_mode.py: 4.4
+  test_ingest_validation.py: 1.4
+  test_longmem_runner.py: 173.3
+  test_mcp_http.py: 16.5
+  test_mcp_route_challenge.py: 0.8
+  test_migrate_db.py: 34.1
+  test_pack_shipping_wheel.py: 33.7
+  test_per_session_census.py: 2.0
+  test_pre_migration_safety.py: 2.3
+  test_precision_leak_4028.py: 3.1
+  test_projection.py: 8.9
+  test_projection_embedded_socket_timeout.py: 1.9
+  test_projection_lifecycle.py: 8.9
+  test_reaper.py: 195.9
+  test_reaper_orphan.py: 0.1
+  test_redis_guard.py: 0.5
+  test_resume_gate_parity.py: 0.1
+  test_sdk.py: 7.9
+  test_sdk_group3.py: 2.7
+  test_search_engine_gaps.py: 3.0
+  test_source_inheritance_own.py: 45.7
+
+  eval/write_path/test_write_path_operator_lane.py: 6.7
+  longmem_eval/test_temporal_admission_trace.py: 0.1
+  test_2884_ep_state_journaled.py: 4.5
+  test_3276_has_ep_measured.py: 1.2
+  test_4220_blog_residue_cleanup.py: 0.0
+  test_activation_scorecard.py: 1.6
+  test_analytics_fallback_alert.py: 1.7
+  test_analytics_write_path_resolution.py: 0.1
+  test_ask_eval_only.py: 4.5
+  test_ask_seed_shape.py: 0.7
+  test_ask_spotcheck_seed_shape.py: 0.3
+  test_battery_recall_wiring.py: 0.4
+  test_blog_agent_delete_guard.py: 2.7
+  test_capture_cost_measurement.py: 4.1
+  test_capture_entity_attachment_3664.py: 6.7
+  test_capture_install.py: 16.5
+  test_cimd_ssrf.py: 2.3
+  test_claude_hook_install_probe.py: 0.1
+  test_client_cli_probe.py: 0.0
+  test_client_status_vocabulary.py: 0.1
+  test_cmux_dispatch.py: 0.4
+  test_codex_capture_hook.py: 7.5
+  test_cohort_cost_cap.py: 6.3
+  test_cursor_capture_hook.py: 8.8
+  test_cursor_mcp_exit_evidence.py: 1.7
+  test_d3_session_identity.py: 1.4
+  test_dashboard_unknown_address.py: 0.1
+  test_dream_noop_3139.py: 3.5
+  test_durability_posture.py: 1.6
+  test_embedder_provision.py: 1.1
+  test_entity_delete_rebuild.py: 1.9
+  test_env_truthy.py: 11.2
+  test_health_client_effect.py: 3.5
+  test_hook_upgrade.py: 9.2
+  test_issue_4010_sessions_unlimited.py: 2.0
+  test_lifecycle_guards.py: 4.7
+  test_metering_period_window.py: 2.9
+  test_metering_window_admission.py: 1.0
+  test_operator_annotator_rebuild.py: 5.9
+  test_pi_capture_hooks.py: 10.3
+  test_product_rerank.py: 0.2
+  test_projection_maxmemory_message.py: 0.1
+  test_provenance_extractedfrom_3263.py: 2.6
+  test_rebuild_turn_points_3947.py: 4.4
+  test_restore_seq_3902.py: 0.8
+  test_retention_promise.py: 2.7
+  test_retired_tools.py: 0.2
+  test_session_bridge_fragment_retention.py: 0.3
+  test_session_verify.py: 97.4
+  test_ship_test_onboarding.py: 1.2
+  test_surface_manifest.py: 102.5
+  test_surface_resolution.py: 1.1
+  test_telemetry_registration.py: 1.0
+  test_temporal_leg_2976.py: 0.5
+  test_terminal_dedup_nullhash.py: 1.0
+  test_terminal_status_vocabulary.py: 0.7
+  test_tmpdir_hygiene_4096.py: 8.2
+  test_turn_embedding_write_path_4194.py: 1.3
+  test_website_docs_consistency.py: 4.2
+  test_helpers.py: 0.0
