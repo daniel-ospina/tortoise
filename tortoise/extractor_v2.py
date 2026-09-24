@@ -2929,6 +2929,14 @@ def _num_word_value(s: str) -> int | None:
 
 _NUM_WORD_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
 
+# The clock forms' single authority: "6pm" | "6:00 pm" | "six pm" |
+# "six thirty pm".  Shared by ``_value_signature`` (which normalises them) and
+# the D12/O4 guard (which strips them, so a differing number beside an equal
+# clock value is still compared).
+_CLOCK_RE = re.compile(
+    rf"\b(\d{{1,2}}(?::\d{{2}})?|(?:{_NUM_WORD_ALT})(?:[\s-]+"
+    rf"(?:{_NUM_WORD_ALT}))?)\s*(a\.?m\.?|p\.?m\.?)\b")
+
 
 def _value_signature(content: str) -> str | None:
     """Deterministic value-token normalization (D2, Q3) — the value-identity
@@ -2945,10 +2953,7 @@ def _value_signature(content: str) -> str | None:
     # clock forms: "6pm" | "6:00 pm" | "six pm" | "six thirty pm" — the
     # hour word is constrained to the number-word vocabulary so "at six pm"
     # cannot greedily capture "at six" as the hour (deterministic).
-    clock_re = re.compile(
-        rf"\b(\d{{1,2}}(?::\d{{2}})?|(?:{_NUM_WORD_ALT})(?:[\s-]+"
-        rf"(?:{_NUM_WORD_ALT}))?)\s*(a\.?m\.?|p\.?m\.?)\b")
-    for m in clock_re.finditer(c):
+    for m in _CLOCK_RE.finditer(c):
         raw, amp = m.group(1), m.group(2)[0].lower()
         if ":" in raw:
             hh, mm = raw.split(":")
@@ -3030,6 +3035,231 @@ def _date_is_later_or_undated(current_date: str | None, prior: dict) -> bool:
     return True
 
 
+# ── D12/O4 — the never-across boundary (#5080) ─────────────────────────────
+# The owner ruling of 2026-09-24 (recorded on #4899; EXT4 §16.4) authorises
+# merging near-duplicate claims and forbids a merge "across a difference in: a
+# number or quantity, a named entity, a language, a negation, or a condition".
+# The ruling, D12 and §16.4 state different-length lists of that boundary, so
+# the union is the floor enforced here.
+#
+# The asymmetry is also the ruling's: a false merge costs more than a kept
+# near-duplicate.  An unreadable comparison therefore reads as a DIFFERENCE
+# (both claims survive) and never as agreement.
+#
+# The dimension list alone does not cover a claim that OPPOSES its prior
+# without a marker — "failed at 3pm" vs "succeeded at 3pm" differ in no
+# number, name, negation or condition; the predicates differ — so a second,
+# more general test applies: the mechanical form of §4.2's "merged only when
+# nothing distinguishing is lost".  A fold may BROADEN a claim ("the team
+# meets weekly in main office" ← "the team meets weekly"); it may not
+# SUBSTITUTE its content.  If each side owns a content token the other lacks,
+# something distinguishing would be lost and the fold is refused.
+_NEGATION_MARKERS = frozenset({
+    "not", "no", "never", "none", "nor", "nothing", "without", "cannot",
+    "cant", "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
+    "wont", "wouldnt", "shouldnt", "couldnt", "hasnt", "havent", "aint",
+})
+_CONDITION_MARKERS = frozenset({
+    "if", "unless", "until", "when", "whenever", "provided", "assuming",
+    "whether",
+})
+# Relative days + month names.  Not interchangeable with the value dimension:
+# "shipped in march" vs "shipped in april" carries no number.
+_DATE_WORDS = frozenset({
+    "today", "tomorrow", "yesterday",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday",
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
+})
+# Clock units are dropped from the content skeleton: "six pm" and "6pm" are
+# one value spelled twice, and the value dimension compares them.
+_CLOCK_UNITS = frozenset({"pm", "am"})
+# Token edges stripped before comparison.  `_norm` lowercases and collapses
+# whitespace but keeps punctuation, so "team." and "team" would otherwise read
+# as different tokens and the substitution test would fire on a full stop.
+_TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
+# Non-Latin scripts, by the codepoint block that identifies them.
+_SCRIPT_BLOCKS = (
+    ("greek", 0x0370, 0x03FF),
+    ("cyrillic", 0x0400, 0x04FF),
+    ("hebrew", 0x0590, 0x05FF),
+    ("arabic", 0x0600, 0x06FF),
+    ("devanagari", 0x0900, 0x097F),
+    ("kana", 0x3040, 0x30FF),
+    ("han", 0x4E00, 0x9FFF),
+    ("hangul", 0xAC00, 0xD7AF),
+)
+
+
+# Differences that make two claims RIVALS rather than one claim in two
+# spellings.  The value dimensions (number, date) are absent by design: a
+# differing value is a new value for the same attribute, which is exactly what
+# UPDATE exists to record.  These are the differences where nothing may be
+# destroyed — neither a fold nor a supersede.
+_IDENTITY_DIMENSIONS = frozenset({
+    "negation", "condition", "language", "substituted_content", "unreadable",
+})
+
+
+def _guard_tokens(content: str) -> set[str]:
+    """Lowercased whitespace tokens with edge punctuation stripped."""
+    return {t for t in (_s.strip(_TOKEN_EDGE_PUNCT)
+                        for _s in _norm(content).split()) if t}
+
+
+def _value_tokens(content: str) -> frozenset[str]:
+    """Number-shaped tokens in one normalised form: number words map to their
+    value ("six" → "6"), and clock forms are removed entirely.
+
+    Clock forms are removed because ``_value_signature`` compares them in its
+    own normalised encoding, where "6pm", "six pm" and "6:00 pm" are one
+    value — leaving their raw tokens here would read a notation change as a
+    value change.  The signature alone is not sufficient either: it returns
+    early once both sides carry one, and so misses a differing number sitting
+    BESIDE an equal clock value ("3 crates at 9am" vs "4 crates at 9am").
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(_CLOCK_RE.sub(" ", _norm(content))):
+        if any(c.isdigit() for c in t):
+            out.add(t)
+        else:
+            v = _num_word_value(t)
+            if v is not None:
+                out.add(str(v))
+    return frozenset(out)
+
+
+def _negation_markers(content: str) -> frozenset[str]:
+    """Negation markers, including the clitic form no bare-word list entry
+    matches ('dont' is in the set, "don't" is not, and both negate)."""
+    return frozenset(t for t in _guard_tokens(content)
+                     if t in _NEGATION_MARKERS or t.endswith("n't"))
+
+
+def _condition_markers(content: str) -> frozenset[str]:
+    """Condition/qualifier markers."""
+    return frozenset(t for t in _guard_tokens(content)
+                     if t in _CONDITION_MARKERS)
+
+
+def _date_tokens(content: str) -> frozenset[str]:
+    """Date/scope words — month names and relative days.
+
+    Deliberately WITHOUT digit-bearing tokens: those are the value dimension's
+    job, and it normalises them ("6pm"/"six pm" are one value).  Including
+    them here would read a value spelling change as a date change.
+    """
+    return frozenset(t for t in _guard_tokens(content) if t in _DATE_WORDS)
+
+
+def _content_tokens(content: str) -> set[str]:
+    """A claim's distinguishing skeleton — stopword- and value-free tokens.
+
+    Values are removed deliberately: they are compared by their own
+    dimension, and "six pm"/"6pm" must not read as a content substitution.
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        if t in _FRAME_STOPWORDS or t in _CLOCK_UNITS:
+            continue
+        if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
+            continue
+        out.add(t)
+    return out
+
+
+def _scripts(content: str) -> frozenset[str]:
+    """Scripts the claim's letters are drawn from — a language difference in
+    the one form decidable without a model."""
+    found: set[str] = set()
+    for ch in str(content or ""):
+        if ch.isascii() and ch.isalpha():
+            found.add("latin")
+            continue
+        cp = ord(ch)
+        for name, lo, hi in _SCRIPT_BLOCKS:
+            if lo <= cp <= hi:
+                found.add(name)
+                break
+    return frozenset(found)
+
+
+def distinguishing_difference(a: str, b: str) -> str | None:
+    """The never-across dimension in which ``a`` and ``b`` differ, else None.
+
+    Returns one of ``number``, ``negation``, ``condition``, ``date``,
+    ``language``, ``substituted_content`` or ``unreadable``.  Any of them
+    means the pair may not be folded into one claim: two claims differing in a
+    distinguishing dimension are rival claims, not duplicates.
+
+    Total — every input is coerced by ``_norm`` and every operation is a
+    string, regex or set operation, so LLM-shaped input cannot raise here.
+    """
+    ta, tb = _guard_tokens(a), _guard_tokens(b)
+    if not ta or not tb:
+        # Nothing to compare: refuse the fold rather than assume agreement.
+        return "unreadable"
+    sig_a, sig_b = _value_signature(a), _value_signature(b)
+    # Both halves are needed.  The signature normalises the clock and
+    # quantity forms ("6pm"/"six pm" are one value); the token set catches a
+    # differing number ANYWHERE in the claim, including the one that sits
+    # beside an equal signature — which comparing signatures alone misses,
+    # because it returns early once both sides carry one.
+    if sig_a != sig_b:
+        return "number"
+    if _value_tokens(a) != _value_tokens(b):
+        return "number"
+    if _negation_markers(a) != _negation_markers(b):
+        return "negation"
+    if _condition_markers(a) != _condition_markers(b):
+        return "condition"
+    if _date_tokens(a) != _date_tokens(b):
+        return "date"
+    script_a, script_b = _scripts(a), _scripts(b)
+    if script_a and script_b and script_a != script_b:
+        return "language"
+    content_a, content_b = _content_tokens(a), _content_tokens(b)
+    if (content_a - content_b) and (content_b - content_a):
+        return "substituted_content"
+    return None
+
+
+def _difference(a: str, b: str) -> str | None:
+    """``distinguishing_difference`` with the fail-closed sentinel filled in.
+
+    An unreadable comparison is a DIFFERENCE, so a caller that consults this
+    destroys nothing when either side cannot be read.
+    """
+    try:
+        return distinguishing_difference(a, b)
+    except Exception:  # noqa: BLE001, RUF100
+        return "unreadable"
+
+
+def fold_allowed(a: str, b: str) -> bool:
+    """True when ``a`` and ``b`` may be treated as the same claim.
+
+    Fail-closed toward KEEP: any failure to read either side refuses the fold,
+    so an unreadable comparison preserves both claims instead of dropping one
+    (D12/O4's asymmetry — a wrong keep is noise, a wrong drop is memory loss).
+    """
+    return _difference(a, b) is None
+
+
+def supersede_allowed(a: str, b: str) -> bool:
+    """True when ``a`` may supersede ``b`` (an UPDATE of the same attribute).
+
+    A differing NUMBER or DATE is a new value for one attribute, which is what
+    UPDATE is for — the boundary does not block it.  A differing NEGATION,
+    CONDITION, LANGUAGE or substituted content means the two are RIVAL claims:
+    a rival may be neither folded nor superseded, so both survive.
+    """
+    return _difference(a, b) not in _IDENTITY_DIMENSIONS
+
+
 def classify_consolidation(point: dict, priors: list[dict], *,
                            entity_mentions: list[str] | None = None,
                            current_date: str | None = None) -> DecisionRecord:
@@ -3097,15 +3327,23 @@ def classify_consolidation(point: dict, priors: list[dict], *,
             value_differs = bool(_frame_tokens(content)
                                  - _frame_tokens(old_content))
         later = _date_is_later_or_undated(current_date, p)
+        # D12/O4 (#5080): the boundary guards every decision that would
+        # destroy the prior, not only the fold.
+        difference = _difference(old_content, content)
         # 2) UPDATE — priority over NOOP
-        if gate and later and value_differs:
+        if gate and later and value_differs \
+                and difference not in _IDENTITY_DIMENSIONS:
             band_ok = ov >= REVISES_MIN_OVERLAP
             contradiction = _fact_value_contradiction(
                 content, mentions, p, when=current_date)
             if (band_ok or contradiction) \
                     and (best_update is None or ov > best_update[0]):
                 best_update = (ov, p)
-        # 3) NOOP — paraphrase
+        # 3) NOOP — paraphrase.  A fold may never cross a distinguishing
+        # difference (D12/O4, #5080).  The boundary is checked per prior, so a
+        # refused fold falls through to ADD — both claims survive.
+        if difference is not None:
+            continue
         if sig_equal and (tier_a or bool(mentions)) and gate:
             # value identity — short-circuits both bands
             if best_noop is None or ov > best_noop[0]:

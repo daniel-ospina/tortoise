@@ -885,6 +885,11 @@ surfaces:
   - test_battery_parity_vector_guard.py
   - test_monitoring.py
   - test_navigation.py
+  # #5080: the D12/O4 never-across boundary. Both write-path fold sites — the
+  # against-store classifier and the in-capture band — resolve it from one
+  # implementation (extractor_v2.fold_allowed), so the file is registered
+  # alongside test_consolidation_4way.py, which guards the same classifier.
+  - test_never_across_fold_5080.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
@@ -2183,6 +2188,10 @@ durations:
   test_model_adapters_taxonomy.py: 0.0
   test_models.py: 0.0
   test_navigation.py: 0.0
+  # #5080: no CI junit measurement yet (the file is not on main), so the flat
+  # 2.0s conservative floor the #3400 policy prescribes for an unmeasured file
+  # — not a local timing, which that policy distrusts. Auto-population: #4817.
+  test_never_across_fold_5080.py: 2.0
   test_no_tests_imports_in_production.py: 0.0
   test_onboard_prompt_ref.py: 0.0
   # #3949: 24 tests, ~0.02s of junit testcase time (run 35392801726, test-b
