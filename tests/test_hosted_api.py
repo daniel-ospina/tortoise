@@ -946,7 +946,8 @@ class TestBootOrder:
 
 class TestVersionEndpoint:
     """GET /v1/version — public version/sha surface so clients (and the
-    onboarding skill) can detect an outdated server before authenticating.
+    onboarding instructions — not a skill, #4365) can detect an outdated
+    server before authenticating.
     """
 
     def test_version_returns_package_version(self, client):

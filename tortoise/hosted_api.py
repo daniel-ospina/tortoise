@@ -105,8 +105,8 @@ from tortoise.monitoring import (
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
-    _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
+    journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
@@ -2834,11 +2834,17 @@ async def provision_tenant(request: Request):
             "CREATE (:TeamMeta {name: $name, created: $now})",
             {"name": org_name, "now": now},
             org_id=org_id)
-        org_graph.query(_init_q, params=_init_p)
+        # #3390 WRITE-AHEAD: journal BEFORE the CREATE (was record-after-effect
+        # — a kill in the gap left an unowned org_* graph). Rollback must not
+        # remove the line: it is the ownership tombstone the sweep cleans up by.
+        # #7795 review P2-3: `org_id` here is CALLER-SUPPLIED, so the write-ahead
+        # line is written ONLY when THIS call mints the TeamMeta — journaling a
+        # graph we merely adopted would hand a live tenant graph to the session
+        # sweep for DETACH+DELETE. `_minted_here` is computed above, BEFORE this
+        # call, so the write-ahead ordering (journal ⇒ CREATE) is preserved.
         if _minted_here:
-            # #1686: journal the org_* graph THIS call minted (session sweep
-            # drops it).
-            _journal_append_product(graph_name)
+            journal_mint_write_ahead(graph_name)
+        org_graph.query(_init_q, params=_init_p)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
@@ -3529,12 +3535,13 @@ async def health_security():
 async def version_info() -> dict:
     """Deployed build surface — clients detect an outdated server (#2208).
 
-    Public (no auth, like /health): a client or onboarding skill reads this
-    BEFORE authenticating to compare the running server against the version
-    it expects (skew detection — the #2208 failure class shipped code whose
-    server had silently drifted behind main). ``version`` is the package
-    version (tortoise.__version__, mirrors pyproject.toml); ``commit_sha`` is
-    the exact deploy commit, baked at deploy time by deploy-hosted.yml
+    Public (no auth, like /health): the onboarding instructions (not a skill —
+    #4365) and any client read this BEFORE authenticating to compare the
+    running server against the version it expects (skew detection — the #2208
+    failure class shipped code whose server had silently drifted behind main).
+    ``version`` is the package version (tortoise.__version__, mirrors
+    pyproject.toml); ``commit_sha`` is the exact deploy commit, baked at
+    deploy time by deploy-hosted.yml
     (TORTOISE_GIT_SHA=${GITHUB_SHA} staged into the release env). Null when
     no deploy pipeline set it (selfhost / local dev). Never touches the DB.
     """
@@ -6995,6 +7002,14 @@ async def register_user(request: Request, response: Response):
         # orgs row (org without a resolvable graph) is worse than an
         # unreferenced namespace.
         import hashlib as _hashlib
+        # #3390 WRITE-AHEAD: journal BEFORE `_make_sdk(namespace=org_id)
+        # ._get_proj()`. A projection's __init__ runs `_ensure_indexes()` (a
+        # query) and therefore MATERIALIZES org_{org_id}; journaling only
+        # before the CREATE would leave a materialization→journal gap (a kill
+        # there strands an unowned graph). The Supabase lane already
+        # compensates by dropping the graph on a later provision failure; the
+        # line is the ownership tombstone for that drop.
+        journal_mint_write_ahead(graph_name)
         try:
             org_graph = _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
@@ -7006,8 +7021,6 @@ async def register_user(request: Request, response: Response):
                 {"name": org_name, "now": now},
                 org_id=org_id)
             org_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted org_* graph (session sweep drops it).
-            _journal_append_product(graph_name)
         except Exception:
             raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
         try:
@@ -7096,9 +7109,10 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 {"name": org_name, "now": now},
                 org_id=org_id)
+            # #3390 WRITE-AHEAD: journal BEFORE the CREATE (was
+            # record-after-effect — an unowned org_* graph on a mid-gap kill).
+            journal_mint_write_ahead(graph_name)
             org_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted org_* graph (session sweep drops it).
-            _journal_append_product(graph_name)
 
             # #318 (multi-tenant pack isolation): activate the starter pack
             # set — registry-mode self-service path (the Supabase-mode path
@@ -12838,6 +12852,14 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
     """
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
+    # #3390 WRITE-AHEAD: journal BEFORE `_make_sdk(namespace=org_id)._get_proj()`
+    # — its `_ensure_indexes()` MATERIALIZES org_{org_id}. A kill between that
+    # materialization and the journal is the orphan window. The idempotency
+    # probe below may early-return on an already-initialised graph: this session
+    # has still materialized it, so the ownership line is written on that path
+    # too (the invariant is materialized ⇒ journaled; #3406 tracks the
+    # sweep-side protection for a pre-existing same-named graph).
+    journal_mint_write_ahead(graph_name)
     proj = _make_sdk(namespace=org_id)._get_proj()
     # ⚠️ Do NOT de-duplicate this literal against the SDK's namespace rule by
     # reading `proj._graph_name` back. That attribute carries the PHYSICAL
@@ -12870,8 +12892,6 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
         {"name": name, "now": datetime.now(UTC).isoformat()},
         org_id=org_id, fork=init_fork, compact=init_compact)
     graph.query(_init_q, params=_init_p)
-    # #1686: journal the minted org_* graph (session sweep drops it).
-    _journal_append_product(graph_name)
     return graph_name
 
 
@@ -20443,8 +20463,9 @@ def _maybe_file_harness_connected(org_id: str) -> None:
 # re-completion re-emits; see ``analytics.onboarding_decide_complete``.)
 #
 # Deliberately NOT instrumented: ``harness-connected`` (the funnel keys off
-# seed/decide) and ``catalog-presented`` (the build fork's display row has
-# no W11 event).
+# seed/decide), ``catalog-presented`` (the build fork's display row has
+# no W11 event), and ``connection-written`` (#3451 — a client-observed trace
+# of the config WRITE, not a funnel transition).
 _ONBOARDING_STEP_EVENTS = {
     "first-points-filed": onboarding_seed_complete,
     "decide-completed": onboarding_decide_complete,
@@ -20759,6 +20780,10 @@ def _get_onboarding_projection(org_id: str) -> dict:
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
             None, bool(raw.get("onboarding_complete")), [])
+        # #3451: no namespace → no steps → not restart-pending (False, never
+        # the bare absence of the key, which a reader could confuse with
+        # 'unknown').
+        state["restart_pending"] = _os.restart_pending([])
         return state
     try:
         # Open the name the guard actually verified. `_make_sdk(namespace=)`
@@ -20779,12 +20804,17 @@ def _get_onboarding_projection(org_id: str) -> dict:
         # legacy jsonb — 'unavailable' keeps the wire honest and the MCP
         # gate fail-open (non-bool → tools stay visible during outages).
         state["onboarding_complete"] = "unavailable"
+        # #3451: a graph-down read does not know the step set, so it must not
+        # claim either direction — 'unavailable', exactly like the FLOW keys
+        # (never a fabricated False that would read as 'not restart-pending').
+        state["restart_pending"] = "unavailable"
         return state
     state = dict(raw)
     if node is None:
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
             None, bool(raw.get("onboarding_complete")), [])
+        state["restart_pending"] = _os.restart_pending([])
         return state
     state.update({
         "fork": node.get("fork"),
@@ -20799,6 +20829,9 @@ def _get_onboarding_projection(org_id: str) -> dict:
     })
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
+    # #3451: DERIVED from the step edges — config written, harness not yet
+    # verified. The one definition lives in state.py (no second stored field).
+    state["restart_pending"] = _os.restart_pending(steps)
     return state
 
 
@@ -20938,6 +20971,11 @@ class OnboardingStatePatchRequest(BaseModel):
     decide_completed: bool | None = None
     capture_disclosed: bool | None = None
     org_named: bool | None = None
+    # #3451: ``connection-written`` is agent-only on the checkpoint surface —
+    # declared here so a stray PATCH is REJECTED loudly (422
+    # unknown_step_on_patch via _PATCH_REJECTED_STEP_FIELDS), never silently
+    # dropped+reported like an unknown field.
+    connection_written: bool | None = None
     fork: str | None = None
     compact: bool | None = None
     status: str | None = None
@@ -21014,7 +21052,7 @@ _PATCH_SERVER_OWNED_KEYS = {
 } | _CAPTURE_SERVER_OWNED_KEYS
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
-    "capture_disclosed", "org_named",
+    "capture_disclosed", "org_named", "connection_written",
 }
 
 
@@ -21244,6 +21282,8 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 # nowhere else; the predicate below reads the allowlist, never the reverse).
 _DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset()
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
+    "connection-written",     # #3451: MCP config WRITTEN (client-observed;
+                              # the server cannot see the user's config file)
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
     "decide-completed",       # W3: real decide protocol
@@ -21278,8 +21318,9 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     comes from the auth context — the body never carries org_id (F2).
 
     Contract (scope pin 8):
-    - step ∈ {harness-connected, first-points-filed, decide-completed,
-      capture-disclosed, catalog-presented} — keyed-MERGE, first-write-wins
+    - step ∈ {connection-written, harness-connected, first-points-filed,
+      decide-completed, capture-disclosed, catalog-presented} — keyed-MERGE,
+      first-write-wins
       (replay → noop), unknown step → 422.
       #3671: EVERY step write requires an AGENT credential — a session-JWT
       step write is refused 403 ``agent_credential_required`` (no dashboard
@@ -26786,6 +26827,47 @@ async def billing_portal(request: Request, org: dict = Depends(get_current_org_s
     return await asyncio.to_thread(_billing_portal_sync, org)
 
 
+# #4335: a broken/misconfigured price catalog used to degrade silently — a
+# total billing outage looked exactly like a UI preference, and the dashboard
+# could only fall back to a marketing link. Emit the failure ONCE per outage at
+# WARNING (catalog-load exception class + message, or a parsed catalog that
+# resolves no paid tier) and latch the emission so the per-request /v1/team
+# call cannot flood the log. A success clears the latch so a NEW breakage after
+# a recovery is still reported.
+_checkout_catalog_failure_logged = False
+
+
+def _log_checkout_catalog_failure(exc: Exception) -> None:
+    """One visible WARNING per catalog outage (#4335).
+
+    This stays best-effort / non-5xx (registry and selfhost legitimately run
+    without Stripe) — but the degradation must be diagnosable. The exception
+    message can embed a raw STRIPE_PRICE_IDS value (PriceCatalog validation
+    quotes the offending id), so it is scrubbed through the repo's own secret
+    scrubber before it reaches the log — the secret value is never emitted.
+    """
+    global _checkout_catalog_failure_logged
+    if _checkout_catalog_failure_logged:
+        return
+    _checkout_catalog_failure_logged = True
+    try:  # the scrubber must never mask the warning it exists to make safe
+        from tortoise.billing import _scrub_secrets
+        # Composite scrubber — the repo's established billing-log convention
+        # (the Stripe-webhook handler's `_safe_log` below): redact_error strips
+        # credentials-in-URI / paths and prefixes the exception class,
+        # _scrub_secrets redacts Stripe-shaped values. PriceCatalog errors
+        # quote the offending STRIPE_PRICE_IDS value, which can be a secret of
+        # either shape.
+        detail = _scrub_secrets(redact_error(exc))
+    except Exception:
+        detail = type(exc).__name__
+    _logger.warning(
+        "checkout price catalog unavailable (%s) — checkout price ids "
+        "will be empty until STRIPE_PRICE_IDS is fixed",
+        detail,
+    )
+
+
 def _default_checkout_price_id() -> str | None:
     """Server-resolved default checkout price: pro monthly (#310 Task 9).
 
@@ -26794,29 +26876,51 @@ def _default_checkout_price_id() -> str | None:
     when the catalog is unconfigured (missing env → BillingConfigError on
     PriceCatalog() construction; registry/selfhost must not 500 /v1/team).
     """
+    global _checkout_catalog_failure_logged
     try:
         from tortoise.billing import PriceCatalog
         catalog = PriceCatalog()
-        return catalog.price_for("pro", "monthly") or None
-    except Exception:
+        price = catalog.price_for("pro", "monthly") or None
+    except Exception as exc:  # best-effort, never 5xx /v1/team
+        _log_checkout_catalog_failure(exc)
         return None
+    if price is not None:
+        # Only a resolved default proves the catalog is healthy — clearing the
+        # latch when pro is merely absent would let the zero-paid-tier warning
+        # in _checkout_price_ids() re-fire on every request.
+        _checkout_catalog_failure_logged = False
+    return price
 
 
 def _checkout_price_ids() -> dict[str, str]:
     """#1623: tier → monthly price_id for the paid public tiers, server-
     resolved from STRIPE_PRICE_IDS (the Billing page's per-plan Upgrade
     CTAs — never hardcoded in the client). Free/anon ($0) have no checkout.
-    Best-effort {} when the catalog is unconfigured.
+    Best-effort {} when the catalog is unconfigured. A parsed catalog that
+    resolves NO paid tier is a total checkout outage and is reported once
+    through the same latch; a legitimately PARTIAL catalog (some paid tiers,
+    e.g. solo/team only) is supported by #2789 and stays silent.
     """
+    global _checkout_catalog_failure_logged
     try:
         from tortoise.billing import PriceCatalog
         catalog = PriceCatalog()
-        return {
+        ids = {
             tier: pid for tier in ("solo", "pro", "team")
             if (pid := catalog.price_for(tier, "monthly")) is not None
         }
-    except Exception:
+    except Exception as exc:  # best-effort, never 5xx /v1/team
+        _log_checkout_catalog_failure(exc)
         return {}
+    if not ids:
+        # Parsed fine but resolves no paid checkout tier — every paid Upgrade
+        # CTA is dead. Report that ONCE (do not clear the latch); a partial
+        # catalog keeps ≥1 tier and is not a failure (#2789).
+        _log_checkout_catalog_failure(
+            LookupError("STRIPE_PRICE_IDS resolved no paid checkout tier (solo/pro/team)"))
+        return ids
+    _checkout_catalog_failure_logged = False
+    return ids
 
 
 

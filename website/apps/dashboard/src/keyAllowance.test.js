@@ -117,6 +117,20 @@ test('#3874/#4355: numbered notices keep the approved number sentence (source ch
     'the pre-#4355 mint-then-revoke mechanism clause must not return')
 })
 
+test('#4335: the notices drop the upgrade clause when no upgrade path exists', () => {
+  const up = upgradeNoticeFrom(capDetail(2), { max_api_keys: 2 }, false)
+  const rot = rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }, false)
+  assert.equal(up,
+    "You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot.")
+  assert.equal(rot,
+    "You're over your plan's limit of 2 API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit.")
+  assert.doesNotMatch(up, /upgrade/)
+  assert.doesNotMatch(rot, /upgrade/)
+  // Degraded (no number) variant too.
+  assert.doesNotMatch(upgradeNoticeFrom('', {}, false), /upgrade/)
+  assert.doesNotMatch(rotateCapNoticeFrom('', {}, false), /upgrade/)
+})
+
 // ── 4b. #2699: the at-cap remedy must be ACHIEVABLE ──────────────────────
 // The create/shared notice used to advertise "regenerate an existing key
 // instead" — but a team AT the cap 402s on the rotate path too (rotate mints

@@ -507,19 +507,26 @@ def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
         sdk.close()
 
 
-def test_team_create_drops_the_graph_when_the_journal_append_fails(
+def test_team_create_leaves_no_graph_when_the_journal_append_fails(
         tmp_path, monkeypatch):
-    """#3214 (review P2): the journal append IS the ownership record, so its
-    failure must not leave the just-minted team graph behind — the raise is
-    only honest if it is not itself a leak.
+    """#3214/#3390: the journal append IS the ownership record, so its
+    failure must not leave an unowned team graph behind — no graph a sweep
+    cannot attribute.
+
+    #3390 made the order write-ahead at this site: the journal line is
+    written BEFORE the TeamMeta CREATE that materializes ``org_{name}``, so a
+    failed append means the CREATE never ran and there is nothing to drop.
+    This test still guards the invariant (no unowned graph after a failed
+    append); it now passes because the graph is NEVER MINTED, not because a
+    compensating ``delete()`` removes it. Do NOT re-add a delete on the
+    failure path — it would be dead compensation for a graph that cannot
+    exist, re-introducing the very removal #3390 made.
 
     The append is forced to fail for the TEAM graph only (the registry append
     must succeed, or _get_registry would raise before anything is created —
     that call site's own contract is that a raise there mints nothing). Then
-    assert: the raise propagated, the ``org_{name}`` graph is GONE (post-fix
-    the failure path calls ``team_graph.delete()``; pre-fix it survived with
-    no ownership record, and no sweep could attribute it), and the registry
-    Team node was rolled back by team_create's own handler.
+    assert: the raise propagated, the ``org_{name}`` graph is ABSENT, and the
+    registry Team node was rolled back by team_create's own handler.
     """
     import tortoise.projection as proj_mod
     from tortoise.sdk import TortoiseSDK
@@ -540,7 +547,7 @@ def test_team_create_drops_the_graph_when_the_journal_append_fails(
         with pytest.raises(RuntimeError, match="forced append failure"):
             sdk.org_create("unjournalled")
         assert "org_unjournalled" not in (sdk._get_proj().db.list_graphs() or []), \
-            "team_create must DROP the graph whose ownership it could not record"
+            "team_create must leave no unowned graph when the journal append fails"
         rows = sdk._get_registry().query(
             "MATCH (t:Team {name:$n}) RETURN count(t)",
             params={"n": "unjournalled"},

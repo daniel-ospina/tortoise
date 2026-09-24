@@ -340,6 +340,7 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  - test_write_ahead_mint.py
   # #3808: the CLI half of the capture install (`tortoise install <harness>`
   # in tortoise/__main__.py, an api-classified source) — dual-registered so a
   # CLI-wiring regression still runs the install guard. See the core entry for
@@ -549,6 +550,21 @@ surfaces:
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
+  # KEEP BOTH ARMS — a conflict in THIS list is a registration conflict: one
+  # name arrives on each side and the resolver must keep both.
+  # main landed `test_cmux_dispatch.py` in commit 423c7bec5 (PR #4405, issue
+  # #4292), in the same slot this branch adds `test_dry_run_preview.py` to.
+  #
+  # Dropping one side does NOT go unnoticed here. Tested, not assumed: with the
+  # cmux line deleted, the gated `python3 tools/ci_selection.py --integrity` step
+  # (python-ci.yml:326) fails and names the dropped file, because integrity()
+  # classifies every top-level test file and `core` is that file's only surface.
+  # So the cost is a red and a manual re-add, not a silent hole. Note the limit
+  # of that guarantee: it holds for a SINGLE-surface file. A file registered in
+  # more than one surface would stay classified after a dropped registration and
+  # `--integrity` would pass — which is the case issue #4617 covers for its own
+  # (dual-registered) file, not this one.
+  - test_dry_run_preview.py
   - test_cmux_dispatch.py
   - test_embedder_provision.py
   - test_embedded_evidence.py
@@ -1161,6 +1177,12 @@ surfaces:
   - test_invite_fusion_http.py      # #2003 (W7): 3-path + OTP + admin resend/expire (registry lane)
   - test_invite_fusion_docker.py   # #2003 (W7): DE2E-7/8 docker-lane fusion journeys
   - test_onboard_prompt_ref.py
+  # #3673: the installer's foreign-content guard. DUAL-registered with `core`
+  # because it is NOT in `tier1` and no other pattern reaches it: before this
+  # entry an installer-only PR (`public/install-tortoise-skills.sh`) selected no
+  # surface at all, so the guard for the file under review never ran — the same
+  # silent-drop class as the `website/` entries in SOURCE_PATTERNS.
+  - test_installer_preserves_foreign_skill_content.py
   - test_capabilities_endpoint.py  # #2004 (W8): docker-lane catalog endpoint + build-fork gate tests
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
@@ -1268,6 +1290,7 @@ surfaces:
   - test_reader.py
   - test_reader_prerendered.py  # #3011: pre-rendered-evidence reader seam — byte-identical to the hit-list lane (hermetic)
   - test_reader_abstention_calibration.py
+  - test_reader_4107_advice_shape.py  # #4107: hermetic characterisation drift pin (detector→None, advice-clause tension)
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
@@ -1564,6 +1587,15 @@ durations:
 # the file back to the default anyway, and cannot mis-balance the LPT pack).
 # Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 2.0
+  # #4102: new file in this pool — no CI junit measurement exists yet, so it
+  # enters at the flat 2.0s default per the #3400/#4221 convention above, NOT the
+  # local timing measured on this host (148.6s at fleet load; local values are not
+  # the input here — see the #3827 note). It is a genuinely heavy file, so the
+  # entry matters more than usual: without it the file enters the pool with no
+  # weight, coverage falls to 89.9% (544/605) and duration_coverage_issues()
+  # fails closed, which is how this was caught. Refresh from the first post-merge
+  # main run that includes it.
+  test_dry_run_preview.py: 2.0
   # #4327: no CI junit measurement yet (new file), so enter at the flat 2.0s
   # default per the #3400/#4221 convention — the conservative floor keeps the
   # 90% durations-coverage floor satisfied; refresh from the first post-merge
@@ -1575,6 +1607,13 @@ durations:
   # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
   # (7 tests, DB-free, app-boot-free) on a loaded machine.
   test_backup_watcher_health.py: 2.0
+  # #3426 (merge resolution — added by the #3390 write-ahead-mint PR): this PR's
+  # own hermetic ordering + AST guard. It has NO CI junit measurement yet, so it
+  # enters at the flat 2.0s default under the #3400/#4221 convention — the
+  # conservative floor keeps the 90% durations-coverage floor satisfied (main sat
+  # at 541/601 = 90.02%, and this fast-pool file without an entry dropped it to
+  # 541/602 = 89.9%). Refresh from the first post-merge main run that includes it.
+  test_write_ahead_mint.py: 2.0
   # #2718: new file, so no CI junit measurement yet — enter at the flat 2.0s
   # default per the #3400/#4221 convention (the conservative floor keeps the
   # durations-coverage floor satisfied) and refresh from the first post-merge
@@ -1876,6 +1915,7 @@ durations:
   test_lme_ingest_v2_supersession.py: 1.4
   test_one_free_org_entitlement.py: 1.4
   test_reader_abstention_calibration.py: 1.4
+  test_reader_4107_advice_shape.py: 1.4
   test_subjectadded_journal.py: 1.4
   test_turnstile_signup.py: 1.4
   test_validity_windows.py: 1.4

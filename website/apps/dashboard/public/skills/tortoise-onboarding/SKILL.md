@@ -12,6 +12,15 @@ allowed-tools: read write bash
 ---
 
 > ⛔ **This is the single live onboarding script.** `AGENT_ONBOARDING.md` and its deployed copies are ARCHIVED under `tortoise/onboarding/archive/` (M8, epic #1976) — never create a second live onboarding script. Edit THIS file; the deployed mirror (`website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md`) is byte-identical by test.
+>
+> **#4365 — delivered as INSTRUCTIONS, never installed as a skill.** Onboarding is a
+> one-time setup FLOW, not a reusable capability, so this document is READ — at the
+> served URL (`https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md`),
+> printed by `tortoise init` as `onboarding_prompt_url`, or named by the dashboard's
+> connect command — and is never copied into a harness's skills namespace. The skill
+> installer ships the three reusable capabilities only (`how-to-use-tortoise`,
+> `tortoise-decide`, `tortoise-file-finding`); reach across all six harnesses comes
+> from reading this document, not from a local install.
 
 # Tortoise Onboarding — install and connect your agent
 
@@ -19,15 +28,16 @@ Successor to the archived `AGENT_ONBOARDING.md` question flow. Instead of a
 paste-the-prompt Q&A, onboarding is now: **read state → pick your harness →
 install/connect (self-hosted: Docker Compose first — §3a) → verify →
 checkpoint → (later) seed + decide**. The dashboard wizard
-hands you ONE universal command; this skill is what your agent follows after
-you run or paste it.
+hands you ONE universal command; the instructions below are what your agent
+follows after you run or paste it — nothing is installed into a skills dir.
 
 ## When to use
 
 - The user pastes the dashboard's universal setup command into you (any of
-  the 6 skill-installer harnesses) or runs it in a terminal. (A 7th harness —
-  ChatGPT — connects key-less via OAuth and never runs this command; see the
-  §2 note.)
+  the 6 harnesses this document covers — 4 config-writing harnesses that run
+  the skill installer, plus 2 teach-human leaves) or runs it in a terminal.
+  (A 7th harness — ChatGPT — connects key-less via OAuth and never runs this
+  command; see the §2 note.)
 - The Setup guide card / Overview says the organization is waiting on
   "Connect your agent".
 - You are a fresh agent pointed at a Tortoise organization and need to know
@@ -41,9 +51,14 @@ resume where the flow left off — onboarding is stateful and idempotent:
 - **Hosted, MCP-connected agents:** call `tortoise_onboarding_state` (the MCP
   read tool) when it is listed. It returns the FLOW projection: `fork`
   (`'self' | 'build' | null`), `status` (`'active' | 'complete'`), `compact`,
-  `completed_steps[]` (canonical ids: `team-named`, `harness-connected`,
-  `first-points-filed`, `decide-completed`, `capture-disclosed`,
-  `catalog-presented`).
+  `completed_steps[]` (canonical ids: `team-named`, `connection-written`,
+  `harness-connected`, `first-points-filed`, `decide-completed`,
+  `capture-disclosed`, `catalog-presented`), and the DERIVED `restart_pending`
+  (`true` iff `connection-written` is present and `harness-connected` is not —
+  §3 records the first; §4 records the second). Like the other FLOW keys it
+  serves the literal string `'unavailable'` during a graph outage — it is
+  `true` ONLY as the boolean `true`. Never truthiness-test it: a non-empty
+  sentinel would read as "the config is already written".
 - **Hosted, CLI agents (no MCP tool listed yet):** `curl -s
   https://api.premiselabs.co/v1/onboarding/state -H "Authorization: Bearer
   $TORTOISE_API_KEY"` (same projection). If the org is grandfathered (node
@@ -60,6 +75,8 @@ Branch on what you find:
 | State | Action |
 |---|---|
 | `completed_steps` already contains `harness-connected` | Tell the user their agent is already connected; stop (idempotent). Post-completion re-entry is a no-op — the onboarding tools retire from tools/list once the org completes. |
+| `restart_pending` is the boolean `true` (`completed_steps` has `connection-written` but not `harness-connected`) | The MCP config is already WRITTEN — the file is on disk; only the restart verification is outstanding. Do **NOT** re-walk §2–§3 (and do not re-litigate the collision protocol against a config that already holds the answer). Confirm the config is intact, tell the user to relaunch from a NEW shell, then proceed to §4. |
+| `restart_pending` is `'unavailable'` | The server could not read the graph. This is NEITHER "pending" NOR "not pending" — a graph outage must never be read as "the config is already written". Re-read before acting, and do not tell the user the config is written. |
 | `fork` is `null` (never chosen) | **Do NOT guess or persist a fork** — the fork card is a human decision, once per organization (presentation fork, never a billing gate). Tell the user the fork card is waiting in the dashboard wizard and re-read the state after they choose. |
 | `fork` is `'build'` | Connect as usual; the build fork completes on the two acts the server OBSERVES — `harness-connected` + `first-points-filed` — never on a catalog render, and not decide-based — so no decide nudge is required later. |
 | `fork` is `'self'` | Connect as usual; the decide nudge (section 4) applies later. |
@@ -83,12 +100,16 @@ If you are unsure which row applies (e.g. a wrapper/terminal agent), assume
 the config-writing class — you can verify after writing (section 3, failure
 mode → teach-human fallback).
 
-> **#1701 — ChatGPT is a 7th dashboard harness, outside this table.** ChatGPT
-> connects key-less through OpenAI's Developer-mode OAuth connector (dashboard
-> → ChatGPT tab: Scan Tools → OAuth consent on the hosted endpoint → paste the
-> workflows prompt). It has no local filesystem, shell, or skill installer, so
-> it never runs this skill and has no row here — these six rows are the
-> skill-installer/agent harnesses. (If you are ChatGPT and already have the
+> **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
+> key-less through OpenAI's Developer-mode OAuth connector (chatgpt.com →
+> Settings → Security and login → Developer mode, then chatgpt.com/plugins →
+> new app → MCP server URL → OAuth → Scan Tools → paste the workflows prompt).
+> There is no ChatGPT surface in the dashboard chooser (#2698), so this is the
+> path a ChatGPT user takes. It has no local filesystem, shell, or skill
+> installer, so it never runs these instructions and has no row here — these
+> six rows are the harnesses this document covers (4 config-writing, 2
+> teach-human). (If you
+> are ChatGPT and already have the
 > tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
 > verify still applies.)
 
@@ -150,6 +171,32 @@ or `${TORTOISE_API_KEY}`); Desktop/Web configs stay literal-with-privacy-note
 (private user-machine / cloud-held — no commit surface). The rows below are
 the HOSTED connect — self-hosted agents apply the §3a delta to the same
 rows.
+
+> **After the config WRITE, and before you hand the restart to the user,
+> checkpoint `connection-written`.** The write is the one step no server can
+> verify — the config file is on the user's disk and the server cannot see it
+> — so it is the CLIENT's act to record, with an AGENT credential (a
+> session/browser JWT is refused `403 agent_credential_required`):
+>
+> ```bash
+> curl -sS -X POST https://api.premiselabs.co/v1/onboarding/state/checkpoint \
+>   -H "Authorization: Bearer $TORTOISE_API_KEY" \
+>   -H "Content-Type: application/json" -d '{"step":"connection-written"}'
+> ```
+>
+> Use the key THIS session already holds — the one the config was just written
+> with. A profile-only export does not reach a running process, and `-s` would
+> hide a 401, so **confirm the response names `connection-written`** in
+> `created_steps`/`noop_steps`; if it does not, surface the failure rather than
+> treating the write as recorded (an unrecorded write is exactly the
+> "indistinguishable" case this step exists to remove).
+>
+> It is what makes a **restart-pending** install distinguishable from one that
+> never happened (§1's `restart_pending` row). It does NOT claim the harness is
+> connected: `harness-connected` remains §4's job, and only after
+> `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
+> (Claude Desktop / Claude Web) have no config write and no REST surface — they
+> never record this step.**
 
 ### Claude Code (self-install)
 
@@ -521,4 +568,4 @@ Contract notes:
 ---
 > **Archived:** `AGENT_ONBOARDING.md` + variant headers live under
 > `tortoise/onboarding/archive/` (A0 rollback path — do not delete; never
-> re-promote while this skill is live).
+> re-promote while this document is live).
