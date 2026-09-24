@@ -2730,26 +2730,35 @@ INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
 
 #: Files whose content IS the v2 extractor pipeline (the "extractor code
 #: version" dimension of the ingest fingerprint): ingest_v2.py (the
-#: eval-side pipeline + payload writer) and tortoise/extractor_v2.py (the
-#: production 5-stage extractor). A content change to either invalidates
-#: every cached per-question graph automatically — no manual cache-bust.
+#: eval-side pipeline + payload writer), tortoise/extractor_v2.py (the
+#: production 5-stage extractor), and tortoise/vet_gate.py (its S2.2 gate).
+#: A content change to any of these invalidates every cached per-question
+#: graph automatically — no manual cache-bust.
 INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
     / "tortoise" / "extractor_v2.py",
+    # #5005: the S2.2 VET gate is imported by the extractor and REMOVES
+    # candidates from the embed list, so an uncommitted edit to it changes
+    # extraction output — the dirty-tree half of the fingerprint must see it
+    # (``git_sha`` only covers committed HEAD).
+    Path(__file__).resolve().parent.parent.parent
+    / "tortoise" / "vet_gate.py",
 )
 
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
 #: + model untouched (P1 #2607-review-style gap on the seam): the prompt
 #: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
-#: later pipeline switch, and the stage token caps/truncation. ANY of them
+#: later pipeline switch, the S2.2 VET gate, and the stage token caps/
+#: truncation. ANY of them
 #: toggled between QA cycles must invalidate cached ingests — a silent
 #: reuse across modes would corrupt the very A/B this seam exists for.
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
     "TORTOISE_EXTRACTOR_PROMPT",       # compact ↔ default render
     "TORTOISE_LABEL_ORDER",            # S2/S4 shuffled kind-order renders
-    "TORTOISE_LABEL_SEED",             # the shuffle seed (with the above)
+    "TORTOISE_LABEL_ORDER_SEED",       # the shuffle seed (with the above)
     "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
+    "TORTOISE_VET",                    # S2.2 VET gate (#5005) — DISCARDs items
     "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
     "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
 )
@@ -2759,17 +2768,17 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     """sha256 (full hex) over the extractor pipeline module contents — the
     ``extractor code version`` dimension of the ingest fingerprint.
 
-    Reads the files at run start (cheap: two small modules); the digest is
+    Reads the files at run start (cheap: three small modules); the digest is
     stable within a process and identical across processes on the same
     checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
     missing module would fail the ingest itself long before). P1 (#2607-
-    review class): the two modules' IMPORT CLOSURE (chain_enforcer,
+    review class): the three modules' IMPORT CLOSURE (chain_enforcer,
     kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the
     closure) invalidates cached ingests automatically. ``git_sha`` is the
-    conservative net; ``paths`` keeps the digest sensitive to the two
+    conservative net; ``paths`` keeps the digest sensitive to the three
     hot files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()

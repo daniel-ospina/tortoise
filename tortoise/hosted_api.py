@@ -120,6 +120,7 @@ from tortoise.sdk import (
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
+    _capture_turn_role_text,  # #4675: the inverse of the stored turn format
     _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
@@ -2816,6 +2817,15 @@ async def provision_tenant(request: Request):
 
         # Provision FalkorDB namespace for the org
         org_graph = sdk._get_proj().db.select_graph(graph_name)
+        # #7795 review P2-3: `org_id` here is CALLER-SUPPLIED
+        # (`body.get("org_id")`) with no existence guard, so this call may be
+        # handed a graph it did NOT mint. The journal is the session sweep's
+        # OWNERSHIP record — append only when THIS call creates the TeamMeta,
+        # or a live tenant graph would be handed to the sweep to
+        # DETACH+DELETE. Mirrors the existence check in
+        # `_eager_provision_org_graph` below.
+        _seen = org_graph.query("MATCH (m:TeamMeta) RETURN count(m)").result_set
+        _minted_here = not (_seen and _seen[0][0])
         # #2001 (W5): eager OnboardingState init in the SAME statement as
         # TeamMeta (graph-side atomicity) — first-org semantics here
         # (selfhost single-tenant mint; fork card asked once, set-once).
@@ -2825,8 +2835,10 @@ async def provision_tenant(request: Request):
             {"name": org_name, "now": now},
             org_id=org_id)
         org_graph.query(_init_q, params=_init_p)
-        # #1686: journal the minted org_* graph (session sweep drops it).
-        _journal_append_product(graph_name)
+        if _minted_here:
+            # #1686: journal the org_* graph THIS call minted (session sweep
+            # drops it).
+            _journal_append_product(graph_name)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
@@ -4613,10 +4625,15 @@ async def get_current_org_session_ungated(request: Request) -> dict:
     return await get_current_org_session(request, gate_key_login=False)
 
 
-def _check_org_limit(org: dict, resource: str) -> None:
+def _check_org_limit(org: dict, resource: str, *,
+                     slot_credit: int = 0) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
 
     resource: 'points' | 'api_keys' | 'sessions' | 'users' | 'graphs'
+    slot_credit (#4355): slots this same operation RELEASES — the rotate
+    primitive passes 1 so the admission check is evaluated post-release. Only
+    the rotate path may pass a non-zero credit, and only after
+    ``quota.api_key_occupies_slot`` proved the displaced row is counted.
 
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -4640,7 +4657,7 @@ def _check_org_limit(org: dict, resource: str) -> None:
         return  # internal/no-org context — skip
     from tortoise.quota import QuotaCheckError, QuotaExceededError, enforce_org_limit
     try:
-        enforce_org_limit(org, resource)
+        enforce_org_limit(org, resource, slot_credit=slot_credit)
     except QuotaExceededError as e:
         raise HTTPException(status_code=402, detail=str(e))  # noqa: B904
     except QuotaCheckError as e:
@@ -5075,6 +5092,10 @@ class BackupRestoreRequest(BaseModel):
 # the allowlist filter silently drops it (STATE-KEY REGISTRATION TABLE).
 DEFAULT_ONBOARDING_STATE = {
     "github_connected": False,
+    # #1924: per-source enable intent (see _ONBOARDING_DEFAULT_STATE) —
+    # registered in BOTH dicts or the allowlist filter silently drops it.
+    "issues_enabled": True,
+    "docs_enabled": True,
     "github_org": None,
     "github_connected_at": None,
     "github_indexed": False,
@@ -5469,6 +5490,46 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
         functools.partial(ctx.run, fn), op=op, pool="graph",
         timeout=graph_offload_timeout_s() if timeout is None else timeout,
         unavailable=_graph_unavailable)
+
+
+async def _capture_session_probe_off_loop(org: dict, session_id: str):
+    """#4625 leg 62: the capture's SDK open + projection attach + session probe.
+
+    The capture path's first three sync FalkorDB units used to run inline in
+    ``_capture_session_impl``: ``_data_sdk`` (the tenancy resolver —
+    ``_make_sdk`` and, for a graph-bound key, ``_assert_graph_owned``'s
+    ownership query), ``sdk._get_proj()`` (a possibly-cold projection open:
+    TCP/TLS/``Is_Sentinel``) and the first ``MATCH``. Together they parked the
+    single event loop for the sample #4625 was measured on.
+
+    The SDK open goes through its own #3773 twin ``_data_sdk_offloaded``, which
+    performs the #2600 actor bind LOOP-side (the bind matters on the loop, not
+    in the discarded worker context). The attach + probe then ride the house
+    ``asyncio.to_thread`` for a short graph read (the ``list_points`` /
+    ``get_point`` shape), with ``_get_proj()`` INSIDE the worker because its
+    FIRST call opens the projection. ``proj`` is returned for the capture's
+    later work; writing it in a worker and using it afterwards is the same
+    cross-thread usage this path already had (``proj`` is handed to
+    ``asyncio.to_thread`` and the dream pools throughout).
+
+    Leg 72 of the same profile — the SDK open in the extraction-estimate quota
+    block a few lines below (``count_org_usage``) — is deliberately NOT folded
+    in: the required #4282 collision pre-flight returned COLLISION, so that leg
+    is skipped in this unit and declared residual by the #4625 guard.
+    """
+    sdk = await _data_sdk_offloaded(org)
+
+    def _probe():
+        proj = sdk._get_proj()
+        return proj, proj.g.query(
+            "OPTIONAL MATCH (s:Session {id:$sid}) "
+            "RETURN count(s) AS n, s.capture_ok AS ok, "
+            "s.capture_extractor AS extractor, s.harness AS harness",
+            params={"sid": session_id},
+        ).result_set[0]
+
+    proj, session_row = await asyncio.to_thread(_probe)
+    return sdk, proj, session_row
 
 
 async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
@@ -7801,7 +7862,8 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
               created_via: str = "provisioned",
               name: str | None = None,
               expires_at: str | None = None,
-              acl_strict: bool = False) -> dict:
+              acl_strict: bool = False,
+              cap_slot_credit: int = 0) -> dict:
     """C3 (#2112) — the ONE low-level key write (registry + Supabase).
     Generalized from C2's _mint_graph_key (D14 — never re-implemented):
     graph_id is OPTIONAL (None = org-wide key → default graph), scopes
@@ -7819,6 +7881,8 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     appears ONLY in this return (reveal-once: the caller puts it in the 201
     envelope / mint response and nowhere else; hash-only stored). Raises
     _KeyCapExceeded when the org is at max_api_keys (caller maps 409).
+    ``cap_slot_credit`` (#4355) is the replacement-aware rotate's released-slot
+    credit — see the gate below; it defaults to 0 and no other caller sets it.
     C4 (#2113) ACL seam fires for graph-bound mints (fail-soft no-op).
     """
     import uuid
@@ -7854,7 +7918,17 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     max_keys = _org_node_sync_limits(org_id).get("max_api_keys")
     if max_keys is not None:
         count = _count_resource(org_id, "api_keys")
-        if count >= int(max_keys):
+        # #4355 ``cap_slot_credit``: the replacement-aware rotate primitive
+        # passes 1 when the SAME operation releases one counted slot, so the
+        # new key is admitted against the POST-release count (at N/N:
+        # N-1 >= N is false → the 1-for-1 replacement mints). It is a PRIVATE
+        # keyword, default 0, and ONLY the rotate path passes it — and only
+        # after quota.api_key_occupies_slot proved the displaced row is counted
+        # exactly once, so the credit can never conjure a slot the cap never
+        # charged. Every other caller (plain mint, per-graph mint, rotate's
+        # plain sibling) keeps the unmodified `count >= max_keys` gate, which
+        # is what keeps a plain POST /v1/team/keys 402ing at N/N.
+        if count - cap_slot_credit >= int(max_keys):
             raise _KeyCapExceeded()
 
     # C4 (#2113) ACL seam — fires for graph-bound mints BEFORE the key write
@@ -8038,6 +8112,138 @@ def _acl_user_drop_hook(graph_id: str) -> None:
         _logger.warning("ACL user drop failed for graph %s (non-blocking): %s", graph_id, e)
 
 
+async def _key_created_analytics(org: dict, kid: str, key_prefix: str) -> None:
+    """#528 analytics for a freshly-minted key — the ONE actor-resolution +
+    ``api_key_created`` emit shared by ``create_api_key`` and the #4355
+    replacement-aware rotate (which creates a key and must not be invisible to
+    the analytics that count key creation).
+
+    Actor id from the org's active memberships when resolvable (one seam
+    query), else an org_id-prefixed id (request.state only carries org_id
+    here). The registry lane reads the Membership graph instead. Resolution
+    failures degrade to the org-prefixed id — analytics is fail-safe and must
+    never fail a committed mint.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        try:
+            rows = cp.query(
+                "org_memberships",
+                select=["user_id", "identity"],
+                filters=[("org_id", "eq", org["org_id"]),
+                         ("status", "eq", "active")],
+            )
+            actor = next((r.get("user_id") or r.get("identity")
+                          for r in rows if r.get("user_id") or r.get("identity")),
+                         None)
+            distinct_id = actor or f"team:{org['org_id']}"
+        except Exception:
+            distinct_id = f"team:{org['org_id']}"
+    else:
+        sdk = _make_sdk(namespace="registry")
+        try:
+            actor = sdk._get_registry().query(
+                "MATCH (m:Membership {org_id:$tid}) RETURN m.user_id LIMIT 1",
+                params={"tid": org["org_id"]},
+            ).result_set
+            distinct_id = actor[0][0] if actor else f"team:{org['org_id']}"
+        except Exception:
+            distinct_id = f"team:{org['org_id']}"
+    await asyncio.to_thread(
+        api_key_created,
+        distinct_id, org["org_id"], key_prefix, kid, "org_keys",
+    )
+
+
+def _rotatable_key_row(org_id: str, key_id: str) -> dict | None:
+    """#4355: read the displaceable row's CLASS + label (both auth lanes).
+
+    Returns ``{org_id, name, graph_id, scopes, delegation_depth,
+    created_by_key_id, created_via, expires_at, revoked_at}`` or None when the
+    id does not resolve. Ownership (403) and slot-occupancy (409) are checked
+    by the caller with the shared helpers — this is only the field read.
+    ``expires_at`` rides it so a body-omitted expiry inherits the displaced
+    row's expiry verbatim instead of widening the replacement to Never.
+    """
+    from tortoise.supabase_control import (
+        api_key_by_id,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        return api_key_by_id(get_control_plane(), key_id)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.name, k.graph_id, "
+        "k.scopes, k.delegation_depth, k.created_by_key_id, k.created_via, "
+        "k.expires_at, k.revoked_at",
+        params={"id": key_id},
+    ).result_set
+    if not rows:
+        return None
+    return {
+        "org_id": rows[0][0], "name": rows[0][1], "graph_id": rows[0][2],
+        "scopes": rows[0][3], "delegation_depth": rows[0][4],
+        "created_by_key_id": rows[0][5], "created_via": rows[0][6],
+        "expires_at": rows[0][7], "revoked_at": rows[0][8],
+    }
+
+
+def _claim_key_revocation(org_id: str, key_id: str, now: str) -> bool:
+    """#4355: conditionally revoke a LIVE row and report whether THIS call
+    claimed it — the single-statement guard that admits exactly one concurrent
+    rotation of a given row (and detects a concurrent plain revoke).
+
+    Supabase: ``PATCH api_keys?id=eq.X&revoked_at=is.null`` with a ``select``
+    (``Prefer: return=representation``) → ``[]`` when the WHERE matched
+    nothing. Registry: the Cypher twin, whose own matched-row count is the
+    claim (the existing CAS idiom, cf. the accept-rotate lane). A False result
+    is NOT an error — the caller compensates and refuses.
+    """
+    from tortoise.supabase_control import (
+        claim_api_key_revocation,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        return claim_api_key_revocation(get_control_plane(), key_id, now)
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $id}) WHERE k.revoked_at IS NULL "
+        "SET k.revoked_at = $now RETURN k.id",
+        params={"tid": org_id, "id": key_id, "now": now},
+    ).result_set
+    return bool(rows)
+
+
+def _force_revoke_key_row(org_id: str, key_id: str, now: str) -> None:
+    """#4355: UNCONDITIONAL revoke of a row by id — the rotate compensation.
+
+    Used only to roll back the replacement this call just created when the
+    destructive leg could not be claimed. It must not be conditional: the row
+    is ours, it is live, and the whole point is to leave no orphan live
+    credential. (The ordinary :func:`revoke_api_key` endpoint keeps its own
+    idempotent semantics; this is a private helper.)
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import revoke_api_key as _sb_revoke
+    if is_supabase_enabled():
+        _sb_revoke(get_control_plane(), key_id, now)
+        return
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $id}) SET k.revoked_at = $now",
+        params={"tid": org_id, "id": key_id, "now": now},
+    )
+
+
 @app.post("/v1/team/keys")
 async def create_api_key(request: Request, response: Response, org: dict = Depends(get_current_org_session)):  # noqa: B008
     """Generate a new API key for the org.
@@ -8067,10 +8273,6 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     must not mint deleg-NULL owner-class keys — the escalation root of
     #2297's P1); the KEY-auth lane is unchanged (C2 deleg + D13 class gates).
     """
-    from tortoise.supabase_control import (
-        get_control_plane,
-        is_supabase_enabled,
-    )
     # C2 (#2111) one-level-deep guard: a MINTED (deleg=0) caller key can
     # NEVER mint another key — the child policy (deleg=0 keys cannot
     # escalate) covers this capability surface, not just scope columns
@@ -8281,46 +8483,9 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     key_prefix = minted["key_prefix"]
     now = minted["created_at"]
 
-    if is_supabase_enabled():
-        cp = get_control_plane()
-        # #528 analytics — actor id from the org's active memberships when
-        # resolvable (one seam query), else a org_id-prefixed id (request.
-        # state only carries org_id here). Registry path below reads the
-        # Membership graph instead.
-        try:
-            rows = cp.query(
-                "org_memberships",
-                select=["user_id", "identity"],
-                filters=[("org_id", "eq", org["org_id"]),
-                         ("status", "eq", "active")],
-            )
-            actor = next((r.get("user_id") or r.get("identity")
-                          for r in rows if r.get("user_id") or r.get("identity")),
-                         None)
-            distinct_id = actor or f"team:{org['org_id']}"
-        except Exception:
-            distinct_id = f"team:{org['org_id']}"
-        await asyncio.to_thread(
-            api_key_created,
-            distinct_id, org["org_id"], key_prefix, kid, "org_keys",
-        )
-    else:
-        sdk = _make_sdk(namespace="registry")
-        # #528 analytics — actor user id from the org's Membership graph when
-        # resolvable (key creation is rare; one extra registry lookup), else a
-        # org_id-prefixed id (request.state only carries org_id here).
-        try:
-            actor = sdk._get_registry().query(
-                "MATCH (m:Membership {org_id:$tid}) RETURN m.user_id LIMIT 1",
-                params={"tid": org["org_id"]},
-            ).result_set
-            distinct_id = actor[0][0] if actor else f"team:{org['org_id']}"
-        except Exception:
-            distinct_id = f"team:{org['org_id']}"
-        await asyncio.to_thread(
-            api_key_created,
-            distinct_id, org["org_id"], key_prefix, kid, "org_keys",
-        )
+    # #528 analytics — actor id from the org's active memberships when
+    # resolvable, else an org_id-prefixed id (shared with the #4355 rotate).
+    await _key_created_analytics(org, kid, key_prefix)
 
     # Log audit event (both modes — after the key lands)
     await _async_audit(
@@ -8358,6 +8523,239 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
         resp["graph_id"] = minted.get("graph_id")
         resp["scopes"] = minted.get("scopes")
         resp["delegation_depth"] = minted.get("delegation_depth")
+    return resp
+
+
+@app.post("/v1/team/keys/{key_id}/rotate")
+async def rotate_api_key(key_id: str, request: Request, response: Response,
+                         org: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#4355 — the replacement-aware rotate primitive: ONE server call that
+    creates a replacement key and revokes the displaced row, so a 1-for-1
+    rotation is CAP-NEUTRAL BY CONSTRUCTION.
+
+    Why this exists. The dashboard's rotate was two calls against the same
+    mint endpoint (`POST /v1/team/keys` then `DELETE /v1/team/keys/{id}`), so
+    at the `max_api_keys` cap the MINT leg 402'd before the old row was
+    revoked and a replacement that would have kept the count at N was refused.
+    Unconditionally exempting the mint would nullify the cap for EVERY mint —
+    the hole #2699 rejected. Instead the replacement CONSUMES THE SLOT BEING
+    RELEASED: the mint is admitted against the post-release count
+    (`cap_slot_credit=1`), and the displaced row is proven first to occupy a
+    counted slot (`quota.api_key_occupies_slot`, the SAME predicate
+    `quota._count_resource("api_keys")` uses). A revoked/expired/bootstrap row
+    is refused 409 precisely because the cap never charged it, so it cannot buy
+    a free key. `POST /v1/team/keys` itself is UNCHANGED and still 402s at N/N.
+
+    Caller authorisation mirrors the siblings exactly: the C2 one-level-deep
+    `deleg=0` guard (as `create_api_key`), `keys:manage` (as `revoke_api_key`),
+    the #2297 POLICY A owner/admin session gate, and the fail-closed
+    `_ensure_key_in_pinned_org` ownership check (as `DELETE`). The lookup runs
+    AFTER every caller gate, so a refused caller gets no existence oracle.
+
+    Privilege class. The replacement is NOT shaped by the request body: it
+    inherits the DECLARED ROW's class (graph_id, scopes, delegation_depth,
+    lineage), so rotate can neither widen nor silently demote a credential —
+    the shape CVE-2024-37282 (Elastic) / CVE-2026-56216 (Capgo) established as
+    the escalation class for rotation endpoints. A non-owner caller (a scoped
+    deleg-NULL key with keys:manage — the only other reachable class) gets at
+    most a deleg=0 child with the inherited scopes ∩ `_MINTABLE_SCOPES`, i.e.
+    strictly no more than it could already mint. `scopes`/`graph_id` in the
+    rotate body are 422 — the body cannot set privilege.
+
+    Ordering and atomicity (stated, never claimed beyond the implementation).
+    CREATE first, then CLAIM-REVOKE: a create-leg failure or crash leaves the
+    caller with the OLD key still live — never with neither. The revoke is a
+    conditional write (`revoked_at IS NULL`) whose own matched-row count is the
+    claim, so of N concurrent rotates of one row exactly one wins; a loser
+    compensates its replacement away and 409s, keeping the live count at N.
+    The response carries `replaced_revoked`; when the destructive leg could not
+    be completed AND its compensation also failed, the live replacement's
+    plaintext is still returned (reveal-once: the only alternative is losing a
+    live secret). There is NO cross-lane transaction and none is claimed — see
+    the #4355 scoping comment for the declared residuals.
+    """
+    from tortoise.quota import api_key_occupies_slot
+
+    # ── Caller gates (identical order to the siblings; before ANY lookup) ──
+    _reject_minted_delegated_key(org, "rotate API keys")
+    _require_keys_manage(org, "rotate API keys")
+    await _require_owner_admin_if_session(org)
+
+    # ── Body: label + expiry ONLY (the replacement's class is inherited) ──
+    payload: dict = {}
+    raw = b""
+    try:
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        parsed = _json.loads(raw) if raw else {}
+        payload = parsed if isinstance(parsed, dict) else {}
+    except HTTPException:
+        raise
+    except Exception:
+        # Mirror the mint's fail-closed expiry parse: a body that REQUESTED an
+        # expiry must never silently degrade to an inheriting/Never key.
+        if raw and (b"expires_in" in raw or b"expires_at" in raw):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "expires_in/expires_at could not be read — send expires_in "
+                    "(1-366 days) or an ISO-8601 expires_at"
+                ),
+            ) from None
+        payload = {}
+    if payload.get("scopes") is not None or payload.get("graph_id") is not None:
+        # The replacement INHERITS the displaced row's graph + scopes. Accepting
+        # a body-supplied class here would reintroduce the scoped-key →
+        # unrestricted-key escalation class this endpoint exists to avoid.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "rotate inherits the existing key's graph and scopes — "
+                "scopes/graph_id must not be sent"
+            ),
+        )
+    name = _clean_key_label(payload.get("name"))
+    expires_at = _validate_mint_expiry(payload)
+
+    # ── Target verification (ownership first — no existence oracle) ──
+    row = await asyncio.to_thread(_rotatable_key_row, org["org_id"], key_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    _ensure_key_in_pinned_org(org["org_id"], row.get("org_id"), required=True)
+    occupies = await asyncio.to_thread(
+        api_key_occupies_slot, org["org_id"], key_id)
+    if not occupies:
+        # Revoked / expired / bootstrap (cap-exempt) rows are NOT counted by
+        # max_api_keys, so releasing one frees no slot. Crediting it would let
+        # a dead row id mint a free key — a real cap hole. Fail closed.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "API key is not active — rotate requires a live key that "
+                "occupies a key slot"
+            ),
+        )
+
+    # ── Replacement class: inherited from the target, capped by caller class ──
+    target_graph = row.get("graph_id")
+    target_scopes = list(row.get("scopes") or [])
+    is_owner_class = (org.get("key_id") is None
+                      or bool(org.get("legacy_full_access")))
+    if is_owner_class:
+        # Faithful replacement: the owner may mint anything, so the target's
+        # class is preserved verbatim (a legacy tt_ stays tt_, a tk_ keeps its
+        # graph/scopes, a deleg=0 child stays deleg=0 with its lineage).
+        final_scopes = target_scopes
+        delegation_depth = row.get("delegation_depth")
+        caller_key_id = row.get("created_by_key_id")
+    else:
+        # A scoped deleg-NULL caller can only ever mint deleg=0 children; the
+        # replacement is exactly that, with the target's scopes ∩ the child
+        # policy (strictly ≤ what this caller could already mint).
+        final_scopes = [s for s in target_scopes
+                        if s in _MINTABLE_SCOPES] or ["graphs:read"]
+        delegation_depth = 0
+        caller_key_id = org.get("key_id")
+    if target_graph is not None:
+        _ensure_graph_exists(org["org_id"], target_graph)
+    # Inherited metadata — a body-omitted value must never WIDEN the replacement
+    # (an omitted expiry inheriting None would mint a Never key in place of an
+    # expiring one).
+    if name is None:
+        name = _clean_key_label(row.get("name"))
+    if expires_at is None:
+        expires_at = row.get("expires_at")
+    created_via = row.get("created_via") or "provisioned"
+
+    # ── Cap: the replacement consumes the released slot ──
+    # Both gates are credited, so at N/N `N-1 >= N` is false and the 1-for-1
+    # rotation mints. The credit is sound only because `occupies` above proved
+    # the displaced row is counted exactly once.
+    _check_org_limit(org, "api_keys", slot_credit=1)
+    try:
+        minted = _mint_key(
+            org["org_id"], graph_id=target_graph, scopes=final_scopes,
+            delegation_depth=delegation_depth, caller_key_id=caller_key_id,
+            session_user_id=org.get("session_user_id"), prefix=None,
+            created_via=created_via, name=name, expires_at=expires_at,
+            cap_slot_credit=1,
+        )
+    except _KeyCapExceeded:
+        raise HTTPException(
+            status_code=402,
+            detail="API key limit reached.",
+        ) from None
+
+    kid = minted["id"]
+    api_key = minted["key_plaintext"]
+    key_prefix = minted["key_prefix"]
+    now = minted["created_at"]
+
+    # ── Destructive leg: a CLAIM, so exactly one concurrent rotate wins ──
+    replaced_revoked = True
+    warning = None
+    try:
+        claimed = await asyncio.to_thread(
+            _claim_key_revocation, org["org_id"], key_id, now)
+    except Exception:
+        _logger.exception("rotate: claim-revoke of %s failed", key_id)
+        claimed = False
+    if not claimed:
+        # The row was revoked between our check and the claim (a concurrent
+        # rotate or a plain revoke won). Never leave an orphan live
+        # replacement behind: roll our new row back.
+        compensated = True
+        try:
+            await asyncio.to_thread(
+                _force_revoke_key_row, org["org_id"], kid, now)
+        except Exception:
+            compensated = False
+            _logger.exception("rotate: compensation of %s failed", kid)
+        if compensated:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "API key is no longer active — it was revoked while this "
+                    "rotation ran; the replacement was rolled back. Retry or "
+                    "rotate another key."
+                ),
+            )
+        # Both legs failed: the replacement is LIVE. Reveal it — the only
+        # alternative is a live secret nobody can see. The old row is also
+        # still live (never neither key); the count is +1 until it is cleaned.
+        replaced_revoked = False
+        warning = (
+            "The replacement was created, but the previous key could not be "
+            "revoked and the rollback failed — both are currently active. "
+            "Revoke the key you no longer need from the table."
+        )
+
+    await _key_created_analytics(org, kid, key_prefix)
+    await _async_audit(
+        request, org["org_id"], "api_key_rotate",
+        resource_type="api_key", resource_id=kid,
+        detail={"replaced_key_id": key_id, "replaced_revoked": replaced_revoked},
+    )
+    # #308 (R2): a rotate is a mint — the velocity evaluation must run here
+    # exactly as it does on the mint path (its own comment names rotation).
+    await _abuse_evaluate_keys(org["org_id"])
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp = {
+        "id": kid,
+        "key": api_key,
+        "key_prefix": key_prefix,
+        "created_at": now,
+        "name": name,
+        "graph_id": minted.get("graph_id"),
+        "scopes": minted.get("scopes"),
+        "delegation_depth": minted.get("delegation_depth"),
+        "replaced_key_id": key_id,
+        "replaced_revoked": replaced_revoked,
+    }
+    if expires_at is not None:
+        resp["expires_at"] = expires_at
+    if warning is not None:
+        resp["warning"] = warning
     return resp
 
 
@@ -9275,7 +9673,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # layer gets the same clear 409 (state-conflict: recording policy off —
     # NOT the old 403 consent error), capture stops (no Session write, no
     # receipt), and the per-harness last-error surfaces the message.
-    recording_ok, rec_layer = _session_recording_allowed(org)
+    # #4625 leg 12: the recording gate is a blocking jsonb/graph read
+    # (`_session_recording_allowed` -> `_get_onboarding_state`). It used to run
+    # inline here, holding the single event loop for the resolution; it now
+    # rides the shared offload seam like the other onboarding reads.
+    recording_ok, rec_layer = await _session_recording_allowed_off_loop(org)
     if not recording_ok:
         if rec_layer == "graph":
             # #2302 (recording-on surface): the graph-layer 409 copy names
@@ -9356,10 +9758,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # below skips extraction) and must never be 402-blocked by an as-if-fresh
     # estimate. The opt-out check above stays FIRST in the gate stack; the
     # sessions-limit gate below still counts Session nodes.
-    sdk = _data_sdk(org)
-    proj = sdk._get_proj()
+    # #4625 leg 62: the SDK open (`_data_sdk` -> `_make_sdk` and, for a
+    # graph-bound key, `_assert_graph_owned`'s ownership query) plus the
+    # projection attach and the session probe are ALL sync FalkorDB work; they
+    # used to run inline here, parking the single event loop for the tenancy
+    # resolution, a possibly-cold projection open (TCP/TLS/Is_Sentinel) and the
+    # first MATCH. `_capture_session_probe_off_loop` owns the hand-off (the same
+    # off-loop seam the onboarding projection read uses); `session_id`/`now` are
+    # pure computations, hoisted above it.
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
     now = datetime.now(UTC).isoformat()
+    sdk, proj, session_row = await _capture_session_probe_off_loop(
+        org, session_id)
     # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
@@ -9374,12 +9784,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # sessionCaptured Event mint below uses a DETERMINISTIC id derived from
     # session_id (_session_capture_event_id), so both writers MERGE onto
     # ONE Event node instead of minting two.
-    session_row = proj.g.query(
-        "OPTIONAL MATCH (s:Session {id:$sid}) "
-        "RETURN count(s) AS n, s.capture_ok AS ok, "
-        "s.capture_extractor AS extractor, s.harness AS harness",
-        params={"sid": session_id},
-    ).result_set[0]
     session_existed = bool(session_row[0])
     # #3681 (server-stamped harness): the capture's harness is resolved from
     # the SERVER's own record — a session-JWT caller never names one (bare
@@ -11036,9 +11440,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         )
     external_urls: list[str] = []
     for src in payload.sources:
-        external_urls.append(src.url)
+        # S0b (#5012): resolve the inbound spelling to the node that owns its
+        # canonical identity, so the session↔external `references` join below
+        # (keyed on these urls) addresses the SAME node create_source wrote.
+        u = sdk._resolve_source_url(src.url)
+        external_urls.append(u)
         sdk.create_source(
-            src.url, src.sourceKind, tier=src.credibilityTier,
+            u, src.sourceKind, tier=src.credibilityTier,
             contentHash=src.contentHash or "", is_episodic=True,
         )
     for url in session_urls:
@@ -11534,7 +11942,6 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     capture). Org-member authz: session users are membership-validated in
     _session_user_org (?org_id= → non-member 403); keys are org-scoped.
     """
-    import re
     _require_scope(org, "graphs:read", "get_session_detail")
     sdk = _data_sdk(org)
     try:
@@ -11598,10 +12005,11 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         tid = tr[0]
         content = tr[1] or ""
         created_at = tr[2]
-        # Parse "[role] content" format — role is bracketed prefix
-        role_match = re.match(r'^\[([^\]]+)\]\s*', content)
-        role = role_match.group(1) if role_match else "unknown"
-        body = content[role_match.end():] if role_match else content
+        # Split "[role] content". The inverse lives in `tortoise.sdk` next to the
+        # writer (`_capture_turn_texts`) so the stored format and this read have
+        # ONE definition — a client comparing a stored turn against a served
+        # detail depends on the two agreeing (#4675).
+        role, body = _capture_turn_role_text(content)
         turns.append({
             "id": tid,
             "role": role,
@@ -19615,6 +20023,14 @@ async def issue_insight(title: str, body: str | None = None,
 
 _ONBOARDING_DEFAULT_STATE = {
     "github_connected": False,
+    # #1924: per-source ENABLE intent, separate from the GitHub CONNECTION
+    # (github_connected). Both default ON so a connected org keeps today's
+    # behavior; `False` is the user's "don't bring this source in" choice and
+    # NEVER tears down the OAuth token. Before #1924 the Issues off-toggle
+    # PATCHed github_connected=False — a full disconnect that also killed the
+    # docs source and forced a fresh OAuth round-trip to re-enable.
+    "issues_enabled": True,
+    "docs_enabled": True,
     "github_indexed": False,
     "github_indexed_at": None,            # #1894: last github index completion (ISO, parity with github_indexed)
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
@@ -19823,6 +20239,36 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     if override is not None:
         return bool(override), "graph"
     return True, "team"
+
+
+async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
+    """`_session_recording_allowed` off the event loop (#4625, leg 12).
+
+    The helper is synchronous END TO END and both of its legs block: its
+    ``_get_onboarding_state`` read goes through the blocking
+    ``SupabaseControlPlane`` transport in hosted mode (and the registry Team
+    node in selfhost), and ``_graph_recording_override`` opens a graph handle.
+    Called inline from ``_capture_session_impl`` it held the single event loop
+    for the whole resolution — one of the py-spy MainThread legs #4625 was
+    measured on.
+
+    The unit of offload is the RESOLUTION (the #3498 design), so the org
+    default read and the per-graph override probe stay in ONE worker. The pool
+    is ``graph`` and the bound is the seam's standard REQUEST bound — the same
+    contract its sibling read wrapper keeps
+    (``_get_onboarding_projection_off_loop``): a capture must not park a graph
+    worker for the lane's cold-start allowance, and an over-bound read fails
+    closed (503) rather than hanging the capture.
+
+    Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
+    ``_get_onboarding_state`` auto-materializes defaults, but that write is
+    idempotent, so abandoning the worker on a bound miss is safe.
+    """
+    return await _graph_offload(
+        lambda: _session_recording_allowed(org),
+        op="session_recording_allowed",
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
+    )
 
 
 def _onboarding_defaults() -> dict:
@@ -20422,6 +20868,10 @@ _PATCH_FIELD_TO_STATE_KEY: dict[str, str] = {
 
 class OnboardingStatePatchRequest(BaseModel):
     github_connected: bool | None = None
+    # #1924: per-source enable intent — the off-toggles write THESE, never
+    # github_connected (which is the connection, shared by both sources).
+    issues_enabled: bool | None = None
+    docs_enabled: bool | None = None
     github_indexed: bool | None = None
     github_indexed_at: str | None = None  # #1894: last github index completion (ISO timestamp, server-stamped)
     demo_created: bool | None = None
@@ -20602,9 +21052,17 @@ async def get_onboarding_state(org: dict = Depends(get_current_org_session_ungat
     an overview read)."""
     # C5 #2114: onboarding state reads the DEFAULT graph — org-level surface.
     _reject_graph_bound_org_surface(org, "onboarding")
+    # #4625: this route is a declared READ of the issue, not the write-path
+    # residual — BOTH of its legs block (the projection read opens the graph /
+    # hits PostgREST; `_org_email` reads `teams.email`, or the registry Team
+    # node in selfhost), so neither may run on the event loop. The projection
+    # rides its #2924 off-loop wrapper; the email read rides `asyncio.to_thread`
+    # — the same short-read hand-off `list_points` / the capture probe use,
+    # which (unlike `_cp_offload`) does not put a registry graph open on the
+    # auth pool nor impose its fail-closed 503 on this read.
     return {
-        "onboarding": _get_onboarding_projection(org["org_id"]),
-        "email": _org_email(org["org_id"]),
+        "onboarding": await _get_onboarding_projection_off_loop(org["org_id"]),
+        "email": await asyncio.to_thread(_org_email, org["org_id"]),
     }
 
 

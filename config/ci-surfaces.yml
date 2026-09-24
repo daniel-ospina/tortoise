@@ -274,6 +274,7 @@ surfaces:
   - test_attribution_machine_model.py   # #2599: additive session machine_id + model attribution (docker lane)
   - test_commit_supersession_parity.py
   - test_session_auth.py
+  - test_capture_consent.py   # #3615: capture consent predicate + durable migration notice (CLI/parity)
   - test_session_capture_e2e.py
   - test_session_context.py
   - test_session_extraction_modes.py
@@ -366,6 +367,13 @@ surfaces:
   # rather than PROVEN on rc=0 with no downstream effect. Same dual
   # registration as test_session_verify.py (mechanism = core; CLI = api).
   - test_4314_inert_hooks.py
+  # #4675: the post-commit confirmation — a client-side refusal whose effect
+  # LANDED. Its source is tortoise/session_confirm.py (an ENGINE path matching
+  # no SOURCE_PATTERNS entry, so `core` via the `tortoise/` fallback) plus the
+  # import / spool-drain / `session verify` wiring in tortoise/__main__.py and
+  # tortoise/session_verify.py, which select `api`. Same dual registration as
+  # test_session_verify.py.
+  - test_session_confirm.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -477,6 +485,7 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  - test_4716_capture_operator_ref_remap.py
   - test_ask_eval_only.py
   # #4282: dual-registered with `api` because `api` is keyed on SOURCE PATTERNS, and
   # the files this guard protects are not api-owned: `tools/bridge_table.py`, the
@@ -494,10 +503,17 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
   # else matched.
   - test_operator_alert.py
+  # #2718: the eval-key launcher's guard — it pins (managed-key-set drift) the
+  # provider registries, and `core` is the docs/default surface this file is
+  # otherwise selected under. The `ep` surface carries the second arm, because
+  # a `tortoise/analyze.py`-only change selects `ep` and would otherwise never
+  # run the drift guard (#2938 convention).
+  - test_run_with_eval_keys.py
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
@@ -586,6 +602,9 @@ surfaces:
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
+  - test_source_dedup_registration.py
+  - test_source_identity.py
+  - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
@@ -621,6 +640,18 @@ surfaces:
   - test_rebuild_turn_points_3947.py
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
+  # #5004: the journal must carry a Point's embedding (the design's largest
+  # cost lever) and a replay must restore it VERBATIM rather than re-encode
+  # under whatever embedder is configured. `tortoise/projection/entities.py`
+  # selects `core` and `tortoise/api.py` selects `api`+`core`;
+  # `tortoise/sdk.py` is a SHARED_MODULE (already the full matrix).
+  # DUAL-REGISTERED with `eval`, which owns `tortoise/embeddings.py`
+  # (`tools/ci_selection.py` SOURCE_PATTERNS) — the file that defines
+  # `stamp_journal_embedding`/`embedding_identity` and the guards this test
+  # pins. Core-only registration would leave an `embeddings.py`-only PR
+  # selecting `['eval']` with this guard never run (#1349 class) — same
+  # rationale as `test_turn_embedding_write_path_4194.py` above.
+  - test_journal_embedding_5004.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
@@ -673,6 +704,12 @@ surfaces:
   # rather than PROVEN on rc=0 with no downstream effect. Same dual
   # registration as test_session_verify.py (mechanism = core; CLI = api).
   - test_4314_inert_hooks.py
+  # #4675: the post-commit confirmation — a client-side refusal whose effect
+  # LANDED. Its sources are `tortoise/session_confirm.py` and the client paths
+  # it re-arms in `tortoise/__main__.py` (the `session import` / spool drain
+  # refusal handlers) — the latter selects `api`. See the core entry for the
+  # mechanism half.
+  - test_session_confirm.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -968,6 +1005,7 @@ surfaces:
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
+  - test_vet_gate_5005.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
@@ -1031,6 +1069,14 @@ surfaces:
   # keeps them for engine-wide changes, `ep` runs them on analyze.py edits.
   - test_analyze.py
   - test_analyze_scoped.py
+  # #2718: the eval-key launcher's guard derives its expected managed-key set
+  # from `tortoise/analyze.py::_LLM_PROVIDERS` (an ep-mapped source). A
+  # SOURCE_PATTERNS match REPLACES the `core` fallback, so without this
+  # registration a new provider key added to `_LLM_PROVIDERS` would leave the
+  # new ambient key un-stripped (the #4860 failure mode) with a green suite —
+  # the same hole #2938 fixed for `test_analyze.py`. Dual-registered: `core`
+  # keeps it for engine-wide changes, `ep` runs it on analyze.py edits.
+  - test_run_with_eval_keys.py
   # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes must run
   # the deterministic replay gate. NOTE (posture split, #2098 round 2): the
   # strict-survival dimension is pinned at 0.0 on the m2 lane until the
@@ -1081,6 +1127,7 @@ surfaces:
   - test_2952_write_path_determinism.py  # #2952 defect 1: fresh-create write path must not skew fulltext/recall_state scores (docker-lane; DB)
   - test_recall_gaps_subgraph.py
   - test_subgraph_pure.py  # #3011: subgraph traversal/ranking engine — seed policy, hop decay, hub damping, cap→dedupe (hermetic)
+  - test_fanout_cap.py  # #5010: the adopted per-entity fan-out cap (STORAGE-ARCHITECTURE §11.5) — the hub expansion is bounded per entity, the value has one home, a caller cannot raise it (tortoise/subgraph.py is the read-path expansion; tortoise/fanout.py is the shared declaration)
   - test_subgraph_render.py  # #3011: frozen serializer — block order, provenance, confidence, word budget (hermetic)
   - test_recall_state.py
   - test_source_credibility.py
@@ -1106,6 +1153,15 @@ surfaces:
   # (the agent API cannot archive) — those cases live here.
   - test_blog_agent_delete_guard.py
   - test_dashboard_unknown_address.py
+  # #2409: the public contact form. The handler's behaviour — the byte ceiling
+  # (including what it SPENDS), the rate limiter, the honeypot, the transport —
+  # executed under Node with a stubbed fetch (no wrangler, no network, no DB).
+  - test_contact_form.py
+  # #4108: the same limiter observed as BEHAVIOUR rather than as source shape —
+  # the limiter is compiled in a `node:vm` context and driven across the clock
+  # and the key space. Distinct from test_contact_form.py above: that file reads
+  # the source, this one runs it.
+  - test_contact_rate_limit_behaviour.py
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
@@ -1267,6 +1323,10 @@ surfaces:
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
   # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
   # (a module #4097 migrated) and `tortoise/cross_lens.py`.
+  # #5004: dual with `core` (sdk/capture loop) — this test pins
+  # `tortoise/embeddings.py` (stamp_journal_embedding / embedding_identity /
+  # the normalization & width guards), which this surface owns.
+  - test_journal_embedding_5004.py
   - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
@@ -1464,6 +1524,14 @@ durations:
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
 #
+# Post-#3400 additions: a file that is NOT yet on main has no main-run
+# measurement, yet the 90% coverage floor blocks its merge — so its entry is
+# sourced from the first run in which that file executed (its own junit
+# `testcase/@time`), not from run 34725816431. First such entry:
+#   test_rotate_key.py from run 35782572252 (pytest-log-test-a)
+# This is a stopgap, not the intended state: auto-populating it is #4817,
+# and the value-level re-sweep that supersedes the number is #4729.
+#
 # #4221: the six `test_shared_state_*.py` files (moved out of
 # tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
 # pool for the first time here. They have NO CI junit measurement — a file that
@@ -1497,6 +1565,14 @@ durations:
   test_shared_state_imports.py: 2.0
   test_shared_state_monitoring.py: 2.0
   test_shared_state_recovery.py: 2.0
+  # #2409/#4108: the contact form's guard and its behavioural harness — same
+  # situation as the files above (a file that has not run on main cannot appear
+  # in a junit artifact). Entered at the flat 2.0s default for the same stated
+  # reason: coverage stays satisfied and the LPT pack is not mis-balanced by
+  # this host's inflated local timing. Refresh from the first post-merge main
+  # run that includes them.
+  test_contact_form.py: 2.0
+  test_contact_rate_limit_behaviour.py: 2.0
 # #4366: the consumer-skills licence assertion's unit file — no CI junit
 # measurement yet, so it enters at the same flat 2.0s default as the #4221 six
 # above (the conservative floor: it keeps coverage at 100% instead of dropping
@@ -1523,6 +1599,12 @@ durations:
   # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
   # (7 tests, DB-free, app-boot-free) on a loaded machine.
   test_backup_watcher_health.py: 2.0
+  # #2718: new file, so no CI junit measurement yet — enter at the flat 2.0s
+  # default per the #3400/#4221 convention (the conservative floor keeps the
+  # durations-coverage floor satisfied) and refresh from the first post-merge
+  # main run that includes it. Measured locally 2026-09-23: ~17s for the file
+  # (25 tests; each spawns the wrapper as a subprocess, DB-free, no network).
+  test_run_with_eval_keys.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   # #3746: the new onboarding truth-surface file. 31 docker-lane cases, junit
@@ -1541,6 +1623,7 @@ durations:
   test_platform_seams.py: 73.3
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
   test_quota.py: 65.3
+  test_rotate_key.py: 3.6
   # #3501: the migration-backlog gate. A pure static scan of website/ (no
   # wrangler, no server), so it runs in the python-ci matrix like any other
   # static guard. Measured 53s-90s standalone across runs — a SINGLE SAMPLE of a
@@ -2031,6 +2114,7 @@ durations:
   test_session_key.py: 0.1
   test_sparse.py: 0.1
   test_subgraph_pure.py: 0.1
+  test_fanout_cap.py: 0.2
   test_supplementary.py: 0.1
   test_user_identity_inventory.py: 0.1
   bench/test_roundrobin.py: 0.0
@@ -2294,6 +2378,7 @@ durations:
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.6
   test_rebuild_turn_points_3947.py: 4.4
+  test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2

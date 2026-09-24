@@ -1194,7 +1194,14 @@ ERR_INVALID = -32003
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
 _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session",
+    # #5004: the embedding's journal IDENTITY keys are server-minted. Rejected
+    # at this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    # `embedding` ITSELF is deliberately NOT here — `create_point` has a
+    # recorded decision (PR #3018 review P2) that a caller-supplied vector is
+    # stored verbatim; the writer marks it `embedding_verbatim` instead.
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+    "embedding_verbatim", "embedding_preserved"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
