@@ -51,6 +51,9 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
+// #4335: the billing CTA's honest-unavailable derivation — one pure source so
+// the three render sites cannot drift (see billingCta.js).
+import { COMPARE_PLANS_URL, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -964,31 +967,81 @@ function wizardWorkflowsText(key, mode) {
   return `${WORKFLOWS_PROMPT}\n\n${wizardPromptText('claude-web', 2, key, mode)}`
 }
 
+// #4335: the checkout CTA for the billing surfaces in this issue's scope
+// (Billing plan cards, welcome plan chooser, API-keys cap notice). A missing
+// server price id renders a DISABLED Upgrade control + the honest reason; it
+// never becomes a marketing link. The caller may add the secondary
+// "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
+// Graphs-tab upgrade buttons) are out of scope here.
+function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false, anyConfigured = false }) {
+  const reasonId = React.useId()
+  const cta = checkoutCtaFor(priceId, { anyConfigured })
+  if (cta.disabled) {
+    // #4335 review: native `disabled` already conveys the state (a redundant
+    // aria-disabled would contradict it), and the reason is visible AND tied
+    // to the control via aria-describedby. The wrapper stacks button-over-
+    // reason so a two-element fragment cannot wedge the reason between the
+    // controls of a single-row flex container (.cap-notice). `block` makes the
+    // disabled button fill a .plan-card exactly like the enabled one (which is
+    // a stretched direct child); the cap-notice stays content-width.
+    return (
+      <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: block ? 'stretch' : 'flex-start', gap: 4, width: block ? '100%' : undefined }}>
+        <button className={className} disabled title={cta.reason} aria-describedby={reasonId}>
+          {cta.label}
+        </button>
+        <span id={reasonId} className="dim small" style={{ textAlign: 'left' }}>{cta.reason}</span>
+      </span>
+    )
+  }
+  return (
+    <button className={className} onClick={onUpgrade} disabled={pending}>
+      {pending ? 'Opening checkout…' : cta.label}
+    </button>
+  )
+}
+
 // #4330: ONE cap notice, TWO surfaces — the API Keys tab and the create-key
 // modal. Extracted so the upgrade CTA cannot drift between them; the modal MUST
 // carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
 // stage (an empty `.key-value` box, and a clipboard write of the literal
 // "null") while the notice sat on the tab BEHIND the modal, invisible.
-function CapNotice({ text, route, checkoutPending, billingPending, onUpgrade, onManage }) {
+function CapNotice({ text, team, route, checkoutPending, billingPending, onUpgrade, onManage }) {
+  // A cap-notice "Upgrade" must be a REAL upgrade: the next configured paid
+  // tier strictly above the org's current tier. When a higher tier exists but
+  // the catalog is entirely down, show the honest DISABLED control (never the
+  // marketing link as the substitute CTA); when the deployment sells no higher
+  // tier, render no CTA at all — never a current/downgrade plan.
+  // #4639: a PAYING team gets the portal instead (checkout 409s on an active
+  // subscription), so `route` decides which control renders.
+  const { target, outage } = capNoticeUpgrade(team, planOptions().map((p) => p.tier))
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
-      {/* #4639: the same route derivation the error banner uses. Checkout 409s
-          on an active subscription, so a paying team gets the portal — never a
-          button that can only fail. No route → the See-pricing fallback. */}
-      {route === 'checkout' ? (
-        <button className="ghost small" onClick={onUpgrade} disabled={checkoutPending}>
-          {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-        </button>
-      ) : route === 'portal' ? (
+      {/* #4335: never a marketing link as the CTA — a real checkout control
+          when a higher tier is offered, an honest DISABLED control during a
+          catalog outage, and nothing when the deployment sells no higher tier.
+          #4639: a PAYING team gets the portal instead (checkout 409s on an
+          active subscription), so `route` decides which control renders. */}
+      {route === 'portal' ? (
         <button className="ghost small" onClick={onManage} disabled={billingPending}>
           {billingPending ? 'Opening portal…' : 'Manage subscription'}
         </button>
-      ) : (
-        <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
-      )}
+      ) : target ? (
+        <UpgradeCta priceId={target.priceId} onUpgrade={() => onUpgrade(target.priceId)} pending={checkoutPending} className="ghost small" />
+      ) : outage ? (
+        <UpgradeCta priceId="" onUpgrade={onUpgrade} pending={checkoutPending} className="ghost small" />
+      ) : null}
+      <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
     </div>
   )
+}
+
+// #4335: whether the cap-notice copy's "or upgrade to add more" is truthful
+// for this org (a real offered upgrade, or one temporarily unavailable due to
+// a catalog outage) — false for the top tier or a deployment selling no higher
+// tier.
+function teamHasUpgrade(team) {
+  return capNoticeUpgrade(team, planOptions().map((p) => p.tier)).hasUpgrade
 }
 
 function App() {
@@ -2945,10 +2998,13 @@ function claimIntentInFlight() {
   // WIZARD_STEPS (wizardFlow.js) — 4 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
   // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
-  // stays byte-identical for the A0 gate's rollback path (partial revert
-  // restores it); it is NEVER rendered by the live wizard. Flipping this
-  // back to true + re-enabling the welcomeOriented gate restores the
-  // legacy surface (rollback drill, epic §8).
+  // is the A0 gate's rollback surface (partial revert restores it); it is
+  // NEVER rendered by the live wizard. #4335 intentionally edited its welcome
+  // plan-chooser fallback (marketing "See pricing" link → honest disabled CTA)
+  // so a rollback cannot resurrect the marketing link — the block is therefore
+  // no longer byte-identical end-to-end (see the overview.test.js line-count
+  // canary, kept in sync). Flipping this back to true + re-enabling the
+  // welcomeOriented gate restores the legacy surface (rollback drill, epic §8).
   const LEGACY_WIZARD_ARCHIVED = false
   // #1997 (W1): org-create + fork-card state for the 5-step wizard.
   const [wizardOrgName, setWizardOrgName] = React.useState('')
@@ -6021,7 +6077,7 @@ function claimIntentInFlight() {
         // learns the reason without dismissing it; the tab banner still shows
         // after a dismiss.
         if (e.status === 402) {
-          const notice = upgradeNoticeFrom(e.message, team)
+          const notice = upgradeNoticeFrom(e.message, team, teamHasUpgrade(team))
           setCapNotice(notice)
           setKeyModalCapNotice(notice)
           setError('')
@@ -6267,8 +6323,10 @@ function claimIntentInFlight() {
       // #4355: a rotate 402 means the org is OVER its limit (a 1-for-1
       // rotation is admitted BY construction, so the notice's copy describes
       // the over-cap state, not the old mint-then-revoke mechanism).
+      // #4335: the "or upgrade" tail is only truthful when an upgrade path
+      // exists, so the notice takes the same hasUpgrade flag as the create path.
       if (e.status === 402) {
-        setCapNotice(rotateCapNoticeFrom(e.message, team))
+        setCapNotice(rotateCapNoticeFrom(e.message, team, teamHasUpgrade(team)))
         setError('')
       } else {
         // #4355: any other failure may be a LOST RESPONSE, not a lost
@@ -8007,7 +8065,10 @@ function claimIntentInFlight() {
                     A0 gate's rollback path restores it by re-enabling this
                     gate + the welcomeOriented pre-card (epic §8). DE2E-1: the
                     archived-not-deleted assertion greps this marker + the
-                    legacy wizardSteps labels. */}
+                    legacy wizardSteps labels. #4335 intentionally updated the
+                    welcome plan-chooser CTA here (honest disabled state), so
+                    the block is no longer byte-identical end-to-end; the
+                    line-count canary in overview.test.js is kept in sync. */}
                 {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (
                 <div className="wizard">
                   <div className="wizard-progress">
@@ -8269,12 +8330,11 @@ function claimIntentInFlight() {
                                     >
                                       Start free
                                     </button>
-                                  ) : hasPrice ? (
-                                    <button className="ghost" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
-                                      {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                                    </button>
                                   ) : (
-                                    <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                                    <>
+                                      <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} anyConfigured={Object.keys(team.checkout_price_ids || {}).length > 0} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} block />
+                                      <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
+                                    </>
                                   )}
                                 </div>
                               )
@@ -8447,7 +8507,7 @@ function claimIntentInFlight() {
                     cap 402 puts its message on `capNotice` (not `error`), and
                     the tab-level notice sits behind this dialog — so without
                     this the user saw a silent form → empty reveal. */}
-                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgrade} onManage={manageBilling} />}
+                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgradeToPrice} onManage={manageBilling} />}
                 {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{errorMessage(error)}</p>}
               </>
             )}
@@ -9120,7 +9180,7 @@ function claimIntentInFlight() {
             )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {/* #4330: the SAME notice component the create-key modal renders. */}
-            {capNotice && <CapNotice text={capNotice} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgrade} onManage={manageBilling} />}
+            {capNotice && <CapNotice text={capNotice} team={team} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgradeToPrice} onManage={manageBilling} />}
 
             {/* #4355: the rotate partial-state disclosure. `replaced_revoked:false`
                 means the replacement was created but the displaced row could not
@@ -9911,12 +9971,15 @@ function claimIntentInFlight() {
                       <button className="ghost" onClick={manageBilling} disabled={billingPending}>
                         {billingPending ? 'Opening portal…' : 'Manage subscription'}
                       </button>
-                    ) : hasPrice ? (
-                      <button className="btn-primary" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
-                        {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                      </button>
+                    ) : p.tier === 'free' ? (
+                      // The $0 plan has no checkout by design — never render the
+                      // "temporarily unavailable" outage claim for it.
+                      <button className="ghost" disabled title="The free plan needs no checkout">Free — no card needed</button>
                     ) : (
-                      <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                      <>
+                        <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} anyConfigured={Object.keys(team.checkout_price_ids || {}).length > 0} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" block />
+                        <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
+                      </>
                     )}
                   </div>
                 )

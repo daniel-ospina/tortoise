@@ -121,12 +121,15 @@ export function capLimitFrom(message, team) {
 // does NOT promise a SINGLE revoke always suffices (an over-cap org stays
 // at/over the gate until enough rows are revoked), and does NOT promise the
 // upgrade frees a key immediately.
-export function upgradeNoticeFrom(message, team) {
+export function upgradeNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
-  if (limit === null) {
-    return "You've reached your plan's API key limit. Revoke an existing key to free a slot — or upgrade to add more."
-  }
-  return `You've reached your plan's limit of ${limit} API keys. Revoke an existing key to free a slot — or upgrade to add more.`
+  const head = limit === null
+    ? "You've reached your plan's API key limit"
+    : `You've reached your plan's limit of ${limit} API keys`
+  // #4335: the "or upgrade" tail is only truthful when an upgrade path exists
+  // (a configured higher tier, or one temporarily unavailable). Callers pass
+  // hasUpgrade=false for the top tier / a deployment selling no higher tier.
+  return `${head}. Revoke an existing key to free a slot${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
 }
 
 // #2229/#4355: rotate-path cap notice.
@@ -143,12 +146,12 @@ export function upgradeNoticeFrom(message, team) {
 // revoking this one") is now FALSE and is deleted: it described the old
 // mint-then-revoke ordering, which is exactly what #4355 replaced. The remedy
 // is the truthful over-cap one — revoke down to the limit, or upgrade.
-export function rotateCapNoticeFrom(message, team) {
+export function rotateCapNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
   if (limit === null) {
-    return "You're over your plan's API key limit. Rotating replaces this key without adding one, so revoke keys until you're back within the limit — or upgrade to add more."
+    return `You're over your plan's API key limit. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
   }
-  return `You're over your plan's limit of ${limit} API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit — or upgrade to add more.`
+  return `You're over your plan's limit of ${limit} API keys. Rotating replaces this key without adding one, so revoke keys until you're back within the limit${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
 }
 
 // #4353/#4355: the connect step's existing-key note. #4353 made this

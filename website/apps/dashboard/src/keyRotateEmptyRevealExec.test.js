@@ -147,6 +147,11 @@ function rotateEnv({ response, reject, loadAll, orgIdRef, apiImpl, lifetimeDays 
     keyRowDisclosure: () => 'residue row · tt_live_re · 2026-08-01',
     confirm: () => true,
     rotateCapNoticeFrom: (m) => `rotate cap: ${m}`,
+    // #4335: the rotate notice takes the same hasUpgrade flag as the create
+    // path, so the rotate handler now calls this. `{tier:'free'}` has a higher
+    // tier available → true (the stub only has to be callable here; the
+    // copy itself is stubbed above).
+    teamHasUpgrade: () => true,
     api: async (url, opts) => {
       calls.order.push('rotate')
       calls.api.push([url, opts])
