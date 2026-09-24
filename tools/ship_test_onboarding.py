@@ -626,6 +626,18 @@ _PS_TIMEOUT_S = 1.0
 # is strictly safer than signalling by the output of an unverified binary.
 _PS_BIN = "/bin/ps"
 
+# Both `ps` selections ask for UNLIMITED output width. A host's `ps` truncates
+# its LAST column to the terminal width, and the CI runner does exactly that
+# (the same truncation class fixed for the embedded reaper in #1365): the
+# `command` field is unbounded, so on a runner whose interpreter path alone is
+# ~49 characters a real driver's trailing `run-driver` marker is cut off, no
+# candidate matches, the driver is never signalled, and a healthy run abandons
+# with its Chromium tree live. `ppid=,lstart=` is short enough not to be cut at
+# 80 columns, but a truncated start time would collapse two different processes
+# into one identity — the pid reuse the atomic read exists to defeat — so the
+# reader takes `-ww` too and neither read depends on the venue's width.
+_PS_UNLIMITED_WIDTH = "-ww"
+
 
 def _browser_teardown_record() -> dict:
     """The pre-teardown document's shape: `not_run`, no closes, no detail."""
@@ -1335,12 +1347,19 @@ def _child_identity(pid: int) -> tuple[int, str] | None:
     ``None`` means the identity could not be read at all this time — ``ps`` was
     absent or timed out, the process exited, or the output was unrecognizable. A
     partial identity is never returned.
+
+    The read takes `-ww` (unlimited width, see `_PS_UNLIMITED_WIDTH`): a start
+    time truncated at the venue's column width would make two different
+    processes compare equal, which is the pid reuse this atomic read exists to
+    defeat — and the re-check compares the SAME reader, so it would agree with
+    the truncated value rather than catch it.
     """
     ps = _ps_binary()
     if ps is None:
         return None
     try:
-        out = subprocess.run([ps, "-o", "ppid=,lstart=", "-p", str(pid)],
+        out = subprocess.run([ps, _PS_UNLIMITED_WIDTH, "-o", "ppid=,lstart=",
+                              "-p", str(pid)],
                              capture_output=True, text=True,
                              timeout=_ps_timeout()).stdout
     except Exception:
@@ -1382,6 +1401,15 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None, str]:
     The identity read is retried ONCE before giving up, because a single `ps`
     timeout is not evidence about the child.
 
+    The selection takes `-ww` (unlimited width, see `_PS_UNLIMITED_WIDTH`). It
+    is load-bearing here: `command` is the unbounded field, and a host that
+    truncates it to its terminal width hides the marker of any driver whose
+    command line is longer than that width — the CI runner's interpreter path
+    alone is ~49 characters, so a trailing ``run-driver`` is past the cut. The
+    enumerator then finds no candidate, the driver is never signalled, and a
+    healthy run abandons with its Chromium tree live (the same truncation class
+    as the embedded reaper's #1365).
+
     A non-positive pid is never returned: ``os.kill(-1, SIGKILL)`` signals every
     process this uid may signal, so a misread pid must never become the signal
     target.
@@ -1391,7 +1419,8 @@ def _driver_pid_and_starttime() -> tuple[int | None, str | None, str]:
     if ps is None:
         return None, None, DRIVER_ENUM_NO_CANDIDATE
     try:
-        out = subprocess.run([ps, "-axo", "pid=,ppid=,command="],
+        out = subprocess.run([ps, _PS_UNLIMITED_WIDTH, "-axo",
+                              "pid=,ppid=,command="],
                              capture_output=True, text=True,
                              timeout=_ps_timeout()).stdout
     except Exception:

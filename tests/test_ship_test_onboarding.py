@@ -2973,22 +2973,33 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
 
     Every other teardown test stubs `_driver_pid_and_starttime`, so the filter
     that decides what may EVER be signalled — `ppid == os.getpid()` plus the
-    driver marker — would otherwise be pinned by nothing: a mutant returning any
-    child, or a process that is not a child at all, would pass the suite. Here
-    two REAL children are spawned, the unmarked one FIRST, so an enumerator that
-    returned "the first child" fails.
+    driver marker — would otherwise be pinned against the real process table by
+    nothing. This is that ONE live test: it spawns a REAL child whose argv
+    carries the marker, retries the enumeration inside a short bound (it never
+    sleeps and hopes), and requires the whole identity (parent pid AND start
+    time) to re-read identically from `_child_identity` — the pair the
+    watchdog's re-check compares.
 
-    The identity is read ATOMICALLY: the start time the enumerator carries must
-    re-read identically from `_child_identity` TOGETHER with this process as the
-    parent — the pair the watchdog's re-check compares."""
+    Every OTHER claim — which candidate wins over an earlier unmarked one, the
+    parent filter, the non-positive-pid refusal, the untruncated `ps` query — is
+    pinned deterministically at the `ps`-OUTPUT seam below, because a venue
+    whose `ps` renders the table differently (the CI runner truncates the last
+    column to the terminal width) must not decide whether this instrument is
+    correct. The marker is the LAST argv token on purpose: that is the position
+    the venue truncation cuts, so this test also exercises the `-ww` fix on a
+    real table rather than merely on a fake one."""
     import os
     import subprocess
     import sys
 
     import tools.ship_test_onboarding as mod
 
+    if mod._ps_binary() is None:
+        pytest.skip(
+            f"the platform has no absolute `ps` at {mod._PS_BIN}: there is no "
+            "live process table for the enumerator to read")
+
     marker = mod.TEARDOWN_DRIVER_MARKERS[0]
-    plain = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     driver = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)", marker])
     try:
@@ -3000,8 +3011,7 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
                 break
             time.sleep(0.1)
         assert pid == driver.pid, (
-            f"enumerated {pid}; expected the MARKED child {driver.pid} "
-            f"(the unmarked {plain.pid} was spawned first)")
+            f"enumerated {pid}; expected the MARKED child {driver.pid}")
         assert status == mod.DRIVER_ENUM_FOUND, status
         assert started, "no start time was carried alongside the pid"
         assert mod._child_identity(pid) == (os.getpid(), started), (
@@ -3009,9 +3019,8 @@ def test_the_production_enumerator_returns_only_this_processs_own_marked_child()
             "identically in ONE read, or the TOCTOU re-check would silently "
             "refuse to signal the real driver")
     finally:
-        for p in (plain, driver):
-            p.kill()
-            p.wait()
+        driver.kill()
+        driver.wait()
 
 
 class _PS:
@@ -3042,7 +3051,7 @@ def test_the_enumerators_start_time_comes_from_the_same_reader_as_the_recheck(
     import tools.ship_test_onboarding as mod
 
     def _fake_run(argv, **k):
-        if argv[1] == "-axo":
+        if "pid=,ppid=,command=" in argv:
             # the enumerator's selection: the command is the LAST field and no
             # `lstart` appears anywhere in it, so there is nothing to slice.
             return _PS(stdout=f"4242 {os.getpid()} python playwright run-driver")
@@ -3072,6 +3081,90 @@ def test_a_nonpositive_pid_is_never_returned_as_the_driver(monkeypatch, bad_pid)
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _PS(stdout=line))
     assert mod._driver_pid_and_starttime() == (
         None, None, mod.DRIVER_ENUM_NO_CANDIDATE)
+
+
+def test_the_enumerator_picks_the_marked_own_child_not_an_earlier_unmarked_one(
+        monkeypatch) -> None:
+    """The marker filter, pinned DETERMINISTICALLY at the `ps`-output seam.
+
+    The live-table test can only fail a "returned the first child" mutant when
+    the venue's `ps` happens to expose both children in a stable order, so the
+    preference is pinned here instead, on a fake table: an unmarked own child is
+    listed FIRST and a marked own child SECOND, and the enumerator must return
+    the MARKED one. A mutant that drops the marker guard — or returns the first
+    parseable child — returns 1111 here and is RED."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    def _fake_run(argv, **k):
+        if "pid=,ppid=,command=" in argv:
+            return _PS(stdout=(
+                f"1111 {os.getpid()} python -c import time; time.sleep(30)\n"
+                f"2222 {os.getpid()} python -c import time; time.sleep(30) "
+                f"run-driver\n"))
+        return _PS(stdout=f"{os.getpid()} Thu Jan  1 00:00:00 2026\n")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    assert mod._driver_pid_and_starttime() == (
+        2222, mod._norm_start_time("Thu Jan  1 00:00:00 2026"),
+        mod.DRIVER_ENUM_FOUND)
+
+
+def test_the_enumerator_ignores_a_marked_process_that_is_not_its_own_child(
+        monkeypatch) -> None:
+    """The parent filter, pinned at the same `ps`-output seam.
+
+    `os.kill` on a marker-matching process that is NOT this run's child would
+    signal a stranger's Playwright driver (or a pid reused by one). A process
+    whose command carries the marker but whose parent is another pid is listed
+    FIRST; the enumerator must skip it and take THIS process's child. A mutant
+    that drops the `ppid != me` guard returns 4242 here and is RED."""
+    import os
+
+    import tools.ship_test_onboarding as mod
+
+    stranger = os.getpid() + 1
+
+    def _fake_run(argv, **k):
+        if "pid=,ppid=,command=" in argv:
+            return _PS(stdout=(
+                f"4242 {stranger} python playwright run-driver\n"
+                f"4343 {os.getpid()} python playwright run-driver\n"))
+        return _PS(stdout=f"{os.getpid()} Thu Jan  1 00:00:00 2026\n")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    pid, _started, status = mod._driver_pid_and_starttime()
+    assert (pid, status) == (4343, mod.DRIVER_ENUM_FOUND), (pid, status)
+
+
+def test_both_ps_reads_ask_for_an_untruncated_field(monkeypatch) -> None:
+    """The CI-only defect of #4956, pinned without a live process table.
+
+    `command` is the unbounded `ps` field, and a host truncates its LAST column
+    to the terminal width — the CI runner does, and the hostedtoolcache
+    interpreter path alone is ~49 characters, which puts a trailing
+    `run-driver` marker past the 80-column cut. The marker then disappears, the
+    enumerator finds no candidate, and a healthy run abandons with its Chromium
+    tree live. BOTH readers therefore ask for unlimited width: dropping `-ww`
+    from the enumeration reddens this test, and dropping it from the identity
+    read would let a truncated start time collapse two processes into one
+    identity."""
+    import tools.ship_test_onboarding as mod
+
+    seen = []
+
+    def _fake_run(argv, **k):
+        seen.append(list(argv))
+        return _PS(stdout="")
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    mod._driver_pid_and_starttime()
+    mod._child_identity(1)
+    assert len(seen) == 2, seen
+    for argv in seen:
+        assert argv[0] == mod._PS_BIN, argv
+        assert "-ww" in argv, argv
 
 
 def test_the_ps_binary_is_absolute_and_a_missing_one_refuses(monkeypatch) -> None:
