@@ -26787,6 +26787,47 @@ async def billing_portal(request: Request, org: dict = Depends(get_current_org_s
     return await asyncio.to_thread(_billing_portal_sync, org)
 
 
+# #4335: a broken/misconfigured price catalog used to degrade silently — a
+# total billing outage looked exactly like a UI preference, and the dashboard
+# could only fall back to a marketing link. Emit the failure ONCE per outage at
+# WARNING (catalog-load exception class + message, or a parsed catalog that
+# resolves no paid tier) and latch the emission so the per-request /v1/team
+# call cannot flood the log. A success clears the latch so a NEW breakage after
+# a recovery is still reported.
+_checkout_catalog_failure_logged = False
+
+
+def _log_checkout_catalog_failure(exc: Exception) -> None:
+    """One visible WARNING per catalog outage (#4335).
+
+    This stays best-effort / non-5xx (registry and selfhost legitimately run
+    without Stripe) — but the degradation must be diagnosable. The exception
+    message can embed a raw STRIPE_PRICE_IDS value (PriceCatalog validation
+    quotes the offending id), so it is scrubbed through the repo's own secret
+    scrubber before it reaches the log — the secret value is never emitted.
+    """
+    global _checkout_catalog_failure_logged
+    if _checkout_catalog_failure_logged:
+        return
+    _checkout_catalog_failure_logged = True
+    try:  # the scrubber must never mask the warning it exists to make safe
+        from tortoise.billing import _scrub_secrets
+        # Composite scrubber — the repo's established billing-log convention
+        # (the Stripe-webhook handler's `_safe_log` below): redact_error strips
+        # credentials-in-URI / paths and prefixes the exception class,
+        # _scrub_secrets redacts Stripe-shaped values. PriceCatalog errors
+        # quote the offending STRIPE_PRICE_IDS value, which can be a secret of
+        # either shape.
+        detail = _scrub_secrets(redact_error(exc))
+    except Exception:
+        detail = type(exc).__name__
+    _logger.warning(
+        "checkout price catalog unavailable (%s) — checkout price ids "
+        "will be empty until STRIPE_PRICE_IDS is fixed",
+        detail,
+    )
+
+
 def _default_checkout_price_id() -> str | None:
     """Server-resolved default checkout price: pro monthly (#310 Task 9).
 
@@ -26795,29 +26836,51 @@ def _default_checkout_price_id() -> str | None:
     when the catalog is unconfigured (missing env → BillingConfigError on
     PriceCatalog() construction; registry/selfhost must not 500 /v1/team).
     """
+    global _checkout_catalog_failure_logged
     try:
         from tortoise.billing import PriceCatalog
         catalog = PriceCatalog()
-        return catalog.price_for("pro", "monthly") or None
-    except Exception:
+        price = catalog.price_for("pro", "monthly") or None
+    except Exception as exc:  # best-effort, never 5xx /v1/team
+        _log_checkout_catalog_failure(exc)
         return None
+    if price is not None:
+        # Only a resolved default proves the catalog is healthy — clearing the
+        # latch when pro is merely absent would let the zero-paid-tier warning
+        # in _checkout_price_ids() re-fire on every request.
+        _checkout_catalog_failure_logged = False
+    return price
 
 
 def _checkout_price_ids() -> dict[str, str]:
     """#1623: tier → monthly price_id for the paid public tiers, server-
     resolved from STRIPE_PRICE_IDS (the Billing page's per-plan Upgrade
     CTAs — never hardcoded in the client). Free/anon ($0) have no checkout.
-    Best-effort {} when the catalog is unconfigured.
+    Best-effort {} when the catalog is unconfigured. A parsed catalog that
+    resolves NO paid tier is a total checkout outage and is reported once
+    through the same latch; a legitimately PARTIAL catalog (some paid tiers,
+    e.g. solo/team only) is supported by #2789 and stays silent.
     """
+    global _checkout_catalog_failure_logged
     try:
         from tortoise.billing import PriceCatalog
         catalog = PriceCatalog()
-        return {
+        ids = {
             tier: pid for tier in ("solo", "pro", "team")
             if (pid := catalog.price_for(tier, "monthly")) is not None
         }
-    except Exception:
+    except Exception as exc:  # best-effort, never 5xx /v1/team
+        _log_checkout_catalog_failure(exc)
         return {}
+    if not ids:
+        # Parsed fine but resolves no paid checkout tier — every paid Upgrade
+        # CTA is dead. Report that ONCE (do not clear the latch); a partial
+        # catalog keeps ≥1 tier and is not a failure (#2789).
+        _log_checkout_catalog_failure(
+            LookupError("STRIPE_PRICE_IDS resolved no paid checkout tier (solo/pro/team)"))
+        return ids
+    _checkout_catalog_failure_logged = False
+    return ids
 
 
 

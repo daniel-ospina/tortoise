@@ -232,6 +232,9 @@ def test_sessions_import_windows_to_last_max_session_turns(tmp_path, monkeypatch
 
     p = _pi_turns_file(tmp_path, 1005)
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not consent.
+    # This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -288,6 +291,9 @@ def test_sessions_import_window_is_a_noop_at_or_below_the_limit(tmp_path, monkey
 
     p = _pi_turns_file(tmp_path, MAX_TURNS)
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not consent.
+    # This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -348,6 +354,10 @@ def _import_env(tmp_path, monkeypatch):
 
     spool = tmp_path / "spool"
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: `sessions import` TRANSMITS and is consent-gated. This helper is
+    # the shared env for the import-path tests, none of which pin the refusal
+    # (that lives in tests/test_capture_consent.py), so they all opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(spool))

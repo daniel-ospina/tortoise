@@ -282,11 +282,13 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    (same `url` AND `Authorization: Bearer ${TORTOISE_API_KEY}`), report
 >    "already correct — no repoint needed" and STOP: no confirm, no preserve,
 >    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
->    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: that
->    variable may be deliberately distinct so a hosted session-capture path
->    stays off. Report it and ASK; do not rewrite it on your own initiative,
->    and treat "this profile intentionally defines that variable" as the
->    human's decision rather than a misconfiguration to repair. Only a
+>    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: a
+>    profile may deliberately name its MCP credential separately. It is no
+>    longer required for that purpose — hosted capture is gated on EXPLICIT
+>    consent (`TORTOISE_CAPTURE=1`), never on the credential (#3615). Report it
+>    and ASK; do not rewrite it on your own initiative, and treat "this profile
+>    intentionally defines that variable" as the human's decision rather than a
+>    misconfiguration to repair. Only a
 >    genuinely BROKEN entry (wrong `url`, missing or headerless
 >    `Authorization`) is yours to correct — and only after the confirm gate.
 >    A home/base entry is left untouched and merely shadowed, so nothing is
@@ -493,9 +495,14 @@ ONE line, non-blocking:
 > "Heads up: I'll remember this session so you can recall it later. View/delete in Settings → Captured sessions."
 
 Contract notes:
+- **Two layers (#3615).** *Server recording policy* is per-organization,
+  default-ON (ToS-covered) with a quiet 409 off-switch (#1927) — unchanged.
+  *Client transmission authorization* is per-host and requires the EXPLICIT
+  opt-in `TORTOISE_CAPTURE=1`; a credential (`TORTOISE_API_KEY`) never enables
+  capture. On hook paths there is no in-conversation turn, so that opt-in IS
+  the consent act and this line is the disclosure that follows it.
 - **Timing:** first capture only, in-conversation, one line, non-blocking.
-  Recording is default-ON (ToS-covered); this is disclosure, NOT a consent
-  ceremony (no re-gate — the off-switch stays quiet-409, #1927).
+  The off-switch stays quiet-409 (no re-gate, #1927).
 - **Destination (#2002):** `Settings → Captured sessions` — the capture
   view/delete home (`<h3 id="settings-capture-heading">`). NOT
   `Settings → Memory sources`, which is the SIBLING home holding the four
@@ -508,8 +515,10 @@ Contract notes:
   surface) — it is never a card-counted step (the Setup guide renders it
   uncounted).
 - **Ownership:** W2 owns this copy; W6 owns the trigger placement +
-  Settings view/delete (hook-driven auto-capture has no in-conversation turn
-  at capture time — W6's trigger covers it). Do not drift the wording.
+  Settings view/delete. Hook-driven auto-capture has no in-conversation turn
+  at capture time — it runs only under the explicit client opt-in (#3615),
+  and W6's trigger covers the in-conversation surfaces. Do not drift the
+  wording.
 
 ## Pointers
 
