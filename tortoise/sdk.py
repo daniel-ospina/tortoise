@@ -143,6 +143,18 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 STALE_TERMINAL_STATUSES = frozenset(
     {'retracted', 'superseded', 'outdated', 'archived'})
 
+# The structural rels `supersede_point` transfers in its 2b leg (#122). Single
+# source of truth for the WRITER and for every mirror of it: the MCP dry-run
+# preview imports this name rather than re-listing the rels, so a rel added to
+# (or dropped from) the transfer cannot drift out of the preview. Superset of
+# `projection.edges.STRUCTURAL_REL_LABELS` (which carries only the
+# snapshot-derivable subset): `aboutAction` (Action dissolved in Ontology v3.0)
+# and `wasDerivedFrom` (A10 raw family) transfer but are never snapshot-recreated.
+SUPERSEDE_STRUCTURAL_RELS = (
+    'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
+    'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom',
+)
+
 # Epic #902 W4 A0 — single-source valid-value sets for ingest() (consumed by
 # the SDK validation AND the MCP pre-validation so the two layers cannot
 # drift; INGEST_CONTRACT.md §2/§5 pins the exact values + error shapes).
@@ -6202,10 +6214,7 @@ class TortoiseSDK:
         # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
         # never the FalkorDB internal ID (internal ids die at rebuild).
         from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
-        structural_rels = [
-            'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
-            'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom'
-        ]
+        structural_rels = SUPERSEDE_STRUCTURAL_RELS
         # Successor internal node id — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
         # the successor (mirror 2a-DIRECT's tid==new_id guard at ~4407): without
@@ -16206,37 +16215,20 @@ class TortoiseSDK:
                 "CREATE (:TeamMeta {name:$name, created:$now})",
                 {"name": name, "now": now},
                 org_id=tid, fork=init_fork, compact=init_compact)
+            # #3390 WRITE-AHEAD: journal the intended org_{name} graph
+            # BEFORE the TeamMeta CREATE that materializes it. The old order
+            # (CREATE then journal) left an UNOWNED graph whenever the
+            # process died in the gap — no live peer could attribute it, so a
+            # scope=None sweep could DETACH it and a journal rebuild diverged
+            # from live (live != rebuild). Journal-first makes an unjournaled
+            # graph impossible by construction; a journaled-but-never-created
+            # name is harmless (the sweep's GRAPH.DELETE on an absent graph is
+            # the is_missing_graph_error success family). No rollback removes
+            # the line — it is the ownership tombstone that guarantees cleanup.
+            # No-op outside test sessions (journal env absent).
+            from tortoise.projection import journal_mint_write_ahead
+            journal_mint_write_ahead(graph_name)
             org_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted org_{name} graph IMMEDIATELY after
-            # the TeamMeta CREATE succeeds (and before _graph_create, whose
-            # failure rolls back only the registry Org node — the graph is
-            # already minted; journaling before it captures the orphan). The
-            # session-end sweep drops journaled names, so org_* graphs no
-            # longer accumulate on the docker. No-op outside test sessions
-            # (journal env absent).
-            from tortoise.projection import _journal_append_product
-            try:
-                _journal_append_product(graph_name)
-            except Exception:
-                # #3214 (review P2): the append raising means the org graph
-                # created immediately above cannot be recorded as this
-                # session's — no sweep can attribute it, so the raise must
-                # not itself leave an UNOWNED graph behind. Drop it (the
-                # same select_graph(...).delete() rollback the hosted mint
-                # paths use) before re-raising; the outer handler below rolls
-                # the registry Org node back. Best-effort: if the drop fails
-                # too (the backend fault that broke the append), the graph
-                # survives and is named in the WARNING. The general fix —
-                # journal BEFORE the CREATE at every mint site — is #3390.
-                try:
-                    org_graph.delete()
-                except Exception as _drop_err:  # noqa: BLE001, RUF100
-                    _logger.warning(
-                        "unjournalable team graph %s could not be dropped "
-                        "after the journal append failed — it is UNOWNED "
-                        "and must be removed manually: %r",
-                        graph_name, _drop_err)
-                raise
             # Graph node (org→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
             # #1748: the owner Membership for the session user — INSIDE the

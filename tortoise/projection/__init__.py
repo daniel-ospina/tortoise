@@ -1482,20 +1482,17 @@ def _journal_append_product(graph_name: str) -> None:
         cached and BEFORE ``_ensure_registry_indexes`` writes, and
         ``select_graph`` is client-side (no server call) — a raise there
         mints nothing and leaves no half-initialized registry behind;
-      * the org-mint append (``org_create``) runs AFTER the org graph's
-        TeamMeta CREATE, and its failure path DROPS that graph (best-effort —
-        if the drop fails too the graph survives and is WARNING-logged)
-        before re-raising; ``org_create``'s own handler rolls the registry
-        Org node back.
-    The other call sites are MIXED, which is why this is a per-caller
-    contract and not a property of the function: some hosted mint lanes drop
-    the graph on failure (``provision_tenant``, ``register_user``'s provision
-    lane) and some do not (``register_user``'s first lane,
-    ``_eager_provision_org_graph``) — those propagate the raise with the
-    graph left in place. The projection redirect / from_uri seams append
-    BEFORE the projection (and so the graph) is materialized, so a raise
-    there mints nothing. The ordering behind all of them (CREATE before the
-    ownership line) is the real fix and is tracked in #3390.
+      * the org-mint append (``org_create``) runs BEFORE the org graph's
+        TeamMeta CREATE (the write-ahead seam, #3390), so a raise mints
+        nothing — there is no unowned graph left to drop; ``org_create``'s
+        own handler still rolls the registry Org node back.
+    Every product mint site now journals through the write-ahead seam
+    (``journal_mint_write_ahead``, #3390), so the append precedes the CREATE
+    at all of them and a raise mints nothing to own. The hosted lanes' outer
+    rollback handlers still drop ``graph_name`` best-effort (a no-op on a
+    graph that was never created), and the projection redirect / from_uri
+    seams appended BEFORE materialization already. The ordering is now a
+    property of the seam rather than a per-caller contract.
 
     The two no-op gates above (absent path, not a test session) are
     unchanged, so production mints never reach the raise."""
@@ -1524,6 +1521,67 @@ def _journal_append_product(graph_name: str) -> None:
             f"not be recorded; a caller that already created the graph "
             f"must drop it (see #3390 for the write-ahead fix)."
         ) from e
+
+
+def journal_mint_write_ahead(graph_name: str) -> None:
+    """#3390: WRITE-AHEAD mint journaling — journal the INTENDED name BEFORE
+    the graph is materialized.
+
+    Every product mint site used to materialize the graph and journal its
+    ownership *afterwards*::
+
+        graph.query(_init_q)              # effect
+        _journal_append_product(name)     # ownership record
+
+    A kill in that gap left a graph the session's journal did not own — an
+    ORPHAN. The journal is the ownership record the journal-driven own/stale
+    sweep (``_sweep_drop``) reads, so an orphan leaks — no journal-driven sweep
+    can see it (``wipe_server`` is fail-closed to the ``test_``/``tortoise_test``
+    prefixes and never touches the ``org_*``/``team_*`` product namespace) — makes the owned-set a rebuild
+    produces diverge from live (live != rebuild), and is reclaimable only by
+    the opt-in ``_sweep_team_strays`` pass. This seam reverses the order: the
+    ownership line is journaled FIRST, so at the sites that adopt it the CREATE
+    cannot run before the line — including the two
+    ``_make_sdk(namespace=org_id)._get_proj()`` lanes, which journal before the
+    projection is constructed (``Projection.__init__`` runs ``_ensure_indexes()``,
+    a query that MATERIALIZES the graph).
+
+    The fail-closed half is ``_journal_append_product``'s raising variant
+    (#3214/#3379, landed on main): a journal WRITE failure propagates instead
+    of being swallowed at DEBUG. Paired with the order this seam supplies, a
+    raise means the CREATE never runs, so the fail-closed property comes from
+    the two together rather than from each caller dropping its own graph
+    after the fact.
+
+    The residual window is the harmless inverse — journaled-but-never-created:
+    the sweep's DETACH+DELETE of an absent graph succeeds (or logs and
+    continues, ``_drop_one_graph``), and the journal file is removed only when
+    every name dropped, so replay/rebuild converges. It is idempotent: a
+    duplicate line is set-equivalent for the sweep's owned-set delta and the
+    peer-protection read (``_live_peer_session_graphs``); a never-materialized
+    line only ADDS a name to that protected set, which can spare a graph from a
+    global sweep — it can never cause a delete.
+
+    Rollback handlers must NOT compensate by removing the line: the journaled
+    name is the ownership tombstone that lets the sweep clean up a graph whose
+    create partially landed — removing it would re-open the orphan window this
+    seam closes. Known residual (follow-up to #3390): the session's own sweep
+    (``_sweep_drop``) carries no live-peer skip (unlike ``wipe_server``'s #3074
+    guard), so a name whose create FAILED — or was never reached — here can be
+    dropped at session end while a concurrent session's same-named graph is
+    live; a pair of *successful* same-name mints already had that exposure, but
+    write-ahead adds the never-created case. A second residual: a namespaced SDK
+    whose namespace equals the org name (``TortoiseSDK(namespace=X)
+    .org_create(X)``) has its target ``org_X`` materialized by
+    ``self._get_proj()``'s ``_ensure_indexes`` before this seam at the SDK
+    org-mint site — journaling earlier would over-own an EXISTING org on the
+    duplicate-name early-return path, so the order is left as-is; no product
+    caller uses that shape today.
+
+    No-op outside a test session (``_journal_append_product`` is env- and
+    process-flag gated), exactly as the post-create call it replaces.
+    """
+    _journal_append_product(graph_name)
 
 
 # ── Mixins ────────────────────────────────────────────────────────────────
