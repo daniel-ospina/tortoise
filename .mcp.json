@@ -55,7 +55,7 @@
       "cost": "one npx process"
     },
     "tortoise": {
-      "_comment": "HTTP transport - points at the HOSTED Tortoise MCP endpoint by default, so no local daemon is required; the DB target is resolved SERVER-SIDE by the hosted API (FALKORDB_CLOUD_URI). Self-host users point the url at their own daemon instead (http://localhost:8000/mcp via docker compose - see docs/quickstart-selfhosted.md and the onboarding skill section 3a delta). Auth is env-indirect - no key is ever committed. The old stdio command+env pattern (python3 -m tortoise.mcp_server with TORTOISE_DB_URI in env) was replaced in feat/338 (commit 6ea920f). See how-to-use-tortoise skill DB URI Reality for full env precedence on the self-hosted/stdio path (its TORTOISE_DB_URI rules describe that path, not this hosted default).",
+      "_comment": "HTTP transport - points at the HOSTED Tortoise MCP endpoint by default, so no local daemon is required; the DB target is resolved SERVER-SIDE by the hosted API (FALKORDB_CLOUD_URI). Self-host users point the url at their own daemon instead (http://localhost:8000/mcp via docker compose - see docs/quickstart-selfhosted.md and the onboarding instructions section 3a delta). Auth is env-indirect - no key is ever committed. The old stdio command+env pattern (python3 -m tortoise.mcp_server with TORTOISE_DB_URI in env) was replaced in feat/338 (commit 6ea920f). See how-to-use-tortoise skill DB URI Reality for full env precedence on the self-hosted/stdio path (its TORTOISE_DB_URI rules describe that path, not this hosted default).",
       "type": "http",
       "url": "https://api.premiselabs.co/mcp/",
       "headers": {

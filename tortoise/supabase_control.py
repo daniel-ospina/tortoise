@@ -1067,6 +1067,33 @@ def revoke_api_key(cp, key_id: str, now: str | None = None) -> None:
         json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},  # noqa: UP017
     )
 
+
+def claim_api_key_revocation(cp, key_id: str, now: str | None = None) -> bool:
+    """#4355: conditionally revoke a LIVE api_keys row and report whether THIS
+    call claimed it.
+
+    ``UPDATE api_keys SET revoked_at = :now WHERE id = :id AND revoked_at IS
+    NULL`` with ``Prefer: return=representation`` (see ``ControlPlane.query``:
+    a PATCH with a ``select`` returns the UPDATED rows, ``[]`` when the WHERE
+    matched nothing). Returns True only when the row was live at the write —
+    the single-statement claim the rotate primitive uses to admit exactly one
+    concurrent rotation of a row.
+
+    Distinct from :func:`revoke_api_key` on purpose: that one is the
+    IDEMPOTENT revoke (an already-revoked row re-answers ``already: true``),
+    whereas a rotate must be able to tell "I released this slot" from "someone
+    else already did", so the loser can compensate and refuse. Never raises on
+    a lost claim (only on a real transport failure, via the seam).
+    """
+    updated = cp.query(
+        "api_keys",
+        select=["id"],
+        method="PATCH",
+        filters=[("id", "eq", key_id), ("revoked_at", "is", None)],
+        json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},  # noqa: UP017
+    )
+    return bool(updated)
+
 def set_api_key_enabled(cp, key_id: str, enabled: bool) -> None:
     """#1148: enable/disable an API key (per-key toggle). Disabled keys stop
     authenticating (resolve_api_key rejects enabled=false) but stay listed —
@@ -2383,11 +2410,17 @@ def org_api_keys(cp, org_id: str,
 
 def api_key_by_id(cp, key_id: str) -> dict | None:
     """One api_keys row by id (revoke/shrink lookup — org-scoping +
-    already-revoked + current scopes for the C3 shrink subset check)."""
+    already-revoked + current scopes for the C3 shrink subset check).
+
+    #4355: ``expires_at`` rides the select so the replacement-aware rotate can
+    inherit the displaced row's expiry verbatim when the rotate body omits one
+    (a body-omitted expiry must never WIDEN the replacement to a Never key).
+    """
     rows = cp.query(
         "api_keys",
         select=["org_id", "revoked_at", "created_via", "enabled", "name",
-                "scopes", "graph_id", "delegation_depth", "created_by_key_id"],
+                "scopes", "graph_id", "delegation_depth", "created_by_key_id",
+                "expires_at"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None
@@ -2999,6 +3032,34 @@ def org_id_for_stripe_customer(cp, customer_id: str) -> str | None:
         "organizations", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
     )
     return rows[0]["id"] if rows else None
+
+
+def org_billing_state(cp, org_id: str) -> dict:
+    """Billing-identity columns for one org (checkout guard + portal read).
+
+    The FORWARD twin of :func:`org_id_for_stripe_customer` (the reverse
+    webhook lookup). Supabase mode only: the registry lane keeps its
+    ``Team``-node read inline in ``hosted_api`` (selfhost). ``{}`` when the
+    org row is absent.
+
+    ``stripe_customer_id`` is a 0006 base column; ``subscription_status`` /
+    ``customer_email`` are the 0012 additive tier, read through the #1096
+    fail-soft ladder so a pre-0012 schema degrades THESE READS to None instead
+    of failing the portal. (The checkout WRITE stays fail-closed: on a first
+    bind ``update_org_billing`` still PATCHes 0012 columns, so a pre-0012
+    deployment cannot complete a checkout — deploy drift, not a normal path.)
+
+    Used by the two billing routes that must agree on WHERE the
+    ``stripe_customer_id`` mirror lives (#4640): the checkout sync-persist and
+    the portal read. A registry-graph read here would miss the authoritative
+    row the webhook wrote post-#669.
+    """
+    row = _orgs_row_fail_soft(
+        cp, org_id,
+        select=["stripe_customer_id", "subscription_status", "customer_email"],
+        additive_tiers=[_ORG_ADDITIVE_BILLING_TIER],
+    )
+    return row or {}
 
 
 def update_org_billing(cp, org_id: str, updates: dict) -> None:

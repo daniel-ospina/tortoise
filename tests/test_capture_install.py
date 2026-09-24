@@ -3230,7 +3230,9 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # makes the next bump a deliberate edit of this table.  A literal at each
 # install assertion does neither: it goes stale silently, which is exactly how
 # #4314 left two red assertions behind (#4545).
-_EXPECTED_INSTALL_CONTRACT = {"claude": 5, "codex": 2, "cursor": 2}
+# claude 5→6 is the #3615 consent gate merged over main's 5 (the hooks changed
+# behaviour again, so an already-installed copy must read as stale).
+_EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
