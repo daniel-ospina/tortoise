@@ -1937,7 +1937,8 @@ def test_drift_gate_cannot_skip_the_test_matrix():
 
 
 def test_required_gate_excludes_the_long_legs():
-    """The required check's `needs` IS the merge-path critical path.
+    """The required check's transitive `needs:` closure IS the merge-path
+    critical path (a job's `if:` is evaluated only AFTER its `needs` complete).
 
     This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
     (strict up-to-date protection + `gh pr merge --auto --merge`, see
@@ -1946,10 +1947,16 @@ def test_required_gate_excludes_the_long_legs():
     the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
     ~30m on a green run, against a ~20m main-merge cadence) the head went
     BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
-    must NOT depend on the >15m legs, and those legs must still EXIST — they
-    move out of the gate, they are not deleted: they keep running pre-merge
-    (advisory) and post-merge on main. A future edit that re-adds one silently
-    restores the latency this change removes.
+    must NOT depend on the >15m legs — directly OR transitively — and those legs
+    must still EXIST: they move out of the gate, they are not deleted, and they
+    keep running pre-merge (advisory) and post-merge on main.
+
+    The TRANSITIVE half is load-bearing, not pedantry: an earlier version of
+    this change left the push-only `canary-streak` in `needs:`, and because
+    `canary-streak` `needs: test`, the *skipped* job still held the aggregate
+    for the whole ~30m `test` leg on every PR (run 35960027173: the gate was
+    not scheduled while `test (a)` ran, though every short leg had completed).
+    A direct-`needs` assertion cannot see that shape.
 
     Keeping them running on the PR lane (rather than skipping them there) is
     deliberate and belongs to the same contract: the `--admin` rail requires
@@ -1959,15 +1966,30 @@ def test_required_gate_excludes_the_long_legs():
     refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
     """
     jobs = _load_python_ci()["jobs"]
-    needs = set(jobs["python-ci-gate"].get("needs") or [])
+
+    def _needs(name: str) -> list[str]:
+        n = jobs[name].get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
+
+    direct = list(_needs("python-ci-gate"))
+    closure, frontier = set(direct), list(direct)
+    while frontier:
+        for parent in _needs(frontier.pop()):
+            if parent not in closure:
+                closure.add(parent)
+                frontier.append(parent)
+
     for leg in ("test", "test-slow", "test-carve-out"):
         assert leg in jobs, (
             f"{leg} must still RUN — the latency fix removes it from the "
             "required aggregate, it does not delete the leg")
-        assert leg not in needs, (
-            f"{leg} is a >15m leg; putting it back in `python-ci-gate.needs` "
-            "re-adds the ~30m merge-path latency this change removes")
-    assert "manifest-integrity" in needs, (
+        assert leg not in closure, (
+            f"{leg} is a >15m leg reachable from `python-ci-gate` through "
+            "`needs:` — directly or transitively — which re-adds the ~30m "
+            "merge-path latency this change removes. A skipped intermediate "
+            "job does NOT break the chain: its own `needs:` still hold the "
+            "aggregate (the `canary-streak` → `test` shape).")
+    assert "manifest-integrity" in closure, (
         "the required aggregate must still include the manifest drift gate, "
         "or a drift stops blocking merges (#2656)")
 

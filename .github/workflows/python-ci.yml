@@ -1398,12 +1398,13 @@ jobs:
           EOF
 
   # #1008 queue health: REQUIRED check (branch protection). Aggregates the
-  # path-filtered matrix so docs-only PRs (all legs skipped) still report a
-  # green check, while code PRs are fully gated. Fails iff any leg failed OR
-  # was cancelled (a runner-killed suite — e.g. test-slow hitting its 90m cap —
-  # must never pass silently). Job id is load-bearing: branch protection
-  # requires the exact check name `python-ci-gate` — do NOT rename or add a
-  # `name:` field.
+  # SHORT deterministic legs so docs-only PRs (those legs skipped) still report
+  # a green check. Fails iff any leg it needs failed OR was cancelled (a runner-
+  # killed suite must never pass silently). NOTE: it deliberately does NOT gate
+  # on the long legs (`test`, `test-slow`, `test-carve-out`) — see this job's own
+  # `needs:` comment for the merge-path rationale and the disclosure that goes
+  # with it. Job id is load-bearing: branch protection requires the exact check
+  # name `python-ci-gate` — do NOT rename or add a `name:` field.
   # Track B job (epic #902 A8, #1058): runs ONLY the @track_b tests
   # explicitly. MUST-PASS — both Track B sentinels (_TRACK_B_FULL,
   # SENTINEL_A9) have shipped; wired into python-ci-gate's needs. The suite
@@ -1962,8 +1963,8 @@ jobs:
   # auto-merge can fire before main has moved again.
   #
   # THE LONG LEGS ARE NOT DELETED — they still run, on BOTH lanes:
-  #   * pre-merge on every PR (advisory: visible on the PR, no longer holding
-  #     this required check red), and
+  #   * pre-merge on every PR whose diff selects them (advisory: visible on the
+  #     PR, no longer holding this required check red), and
   #   * post-merge on every push to main, exactly as today.
   # They are deliberately NOT made push-only (skipped on PRs), even though that
   # would also save their runner time, because the merge rail refuses it:
@@ -1984,12 +1985,19 @@ jobs:
   # full-suite-green head. The legs still run on main, so a regression is still
   # detected; the cost is revert-latency instead of block-at-merge.
   #
-  # `canary-streak` is push-only and is SKIPPED on PRs, so it adds no
-  # merge-path latency while keeping the push-lane aggregate attached to the
-  # post-merge canary.
+  # `canary-streak` is deliberately NOT in `needs:` either. It is push-only
+  # (`if: github.event_name == 'push'`) but it `needs: test`, and GitHub
+  # evaluates a job's `if:` only AFTER its `needs` complete — so a *skipped*
+  # `canary-streak` still holds this aggregate for the whole ~30m `test` leg on
+  # every PR, silently nullifying the change (verified: on run 35960027173 the
+  # gate was not even scheduled while `test (a)` ran, though every short leg had
+  # completed). It still runs on each push, alongside the long legs it depends
+  # on. The transitive-closure pin in
+  # tests/test_ci_selection.py::test_required_gate_excludes_the_long_legs keeps
+  # this from recurring.
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, canary-streak, surface-guard]
+    needs: [changes, manifest-integrity, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
