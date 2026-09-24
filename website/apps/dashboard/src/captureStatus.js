@@ -68,9 +68,9 @@ export function captureStatusLabelForHarness(state, harness) {
 // #3700: the per-row harness ATTRIBUTION — the disclosure that the harness a
 // row NAMES is the caller's own declaration, not something Tortoise verified.
 //
-// It answers "does this row render a harness-naming fact?", which is why it is
-// a DIFFERENT predicate from `captureClaimForHarness` (that one asks whether a
-// per-harness capability claim is allowed at all, hence its support gate):
+// It is a DIFFERENT predicate from `captureClaimForHarness` (that one asks
+// whether a per-harness capability claim is allowed at all, hence its support
+// gate):
 //   * a per-harness STATE key was observed (`active` / `waiting`) and the row
 //     renders a state word for it;
 //   * a per-harness FAILURE was recorded (`session_capture_last_error_<h>`),
@@ -79,8 +79,8 @@ export function captureStatusLabelForHarness(state, harness) {
 //     and no probe.
 // Both legs live under the SAME support gate as the render sites in main.jsx
 // (the pill AND the failure line), so the predicate cannot outlive the facts it
-// describes: an unsupported row renders the registry reason and nothing else,
-// and never acquires the disclosure.
+// describes: an unsupported row renders the registry reason and never acquires
+// the disclosure.
 // Returns `HARNESS_ATTRIBUTION` in exactly those cases and null otherwise.
 //
 // Call sites render it as a dim fragment beside the harness name, inside the
