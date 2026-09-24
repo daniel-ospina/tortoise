@@ -14,57 +14,38 @@ doc_status: live
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
 >
-> **Changelog v3.15 (2026-09-24, issue #5013 — D10: a document is a `:Source`):**
-> - §4.4: **rewritten.** A document is a **`:Source`, not a graph node**. The
->   `:Document` graph label is retired, `objectKind: document` is retired, and
->   **`content` leaves the graph** (raw bytes live in raw storage, reached
->   through the `:Source` — the two-store model, `#3919`/D30). **Liveness is a
->   READ** of the entities extracted from the document, never a stored field, so
->   **`doc_status` is retired** (`pav:status`). **This supersedes the former
->   "Document is an Object" model** in force from v3.0 through `PR #129`.
-> - §4.4 + §6: **two classification axes are RETAINED and kept separate.**
->   `sourceKind` = what kind of SOURCE (`document` was **already** a declared
->   pack `sourceTypes` value — `packs/dev/manifest.yaml` — while §4.4 called it an
->   Object subclass; **that contradiction is what D10 resolves**).
->   `documentKind` = what GENRE of document. Neither absorbs the other
->   (library practice separates *document type* from *genre*).
-> - §4.3: **`aboutDocument` is RETAINED — only its target label moves**
->   (`:Document` → `:Source`). **It is NOT collapsed into `aboutSource`.**
->   `aboutDocument` is in the snapshot-derivable set (`DERIVABLE_STRUCTURAL_RELS`,
->   `#2489`) and is therefore resurrected at the old point by `rebuild_all`
->   pass-2b, whereas `aboutSource` is **deliberately excluded** and never
->   resurrects — merging them would silently delete that rebuild guarantee.
->   **Its replay key moves `coalesce(title, name)` → `url` (Q5)**, because a
->   `:Source` resolves by `url`.
-> - §4.3: `Document` is removed as an **edge source** from
->   `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutSource` (a Source is raw
->   data; what its contents are *about* is carried by the Points/Events extracted
->   from it) and from `references` (now covered by the `Source` target). One
->   example that used `uses`→`:Document` is corrected to `:Object` — `uses` was
->   always declared `Event → Object`, and a `:Document` never carried `:Object`.
-> - §4.7: the **Document column is removed** from both matrices; its temporal
->   slots are the Source column's. The old † finding is retained as history and as
->   a **live precedent for `:Source`** (no Object-labelled write path reaches
->   either, so the supersession fold can never stamp one). **⚠️ Open question
->   T6:** a re-fetched source currently mutates in place (`updatedAt`,
->   `#5013`) with **no journal record** — separate from D10.
-> - §6: `document` is removed from the Object core-subclass list; the
->   `documentKind` vocabulary survives as the **genre axis** over
->   `sourceKind: document`. §12 (BIBO) reworded accordingly.
-> - **⚠️ Migration cost is ZERO today and cannot be deferred.** Production holds
->   **zero `:Document` nodes** and the commit lane has **never run**; the old
->   `:Document` replay key was `coalesce(title, name)` vs a `:Source`'s `url`, and
->   `#2489`'s own boundary is that *"rebuild does NOT repair pre-existing
->   graphs."* The `documents` quota resource (`#1726`) is **re-pointed at
->   `:Source`** — it is NOT retired (that would ungate `/v1/index/docs`) and NOT
->   folded into the node cap (that would silently start metering ~2,193 sources).
-> - §4.3/§4.7: the v3.12 changelog entries that stated the Object-inheritance
->   model are **marked superseded in place, not rewritten** — the reversal is
->   part of the record.
-> - **Precedence:** `ONTOLOGY.md` (canonical) > `#5013` (the D10 decision) >
+> **Changelog v3.15 (2026-09-24, issue #5013 — a document is a `:Source`; sources are versioned):**
+> - §4.4: **rewritten.** A document is a `:Source`, not an entity. The
+>   `:Document` label and `objectKind: document` are retired; **`content` leaves
+>   the graph**; **`doc_status` is retired** — liveness is a read of the entities
+>   extracted from the source, never a stored field. **Supersedes the "Document is
+>   an Object" model** in force from v3.0 through `PR #129`.
+> - §4.4 + §6: the two classification axes are **kept and kept separate** —
+>   `sourceKind` (what kind of source) and `documentKind` (what genre of
+>   document). Neither absorbs the other.
+> - §4.3: `aboutDocument` is **kept**; its target label moves to `:Source` and
+>   its replay key becomes `url`. It is **not** merged into `aboutSource` — the
+>   two differ in whether `rebuild_all` pass-2b resurrects them (`#2489`).
+>   `Document` is removed as an edge source from the other `about*` predicates,
+>   and one example that used `uses`→`:Document` is corrected to `:Object`
+>   (`uses` is declared `Event → Object`).
+> - §4.6: **source versioning stated.** Identity is `url`; `contentHash`
+>   identifies a **version**; raw content is **append-only**; **extraction is
+>   version-scoped**; `validFrom`/`validTo`/`expiredAt` become the version's
+>   window; **supersession is additive and deferred until the replacement
+>   exists**. `contentHash`'s role changes from an *idempotency anchor* to a
+>   **version anchor**.
+> - §4.7: the Document column is removed from both matrices; its temporal slots
+>   are the Source column's, which gains the version window.
+> - §6/§12: `document` is removed from the Object core-subclass list; the
+>   `documentKind` vocabulary is the **genre axis** over `sourceKind: document`.
+> - **Precedence:** `ONTOLOGY.md` (canonical) > `#5013` (the decision) >
 >   `docs/architecture/STORAGE-ARCHITECTURE.md` +
 >   `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (PR #5016) > the
 >   implementing issue.
+> - **Implementation status:** the code half is not landed — `#5026` (the label
+>   migration), `#5024` (the unjournalled version transition), `#5038` (the
+>   version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 > - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
@@ -132,8 +113,6 @@ doc_status: live
 >   **conceptual** (`objectKind: document`); Documents carry `:Document` and not
 >   `:Object`, so the Object-labelled supersession fold never reaches them and
 >   supersession is unreachable for a Document.
->   **⛔ SUPERSEDED by v3.15 (D10, #5013): a document is a `:Source`; the
->   Document column is retired and this entry is a historical record — see §4.4.**
 > - §4.7/§4.1/§12 (correction): `validTo` is the successor's `validFrom` **only
 >   when the successor carries one** — `supersede_point` falls back to the
 >   successor's `createdAt`, then `now` (monotone, never a gap), so exact
@@ -151,8 +130,6 @@ doc_status: live
 >   is declared, not built; implementation tracked separately).
 > - §4.4: Document declared to inherit the Object temporal fields conceptually
 >   (no duplicate rows; no `:Object` label — see §4.7 †).
->   **⛔ SUPERSEDED by v3.15 (D10, #5013): a document is a `:Source`, not an
->   Object subclass, and `objectKind: document` is retired — see §4.4.**
 > - §4.5: `capturedAt` moved from planned(❌) to the declared transaction-time
 >   start (⚠️ — written by the hosted capture/commit + session-index paths, not
 >   yet on every Event write path); cross-references §4.7.
@@ -297,7 +274,7 @@ Five core types.
 | 4 | **Event** | `prov:Activity` (instantiated) / `schema:Event` | Temporal occurrence — the verb. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object) | What happened |
 | 5 | **Source** | `prov:Entity` (provenance) / `pav:Source` | Provenance anchor — where content was extracted from | Where it came from |
 
-**Core subclass model (§6):** Object has core subclasses (Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9). **⛔ `document` is NOT an Object subclass (D10, v3.15)** — a document is a `:Source` (§4.4); the source-kind axis is `sourceKind`, and `documentKind` is the genre axis over `sourceKind: document` (§5).
+**Core subclass model (§6):** Object has core subclasses (Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9). A **document is not an Object subclass** — it is a `:Source` (§4.4); a source's kind axis is `sourceKind` and `documentKind` is its genre.
 
 ---
 
@@ -307,7 +284,7 @@ Each layer answers a different question. All four are live mechanisms.
 
 | Layer | Question | Entity | How it works |
 |-------|----------|--------|--------------|
-| **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents** — D10, §4.4) | Nouns. Standing structural relations (owns, memberOf, hasPart) via plain edges. |
+| **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents**) | Nouns. Standing structural relations (owns, memberOf, hasPart) via plain edges. |
 | **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the reconstruction source for `Object.status` (§11), status is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved). |
@@ -355,7 +332,7 @@ Each layer answers a different question. All four are live mechanisms.
 
 > **Supersession / invalidation semantics (the shared `CORRECTS` edge):** `CORRECTS` is the structural replacement edge — both writes below create it, and only `status='superseded'` separates them (§4.7). `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy** (#2421). `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 >
-> **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects MERGE by `name`, **Sources and (D10, v3.15) `:Document`-retargeted `aboutDocument` edges by `url`**, never `target.id`). **⚠️ `aboutDocument`'s replay key moved from `coalesce(title, name)` to `url` under D10 (Q5, #5013)** — a `:Source` resolves by `url`, so the resolver must be updated in the same change as the label retarget; a key mismatch silently mis-points the rebuilt edge. Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
+> **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects MERGE by `name`, **Sources and `aboutDocument` edges by `url`**, never `target.id`). **⚠️ `aboutDocument`'s replay key is `url`** — the same key a `:Source` resolves by, so the label and the key must always change together: a retargeted label with a stale key resolves to **nothing** and **silently mis-points** the rebuilt edge. A `:Source` resolves by `url`, so the resolver must be updated in the same change as the label retarget; a key mismatch silently mis-points the rebuilt edge. Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
 >
 > **Restatement-vs-correction policy (#2421):** two supersede cases look alike but demand opposite edge handling, so edge disposition is decided **per edge at write time** (never silently bulk-transferred):
 > - **Case 1 — restatement:** the new point says the same thing more precisely (better source, fixed typo, merged duplicate). Every connection still applies; edges and belief transfer — belief-preservation is asserted (eval-spec P6.1/P6.2).
@@ -384,11 +361,11 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `aboutSubject` | Point/Event → Subject | unidirectional | many→many | `schema:about` (typed) | What Subject this describes. **A document does not carry this edge (D10, v3.15)** — a document is a `:Source`; what its *contents* are about is carried by the Points/Events extracted from it |
-| `aboutObject` | Point/Event/**Session** → Object | unidirectional | many→many | `schema:about` (typed) | What Object this describes. **A document does not carry this edge (D10, v3.15)** — see the row above |
-| `aboutEvent` | Point → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events. **A document does not carry this edge (D10, v3.15)** |
+| `aboutSubject` | Point/Event → Subject | unidirectional | many→many | `schema:about` (typed) | What Subject this describes. A source does not carry this edge — what a source's *contents* are about is carried by the nodes extracted from it |
+| `aboutObject` | Point/Event/**Session** → Object | unidirectional | many→many | `schema:about` (typed) | What Object this describes. A source does not carry this edge — see the row above |
+| `aboutEvent` | Point → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events. A source does not carry this edge |
 | `aboutPoint` | Event → Point | unidirectional | many→many | `schema:about` (typed) | What Point this Event describes. Event-only edge |
-| `aboutDocument` | Event → **Source** | unidirectional | many→many | `schema:about` (typed) | **⭐ The type is RETAINED under D10 (Q1, v3.15) — only its TARGET LABEL moves (`:Document` → `:Source`).** What document this Event is about. **⚠️ Do NOT collapse it into `aboutSource`:** `aboutDocument` is in the snapshot-derivable set (`DERIVABLE_STRUCTURAL_RELS`) and is therefore rebuilt at the old point by `rebuild_all` pass-2b, whereas `aboutSource` is deliberately excluded and never resurrects — merging them would silently delete that rebuild guarantee (see the #2489 note below) |
+| `aboutDocument` | Event → **Source** | unidirectional | many→many | `schema:about` (typed) | What document this Event is about. **⚠️ It is a distinct predicate from `aboutSource` and must not be merged with it:** `aboutDocument` is in the snapshot-derivable set (`DERIVABLE_STRUCTURAL_RELS`) and is therefore **rebuilt at the old point** by `rebuild_all` pass-2b, whereas `aboutSource` is deliberately excluded and never resurrects — merging them would silently delete that rebuild guarantee (see the #2489 note below) |
 | `aboutSource` | Point/Event → Source | unidirectional | many→many | `schema:about` (typed) | What Source this describes (e.g., an evaluation of a source). Creatable via `create_edge` (#391); may coexist with `extractedFrom` when the claim's text was also retrieved from that source. **⚠️ NOT snapshot-derivable by design — it gets no replay descriptor** |
 | `aboutAction` | Point → Point (legacy) | unidirectional | many→many | `schema:about` (typed) | Legacy predicate retained for pre-v3.0 Action edges (Action entity dissolved in v3.0). No automatic producer — creatable only via explicit `create_edge` (#391); endpoints are whatever the resolver finds |
 | `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
@@ -409,7 +386,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `references` | Source → Event/Object/Source | unidirectional | 1→many | — | The source links to / references this entity — target may be an Event, Object, **or another Source** (producer extension in `link_source_to_entity`, #909 §4.3 #8 — previously validated only Document/Event/Object). **A document is now itself a `:Source` (D10, v3.15), so it is covered by the Source target rather than named separately.** Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205); external artifacts referenced in a captured conversation become external Source nodes that the session Source `references` (referential chain, #909). |
+| `references` | Source → Event/Object/Source | unidirectional | 1→many | — | The source links to / references this entity — target may be an Event, an Object, **or another Source** (producer extension in `link_source_to_entity`, #909 §4.3 #8). A document is itself a `:Source`, so it is covered by the Source target. Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205); external artifacts referenced in a captured conversation become external Source nodes that the session Source `references` (referential chain, #909). |
 
 `(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary, e.g. `github_issue`, `github_pr`, `linear_card`, `linear_cycle`, `slack_message`, `document`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
 
@@ -512,7 +489,7 @@ Mitigation edge: `mitigated_by` — Point → Point (operator → mitigation Poi
 > The strength is NOT fused into the mitigation point's own Beta prior
 > (#2199 decision 3).
 
-About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`, `aboutSource` (Point/Event → Source; **`aboutDocument` retargets to `:Source` under D10 — see §4.3**), `aboutAction` (legacy).
+About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`, `aboutSource` (Point/Event → Source — `aboutDocument` targets `:Source`), `aboutAction` (legacy).
 
 ---
 
@@ -581,34 +558,21 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 
 > **Object registration durability (#2194)** — SDK-created Objects (`create_entity("object")`, the capture/entity write path) journal an `ObjectRegistered` event on their FIRST canonical registration **when the SDK is built with an `event_log_path`** (probe-gated on the deterministic `obj-<sha26(name)>` id + name — a canonical re-mention after the fix never double-journals; a probe failure fails open to a replay-safe duplicate line, and an EventAPI `add_object` mention under a non-canonical ulid followed by an SDK create of the same name double-registers by design), so capture-created Objects and their `ObjectSuperseded` folds survive `rebuild_all` (the JSONL event stream is the rebuild source). **Subjects ride the same probe-gated design since #2295 (see the §4.2 note).** Byte-identity is **node-property scope**: `authoredBy`/`ownedBy`/`managedBy` ride the mirror but replay wires node properties only — responsibility edges are not durable for Object replay (EventAPI-parity, §3.5 edges). **Residual non-durable classes** (they apply without journaling, or were never registered — dropped by rebuild without a warning unless a fold references them): pre-#2194 journals (no backfill), unjournaled/legacy raw producers and journal-less SDK instances sharing the graph, and deleted Objects — `_delete_entity` leaves no tombstone, so a deleted Object **resurrects** on the next rebuild and a delete→recreate's replay first-wins the earlier incarnation's `createdAt`/fold state over the live one (#2296 scope hook: the durability write-surface invariant must cover the delete side of the lifecycle). EventAPI `add_object` remains a separate unconditional producer. **Reserved-name narrowing**: `point`/`payload` props passed to an SDK Object create are dropped (unconditional, both lanes — Event-precedent parity, #2061); they are `_emit_event`-reserved kwargs and must never reach the journal mirror or live node. **createdAt synthesis**: first-registration Object creates synthesize `createdAt` pre-apply when the event carries none OR an explicit `None` (the is-None gate — #2309 review hardening, mirrored for Subjects in #2295) so live == journal == replay; re-mentions and journal-less SDKs keep the projection's `coalesce($now)` behavior.
 
-### §4.4 Document — a SOURCE, not a graph node
+### §4.4 Document — a source, not an entity
 
-> **A document is a `:Source`, not a graph node** (owner, 2026-09-24 — **D10**; consistent with the two-store ruling `#3919`/D30, tracked as `#5013`). A document is a file of raw data: it lives **outside the graph**, referenced by a `:Source`, and **the entities/claims/events extracted from it carry the epistemic weight**. **There is no `:Document` graph label.** The `:Source` node is the provenance anchor every extracted node points at via `extractedFrom`; the raw bytes live in raw storage, reached through it.
->
-> **⚠️ This SUPERSEDES the former "Document is an Object" model** (`objectKind: document`, in force from v3.0 through `PR #129`, merged 2026-08-06). That model had one label and a *conceptual* Object inheritance; it is **retired here, not reworded**.
->
-> **Liveness is a READ, not a field.** *"Is this document still good?"* is answered by asking whether the entities extracted from it are high-confidence and live (not superseded, not under a `NAND`). **The document inherits its health from its contents** — so nothing is stored to keep in sync and nothing can drift from the graph it describes. **`doc_status` is RETIRED** (see the field table below).
->
-> **⭐ Two classification axes, BOTH retained — they answer different questions.** `sourceKind` is **what kind of SOURCE** it is (`document`, `conversation`, `github_issue`, `agentSession`) and is the **pack-declared** vocabulary (§5); `documentKind` is **what GENRE OF DOCUMENT** it is (research, planDoc, apiSpec, transcript…). Note that **`document` was ALREADY a declared pack `sourceTypes` value** (`packs/dev/manifest.yaml`) while this section declared it an Object subclass — that inconsistency is what D10 resolves. **Neither axis absorbs the other** (library practice separates *document type* from *genre*; `#909 §4.3 #6` registered `documentKind` independently).
->
-> **⚠️ The change is NOT free, and two recorded decisions bound it.** The `:Document` label is **written** (`_upsert_document`, `projection/entities.py:1527` → `MERGE (d:Document {id:$id})`), **read** (`ingest.py:188/266/307/412`; `memory_orchestrator.py` `docIndex`) and **quota-metered** (the `documents` resource, `quota.py:524`, `#1726` — **re-pointed at `:Source`, see §4.6 note**). **⭐ The migration is free TODAY only because production holds ZERO `:Document` nodes and the commit lane has never run — and it cannot be deferred past that lane's first run**: a `:Document` resolves by `coalesce(title, name)` while a `:Source` resolves by `url`, and `#2489`'s own boundary is that *"rebuild does NOT repair pre-existing graphs"*.
+A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, reached through the source; the entities, claims and events **extracted** from it carry the epistemic weight, and `extractedFrom` ties each extracted node to the source it was read from.
 
-| Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
-|-------|------|----------|-------------|------|---------|
-| ~~`objectKind`~~ | — | — | — | ⛔ | **RETIRED by D10** — a document is not an Object; the source-kind axis is `sourceKind` (§5) |
-| `documentKind` | string | ⚠️ | `bibo:Document` subclasses | ✅ | **GENRE, retained (Q2).** research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief + pack documentKinds. ⚠️ **A genre axis over the `sourceKind: document` class — it does NOT merge with `sourceKind`** |
-| `title` | string | — | `dc:title` | ✅ | Human-readable title |
-| `format` | string | — | `dc:format` | ⚠️ | Storage format (markdown, jsonl, yaml, cypher). **⚠️ Currently declared on `:Document` only; it is a `:Source` property under D10 and `_SOURCE_HANDLED` does not yet carry it** |
-| `content` | string | — | `schema:text` | ⛔ | **RETIRED by D10/D30 — raw text does NOT belong in the graph.** The document's bytes live in raw storage, referenced through the `:Source`. *(Was `"Raw document text"`.)* |
-| `topics` | list[str] | — | — | ✅ | Searchable topic labels (session/discussion index). FTS-indexed metadata — NOT Points, never EP-participating. **Already a `:Source` property (measured)** |
-| `summary` | string | — | — | ✅ | Story-arch summary (bullet "what was done" for captured sessions). Searchable via FTS. **Already a `:Source` property** |
-| `story_arc` | string | — | — | ❌ | Arc continuation of the captured session — `summary` = short ("what was done"), `story_arc` = the full arc continuation (registered #909 §4.3 #4; planned for the capture path, slice 5+) |
-| ~~`doc_status`~~ | — | — | — | ⛔ | **RETIRED by D10 — liveness is a READ, not a stored field.** *(Was: `pav:status`, "captured / extracted / draft".)* ⚠️ **Dropping it also removes one of only TWO unjournalled raw-`SET` writes in the system** (`ingest.py:262-266`; `hosted_api.py` commit path) |
-| `sessionId` | string | — | — | ✅ | Source session identifier (for `documentKind: transcript` captures) |
-| `eventId` | string | — | — | ✅ | Link to the producing Event's log record — 1-hop audit to the mechanism snapshot |
-| `sourcePath` | string | — | — | ✅ | Filesystem path to the original conversation file — agents can open/search it after finding the session |
-| `updatedAt` | ISO8601 | — | — | ✅ | **⚠️ NOT a new field — `:Source` already carries it** (`_SOURCE_HANDLED`, `projection/entities.py:281`; `_upsert_source` bumps it on a hash-differing ON MATCH). See **T6** in `#5013` — this in-place bump is **unjournalled** and is a separate finding |
-| `_searchText` | string | — | — | ✅ | FTS index text = title + summary + topics (coalesce-null sentinels) |
+**A source's fields and its versioning rules are in §4.6.** This section states only what is specific to a document.
+
+**`documentKind` — the genre axis.** When `sourceKind: document`, `documentKind` names the **genre**: research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief, plus pack documentKinds.
+
+**`documentKind` is not `sourceKind`.** `sourceKind` answers *what kind of source this is* (`document`, `conversation`, `github_issue`, `agentSession`); `documentKind` answers *what genre of document it is*. Different questions — **neither absorbs the other**.
+
+**Liveness is a read, not a field.** *"Is this source still good?"* is answered from the entities extracted from it — high confidence, not superseded, not under a `NAND`. **The source inherits its health from its contents**, so nothing is stored to keep in sync and nothing can drift from the graph it describes. There is no `doc_status`.
+
+**Currency is also a read, and it needs an anchor.** Whether the extracted entities are *about the current content* is decided by the **version recorded on the extraction link** against the source's current version (§4.6) — not by any stored flag.
+
+**`content` is not a graph property.** A document's bytes live in raw storage (D30, §2); the graph holds the entity that references them, never the text.
 
 ### §4.5 Event
 
@@ -634,12 +598,14 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `url` | string | ✅ | `dc:source` / `pav:retrievedFrom` | ✅ | Permalink back to original |
 | `sourceKind` | string | ✅ | — | ✅ | Extensible source TYPE vocabulary (github_issue, slack_message, linear_card, document...). Tier-form values (T0-T4) mirror to `credibilityTier` (dual-write, #398) |
 | `credibilityTier` | string | — | — | ✅ | T0-T4 credibility tier — the property the inheritance adapter reads (v3.2) |
-| `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | Idempotency anchor — skip re-extraction if unchanged |
+| `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | **Version anchor** — the digest of the content read. A differing hash on re-fetch is a **new version**, not an edit (see *Versioning* below) |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
-| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last modified (set ON MATCH by `_upsert_source`) |
-| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | Valid-time window — when the source content held in the world (declared §4.7, #3642; not yet written by `_upsert_source`) |
-| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of the Source stopped being current (declared §4.7, #3642) |
+| `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last version transition. Set **in place** on `ON MATCH` by `_upsert_source` — **unjournalled today** (`#5024`) |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The version's valid-time window** — when the content held in the world (declared §4.7, #3642; not yet written by `_upsert_source`) |
+| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
+| `documentKind` | string | — | `bibo:Document` subclasses | ✅ | **Genre**, when `sourceKind: document` — research, planDoc, apiSpec, transcript + pack documentKinds. Distinct from `sourceKind` (§4.4) |
+| `format` | string | — | `dc:format` | ⚠️ | Storage format (markdown, jsonl, yaml, cypher). Not yet in `_SOURCE_HANDLED` |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
 | `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
@@ -647,6 +613,14 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `reliability` | float 0..1 | — | — | ⚠️ | DERIVED query-time projection (mean of the modulated Beta prior) — documented cache, never authoritative (v3.2, #398) |
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
+
+**Versioning.** Identity is `url`; `contentHash` identifies a **version** of that identity. Raw content is **append-only**: a re-fetched source whose content differs is a **new version, never an edit**. A version change **closes the previous version's interval** (`validTo`, `expiredAt`) and **adds a supersession link** — it never overwrites. **Interval-closing is part of the write, not a later repair**: an unclosed `validTo` reads as *"still true"* indefinitely.
+
+**Extraction is version-scoped.** A derived node records the version it was read from, so *"are these entities current?"* is a comparison of the **recorded version** against the source's **current version** — a read, like liveness (§4.4), and unanswerable without the version on the link.
+
+**Stale is not wrong.** Entities extracted from an earlier version **were true of the content that was read**. Supersession is **deferred until the replacement exists**: the earlier version's entities are **marked stale and remain standing**, and are **superseded when re-inference produces their successors** (§4.7). Superseded entities are **superseded, never deleted** — the previous belief stays queryable alongside the new one.
+
+**Currency is a read, and `updatedAt` is not it.** No stored flag says *"this source is current"*; currency is computed from the version on the extraction link. `updatedAt` records the last version transition, and is a durability defect until it is journalled (`#5024`).
 
 ### §4.7 Temporal Model (canonical)
 
@@ -706,17 +680,7 @@ declared, not built (implementation is tracked separately):
 | txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † ~~Document's inheritance of the Object column is CONCEPTUAL only~~ — **the
-> Document column was RETIRED in v3.15 (D10, `#5013`): a document is a
-> `:Source`, and its temporal slots are the Source column's.** The historical
-> finding is preserved because it is a live **precedent for `:Source`**: because
-> no `:Object`-labelled write path reaches a Source either, the Object-labelled
-> supersession fold (`_fold_object_superseded` / `apply_supersessions`, which
-> `MATCH`es `(o:Object {id|name})`) **can never stamp a Source** — Source
-> supersession is **unreachable**, not merely unimplemented (`—`). Likewise
-> `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`. **⚠️ Open under
-> `#5013`: a source that is re-fetched and found changed currently mutates in
-> place (`updatedAt`) with no journal record — see T6.**
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`, and a Source gets `createdAt` only when its event carries one through `_persist_extra_props` (the SDK index path does not) — hence ⚠️. **⚠️ A re-fetched source whose content changed currently mutates in place (`updatedAt`) with no journal record (`#5024`).**
 
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths, with the legacy mining W-4 post-pass falling back to the wall clock when
@@ -728,20 +692,6 @@ declared, not built (implementation is tracked separately):
 > old window is the open start's consequence — never read contiguity as
 > unconditional. This matches the ⚠️ convention `capturedAt` follows; §4.1 marks
 > `validFrom` and `validTo` separately.
-
-> † **Document's inheritance of the Object column is CONCEPTUAL only**
-> (`objectKind: document`, §4.4) — Documents carry the `:Document` label and
-> **not** `:Object`, so Object-labelled write paths never reach them. The
-> supersession fold (`_fold_object_superseded` / `apply_supersessions`)
-> `MATCH`es `(o:Object {id|name})` and can **never** stamp a Document: Document
-> supersession is **unreachable**, not merely unimplemented (`—`).
-> `_upsert_document` writes no `validFrom`/`validTo`/`expiredAt`, and no
-> `createdAt` either — a Document gets `createdAt` only when its event carries
-> one through `_persist_extra_props` (the SDK index path does not) — hence ⚠️.
->
-> **⛔ SUPERSEDED by v3.15 (D10, #5013)** — the Document column is retired and
-> this note is retained as history only; see the † note above the matrix for the
-> `:Source`-equivalent finding.
 
 > ‡ **Point supersession discriminator.** `supersede_point` and
 > `invalidate_point` write the **same** four markers — `outdated=true`,
@@ -765,7 +715,7 @@ here: Event's transaction-time start is `capturedAt`.)
 | responsibility | authoredBy | — | edge (§3.5) | — | — |
 | ownership | — | — | edge (§3.5) | — | — |
 | management | — | — | edge (§3.5) | — | — |
-| format | — | — | — | format | **⚠️ `format` must move here (D10/Q3)** — `_SOURCE_HANDLED` does not yet carry it |
+| format | — | — | — | format | **⚠️ `format` belongs here** — `_SOURCE_HANDLED` does not yet carry it |
 | aboutEdges | ✅ | — | ✅ | ✅ | — |
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ✅ | — | ❌ | ✅ | ✅ |
@@ -846,10 +796,7 @@ occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted
 
 ### Document Kind Vocabulary — the GENRE axis (core)
 
-> **⚠️ v3.15 (D10, #5013):** this is an `documentKind` vocabulary — the **GENRE**
-> of a document, applied to a `:Source` whose `sourceKind` is `document`. It is
-> **not** an Object subclass vocabulary (that model is retired, §4.4/§6) and it is
-> **not** the same axis as `sourceKind`.
+> This is a **`documentKind`** vocabulary — the **GENRE** of a document, applied to a `:Source` whose `sourceKind` is `document`. It is **not** an Object subclass vocabulary, and it is **not** the same axis as `sourceKind`.
 
 ```
 research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc,
@@ -942,10 +889,10 @@ At query time, `expand_kind("Project")` returns `["Project", "dev:epic"]`. Queri
 | Parent | Core subclasses |
 |--------|-----------------|
 | Object | Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard |
-| ~~Document (⊂ Object)~~ | ⛔ **RETIRED by v3.15 (D10, #5013)** — a document is a `:Source`, not an Object subclass. **The vocabulary below survives as the GENRE axis (`documentKind`) over `sourceKind: document`** (Q2): research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief |
+| Document | **Not a subclass** — a document is a `:Source` (§4.4). Its vocabulary is the `documentKind` genre axis over `sourceKind: document`: research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief |
 | Subject | organization, team, role, legalPerson, naturalPerson |
 
-> ~~Document is the only Object subclass with its own metadata table (§4.4) — it inherits Object fields and adds documentKind vocabulary + capture fields.~~ **⛔ Superseded by v3.15 (D10, #5013):** §4.4 is now the **document-as-`:Source`** section, not an Object subclass table. Its surviving content is the **genre vocabulary (`documentKind`)** plus the capture fields, and the remaining fields it listed (`topics`, `summary`, `title`) are already `:Source` properties. **No Object subclass has its own metadata table** — they inherit Object fields verbatim.
+> No Object subclass has its own metadata table — they inherit Object fields verbatim. A document's fields are a source's fields, and they are in **§4.6**.
 
 ---
 
