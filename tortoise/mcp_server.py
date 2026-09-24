@@ -4366,8 +4366,8 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     writer reports as `edges_transferred`, and a differential test pins the two
     together there. It is NOT equal when BOTH of two conditions hold: `old`
     carries a direct IMPL/NAND self-loop of type `T`, AND no edge
-    `(new)-[:T]->(old)` of that SAME type already exists. Then the writer is the
-    one that over-counts: its out-pass repoints `(old)-[:T]->(old)` to
+    `(new)-[r:T]->(old)` of that SAME type already exists. Then the writer is the
+    one that over-counts: its out-pass repoints `(old)-[r:T]->(old)` to
     `(new)->(old)` and MERGEs that edge into existence — and the MERGE is typed
     by `rtype`, the self-loop's OWN type (`sdk.py`, `MERGE (new)-[nr:{rtype}]->(t)`) —
     and its in-pass then matches the freshly created edge and delete-onlys it,
