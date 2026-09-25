@@ -24,14 +24,15 @@ def _env(monkeypatch):
     monkeypatch.delenv("BILLING_FROM_EMAIL", raising=False)
     notify._skip_logged.clear()
     # #3631: billing reserves from email_notify's shared send budget — reset it
-    # so a prior test cannot leak a spent slot into this one.
+    # (and the skip-incident day guard) via monkeypatch so nothing leaks out.
     from tortoise import email_notify
     monkeypatch.delenv("RESEND_SEND_BUDGET_DAILY", raising=False)
     monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
-    email_notify._send_counts_day = 0
-    email_notify._send_counts_month = 0
-    email_notify._send_counts_day_period = ""
-    email_notify._send_counts_month_period = ""
+    monkeypatch.setattr(email_notify, "_send_counts_day", 0)
+    monkeypatch.setattr(email_notify, "_send_counts_month", 0)
+    monkeypatch.setattr(email_notify, "_send_counts_day_period", "")
+    monkeypatch.setattr(email_notify, "_send_counts_month_period", "")
+    monkeypatch.setattr(notify, "_incident_day", {})
     yield
 
 
@@ -286,16 +287,20 @@ def test_billing_email_skipped_when_shared_budget_exhausted(monkeypatch, caplog)
 
 def test_billing_budget_skip_files_a_deduped_incident(monkeypatch, caplog):
     """#3631: a budget-skipped billing leg is ops-visible on the same deduped
-    incident the provider-failure path uses — the webhook has already claimed
-    its idempotency marker, so the alert can never re-fire."""
+    incident the provider-failure path uses, and it is blocked BEFORE any
+    provider call — the webhook has already claimed its idempotency marker, so
+    the alert can never re-fire. Asserting no POST makes this revert-sensitive
+    (pre-fix the provider-failure path filed the incident instead)."""
     filed, _pushed = _install_alert_store(monkeypatch)
     monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "0")
+    posted: list[str] = []
     monkeypatch.setattr(
         notify.httpx, "post",
-        lambda url, **kw: (_ for _ in ()).throw(AssertionError("no send")))
+        lambda url, **kw: posted.append(url))
     with caplog.at_level(logging.WARNING):
         notify.notify_billing_event("billing_payment_failed", TEAM, DETAILS)
         notify.notify_billing_event("billing_payment_failed", TEAM, DETAILS)
+    assert notify.RESEND_URL not in posted  # blocked before any Resend call
     assert len(filed) == 1, f"expected one deduped incident, got {filed}"
     assert notify._BILLING_SEND_FAILED_KIND in filed[0]
 

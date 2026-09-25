@@ -41,7 +41,8 @@ alerts in 3h). The ALERT is also bounded to once per ``(org, rule)`` per
 STAGE per staging window in-process, so neither a read that raises nor one that
 returns a stale ``None`` (replica lag) can re-notify per evaluation (the stage
 distinction is what lets the stage-2 suspend alert still escalate a stage-1
-flag alert). The durable store
+flag alert). The claim is released when the engine observes the episode end (a
+clean window), so a genuinely NEW episode alerts again. The durable store
 remains authoritative for staging; the in-process map bounds ONE process, so
 the honest ceiling across replicas is ``N replicas × 1`` per window — a global
 cap needs shared state (Redis/DB) and is deliberately out of scope here.
@@ -491,10 +492,10 @@ class AbuseEngine:
 
     def __init__(self, store):
         self.store = store
-        # In-process alert dedup (#3631): key -> the instant the alert budget
-        # for that (org, rule) re-opens. Bounds ONE process; the durable store
-        # remains authoritative for staging and is the cross-replica gate.
-        self._last_notified: dict[tuple[str, str], datetime] = {}
+        # In-process alert dedup (#3631): (org, rule, stage) -> the instant the
+        # alert budget for that key re-opens. Bounds ONE process; the durable
+        # store remains authoritative for staging and is the cross-replica gate.
+        self._last_notified: dict[tuple[str, str, str], datetime] = {}
         self._notify_lock = threading.Lock()
 
     def _claim_notify(self, org_id: str, rule: str, stage: str,
@@ -519,6 +520,15 @@ class AbuseEngine:
                     k: exp for k, exp in self._last_notified.items()
                     if exp > now}
             return True
+
+    def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
+        """Re-arm the alert budget for a stage when its episode ENDS, so a
+        genuinely NEW episode alerts again. The claim is per-EPISODE, not a
+        wall-clock cooldown (#3631) — without this release, a burst that
+        recycles inside the previous episode's window would re-flag durably but
+        stay silent to ops."""
+        with self._notify_lock:
+            self._last_notified.pop((org_id, rule, stage), None)
 
     def point_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
@@ -575,6 +585,11 @@ class AbuseEngine:
                     self.store.flag_clear(org_id, rule, now=now)
             except Exception:
                 logger.debug("abuse flag_clear failed for %s/%s", org_id, rule)
+            # The episode is over (or was already clean): re-arm the alert
+            # budget so a NEW episode alerts again (#3631 — per-episode, not a
+            # wall-clock cooldown).
+            self._release_notify(org_id, rule, EVENT_FLAG)
+            self._release_notify(org_id, rule, EVENT_SUSPEND)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}

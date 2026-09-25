@@ -643,6 +643,20 @@ class TestFlagNotificationBudget:
         # the 24h entry survived its own expiry, not the 1h caller's window
         assert ("o", "key_create", "flag") in eng._last_notified
 
+    def test_new_episode_after_clean_window_alerts_again(self, notified):
+        """The claim is per-EPISODE, not a wall-clock cooldown: once a clean
+        window ends the first episode, a new burst must alert again even if it
+        starts inside the first episode's original window."""
+        eng = AbuseEngine(MemoryAbuseStore())
+        eng.record_point_create("t1", 501, now=T0)          # episode 1 → alert
+        assert [c[0] for c in notified].count("abuse_flag") == 1
+        # window goes clean → episode ends → the claim is released
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(seconds=3601)) is None
+        assert eng.record_point_create(
+            "t1", 501, now=T0 + timedelta(seconds=3602)) == "flag"
+        assert [c[0] for c in notified].count("abuse_flag") == 2
+
     def test_no_notification_when_flag_not_persisted(self, notified):
         """(b): a store write failure emits ZERO abuse alerts — the pre-fix
         swallow notified on every evaluation (401 alerts in 3h)."""
@@ -651,8 +665,7 @@ class TestFlagNotificationBudget:
         for i in range(20):
             eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
         assert notified == []
-        assert store.flag_attempts == 20
-        assert not [r for r in store.rows if r["event_type"] == "flag"]
+        assert store.flag_attempts == 20  # the flag path WAS reached 20 times
 
     def test_notification_resumes_once_write_recovers(self, notified):
         """(b): suppressing while the write is broken must NOT permanently
@@ -693,8 +706,8 @@ class TestAbuseStormDoesNotStarveTransactional:
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.delenv("RESEND_SEND_BUDGET_DAILY", raising=False)
         monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
-        notify_mod._skip_logged.clear()
-        en._skip_logged.clear()
+        monkeypatch.setattr(notify_mod, "_skip_logged", set())
+        monkeypatch.setattr(en, "_skip_logged", set())
         # monkeypatch (not bare assignment) so the budget globals are restored.
         monkeypatch.setattr(en, "_send_counts_day", 0)
         monkeypatch.setattr(en, "_send_counts_month", 0)

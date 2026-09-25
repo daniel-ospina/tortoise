@@ -32,6 +32,7 @@ from __future__ import annotations  # noqa: I001
 
 import logging
 import os
+from datetime import datetime, timezone
 
 import httpx
 from tortoise.telegram_push import send_message as telegram_send  # noqa: E402, RUF100
@@ -57,6 +58,13 @@ KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "bill
 _BILLING_SEND_FAILED_KIND = "BILLING_SEND_FAILED"
 
 _skip_logged: set[str] = set()
+
+# Budget-skip billing incidents are informational and the budget stays exhausted
+# for the rest of the UTC day: file at most one per (kind, org) per process per
+# day. AlertStore dedups the ISSUE but still pays an uncached GitHub read per
+# call, and this branch is reached on every Stripe billing event while the
+# budget is spent (#3631).
+_incident_day: dict[tuple[str, str], str] = {}
 
 
 def _env(name: str) -> str | None:
@@ -116,6 +124,16 @@ def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bo
         return False
 
 
+def _file_incident_once_a_day(kind: str, org_id: str, detail: dict) -> None:
+    """`file_incident` at most once per ``(kind, org_id)`` per UTC day."""
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # noqa: UP017
+    key = (kind, org_id)
+    if _incident_day.get(key) == day:
+        return
+    _incident_day[key] = day
+    file_incident(kind, org_id, detail)
+
+
 def _email_text(kind: str, org: dict, details: dict) -> str:
     tier = details.get("tier", org.get("tier", "?"))
     lines = [
@@ -172,50 +190,47 @@ def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> N
         # email, so it reserves from the SAME send budget (not a second one) —
         # an uncounted billing storm could otherwise starve invites/OTPs. The
         # import is function-level (email_notify imports file_incident from
-        # here, so a module-level import would cycle) and guarded: this
-        # function's never-raise contract is load-bearing on the Stripe
-        # webhook path, which has ALREADY claimed its event marker by the time
-        # it calls us.
+        # here, so a module-level import would cycle), and BOTH it and the
+        # reservation are guarded: this function's never-raise contract is
+        # load-bearing on the Stripe webhook, which has already claimed its
+        # event marker by the time it calls us.
+        reason: str | None = None
         try:
             from tortoise.email_notify import refund_send_slot, reserve_send_slot
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning(
-                "billing notify: send-budget guard unavailable (%s)",
-                redact_safe(e))
-        else:
             reason = reserve_send_slot()
-            if reason is not None:
-                logger.warning(
-                    "billing notify: resend SKIPPED — send budget exhausted (%s)",
-                    reason)
-                # The webhook has already consumed its idempotency marker, so a
-                # dropped billing alert cannot re-fire — surface it on the same
-                # deduped ops incident the provider-failure path uses.
+        except Exception as e:  # noqa: BLE001, RUF100
+            reason = f"send-budget guard unavailable ({redact_safe(e)})"
+        if reason is not None:
+            logger.warning("billing notify: resend SKIPPED — %s", reason)
+            # The webhook has consumed its idempotency marker, so a dropped
+            # billing alert cannot re-fire — surface it on the same deduped
+            # incident the provider-failure path uses (once per day, see
+            # _file_incident_once_a_day).
+            _file_incident_once_a_day(_BILLING_SEND_FAILED_KIND, "", {
+                "channel": "resend",
+                "event_kind": kind,
+                "org_id": org.get("org_id", "?"),
+                "reason": reason,
+            })
+        else:
+            try:
+                subject = f"Tortoise Billing — {kind}"
+                body = _email_text(kind, org, details).replace("\n", "<br>")
+                _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
+            except Exception as e:  # noqa: BLE001, RUF100
+                refund_send_slot()  # provider rejected/failed — free the slot
+                logger.warning("billing notify: resend failed (%s)", redact_safe(e))
+                # Ops incident (GH issue + Telegram) — a billing notification that
+                # never left the building was previously visible only in a log
+                # line. Platform subject ("") on purpose: ONE Resend account serves
+                # every team, so keying by team would file one issue per affected
+                # team for a single outage. The team is still in the detail.
                 file_incident(_BILLING_SEND_FAILED_KIND, "", {
                     "channel": "resend",
                     "event_kind": kind,
                     "org_id": org.get("org_id", "?"),
-                    "reason": f"budget exhausted ({reason})",
+                    "error": redact_safe(e),
                 })
-            else:
-                try:
-                    subject = f"Tortoise Billing — {kind}"
-                    body = _email_text(kind, org, details).replace("\n", "<br>")
-                    _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
-                except Exception as e:  # noqa: BLE001, RUF100
-                    refund_send_slot()  # provider rejected/failed — free the slot
-                    logger.warning("billing notify: resend failed (%s)", redact_safe(e))
-                    # Ops incident (GH issue + Telegram) — a billing notification that
-                    # never left the building was previously visible only in a log
-                    # line. Platform subject ("") on purpose: ONE Resend account serves
-                    # every team, so keying by team would file one issue per affected
-                    # team for a single outage. The team is still in the detail.
-                    file_incident(_BILLING_SEND_FAILED_KIND, "", {
-                        "channel": "resend",
-                        "event_kind": kind,
-                        "org_id": org.get("org_id", "?"),
-                        "error": redact_safe(e),
-                    })
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     chat_id = _env("TELEGRAM_CHAT_ID")
