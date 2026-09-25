@@ -32,6 +32,18 @@ self-heals on the next request).
 Everything here is best-effort on the request path: recording/evaluation
 failures are logged and swallowed — abuse telemetry must never break the
 write path. Kill-switch: ``TORTOISE_ABUSE_DISABLED=1``.
+
+Notification volume (#3631): an abuse alert is emitted ONLY when the flag was
+actually persisted — a store read/write failure REDUCES notification volume,
+never increases it (the 2026-09-14 storm was a swallowed ``flag_org`` write
+failure that notified on every evaluation, 401 alerts in 3h). Repeated
+evaluations of one episode are additionally deduped in-process per
+``(org, rule)`` per staging window, for the case where the DURABLE anchor read
+(``latest_flag_at``) raises: without it every blind evaluation re-notifies.
+The durable store is the cross-REPLICA gate; the in-process map only bounds
+ONE process, so the honest ceiling under a sustained read outage is
+``N replicas × 1`` per ``(org, rule)`` per window. Making that a hard global
+cap needs shared state (Redis/DB) — deliberately out of scope here.
 """
 from __future__ import annotations
 
@@ -474,6 +486,27 @@ class AbuseEngine:
 
     def __init__(self, store):
         self.store = store
+        # In-process notify dedup (#3631) — consulted only when the durable
+        # episode read RAISED (see _evaluate/_flag). Not a cross-replica cap.
+        self._last_notified: dict[tuple[str, str], datetime] = {}
+        self._notify_lock = threading.Lock()
+
+    def _claim_notify(self, org_id: str, rule: str, now: datetime,
+                      window_s: int) -> bool:
+        """True only if no notification for ``(org_id, rule)`` was emitted
+        within the last ``window_s`` seconds. Bounds a repeated evaluation of
+        one episode when the durable anchor is unreadable (#3631)."""
+        key = (org_id, rule)
+        with self._notify_lock:
+            last = self._last_notified.get(key)
+            if last is not None and (now - last).total_seconds() < window_s:
+                return False
+            self._last_notified[key] = now
+            if len(self._last_notified) > 10_000:
+                cutoff = now - timedelta(seconds=window_s)
+                self._last_notified = {
+                    k: t for k, t in self._last_notified.items() if t > cutoff}
+            return True
 
     def point_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
@@ -533,12 +566,14 @@ class AbuseEngine:
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
+        read_failed = False
         try:
             flagged_at = self.store.latest_flag_at(org_id, rule)
         except Exception:
             flagged_at = None
+            read_failed = True  # operating blind — dedup the re-flag notify
         if flagged_at is None:
-            return self._flag(org_id, rule, details, now)
+            return self._flag(org_id, rule, details, now, window_s, read_failed)
         flagged_at = _ensure_aware(flagged_at)
         age_s = (now - flagged_at).total_seconds()
         if age_s < window_s:
@@ -554,22 +589,37 @@ class AbuseEngine:
         except Exception:
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
-            return self._flag(org_id, rule, details, now)
+            return self._flag(org_id, rule, details, now, window_s,
+                              read_failed=False)
         try:
             self.store.suspend_org(org_id, details, now=now)
         except Exception:
             logger.debug("abuse suspend_team failed for %s", org_id)
             return "breach"
         mark_suspended(org_id)
-        self._notify("abuse_suspended", org_id, details)
+        # Stage-2 alert is one-per-window too: a sustained breach is
+        # re-evaluated on every request and would otherwise alert each time.
+        if self._claim_notify(org_id, rule, now, window_s):
+            self._notify("abuse_suspended", org_id, details)
         return "suspend"
 
-    def _flag(self, org_id: str, rule: str, details: dict,
-              now: datetime) -> str:
+    def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
+              window_s: int, read_failed: bool) -> str:
+        """Stage-1 flag. The notification is CONTINGENT on the flag having
+        been persisted (#3631 target b): a store write failure must reduce
+        alert volume, never increase it — the pre-fix swallow notified on
+        every evaluation, because a never-persisted flag also reads as None."""
         try:
             self.store.flag_org(org_id, rule, details, now=now)
         except Exception:
-            logger.debug("abuse flag_team failed for %s", org_id)
+            logger.warning(
+                "abuse: flag NOT persisted for %s/%s — suppressing the abuse "
+                "notification (a store failure must never amplify alerts, "
+                "#3631)", org_id, rule)
+            return "flag"
+        if read_failed and not self._claim_notify(org_id, rule, now, window_s):
+            # Durable anchor unreadable: one alert per window, not per request.
+            return "flag"
         self._notify("abuse_flag", org_id, details)
         return "flag"
 

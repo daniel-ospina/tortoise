@@ -14,11 +14,12 @@ Absent secret → channel skipped (logged once per process).
 
 Channel scope by kind (#3639, user decision 2026-09-16): **billing** events keep
 BOTH channels (the #310 decision above stands). **Abuse/security** events are
-TELEGRAM ONLY — the email leg was removed because abuse notifications bypass the
-Resend send budget (``email_notify.py`` documents that budget as invite-path
-only), so a flag storm consumed the entire transactional quota and starved
-user-facing email. There is deliberately no email fallback: a Telegram outage
-means a lost abuse alert.
+TELEGRAM ONLY — the email leg was removed because abuse notifications bypassed
+the shared Resend send budget, so a flag storm consumed the entire
+transactional quota and starved user-facing email. There is deliberately no
+email fallback: a Telegram outage means a lost abuse alert. The billing email
+leg now reserves from that SAME shared budget (``email_notify.reserve_send_slot``,
+#3631) instead of bypassing it — abuse is the only kind with no Resend leg.
 
 Sender identity (#1136): the Resend sender comes from RESEND_FROM_EMAIL — the
 single managed sender identity shared with the transactional invite sender
@@ -167,23 +168,36 @@ def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> N
     api_key = _env("RESEND_API_KEY")
     to = _env("BILLING_NOTIFY_TO")
     if not _skip_channel("resend", api_key) and not _skip_channel("resend-recipient", to):
-        try:
-            subject = f"Tortoise Billing — {kind}"
-            body = _email_text(kind, org, details).replace("\n", "<br>")
-            _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("billing notify: resend failed (%s)", redact_safe(e))
-            # Ops incident (GH issue + Telegram) — a billing notification that
-            # never left the building was previously visible only in a log
-            # line. Platform subject ("") on purpose: ONE Resend account serves
-            # every team, so keying by team would file one issue per affected
-            # team for a single outage. The team is still in the detail.
-            file_incident(_BILLING_SEND_FAILED_KIND, "", {
-                "channel": "resend",
-                "event_kind": kind,
-                "org_id": org.get("org_id", "?"),
-                "error": redact_safe(e),
-            })
+        # #3631: billing email shares the Resend account with transactional
+        # email, so it reserves from the SAME send budget (not a second one) —
+        # an uncounted billing storm could otherwise starve invites/OTPs. The
+        # module imports at call time: email_notify imports file_incident from
+        # here, so a module-level import would cycle.
+        from tortoise.email_notify import refund_send_slot, reserve_send_slot
+        reason = reserve_send_slot()
+        if reason is not None:
+            logger.warning(
+                "billing notify: resend SKIPPED — send budget exhausted (%s)",
+                reason)
+        else:
+            try:
+                subject = f"Tortoise Billing — {kind}"
+                body = _email_text(kind, org, details).replace("\n", "<br>")
+                _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
+            except Exception as e:  # noqa: BLE001, RUF100
+                refund_send_slot()  # provider rejected/failed — free the slot
+                logger.warning("billing notify: resend failed (%s)", redact_safe(e))
+                # Ops incident (GH issue + Telegram) — a billing notification that
+                # never left the building was previously visible only in a log
+                # line. Platform subject ("") on purpose: ONE Resend account serves
+                # every team, so keying by team would file one issue per affected
+                # team for a single outage. The team is still in the detail.
+                file_incident(_BILLING_SEND_FAILED_KIND, "", {
+                    "channel": "resend",
+                    "event_kind": kind,
+                    "org_id": org.get("org_id", "?"),
+                    "error": redact_safe(e),
+                })
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     chat_id = _env("TELEGRAM_CHAT_ID")
@@ -198,13 +212,13 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
     """Abuse notification — Telegram ONLY (#308, channel decision #3639).
 
     NEVER raises. The Resend leg was removed 2026-09-16 (#3639): abuse
-    notifications are not counted by the Resend send budget
-    (``email_notify.py``: "Scope: INVITE path only — billing/abuse
-    notifications share the Resend account but are not counted"), so a flag
-    storm burned the whole transactional quota — 401 ``abuse_flag`` emails in
-    3 hours drove two consecutive days to a reported 200% of the daily cap and
-    starved invites/OTPs. Telegram is the channel for this use case; email is
-    intentionally no longer sent, so a Telegram failure loses the alert.
+    notifications are not counted by the Resend send budget (``email_notify.py``
+    counts every send it takes — invite/OTP/onboarding + billing, #3631), so a
+    flag storm burned the whole transactional quota — 401 ``abuse_flag`` emails
+    in 3 hours drove two consecutive days to a reported 200% of the daily cap
+    and starved invites/OTPs. Telegram is the channel for this use case; email
+    is intentionally no longer sent, so abuse consumes no Resend slot at all
+    and a Telegram failure loses the alert.
 
     ``org`` is retained for the caller shape (``abuse.py`` passes org_id and
     email); the ``email`` key is no longer read. Callers in async contexts

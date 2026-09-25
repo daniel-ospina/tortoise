@@ -612,3 +612,38 @@ def test_onboarding_budget_exhausted_returns_skipped(monkeypatch, caplog):
     assert len(calls) == 1  # second send skipped at the daily cap
     assert any("SKIPPED" in r.message and "budget" in r.message
                for r in caplog.records)
+
+
+def test_billing_send_consumes_the_shared_budget(monkeypatch):
+    """#3631: a billing email is counted on the SAME budget as invites (not a
+    second one) — with a daily cap of 1, the invite that follows is stopped."""
+    monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "1")
+    monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
+    from tortoise import notify as notify_mod
+    notify_mod._skip_logged.clear()
+
+    billing_calls = []
+
+    def fake_billing_post(url, **kwargs):
+        billing_calls.append(url)
+
+        class _R:
+            def raise_for_status(self):
+                pass
+        return _R()
+
+    monkeypatch.setattr(notify_mod.httpx, "post", fake_billing_post)
+    notify_mod.notify_billing_event(
+        "billing_upgrade", {"org_id": "t1", "tier": "pro"}, {"tier": "pro"})
+    assert billing_calls  # billing consumed the one shared slot
+
+    posts = []
+
+    async def fake_post(self, url, **kwargs):
+        posts.append(url)
+        return _FakeResponse()
+
+    monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", fake_post)
+    _invoke("Acme", "a@example.com", "member", "t", "i1")
+    assert posts == []  # budget already spent by billing → invite skipped
+    assert email_notify._send_counts_day == 1
