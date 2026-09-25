@@ -66,7 +66,11 @@ def _markdown_files(root: Path | str) -> list[Path]:
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
     try:
-        from tortoise.projection import FalkorProjection, RebuildDroppedEpisodicPoints
+        from tortoise.projection import (
+            FalkorProjection,
+            NonFoldedEventsError,
+            RebuildDroppedEpisodicPoints,
+        )
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
         # not block its own rebuild (ops safety #428).
         proj = FalkorProjection(args.db, skip_health_check=True)
@@ -111,6 +115,13 @@ def _cmd_rebuild(args):
         # reach the operator as the message it was written to be — not as a
         # traceback on a supported ops path. Nothing was wiped; exit non-zero
         # so a scripted caller cannot read the refusal as success.
+        print(f"Refused: {e}", file=sys.stderr)
+        return 1
+    except NonFoldedEventsError as e:
+        # #3585 review: `rebuild_all` now raises this when the journal holds an
+        # event the fold could not resolve (R8). It is the same class of
+        # operator-facing refusal as the arm above, so it must reach the
+        # operator as the message it was written to be, not a raw traceback.
         print(f"Refused: {e}", file=sys.stderr)
         return 1
     except ImportError as e:
@@ -7892,7 +7903,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\u2713 Consistent: {result['log_points']} points in both log and graph")
             return 0
         else:
+            # #3585 review: a `non-folded` divergence is counts-equal and
+            # hash-clean, so the delta-only line read as a content mismatch with
+            # nothing to point at. Name the class and the refused events.
             print(f"\u2717 Inconsistent: {result['log_points']} in log, {result['db_points']} in graph (delta: {result['delta']})")
+            _div = result.get("divergence")
+            if _div:
+                print(f"  class: {_div}", file=_sys.stderr)
+            for _e in result.get("non_folded_events") or []:
+                print(f"  non-folded: {_e}", file=_sys.stderr)
+            if result.get("action"):
+                print(f"  action: {result['action']}", file=_sys.stderr)
             return 1
     elif args.cmd == "audit":
         return _cmd_audit(args)

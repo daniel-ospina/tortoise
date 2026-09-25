@@ -73,45 +73,56 @@ SHAPE_POINT_INVALIDATED_MISS = "point-invalidated-miss"
 SHAPE_POINT_BELIEF_MISS = "point-belief-miss"
 #: A record type outside the projection's recognized vocabulary.
 SHAPE_UNKNOWN_EVENT_TYPE = "unknown-event-type"
-#: A fold resolved its target AMBIGUOUSLY (more than one candidate) — the
-#: projection may not guess, so the target is left untouched.
-SHAPE_AMBIGUOUS_TARGET = "ambiguous-target"
 
 #: Shapes that are genuinely exempt from the fail-the-run assertion. Each MUST
 #: carry its degraded guarantee in writing — an unnamed exemption is a green
 #: pass over an unfolded event, which is exactly what R8 exists to prevent.
 #:
-#: ``delete-miss`` (recorded decision: #4743 / its plan L1237): "already absent"
-#: IS the delete's desired end state, so a delete matching 0 rows is
-#: legitimately idempotent (a retried delete, or an apply-based replay onto a
-#: graph that already holds the node). DEGRADED GUARANTEE: this exemption does
-#: not hide an unjournaled CREATION — a journal that deletes an entity it never
-#: registered is caught by the rebuild's entity census (the journal registers
-#: nothing, but the delete is still reported) and by ``check_consistency``'s
-#: entity parity leg.
+#: ``delete-miss`` (recorded decision: `docs/plans/2026-09-22-unjournaled-mutation-class.md`
+#: §"Task 4" — Policy, and #4743's disposition): "already absent" IS the
+#: delete's desired end state, so a delete matching 0 rows is legitimately
+#: idempotent (a retried delete, or an apply-based replay onto a graph that
+#: already holds the node). DEGRADED GUARANTEE: this exemption does not hide an
+#: unjournaled CREATION — a journal that deletes an entity it never registered
+#: is caught by the rebuild's entity census (the journal registers nothing, but
+#: the delete is still reported) and by ``check_consistency``'s entity parity
+#: leg.
 #:
-#: ``point-superseded-no-new-id``: the graph fold treats a ``PointSuperseded``
-#: with no ``new_id`` as a documented no-op (``_fold_journal`` mirrors it), so
-#: neither side changes state. DEGRADED GUARANTEE: the malformed record is
-#: reported, and a later CORRECTS edge it might have carried is absent on both
-#: sides — a bounded, symmetrical loss, not a live/replay divergence.
+#: ``point-superseded-no-new-id`` (recorded decision: the same plan's §Task 4
+#: warning policy): the graph fold treats a ``PointSuperseded`` with no
+#: ``new_id`` as a documented no-op (``_fold_journal`` mirrors it), so neither
+#: side changes state. DEGRADED GUARANTEE: the malformed record is reported,
+#: and a later CORRECTS edge it might have carried is absent on both sides — a
+#: bounded, symmetrical loss, not a live/replay divergence.
+#:
+#: ``supersede-target-deleted`` (recorded decision: #4743's disposition — the
+#: supersede/invalidate fold is DEFERRED to a trailing sweep that runs after
+#: pass-1b, so a target the journal hard-deleted is legitimately gone by sweep
+#: time): ``live`` and ``replay`` both end with the node absent. DEGRADED
+#: GUARANTEE: the exemption is granted only for a hard delete of the SAME kind
+#: (or the id-wide fallback) that the fold actually applied — a same-kind
+#: re-creation anchor that suppressed the delete does not tag it. So a delete
+#: of a DIFFERENT kind sharing the id still refuses, an ``Object``/``Point``
+#: whose status was merely buried still refuses, and the entity-parity leg
+#: still compares any re-created node's status.
 EXEMPT_SHAPES: dict[str, str] = {
     SHAPE_DELETE_MISS: (
         "idempotent by construction — 'already absent' is the delete's end "
-        "state (recorded exemption, #4743)"
+        "state (recorded decision: plan §Task 4 Policy / #4743)"
     ),
     "point-superseded-no-new-id": (
         "the graph fold treats it as a documented no-op; no state changes on "
-        "either side"
+        "either side (recorded decision: plan §Task 4 warning policy)"
     ),
     "supersede-target-deleted": (
         "the supersede/invalidate fold is DEFERRED to a trailing sweep, so a "
-        "target the journal hard-deleted before the sweep is legitimately "
+        "target the journal hard-deleted BEFORE the sweep runs is legitimately "
         "gone — live and replay both end with the node absent. DEGRADED "
-        "GUARANTEE: a supersede whose target was deleted and then RE-created "
-        "under the same id is not exempted by this shape unless the delete is "
-        "the last journaled event for that id; the entity-parity leg still "
-        "compares the re-created node's status"
+        "GUARANTEE: exempt only for a SAME-KIND hard delete (`_hard_deleted_any`; "
+        "the id-wide fallback is checked too) that the fold actually applied — "
+        "a re-creation anchor that suppressed the delete does not tag it — so a "
+        "foreign-kind delete sharing the id still refuses, and the "
+        "entity-parity leg still compares a re-created node's status"
     ),
 }
 

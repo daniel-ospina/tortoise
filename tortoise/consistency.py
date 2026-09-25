@@ -51,6 +51,8 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from .projection import (
+    _CANONICAL_ENTITY_LABELS,
+    _ENTITY_ID_PROP,
     _ENTITY_MUTATION_STATE_OPS,
     _apply_one,
     _load_prewipe_snapshot,
@@ -759,6 +761,25 @@ def _fold_journal(events: list[dict]) -> dict:
                 # terminalizer to a point — the journal claims a state change
                 # this fold cannot produce. Recording it is what makes the
                 # #5011 content comparison non-vacuous.
+                #
+                # #3585 review: a supersede/invalidate whose target the journal
+                # HARD-DELETED earlier is the GRAPH fold's named exemption too
+                # (the deferred sweep runs after the delete, so a 0-row match is
+                # legitimate). Refusing it here made `check_consistency` red on
+                # exactly the journal `rebuild_all` accepts — the two classifiers
+                # must agree, or the fail-closed set is not one set.
+                _del_seq = anchors.get(pid, {}).get("Point")
+                if (t in ("PointSuperseded", "PointInvalidated")
+                        and isinstance(_del_seq, int) and _del_seq < seq):
+                    record_non_folded(
+                        "supersede-target-deleted",
+                        event_id=ev.get("event_id"), event_type=t, seq=seq,
+                        id=pid,
+                        candidates=(ev.get("new_id"), ev.get("corrected_by")),
+                        detail=("reference fold: target hard-deleted earlier "
+                                "(graph fold's named exemption)"),
+                    )
+                    continue
                 record_non_folded(
                     SHAPE_POINT_INVALIDATED_MISS if t == "PointInvalidated"
                     else SHAPE_POINT_RETRACTED_MISS if t == "PointRetracted"
@@ -793,25 +814,57 @@ def _fold_journal(events: list[dict]) -> dict:
 # point-only check cannot see the Object at all. This leg closes that hole for
 # the fields a burial actually moves — entity PRESENCE and `status`.
 #
-# Deliberate bounds (reported, not hidden):
+# Deliberate bounds:
 #   * `Source` is excluded — its graph identity is ``url`` while the journal's
 #     delete/mutation records carry ``id`` (#4649's url-keyed no-op class), so
 #     a presence comparison there would be a false positive by construction.
 #   * Only `status` is compared, not `name` — `#3574`'s ``name[:200]``
 #     truncation is a known journal/graph asymmetry.
+#   * Object/Subject PRESENCE is resolved by NAME as well as id, because the
+#     graph MERGEs those labels by name (`_upsert_object`/`_upsert_subject`):
+#     two journal registrations of one name under different ids are ONE node
+#     carrying the LAST id, and an id-only key would report the older one
+#     `absent-from-graph` on a correctly-replayed graph.
 #   * A name-only `ObjectSuperseded` (no id, >1 carrier) leaves the object's
 #     status AMBIGUOUS: the fold's own resolution is heuristic, so those
-#     objects are EXCLUDED from the comparison and the exclusion is reported.
-_ENTITY_PARITY: tuple[tuple[str, str], ...] = (
-    ("Object", "id"), ("Subject", "id"),
-    ("Document", "id"), ("Event", "eventId"),
+#     objects are EXCLUDED from the comparison — and the exclusion is REPORTED
+#     to the caller (`entity_parity_ambiguous*`), never silently absorbed.
+#   * The comparison runs in ONE direction, journal→graph (`entity_parity_bounds`
+#     states it): a node the GRAPH holds with no journal record is not a
+#     divergence here, because several in-tree paths write the projection
+#     without journaling (e.g. `sdk`'s direct `proj.apply`).
+_ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
+    (label, _ENTITY_ID_PROP[label])
+    for label in ("Object", "Subject", "Document", "Event")
 )
-_ENTITY_CREATION: dict[str, tuple[str, str, str | None]] = {
-    "ObjectRegistered": ("Object", "id", "live"),
-    "SubjectAdded": ("Subject", "id", "live"),
-    "DocumentCreated": ("Document", "id", "draft"),
-    "EventRecorded": ("Event", "eventId", None),
+# (label, default status) per creation record. The ID PROP is NOT re-listed:
+# `_creation_entity_id` reads the writer's own `_CANONICAL_ENTITY_ID_PROPS`,
+# so a change there cannot silently desync this leg (the hand-copied second
+# list is what this file's doctrine forbids).
+_ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
+    "ObjectRegistered": ("Object", "live"),
+    "SubjectAdded": ("Subject", "live"),
+    "DocumentCreated": ("Document", "draft"),
+    "EventRecorded": ("Event", None),
 }
+
+
+def _creation_entity_id(t: str, ev: dict) -> object:
+    """The id a creation record registers, resolved as the GRAPH fold does.
+
+    `_upsert_event` accepts BOTH the nested ``{type, event:{…}}`` shape (the
+    miner) and the flat one (``EventAPI.add_event``), reading ``id`` OR
+    ``eventId``; the other three creation records carry a top-level ``id``.
+    Reading only ``eventId`` here made this leg blind to every Event the
+    public writers produce — a silent false NEGATIVE, the class #3585 exists
+    to remove.
+    """
+    if t == "EventRecorded":
+        inner = ev.get("event")
+        inner = inner if isinstance(inner, dict) else ev
+        return inner.get("id") or inner.get("eventId")
+    label = _ENTITY_CREATION[t][0]
+    return ev.get(_ENTITY_ID_PROP[label])
 
 
 def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
@@ -828,18 +881,25 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     for ev in events:
         t = ev.get("type")
         if t in _ENTITY_CREATION:
-            label, keyprop, default_status = _ENTITY_CREATION[t]
-            eid = ev.get(keyprop)
+            label, default_status = _ENTITY_CREATION[t]
+            eid = _creation_entity_id(t, ev)
             if not isinstance(eid, str) or not eid:
                 continue
+            # The nested EventRecorded shape carries its fields one level down;
+            # unwrap it the same way so status/name are read where the writer
+            # put them.
+            payload = ev
+            if t == "EventRecorded" and isinstance(ev.get("event"), dict):
+                payload = ev["event"]
             rec = entities.setdefault((label, eid), {})
             # A later creation RE-CREATES the incarnation: the id is live
             # again, so an earlier journaled delete no longer owns it.
             deleted.discard((label, eid))
-            status = ev.get("status") or ev.get("eventStatus") or default_status
+            status = (payload.get("status") or payload.get("eventStatus")
+                      or default_status)
             if isinstance(status, str) and status and "status" not in rec:
                 rec["status"] = status
-            name = ev.get("name") or ev.get("title")
+            name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
                 rec["name"] = name
         elif t == "EntityMutated":
@@ -847,12 +907,16 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             if not isinstance(eid, str):
                 continue
             if op == "delete":
-                if isinstance(label, str):
+                if (isinstance(label, str)
+                        and label in _CANONICAL_ENTITY_LABELS):
                     deleted.add((label, eid))
                     entities.pop((label, eid), None)
                 else:
-                    # Legacy id-wide delete: the record owns every kind with
-                    # this id (parity with `_delete_entity_by_id`).
+                    # Legacy id-wide delete: `_delete_entity_by_id` scopes ONLY
+                    # a CANONICAL label and falls back to the id-wide delete
+                    # for a missing/unknown/non-canonical one — so a bare
+                    # `isinstance(label, str)` here marked the wrong kind and
+                    # reported a false `absent-from-graph`.
                     for k in [k for k in entities if k[1] == eid]:
                         deleted.add(k)
                         entities.pop(k, None)
@@ -886,9 +950,16 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     return entities, deleted, ambiguous
 
 
-def _graph_entities(projection) -> dict:
-    """``{(label, id): {"status": ...}}`` for the graph's non-Point entities."""
+def _graph_entities(projection) -> tuple[dict, dict]:
+    """The graph's non-Point entities, indexed two ways.
+
+    Returns ``({(label, id): {"status": …}}, {(label, name): same-record})``.
+    The NAME index exists because `_upsert_object`/`_upsert_subject` MERGE on
+    name, so the id a journal record registered may not be the id the node
+    carries (#3585 review).
+    """
     out: dict = {}
+    by_name: dict = {}
     rows = projection.query(
         "MATCH (n) WHERE n:Object OR n:Subject OR n:Document OR n:Event "
         "RETURN labels(n), properties(n)"
@@ -906,25 +977,45 @@ def _graph_entities(projection) -> dict:
                 continue
             eid = props.get(prop)
             if isinstance(eid, str) and eid:
-                out[(label, eid)] = {"status": props.get("status")}
-    return out
+                rec = {"status": props.get("status")}
+                out[(label, eid)] = rec
+                name = props.get("name")
+                if isinstance(name, str) and name:
+                    by_name[(label, name)] = rec
+    return out, by_name
 
 
-def _compare_entities(journal_entities, graph_entities, deleted,
-                      ambiguous) -> tuple[list, int]:
-    """Field-aware non-Point comparison. Returns (mismatches, count)."""
+def _compare_entities(journal_entities, graph_entities, graph_names,
+                      deleted, ambiguous) -> tuple[list, int, list]:
+    """Field-aware non-Point comparison.
+
+    Returns ``(mismatches, count, excluded_ambiguous)``. The mismatch LIST is
+    capped at ``_MAX_DIVERGENT_POINTS`` (the Point leg's contract) while
+    ``count`` is the true number; ``excluded_ambiguous`` names the Objects the
+    ambiguity bound skipped, so the verdict states what it did NOT compare.
+    """
     mismatches: list = []
+    count = 0
+    excluded_ambiguous: list = []
     for key, rec in journal_entities.items():
         label, eid = key
         if label == "Object" and rec.get("name") in ambiguous:
+            excluded_ambiguous.append((label, eid, rec.get("name")))
             continue
         g = graph_entities.get(key)
+        if g is None and label in ("Object", "Subject"):
+            # The graph MERGEs these labels by NAME, so a second registration
+            # of the same name under a fresh id is ONE node carrying the LAST
+            # id — resolve by name before declaring a burial (#3585 review).
+            g = graph_names.get((label, rec.get("name")))
         if g is None:
-            mismatches.append({
-                "id": eid, "label": label, "field": "presence",
-                "expected": "registered-in-journal",
-                "found": "absent-from-graph",
-            })
+            count += 1
+            if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                mismatches.append({
+                    "id": eid, "label": label, "field": "presence",
+                    "expected": "registered-in-journal",
+                    "found": "absent-from-graph",
+                })
             continue
         # `status` is only a NODE PROPERTY for Object (Subject/Document/Event
         # store `subjectKind`/`doc_status`/`eventStatus` respectively), so the
@@ -937,18 +1028,22 @@ def _compare_entities(journal_entities, graph_entities, deleted,
             continue
         gv = g.get("status")
         if gv != jv:
-            mismatches.append({
-                "id": eid, "label": label, "field": "status",
-                "expected": jv, "found": gv,
-            })
+            count += 1
+            if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                mismatches.append({
+                    "id": eid, "label": label, "field": "status",
+                    "expected": jv, "found": gv,
+                })
     for key in deleted:
         if key in graph_entities:
-            mismatches.append({
-                "id": key[1], "label": key[0], "field": "presence",
-                "expected": "hard-deleted-in-journal",
-                "found": "present-in-graph",
-            })
-    return mismatches, len(mismatches)
+            count += 1
+            if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                mismatches.append({
+                    "id": key[1], "label": key[0], "field": "presence",
+                    "expected": "hard-deleted-in-journal",
+                    "found": "present-in-graph",
+                })
+    return mismatches, count, excluded_ambiguous
 
 
 def check_consistency(log_path: str, projection, *,
@@ -1006,6 +1101,11 @@ def check_consistency(log_path: str, projection, *,
     # vacuously — the collected set is what makes that a failure.
     with collect_non_folded() as _nf_entries:
         journal_by_id = _fold_journal(events)
+        # #3585 review: the ENTITY reference fold belongs inside the collector
+        # too — a fold that cannot resolve an entity is the same class of event,
+        # and outside the block its `record_non_folded` calls would be no-ops.
+        journal_entities, entity_deleted, entity_ambiguous = (
+            _fold_journal_entities(events))
     non_folded = list(_nf_entries)
     non_folded_refused = refused_events(non_folded)
 
@@ -1041,10 +1141,11 @@ def check_consistency(log_path: str, projection, *,
     # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
     # Point-only, so an Object/Subject burial would be invisible; this compares
     # the journal's entity reference against the graph's entity nodes.
-    journal_entities, entity_deleted, entity_ambiguous = _fold_journal_entities(events)
-    graph_entities = _graph_entities(projection)
-    entity_mismatches, entity_divergent_count = _compare_entities(
-        journal_entities, graph_entities, entity_deleted, entity_ambiguous)
+    graph_entities, graph_entity_names = _graph_entities(projection)
+    entity_mismatches, entity_divergent_count, entity_ambiguous_excluded = (
+        _compare_entities(journal_entities, graph_entities,
+                          graph_entity_names, entity_deleted,
+                          entity_ambiguous))
     entities_ok = not entity_mismatches
     # `db_hash` is a pure function of the GRAPH — the fields the verdict covers
     # PLUS the embedding, so a vector-only rewrite of an otherwise-identical
@@ -1142,6 +1243,19 @@ def check_consistency(log_path: str, projection, *,
         # ── #3585 non-Point leg + the non-folded set (R8/R9) ───────────
         "divergent_entities": entity_mismatches,
         "divergent_entity_count": entity_divergent_count,
+        # #3585 review: the bounds are REPORTED, not silent. `…ambiguous` names
+        # the Objects the ambiguity rule excluded (so `ok` states what it did
+        # not compare), and `…bounds` states the direction and the compared
+        # field set.
+        "entity_parity_ambiguous": [
+            {"label": lbl, "id": iid, "name": nm}
+            for lbl, iid, nm in entity_ambiguous_excluded],
+        "entity_parity_ambiguous_count": len(entity_ambiguous_excluded),
+        "entity_parity_bounds": {
+            "direction": "journal->graph",
+            "status_compared": ["Object"],
+            "name_keyed": ["Object", "Subject"],
+        },
         "non_folded_events": [str(e) for e in non_folded],
         "non_folded_count": len(non_folded),
         "non_folded_refused_count": len(non_folded_refused),

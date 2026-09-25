@@ -368,3 +368,149 @@ class TestEntityParityBounds:
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
         assert r["divergent_entity_count"] == 0, r["divergent_entities"]
         assert r["ok"] is True, r["divergence"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Review round 1 — the fixes that made the invariant honest
+# (each pins a defect a fresh reviewer found in the first cut)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestReferenceFoldMirrorsTheWriters:
+    def test_flat_and_nested_event_ids_are_resolved(self, env):
+        """FAILS IF: the reference fold reads only a top-level `eventId`.
+
+        `EventAPI.add_event` journals a FLAT record with `id`, and the miner
+        journals a NESTED `{event: {...}}` one; `_upsert_event` reads `id` OR
+        `eventId`, nested or flat. A reference fold that assumes the third
+        shape registers NOTHING, so a buried Event is never reported — the
+        silent false negative #3585 exists to remove.
+        REACHABLE: both writer shapes, then the Event nodes are removed from
+        the graph (the burial) and `check_consistency` must see it."""
+        sdk, events = env
+        _raw(events, type="EventRecorded", id="evt-flat", name="EF",
+             eventType="meeting")
+        _raw(events, type="EventRecorded",
+             event={"id": "evt-nested", "name": "EN",
+                    "eventType": "meeting"})
+        proj = sdk._get_proj()
+        proj.rebuild_all(str(events))
+        proj.g.query("MATCH (e:Event) DETACH DELETE e")
+        r = check_consistency(str(events / "events.jsonl"), proj)
+        buried = {d["id"] for d in r["divergent_entities"]
+                  if d["label"] == "Event" and d["field"] == "presence"}
+        assert buried == {"evt-flat", "evt-nested"}, r["divergent_entities"]
+
+    def test_second_registration_of_one_name_is_not_a_divergence(self, env):
+        """FAILS IF: the entity leg keys Object/Subject by id ONLY.
+
+        The graph MERGEs those labels by NAME, so the same name registered
+        twice under different ids is ONE node carrying the LAST id. An id-only
+        key reported the older id `absent-from-graph` and reddened a CORRECTLY
+        replayed graph.
+        REACHABLE: a second `ObjectRegistered` for the same name (the
+        `EventAPI.add_object` shape mints a fresh id per call)."""
+        sdk, events = env
+        sdk.create_entity("object", name="SAME", objectKind="k")
+        _raw(events, type="ObjectRegistered", id="obj-second", name="SAME",
+             objectKind="k", status="live")
+        proj = sdk._get_proj()
+        proj.rebuild_all(str(events))
+        r = check_consistency(str(events / "events.jsonl"), proj)
+        assert r["divergent_entity_count"] == 0, r["divergent_entities"]
+        assert r["ok"] is True, r["divergence"]
+
+    def test_the_ambiguity_exclusion_is_reported(self, env):
+        """FAILS IF: an ambiguous name-only supersede is silently skipped.
+
+        The bound must be REPORTED (`entity_parity_ambiguous*`), not absorbed:
+        a caller reading `ok` has to be able to see what the verdict did NOT
+        compare.
+        REACHABLE: two registrations of one name make a name-only
+        `ObjectSuperseded` unresolvable (>1 carrier)."""
+        sdk, events = env
+        sdk.create_entity("object", name="AMB", objectKind="k")
+        _raw(events, type="ObjectRegistered", id="obj-amb-2", name="AMB",
+             objectKind="k", status="live")
+        _raw(events, type="ObjectSuperseded", name="AMB",
+             supersedes_by="other", event_id="e-amb")
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["entity_parity_ambiguous_count"] >= 1, r
+        assert r["entity_parity_bounds"]["direction"] == "journal->graph"
+
+    def test_a_noncanonical_delete_label_is_replayed_id_wide(self, env,
+                                                            tmp_path):
+        """FAILS IF: the reference fold scopes ANY string label.
+
+        `_delete_entity_by_id` scopes only a CANONICAL label and falls back to
+        the id-wide delete otherwise. A bare `isinstance(label, str)` guard
+        left the `(Object, id)` entry registered while the replayed graph had
+        been id-wiped — a FALSE `absent-from-graph` on a faithful replay.
+        REACHABLE: `label="Objects"` (non-canonical, a pre-#3860 shape), then
+        compare against the graph the same journal produces."""
+        sdk, events = env
+        oid = sdk.create_entity("object", name="NC",
+                                objectKind="k")["node"]["id"]
+        _raw(events, type="EntityMutated", op="delete", label="Objects",
+             id=oid, event_id="e-nc")
+        sdk.close()
+        proj = _fresh(tmp_path, "nc")
+        proj.rebuild_all(str(events))
+        try:
+            assert not proj.g.query(
+                "MATCH (o:Object {id:$id}) RETURN o",
+                params={"id": oid}).result_set, (
+                "fixture: the id-wide delete must have removed the node")
+            r = check_consistency(str(events / "events.jsonl"), proj)
+            assert r["divergent_entity_count"] == 0, r["divergent_entities"]
+        finally:
+            proj.close()
+
+
+class TestOneClassifierForTheNonFoldedSet:
+    def test_retract_miss_fails_the_graph_engines_too(self, env):
+        """FAILS IF: only the reference fold refuses a retract-miss.
+
+        `_retract` is a blind MATCH-SET (no miss detection) in the apply/rebuild
+        engines, so `check_consistency` said `non-folded` while `rebuild_all`
+        returned counts — the two classifiers must agree.
+        REACHABLE: `PointRetracted` for an id no event created."""
+        sdk, events = env
+        _raw(events, type="PointRetracted", event_id="e-retract-2", id="p-none")
+        with pytest.raises(NonFoldedEventsError) as ei:
+            sdk._get_proj().rebuild_all(str(events))
+        assert "point-retracted-miss" in str(ei.value), str(ei.value)
+
+    def test_unimplemented_op_is_recorded_by_the_reference_fold(self, env):
+        """FAILS IF: `_apply_one`'s pending-op branch only logs.
+
+        The graph fold records `SHAPE_UNIMPLEMENTED_OP` and fails; if the
+        reference fold does not, `check_consistency` returns ok=True on a
+        journal `rebuild_all` refuses.
+        REACHABLE: `EntityMutated op="retract"` (a `_ENTITY_MUTATION_PENDING_OPS`
+        member on an id that is) folded by the reference fold only."""
+        sdk, events = env
+        oid = sdk.create_entity("object", name="PEND",
+                                objectKind="k")["node"]["id"]
+        _raw(events, type="EntityMutated", op="retract", label="Object",
+             id=oid, event_id="e-pend")
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+        assert r["divergence"] == "non-folded", r["divergence"]
+        assert "unimplemented-op" in " ".join(r["non_folded_events"])
+
+    def test_a_foreign_kind_delete_does_not_exempt_a_point_supersede(self, env):
+        """FAILS IF: the exemption discriminator is a bare ID set.
+
+        A delete of `(Object, X)` must not exempt a `PointSuperseded` miss on
+        `Point X` — that turns a genuine burial into a green pass (the
+        fail-open a kind-scoped discriminator closes).
+        REACHABLE: an Object hard-delete plus an unfoldable `PointSuperseded`
+        for a Point that merely shares the id."""
+        sdk, events = env
+        _raw(events, type="EntityMutated", op="delete", label="Object",
+             id="shared-X", event_id="e-del-X")
+        _raw(events, type="PointSuperseded", id="shared-X", new_id="p-new",
+             event_id="e-sup-X")
+        with pytest.raises(NonFoldedEventsError) as ei:
+            sdk._get_proj().rebuild_all(str(events))
+        assert "point-superseded-miss" in str(ei.value), str(ei.value)
