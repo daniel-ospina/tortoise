@@ -450,8 +450,8 @@ Guide the human through:
      https://api.premiselabs.co/v1/onboarding/state/checkpoint -H
      "Authorization: Bearer $TORTOISE_API_KEY" -H "Content-Type:
      application/json" -d '{"step":"harness-connected"}'`
-   - Claude Desktop / Claude Web / ChatGPT: you have no REST/curl surface, and
-     **no dashboard click connects anything** — the server writes this same
+   - Claude Desktop / Claude Web: you have no REST/curl surface, and **no
+     dashboard click connects anything** — the server writes this same
      checkpoint itself on your first successful graph write
      (`tortoise_create_point` / `tortoise_file_decision` →
      `_maybe_onboarding_auto_complete()`). File a first memory and the
@@ -459,9 +459,12 @@ Guide the human through:
      the moment your agent files. The connect step does NOT advance by itself
      — the poll runs only on the done step, so the user still clicks
      Continue/Skip to leave the connect step. Never tell the human a click
-     connects them. **ChatGPT is the one harness with no chooser surface at
-     all** (#2912), so its user has no connect step to click — this document is
-     its live path (#4836).
+     connects them.
+   - ChatGPT: same server-side checkpoint as Claude Desktop/Web, but you have
+     **no chooser surface and therefore no connect step at all** (#2912) — so
+     the Continue/Skip sentence above does not describe your path. File a first
+     memory and the server writes `harness-connected` itself. This document is
+     your live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —
    never from a dashboard click (lane B3, 2026-09-16).

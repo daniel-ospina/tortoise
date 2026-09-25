@@ -515,9 +515,12 @@ class TestDocsPageAndSkillConfig:
         return rest.split("\n])", 1)[0]
 
     def test_4836_docs_page_is_the_live_chatgpt_carrier(self):
-        """#4836: ChatGPT has no dashboard surface (#2912's 4-family chooser keeps
-        it out; #2698 deleted the flat tab first), so the public docs page is its
-        live carrier — it is the surface that already CLAIMED to describe ChatGPT
+        """#4836: ChatGPT has no dashboard CHOOSER/connect surface (#2912's 4-family
+        chooser keeps it out; #2698 deleted the flat tab first). It is not absent
+        from the dashboard — the LIVE Memory-sources capture panel lists it as
+        unsupported-with-a-reason — but nothing there carries its onboarding
+        instructions, so the public docs page does. That page is the surface that
+        already CLAIMED to describe ChatGPT
         connection. That claim was false ("the dashboard's ChatGPT tab") and must
         not come back.
 

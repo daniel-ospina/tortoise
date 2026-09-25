@@ -618,11 +618,16 @@ export function preferredSurface(family, current) {
 // skill) is the agent-side self-adjudication source (the chooser's
 // successor). chatgpt is key-less/OAuth (HARNESS_OAUTH); #2698 deleted its flat
 // dashboard tab and #2912's 4-family HARNESS_FAMILIES excluded it from the
-// chooser, so it renders on NO dashboard branch — UNIVERSAL_COMMAND.chatgpt,
-// HARNESS_INTRO.chatgpt and HARNESS_CONTINUE_LABEL.chatgpt exist for
-// total-loop/roundtrip consumers only (the roundtrip test reads them; nothing
-// in the UI does), and HARNESS_CONTINUE_LABEL.chatgpt is a LEGACY label — there
-// is no ChatGPT connect step for it to caption. Its LIVE
+// chooser, so it renders on NO CHOOSER/connect branch. It is NOT absent from the
+// dashboard: the LIVE Memory-sources capture panel maps HARNESS_ORDER (which
+// includes it) and reads HARNESS_NAMES/HARNESS_CAPTURE_REASON to list it as
+// unsupported-with-a-reason. UNIVERSAL_COMMAND.chatgpt, HARNESS_STEPS.chatgpt,
+// HARNESS_INSTALL.chatgpt, HARNESS_INTRO.chatgpt, HARNESS_COPY_LABEL.chatgpt and
+// HARNESS_CONTINUE_LABEL.chatgpt are reachable only from the ARCHIVED
+// LEGACY_WIZARD_ARCHIVED render (the #2827 note above — that A0 rollback gate
+// must stay OFF for the chooser to keep #2912's four families) and from the
+// roundtrip test. HARNESS_CONTINUE_LABEL.chatgpt is therefore a LEGACY label:
+// there is no ChatGPT connect step for it to caption. Its LIVE
 // carrier is the public setup docs page (#4836): website/docs.html#chatgpt
 // names the Developer-mode path, the canonical connector URL and the onboarding
 // instructions URL, so a ChatGPT user is not left with only a test-consumed
