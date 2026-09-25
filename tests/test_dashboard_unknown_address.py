@@ -699,22 +699,43 @@ const mod = await import(process.argv[2]);
 const cases = JSON.parse(process.argv[3]);
 const out = [];
 for (const c of cases) {
+  // The stub is KEYED ON THE REQUEST: it echoes back exactly what it was
+  // handed, so the caller can assert the Function forwarded the ORIGINAL
+  // request (method, URL and headers) rather than a rebuilt one that silently
+  // drops `If-None-Match` / `Range` / `Accept-Encoding`.
+  const seen = [];
   const env = c.binding === false ? {} : {
     ASSETS: {
-      fetch: async () => new Response(c.body === undefined ? null : c.body, {
-        status: c.status,
-        headers: c.headers || {},
-      }),
+      fetch: async (received) => {
+        seen.push({
+          method: received.method,
+          url: received.url,
+          headers: Object.fromEntries(received.headers),
+          probe: received.__probe ?? null,
+        });
+        return new Response(c.body === undefined ? null : c.body, {
+          status: c.status,
+          headers: c.headers || {},
+        });
+      },
     },
   };
-  const request = new Request('https://app.premiselabs.co' + c.path);
+  const request = new Request('https://app.premiselabs.co' + c.path, {
+    method: c.requestMethod || 'GET',
+    headers: c.requestHeaders || {},
+  });
+  // A property only the ORIGINAL request object carries: a rebuilt request
+  // (e.g. `new Request(request.url)`) cannot show it.
+  request.__probe = c.path;
   const res = await mod.onRequest({ request, env, params: { path: [] }, waitUntil: () => {} });
   out.push({
     status: res.status,
     contentType: res.headers.get('Content-Type'),
     cacheControl: res.headers.get('Cache-Control'),
     etag: res.headers.get('ETag'),
+    headers: Object.fromEntries(res.headers),
     body: await res.text(),
+    forwarded: seen,
   });
 }
 console.log(JSON.stringify(out));
@@ -722,8 +743,8 @@ console.log(JSON.stringify(out));
 
 # `miss` is the state the asset router is in for an undeployed chunk — the
 # #4006 `404.html` fallback, i.e. `404` with an HTML body. The rest model the
-# responses the pass-through must preserve unchanged: a real bundle asset, a
-# revalidation `304`, and a range `206`.
+# responses the pass-through must preserve unchanged: a real bundle asset (with
+# its request headers), a revalidation `304`, and a range `206`.
 _ASSETS_CASES: dict[str, dict] = {
     "miss": {
         "path": "/assets/index-DOES-NOT-EXIST.js",
@@ -733,26 +754,46 @@ _ASSETS_CASES: dict[str, dict] = {
     "real_asset": {
         "path": "/assets/index-DSI3aDc5i.js",
         "status": 200,
-        "body": "console.log(1)",
+        # Non-ASCII so the byte-for-byte body check is a real byte check.
+        "body": 'console.log("caf\u00e9");\n',
+        # The last header is deliberately NOT one the assertions name: it pins
+        # that the WHOLE header set survives, not just the fields asserted here.
         "headers": {
             "Content-Type": "application/javascript",
             "ETag": '"abc123"',
             "Cache-Control": "public, max-age=0, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+        },
+        # What a real bundle request carries. They change the response (304 on
+        # `If-None-Match`, 206 on `Range`, compression on `Accept-Encoding`),
+        # so the Function must hand the request on untouched.
+        "requestHeaders": {
+            "Accept-Encoding": "gzip, br",
+            "If-None-Match": '"abc123"',
+            "Range": "bytes=0-0",
+            "X-Test-Marker": "real_asset",
         },
     },
     "not_modified": {
         "path": "/assets/index-DSI3aDc5i.js",
         "status": 304,
         "headers": {"ETag": '"abc123"'},
+        "requestHeaders": {"If-None-Match": '"abc123"'},
     },
     "range": {
         "path": "/assets/font.woff2",
         "status": 206,
         "body": "x",
         "headers": {"Content-Type": "font/woff2", "Content-Range": "bytes 0-0/4"},
+        "requestHeaders": {"Range": "bytes=0-0"},
     },
     "no_binding": {"path": "/assets/anything.js", "binding": False},
 }
+
+
+def _lower_headers(headers: dict[str, str]) -> dict[str, str]:
+    """HTTP header names are case-insensitive; undici lowercases them."""
+    return {k.lower(): v for k, v in headers.items()}
 
 
 # A module-scoped fixture: each node start costs seconds and the cases are
@@ -826,11 +867,54 @@ def test_real_asset_responses_pass_through_verbatim(assets_results) -> None:
     bundle's responses must survive it: a Function answering every request with
     its own 404 would take the dashboard down while a "missing assets 404"
     assertion stayed green (#3048).
+
+    "Verbatim" is asserted, not assumed. The stub is keyed on the request it is
+    handed, so this pins the HANDOFF (the original request — method, URL and the
+    `If-None-Match` / `Range` / `Accept-Encoding` headers — reaches the asset
+    router untouched), the BODY byte-for-byte, and the FULL header set (including
+    `X-Content-Type-Options`, which the Function's doc block claims survives).
+    Dropping the request headers kills `304`/`206`/compression in production;
+    rebuilding the response with only the named headers drops the `_headers`
+    policy — neither was visible to the previous, four-field version.
     """
     real = assets_results["real_asset"]
+    case = _ASSETS_CASES["real_asset"]
+
+    # 1. The handoff: the ORIGINAL request object reached `env.ASSETS.fetch`.
+    forwarded = real["forwarded"]
+    assert len(forwarded) == 1, f"the asset router was consulted {len(forwarded)} time(s): {real}"
+    handed = forwarded[0]
+    assert handed["method"] == "GET" and handed["url"].endswith(case["path"]), (
+        f"the request forwarded to the asset router was rewritten: {handed}"
+    )
+    assert handed["headers"] == _lower_headers(case["requestHeaders"]), (
+        "the request forwarded to the asset router lost or rewrote headers — "
+        "If-None-Match / Range / Accept-Encoding must reach it untouched or the "
+        f"304, 206 and compressed responses break: {handed}"
+    )
+    assert handed["probe"] == case["path"], (
+        "the Function handed the asset router a NEW request instead of the original — "
+        "a rebuilt request silently drops If-None-Match / Range / Accept-Encoding, "
+        f"killing 304, 206 and compressed responses: {handed}"
+    )
+
+    # 2. The response: status, the WHOLE header set, and the body, untouched.
     assert (real["status"], real["contentType"]) == (200, "application/javascript"), real
     assert real["etag"] == '"abc123"', f"the pass-through dropped the ETag: {real}"
     assert real["cacheControl"] == "public, max-age=0, must-revalidate", real
+    assert real["headers"].get("x-content-type-options") == "nosniff", (
+        "the pass-through dropped X-Content-Type-Options, which the Function's "
+        f"doc block claims survives: {real}"
+    )
+    assert real["headers"] == _lower_headers(case["headers"]), (
+        "the pass-through rebuilt the response with a partial header set — every "
+        "header the asset router produced must survive, not only the ones this "
+        f"test names: {real}"
+    )
+    assert real["body"].encode() == case["body"].encode(), (
+        f"the pass-through altered the asset body: {real['body']!r} != {case['body']!r}"
+    )
+
     assert assets_results["not_modified"]["status"] == 304, assets_results["not_modified"]
     assert assets_results["range"]["status"] == 206, assets_results["range"]
 
