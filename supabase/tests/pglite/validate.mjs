@@ -180,6 +180,31 @@ for (const f of files) {
                 now() + interval '1 hour', '3036-preseed-good-refresh');
       `);
     }
+    if (f === '20260925000002_oauth_redemption_state.sql') {
+      // #3027: seed a CONSUMED pre-migration code (the `redemption_state` column
+      // does not exist yet). Only this migration's own backfill UPDATE can make
+      // it terminal, so deleting the backfill reds here — the #4216/#3036 pattern.
+      // A second row is left UNCONSUMED, so an over-broad backfill (one that
+      // burns every row instead of `used_at IS NOT NULL`) reds too.
+      await db.exec(`
+        INSERT INTO public.organizations (id, name, graph_name)
+          VALUES ('3027-preseed-org', '3027-preseed-org', 'org_3027-preseed-org');
+        INSERT INTO public.oauth_clients (id, client_name)
+          VALUES ('3027-preseed-client', '3027-preseed-client');
+        INSERT INTO public.oauth_codes
+          (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+           expires_at, used_at)
+        VALUES ('3027-preseed-used', '3027-preseed-client', '3027-preseed-user',
+                '3027-preseed-org', 'https://app.example/cb', 'challenge',
+                now() + interval '10 min', now());
+        INSERT INTO public.oauth_codes
+          (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+           expires_at, used_at)
+        VALUES ('3027-preseed-unused', '3027-preseed-client', '3027-preseed-user',
+                '3027-preseed-org', 'https://app.example/cb', 'challenge',
+                now() + interval '10 min', NULL);
+      `);
+    }
     await db.exec(sql);
     console.log(`✓ migration ${f}`);
   } catch (e) {
@@ -269,6 +294,49 @@ for (const f of files) {
   console.log('✓ #3036: the migration\'s own dangling-pointer repair nulled both seeded links');
 }
 
+// ── #3027: the migration's redemption-state BACKFILL actually ran ───────────
+// The consumed row was seeded BEFORE `20260925000002` (its columns did not
+// exist). Only that migration's own `UPDATE ... WHERE used_at IS NOT NULL` can
+// have made it terminal, so this goes red if the backfill is deleted, if it is
+// too NARROW (the consumed row stays 'unclaimed'), or if it is OVER-broad (the
+// unconsumed row is burned too).
+{
+  const r = await db.query(`SELECT
+    (SELECT redemption_state FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-used') AS used_state,
+    (SELECT redemption_settled_at FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-used') AS used_settled,
+    (SELECT redemption_note FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-used') AS used_note,
+    (SELECT redemption_state FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-unused') AS unused_state,
+    (SELECT redemption_settled_at FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-unused') AS unused_settled`);
+  const d = r.rows[0] || {};
+  if (d.used_state !== 'burned') {
+    console.error(`✗ #3027: the backfill did NOT burn the consumed pre-migration code (state=${d.used_state})`);
+    process.exit(1);
+  }
+  if (d.used_settled === null || d.used_settled === undefined) {
+    console.error('✗ #3027: the backfill did not record redemption_settled_at on the consumed code');
+    process.exit(1);
+  }
+  if (d.used_note !== 'backfill') {
+    console.error(`✗ #3027: the backfilled row must be marked 'backfill' (got ${d.used_note})`);
+    process.exit(1);
+  }
+  if (d.unused_state !== 'unclaimed' || d.unused_settled !== null) {
+    console.error(`✗ #3027: the backfill is OVER-broad — an unconsumed code was touched (state=${d.unused_state}, settled=${d.unused_settled})`);
+    process.exit(1);
+  }
+  await db.exec(`
+    DELETE FROM public.oauth_codes   WHERE code_hash LIKE '3027-preseed-%';
+    DELETE FROM public.oauth_clients WHERE id LIKE '3027-preseed-%';
+    DELETE FROM public.organizations WHERE id LIKE '3027-preseed-%';
+  `);
+  console.log('✓ #3027: the migration\'s own backfill burned the consumed code and left the unconsumed one alone');
+}
+
 // ── Run the assertion suites (0006–0009 from #769, 0010 from #770, then
 // the 0010 suite's #1716 keyless sections against the post-keyless RPC) ──
 const suites = [
@@ -283,6 +351,7 @@ const suites = [
   '20260906000001_graphs_deleted_at.sql',  // #2304
   '20260919000001_metering_period_end_repair.sql',  // #4216
   '20260925000001_oauth_referential_integrity.sql',  // #3036
+  '20260925000002_oauth_redemption_state.sql',  // #3027
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
@@ -434,6 +503,47 @@ try {
   console.log('✓ #3036: OAuth FK migration re-applies idempotently');
 } catch (e) {
   console.error(`✗ #3036 migration re-apply FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #3027: the redemption-state migration re-applies idempotently ───────────
+// Same drill as #3036, but this migration carries STATE-BEARING rows: a
+// re-apply must not clobber a settled claim, must not re-run the backfill over
+// a row the state machine already moved, and must not fail on the ADD COLUMN /
+// ADD CONSTRAINT pair. The row is inserted BEFORE the re-apply, so deleting the
+// backfill's `AND redemption_state = 'unclaimed'` guard (making it over-broad)
+// reds here.
+try {
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('3027-reapply-org', '3027-reapply-org', 'org_3027-reapply-org');
+    INSERT INTO public.oauth_clients (id, client_name)
+      VALUES ('3027-reapply-client', '3027-reapply-client');
+    INSERT INTO public.oauth_codes
+      (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+       expires_at, used_at, redemption_state, redemption_id, redemption_note)
+    VALUES ('3027-reapply', '3027-reapply-client', '3027-reapply-user',
+            '3027-reapply-org', 'https://app.example/cb', 'challenge',
+            now() + interval '10 min', now() - interval '10 min',
+            'claimed', '3027-reapply-rid', NULL);
+  `);
+  await db.exec(readFileSync(`${MIG_DIR}/20260925000002_oauth_redemption_state.sql`, 'utf8'));
+  const r = await db.query(`SELECT redemption_state, redemption_id, redemption_note,
+      redemption_settled_at FROM public.oauth_codes WHERE code_hash = '3027-reapply'`);
+  const d = r.rows[0] || {};
+  if (d.redemption_state !== 'claimed' || d.redemption_id !== '3027-reapply-rid' ||
+      d.redemption_note !== null || d.redemption_settled_at !== null) {
+    console.error(`✗ #3027 migration re-apply CLOBBERED a live claim: ${JSON.stringify(d)}`);
+    process.exit(1);
+  }
+  await db.exec(`
+    DELETE FROM public.oauth_codes   WHERE code_hash = '3027-reapply';
+    DELETE FROM public.oauth_clients WHERE id = '3027-reapply-client';
+    DELETE FROM public.organizations WHERE id = '3027-reapply-org';
+  `);
+  console.log('✓ #3027: redemption-state migration re-applies idempotently (a live claim survives)');
+} catch (e) {
+  console.error(`✗ #3027 migration re-apply FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
   process.exit(1);
 }
 
