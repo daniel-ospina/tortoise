@@ -404,6 +404,79 @@ def _hook_run(env, harness: str, stdin: str, tmp: Path):
     )
 
 
+def _minimal_path(tmp_path) -> Path:
+    """A PATH with ONLY the tools the hook uses (plus ``python3``) — no
+    ``tortoise`` binary and no venv ``bin`` can leak in from the host."""
+    utils = tmp_path / "utils"
+    utils.mkdir()
+    for tool, path in (("cat", "/bin/cat"), ("bash", "/bin/bash"),
+                       ("tr", "/usr/bin/tr"), ("head", "/usr/bin/head"),
+                       ("dirname", "/usr/bin/dirname"),
+                       ("grep", "/usr/bin/grep"),
+                       ("mkdir", "/bin/mkdir"), ("date", "/bin/date"),
+                       ("mktemp", "/usr/bin/mktemp"), ("rm", "/bin/rm"),
+                       ("python3", sys.executable)):
+        (utils / tool).symlink_to(path)
+    return utils
+
+
+def test_volunteer_turn_hook_resolves_the_owning_venv_for_a_wheel_layout(
+        tmp_path):
+    """#2385 item 3: a WHEEL install puts the hook in
+    ``<venv>/lib/python3.x/site-packages/tortoise/claude-hooks/``, so the
+    source-checkout ``<module>/.venv/bin/tortoise`` probe can never match and
+    the module fallback runs the AMBIENT ``python3`` — which does not have the
+    wheel's dependencies — injecting nothing while reporting success. The hook
+    must resolve the venv that OWNS the module dir (``pyvenv.cfg``) and run
+    its console script.
+
+    The fake package's ``__init__`` raises, so the ambient-interpreter module
+    fallback can never accidentally succeed: only the owning venv's console
+    script can produce the block."""
+    venv = tmp_path / "venv"
+    site = venv / "lib" / "python3.12" / "site-packages"
+    hooks = site / "tortoise" / "claude-hooks"
+    hooks.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+    (site / "tortoise" / "__init__.py").write_text(
+        "raise ImportError('wheel deps are not on the ambient interpreter')\n")
+    hooked = hooks / "volunteer-turn.sh"
+    hooked.write_text(_HOOK.read_text(encoding="utf-8"), encoding="utf-8")
+    hooked.chmod(0o755)
+    (venv / "bin").mkdir()
+    console = venv / "bin" / "tortoise"
+    console.write_text(
+        "#!/bin/bash\n"
+        "cat > /dev/null\n"
+        "printf '%s\\n' '- **Wheel reflex** → point/pt_wheel123 — owning "
+        "venv'\n",
+        encoding="utf-8")
+    console.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": str(_minimal_path(tmp_path)),
+        "HOME": str(tmp_path / "home"),
+        "VIRTUAL_ENV": "",
+        "TORTOISE_SRC_DIR": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_DB_PATH": str(tmp_path / "wheel.db"),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    r = subprocess.run(
+        [str(hooked), "codex"],
+        input=json.dumps({"prompt": "what do we know about the wheel?"}),
+        env=env, cwd=str(tmp_path), capture_output=True, text=True,
+        timeout=180,
+    )
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "pt_wheel123" in ctx, (
+        f"the wheel hook must reach the OWNING venv's console script, got "
+        f"{ctx!r} (stderr={r.stderr!r})")
+
+
 def test_volunteer_turn_hook_codex_contract(env, tmp_path):
     """Codex/Claude UserPromptSubmit stdin JSON → hookSpecificOutput with
     additionalContext carrying the reflex block."""

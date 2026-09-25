@@ -477,13 +477,36 @@ def _assemble_entry(block: dict) -> dict:
 
 # ── Pointer-block markdown (injectable — ≤ BLOCK_MAX_BYTES) ───────────────
 
-def build_block(pointers: list[dict], surfaced: list[dict]) -> str:
+def _pointer_flag(cand: dict) -> str:
+    """The contestation/supersession mark for ONE pointer's block line.
+
+    #2385 (item 1) + plan §E2E-9 1a: the injected ``block`` — the ONLY
+    channel a model sees when ``why`` is off — must carry the flag, not just
+    the ``why`` entry. A contested or superseded belief that rides the block
+    unmarked reads as a settled current belief, which is exactly what makes
+    a planted evidence→claim chain above the gate worth planting.
+
+    The mark is derived from booleans/status only (never graph text), so it
+    cannot itself carry prompt injection, and it is deterministic.
+    """
+    marks: list[str] = []
+    if cand.get("superseded"):
+        marks.append("superseded — see what changed")
+    if cand.get("contested"):
+        marks.append("contested — read the counterargument")
+    return f" [{'; '.join(marks)}]" if marks else ""
+
+
+def build_block(pointers: list[dict], surfaced: list[dict],
+                flags: list[str] | None = None) -> str:
     """Deterministic injectable markdown (§3.4 shape — gbrain ADAPT).
 
     Detect + point, never auto-dump bodies; the anti-hallucination
     instruction rides the block; the ``<!-- … -->`` comment envelope is the
     prompt-injection defense (ux-research). Contestation/supersession ride
-    the pointer line. Truncated deterministically to ≤ 8 KB.
+    the pointer line (``flags``, one per pointer — see ``_pointer_flag``;
+    plan §E2E-9 1a pins the ``block`` half, not only ``why``). Truncated
+    deterministically to ≤ 8 KB.
     """
     if not pointers:
         return ""
@@ -495,9 +518,11 @@ def build_block(pointers: list[dict], surfaced: list[dict]) -> str:
         "",
     ]
     lines = list(header)
-    for ptr in pointers:
+    for i, ptr in enumerate(pointers):
+        flag = flags[i] if flags and i < len(flags) else ""
         lines.append(
-            f"- **{ptr['label']}** → point/{ptr['id']} — {ptr['synopsis']}"
+            f"- **{ptr['label']}** → point/{ptr['id']}{flag} — "
+            f"{ptr['synopsis']}"
             " (read supports before relying on details)")
     lines.append("")
     block = "\n".join(lines)
@@ -739,6 +764,7 @@ def run_volunteer_pipeline(
         # ── Stage 7: pointer assembly (+ why-block assembly when why=True).
         pointers: list[dict] = []
         surfaced: list[dict] = []
+        flags: list[str] = []
         why_entries: list[dict] = []
         for cand in selected:
             label = _label_from_content(cand["content"]) or cand["id"]
@@ -748,13 +774,14 @@ def run_volunteer_pipeline(
                 "synopsis": _synopsis(cand["content"]),
             })
             surfaced.append({"label": label, "band": _band(cand["mean"])})
+            flags.append(_pointer_flag(cand))
             if why:
                 why_entries.append(_assemble_entry(cand["block"]))
         return {
             "pointers": pointers,
             "why": why_entries,
             "surfaced": surfaced,
-            "block": build_block(pointers, surfaced),
+            "block": build_block(pointers, surfaced, flags),
             "degraded_reason": None,
         }
     except _UnboundSearchError:

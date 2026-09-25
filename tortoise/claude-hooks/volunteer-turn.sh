@@ -118,6 +118,39 @@ if [ -z "$TORTOISE_BIN" ] && [ -n "$TORTOISE_MODULE" ] \
    && [ -x "$TORTOISE_MODULE/.venv/bin/tortoise" ]; then
   TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
 fi
+
+# ── The venv that OWNS the module dir (the WHEEL case) ───────────────────
+# A wheel install puts this hook in ``site-packages/tortoise/claude-hooks/``,
+# so the module dir is ``site-packages`` — there is NO ``.venv`` beneath it
+# and the source-checkout probe above can never match (#2385 item 3). The
+# venv that owns site-packages is the one whose ``bin/tortoise`` console
+# script and ``bin/python`` have the wheel's dependencies, and it is marked
+# by a ``pyvenv.cfg`` at the venv root. POSIX
+# (``lib/python3.x/site-packages``) and Windows (``Lib/site-packages``) differ
+# in depth, so walk UP to the marker (bounded) instead of assuming a fixed
+# ``../../..``. Without this, the module fallback runs under the ambient
+# ``python3`` — which does not have the wheel's dependencies — and the hook
+# silently injects nothing while reporting success.
+TORTOISE_VENV=""
+if [ -n "$TORTOISE_MODULE" ]; then
+  _probe="$TORTOISE_MODULE"
+  _depth=0
+  while [ "$_depth" -lt 5 ]; do
+    if [ -z "$_probe" ] || [ "$_probe" = "/" ]; then
+      break
+    fi
+    if [ -f "$_probe/pyvenv.cfg" ]; then
+      TORTOISE_VENV="$_probe"
+      break
+    fi
+    _probe="${_probe%/*}"
+    _depth=$((_depth + 1))
+  done
+fi
+if [ -z "$TORTOISE_BIN" ] && [ -n "$TORTOISE_VENV" ] \
+   && [ -x "$TORTOISE_VENV/bin/tortoise" ]; then
+  TORTOISE_BIN="$TORTOISE_VENV/bin/tortoise"
+fi
 if [ -z "$TORTOISE_BIN" ] && [ -n "${VIRTUAL_ENV:-}" ] \
    && [ -x "$VIRTUAL_ENV/bin/tortoise" ]; then
   TORTOISE_BIN="$VIRTUAL_ENV/bin/tortoise"
@@ -133,10 +166,14 @@ if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
 fi
 # Python fallback for a source checkout: prefer the checkout's own venv so
 # the module runs under an interpreter that actually has tortoise installed.
+# A wheel install has no checkout venv, so fall back to the venv that OWNS
+# the resolved module dir (#2385 item 3) before the ambient python3.
 PYTHON_BIN=""
 if [ -z "$TORTOISE_BIN" ]; then
   if [ -x "$TORTOISE_MODULE/.venv/bin/python" ]; then
     PYTHON_BIN="$TORTOISE_MODULE/.venv/bin/python"
+  elif [ -n "$TORTOISE_VENV" ] && [ -x "$TORTOISE_VENV/bin/python" ]; then
+    PYTHON_BIN="$TORTOISE_VENV/bin/python"
   elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
     PYTHON_BIN="$VIRTUAL_ENV/bin/python"
   else
