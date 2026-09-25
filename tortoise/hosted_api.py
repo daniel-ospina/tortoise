@@ -4643,14 +4643,26 @@ async def get_current_org_session_ungated(request: Request) -> dict:
 
 
 def _key_limit_refusal(message: str = "Key limit reached — revoke an existing key") -> dict:
-    """The ONE structured `api_keys` quota refusal (#4614).
+    """The api_keys 402 for the doors that hold no count (#4614).
 
-    Every api_keys cap door answers with this shape — `/v1/team/keys`'s
-    pre-check via `_check_org_limit`, the mint/rotate `_KeyCapExceeded` race
-    backstops, and the two `/v1/session/key` recovery lanes. Before this they
-    were bare prose, so the SAME exhausted quota had one machine-readable
-    shape on one door and none on another — a caller branching on
-    `detail.code` could still not tell an api-keys refusal from any other 402.
+    `quota_refusal_payload` is the ONE builder every quota 402 uses, so the
+    refusal SHAPE — and the `code` a caller branches on — is uniform across
+    doors. This helper is that builder with the argument set for the api_keys
+    doors that cannot resolve the gate's own numbers: the mint/rotate
+    `_KeyCapExceeded` race backstops and the two `/v1/session/key` recovery
+    lanes. It therefore emits `code`/`message`/`resource` and no
+    `used`/`limit`.
+
+    `/v1/team/keys`'s pre-check is deliberately NOT one of them: it goes
+    through `_check_org_limit`, which forwards the numbers
+    `enforce_org_limit` compared. So that one door can answer with or without
+    `used`/`limit` depending on which arm refused — the pre-check knows the
+    numbers, the race backstop does not — which is `quota_refusal_payload`'s
+    documented contract (emit only what the raise site actually knew, never a
+    fabricated count). Before #4614 every one of these doors answered with
+    bare prose, so the same exhausted quota had one machine-readable shape on
+    one door and none on another, and a caller branching on `detail.code`
+    could still not tell an api-keys refusal from any other 402.
     """
     from tortoise.quota import QuotaExceededError, quota_refusal_payload
     return quota_refusal_payload(
