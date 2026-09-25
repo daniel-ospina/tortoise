@@ -17,6 +17,11 @@ in their home files (test_hosted_api.py, test_commit_endpoint.py,
 test_claim_endpoints.py, test_signup_token_revoke.py) where the auth fixtures
 live. This file covers the PUBLIC + webhook + OAuth surfaces with
 self-contained fixtures.
+
+#2048 extends this file with the RESIDUAL class #2032 left open: the
+`body: XxxRequest` / `body: dict` endpoints (FastAPI buffers the full wire body
+before validation) capped by `CappedBodyMiddleware`, and the /mcp sub-app's
+chunked `Transfer-Encoding` bypass of its header-only size check.
 """
 from __future__ import annotations
 
@@ -331,3 +336,193 @@ class TestOAuthCaps:
                                  headers={"content-type": "application/json"})
         assert r.status_code == 400
         assert r.json()["detail"] == "Invalid JSON body"
+
+
+# ── #2048: pydantic/dict-body class + the /mcp chunked bypass ───────────────
+# The residual class #2048 closes: a `body: XxxRequest` / `body: dict`
+# parameter is parsed by FastAPI's `get_request_handler` (`await
+# request.body()`) BEFORE any dependency or handler body runs, so those
+# endpoints buffer the WHOLE wire body upstream of where #2032's per-site
+# `_read_capped_body` call could sit. `CappedBodyMiddleware`
+# (tortoise/body_limits.py) caps them at the default 256 KiB while the body is
+# still a stream, then replays under-cap bytes to the router.
+
+def _oversized_default_chunked(n_chunks: int = 6, step: int = 100_000):
+    """600 KiB, chunked (NO content-length) — above the 256 KiB default cap.
+    A buffering parse would 500/401 on this junk, so a 413 uniquely proves the
+    middleware cap fired before parse (the #2032 `_oversized_chunked` idiom)."""
+    for _ in range(n_chunks):
+        yield b"x" * step
+
+
+def _mcp_oversized_chunked(n_chunks: int = 12, step: int = 100_000):
+    """1.2 MB, chunked — above the /mcp sub-app's 1 MB cap."""
+    for _ in range(n_chunks):
+        yield b"x" * step
+
+
+class TestPydanticBodyClassCap:
+    """#2048 — the pydantic/`dict`-body endpoints.
+
+    Guard is LOAD-BEARING: with `CappedBodyMiddleware`'s default raised (the
+    mutation), these bodies are parsed by the endpoint and return 401/422/200
+    instead of 413.
+    """
+
+    def test_public_claim_email_oversized_chunked_413(self, embedded_client):
+        """`POST /v1/claim/email` has NO auth dependency — the truly public
+        member of the class (the issue also named
+        `/v1/onboarding/github/connect`, which is auth-gated; see the issue
+        note)."""
+        import tortoise.body_limits as bl
+        r = embedded_client.post("/v1/claim/email", content=_oversized_default_chunked())
+        assert r.status_code == 413, r.text
+        assert r.json()["detail"] == bl.BODY_413_DETAIL
+
+    def test_auth_gated_pydantic_oversized_413_before_auth(self, embedded_client):
+        """`/v1/objects` is auth-gated, but FastAPI buffers the declared body
+        BEFORE the dependency — so an unauthenticated caller can drive the
+        buffering and now gets 413, not 401. This is the class's whole point:
+        auth-gating does NOT mitigate it."""
+        r = embedded_client.post(
+            "/v1/objects", content=_oversized_default_chunked(),
+            headers={"content-type": "application/json"})
+        assert r.status_code == 413, r.text
+
+    def test_auth_gated_pydantic_spoofed_short_cl_413(self, embedded_client):
+        """Valid JSON + a spoofed short Content-Length: the streaming cap
+        catches the under-claim (the CL header is never trusted)."""
+        r = embedded_client.post(
+            "/v1/objects", content=_oversized_default_chunked(),
+            headers={"content-type": "application/json",
+                     "content-length": "37"})
+        assert r.status_code == 413
+
+    def test_auth_gated_pydantic_under_cap_reaches_auth_401(self, embedded_client):
+        """Under the cap the middleware is BYTE-TRANSPARENT: the replayed body
+        is parsed and the auth dependency runs → the pre-#2048 401."""
+        r = embedded_client.post("/v1/objects", json={"name": "cap-probe"})
+        assert r.status_code == 401, r.text
+
+    def test_middleware_413_carries_cors_header(self, embedded_client):
+        """Placement pin: `CappedBodyMiddleware` is registered FIRST so it is
+        INNERMOST (inside CORSMiddleware). A middleware 413 therefore carries
+        the SAME response headers a handler 413 would. (Mutation: register the
+        middleware last/outermost → no access-control-allow-origin here.)"""
+        r = embedded_client.post(
+            "/v1/objects", content=_oversized_default_chunked(),
+            headers={"content-type": "application/json",
+                     "origin": "https://app.premiselabs.co"})
+        assert r.status_code == 413
+        assert (r.headers.get("access-control-allow-origin")
+                == "https://app.premiselabs.co")
+
+
+class TestCaptureSessionCapOverride:
+    """`/v1/sessions` (capture_session) carries `conversation` — per-turn
+    content is schema-UNBOUNDED on the wire, so the 256 KiB default would
+    false-413 a legal capture. It is overridden to the capture hook's own
+    16 MiB spool ceiling (tortoise/body_limits.py::CAPTURE_SESSION_MAX_BYTES)."""
+
+    def test_300kib_capture_body_not_413(self, embedded_client):
+        """300 KiB > the 256 KiB default: reaching the auth dependency (401)
+        proves the override raised the cap. (Mutation: drop the override →
+        413.)"""
+        body = b" " * (300 * 1024) + b'{"conversation": []}'
+        r = embedded_client.post(
+            "/v1/sessions", content=body,
+            headers={"content-type": "application/json"})
+        assert r.status_code != 413, r.text
+
+    def test_capture_override_value_pinned(self):
+        """The override value is the client spool ceiling, derived in ONE
+        place — pin it so a silent retune is caught."""
+        import tortoise.body_limits as bl
+        assert bl.CAPTURE_SESSION_MAX_BYTES == 16 * 1024 * 1024
+        assert bl.CAPTURE_SESSION_413_DETAIL == (
+            "session request body exceeds the size cap (16 MiB)")
+
+    def test_default_cap_constant_shared(self):
+        """hosted_api's `_BODY_MAX_BYTES` / `_BODY_413_DETAIL` are ALIASES of
+        the shared module's — a drift would give the middleware and a handler
+        cap different values for the same surface."""
+        import tortoise.body_limits as bl
+        import tortoise.hosted_api as ha_mod
+        assert ha_mod._BODY_MAX_BYTES == bl.BODY_MAX_BYTES
+        assert ha_mod._BODY_413_DETAIL == bl.BODY_413_DETAIL
+
+
+class TestMcpChunkedBodyCap:
+    """#2048 — the /mcp sub-app's `RequestBodySizeMiddleware` checked
+    `content-length` ONLY, so a chunked `Transfer-Encoding` body (no CL header)
+    bypassed the 1 MB cap. The streaming rewrite reads the body under the same
+    cap. Mutation: restore the header-only check and
+    `test_mcp_chunked_oversized_413` fails (the oversized body reaches the
+    sub-app's auth middleware → 401)."""
+
+    def test_mcp_chunked_oversized_413(self, embedded_client):
+        r = embedded_client.post(
+            "/mcp", content=_mcp_oversized_chunked(),
+            headers={"content-type": "application/json",
+                     "accept": "application/json, text/event-stream"})
+        assert r.status_code == 413, r.text
+        body = r.json()
+        assert body["error"]["code"] == -32600
+        assert body["error"]["message"] == "Request body too large (max 1MB)"
+
+    def test_mcp_chunked_under_cap_replays_to_auth_401(self, embedded_client):
+        """A small CHUNKED JSON-RPC body must survive the streaming read (the
+        bytes are replayed downstream) and reach the auth middleware → 401.
+        A cap that consumed the body without replaying would 400/hang here."""
+        payload = b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+        r = embedded_client.post(
+            "/mcp", content=iter([payload]),
+            headers={"content-type": "application/json",
+                     "accept": "application/json, text/event-stream"})
+        assert r.status_code == 401, r.text
+
+
+class TestMiddlewareExemptionMap:
+    """#2048: the middleware's scope is EXACTLY the previously-uncapped class.
+
+    Every #2032 handler-capped route is exempt (its own `_read_capped_body`
+    runs at its documented position). Two of those are EXACT-path exemptions
+    where a prefix would have leaked coverage onto a pydantic sibling — the
+    assertions below pin that, so a future prefix "simplification" is caught.
+    """
+
+    @staticmethod
+    def _middleware_kwargs():
+        import tortoise.body_limits as bl
+        from tortoise.hosted_api import app
+        entry = next(m for m in app.user_middleware
+                     if m.cls is bl.CappedBodyMiddleware)
+        return bl.CappedBodyMiddleware, entry.kwargs
+
+    def test_2032_handler_capped_paths_exempt(self):
+        cls, kwargs = self._middleware_kwargs()
+        mw = cls(None, **kwargs)
+        for path in ("/v1/register", "/v1/session/login", "/v1/signup/email",
+                     "/v1/team/keys", "/v1/team/keys/k1/rotate", "/v1/claim",
+                     "/v1/agent/signup", "/v1/agent/recover",
+                     "/v1/agent/token/revoke", "/oauth/consent", "/oauth/token",
+                     "/oauth/revoke", "/register", "/v1/sessions/commit",
+                     "/v1/packs/manifests", "/webhooks/stripe",
+                     "/v1/organizations/org1/import", "/internal/demo",
+                     "/v1/internal/backups/purge", "/mcp/"):
+            assert mw.resolve_cap(path) is None, path
+
+    def test_pydantic_siblings_stay_capped(self):
+        """`/v1/team/keys/{key_id}` (pydantic PATCH) and `/v1/claim/email`
+        (public pydantic POST) sit NEXT TO an exempt path — they must keep the
+        default cap. A prefix exemption on `/v1/team/keys` or `/v1/claim` would
+        silently drop them (they are the class this middleware exists for)."""
+        import tortoise.body_limits as bl
+        cls, kwargs = self._middleware_kwargs()
+        mw = cls(None, **kwargs)
+        assert mw.resolve_cap("/v1/team/keys/k1") == (
+            bl.BODY_MAX_BYTES, bl.BODY_413_DETAIL)
+        assert mw.resolve_cap("/v1/claim/email") == (
+            bl.BODY_MAX_BYTES, bl.BODY_413_DETAIL)
+        assert mw.resolve_cap("/v1/objects") == (
+            bl.BODY_MAX_BYTES, bl.BODY_413_DETAIL)
