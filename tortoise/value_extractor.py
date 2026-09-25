@@ -23,16 +23,17 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                         installed_namespaces: Collection[str] | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
 
-    The brief the PROMPTS are compiled from. It is graph-gated only when a
-    caller passes ``installed_namespaces`` — the ENFORCER is not: the
-    deterministic enforcer (``validate_summary`` → ``_object_kind_vocab``),
-    the Layer-1 write gate (``commit_schema.get_vocab`` /
-    ``refresh_vocab``) and the classify-later index
-    (``compile_kind_index_spec``) all still compile the UNGATED catalog
-    union, so a gated graph's prompt offers a narrower vocabulary than what
-    the system will ACCEPT or CLASSIFY INTO until that plumbing lands —
-    the three callers #5163 tracks. Do not read "gated brief" as "gated
-    system".
+    The brief the PROMPTS are compiled from. It is graph-gated when a caller
+    passes ``installed_namespaces``. Every caller that can observe a graph
+    now passes the gate (#5163): the classify-later kind index
+    (``compile_kind_index_spec``), the deterministic enforcer
+    (``validate_summary`` → ``_object_kind_vocab``, via the SDK v1 path and
+    its client-side Layer-1 pre-check) and the hosted commit door (which
+    compiles a graph-scoped ``commit_schema`` vocab and passes it to
+    ``validate_payload_dict``). The seams keep ``None`` = no gate (the
+    catalog union) for a caller with no graph handle — the documented
+    back-compat value — and a graph that IS bound but unreachable RAISES;
+    there is no silent fallback from a real graph to the union.
 
     ``tenant_manifests`` (#2031 — hosted per-tenant custom packs) is an
     ADDITIVE overlay: ``{namespace: full manifest yaml}`` compiled through
@@ -186,7 +187,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
             "memory_granularity": granularity}
 
 
-def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
+def compile_kind_index_spec(packs_dir: Path | str | None = None,
+                            installed_namespaces: Collection[str] | None = None
+                            ) -> dict:
     """The FULL kind-classification candidate set (issue #1695, Task 3):
     ``{kind: {"text", "section", "description", "synonyms", "examples",
     "nearMisses"}}`` for every classifiable kind — core §5 objects, the
@@ -214,15 +217,30 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
     Lazy imports keep the module importable without the pack machinery
     (``extractor_v2`` imports this module's ``compile_value_brief``).
 
-    Memoized per RESOLVED ``packs_dir`` (the key is the resolved path, so a
-    custom-dir call never poisons the default-dir memo and vice versa —
-    cycle-3 P2 unkeyed memo)."""
+    ``installed_namespaces`` (#5163) gates the PACK candidate set to one
+    GRAPH's installed pack set — the same namespace filter
+    ``compile_value_brief`` applies, so the index the classifier retrieves
+    over can never offer a kind from a pack the graph does not install (a
+    422 the prompt never offered). ``None`` = no gate (the catalog union —
+    the back-compat path for a graph with no ``:PackInstall`` records); the
+    CORE sections (objects-from-core/subjects/points/events) are never
+    gated.
+
+    Memoized per ``(RESOLVED packs_dir, installed_namespaces gate)`` — the key
+    includes the gate (#5163), so a gated compile is never served to an
+    ungated (or differently-gated) caller and vice versa; a custom dir or a
+    different gate is its own slot (cycle-3 P2 unkeyed memo)."""
     import copy
 
     from tortoise.pack_registry import default_packs_dir
     global _KIND_SPEC_CACHE
     packs_dir = (Path(packs_dir) if packs_dir else default_packs_dir()).resolve()
-    cached = _KIND_SPEC_CACHE.get(str(packs_dir))
+    # #5163: the graph gate. None = no gate (catalog union). Frozen so the
+    # memo key is hashable and two equal gates share one slot.
+    _gate = (None if installed_namespaces is None
+             else frozenset(installed_namespaces))
+    _memo_key = (str(packs_dir), _gate)
+    cached = _KIND_SPEC_CACHE.get(_memo_key)
     if cached is not None:
         # deep copy — callers must never mutate the shared cache (the
         # build/load paths treat the spec as read-only).
@@ -237,7 +255,8 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
             parts.append("examples: " + ", ".join(str(e) for e in exs))
         return " | ".join(parts)
 
-    brief = compile_value_brief(packs_dir)
+    brief = compile_value_brief(packs_dir,
+                               installed_namespaces=installed_namespaces)
     spec: dict[str, dict] = {}
     for k in CORE_OBJECT_KEYS:
         desc = str(brief.get(k, "") or "")
@@ -268,6 +287,11 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
     reg = PackRegistry(packs_dir)
     reg.load_all()
     for ns, pack in reg.packs.items():
+        # #5163: the SAME namespace gate the brief applies. Without it the
+        # kind INDEX (the classifier's candidate set) offers kinds from a
+        # pack the graph does not install.
+        if _gate is not None and ns not in _gate:
+            continue
         # Section mapping for DECLARED kinds: eventKinds → events,
         # object/documentKinds → objects (setdefault so a kind declared in
         # BOTH keeps the first non-point section; pointKinds are excluded
@@ -307,20 +331,25 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
             spec[k] = {"text": k, "section": section,
                        "description": "", "synonyms": [], "examples": [],
                        "nearMisses": []}
-    _KIND_SPEC_CACHE[str(packs_dir)] = spec
+    _KIND_SPEC_CACHE[_memo_key] = spec
     return copy.deepcopy(spec)
 
 
-_VOCAB_CACHE: dict | None = None
+#: Load-once memo for the enforcer's objectKind set, KEYED BY THE GATE
+#: (#5163): the set is a function of the graph's installed namespaces, so a
+#: single process-global slot would serve a dev-only graph the catalog union
+#: (and vice versa). ``None`` = no gate (the union).
+_VOCAB_CACHE: dict[frozenset[str] | None, set[str]] = {}
 
 
-#: Load-once memo for the kind-index spec, keyed by the RESOLVED packs dir
-#: (packs are static per process per dir — per-session classifier
-#: construction must not re-read + YAML-parse every pack manifest; the key
-#: keeps a custom-dir call from poisoning the default-dir memo and vice
-#: versa — cycle-3 P2 unkeyed memo). Mirrors ``_MASTER_LIST_CACHE`` /
-#: ``_VOCAB_CACHE``.
-_KIND_SPEC_CACHE: dict[str, dict] = {}
+#: Load-once memo for the kind-index spec, keyed by ``(RESOLVED packs dir,
+#: installed_namespaces gate)`` (packs are static per process per dir —
+#: per-session classifier construction must not re-read + YAML-parse every
+#: pack manifest; the key keeps a custom-dir call from poisoning the
+#: default-dir memo and vice versa — cycle-3 P2 unkeyed memo — and the gate
+#: from #5163 keeps a gated graph's spec from leaking to an ungated caller).
+#: Mirrors ``_MASTER_LIST_CACHE`` / ``_VOCAB_CACHE``.
+_KIND_SPEC_CACHE: dict[tuple[str, frozenset[str] | None], dict] = {}
 
 
 def _clear_kind_spec_cache() -> None:
@@ -330,13 +359,24 @@ def _clear_kind_spec_cache() -> None:
     _KIND_SPEC_CACHE = {}
 
 
-def _object_kind_vocab() -> set[str]:
-    """The closed objectKind set (core §5 + pack kinds), cached (T12 —
-    compile_value_brief does PackRegistry.load_all() per call). Bare forms
-    are normalized to their namespaced key; case is folded."""
+def _object_kind_vocab(installed_namespaces: Collection[str] | None = None
+                       ) -> set[str]:
+    """The closed objectKind set (core §5 + pack kinds), cached per GATE
+    (T12 — compile_value_brief does PackRegistry.load_all() per call). Bare
+    forms are normalized to their namespaced key; case is folded.
+
+    ``installed_namespaces`` (#5163) gates the set exactly as
+    ``compile_value_brief`` does: ``None`` = the catalog union (a graph with
+    no ``:PackInstall`` records — the back-compat path), a collection = only
+    those namespaces contribute. The memo is keyed by the gate, so a
+    dev-only graph is never served the union's set from a process-global
+    slot."""
     global _VOCAB_CACHE
-    if _VOCAB_CACHE is None:
-        brief = compile_value_brief()
+    cache_key = (None if installed_namespaces is None
+                 else frozenset(installed_namespaces))
+    cached = _VOCAB_CACHE.get(cache_key)
+    if cached is None:
+        brief = compile_value_brief(installed_namespaces=installed_namespaces)
         vocab = set()
         for key in brief:
             ns, _, kind = key.rpartition(":")
@@ -344,8 +384,9 @@ def _object_kind_vocab() -> set[str]:
             vocab.add(kind)                       # bare form
             vocab.add(kind.lower())              # case-folded
             vocab.add(f"{ns}:{kind.lower()}")   # namespaced + folded
-        _VOCAB_CACHE = vocab
-    return _VOCAB_CACHE
+        _VOCAB_CACHE[cache_key] = vocab
+        cached = vocab
+    return cached
 
 
 # ── Process 1: the summary pass ─────────────────────────────────────────────
@@ -430,16 +471,23 @@ EVENT_KINDS = {"decision", "occurrence", "deployment", "review", "extraction",
                "humanApproval"}
 
 
-def validate_summary(summary: dict, vocab: dict | None = None,
-                    mode: str = "fail-closed") -> list[str]:
+def validate_summary(summary: dict, vocab: Collection[str] | None = None,
+                    mode: str = "fail-closed",
+                    installed_namespaces: Collection[str] | None = None
+                    ) -> list[str]:
     """Deterministic validation of the summary stream (the enforcer).
 
     T12 (#1272): ``mode`` selects fail-closed (default — non-vocab
     objectKinds reject) vs warn (Phase B calibration — non-vocab kinds
     become proposal notes, not errors, so the calibration windows are
     reachable; criteria v1 §2.2.6 proposal semantics). The kind check is
-    ALWAYS active against the aligned §5+pack vocab (never gated on vocab
-    being passed — the vocab is loaded internally when None)."""
+    ALWAYS active against the aligned §5+pack vocab.
+
+    ``vocab`` is the accepted-forms set when the caller already holds one;
+    when None it is loaded internally. ``installed_namespaces`` (#5163) is
+    the graph gate for that internal load — the SDK v1 path passes the
+    graph's installed-pack set, so a dev-only graph rejects a ``marketing:*``
+    objectKind instead of passing the catalog union. ``None`` = no gate."""
     errors = []
     for d in summary.get("decisions", []) or []:
         if not d.get("content"):
@@ -456,7 +504,8 @@ def validate_summary(summary: dict, vocab: dict | None = None,
             errors.append(f"state {s.get('name','')[:30]}: missing objectKind "
                           "(fail-closed — the mapper default core:other is a "
                           "payload fallback, not a validation pass)")
-        elif kind not in _object_kind_vocab():
+        elif kind not in (vocab if vocab is not None
+                          else _object_kind_vocab(installed_namespaces)):
             if mode == "fail-closed":
                 errors.append(f"state {s.get('name','')[:30]}: objectKind "
                               f"{kind!r} not in the closed vocabulary "
@@ -696,7 +745,9 @@ def extract_session(model, conversation: list[dict],
                     existing_state: dict | None = None,
                     session_id: str = "session",
                     chunk_size: int = 6,
-                    mode: str = "fail-closed") -> dict:
+                    mode: str = "fail-closed",
+                    installed_namespaces: Collection[str] | None = None
+                    ) -> dict:
     """The production entry: conversation -> summary (+ delta when existing
     state is provided). Returns the commit-ready stream.
 
@@ -704,12 +755,16 @@ def extract_session(model, conversation: list[dict],
     the model is re-prompted ONCE with the errors (CORRECT_PASS) to fix them
     (≤1 retry; the harness's proven run_iterative pattern, production-schema
     adapted). The mode param (T12) selects fail-closed (default) vs warn.
+
+    ``installed_namespaces`` (#5163) threads the graph's installed-pack gate
+    to the objectKind enforcer (and its repair re-check). None = no gate.
     """
     edus = [{"index": i, "role": t.get("role", "unknown"),
              "text": _mask_refs(str(t.get("content", "")))}
             for i, t in enumerate(conversation) if t.get("content")]
     summary = summarize(model, edus, chunk_size=chunk_size)
-    errors = validate_summary(summary, mode=mode)
+    errors = validate_summary(summary, mode=mode,
+                              installed_namespaces=installed_namespaces)
     if errors:
         # T10: one bounded repair attempt (the dev lineage's CORRECT_PASS).
         try:
@@ -717,7 +772,8 @@ def extract_session(model, conversation: list[dict],
                 model, CORRECT_PASS.format(errors="\n".join(errors[:8])),
                 json.dumps(summary, indent=1)))
             if isinstance(fixed, dict):
-                fixed_errors = validate_summary(fixed)
+                fixed_errors = validate_summary(
+                    fixed, installed_namespaces=installed_namespaces)
                 if len(fixed_errors) < len(errors):
                     summary = fixed
                     errors = fixed_errors

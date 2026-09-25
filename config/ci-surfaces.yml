@@ -397,6 +397,13 @@ surfaces:
   # operator surface for the config third state); a __main__-only PR would
   # otherwise select `api` and never run it.
   - test_rebuild_config_preservation.py
+  # #5163: the three CALLERS of the #2714 installed-pack gate — the
+  # classify-later kind index, the S1 summary enforcer and the HOSTED COMMIT
+  # DOOR (`tortoise/hosted_api.py`, which this surface owns). A hosted_api.py
+  # change selects `api`, so this registration is what runs the door's 422
+  # assertion; also registered under `core` (the compile seams it reads),
+  # `sdk` (the local v1/client wiring) and `classify` (the kind index).
+  - test_vocab_gating_callers_5163.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1118,6 +1125,10 @@ surfaces:
   # then never run (the #1349/#3332 silent-drop class). Dual-registered with
   # `ep`, which owns `tortoise/dream.py`. See the note in the `ep` block.
   - test_2884_ep_state_journaled.py
+  # #5163: dual with `api`/`sdk`/`classify` — this file pins the CALLERS of
+  # the #2714 gate; `tortoise/value_extractor.py` (the enforcer + kind index)
+  # selects `core`.
+  - test_vocab_gating_callers_5163.py
   ep:
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
@@ -1389,6 +1400,10 @@ surfaces:
   - test_sdk_props_coercion.py
   - test_tortoise_client.py
   - test_version_vector.py
+  # #5163: dual with `api`/`core`/`classify` — `tortoise/sdk.py` selects
+  # `sdk`, and this file pins the SDK's local v1 enforcer wiring + client-side
+  # Layer-1 pre-check.
+  - test_vocab_gating_callers_5163.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -1398,6 +1413,10 @@ surfaces:
   - test_chain_enforcer.py
   - test_kind_index.py
   - test_kind_classifier.py
+  # #5163: dual with `api`/`core`/`sdk` — `tortoise/kind_classifier.py` and
+  # `tortoise/extractor_v2.py` select `classify`; this file pins the gated
+  # kind index.
+  - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
   # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard

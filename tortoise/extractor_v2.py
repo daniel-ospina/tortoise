@@ -554,13 +554,17 @@ def _value_gate_enabled() -> bool:
     return _value_gate.value_gate_enabled()
 
 
-def _default_kind_classifier(model):
+def _default_kind_classifier(model, installed_namespaces=None):
     """The default classify-later classifier (built lazily — index build is
     the first-use cost; the EmbeddingModel singleton is shared, never
     re-instantiated). The session's LLM adapter powers the adjudication
-    tail."""
+    tail.
+
+    ``installed_namespaces`` (#5163) is the graph's installed-pack gate
+    threaded into the kind index — ``None`` = no gate (the catalog union)."""
     from tortoise.kind_classifier import KindClassifier
-    return KindClassifier(model=model)
+    return KindClassifier(model=model,
+                          installed_namespaces=installed_namespaces)
 
 
 def _render_master(master: dict, story: str | None = None, *,
@@ -5822,7 +5826,20 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     classify_later = kind_classifier is not None or _classify_later_enabled()
     if classify_later and kind_classifier is None:
         try:
-            kind_classifier = _default_kind_classifier(model)
+            # #5163: gate the classifier's kind index on the graph's
+            # installed pack set — the SAME resolver the prompt's
+            # tenant_view uses, so the classifier can never assign a kind
+            # the L1 write gate will 422. ``sdk=None`` (offline callers) =
+            # no gate (the union). A bound-but-unreachable graph RAISES
+            # here and the except below disables classify-later for this
+            # session — no ungated classification runs (fail-closed),
+            # never a silent fallback to the catalog union.
+            installed = None
+            if sdk is not None:
+                from tortoise.pack_state import graph_installed_namespaces
+                installed = graph_installed_namespaces(sdk)
+            kind_classifier = _default_kind_classifier(
+                model, installed_namespaces=installed)
         except Exception as e:  # noqa: BLE001, RUF100 — never let the
             # classifier construction block capture (fail-open: legacy path)
             classify_later = False

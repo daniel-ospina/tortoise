@@ -174,12 +174,15 @@ def compile_vocab(packs_dir: Path | str | None = None,
     so the set the extractor is *offered* and the set it may *write* are
     derived from one decision.
 
-    ⚠️ Accepting the resolver's output is not the same as RECEIVING it: the
-    prompt side is wired in production (``tenant_view`` threads the gate
-    into ``compile_value_brief``), but **no production caller passes this
-    argument yet** — ``get_vocab``/``refresh_vocab`` still compile the union,
-    so Layer-1 does not enforce per-graph approval on the live commit path.
-    The remaining plumbing is filed as #5163 (see also #2728).
+    ``get_vocab``/``refresh_vocab`` still compile the union (a process-global
+    default), but the PRODUCTION callers now pass a graph-scoped vocab
+    explicitly (#5163): the hosted commit door
+    (``hosted_api.commit_session``) compiles
+    ``compile_vocab(installed_namespaces=graph_installed_namespaces(sdk))``
+    before ``validate_payload_dict``, and the SDK's client-side pre-check
+    (``TortoiseSDK._commit_session_v2``) does the same — so Layer-1 enforces
+    per-graph approval on the live commit path. What remains is the
+    per-graph pack SELECTION surface (#2728).
     """
     if packs_dir is None:
         from tortoise.pack_registry import default_packs_dir

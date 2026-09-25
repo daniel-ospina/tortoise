@@ -2339,6 +2339,24 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+def _installed_namespaces_for_gate(sdk) -> frozenset[str] | None:
+    """#5163: the graph's installed-pack set for the SDK's LOCAL compile
+    gates — the v1 objectKind enforcer (``validate_summary``) and the
+    client-side Layer-1 pre-check (``validate_payload_dict``).
+
+    ``None`` = no gate (the catalog union) — the documented back-compat value
+    for a graph with no ``:PackInstall`` records, and for an SDK that carries
+    no graph handle at all (never ``__init__``-ed — the test seams that build
+    a summary path with ``object.__new__``). A graph that IS bound but
+    unreachable RAISES out of ``graph_installed_namespaces`` — an outage must
+    never read as "no packs" and silently widen the gate to the union.
+    """
+    if not hasattr(sdk, "_proj"):
+        return None
+    from tortoise.pack_state import graph_installed_namespaces
+    return graph_installed_namespaces(sdk)
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -3663,7 +3681,7 @@ class TortoiseSDK:
         validated payload → POST. Errors are surfaced (ok=False) with the
         payload for inspection — never a silent partial write."""
         from tortoise.extractor_v2 import extract_session_v2  # noqa: I001
-        from tortoise.commit_schema import validate_payload_dict
+        from tortoise.commit_schema import compile_vocab, validate_payload_dict
         from datetime import datetime, timezone
         model = extractor_model or _default_byok_model()
         # E1 (#1533, D8): capture time is the production session date — an
@@ -3682,7 +3700,13 @@ class TortoiseSDK:
             errors.append("no payload produced (empty or failed conversation)")
         l1_errors: list[str] = []
         if payload is not None:
-            l1, _model = validate_payload_dict(payload)
+            # #5163: validate against the GRAPH's installed-pack gate, not the
+            # process-global union — the same decision the hosted commit door
+            # enforces server-side, so the client never POSTs a payload it
+            # knows the door will 422.
+            l1, _model = validate_payload_dict(
+                payload, vocab=compile_vocab(
+                    installed_namespaces=_installed_namespaces_for_gate(self)))
             if not l1.ok:
                 for field, reasons in l1.errors.items():
                     for r in reasons:
@@ -3730,17 +3754,22 @@ class TortoiseSDK:
                                               validate_summary, check_guards)
 
         from tortoise.value_extractor import construct_graph
+        # #5163: the objectKind enforcer's set is graph-gated. Resolve ONCE —
+        # both the extraction path and the direct-summary path below need it.
+        installed = _installed_namespaces_for_gate(self)
         if summary is None and conversation is not None:
             model = extractor_model or _default_byok_model()
             extracted = extract_session(
                 model, conversation, existing_state=existing_state,
-                session_id=session_id, chunk_size=chunk_size, mode=mode)
+                session_id=session_id, chunk_size=chunk_size, mode=mode,
+                installed_namespaces=installed)
             summary = extracted["summary"]
             errors = extracted.get("errors", [])
             guards = extracted.get("guards", [])
             delta = extracted.get("delta")
         else:
-            errors = validate_summary(summary or {}, mode=mode)
+            errors = validate_summary(summary or {}, mode=mode,
+                                      installed_namespaces=installed)
             guards = check_guards(summary or {})
             delta = None
 

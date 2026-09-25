@@ -3601,7 +3601,8 @@ class TestClassifyStage:
         real index build (bge cold load / TF-IDF degrade)."""
         monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
         monkeypatch.setattr(v2, "_default_kind_classifier",
-                            lambda model: _stub_classifier())
+                            lambda model, installed_namespaces=None:
+                                _stub_classifier())
         s2 = {"entities": [
             {"name": "the ticket fix", "kind": "unclassified",
              "lifecycle": "created", "supersedes": None, "note": None}],
