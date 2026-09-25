@@ -130,12 +130,12 @@ property). It gets its own declared sidecar sections instead:
   journaled nothing the anchor cannot be rebuilt; the restore then drops the
   edge rather than minting an endpoint-less one, and reports it as
   `onboarding_missing_onboards` (the edge is never silently assumed to have
-  survived). One deliberate scope limit: a `COMPLETED_STEP` edge whose
-  `step_id` is **outside the canonical vocabulary** is not carried (the
-  capture filters to canonical ids and logs a warning) — the gates in
-  `tortoise/onboarding/state.py` count an unrecognised id as an AGENT step,
-  so such an edge can only ever BLOCK a completion, never create one; it is
-  reported rather than silently dropped.
+  survived). Every `COMPLETED_STEP` edge the live graph holds is carried
+  verbatim, including a `step_id` outside the canonical vocabulary: the gates
+  in `tortoise/onboarding/state.py` count an unrecognised id as an AGENT step,
+  so while the edge exists it BLOCKS the grandfathered completion — and
+  DROPPING it would UNBLOCK (create) that completion, which is why the
+  capture does not filter the vocabulary.
 - `:Batch` + the `Point.batch_id` membership — preserved by the
   `batch_snapshot` / `batch_point_links` sections (**#990**): the
   quarantine/commit marker is raw Cypher that rides no journal record, so the
@@ -160,11 +160,13 @@ property). It gets its own declared sidecar sections instead:
 <!-- config-registry:end -->
 
 **Operator audit** — read-only; it enumerates the configuration classes the
-registry declares **and** the container/link classes the declared sidecar
-sections preserve, so an operator can tell what survived a rebuild. The
-onboarding rows are pinned by the doc-consistency test (a section's classes
-must appear here); the container rows are hand-maintained there too, but as a
-presence check — the test does not prove the list is exhaustive.
+registry declares **and** the container nodes the declared sidecar sections
+preserve (`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), so an
+operator can tell what survived a rebuild. The onboarding rows are pinned by
+the doc-consistency test (a section's classes must appear here); the container
+rows are hand-maintained there too, but as a presence check — the test does
+not prove the list is exhaustive, and the per-Point membership edges
+(`batch_point_links`, `session_point_links`) are not enumerated here.
 
 <!-- config-registry:audit-query -->
 ```cypher
@@ -280,17 +282,22 @@ gate in `tests/test_durability_posture.py` fails the build if a
   #2996) destroys it exactly as before. The live instance is the
   `unenrolled` list above (#5353, #4653).
 - **#4641 residual** — within an interrupted-rebuild window a **pending**
-  (non-retired) pre-wipe sidecar keeps BOTH the leftover `onboarding_snapshot`
-  node map **and** the leftover `onboarding_step_links` pair verbatim, so a
-  mutation made after the sidecar was written can be rolled back by the
-  retry: a repaired/deleted `decide-completed` edge (#3912) can be re-added,
-  and a colliding org's `status`, `member_progress`, `fork` or `compact` is
-  reverted to its pre-wipe value. The node map deliberately keeps the
-  leftover verbatim — the alternative (fresh-wins field merging) would let a
-  self-healed default overwrite recovered truth, the harm #4641 removes — so
-  this is the same trade already documented for a colliding config key in the
-  **#2814 residual** above. The remedy is the same: the operator deletes the
-  pending rescue file (never the retired, entry-less one).
+  (non-retired) pre-wipe sidecar keeps the leftover `onboarding_snapshot`
+  node map and the leftover `onboarding_step_links` pairs, so a mutation made
+  after the sidecar was written can be rolled back by the retry: a
+  repaired/deleted `decide-completed` edge (#3912) can be re-added, and a
+  colliding org's node fields — `status`, `member_progress`, `fork`,
+  `compact`, `version`, `last_decide_attempt`, `fork_unsure_at` — are reverted
+  to their pre-wipe values. The node map deliberately keeps the leftover
+  rather than field-merging — the alternative would let a self-healed default
+  overwrite recovered truth, the harm #4641 removes — so this is the same
+  trade already documented for a colliding config key in the **#2814
+  residual** above. **One field is excluded**: `org_subject_id`, the
+  org-anchor carrier, is taken fresh-wins, because nothing self-heals it and
+  the post-restore check compares against the same merged map — so a stale
+  leftover anchor would silently destroy a live `onboards` edge and still
+  report a clean restore. The remedy is the same as for #2814: the operator
+  deletes the pending rescue file (never the retired, entry-less one).
 - **#2814 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar reverts a **colliding** config key to its
   pre-wipe value, so a config deliberately deleted after the wipe can be

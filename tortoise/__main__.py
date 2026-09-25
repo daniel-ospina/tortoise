@@ -91,6 +91,14 @@ def _cmd_rebuild(args):
             + (counts.get("onboarding_missing_orgs") or 0)
             + (counts.get("onboarding_missing_links") or 0)
             + (counts.get("onboarding_missing_onboards") or 0))
+        # A FAILED verification read reports the missing counts as None (so the
+        # sum above is 0) and `onboarding_verified` False. "Could not confirm"
+        # must not read as "confirmed" here either, so this must agree with
+        # `consistency.recover_from_log`'s `onboarding_gap` for the same shape
+        # (#4641 review round 4).
+        if counts.get("onboarding_verified") is False and \
+                counts.get("onboarding_expected"):
+            onboarding_gap = max(onboarding_gap, 1)
         print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
               f"{counts.get('onboarding_expected', 0)} org state(s) restored")
         if onboarding_gap:

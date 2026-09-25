@@ -696,13 +696,18 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
     * ``links`` — ``(org_id, step_id)`` pairs for every `COMPLETED_STEP` edge.
 
     The labels / edge type come from the DOMAIN module (never re-typed — a
-    rename must not silently de-enrol the class). The step-id set is the
-    canonical ``ONBOARDING_STEPS``: a `:OnboardingStep` id outside it carries
-    no gate semantics (every gate in ``tortoise/onboarding/state.py``
-    resolves canonical ids) and the pre-wipe validator refuses it — so the
-    capture filters to the canonical set. Capturing a foreign id instead would
-    write a sidecar this build then REFUSES to load on the retry, making the
-    log dir unrebuildable over data no gate reads.
+    rename must not silently de-enrol the class).
+
+    #4641 review round 4: the step-id set is deliberately NOT filtered. An
+    earlier version restricted ``links`` to the canonical
+    ``ONBOARDING_STEPS``, reasoning that a foreign id carried no gate
+    semantics. That was backwards and unsafe: the gates
+    (``resolve_wire_completion`` / ``recompute_completion``) count an
+    unrecognised id as an AGENT step, so while the edge exists it BLOCKS the
+    grandfathered completion, and DROPPING it can CREATE that completion —
+    the exact forgery this capture exists to prevent. Every `COMPLETED_STEP`
+    edge the live graph holds is therefore captured verbatim, and the
+    validator accepts any string pair.
 
     An orphan `:OnboardingStep` node (no `COMPLETED_STEP` edge) is not
     captured: it is the ``_prune_orphan_decide_step`` cleanup's residue, it
@@ -717,7 +722,6 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
         COMPLETED_STEP_EDGE,
         ONBOARDING_NODE_LABEL,
         ONBOARDING_STEP_LABEL,
-        ONBOARDING_STEPS,
     )
 
     node_rows = g.query(
@@ -754,32 +758,24 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
         f"-[:{COMPLETED_STEP_EDGE}]->(s:{ONBOARDING_STEP_LABEL}) "
         "RETURN n.org_id, s.step_id"
     ).result_set
-    # Explicit, symmetric predicate: a non-str `org_id` or a step id outside
-    # the canonical set is dropped here (never written), which keeps capture
-    # output ⊆ what `_validate_onboarding_step_link` accepts. The step-id
-    # filter is deliberate rather than accidental: every gate in
-    # `tortoise/onboarding/state.py` resolves canonical ids, so a foreign id
-    # carries no semantics and must not make the rescue file unloadable — but
-    # its loss is LOGGED rather than left silent, so a live non-canonical edge
-    # destroyed by the wipe is visible instead of passing as a clean restore
-    # (the post-restore comparison reads through this same filter). Note it is
-    # NOT harmless: the gates count an unrecognised id as an AGENT step, so a
-    # dropped foreign edge can only ever BLOCK a completion, never create one.
+    # Explicit, symmetric predicate: a non-str `org_id`/`step_id` is dropped
+    # here (never written), which keeps capture output ⊆ what
+    # `_validate_onboarding_step_link` accepts.
+    #
+    # #4641 review round 4: the step id is NOT filtered to the canonical
+    # vocabulary, and the earlier "drop the foreign ones, they are inert"
+    # reasoning was WRONG in the direction that matters. In
+    # `tortoise/onboarding/state.py`, `resolve_wire_completion` and
+    # `recompute_completion` compute `agent_steps = [s for s in done if s not
+    # in _NON_AGENT_STEPS]` and require `not agent_steps`. An unrecognised id
+    # is NOT in `_NON_AGENT_STEPS`, so it counts as an AGENT step: while the
+    # edge is PRESENT it BLOCKS the grandfathered completion, and DROPPING it
+    # empties `agent_steps` and can therefore FORGE that completion
+    # (`resolve_wire_completion('active', True, ['made-up-step'])` is False;
+    # with the edge gone it is True). A faithful rebuild must carry every
+    # step edge it found — the vocabulary is not this section's business.
     links = [(r[0], r[1]) for r in link_rows
-             if isinstance(r[0], str) and isinstance(r[1], str)
-             and r[1] in ONBOARDING_STEPS]
-    non_canonical = sorted({r[1] for r in link_rows or []
-                            if isinstance(r[1], str)
-                            and r[1] not in ONBOARDING_STEPS})
-    if non_canonical:
-        logger.warning(
-            "rebuild: %d COMPLETED_STEP edge(s) carry a step id outside the "
-            "canonical onboarding vocabulary (%s) — they are NOT carried "
-            "into the pre-wipe snapshot. Every onboarding gate resolves "
-            "canonical ids and treats an unrecognised id as an agent step, "
-            "so such an edge can only BLOCK a completion, never create one; "
-            "its loss is recorded here rather than left silent (#4641).",
-            len(non_canonical), non_canonical[:5])
+             if isinstance(r[0], str) and isinstance(r[1], str)]
     return nodes, links
 
 
@@ -894,29 +890,24 @@ def _validate_onboarding_entry(entry) -> str | None:
 def _validate_onboarding_step_link(entry) -> str | None:
     """Return a complaint about an ``onboarding_step_links`` entry, else None.
 
-    Shape first (a 2-element pair of strings, like the other link sections),
-    then MEMBERSHIP: the ``step_id`` must be a canonical onboarding step. The
-    sidecar is caller-supplied, so this is defence-in-depth — it keeps the
-    section's vocabulary canonical and the rescue file loader-acceptable, and
-    refuses to write an `:OnboardingStep` no gate reads. It is deliberately NOT
-    claimed as a completion-forgery guard: the gates in
-    ``tortoise/onboarding/state.py`` are subset tests over canonical ids, so a
-    foreign id is INERT there — it could only ever BLOCK a completion (the
-    grandfathered branch counts it as an agent step), never create one. The id
-    set is imported from the DOMAIN module (never re-typed here), exactly as
-    the labels are.
+    Shape only — a 2-element pair of strings, exactly like the other link
+    sections. There is deliberately NO vocabulary-membership check.
+
+    #4641 review round 4: an earlier version rejected a ``step_id`` outside
+    ``ONBOARDING_STEPS``, on the reasoning that such an id was inert. It is
+    not, and rejecting it was a data-loss path that could FORGE a completion:
+    the gates in ``tortoise/onboarding/state.py``
+    (``resolve_wire_completion`` / ``recompute_completion``) compute
+    ``agent_steps = [s for s in done if s not in _NON_AGENT_STEPS]`` and
+    require ``not agent_steps`` — an unrecognised id is an AGENT step, so
+    while its edge exists it BLOCKS the grandfathered completion, and a
+    rebuild that dropped it would UNBLOCK (create) it. Preserving every edge
+    the live graph held is therefore the fail-safe choice; the vocabulary is
+    the domain module's business, not this validator's. (The values stay
+    `$`-bound and the labels stay module constants, so relaxing this cannot
+    inject Cypher.)
     """
-    complaint = _validate_link_entry(entry)
-    if complaint is not None:
-        return complaint
-    # Function-local import: `tortoise.onboarding.state` is stdlib-only, but
-    # this module is imported early and the #2814 registry uses the same
-    # function-local discipline for domain constants (see `_config_classes`).
-    from tortoise.onboarding.state import ONBOARDING_STEPS
-    if entry[1] not in ONBOARDING_STEPS:
-        return (f"step_id {entry[1]!r} is not a canonical onboarding step "
-                f"({sorted(ONBOARDING_STEPS)})")
-    return None
+    return _validate_link_entry(entry)
 
 
 _SNAPSHOT_ENTRY_CHECK = {
@@ -1229,9 +1220,13 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     ``RETURN n.org_id, s.step_id``).
 
     ``onboarding_snapshot`` (#4641) is the second PER-KEY node union: like
-    ``config_snapshot`` it keeps a colliding LEFTOVER entry verbatim rather
-    than field-merging it, because a self-healed default re-created for the
-    same ``org_id`` must not overwrite recovered truth (see the leg's comment).
+    ``config_snapshot`` it keeps a colliding LEFTOVER entry rather than
+    field-merging it, because a self-healed default re-created for the same
+    ``org_id`` must not overwrite recovered truth (see the leg's comment) —
+    with exactly ONE field-level exception, ``org_subject_id`` (the org-anchor
+    carrier), which is taken fresh-wins because nothing self-heals it and the
+    post-restore check compares against this merged list, so swallowing a
+    fresh anchor would silently destroy a live `onboards` edge.
     """
     leftover = leftover or {}
 
@@ -1305,8 +1300,9 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         _link_key, "session_point_links", merge=False)
         if _link_key(entry) is not None]
     # #4641: the onboarding state machine. The NODE leg is a PER-ORG union
-    # with the LEFTOVER kept VERBATIM — deliberately NOT `_merge_entry`'s
-    # fresh-wins field merge, for the same reason `config_snapshot` avoids it:
+    # with the LEFTOVER kept (see the ONE exception below) — deliberately NOT
+    # `_merge_entry`'s fresh-wins field merge, for the same reason
+    # `config_snapshot` avoids it:
     # a self-healed default must not overwrite recovered truth. The concrete
     # case is `_ensure_onboarding_node_after_provision`
     # (`tortoise/supabase_control.py`) re-creating a DEFAULT
@@ -3288,8 +3284,6 @@ class FalkorProjection(
         — but it must not pass unmentioned either, since this is the caller for
         the unresponsive-graph path where no other surface reports it (#4641).
         """
-        import logging
-
         from tortoise.consistency import recover_from_log
         result = recover_from_log(events_dir, self)
         if not result.get("recovered"):
@@ -3298,7 +3292,7 @@ class FalkorProjection(
                 f"{result.get('reason')}. "
                 f"See operations/skills/tortoise-rebuild/SKILL.md")
         if result.get("onboarding_gap"):
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "recovery completed with %s onboarding state/edge restore "
                 "gap(s) the replay could not close — re-run onboarding for "
                 "the affected org(s) (#4641)",
@@ -5633,8 +5627,9 @@ class FalkorProjection(
                     "COULD NOT RUN (%d restore failure(s)) — the rebuilt "
                     "graph's onboarding state is UNVERIFIED: not confirmed "
                     "intact, and NOT observed gone. Re-check the %d expected "
-                    "org state(s), step edge(s) and `onboards` anchor edge(s) "
-                    "before trusting them — see #4641.",
+                    "org state(s), %d expected step edge(s) and %d expected "
+                    "`onboards` anchor edge(s) before trusting them — "
+                    "see #4641.",
                     onboarding_restore_failures,
                     len(onboarding_expected_orgs),
                     len(onboarding_expected_links),

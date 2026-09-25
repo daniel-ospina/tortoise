@@ -1049,6 +1049,17 @@ def test_cmd_rebuild_reports_config_state(tmp_path, capsys):
     proj.g.query(f"MERGE (p:{_PACK_INSTALL_LABEL} {{namespace:$ns}}) "
                  "SET p.version = $v, p.status = 'active'",
                  params={"ns": "cli", "v": "1.0.0"})
+    # #4641: seed one onboarding org through raw Cypher (the writer's
+    # `validate_step_id` is not the point here) so the `Onboarding:` line is
+    # asserted with a NON-ZERO pair — `0 of 0` cannot distinguish "there was
+    # nothing to restore" from "the counter was never populated".
+    proj.g.query("MERGE (n:OnboardingState {org_id:$oid}) "
+                 "SET n.status = 'active', n.version = 1",
+                 params={"oid": "org-cli"})
+    proj.g.query("MATCH (n:OnboardingState {org_id:$oid}) "
+                 "MERGE (s:OnboardingStep {org_id:$oid, step_id:$sid}) "
+                 "MERGE (n)-[:COMPLETED_STEP]->(s)",
+                 params={"oid": "org-cli", "sid": "harness-connected"})
     proj.close()
 
     rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
@@ -1063,7 +1074,7 @@ def test_cmd_rebuild_reports_config_state(tmp_path, capsys):
     # #4641: the onboarding counts get their own line, printed at zero expected
     # too, so "there was no onboarding state to preserve" stays distinguishable
     # from "preservation was not attempted".
-    assert "Onboarding: 0 of 0 org state(s) restored" in out.out, out.out
+    assert "Onboarding: 1 of 1 org state(s) restored" in out.out, out.out
 
 
 def test_recover_from_log_refuses_nonempty_graph_with_config(graph):
@@ -1482,12 +1493,11 @@ def test_onboarding_capture_failure_aborts_before_wipe(graph):
 def test_onboarding_sidecar_malformed_entries_refused_before_wipe(tmp_path):
     """A planted/erroneous sidecar is refused PRE-wipe, not mid-restore.
 
-    The step-id membership check is the load-bearing one: a `COMPLETED_STEP`
-    edge is what `completed_steps()` feeds into the completion gate, and the
-    gates count an unrecognised id as an AGENT step, so a foreign id can only
-    ever BLOCK a (grandfathered) completion — never forge one. What the check
-    actually buys is vocabulary hygiene plus a rescue file this build can load;
-    it is defence-in-depth, not the completion guard.
+    Shape is what is enforced: a `:OnboardingState` entry must be an object
+    with a str `org_id`, and a step link must be a 2-element pair of strings.
+    A `step_id` OUTSIDE the canonical vocabulary is deliberately ACCEPTED —
+    see `test_foreign_step_edge_survives_and_pins_the_forgery_path` for why
+    rejecting it was a completion-forgery path.
     """
     from tortoise.projection import _load_prewipe_snapshot
 
@@ -1495,8 +1505,7 @@ def test_onboarding_sidecar_malformed_entries_refused_before_wipe(tmp_path):
         "node-not-an-object": {"onboarding_snapshot": ["nope"]},
         "node-missing-org-id": {"onboarding_snapshot": [{"status": "active"}]},
         "link-not-a-pair": {"onboarding_step_links": ["org-x"]},
-        "link-foreign-step": {
-            "onboarding_step_links": [["org-x", "made-up-step"]]},
+        "link-not-strings": {"onboarding_step_links": [["org-x", 7]]},
     }
     for name, overrides in cases.items():
         path = tmp_path / f"{name}.json"
@@ -1504,13 +1513,95 @@ def test_onboarding_sidecar_malformed_entries_refused_before_wipe(tmp_path):
         with pytest.raises(RuntimeError) as exc:
             _load_prewipe_snapshot(str(path))
         assert "onboarding" in str(exc.value), (name, str(exc.value))
-    # The membership complaint names the vocabulary, not just the shape.
-    path = tmp_path / "membership.json"
+    # A well-formed pair with a foreign step id must LOAD (shape is satisfied).
+    path = tmp_path / "foreign-step-loads.json"
     _plant(path, _sidecar_payload(
         onboarding_step_links=[["org-x", "made-up-step"]]))
-    with pytest.raises(RuntimeError) as exc:
-        _load_prewipe_snapshot(str(path))
-    assert "canonical onboarding step" in str(exc.value)
+    loaded = _load_prewipe_snapshot(str(path))
+    assert loaded is not None
+    assert [list(e) for e in loaded["onboarding_step_links"]] == [
+        ["org-x", "made-up-step"]]
+
+
+def test_foreign_step_edge_survives_and_pins_the_forgery_path(graph):
+    """A non-canonical step edge must SURVIVE the wipe+replay (#4641).
+
+    Written with RAW Cypher, because the writer's `validate_step_id` refuses a
+    foreign id — so this edge can only exist on a legacy/raw graph, which is
+    exactly the class the sidecar exists for.
+
+    The gates (`resolve_wire_completion` / `recompute_completion` in
+    `tortoise/onboarding/state.py`) compute
+    `agent_steps = [s for s in done if s not in _NON_AGENT_STEPS]` and require
+    `not agent_steps`. An unrecognised id is an AGENT step, so while its
+    `COMPLETED_STEP` edge exists it BLOCKS the grandfathered completion — and
+    DROPPING it empties `agent_steps` and can therefore FORGE that completion.
+    The capture must not filter the vocabulary; this pins both the survival and
+    the mechanism.
+    """
+    from tortoise.onboarding.state import resolve_wire_completion
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-f", fork="build")
+    _g(sdk).query(
+        "MATCH (n:OnboardingState {org_id:'org-f'}) "
+        "MERGE (s:OnboardingStep {org_id:'org-f', step_id:'made-up-step'}) "
+        "MERGE (n)-[:COMPLETED_STEP]->(s)")
+    before = _read_onboarding(sdk, "org-f")[1]
+    assert "made-up-step" in before, "precondition: the foreign edge is live"
+    # The mechanism as the test's own premise: the foreign edge is the ONLY
+    # agent step, so present -> blocked, and removing it -> forged.
+    assert resolve_wire_completion("active", True, before) is False
+    assert resolve_wire_completion("active", True,
+                                   [s for s in before
+                                    if s != "made-up-step"]) is True
+
+    sdk._get_proj().rebuild_all(str(events))
+
+    after = _read_onboarding(sdk, "org-f")[1]
+    assert after == before, (
+        "a non-canonical COMPLETED_STEP edge must survive the rebuild — "
+        "dropping it can forge a grandfathered completion")
+    assert resolve_wire_completion("active", True, after) is False
+
+
+def test_post_restore_verification_failure_says_unverified(graph, caplog):
+    """A failed verification READ must RENDER as UNVERIFIED, not as loss.
+
+    Round 3 split the single "FAILED" message into "verified absent" and
+    "could not verify" branches — and the UNVERIFIED half's format string had
+    two `%d` placeholders against four args, so formatting it raised and the
+    operator got a logging-error traceback instead of the statement the branch
+    exists to make. Assert the RENDERED text, not merely that the branch was
+    entered.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-v", fork="build",
+                            steps=("harness-connected",))
+    calls = {"n": 0}
+
+    def _fail_on_second_capture(cypher):
+        # The pre-wipe capture and the post-restore verification run the SAME
+        # node query; only the second one may fail.
+        if "MATCH (n:OnboardingState)" in cypher and "properties(n)" in cypher:
+            calls["n"] += 1
+            return calls["n"] >= 2
+        return False
+
+    patcher, injected = _inject_query_failure(sdk, _fail_on_second_capture)
+    with patcher, caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        result = sdk._get_proj().rebuild_all(str(events))
+
+    assert injected, "the verification-read failure was never injected"
+    assert result["onboarding_verified"] is False
+    assert result["onboarding_missing_orgs"] is None, (
+        "'could not confirm' must not be reported as a count of 0 absent")
+    rendered = " ".join(r.getMessage() for r in caplog.records
+                        if r.levelno >= logging.ERROR)
+    assert "UNVERIFIED" in rendered, rendered
+    assert "NOT observed gone" in rendered, rendered
 
 
 def test_onboarding_union_leftover_wins_and_keeps_unpaired_entries():
