@@ -290,6 +290,29 @@ bearer token (`Authorization: Bearer`) and a 401 — not a config error:
 grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
 ```
 
+`TORTOISE_API_KEY` is the canonical name, and the **only** one any code path
+reads — the MCP HTTP client (`tortoise/mcp_client.py`), the hosted SDK
+(`tortoise/sdk.py`), the CLI (`tortoise/__main__.py`), and
+`serve --http --auth static` (`tortoise/auth.py`). Giving the MCP credential a
+different name is a legitimate policy choice (#3615) — but the committed
+`.mcp.json` expands `${TORTOISE_API_KEY}` from `process.env`, so a
+differently-named credential that is NOT also aliased sends an empty Bearer and
+401s while every entry point above goes unauthenticated — a config-name
+mismatch that reads as an auth failure (#5153). If the profile names it
+separately, alias it:
+
+```bash
+# A profile that names its MCP credential separately (e.g. to keep one key per
+# purpose) must ALSO export the canonical name, or only the MCP header works.
+export TORTOISE_MCP_API_KEY=<key>                  # the MCP Bearer header
+# Export it under the canonical name too — every other entry point reads it.
+export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"
+```
+
+The alias is safe since #3615 — hosted capture is gated on explicit
+`TORTOISE_CAPTURE=1` consent, never on the credential, so exporting the
+canonical name no longer opts the machine into data-sharing.
+
 **2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
 existing `mcpServers` block; if the EFFECTIVE config already has a `tortoise`
 entry — even one that only lives in the home/base config — run the collision
@@ -333,7 +356,10 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    consent (`TORTOISE_CAPTURE=1`), never on the credential (#3615). Report it
 >    and ASK; do not rewrite it on your own initiative, and treat "this profile
 >    intentionally defines that variable" as the human's decision rather than a
->    misconfiguration to repair. Only a
+>    misconfiguration to repair. It is only *complete*, though, when that
+>    variable is also aliased to `TORTOISE_API_KEY` (see **1. Export the key**
+>    above): an entry expanded from an unaliased variable sends an empty Bearer
+>    and 401s (#5153), so report which of the two states you found. Only a
 >    genuinely BROKEN entry (wrong `url`, missing or headerless
 >    `Authorization`) is yours to correct — and only after the confirm gate.
 >    A home/base entry is left untouched and merely shadowed, so nothing is

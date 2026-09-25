@@ -174,6 +174,41 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
         "the served document must state that there is no ChatGPT chooser surface")
 
 
+def test_5153_served_document_pins_the_canonical_mcp_key_variable():
+    """#5153: the served document's Pi step must state that `TORTOISE_API_KEY`
+    is the only name any code path reads, and that a differently-named MCP
+    credential — a #3615 policy difference, not a defect — must therefore be
+    aliased. Without that, a profile following the doc exports only its own
+    name, the committed `.mcp.json` expands `${TORTOISE_API_KEY}` to an empty
+    Bearer, and the server answers 401 while the CLI/SDK/static-auth paths go
+    unauthenticated: the config-name mismatch this issue reports.
+
+    The variable name is pinned against the CODE, not against itself — every
+    `Bearer ${VAR}` snippet the document carries must name a variable that
+    `tortoise/mcp_client.py` (the MCP HTTP client) actually reads, so a snippet
+    repointed at an unread name — exactly the issue's proposed "fix option 1"
+    — fails here.
+
+    Canonical only: the mirror is pinned byte-identical by
+    `test_m8_deploy_mirror_matches_canonical`, so this covers both copies."""
+    skill = LIVE_SKILL.read_text(encoding="utf-8")
+    assert "is the canonical name, and the **only** one any code path" in skill, (
+        "the Pi step must state that TORTOISE_API_KEY is the only name read")
+    assert 'export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"' in skill, (
+        "the Pi step must show the alias a separately-named MCP credential needs")
+
+    referenced = set(
+        re.findall(r'"Authorization":\s*"Bearer \$\{([A-Z0-9_]+)\}', skill))
+    assert referenced, (
+        "the served document must carry an env-indirect Bearer snippet")
+    client = (REPO_ROOT / "tortoise" / "mcp_client.py").read_text(encoding="utf-8")
+    unread = sorted(v for v in referenced
+                    if f'os.environ.get("{v}"' not in client)
+    assert not unread, (
+        "the served Bearer snippet references a variable the MCP HTTP client "
+        f"never reads ({', '.join('$' + v for v in unread)}) — the 401 in #5153")
+
+
 def _installer_skills() -> list[str]:
     """The served installer's `SKILLS=(...)` payload set."""
     installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
