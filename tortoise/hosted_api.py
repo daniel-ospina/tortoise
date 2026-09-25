@@ -22771,6 +22771,8 @@ async def list_connectors(
     """List all connectors for the authenticated team's org."""
     from tortoise.supabase_control import (
         connector_by_org as _sb_conn_by_org,
+    )
+    from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
@@ -22794,6 +22796,8 @@ async def create_connector(
     """Create a new connector (no credential yet — OAuth step follows)."""
     from tortoise.supabase_control import (
         connector_create as _sb_conn_create,
+    )
+    from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
@@ -22815,6 +22819,8 @@ async def get_connector(
     """Get a single connector by id, scoped to the caller's org."""
     from tortoise.supabase_control import (
         connector_by_id as _sb_conn_by_id,
+    )
+    from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
@@ -22838,6 +22844,8 @@ async def update_connector(
     """Update connector config/sync state, scoped to the caller's org."""
     from tortoise.supabase_control import (
         connector_update as _sb_conn_update,
+    )
+    from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
@@ -22862,6 +22870,8 @@ async def delete_connector(
     """Delete a connector (disconnect source, clean up), scoped to the org."""
     from tortoise.supabase_control import (
         connector_delete as _sb_conn_delete,
+    )
+    from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
@@ -22885,9 +22895,9 @@ async def connector_auth(
     org_id = org["org_id"]
     if source_type == "github":
         # Reuse the existing GitHub OAuth flow
+        import os as _os
         import secrets
         from urllib.parse import urlencode
-        import os as _os
         client_id = _os.environ.get("GITHUB_CLIENT_ID")
         if not client_id:
             raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
