@@ -52,6 +52,15 @@ _logger = logging.getLogger("tortoise.operator_alert")
 #: ``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``.
 UNMETERED_INCREMENT_KIND = "UNMETERED_INCREMENT"
 
+#: The incident KIND for a Stripe billing notification the #3498 offload seam
+#: REFUSED (#4456). The event is already CLAIMED when the notify is submitted
+#: (the ``WebhookEvent`` marker commits BEFORE it), so a Stripe retry sees
+#: ``is_first=False`` and the notification is **lost permanently** — the org
+#: is never told its plan changed. The seam's public ``refused``
+#: discriminator distinguishes this real drop from a plain bound miss (where
+#: the worker still completes the send), and this is the escalation path.
+BILLING_NOTIFY_REFUSED_KIND = "BILLING_NOTIFY_REFUSED"
+
 #: Repeat-suppression windows (seconds). A recorded incident holds the long
 #: window; an attempt that recorded NOTHING re-arms on the short one, so a
 #: transient channel outage delays the first alert by at most a minute. The
@@ -173,6 +182,21 @@ def alert_unmetered_increment(lane: str, org_id: str | None,
     with contextlib.suppress(Exception):  # the alert must never raise
         alert_operator(UNMETERED_INCREMENT_KIND, org_id,
                        {"lane": lane, "error_type": type(error).__name__})
+
+
+def alert_billing_notify_refused(org_id: str | None,
+                                 event_type: str | None = None) -> None:
+    """Dispatch the ``BILLING_NOTIFY_REFUSED`` incident. Never raises.
+
+    Fired by the Stripe webhook when the #3498 offload seam REFUSED the
+    billing notification (#4456): the event is already claimed, so this real
+    drop is unrecoverable and must not be silent. Detail is a fixed,
+    message-free vocabulary (the incident body is durable) — ``op`` names the
+    seam site and ``event_type`` the Stripe event type; no free text.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        alert_operator(BILLING_NOTIFY_REFUSED_KIND, org_id,
+                       {"op": "billing_notify", "event_type": event_type})
 
 
 def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -> bool:

@@ -861,7 +861,7 @@ def test_kind_constants_match_the_runbook():
             for ln in runbook.splitlines() if ln.startswith("| ")
             and ln.count("|") >= 3}
     kinds = (oa.UNMETERED_INCREMENT_KIND, cc.UNENFORCEABLE_INCIDENT_KIND,
-             cc.INCIDENT_KIND)
+             cc.INCIDENT_KIND, oa.BILLING_NOTIFY_REFUSED_KIND)
     for kind in kinds:
         assert kind in rows, f"no runbook triage row for {kind}"
         row = rows[kind]

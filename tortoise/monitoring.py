@@ -727,16 +727,34 @@ def daemon_worker(name: str, *, workers: int = 1,
         return worker
 
 
-async def _await_future(future, *, timeout: float | None):
+async def _await_future(future, *, timeout: float | None,
+                        cancel_on_timeout: bool = True):
     """Await a concurrent Future, optionally bounded.
 
     Shared by ``run_on_daemon_worker`` and ``run_control_plane_call`` so the
     wrap/cancel/bound semantics have ONE implementation (#3498 review — the
     two offload await paths must not drift).
+
+    ``cancel_on_timeout=False`` (#4456) is for work whose DELIVERY matters.
+    ``asyncio.wait_for`` cancels the awaitable it is handed, and
+    ``asyncio.wrap_future`` propagates that cancellation to the underlying
+    ``concurrent.futures.Future``. For a submission still QUEUED (never
+    dequeued) that ``cancel()`` SUCCEEDS; when a worker later dequeues it,
+    ``set_running_or_notify_cancel()`` returns False and
+    ``_SingleSlotWorker._loop`` SKIPS the callable — the work is silently
+    DROPPED, not merely abandoned. ``asyncio.shield`` keeps the
+    ``wrap_future`` awaitable alive, so the bound abandons only the AWAIT and
+    a QUEUED submission still runs. Callers for which fail-closed
+    abandonment is correct keep the default ``True``.
     """
     awaitable = asyncio.wrap_future(future)
     if timeout is None:
         return await awaitable
+    if not cancel_on_timeout:
+        # shield() marks the inner future's result as retrieved when the
+        # outer is cancelled, so an abandoned success/raise is not re-reported
+        # as "exception was never retrieved".
+        awaitable = asyncio.shield(awaitable)
     return await asyncio.wait_for(awaitable, timeout)
 
 
@@ -899,7 +917,18 @@ class ControlPlaneOffloadError(RuntimeError):
     worker is abandoned) or its backlog is full. The hosted seam maps this to
     the repo-standard 503 ``control_plane_unavailable`` — never a hang and
     never a silent pass-through.
+
+    ``refused`` (#4456) is the public discriminator between the two outcomes:
+    ``True`` when the pool REFUSED the submission (its backlog was full) or
+    the submission was CANCELLED before any worker ran it — the callable did
+    NOT and WILL NOT run; ``False`` for a plain bound miss, where a RUNNING
+    worker still completes the callable (the seam abandons only the await)
+    and a non-cancellable lane keeps a QUEUED submission alive.
     """
+
+    def __init__(self, message: str, *, refused: bool = False) -> None:
+        super().__init__(message)
+        self.refused = refused
 
 
 def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
@@ -980,7 +1009,8 @@ def reset_control_plane_records() -> None:
 
 async def run_control_plane_call(fn, *, op: str,
                                  timeout: float | None = None,
-                                 pool: str = "auth"):
+                                 pool: str = "auth",
+                                 cancel_on_timeout: bool = True):
     """Offload ONE blocking control-plane helper to a bounded pool.
 
     The unit of offload is the RESOLUTION, not an individual HTTP call:
@@ -1001,12 +1031,21 @@ async def run_control_plane_call(fn, *, op: str,
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by
     ``fn`` ITSELF is a DOMAIN error and propagates unchanged — the three cases
     are disambiguated by inspecting the future, not conflated (#3498 review).
+
+    ``cancel_on_timeout`` (#4456) selects the bound-miss semantics. ``True``
+    (default) is fail-closed: the bound cancels the submission, so a QUEUED
+    callable is dropped. ``False`` is DELIVERY-preserving: the bound abandons
+    only the await (``asyncio.shield``) and a QUEUED callable still runs —
+    used by the Stripe billing notify, whose event is already claimed and can
+    never be re-fired. The raised error's public ``refused`` attribute still
+    tells the two apart.
     """
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
     future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
     try:
-        result = await _await_future(future, timeout=bound)
+        result = await _await_future(future, timeout=bound,
+                                     cancel_on_timeout=cancel_on_timeout)
     except TimeoutError as exc:
         # Distinguish the three sources of TimeoutError that meet here:
         #   1. `fn` raised it              -> a domain error, propagate
@@ -1018,8 +1057,15 @@ async def run_control_plane_call(fn, *, op: str,
             raise
         reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                   else f"exceeded its {bound}s bound")
+        # ``refused`` is the DELIVERY discriminator (#4456): True when the
+        # callable did not and will not run (backlog-full refusal, or a queued
+        # submission cancelled by the bound); False when a bound miss left it
+        # running (or, on a non-cancellable lane, still queued).
         raise ControlPlaneOffloadError(
-            f"control-plane call {op!r} {reason}") from exc
+            f"control-plane call {op!r} {reason}",
+            refused=(isinstance(future_exc, _WorkerBacklogFull)
+                     or future.cancelled()),
+        ) from exc
     record_control_plane_offload(op, time.monotonic() - started)
     return result
 

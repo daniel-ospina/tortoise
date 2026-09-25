@@ -5449,9 +5449,32 @@ def _control_plane_unavailable() -> HTTPException:
     )
 
 
+class _OffloadRefused:
+    """Sentinel for a REFUSED best-effort offload (#4456).
+
+    ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
+    when the pool refused the submission (backlog full — or, on a cancellable
+    lane, cancelled before any worker ran it): the work did NOT happen. A
+    plain bound miss still returns ``None``, because the worker that picked
+    the submission up runs it to completion (the seam abandons only the
+    await). Callers that ignore the return value are unaffected; a
+    delivery-sensitive caller can tell a real drop from a later-than-bound
+    completion instead of reading both as ``None``.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "OFFLOAD_REFUSED"
+
+
+#: Public discriminator returned by a REFUSED best-effort offload (#4456).
+OFFLOAD_REFUSED = _OffloadRefused()
+
+
 async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                       pool: str = "auth", timeout: float | None = None,
-                      unavailable=None):
+                      unavailable=None, cancel_on_timeout: bool = True):
     """#3498: run ONE blocking control-plane helper off the event loop.
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
@@ -5493,6 +5516,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     await, never the worker thread (CPython #87185), so abandoning a grant that
     is mid-write would claim a retryable state it cannot observe (#2863).
 
+    ``cancel_on_timeout=False`` (#4456) makes the bound DELIVERY-preserving:
+    the bound abandons only the AWAIT, so a submission still QUEUED when the
+    bound expires STILL RUNS (the default ``True`` cancels a queued submission
+    and the worker skips it — a silent DROP, not an abandonment). A
+    ``best_effort=True`` call then returns :data:`OFFLOAD_REFUSED` — instead
+    of ``None`` — when the pool genuinely REFUSED the submission, so the
+    caller can escalate a real drop instead of swallowing it as a success.
+
     The Auth/REST lane is the blast radius the issue names: a regression here
     is a total auth outage, so this seam is deliberately the ONLY new thing
     callers touch, and every routed site is covered by a behavioural test.
@@ -5502,13 +5533,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
     try:
         return await run_control_plane_call(
-            fn, op=op, pool=effective_pool, timeout=timeout)
+            fn, op=op, pool=effective_pool, timeout=timeout,
+            cancel_on_timeout=cancel_on_timeout)
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
-            return None
+            return OFFLOAD_REFUSED if exc.refused else None
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -23987,6 +24019,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     repos_count = await _cp_offload(
         lambda: _github_repos_count(token), op="github_repos_count",
         best_effort=True)
+    if repos_count is OFFLOAD_REFUSED:
+        # #4456: a REFUSED best-effort offload never ran; keep the pre-seam
+        # client-visible outcome for this display-only count (``None``)
+        # instead of leaking the seam's sentinel into the JSON body.
+        repos_count = None
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -27659,19 +27696,41 @@ async def webhooks_stripe(request: Request):
             # notify is abandoned at the seam's wait bound instead of
             # delaying shutdown, and it can never occupy an auth slot.
             #
+            # #4456 P1: the wait bound must NOT cancel a QUEUED submission.
+            # ``wait_for`` cancels the awaitable, ``asyncio.wrap_future``
+            # propagates that to the concurrent future, and a queued
+            # ``Future.cancel()`` SUCCEEDS — the worker later SKIPS the
+            # callable (``set_running_or_notify_cancel()`` is False), so the
+            # notification is DROPPED, not abandoned. Because the
+            # ``WebhookEvent`` marker was committed BEFORE the notify
+            # (``is_first=True``), Stripe's retry sees ``is_first=False`` and
+            # the notification is lost PERMANENTLY. ``cancel_on_timeout=False``
+            # keeps the bound on the AWAIT — the loop is freed and the webhook
+            # still returns promptly — while guaranteeing the queued
+            # submission still runs.
+            #
             # ``best_effort=True`` + the guard keep the never-raise contract
-            # AT THE HAND-OFF: an offload failure (missed bound / saturated
-            # backlog) is swallowed by the seam, and — because a hand-off is a
-            # NEW failure mode the inline call did not have — any raise is
-            # caught here rather than reaching the handler's
-            # ``except Exception`` → 500, which would strand a claimed event
-            # and cost the payment's ack.
+            # AT THE HAND-OFF: an offload failure is swallowed by the seam —
+            # but a REFUSAL (backlog full: the callable never ran) is a REAL
+            # drop, so the seam returns ``OFFLOAD_REFUSED`` and it is escalated
+            # through the existing operator-alert path instead of being
+            # silently swallowed. Any raise is caught here rather than
+            # reaching the handler's ``except Exception`` → 500, which would
+            # strand a claimed event and cost the payment's ack.
             try:
-                await _cp_offload(
+                result = await _cp_offload(
                     lambda: notify_billing_event(
                         notify_kind, {"org_id": org_id, "tier": tier},
                         {"subscription_status": etype}),
-                    op="billing_notify", best_effort=True)
+                    op="billing_notify", best_effort=True,
+                    cancel_on_timeout=False)
+                if result is OFFLOAD_REFUSED:
+                    with suppress(Exception):
+                        from tortoise.operator_alert import (
+                            alert_billing_notify_refused,
+                        )
+
+                        alert_billing_notify_refused(org_id, etype)
             except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
                 _logger.warning(
                     "webhook: billing notify failed (non-fatal): %s",

@@ -237,7 +237,8 @@ def test_oauth_offload_routes_to_the_oauth_pool(monkeypatch):
     every behavioural test green, so record what it actually passes."""
     seen: list[tuple[str, object]] = []
 
-    async def _recorder(fn, *, op, pool="auth", timeout=None):
+    async def _recorder(fn, *, op, pool="auth", timeout=None,
+                        cancel_on_timeout=True):
         seen.append((pool, timeout))
         return "ok"
 
@@ -335,7 +336,8 @@ def test_graph_offload_routes_to_the_graph_pool(monkeypatch):
     ``_oauth_offload`` and best-effort wiring guards)."""
     seen: list[str] = []
 
-    async def _recorder(fn, *, op, pool="auth", timeout=None):
+    async def _recorder(fn, *, op, pool="auth", timeout=None,
+                        cancel_on_timeout=True):
         seen.append(pool)
         return "ok"
 
@@ -406,7 +408,8 @@ def test_cp_offload_routes_best_effort_to_the_telemetry_pool(monkeypatch):
     Record what ``_cp_offload`` actually passes."""
     seen: list[str] = []
 
-    async def _recorder(fn, *, op, pool="auth", timeout=None):
+    async def _recorder(fn, *, op, pool="auth", timeout=None,
+                        cancel_on_timeout=True):
         seen.append(pool)
         return "ok"
 
@@ -420,6 +423,43 @@ def test_cp_offload_routes_best_effort_to_the_telemetry_pool(monkeypatch):
     assert seen == ["auth", "telemetry"], (
         f"_cp_offload pool routing is wrong: {seen} — best-effort must use the "
         "telemetry pool (the P1 regression this guard exists for)"
+    )
+
+
+def test_best_effort_refusal_is_distinguishable_from_a_bound_miss(monkeypatch):
+    """#4456: a REFUSED best-effort offload must not look like a bound miss.
+
+    ``best_effort`` historically swallowed BOTH a saturating refusal (the
+    pool never accepted the callable — it will NOT run) and a bound miss (the
+    worker that accepted it still runs it) as ``None``, so a delivery-sensitive
+    caller could not tell a real drop from a late completion. The seam returns
+    the public ``OFFLOAD_REFUSED`` sentinel for a refusal only.
+    """
+
+    async def _fake(fn, *, op, pool="auth", timeout=None,
+                    cancel_on_timeout=True):
+        if op == "refused":
+            raise monitoring.ControlPlaneOffloadError(
+                "pool backlog full", refused=True)
+        raise monitoring.ControlPlaneOffloadError("exceeded its bound")
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _fake)
+
+    async def _run():
+        refused = await ha._cp_offload(
+            lambda: None, op="refused", best_effort=True)
+        missed = await ha._cp_offload(
+            lambda: None, op="missed", best_effort=True)
+        return refused, missed
+
+    refused, missed = asyncio.run(_run())
+    assert refused is ha.OFFLOAD_REFUSED, (
+        f"a refused best-effort offload returned {refused!r} — a real drop "
+        "must be distinguishable from a bound miss (#4456)"
+    )
+    assert missed is None, (
+        f"a bound miss returned {missed!r} — the worker still runs it, so "
+        "only a genuine refusal carries the sentinel (#4456)"
     )
 
 

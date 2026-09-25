@@ -24,7 +24,13 @@ These tests are behavioural where it matters:
   (the same invariant ``tests/test_read_routes_loop_responsiveness.py`` pins
   for the graph reads);
 * a RAISING notifier cannot 500 the webhook nor skip the audit/analytics legs;
-* an offload bound miss is swallowed (best_effort), so the webhook still 200s;
+* an offload bound miss is swallowed (best_effort), so the webhook still 200s —
+  and a bound miss on a QUEUED submission must NOT cancel it (the #4456 P1:
+  a still-queued ``Future.cancel()`` succeeds and the worker then SKIPS the
+  callable), so the notify is submitted ``cancel_on_timeout=False``;
+* a REFUSAL (saturated backlog — the callable never ran) is distinguishable
+  per call (``OFFLOAD_REFUSED``) and escalated through the existing
+  ``operator_alert.alert_operator`` path rather than swallowed;
 * a structural pin: the direct call site sits INSIDE the ``_cp_offload``
   callable, so a revert to the inline shape fails regardless of argument.
 
@@ -300,10 +306,20 @@ def test_stripe_billing_notify_raise_cannot_500_the_webhook(monkeypatch):
 def test_stripe_billing_notify_bound_miss_returns_promptly(monkeypatch):
     """A notify that outlives the offload's wait bound must NOT hold the webhook.
 
-    The seam abandons the (daemon) worker at the bound and ``best_effort=True``
+    This is the RUNNING case: on a FREE pool the worker dequeues immediately,
+    so the future is already RUNNING when the 0.1 s bound expires and
+    ``wait_for``'s cancel is a no-op. The seam therefore abandons only the
+    AWAIT and the send completes on the (daemon) worker; ``best_effort=True``
     swallows the ``ControlPlaneOffloadError``, so the handler returns promptly
-    (and the notification still completes in the abandoned worker) — the
-    webhook is never 500'd and never waits out the stalled send.
+    and is never 500'd.
+
+    The QUEUED case is the one that LOSES the notification — a still-queued
+    submission is genuinely cancelled by ``wait_for`` (via
+    ``asyncio.wrap_future`` → ``Future.cancel()``), and the pool worker then
+    SKIPS it (``set_running_or_notify_cancel()`` returns False). That case is
+    neither simulated nor asserted here (the pool must be saturated for it);
+    it is covered by ``test_stripe_billing_notify_queued_submission_still_runs``
+    below, which is the #4456 P1 falsifier.
 
     The TIMING assertion is the discriminating one: inline, the handler blocks
     for the full send (the mutation this test exists to catch); a 1.0 s send
@@ -348,17 +364,157 @@ def test_stripe_billing_notify_bound_miss_returns_promptly(monkeypatch):
     )
 
 
+# ── the QUEUED bound miss: the seam must not CANCEL the notification ───────
+
+
+def test_stripe_billing_notify_queued_submission_still_runs(monkeypatch):
+    """#4456 P1: a bound miss on a QUEUED notify must not CANCEL it.
+
+    A still-queued ``concurrent.futures.Future`` is NOT merely abandoned by
+    ``asyncio.wait_for``: ``asyncio.wrap_future`` propagates the cancellation
+    to the concurrent future, whose ``cancel()`` SUCCEEDS while queued. When a
+    worker later dequeues it, ``set_running_or_notify_cancel()`` returns False
+    and ``_SingleSlotWorker._loop`` SKIPS the callable — the notification is
+    dropped, not delayed. ``best_effort=True`` swallows the
+    ``ControlPlaneOffloadError``, so the webhook still 200s; and because the
+    ``WebhookEvent`` marker was committed BEFORE the notify
+    (``is_first=True``), Stripe's retry sees ``is_first=False`` and the
+    notification is lost PERMANENTLY.
+
+    This test saturates all ``CONTROL_PLANE_TELEMETRY_WORKERS`` slots with a
+    FRESH pool (so it cannot be perturbed by another test's leftover work),
+    drives the real ``webhooks_stripe`` handler so the notify is submitted
+    while every worker is busy (QUEUED), lets the 0.1 s bound expire, and
+    then releases the blockers. The notification must ACTUALLY RUN.
+
+    On the shipped shape this fails: the queued callable is cancelled and
+    never executes (``notify_ran`` is never set).
+    """
+    order: list[str] = []
+    notify_ran = threading.Event()
+    _wire_stripe_webhook(monkeypatch, order)
+
+    def _notify(kind, org, details=None):
+        order.append("notify")
+        notify_ran.set()
+
+    monkeypatch.setattr(nt, "notify_billing_event", _notify)
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.1)
+
+    # A FRESH pool, so the saturation is deterministic regardless of what the
+    # process-wide telemetry singleton is doing for another test.
+    fresh = monitoring._SingleSlotWorker(
+        "test-4456-queued",
+        workers=monitoring.CONTROL_PLANE_TELEMETRY_WORKERS,
+        max_backlog=monitoring.CONTROL_PLANE_TELEMETRY_BACKLOG)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": fresh)
+
+    blocker_started = [threading.Event()
+                       for _ in range(monitoring.CONTROL_PLANE_TELEMETRY_WORKERS)]
+    release = threading.Event()
+
+    def _make_blocker(ev: threading.Event):
+        def _block():
+            ev.set()
+            release.wait(10.0)
+        return _block
+
+    for ev in blocker_started:
+        fresh.submit(_make_blocker(ev))
+
+    try:
+        for ev in blocker_started:
+            assert ev.wait(5.0), (
+                "a telemetry worker never picked up its blocker — the pool "
+                "was not saturated, so the notify would not be queued"
+            )
+        # Every worker is busy: the notify submission lands in the QUEUE.
+        t0 = time.perf_counter()
+        resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
+        elapsed = time.perf_counter() - t0
+        assert resp.status_code == 200, (
+            f"a queued-notify bound miss 500'd the webhook: {resp.status_code} "
+            f"{resp.body[:200]!r} (#4456)"
+        )
+        assert elapsed < 0.5, (
+            f"the webhook took {elapsed:.2f}s with a 0.1s bound — it waited "
+            f"for the queued notification instead of returning at the bound "
+            f"(#4456)"
+        )
+        assert not notify_ran.is_set(), (
+            "the notifier ran before the bound expired — the pool was not "
+            "actually saturated, so this run does not exercise the QUEUED "
+            "case (#4456)"
+        )
+    finally:
+        release.set()
+
+    assert notify_ran.wait(5.0), (
+        "the QUEUED billing notification was CANCELLED by the offload wait "
+        "bound and never ran — the claimed Stripe event's notification is "
+        "lost permanently because the retry sees is_first=False (#4456)"
+    )
+    assert "notify" in order, order
+
+
+def test_stripe_billing_notify_refusal_escalates_to_operator_alert(monkeypatch):
+    """#4456: a REFUSED submission is a REAL drop — distinguishable per call
+    (``OFFLOAD_REFUSED``) and escalated through ``operator_alert``.
+
+    The seam's best-effort contract swallows an offload failure as ``None``,
+    which a caller cannot tell apart from a successful call. A REFUSAL
+    (saturated backlog) means the callable NEVER RAN, and the claimed event's
+    notification is lost, so ``_cp_offload`` returns the public
+    ``OFFLOAD_REFUSED`` sentinel and the webhook reuses the existing
+    ``operator_alert.alert_operator`` path instead of swallowing it.
+    """
+    import tortoise.operator_alert as oa
+
+    order: list[str] = []
+    _wire_stripe_webhook(monkeypatch, order)
+    monkeypatch.setattr(nt, "notify_billing_event",
+                        lambda kind, org, details=None: order.append("notify"))
+
+    async def _refuse(fn, *, op, pool="auth", timeout=None,
+                      cancel_on_timeout=True):
+        raise monitoring.ControlPlaneOffloadError(
+            f"control-plane call {op!r} pool backlog full", refused=True)
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _refuse)
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_billing_notify_refused",
+        lambda org_id, event_type=None: seen.append((org_id, event_type)))
+
+    resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
+
+    assert resp.status_code == 200, resp.body[:200]
+    assert "notify" not in order, (
+        "the notifier ran despite the seam refusing the submission — a real "
+        "refusal must not execute the callable (#4456)"
+    )
+    assert seen == [("org-4456", "checkout.session.completed")], (
+        f"a REFUSED billing notification was not escalated (alert got {seen}) "
+        "— the claimed event's notification is lost silently (#4456)"
+    )
+
+
 # ── the shape pin: the direct call must sit INSIDE the offload boundary ────
 
 
 def test_webhook_notify_direct_call_is_inside_the_offload_boundary():
     """#4456 (shape): the ONLY direct ``notify_billing_event`` call in
     ``webhooks_stripe`` sits inside the ``_cp_offload`` callable, carrying
-    ``op="billing_notify"`` and ``best_effort=True``.
+    ``op="billing_notify"``, ``best_effort=True`` and
+    ``cancel_on_timeout=False``.
 
     An inline call plus a dummy ``_cp_offload(lambda: None, ...)`` would leave
     the blocking HTTP on the loop, so the call is bound to the callable
-    argument rather than merely co-existing with an offload.
+    argument rather than merely co-existing with an offload. The
+    ``cancel_on_timeout=False`` pin is the P1 shape guard: with the default
+    ``True`` a bound miss on a QUEUED submission cancels it and the worker
+    skips the callable, dropping the notification (#4456).
     """
     tree = ast.parse(HOSTED_API.read_text())
     handler = next(
@@ -401,4 +557,10 @@ def test_webhook_notify_direct_call_is_inside_the_offload_boundary():
             and kwargs["best_effort"].value is True), (
         "the notify offload lost best_effort=True — a saturated telemetry pool "
         "could then 503 a claimed webhook (#4456)"
+    )
+    assert (isinstance(kwargs.get("cancel_on_timeout"), ast.Constant)
+            and kwargs["cancel_on_timeout"].value is False), (
+        "the notify offload lost cancel_on_timeout=False — a bound miss on a "
+        "QUEUED notify would then CANCEL it and the worker would SKIP the "
+        "callable, silently dropping a claimed event's notification (#4456)"
     )
