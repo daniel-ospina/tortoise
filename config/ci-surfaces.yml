@@ -1546,8 +1546,9 @@ carve_out:
 # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
 # without this registration every URI-set lane collects the file and SKIPS that
 # case via the marker hook — the SDK guard would be a permanently green and
-# permanently unexecuted gate (the same #4047/#4524 shape). The other four
-# cases in the file need no DB and run in both lanes.
+# permanently unexecuted gate (the same #4047/#4524 shape). The file's other
+# four cases need no DB, so they run here as well — a `carve_out` file is
+# excluded from EVERY docker leg, so this lane is the one that runs all five.
 - test_write_path_unreachable_seam_5148.py
 - bench/test_smoke_embedded.py
 push_extra: []
