@@ -126,8 +126,12 @@ def test_scalar_ref_records_the_version_on_the_edge_and_the_transit(prov):
     """Input: Source(url=DOC, contentHash='h1'); Point with a SCALAR ref.
 
     FAILS IF the edge carries no ``sourceVersion``, OR the node carrier is
-    missing/not ``[[resolved_url,'h1']]``. The scalar form is the ACCEPTANCE
-    case and the one a list-only resolver would iterate character-wise.
+    missing/not ``[[<the Point's raw extractedFrom ref>,'h1']]``. For a canonical
+    scalar ref the raw ref IS the node's stored url, so this reads the same as an
+    older ``[[resolved_url,'h1']]`` phrasing — but the carrier is keyed by the RAW
+    ref, never by a resolution (see the two variant tests below). The scalar form
+    is the ACCEPTANCE case and the one a list-only resolver would iterate
+    character-wise.
     """
     sdk, _events, _log = prov
     sdk.create_source(DOC, "document", contentHash="h1")
@@ -216,13 +220,14 @@ def test_url_variant_ref_keeps_the_anchor_across_rebuild(prov):
 
     FAILS IF the carrier is keyed by ``resolve_source_versions``' live-time
     resolution (``resolve_source_key``'s return) instead of the RAW ref — the
-    replay would then look the anchor up under a key the journal never carried,
-    and a lane whose Source identity differs (the sibling test below) loses the
-    anchor on the edge.
+    carrier assertion below pins the key directly (``[[variant, 'h1']]``).
 
-    Pins the stable contract: the edge scalar is present on BOTH lanes, and the
-    node carrier is keyed by the Point's own raw ``extractedFrom`` spelling (the
-    one key both lanes share), NOT the resolved node url.
+    Scope note — what this fixture can and cannot pin: the Source is registered
+    FIRST here, so its identity is lane-stable and the variant resolves to ``DOC``
+    on BOTH lanes; the edge scalar therefore survives even under the resolved-key
+    mutation. The ANCHOR LOSS itself is pinned by the sibling test below, where an
+    unjournaled stub comes first and the two lanes resolve to different node urls.
+    This test pins the CARRIER KEY contract only.
     """
     sdk, events, _log = prov
     sdk.create_source(DOC, "document", contentHash="h1")
@@ -716,8 +721,14 @@ def test_carrier_without_an_extractedfrom_is_not_written(prov):
 
     FAILS IF ``_upsert_point_props`` writes the carrier on the payload's shape
     alone: a hand-written/foreign journal line then plants a stray
-    ``sourceVersionTransit`` with no edge at all, and ``check_consistency``
-    stays green (the node equals its own journal payload).
+    ``sourceVersionTransit`` with no edge at all.
+
+    ⚠️ Deliberate behaviour change, pinned below: before this gate the stray
+    carrier made the node equal its own journal payload, so the #5011 gate
+    stayed GREEN and the corruption was invisible. Dropping it makes the graph
+    UNfaithful to that line, so the gate now REPORTS the divergence. That is the
+    intended outcome (a corrupt line is surfaced, not silently mirrored), and it
+    is why this test also calls the gate.
     """
     sdk, events, log_path = prov
     sdk.create_point("statement", "plain")
@@ -734,6 +745,12 @@ def test_carrier_without_an_extractedfrom_is_not_written(prov):
     assert _node_transit(proj, "stray-carrier") == "ABSENT", \
         "a carrier with no extractedFrom edge must not be written"
     assert not _has_edge(proj, "stray-carrier", DOC)
+    # Deliberate (see the docstring): the drop makes the UNFAITHFUL line visible
+    # to the #5011 gate instead of silently mirroring it. Pin that call.
+    from tortoise.consistency import check_consistency
+    result = check_consistency(str(log_path), proj)
+    assert result["ok"] is False, result
+    assert [d["id"] for d in result["divergent_points"]] == ["stray-carrier"], result
 
 
 def test_carrier_keeps_only_the_points_own_refs(prov):
@@ -763,6 +780,41 @@ def test_carrier_keeps_only_the_points_own_refs(prov):
         "a pair for a non-referenced source must be filtered out"
     assert _edge_version(proj, "mixed-carrier", DOC) == "h1"
     assert not _has_edge(proj, "mixed-carrier", DOC2)
+
+
+def test_carrier_with_only_foreign_keys_is_not_written(prov):
+    """P2 (round 5), filter half: a carrier whose pairs are ALL foreign to a
+    Point that DOES own an ``extractedFrom`` is dropped entirely — ``None``, not
+    an empty list.
+
+    FAILS IF ``_point_source_transit`` returns the filtered list unconditionally
+    (``return kept`` instead of ``return kept or None``): the node then carries
+    ``sourceVersionTransit=[]`` while the edge fold gets ``{}`` — a written
+    carrier with no anchor, and an empty list is not the honest-absent value this
+    change uses (absent is the missing property, never ``''`` and never ``[]``).
+    """
+    sdk, events, log_path = prov
+    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.create_source(DOC2, "document", contentHash="h2")
+    sdk.create_point("statement", "plain")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "PointAdded",
+            "point": {"id": "foreign-only", "content": "x",
+                      "kind": "statement", "status": "live",
+                      "extractedFrom": DOC2,
+                      "sourceVersionTransit": [[DOC, "h9"]]},
+        }) + "\n")
+
+    sdk._get_proj().rebuild_all(str(events))
+    proj = _proj(sdk)
+    assert _node_transit(proj, "foreign-only") == "ABSENT", \
+        "an all-foreign carrier must be dropped, not written as []"
+    assert not _has_edge(proj, "foreign-only", DOC)
+    assert _has_edge(proj, "foreign-only", DOC2), \
+        "guard: the Point's own edge must still exist"
+    assert _edge_version(proj, "foreign-only", DOC2) is None, \
+        "the foreign pair must not stamp the Point's own edge"
 
 
 # ── the gate sees it and stays green on a faithful graph ───────────────────

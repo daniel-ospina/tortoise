@@ -386,13 +386,20 @@ def _point_source_transit(p: dict):
     ``None`` when there is nothing to record. The gate matters because the
     carrier is a transit for an edge that will be written: without it a
     hand-written/foreign journal line plants a stray carrier with no
-    ``extractedFrom`` edge at all (and ``check_consistency`` stays green — the
-    node equals its own journal payload). The filter matters because the pairs
-    are keyed by the RAW ref (see ``resolve_source_versions``), so a pair whose
-    key is not one of the Point's own refs is not one the edge fold can
-    consume — writing it would record an anchor for an edge this Point never
-    has. BOTH writers (``_upsert_point_props`` and ``_upsert_point_edges``) use
-    THIS selector, so the node carrier and the edge fold cannot disagree.
+    ``extractedFrom`` edge at all. (Before this gate the stray made the node equal
+    its own journal payload, so the #5011 gate stayed GREEN and the corruption was
+    invisible; after it the graph is unfaithful to that line and the gate REPORTS
+    the divergence — a deliberate behaviour change, pinned by
+    ``test_carrier_without_an_extractedfrom_is_not_written``.) The filter matters
+    because the pairs are keyed by the RAW ref (see ``resolve_source_versions``),
+    so a pair whose key is not one of the Point's own refs is not one the edge
+    fold can consume — writing it would record an anchor for an edge this Point
+    never has. BOTH writers (``_upsert_point_props`` and ``_upsert_point_edges``)
+    use THIS selector, so the two writers always select the same pair SET. (That
+    is a claim about the SET, not about per-pair VALUES: a foreign/hand-written
+    carrier may list two raw refs that resolve to ONE Source node with different
+    hashes, and the edge fold stamps the resolved-first value while the node keeps
+    both pairs.)
     """
     pairs = _valid_transit_pairs(p.get("sourceVersionTransit"))
     if pairs is None:
