@@ -3261,11 +3261,13 @@ def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
 # ── #4439: harness fixtures must not fork periodic RDB snapshots ──────────
 #
 # `redislite.configuration.DEFAULT_REDIS_SETTINGS['save']` ships a periodic
-# save schedule, so every harness fixture server forked an
-# `redis-rdb-bgsave` snapshot to persist data that is discarded by
-# definition. `tests/_embedded.py` patches the default to Redis's disable
-# form (`save ""`) at import time. These tests pin the mechanism AND the
-# trap that made an earlier attempt wrong.
+# save schedule, so every harness fixture server is CONFIGURED to fork an
+# `redis-rdb-bgsave` snapshot on those triggers — a short-lived fixture
+# writes too little to reach one, which is why the storm came from the
+# LONG-LIVED fixtures (the leaked #4299 population and the session-scoped
+# shared projection). `tests/_embedded.py` patches the default to Redis's
+# disable form (`save ""`) at import time. These tests pin the mechanism AND
+# the trap that a falsy `save` value renders no `save` line at all.
 
 def test_harness_disables_redislite_rdb_save():
     """The harness default renders exactly `save ""` (Redis's disable form).
