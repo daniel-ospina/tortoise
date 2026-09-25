@@ -583,3 +583,64 @@ class TestConnectIssueObjectsAboutObject:
                        params={"n": long_name}).result_set[0][0] == len(stored)
         assert g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
                        params={"n": long_name[:200]}).result_set[0][0] == 0
+
+
+# ── #3574 follow-up: the supersession fold's OWN 200-char cap ────────────
+
+def test_fold_truncates_superseded_by_independently_of_the_write_path(sdk):
+    """#3574 follow-up / #5370: the Object supersession fold stores
+    ``supersededBy = str(successor)[:200]`` — the FOLD's OWN cap, NOT a
+    mirror of a write-path name cap. The write path holds no cap any more
+    (``test_long_object_name_stored_verbatim_by_both_writers`` above pins
+    that), so a >200-char successor name is stored verbatim while the fold
+    records only its 200-char prefix — a value that names NO Object.
+
+    This is a CHARACTERIZATION pin for a filed defect, not an endorsement:
+    the divergence is live on the ask path — ``_probe_visible_successors``
+    (assembly.py) builds its name set from the STORED value, so a >200-char
+    successor is never verified and ``_state_header_hit`` renders
+    "no successor record found" for a successor that exists and is live.
+    Reported as #5370 and intentionally left unfixed here (a distinct
+    surface from the writer cap #3574 removes).
+
+    **When #5370 is fixed this test MUST FLIP**: the fold asserts (b) below
+    becomes ``stored == long_name`` and assertion (c) becomes 1. The test
+    exists so the `commit_ops.apply_supersessions` comment cannot drift back
+    into claiming the fold's cap mirrors a write-path cap.
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    assert len(long_name) > 200
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "fold-target")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "fold-target", "supersedes_by": long_name,
+          "evidence": "#5370 identity pin"}],
+        session_id="s3574_fold", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    # (a) the WRITE path stored the successor's name verbatim (no cap).
+    assert proj.g.query("MATCH (o:Object {name:$n}) RETURN o.status",
+                        params={"n": long_name}).result_set == [["live"]], \
+        "write path must store the >200-char Object name verbatim (#3574)"
+
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'fold-target'}) RETURN o.status, o.supersededBy",
+    ).result_set
+    assert rows and rows[0][0] == "superseded", rows
+    stored = rows[0][1]
+    # (b) the FOLD applied its own 200-char cap to that verbatim name.
+    assert stored == long_name[:200], (
+        f"fold's stored supersededBy is {len(stored)} chars, expected the "
+        f"200-char prefix of the {len(long_name)}-char successor name")
+    assert stored != long_name, "the fold cap must not be mistaken for a no-op"
+    # (c) hence the stored value names NO Object — a name-keyed probe on it
+    #     (the ask path's own probe) finds nothing (the #5370 hazard).
+    assert proj.g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                        params={"n": stored}).result_set[0][0] == 0

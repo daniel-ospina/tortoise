@@ -554,14 +554,27 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # harmful when a candidate is the target itself; otherwise the fold
         # is deterministic (display-string-only successor).
         # #2164 review (P2, ISSUE C): the fold stores supersededBy truncated
-        # to 200 chars (_fold_object_superseded: str(...)[:200] — mirrors the
-        # write-path name cap, sdk.py name[:200]) — the DEDUP/keep-first
-        # probe below compares against the STORED (truncated) form so a
-        # long same-successor re-ingest dedups instead of warning. The FULL
-        # name is kept for the journaled event (round-2 review, ISSUE 2 —
-        # §11: the event log is the reconstruction source; replay re-truncates
-        # identically at the fold, so journal fidelity costs nothing at
-        # storage). No truncation happens here — only at the compare and fold.
+        # to 200 chars (_fold_object_superseded: str(...)[:200]). That cap is
+        # the FOLD's OWN behaviour, unrelated to any write-path name cap — the
+        # writer-side caps are gone (#3574), so a >200-char Object name is
+        # stored VERBATIM and `name[:200]` exists nowhere on the write path.
+        # The DEDUP/keep-first probe below compares against the STORED
+        # (truncated) form so a long same-successor re-ingest dedups instead
+        # of warning. The FULL name is kept for the journaled event (round-2
+        # review, ISSUE 2 — §11: the event log is the reconstruction source;
+        # replay re-truncates identically at the fold, so journal fidelity
+        # costs nothing at storage). No truncation happens here — only at the
+        # compare and fold.
+        # ⚠️ That fold cap does NOT mirror the stored name, so it is not
+        # lossless: for a successor named >200 chars the stored value is the
+        # successor's 200-char prefix and therefore names NO Object — the
+        # ask-path successor probe (assembly._probe_visible_successors)
+        # matches Objects on the STORED value, finds nothing, and the
+        # renderer reports "no successor record found" for a successor that
+        # exists. Filed as #5370; intentionally NOT fixed here (a distinct
+        # surface from the writer cap #3574 removes). Pinned by
+        # tests/test_sdk_group3.py
+        # ::test_fold_truncates_superseded_by_independently_of_the_write_path.
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
             "RETURN o.id, o.name, o.status, o.supersededBy",
