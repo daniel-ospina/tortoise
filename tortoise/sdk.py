@@ -5300,9 +5300,9 @@ class TortoiseSDK:
             warnings.append(
                 f"{len(event_failures)} extracted event(s) failed to write")
 
-        # ── operators (IMPL/NAND + MITIGATES — shared commit semantics,
-        #    #1532 D3: same artifact + deep-miss drop as the commit path via
-        #    apply_payload_operators) ──
+        # ── operators (IMPL/NAND kinds; a payload's MITIGATES entry is a
+        #    bridge-attack record routed to mitigate_operator — #4937; shared
+        #    commit semantics, #1532 D3 — apply_payload_operators) ──
         ops = payload.get("operators", []) or []
         if ops:
             from tortoise.commit_ops import (
@@ -7199,7 +7199,11 @@ class TortoiseSDK:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
-          - op_type: IMPL or NAND (epistemic mechanism)
+          - op_type: IMPL or NAND (epistemic mechanism). ⛔ ``MITIGATES`` is
+            NOT an operator kind (#4937 — the F1 ruling recorded on #2552):
+            a mitigation is a SEPARATE Point that attacks the operator bridge
+            it damps, so it can express neither an op_type nor a bridge. It is
+            created by ``mitigate_operator`` AFTER the operator exists.
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
           - direction: "bidirectional" (default) or "unidirectional" — explicit
             flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
@@ -7218,6 +7222,21 @@ class TortoiseSDK:
             draft status so JSONL replay preserves it
             (projection/entities.py coalesce default is 'live').
         """
+        # #4937 (F1 ruling on #2552, 2026-09-23): MITIGATES is NOT an operator
+        # kind — a mitigation damps the operator bridge it attacks
+        # ((op:Point {is_operator:true})-[:mitigated_by]->(m:Point),
+        # w_eff = w × (1 − strength), weights.py::compute_operator_weight). It
+        # has no op_type and no bridge, so it cannot be spelled as an operator
+        # here. Refuse loudly and NAME the correct path — a bare
+        # "invalid op_type" leaves the caller with no route to the mechanism.
+        if op_type == "MITIGATES":
+            raise ValueError(
+                "MITIGATES is not an operator kind (#4937). A mitigation damps "
+                "the operator bridge it attacks — create the IMPL/NAND operator "
+                "first, then call sdk.mitigate_operator(id=<operator id>, "
+                "reason=..., strength=0.10..0.50) (MCP: "
+                "tortoise_mitigate_operator) to attach the dampener."
+            )
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
@@ -7246,7 +7265,11 @@ class TortoiseSDK:
             declared = set()
             if reg is not None:
                 declared = {r.get("predicate") for r in reg.list_relations()}
-            if label not in declared and label not in ("IMPL", "NAND", "MITIGATES"):
+            # #4937: the generic operator menu is IMPL/NAND (+ pack-declared
+            # relations) — MITIGATES is NOT a built-in operator label. A
+            # caller spelling it here gets the undeclared-relation warning
+            # instead of a silent peer spelling of mitigation.
+            if label not in declared and label not in ("IMPL", "NAND"):
                 warnings.append(warning_for_relation(label))
                 emit_violation(code="undeclared_relation", relation=label,
                                detail=f"op_type={op_type}")
@@ -7957,6 +7980,9 @@ class TortoiseSDK:
 
     # Operator vocabularies accepted by connection specs (create_operator's
     # op_type whitelist — kept in sync with create_operator's validation).
+    # #4937: MITIGATES is deliberately NOT here — it is not an operator KIND,
+    # so it is never a `conn["operator"]` value. A connection spec expresses a
+    # mitigation in its `mitigation` dict (see `_connection_route`).
     _INGEST_OPERATOR_TYPES = frozenset(
         ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
     )
@@ -8290,11 +8316,22 @@ class TortoiseSDK:
         if has_op:
             op_type = conn["operator"]
             if op_type not in self._INGEST_OPERATOR_TYPES:
+                # #4937: an actionable refusal for the one spelling a caller
+                # is most likely to reach for — name the correct path rather
+                # than only listing the permitted vocabulary.
+                _hint = (
+                    " — MITIGATES is not an operator kind (#4937): a "
+                    "mitigation damps the operator bridge it attacks; create "
+                    "the IMPL/NAND connection, then call "
+                    "sdk.mitigate_operator(id=<operator id>, reason=..., "
+                    "strength=0.10..0.50)"
+                    if op_type == "MITIGATES" else ""
+                )
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] operator must "
                                f"be one of {sorted(self._INGEST_OPERATOR_TYPES)}, "
-                               f"got {op_type!r}",
+                               f"got {op_type!r}{_hint}",
                 })
             frm = conn.get("from")
             to_list = tos if isinstance(tos, list) else [tos]
@@ -21686,8 +21723,8 @@ def _summary_to_payload(summary: dict, session_id: str,
                        stream: dict | None = None) -> dict:
     """Map the summary to the derived-commit payload. When a constructed
     stream (Step 2 output) is provided, its wired structure (argument points
-    with about_entities + IMPL/NAND/MITIGATES operators + decision events) is
-    used directly; otherwise the loose mapping is applied."""
+    with about_entities + IMPL/NAND operators, a MITIGATES payload entry
+    routed to mitigate_operator (#4937) + decision events) is used directly; otherwise the loose mapping is applied."""
     if stream and (stream.get("points") or stream.get("events")):
         return _stream_to_payload(summary, session_id, stream)
     """Map the summary stream to the derived-commit payload (#1013 shape):
