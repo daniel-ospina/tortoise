@@ -4,9 +4,11 @@ difference.
 The owner ruling of 2026-09-24 authorises merging near-duplicate claims and
 forbids a merge across a difference in a number/quantity, a named entity, a
 language, a negation, a condition, a date/scope, or a load-bearing connective
-whose role changes across the pair (``#5139``; the code's
-``_IDENTITY_DIMENSIONS`` is the authoritative enumeration).  Both write-path
-fold sites enforce that boundary from ONE implementation
+whose role changes across the pair (``#5139``).  The authoritative predicate is
+``extractor_v2._boundary`` — the connective class is enumerated by
+``_CONNECTIVE_SLOTS``/``_CONNECTIVE_MEMBERS``, and the labels it can report by
+``distinguishing_difference``; the prose below is a reading aid.  Both
+write-path fold sites enforce that boundary from ONE implementation
 (``extractor_v2.fold_allowed`` / ``supersede_allowed``):
 
 * ``classify_consolidation`` — the against-store classifier, and
@@ -102,6 +104,11 @@ NEVER_ACROSS = [
     # `or` — deleting the phrase instead would have made it one-sided.
     ("we ship the server as well as the client",
      "we ship the server or the client", "substituted_content"),
+    # A member is read from the TOKENS, so a combining mark that does not
+    # compose with its neighbour must not hide it: the flattened read turned
+    # the mark into a separator and split the member in two before `_deaccent`
+    # could drop it, so the slot read empty and the pair folded.
+    ("we ship a\u0338nd test", "we ship or test", "substituted_content"),
     # An entity-bearing pronoun or possessive names the subject; changing it
     # re-subjects the claim.
     ("he won the race", "she won the race", "substituted_content"),
@@ -214,9 +221,9 @@ NEVER_ACROSS = [
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
-# value dimension is reported as the audit label (it is the first match), so a
-# caller that asked only for that label would let the value difference license
-# destroying the identity one.  The decision consults the full identity set.
+# label reports the IDENTITY one (it is matched first), so a caller that asked
+# only for a value dimension would miss the rival identity difference; the
+# decision consults the full identity set.
 MASKED_IDENTITY = [
     ("the deploy succeeded at 3pm", "the deploy failed at 5pm"),
     ("the build succeeded at 3pm", "the build did not succeed at 5pm"),
@@ -493,7 +500,7 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("she'll ship the build", "shell ship the build")
 
     def test_a_script_list_gap_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5139).
+        """Documented residual, pinned so it cannot go silent (#5329).
 
         ``_SCRIPT_BLOCKS`` is finite, so a word in a script it does not name
         reaches no dimension and is a one-sided broadening.  This is the
@@ -506,7 +513,7 @@ class TestDistinguishingDifference:
             == "substituted_content"
 
     def test_a_word_list_gap_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5139).
+        """Documented residual, pinned so it cannot go silent (#5329).
 
         The marker lists are finite and a negator, condition or date word they
         do not name reaches no dimension: "hardly", "rarely", "seldom",
@@ -742,7 +749,7 @@ class TestDistinguishingDifference:
         splits, because a combining mark is not a word character.  Recovering
         the two parts needs the mark to carry separator semantics, which would
         split a legitimately accented word as well ("caf\u00e9"); that is a
-        modelling choice, and it is filed with the word-list gap (#5139).
+        modelling choice, and it is filed with the word-list gap (#5329).
         """
         for a, b in (("we ship the build", "we do\u0301not ship the build"),
                      ("we ship the build passes",
@@ -950,14 +957,31 @@ class TestDistinguishingDifference:
                                "we ship the build")
         assert v2.fold_allowed("we ship with the courier",
                                "we ship by the courier")
-        # A coordination phrase is matched on WORD boundaries, so a word that
-        # merely ENDS in "as" before " well as" is not rewritten into `and`.
+        # A coordination phrase is matched on a phrase EDGE that is "not
+        # alphanumeric", so a word that merely ENDS in "as" before " well as"
+        # is not rewritten into `and`...
         assert v2.fold_allowed("it was well as expected",
                                "it was as expected")
         assert v2.fold_allowed("the gas well as a fuel is fine",
                                "the gas as a fuel is fine")
         assert not v2.distinguishing_difference("the gas well as a fuel",
                                                 "the gas as a fuel")
+        # ... and the canonicalisation is spelling-INSENSITIVE, because the
+        # member pass below it is: a capital (sentence-initial or mid-sentence)
+        # and an underscore emphasis must read as the same phrase.  A raw-text
+        # pass skipped both, and the leftover `as` then filled the COMPARISON
+        # slot — which both folded a rival operator pair and refused these
+        # legitimate folds.
+        for spelled in ("We ship the server As well as the client",
+                        "We ship the server _as well as_ the client",
+                        "As well as the client, we ship the server"):
+            assert v2._connective_slots(spelled)[0] == frozenset({"and"}), \
+                spelled
+            assert v2.fold_allowed(spelled,
+                                   "We ship the server and the client.")
+        assert v2.fold_allowed(
+            "We ship the server _as well as_ the client",
+            "We ship the server, the client")
         assert v2.fold_allowed(
             "We should ship the web server first to unblock the mobile team.",
             "We should ship the web server first and unblock the mobile "
@@ -991,6 +1015,26 @@ class TestDistinguishingDifference:
                 ("we ship and test as agreed", "we ship or test as agreed"),
                 ("we ship and test but wait", "we ship and test so wait")):
             assert v2._connective_swap(prior, candidate), (prior, candidate)
+            assert v2.distinguishing_difference(prior, candidate) \
+                == "substituted_content", (prior, candidate)
+            assert not v2.fold_allowed(prior, candidate)
+            assert not v2.supersede_allowed(prior, candidate)
+
+    def test_a_marked_member_spelling_does_not_hide_the_swap(self):
+        """A member carrying a non-composing mark is still that member.
+
+        `_deaccent` exists for exactly this, and it can only run on a token that
+        is still ONE token: the flattened read turned the mark into a separator
+        and split the member first, so the slot read empty and the pair folded.
+        A pin that cannot fail on the old read is not coverage.
+        """
+        assert v2._connective_slots("we ship a\u0338nd test")[0] == \
+            frozenset({"and"})
+        assert v2._connective_slots("we ship o\u0338r test")[0] == \
+            frozenset({"or"})
+        for prior, candidate in (("we ship a\u0338nd test", "we ship or test"),
+                                 ("we ship and test", "we ship o\u0338r test")):
+            assert v2._connective_swap(prior, candidate)
             assert v2.distinguishing_difference(prior, candidate) \
                 == "substituted_content", (prior, candidate)
             assert not v2.fold_allowed(prior, candidate)
@@ -1087,10 +1131,10 @@ class TestDistinguishingDifference:
     def test_the_slot_partition_is_pinned_literally(self):
         """Which member sits in WHICH slot is pinned, not just the union.
 
-        A behavioural test alone cannot pin the partition: moving `than` into
-        the clause-relation slot keeps the `than`/`as` row refused (because `as`
-        sits in both), and the per-member test reads the module constant, so a
-        mis-assignment would pass.  `as` is the deliberate dual member.
+        A behavioural test alone cannot pin the partition, and the per-member
+        test below cannot either: it reads the same module constant the code
+        reads, so a mis-assignment is invisible to it.  Only a literal pin makes
+        the partition checkable.  `as` is the deliberate dual member.
         """
         assert tuple(tuple(sorted(slot))
                      for slot in v2._CONNECTIVE_SLOTS) == (
@@ -1099,29 +1143,37 @@ class TestDistinguishingDifference:
             ("else", "then"),
             ("as", "than"),
             ("from", "to"))
+        # The union is what the member lookup reads, so a member added to it
+        # but to NO slot would be invisible to `_connective_swap` and to the
+        # table pin above.
+        assert frozenset().union(*v2._CONNECTIVE_SLOTS) == \
+            v2._CONNECTIVE_MEMBERS
         assert [i for i, slot in enumerate(v2._CONNECTIVE_SLOTS)
                 if "as" in slot] == [0, 2]
         assert v2._COORDINATION_PHRASES == (("as well as", "and"),)
 
     @pytest.mark.parametrize("slot", v2._CONNECTIVE_SLOTS,
                              ids=lambda s: "+".join(sorted(s)))
-    def test_every_slot_member_is_exercised_against_a_frame_mate(self, slot):
+    def test_every_slot_member_is_exercised_against_a_slot_mate(self, slot):
         """Class coverage, not exemplars: every member of every slot, spelled
         the way the table spells it, and ATTRIBUTED to the slot predicate.
 
-        The mate is a FRAME-word member of the same slot wherever one exists,
-        so neither side owns a content token the other lacks and no other
-        dimension can refuse the pair — only the slot read can.  The label is
-        asserted POSITIVELY: `unreadable` is the fail-closed sentinel, and an
-        assertion that merely admits "some identity dimension" passes when the
-        comparison crashes instead of detecting the swap.  `nor` legitimately
-        reports `negation` (it is also a negator).
+        The mate is a FRAME-word member of the same slot wherever one OTHER
+        than the member exists, so a frame member's pair has no content token on
+        either side that the other lacks and no other dimension can refuse it —
+        only the slot read can.  The slot read is asserted directly as well as
+        through the label, because `nor` is also a negator and refuses the pair
+        on that ground whatever the slot read says.  The label is asserted
+        POSITIVELY: `unreadable` is the fail-closed sentinel, and an assertion
+        that merely admits "some identity dimension" passes when the comparison
+        crashes instead of detecting the swap.
         """
         frame = sorted(slot & v2._FRAME_STOPWORDS)
         for member in sorted(slot):
-            mate = (frame[0] if frame and member not in frame
-                    else sorted(slot - {member})[0])
+            others = sorted(slot - {member})
+            mate = next((f for f in frame if f != member), others[0])
             a, b = f"we ship {member} test", f"we ship {mate} test"
+            assert v2._connective_swap(a, b), (member, mate)
             label = v2.distinguishing_difference(a, b)
             assert label in {"substituted_content", "negation"}, \
                 (member, mate, label)
@@ -1207,8 +1259,12 @@ class TestDistinguishingDifference:
         one that constrains the decision, and the decisions refuse on the set.
         """
         for prior, candidate in MASKED_IDENTITY:
-            assert v2.distinguishing_difference(prior, candidate) \
-                in v2._IDENTITY_DIMENSIONS
+            label = v2.distinguishing_difference(prior, candidate)
+            # `unreadable` is the fail-closed sentinel, so admitting it would
+            # let a comparison that CRASHED end-to-end pass as "the value
+            # difference did not mask an identity one".
+            assert label in v2._IDENTITY_DIMENSIONS and label != "unreadable" \
+                , (prior, candidate, label)
             # the value difference is genuinely there too
             assert (v2._value_signature(prior) != v2._value_signature(candidate)
                     or v2._value_bindings(prior)
