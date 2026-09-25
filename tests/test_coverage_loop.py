@@ -253,8 +253,10 @@ def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     assert set(inj_hit) == set(base_hit)
     assert len(inj_hit) == 18  # +status (C6 #2520)
     # The C6 ``status`` key is asserted BY NAME (a count alone would pass a
-    # rename that silently disables the status-only stale clause). The value
-    # is the search payload's — empty for a non-terminal draft.
+    # rename that silently disables the status-only stale clause). Its value
+    # is the search payload's ``status`` — absent from the payload for this
+    # undecorated non-terminal draft, so it lands as ``""`` here (verified
+    # by direct execution; the eval's terminal rows carry the real status).
     assert "status" in inj_hit, inj_hit
     # session_date is derived from the QUESTION's haystack_dates, indexed by
     # the point's lme_session_index — a driver that drops ``dates`` (or the
