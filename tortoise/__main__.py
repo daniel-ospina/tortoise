@@ -4899,9 +4899,11 @@ def _mask_uri_userinfo(target: str) -> str:
             # re-emits credential material. Masking to the last '@' can
             # over-reach — past a genuine query/fragment, or across later prose
             # or a second URI in the same message — which loses diagnosability
-            # but never leaks, and mirrors entrypoint.sh::_redact_uri. For
-            # well-formed URIs (delimiters only after the userinfo '@') the
-            # output is unchanged.
+            # but cannot leak the userinfo, because what FOLLOWS the '@' is
+            # judged as a target below (#2987 review). Over-reaching past a
+            # second URI without that judgement would echo the second URI's
+            # credential. For well-formed URIs (delimiters only after the
+            # userinfo '@') the output is unchanged.
             rest_start = j + 3
             authority = line[rest_start:]
             at = authority.rfind("@")
@@ -4932,8 +4934,31 @@ def _mask_uri_userinfo(target: str) -> str:
                 out.append(line[i:j + 3])
                 i = j + 3
                 continue
+            # #2987 review — fail-open fix. The text after the last '@' is the
+            # host for a well-formed URI, but a malformed value can carry a
+            # credential there, and this mask used to echo it verbatim:
+            #   rediss://u:pw@host:SECRET      (credential-shaped tail)
+            #   rediss://u:pw@h:1 rediss://:SECRET   (a later scheme:// this
+            #                                         walk cannot reach)
+            #   rediss://u:pw@:SECRET:6379     (empty user before the ':')
+            # Both are judged by the predicate the no-'@' branch already uses,
+            # so `host:pw` behaves the SAME with and without an '@' — that
+            # asymmetry is what let this leak past the no-'@' fix. A
+            # recognised-safe target (host, host:port, bracketed IPv6, empty)
+            # is still emitted unchanged.
+            #
+            # NOTE: this reverses the "bad port / malformed IPv6 stays readable"
+            # behaviour recorded in the #720 review (tests/test_doctor.py) —
+            # `...@127.0.0.1:notaport` and `...@[abc` now fail closed. The port
+            # value is still named by the exception text in the same message
+            # (`Port could not be cast to integer value as 'notaport'`), so the
+            # diagnostic survives; see the PR body.
+            remainder = authority[at + 1:]
+            if ("://" in remainder
+                    or _credential_shaped(_authority_region(remainder))):
+                return "<uri-redacted-unrecognised-shape>"
             out.append(line[i:k])
-            out.append(f"{scheme}://:***@{authority[at + 1:]}")
+            out.append(f"{scheme}://:***@{remainder}")
             i = len(line)
         result = "".join(out)
         # Mirror entrypoint.sh's unconditional guard: a line the mask did not

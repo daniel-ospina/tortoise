@@ -67,14 +67,34 @@ _redact_uri() {
             # without this the line reads "→ " and the diagnosability the
             # redaction exists to preserve is gone with no signal.
             masked="<unprintable-uri>"
-        elif [ "$masked" = "$line" ]; then
+        else
+            # Whether sed masked anything decides WHICH text is the candidate to
+            # judge. MASKED (the line carried an '@'): the text after the LAST
+            # '@' is the host for a well-formed URI, but a malformed value can
+            # carry a credential there and this used to echo it verbatim —
+            # `rediss://u:pw@h:1 rediss://:pw` (a later scheme:// this
+            # ^-anchored helper cannot reach at all) and `rediss://u:pw@host:pw`
+            # (a credential-shaped tail; the SAME region fails closed below when
+            # no '@' is present — that asymmetry was the leak). The shared
+            # predicate judges it. This reverses the #720 review's "bad port
+            # stays readable" behaviour: `...@127.0.0.1:notaport` and `...@[abc`
+            # now fail closed, and the port value survives in the exception
+            # text of the same message. UNMASKED: judge the post-scheme /
+            # continuation text, as before.
             shaped=0
-            case "$line" in
-                *@*) shaped=1 ;;
-            esac
             candidate=""
+            if [ "$masked" != "$line" ]; then
+                candidate="${line##*@}"
+                case "$candidate" in
+                    *://*) shaped=1 ;;
+                esac
+            else
+                case "$line" in
+                    *@*) shaped=1 ;;
+                esac
+            fi
             if [ "$shaped" -eq 0 ]; then
-                if [ "$line" != "${line#*://}" ]; then
+                if [ "$masked" = "$line" ] && [ "$line" != "${line#*://}" ]; then
                     candidate="${line#*://}"
                     # A single DB URI has one '://'. A SECOND '://' on a line
                     # with no '@' cannot be predicated by this ^-anchored

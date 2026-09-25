@@ -281,6 +281,17 @@ def _redact(uri: str) -> str:
             "rediss://host:6379 rediss://user:S3ntinel",
             "<uri-redacted-unrecognised-shape>",
         ),
+        # #2987 review: the post-'@' remainder is judged with the same predicate
+        # as the no-'@' authority, so `host:pw` behaves the same either way.
+        ("rediss://u:pw@host:S3nPw", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://u:pw@:S3nPw:6379", "<uri-redacted-unrecognised-shape>"),
+        (
+            "rediss://u:pw@h:1 rediss://:S3nPw",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        # ...and a recognised-safe target still prints, masked, intact.
+        ("rediss://u:pw@host:6379/db", "rediss://:***@host:6379/db"),
+        ("rediss://u:pw@[::1]:6379/db", "rediss://:***@[::1]:6379/db"),
     ],
 )
 def test_redactor_masks_userinfo_and_keeps_the_target(uri: str, expected: str):
@@ -351,6 +362,18 @@ _BARE_URI_CORPUS = [
     # ...and the recognised-safe shapes that must stay unchanged.
     "rediss://127.0.0.1:7687/tortoise",
     "rediss://[::1]:6379/tortoise",
+    # #2987 review: the text after the LAST '@' is judged, not echoed. A
+    # credential-shaped tail and a later `scheme://` both used to be re-emitted
+    # verbatim by BOTH maskers (the shell cannot reach a later occurrence at all).
+    "rediss://u:pw@host:S3nPw",
+    "rediss://u:pw@:S3nPw:6379",
+    "rediss://u:pw@h:1 rediss://:S3nPw",
+    "rediss://u:pw@h:1 rediss://user:S3nPw",
+    # Residual, documented by this corpus rather than hidden: text after an
+    # ASCII space is not bounded as an authority by EITHER implementation (a
+    # bare word there is indistinguishable from prose — `h:1 <word>` is a shape
+    # connection errors take). Parity holds; the word is not masked.
+    "rediss://u:pw@h:1 S3nPw",
 ]
 
 
