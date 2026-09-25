@@ -1944,12 +1944,24 @@ jobs:
       - name: Install
         run: pip install -e .
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
-      # Both steps below would otherwise run the CHECKOUT'S OWN copies, so a PR
-      # could add a surface tool and stub the guard out in the same commit: the
+      # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
+      # could add a surface tool and stub the gate out in the same commit: the
       # required `surface-guard` job would go green on a rewritten gate.
       #
-      # Both tools resolve `ROOT = Path(__file__).resolve().parent.parent`, so
-      # the pin overwrites them IN PLACE under `tools/`: the PR's TREE stays the
+      # PIN THE ENFORCEMENT, NOT THE GENERATOR. `tools/surface-guard.py` is the
+      # gate — it compares the declaration against the approved baseline, and it
+      # is SELF-CONTAINED (its own `_read_manifest`, deliberately independent of
+      # `tools/surface_manifest.py`), so nothing in the PR's tree can influence
+      # it. Pinning `tools/surface_manifest.py` as well looked symmetrical and was
+      # a DEADLOCK: the two steps that use it run the BASE ref's copy, so a PR
+      # that FIXES that tool can never make them pass. Measured on #5192 — the
+      # pin succeeded, `surface-guard` and the ordering lint passed, and the
+      # render step failed against a tree whose own (fixed) renderer reproduced
+      # the committed document byte-for-byte. The other two steps it feeds are a
+      # lint and an artifact-consistency check, not the expansion gate.
+      #
+      # The pinned tool resolves `ROOT = Path(__file__).resolve().parent.parent`,
+      # so the pin overwrites it IN PLACE under `tools/`: the PR's TREE stays the
       # subject of the check (that is the point — it is what might have
       # expanded), while the LOGIC that measures it comes from the protected
       # base ref and cannot be edited by the PR under test.
@@ -1976,7 +1988,7 @@ jobs:
           # not only the files.
           test -d tools && test ! -L tools \
             || { echo "::error::tools/ is not a real directory"; exit 1; }
-          for f in tools/surface-guard.py tools/surface_manifest.py; do
+          for f in tools/surface-guard.py; do
             tmp="$(mktemp)"
             # `mv -f` REPLACES the path. A plain `> "$f"` redirect FOLLOWS it, so
             # a PR that commits `tools/surface-guard.py -> /dev/null` would have
