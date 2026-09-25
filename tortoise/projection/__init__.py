@@ -441,6 +441,18 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
     """
     global _config_classes_cache
     if _config_classes_cache is None:
+        # #5148 review — DO NOT guard these imports, and do NOT degrade to an
+        # empty tuple on failure. They reach `tortoise.embeddings` transitively
+        # (`pack_state` -> `sdk` -> `cross_lens`), and the failure propagating
+        # is LOAD-BEARING: `_capture_config_snapshot` calls this unconditionally
+        # and lets the exception reach `rebuild_all`'s `capture_failed` gate,
+        # which raises BEFORE the wipe (#2943). Returning `()` here would
+        # silence that gate, let the wipe proceed, and destroy every graph-only
+        # config node with no durable record — turning a safe refusal into
+        # silent data loss. The fail-soft discipline applied to the WRITE and
+        # REPLAY seams is CORRECT THERE and WRONG HERE: there the failure is
+        # advisory or a single write, here it is the only proof the wipe is
+        # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
         from tortoise.sdk import TortoiseSDK

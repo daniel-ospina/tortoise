@@ -559,6 +559,13 @@ def test_no_redirect_stems_registry_exact():
         # ci-surfaces.yml:carve_out + the core surface and in
         # TEST_NO_REDIRECT_STEMS.
         "test_vecf32_overwrite_seams_4524",
+        # #5148: `test_sdk_emit_event_survives_unreachable_seam` is
+        # `embedded_only` (it constructs a real embedded store). Without the
+        # carve-out routing it is collected by every URI-set lane and skipped
+        # via the marker hook — a permanently green, permanently unexecuted
+        # gate on main (the #4047/#4524 shape). Registered in all three homes:
+        # ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS, and here.
+        "test_write_path_unreachable_seam_5148",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

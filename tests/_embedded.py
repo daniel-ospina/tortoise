@@ -271,6 +271,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # carve_out list in config/ci-surfaces.yml (the two are one set in two
     # homes; tests/test_ci_selection.py pins the equality).
     "test_vecf32_overwrite_seams_4524",
+    # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
+    # (it constructs a real embedded store), so it is a permanently green,
+    # permanently unexecuted gate on main unless this stem is routed to the
+    # URI-unset carve-out job — the #4047/#4524 shape. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality).
+    "test_write_path_unreachable_seam_5148",
 )
 
 _HAS_FALKOR: bool | None = None

@@ -101,11 +101,12 @@ def test_required_embedding_dim_is_fail_soft():
 # ── the two WRITE-path guards ──
 
 def test_add_point_caller_vector_survives_unreachable_seam():
-    """`add_point(embedding=...)` must set the key BEFORE the seam import.
+    """`add_point(embedding=...)` must survive an unimportable seam.
 
-    Order matters: the assignment cannot be skipped by the import failing, or
-    the journal record would carry no `embedding` key at all — which the replay
-    reads as "legacy record, recompute" and would invent a vector for.
+    This pins the GUARD, not the ASSIGNMENT ORDER: `p.update(fields)` has
+    already put the key in the payload before this branch runs, so presence is
+    owned either way and moving the explicit assignment would not change the
+    outcome. What this catches is the unguarded import raising out of the write.
     """
     api, log = _api()
     with _UnimportableSeam():
