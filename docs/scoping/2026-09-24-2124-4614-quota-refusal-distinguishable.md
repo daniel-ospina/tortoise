@@ -124,8 +124,8 @@ a caller branching on `code` to *skip* a write — is not reachable, because the
    exact left-hand side of the comparison that produced the refusal). A bare
    `QuotaExceededError("msg")` still works.
 2. `tortoise/hosted_api.py` — every **`quota_exceeded`** 402 door answers with
-   `detail = quota_refusal_payload(...)`: `_check_org_limit` (points / api_keys /
-   users / graphs, plus the `documents` branch), the capture points-estimate
+   `detail = quota_refusal_payload(...)`: `_check_org_limit` (called with the
+   `points`, `api_keys` and `sessions` resources), the capture points-estimate
    gate, the api-keys `_KeyCapExceeded` mint/rotate race backstops, and the two
    `/v1/session/key` recovery lanes (via one `_key_limit_refusal()` builder, so
    the api_keys category has ONE shape). The prose each door emitted before
@@ -177,8 +177,8 @@ a caller branching on `code` to *skip* a write — is not reachable, because the
 
 | Touch point | Type | Covered by | Status |
 |---|---|---|---|
-| 402 body for `points`/`api_keys` (`/v1/sessions` capture gate, `/v1/team/keys`, `/v1/points`, `/v1/objects`, `/v1/subjects`, MCP quota tools) | API | `_check_org_limit` + `quota_refusal_payload` | ✅ |
-| 402 body for `documents` (`/v1/index/docs`) | API | `enforce_org_limit` documents branch | ✅ |
+| 402 body for `points`/`api_keys`/`sessions` (`/v1/sessions` capture gate, `/v1/team/keys`, `/v1/points`, `/v1/objects`, `/v1/subjects`, MCP quota tools) | API | `_check_org_limit` + `quota_refusal_payload` | ✅ |
+| Documents gate (`/v1/index/docs`) | API | `enforce_org_limit` documents branch — a background-job `failed`/`quota_hit` status, NOT an HTTP 402; the structured fields ride the exception | ✅ |
 | api_keys race backstops + `/v1/session/key` recovery | API | `_key_limit_refusal()` | ✅ |
 | Cohort spend cap 402 | API | `CohortCostCapExceeded` code override | ✅ |
 | Dashboard at-cap notice (api_keys) | UI | unchanged — `api()` + `capLimitFrom` read `detail.message` | ✅ |
