@@ -654,18 +654,86 @@ class TestDistinguishingDifference:
             assert not v2.fold_allowed(a, b)
 
     def test_a_combining_mark_that_composes_is_a_known_limit(self):
+        """Superseded by ``test_a_composing_mark_where_a_separator_would_be_is_a_known_limit``,
+        which names the class and pins it in all three dimensions."""
+        assert v2.fold_allowed("we ship the build", "we do\u0301not ship the build")
+
+    def test_a_condition_marker_fused_on_either_side_is_still_one(self):
+        """A single-word marker is read by its parts, as a negator is.
+
+        "if!the build passes" is one whitespace token whose parts are "if" and
+        "the"; matched only whole, the condition was invisible and the
+        conditional claim folded into the unconditional one.
+        """
+        for sep in ("!", "-", ":", ",", ".", "/", "~", "@", "*", "_", "+", "#",
+                    "&", "|", ";", "=", "?", "\u2026", "\u2014", "\u00b7", "\u201c",
+                    "\u00bf"):
+            a = "we ship the build passes"
+            for b in (f"we ship if{sep}the build passes",
+                      f"we ship the{sep}if build passes"):
+                assert v2.distinguishing_difference(a, b) == "condition", (sep, b)
+                assert not v2.fold_allowed(a, b)
+
+    def test_a_date_word_fused_to_a_separator_is_still_a_date(self):
+        """A relative day is a date word wherever the separator sits.
+
+        The declared shape is a date word fused to a separator at EITHER edge;
+        "tomorrow\u2014the launch" is one token, and reading only the whole token
+        made the day invisible while the edge form was refused.
+        """
+        a = "we ship the launch is ready"
+        for sep in ("\u2014", "!", "/", "-", "@", "#", "\u00b7", "\u2026"):
+            b = f"we ship tomorrow{sep}the launch is ready"
+            assert v2.distinguishing_difference(a, b) == "date", (sep, b)
+            assert not v2.fold_allowed(a, b)
+
+    def test_a_composing_mark_where_a_separator_would_be_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent.
 
-        A combining mark between the parts of a fused negator COMPOSES into the
-        letter before it under NFC, so "do\u0301not" is the single word
-        "d\u00f3not" and there is no part left to read as a marker.  Recovering
-        one needs de-accenting plus a lexicon; the shape is otherwise the same
-        word-list limitation as #5139.
+        A combining mark standing exactly where a separator would be COMPOSES
+        with the letter before it under NFC, and the two parts become one word
+        with no separator left to split on: "the\u0301if" is "th\u00e9if",
+        "do\u0301not" is "d\u00f3not".  A mark that does NOT compose still
+        splits, because a combining mark is not a word character.  Recovering
+        the two parts needs the mark to carry separator semantics, which would
+        split a legitimately accented word as well ("caf\u00e9"); that is a
+        modelling choice, and it is filed with the word-list gap (#5139).
         """
-        assert v2.fold_allowed("we ship the build", "we do\u0301not ship the build")
-        # A mark at a token EDGE composes or strips, and is not a difference.
-        assert v2.distinguishing_difference("we ship the build",
-                                            "we ship the build\u0301") is None
+        for a, b in (("we ship the build", "we do\u0301not ship the build"),
+                     ("we ship the build passes",
+                      "we ship the\u0301if build passes"),
+                     ("we ship the launch is ready",
+                      "we ship tomorrow\u0301the launch is ready")):
+            assert v2.fold_allowed(a, b), b
+        # A mark that cannot compose keeps the split, so the same shapes are
+        # refused when the mark sits against a letter with no precomposed form.
+        assert v2.distinguishing_difference(
+            "we ship the build passes", "we ship if\u0301the build passes") \
+            == "condition"
+
+    def test_a_composing_mark_cannot_hide_a_name_pronoun_or_date(self):
+        """A mark that COMPOSES leaves the capital inside the word.
+
+        NFC turns "for\u0301Alice" into the single word "fo\u0155Alice", so a
+        capital test at a part's start saw nothing; a mark against a pronoun or
+        a day word likewise stopped it matching a list that reads words
+        exactly.  Every lookup now reads the de-accented form as well.
+        """
+        # Every lookup reads the de-accented form, so a mark against a word
+        # list entry cannot hide it.
+        for a, b in (("the deploy failed for\u0301Alice", "the deploy failed"),
+                     ("the deploy failed to\u0301Bob", "the deploy failed"),
+                     ("hi\u0301s manager approved the plan",
+                      "the manager approved the plan"),
+                     ("we ship urgent today\u0308", "we ship urgent")):
+            assert v2.distinguishing_difference(a, b) is not None, (a, b)
+            assert not v2.fold_allowed(a, b)
+        # A detached possessive clitic is still that owner's possessive.
+        assert v2.distinguishing_difference(
+            "bob\u200b's report is ready", "the report is ready") \
+            == "substituted_content"
+        assert not v2.fold_allowed("bob\u200b's report is ready",
+                                   "the report is ready")
 
     def test_a_range_or_a_version_is_a_different_quantity(self):
         """The separators inside a numeric token are part of its value."""

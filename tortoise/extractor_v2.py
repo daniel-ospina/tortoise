@@ -3263,7 +3263,16 @@ def _guard_token_seq(content: str) -> list[str]:
     the positions the comparison is about.
     """
     text = _fold_unicode(_norm(content)).translate(_APOSTROPHES)
-    seq = [t for t in (_strip_edges(_s) for _s in text.split()) if t]
+    # A possessive clitic detached from its owner ("bob\u200b's", where the
+    # format character became a space) is still that owner's possessive; the
+    # edge strip would otherwise reduce the clitic to a bare "s".
+    joined: list[str] = []
+    for t in text.split():
+        if joined and t in ("'s", "'"):
+            joined[-1] = joined[-1] + t
+            continue
+        joined.append(t)
+    seq = [t for t in (_strip_edges(_s) for _s in joined) if t]
     return _rejoin_numeric_signs(seq)
 
 
@@ -3466,19 +3475,54 @@ def _negation_markers(content: str) -> frozenset[str]:
     """
     out: set[str] = set()
     for t in _guard_tokens(content):
-        canon = _canon_token(t)
+        canon = _canon_token(_deaccent(t))
         if canon in _NEGATION_MARKERS or _CLITIC_RE.search(canon):
             out.add(canon)
             continue
         for part in _sub_tokens(t):
+            part = _deaccent(part)
             if part in _NEGATION_MARKERS or _CLITIC_RE.search(part):
                 out.add(part)
     return frozenset(out)
 
 
+def _deaccent(t: str) -> str:
+    """The word with its diacritics removed.
+
+    A combining mark is invisible in the sense that matters here: it does not
+    separate two words, so a marker with one against it is still that marker to
+    a reader, while every lookup that matches a word exactly misses it.  NFD +
+    drop the marks + NFC makes "h\u00eds" read as "his" and "today\u0308" as
+    "today".
+    """
+    decomposed = unicodedata.normalize("NFD", str(t or ""))
+    return unicodedata.normalize(
+        "NFC", "".join(c for c in decomposed if unicodedata.category(c) != "Mn"))
+
+
+def _lookup_keys(t: str) -> tuple[str, ...]:
+    """Every form of a token a word list must be matched against.
+
+    Three, because a word reaches a list through three spellings: as written
+    (``t``), with its diacritics dropped, and by its word-parts when it is
+    fused to a separator ("if!the" holds "if"; "do'not" holds "not").  A key
+    can only ADD a marker downstream, and a marker only ever refuses a fold.
+    """
+    keys = [_deaccent(t)]
+    keys.extend(_sub_tokens(t))
+    return tuple(k for k in keys if k)
+
+
 def _condition_markers(content: str) -> frozenset[str]:
-    """Condition/qualifier markers — single words and multi-word connectives."""
-    found = {t for t in _guard_tokens(content) if t in _CONDITION_MARKERS}
+    """Condition/qualifier markers — single words and multi-word connectives.
+
+    Read whole AND by parts, as the negators are: "if!the build passes" is one
+    whitespace token whose parts are "if" and "the", and matching only the
+    whole token left the condition invisible.
+    """
+    found: set[str] = set()
+    for t in _guard_tokens(content):
+        found.update(k for k in _lookup_keys(t) if k in _CONDITION_MARKERS)
     flat = _norm(content)
     found.update(p for p in _CONDITION_PHRASES if p in flat)
     return frozenset(found)
@@ -3504,12 +3548,19 @@ def _date_tokens(content: str) -> tuple[str, ...]:
     seq = _guard_token_seq(flat)
     found: list[tuple[int, str]] = []
     for i, t in enumerate(seq):
-        unambiguous = t in _DATE_WORDS
+        # A date word fused to a separator is still a date word: "tomorrow-"
+        # and "tomorrow/the launch" are one token each, and reading only the
+        # whole token made the day invisible.
+        keys = _lookup_keys(t)
+        hit = next((k for k in keys if k in _DATE_WORDS), None)
+        if hit is not None:
+            found.append((i, hit))
+            continue
         # A month that is also a modal counts only in a date position —
         # immediately after a date preposition.
-        ambiguous = (t in _MONTH_AMBIGUOUS and i
+        ambiguous = (any(k in _MONTH_AMBIGUOUS for k in keys) and i
                      and seq[i - 1] in _DATE_PREPOSITIONS)
-        if unambiguous or ambiguous:
+        if ambiguous:
             found.append((i, t))
     for phrase in _DATE_PHRASES:
         start = flat.find(phrase)
@@ -3539,9 +3590,12 @@ def _proper_nouns(content: str) -> frozenset[str]:
         # and the fused spelling matches what the content skeleton holds, which
         # is what the one-sided test intersects against.
         parts = [t] if t.isalnum() else [p for p in re.split(r"[^\w]|_+", t) if p]
-        if any(p[:1].isupper() for p in parts):
-            named.update(_apostrophe_free(_norm(p)) for p in parts)
-            named.add(_apostrophe_free(_norm(t)))
+        # ANY uppercase letter, not only one at a part's start: a combining
+        # mark that COMPOSES leaves the capital inside the word ("fo\u0155Alice"),
+        # so a start-of-part test saw no name at all.
+        if any(any(c.isupper() for c in p) for p in parts):
+            named.update(_apostrophe_free(_deaccent(_norm(p))) for p in parts)
+            named.add(_apostrophe_free(_deaccent(_norm(t))))
     return frozenset(named)
 
 
@@ -3562,7 +3616,7 @@ def _content_tokens(content: str) -> set[str]:
     """
     out: set[str] = set()
     for t in _guard_tokens(content):
-        t = _apostrophe_free(t)
+        t = _apostrophe_free(_deaccent(t))
         if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
             continue
         if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
@@ -3578,8 +3632,8 @@ def _possessives(content: str) -> frozenset[str]:
     ``_content_tokens`` strips it to make one word's two spellings agree and
     the possessive signal is exactly what that loses.
     """
-    return frozenset(_canon_token(t) for t in _guard_tokens(content)
-                     if _POSSESSIVE_RE.search(t))
+    return frozenset(_canon_token(_deaccent(t)) for t in _guard_tokens(content)
+                     if _POSSESSIVE_RE.search(_deaccent(t)))
 
 
 def _marker_scope(content: str) -> tuple[str, ...]:
