@@ -623,14 +623,18 @@ export function preferredSurface(family, current) {
 // includes it) and reads HARNESS_NAMES/HARNESS_CAPTURE_REASON to list it as
 // unsupported-with-a-reason. HARNESS_STEPS.chatgpt, HARNESS_INSTALL.chatgpt,
 // HARNESS_INTRO.chatgpt, HARNESS_COPY_LABEL.chatgpt and
-// HARNESS_CONTINUE_LABEL.chatgpt are reachable only from the ARCHIVED
-// LEGACY_WIZARD_ARCHIVED render (main.jsx indexes them by `wizardHarness`; that
+// HARNESS_CONTINUE_LABEL.chatgpt render nowhere live: main.jsx reads them only in
+// the ARCHIVED LEGACY_WIZARD_ARCHIVED block (indexed by `wizardHarness`), and that
 // A0 rollback surface must stay OFF for the chooser to keep #2912's four
-// families) and from the roundtrip test — so HARNESS_CONTINUE_LABEL.chatgpt is a
-// LEGACY label: there is no ChatGPT connect step for it to caption.
-// UNIVERSAL_COMMAND.chatgpt is narrower still: no render indexes UNIVERSAL_COMMAND
-// by harness (main.jsx reads only `.codexDesktop`), so it is reachable only from
-// the roundtrip test and the wizard-prompts snapshot. Its LIVE
+// families. Their other readers are the DE2E-5 roundtrip test (harnesses.test.js)
+// and the #4880 snapshot gate — which commits HARNESS_INTRO.chatgpt and
+// HARNESS_STEPS.chatgpt into src/wizardPrompts.snapshot.json, so editing those
+// two is a reviewed snapshot diff, not a dead-code edit.
+// HARNESS_CONTINUE_LABEL.chatgpt is therefore a LEGACY label: there is no
+// ChatGPT connect step for it to caption. UNIVERSAL_COMMAND.chatgpt is narrower:
+// no render indexes UNIVERSAL_COMMAND by harness (main.jsx reads only
+// `.codexDesktop`), so its readers are the roundtrip test and the snapshot
+// generator alone. Its LIVE
 // carrier is the public setup docs page (#4836): website/docs.html#chatgpt
 // names the Developer-mode path, the canonical connector URL and the onboarding
 // instructions URL, so a ChatGPT user is not left with only a test-consumed
@@ -771,7 +775,7 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
   'claude-web': () =>
     `Tortoise — universal setup command (Claude Web — OAuth, no API key)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${CANONICAL_MCP_URL}\n3. Leave Request headers empty — no API key is needed. On the first connection\n   Claude opens Tortoise's sign-in page: sign in, click Authorize, then pick the\n   Organization you're onboarding.\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've connected it — Continue" in the dashboard connect\n   step (the click only advances — the agent's first successful write is what\n   confirms it).\n   No local skills here — your agent follows the onboarding instructions at\n   ${ONBOARDING_INSTRUCTIONS_URL}.`,
   chatgpt: () =>
-    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools. There is NO dashboard step\nto click for ChatGPT — #2698 deleted its tab and #2912's chooser has no chatgpt\nfamily, so the agent's first successful write is what confirms the connection.\nNo local skills here — your agent's onboarding instructions are the document at\n${ONBOARDING_INSTRUCTIONS_URL}.`,
+    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools. The dashboard connect\nstep has no ChatGPT option to pick (#2698 deleted its tab; #2912's chooser has\nno chatgpt family), so the agent's first successful write is what confirms the\nconnection.\nNo local skills here — your agent's onboarding instructions are the document at\n${ONBOARDING_INSTRUCTIONS_URL}.`,
 }
 
 export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER

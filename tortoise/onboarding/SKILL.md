@@ -62,7 +62,9 @@ resume where the flow left off — onboarding is stateful and idempotent:
 - **Hosted, CLI agents (no MCP tool listed yet):** `curl -s
   https://api.premiselabs.co/v1/onboarding/state -H "Authorization: Bearer
   $TORTOISE_API_KEY"` (same projection). If the org is grandfathered (node
-  absent) the FLOW keys serve defaults — treat them as read-only.
+  absent) the FLOW keys serve defaults — treat them as read-only. **CLI agents
+  only:** a ChatGPT connector never takes this header and has no key to send —
+  if you are ChatGPT, ignore this bullet and the §2 #1701 note applies instead.
 - **Self-hosted:** there is no hosted onboarding REST surface — skip the
   state read and checkpoint steps. Install the SUPPORTED path first —
   Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
