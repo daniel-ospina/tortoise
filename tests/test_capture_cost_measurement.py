@@ -2593,3 +2593,33 @@ def test_capture_lane_swallows_the_strict_mode_registration_raise(
         for record in caplog.records), (
         "the strict-mode raise never reached the capture lane's handler — "
         "either the test is vacuous or the escape was weakened (#4468)")
+
+
+
+def test_hosted_capture_emits_that_session_s_graph_op_row(
+        tmp_path, monkeypatch, _b7_capture_client):
+    """#3561/#3359 emission-boundary acceptance: the REAL REST capture handler
+    emits a ``capture_graph_ops`` row through the REAL analytics writer, with a
+    NON-ZERO op count and a phase split that reconciles.
+
+    REDs on: dropping the ``@counts_capture_ops_async`` decorator, deleting the
+    emit at the end of ``_capture_session_impl``, or a guard that never fires —
+    each of which leaves the meter silently emitting nothing in production
+    (the exact loss this measurement exists to prevent)."""
+    resp = _b7_capture_client.post("/v1/sessions", json={
+        "conversation": _conv(), "harness": "pi",
+        "session_id": "sess-b7-graphops"})
+    assert resp.status_code == 200, resp.text
+
+    rows = [r for r in _b7_rows(tmp_path)
+            if r.get("event_name") == "capture_graph_ops"]
+    assert len(rows) == 1, rows
+    assert rows[0]["org_id"] == _B7_TEAM["org_id"]
+    props = rows[0]["properties"]
+    assert props["session_id"] == "sess-b7-graphops"
+    assert props["graph_ops_total"] > 0, "capture emitted no graph ops"
+    by_phase = props["graph_ops_by_phase"]
+    assert set(by_phase) == {"session_store", "extraction", "commit", "belief"}
+    assert by_phase["session_store"]["total"] > 0
+    # no op is double-counted across phases
+    assert sum(p["total"] for p in by_phase.values()) == props["graph_ops_total"]
