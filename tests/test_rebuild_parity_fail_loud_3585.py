@@ -584,3 +584,97 @@ class TestReReviewRoundTwo:
         assert r["entity_parity_ambiguous_count"] >= 1, r
         assert any(d["field"] == "presence" and d["label"] == "Object"
                    for d in r["divergent_entities"]), r["divergent_entities"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Re-review round 3 — the apply-based engines vs the DEFERRED types
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestReReviewRoundThree:
+    def test_a_journaled_supersede_is_replayable_by_every_engine(
+            self, env, tmp_path):
+        """P0. FAILS IF: a recognized type that `rebuild_all` folds in a
+        DEFERRED sweep is classified `unknown-event-type` by `apply()`, so
+        `rebuild(log)` raises and `recover_from_log` returns
+        `recovered: False` on a journal `rebuild_all` accepts — which would
+        make a LOST-DB RECOVERY impossible for any journal holding a supersede.
+        REACHABLE: two real Points plus a real `supersede_point`, i.e. the
+        ordinary journal every superseded fact produces (not a hand-written
+        line).
+
+        The apply engines are NOT asserted to reproduce the re-stamp: that
+        fold lives in `rebuild_all`'s deferred sweep only, and their skipping
+        it is the pre-existing, warned parity gap. What this pins is that an
+        ACCEPTED journal stays REPLAYABLE."""
+        sdk, events = env
+        p1 = sdk.create_point(content="old", kind="statement")["id"]
+        p2 = sdk.create_point(content="new", kind="statement")["id"]
+        sdk.supersede_point(p1, p2)
+        live = sorted(
+            (r[0], r[1]) for r in sdk._get_proj().g.query(
+                "MATCH (p:Point) RETURN p.id, p.status").result_set)
+        assert (p1, "superseded") in live, live
+        # rebuild_all folds the deferred re-stamp: parity with live.
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "ra"))
+        got = sorted(
+            (r[0], r[1]) for r in proj.g.query(
+                "MATCH (p:Point) RETURN p.id, p.status").result_set)
+        assert got == live, f"rebuild_all mangled a supersede: {got}"
+        proj.close()
+        # The apply-based engines accept the SAME journal (warn, never refuse).
+        for engine in ("rebuild", "recover_from_log"):
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
+            ids = {r[0] for r in proj.g.query(
+                "MATCH (p:Point) RETURN p.id").result_set}
+            assert {p1, p2} <= ids, f"{engine} refused a supersede journal: {ids}"
+            proj.close()
+
+    def test_an_invalidate_is_replayable_by_every_engine(self, env, tmp_path):
+        """P0 (the second deferred type). FAILS IF: `PointInvalidated` — the
+        other member of the deferred re-stamp family — is treated as unknown by
+        `apply()`, refusing a recovery.
+        REACHABLE: a real `invalidate_point` journal (the #2488 writer)."""
+        sdk, events = env
+        p1 = sdk.create_point(content="a", kind="statement")["id"]
+        p2 = sdk.create_point(content="b", kind="statement")["id"]
+        sdk.invalidate_point(p1, p2)
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "ra2"))
+        got = proj.g.query("MATCH (p:Point) RETURN p.id").result_set
+        assert {r[0] for r in got} == {p1, p2}, got
+        proj.close()
+        for engine in ("rebuild", "recover_from_log"):
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
+            ids = {r[0] for r in proj.g.query(
+                "MATCH (p:Point) RETURN p.id").result_set}
+            assert {p1, p2} <= ids, f"{engine} refused an invalidate journal: {ids}"
+            proj.close()
+
+    def test_a_nonpoint_state_op_miss_refuses_the_reference_fold(self, env):
+        """P1. FAILS IF: the reference fold drops an EntityMutated state op on
+        an Object/Subject/Document/Event that no creation made — the graph fold
+        records `state-op-miss` (refused), so an asymmetry would let
+        `check_consistency` pass on a journal `rebuild_all` refuses.
+        REACHABLE: a hand-written `op=restatus` for an id no creation made."""
+        sdk, events = env
+        _raw(events, type="EntityMutated", op="restatus", label="Object",
+             id="obj-never-registered", state={"status": "archived"},
+             event_id="e-r3-state")
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["ok"] is False, r["divergence"]
+        assert r["divergence"] == "non-folded", r["divergence"]
+        assert any("state-op-miss" in e for e in r["non_folded_events"]), \
+            r["non_folded_events"]
+
+    def test_a_belief_write_miss_refuses_the_reference_fold(self, env):
+        """P1. FAILS IF: the reference fold drops a ConfidenceChanged /
+        OperatorAnnotated write-back for a Point it does not hold — the graph
+        fold records `point-belief-miss` (refused).
+        REACHABLE: a belief write for an id no event created, carrying a prop
+        (the graph fold only refuses a write it would actually have made)."""
+        sdk, events = env
+        _raw(events, type="ConfidenceChanged", id="p-never-created",
+             confidence=0.9, event_id="e-r3-belief")
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["ok"] is False, r["divergence"]
+        assert any("point-belief-miss" in e
+                   for e in r["non_folded_events"]), r["non_folded_events"]

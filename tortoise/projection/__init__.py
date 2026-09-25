@@ -1919,6 +1919,14 @@ _NO_PROJECTION_FOLD = frozenset({
     "DedupeRejected",       # #784 content-dedup audit
 })
 
+# #3585: the point-lifecycle types `rebuild_all` folds only in its DEFERRED
+# sweep (order-sensitive re-stamp pass). `apply()` has no sweep, so it cannot
+# fold them; classifying them as unknown would refuse a lost-DB recovery.
+# See the `apply()` branch that consumes this set.
+_APPLY_DEFERRED_POINT_TYPES: frozenset[str] = frozenset({
+    "PointSuperseded", "PointInvalidated", "DirectEdgeRepoint",
+})
+
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
 # every recognized non-point record is a no-op there as well: the non-point
 # entities and the flat edge descriptor have no representation in that index.
@@ -2158,6 +2166,16 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         p = points.get(rid) if _writable_id(rid) else None
         if p:
             p.update(_annotator_dims(ev, aliases=True))
+        elif _writable_id(rid) and _annotator_dims(ev, aliases=True):
+            # #3585 re-review: the graph fold records `point-belief-miss` when
+            # the annotator write matches no Point — the reference fold must
+            # refuse it too, or `check_consistency` passes on a journal
+            # `rebuild_all` refuses.
+            record_non_folded(
+                SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
+                event_type="OperatorAnnotated", id=rid,
+                detail="in-memory fold: annotator write matched no Point",
+            )
     elif t == "PointRetracted":
         # #689: tombstone instead of hard delete — retracted content stays
         # recoverable via raw graph queries. Historical data loss prior to
@@ -2189,11 +2207,24 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if isinstance(rid, str) and _owns_point(ev.get("label")):
                 points.pop(rid, None)
         elif ev.get("op") in _ENTITY_MUTATION_STATE_OPS:
-            # Explicit no-op: this projection indexes POINTS only, so the five
-            # canonical labels these ops mutate are outside its model. Named
-            # here (not a silent fall-through) so the absence is a decision a
-            # reader can see, matching the graph fold's contract.
-            pass
+            # Explicit no-op for the non-Point labels: this projection indexes
+            # POINTS only, so the five canonical labels these ops mutate are
+            # outside its model. Named here (not a silent fall-through) so the
+            # absence is a decision a reader can see, matching the graph fold's
+            # contract. #3585 re-review: a state op whose target IS a Point this
+            # index does not hold is a fold-miss, and the graph fold refuses it
+            # (`state-op-miss`) — the reference fold must agree.
+            _srid = ev.get("id")
+            if (_owns_point(ev.get("label")) and _writable_id(_srid)
+                    and _srid not in points):
+                record_non_folded(
+                    SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
+                    event_type="EntityMutated",
+                    label=ev.get("label") if isinstance(ev.get("label"), str)
+                    else None,
+                    id=_srid, op=ev.get("op"),
+                    detail="in-memory fold: state op matched no Point",
+                )
         elif ev.get("op") in _ENTITY_MUTATION_PENDING_OPS:
             # #3585 (R8): the GRAPH fold records this as a non-folded event
             # (`SHAPE_UNIMPLEMENTED_OP`) and fails the run, so this reference
@@ -2255,6 +2286,15 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
                 if not _belief_bool_value_ok(value):
                     continue
                 p[key] = value
+        elif _writable_id(rid) and any(
+                k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS)):
+            # #3585 re-review: a belief write-back with no Point to write is a
+            # fold-miss the graph fold refuses (`point-belief-miss`).
+            record_non_folded(
+                SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
+                event_type="ConfidenceChanged", id=rid,
+                detail="in-memory fold: belief write matched no Point",
+            )
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,
@@ -3363,6 +3403,20 @@ class FalkorProjection(
             # for a type OUTSIDE this vocabulary — #3299 arose from exactly
             # that (an unknown mutation vanishing under wipe+replay).
             pass
+        elif t in _APPLY_DEFERRED_POINT_TYPES:
+            # #3585 re-review (P0): these ARE recognized and rebuilt — but only
+            # by `rebuild_all`'s DEFERRED pass, which this one-record apply
+            # engine has no equivalent of (the sweeps are order-sensitive and
+            # run after pass-1b). Recording them here would make `rebuild(log)`
+            # and `recover_from_log` REFUSE any journal holding a supersede or
+            # invalidate — i.e. a lost DB could no longer be recovered — so the
+            # engine's known parity gap stays a WARNING, as it was before #3585.
+            # It is NOT an unknown type: the vocabulary knows it (see
+            # `_NO_PROJECTION_FOLD`), and R8's fail-closed rule is for an event
+            # the fold cannot RESOLVE, not for a type this engine models later.
+            logger.warning(
+                "%r is folded by rebuild_all's deferred pass only — this "
+                "apply-based engine skipped it (rebuild-parity gap)", t)
         else:
             # P2-1 (#3299): a record type outside the recognized vocabulary
             # must not be dropped silently. A type that IS recognized but has

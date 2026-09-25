@@ -69,6 +69,7 @@ from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_POINT_INVALIDATED_MISS,
     SHAPE_POINT_RETRACTED_MISS,
     SHAPE_POINT_SUPERSEDED_MISS,
+    SHAPE_STATE_OP_MISS,
     collect_non_folded,
     record_non_folded,
     refused_events,
@@ -851,6 +852,9 @@ _ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
     "DocumentCreated": ("Document", "draft"),
     "EventRecorded": ("Event", None),
 }
+#: The non-Point labels the entity reference fold models.
+_ENTITY_CREATION_LABELS: frozenset[str] = frozenset(
+    label for label, _status in _ENTITY_CREATION.values())
 
 
 def _creation_entity_id(t: str, ev: dict) -> object:
@@ -928,13 +932,27 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             if isinstance(label, str) and op in _ENTITY_MUTATION_STATE_OPS:
                 rec = entities.get((label, eid))
                 state = ev.get("state")
-                if rec is not None and isinstance(state, dict):
-                    status = state.get("status")
-                    if isinstance(status, str) and status:
-                        rec["status"] = status
-                    newname = state.get("name")
-                    if isinstance(newname, str) and newname:
-                        rec["name"] = newname
+                if rec is None or not isinstance(state, dict):
+                    # #3585 re-review: the graph fold records `state-op-miss`
+                    # (refused) when a state op resolves to no entity or
+                    # carries no applied map, so the reference fold must agree.
+                    # Only the non-Point canonical labels are handled here —
+                    # `_apply_one` owns the Point/unknown-label case.
+                    if label in _ENTITY_CREATION_LABELS:
+                        record_non_folded(
+                            SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
+                            event_type="EntityMutated", label=label, id=eid,
+                            op=op, seq=seq,
+                            detail=("reference fold: state op matched no "
+                                    "entity"),
+                        )
+                    continue
+                status = state.get("status")
+                if isinstance(status, str) and status:
+                    rec["status"] = status
+                newname = state.get("name")
+                if isinstance(newname, str) and newname:
+                    rec["name"] = newname
         elif t == "ObjectSuperseded":
             oid, oname = ev.get("id"), ev.get("name")
             target = None
