@@ -1030,6 +1030,16 @@ class TestMitigates:
         assert rows, "mitigation artifact missing"
         assert rows[0][0] == 0.4
         assert rows[0][1] == "statement"
+        # #4937 INVARIANT GUARD (the regression pin for the refusal itself is
+        # tests/test_sdk.py::test_mitigates_is_not_an_operator_kind): the
+        # payload spelling MITIGATES never materializes a peer operator kind —
+        # it attaches to the IMPL bridge above (mitigated_by), it is NOT a
+        # generic operator of kind MITIGATES. Holds on main too, so it guards
+        # the invariant rather than the #4937 diff.
+        peer = g.query(
+            "MATCH (o:Point {is_operator:true}) WHERE o.op_type = 'MITIGATES' "
+            "RETURN count(o)").result_set
+        assert peer[0][0] == 0
 
     def test_mitigates_target_missing_operator_422(self, client):
         ops = [

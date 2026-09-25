@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.16"
+title: "Tortoise — Canonical Ontology v3.17"
 type: data
 domain: data
 status: live
@@ -11,7 +11,7 @@ aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.16
+# Tortoise — Canonical Ontology v3.17
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,37 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.17 (2026-09-24 — issue #4937, the F1 ruling recorded on #2552 — MITIGATES retires from the operator menu):**
+> - §2: the operator KINDS are `IMPL`/`NAND` (+ declared labels). `MITIGATES`
+>   leaves the generic operator menu: a **mitigation** is not a peer operator
+>   but a Point that attaches to the IMPL/NAND operator bridge it damps
+>   (`(op {is_operator:true})-[:mitigated_by]->(m)`, strength ∈ [0.10, 0.50],
+>   `w_eff = w × (1 − strength)`, §3.9). An operator kind cannot express that —
+>   it carries no strength and no bridge.
+> - Code alignment: `sdk.create_operator` refuses `op_type="MITIGATES"` with an
+>   explicit error naming `mitigate_operator` (the correct path), and the
+>   generic label menu is `IMPL`/`NAND` (+ pack-declared relations). The
+>   extractor/commit payload spelling `MITIGATES` (target + strength) is the
+>   WIRE name of a bridge-attack record and is routed to the mitigation path
+>   (`commit_ops.apply_payload_operators` → `mitigate_operator`), never to
+>   `create_operator`.
+> - Existing data: the retired entry was the built-in operator **label**
+>   exemption (`label not in ("IMPL", "NAND", "MITIGATES")`); the `op_type`
+>   allowlist already excluded `MITIGATES`, so `create_operator` with
+>   `op_type="MITIGATES"` never created a node. Point-in-time measurement
+>   (2026-09-24, the 9 reachable fleet FalkorDB stores / 5,131 graphs):
+>   `MATCH (o:Point {is_operator:true}) WHERE o.op_type='MITIGATES'` → **0
+>   hits** (the live mechanism is the `mitigated_by` edges the same sweep
+>   found). The label-exemption removal is **warning-only** (warn-not-block):
+>   an operator carrying `label='MITIGATES'` stays legal and readable, and the
+>   change only stops a NEW one from being silently exempted. So **no migration
+>   runs and no data is dropped** — the refusal is loud at the write boundary,
+>   and the legacy PAYLOAD spelling keeps working.
+> - **OVERRIDES:** the "be liberal in what you accept" default at the write
+>   boundary — a second spelling of mitigation would make "why is this weaker?"
+>   answerable two ways with the strength present in only one; the menu keeps a
+>   single spelling and the mitigation attaches to the bridge it damps.
 >
 > **Changelog v3.16 (2026-09-24 — issues #2726 + #2727, meeting source kinds +
 > object-kind alignment; original branch change dated 2026-09-09, renumbered from
@@ -351,7 +382,7 @@ Each layer answers a different question. All four are live mechanisms.
 | Layer | Question | Entity | How it works |
 |-------|----------|--------|--------------|
 | **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents**) | Nouns. Standing structural relations (ownedBy, memberOf, hasPart) via plain edges. |
-| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
+| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **`MITIGATES` is not an operator kind** (#4937): a mitigation is a Point attached to the operator bridge it damps (`(op {is_operator:true})-[:mitigated_by]->(m)`, §3.9) — it weakens a relationship's relevance, it is not a peer operator. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the reconstruction source for `Object.status` (§11), status is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved). |
 
@@ -361,8 +392,14 @@ Each layer answers a different question. All four are live mechanisms.
 > status is a fold cache over the events — never the truth itself) and their **confidence** (derived from the
 > attached Points). **Points** — the logic: statements (pointKind `statement` —
 > the only extraction point kind; hypothesis folded into confidence) connected
-> to the state they argue about (aboutObject); IMPL/NAND/MITIGATES among them
-> move the object's confidence. **Events** — what happened, for
+> to the state they argue about (aboutObject); the IMPL/NAND **operators**
+> among them move the object's confidence. A **mitigation** is NOT a third
+> operator kind (#4937, the F1 ruling on #2552): it is a Point that attaches
+> to the operator bridge it damps — `(op {is_operator:true})-[:mitigated_by]->
+> (m)` — weakening the relationship's relevance by
+> `w_eff = w × (1 − strength)` (§3.9). It is therefore not a peer in the
+> operator menu, and it contributes no confidence of its own. **Events** — what
+> happened, for
 > context: occurrences AND the **decision-as-event** (eventKind `decision`,
 > aboutObject → the object(s) it resolved). The graph says *"this state is
 > based on these reasons"* — never *"this decision was made because of these

@@ -199,6 +199,15 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     missing target. ``point_content_by_id(pid) -> str`` supplies the
     mitigation reason's content fallback when provided.
 
+    ⛔ #4937 (F1 ruling on #2552): a payload record with ``op_type ==
+    "MITIGATES"`` is a BRIDGE-ATTACK record, not a peer operator kind — the
+    ``target`` names the operator bridge it damps and ``strength`` keeps its
+    ``w_eff = w × (1 − strength)`` meaning. It is therefore routed ONLY to
+    ``mitigate_operator``; the first pass below skips it so it can never reach
+    ``create_operator``. The wire spelling stays ``MITIGATES`` inside the
+    ``operators`` array for backward compatibility with older clients and
+    extractors; the *semantics* are mitigation, never a second operator kind.
+
     ⛔ ID-SPACE PRECONDITION (#4716 P1): every ``src``/``dst`` and MITIGATES
     ``target.{src,dst}`` ref MUST be a GRAPH id by the time it reaches here. A
     caller holding a payload-id space MUST pass the refs through
