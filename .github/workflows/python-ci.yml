@@ -426,6 +426,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
+      - uses: actions/setup-node@v4
+        # #4620: the two installed-artifact checks in
+        # tests/test_pi_capture_hooks.py FAIL (rather than skip) when node is
+        # absent or below the default-on type-stripping floor (22.18), so this
+        # lane owns the toolchain they require instead of inheriting it from the
+        # runner image — same ruling as the embedder step below and the existing
+        # setup-node pin in ci.yml (whose comment records the two floors:
+        # `.ts` type stripping + syntax detection is DEFAULT-ON from 22.18, and
+        # this suite's `node --test` passes no `--experimental-strip-types` flag).
+        with:
+          node-version: '22'
       - name: Install package + test extras
         # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import

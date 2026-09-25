@@ -650,6 +650,18 @@ def cursor_home(home: Path) -> Path:
         hook_install.get_layout("cursor"), home)
 
 
+def pi_home(home: Path) -> Path:
+    """Resolve Pi's extension root: ``~/.pi/agent/extensions``.
+
+    Pi has NO ``HarnessLayout`` (its seam is not a scripted hook, so
+    ``hook_install.default_root`` cannot answer for it), so the directory lives
+    here beside ``PI_EXTENSION_NAME``. ``_install_pi`` writes the seam through
+    this helper and ``session_verify.resolve_install_root`` delegates to it, so
+    the Python install path and the verifier share one definition.
+    """
+    return Path(home) / ".pi" / "agent" / "extensions"
+
+
 def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
                          command: str, root: str | os.PathLike[str],
                          hooks_dir: str, flat: bool) -> dict:
@@ -970,7 +982,7 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
 
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
-    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir = pi_home(home)
     dst = ext_dir / PI_EXTENSION_NAME
     legacy = ext_dir / LEGACY_PI_DIRNAME
     legacy_disabled = ext_dir / PI_DISABLED_DIRNAME
@@ -1184,6 +1196,7 @@ __all__ = [
     "CURSOR_EVENT",
     "CURSOR_REGISTRATION_FILE",
     "CURSOR_SCRIPT_NAME",
+    "PI_EXTENSION_NAME",
     "InstallResult",
     "codex_home",
     "cursor_home",
@@ -1191,4 +1204,5 @@ __all__ = [
     "merge_capture_hooks",
     "merge_codex_capture_hooks",
     "merge_cursor_capture_hooks",
+    "pi_home",
 ]

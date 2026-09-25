@@ -255,9 +255,11 @@ def _require_node() -> None:
     """Fail — never skip — when node is absent.
 
     A skipped harness is a no-op gate: this file is wired into the ``onboarding``
-    CI surface, whose ``python-ci`` test leg provisions ``actions/checkout`` +
-    ``actions/setup-python`` and pins NO Node version — so the harness must not
-    depend on whatever the runner image happens to ship. Mirrors
+    CI surface, and the harness must not depend on whatever the runner image
+    happens to ship. The contract here is deliberately FAIL-ALWAYS (stricter than
+    the CI-only gate ``tests/test_pi_capture_hooks.py`` uses): it predates #4620
+    and is unchanged by it, even though that PR now provisions Node 22 in the
+    ``python-ci`` ``test`` job this file runs in. Mirrors
     tests/e2e/auth/bff_test_helpers.py::require_toolchain; set
     SESSION_BRIDGE_ALLOW_NO_TOOLCHAIN=1 only for a deliberate toolchain-free
     subset (an explicit skip, never a green no-op).
