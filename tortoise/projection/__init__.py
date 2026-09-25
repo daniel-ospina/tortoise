@@ -441,6 +441,18 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
     """
     global _config_classes_cache
     if _config_classes_cache is None:
+        # #5148 review — DO NOT guard these imports, and do NOT degrade to an
+        # empty tuple on failure. They reach `tortoise.embeddings` transitively
+        # (`pack_state` -> `sdk` -> `cross_lens`), and the failure propagating
+        # is LOAD-BEARING: `_capture_config_snapshot` calls this unconditionally
+        # and lets the exception reach `rebuild_all`'s `capture_failed` gate,
+        # which raises BEFORE the wipe (#2943). Returning `()` here would
+        # silence that gate, let the wipe proceed, and destroy every graph-only
+        # config node with no durable record — turning a safe refusal into
+        # silent data loss. The fail-soft discipline applied to the WRITE and
+        # REPLAY seams is CORRECT THERE and WRONG HERE: there the failure is
+        # advisory or a single write, here it is the only proof the wipe is
+        # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
         from tortoise.sdk import TortoiseSDK
@@ -2658,6 +2670,19 @@ class FalkorProjection(
         self._skip_guard = False
         self._is_embedded = (path is not None)
         self._path = path
+        # #5119: `_vector_index_api` MUST exist before the health check below.
+        # Recovery replays the journal through `apply()` -> `_upsert_point_props`,
+        # which reads `self.required_embedding_dim` to guard a journalled
+        # vector's WIDTH — and that property reads THIS attribute. Initialised
+        # only further down (after `_ensure_indexes`), it raised
+        # `AttributeError` on every replayed event, so `recover_from_log`
+        # counted zero applied events and refused with "replay produced an
+        # empty graph": a total graph loss became UNRECOVERABLE, and the only
+        # signal was a warning. `None` is the property's own documented answer
+        # while no index exists, and embedded (`redislite`) is brute-force by
+        # design, so hoisting the initialisation is behaviour-preserving for
+        # every path that reaches `_ensure_indexes`.
+        self._vector_index_api = None
         # Ops safety residual (#428): auto health check on open + transparent
         # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
         # event log when lost/corrupt; production (FLY_APP_NAME) and server
@@ -2688,7 +2713,10 @@ class FalkorProjection(
         # degradation_chain and cross-lens calls): 'cypher' engines skip the
         # failing signature-A attempt and query via signature B directly,
         # saving one failed round trip per query.
-        self._vector_index_api = None
+        #
+        # Its `None` default is set ABOVE, before the health check — the
+        # recovery replay reads it through `required_embedding_dim`, so it must
+        # exist first (#5119).
         self._ensure_indexes()
 
         # Lifecycle hardening (plan Task 4 + issue #1005):
@@ -6268,7 +6296,18 @@ class FalkorProjection(
         """
         if self._vector_index_api is None:
             return None  # no Point vector index → brute-force, any width
-        from ..embeddings import EMBEDDING_DIM
+        try:
+            from ..embeddings import EMBEDDING_DIM
+        except Exception:  # noqa: BLE001, RUF100
+            # #5148 review: this is read on the REPLAY path (`_upsert_point_props`,
+            # outside any `try`), so an unimportable seam here would abort every
+            # replayed event and re-enter the #5119 failure shape. The width is
+            # an ENFORCEMENT guard, not data: degrading to the property's
+            # documented "any width" answer restores the journalled vector and
+            # keeps the graph, which is strictly better than refusing to rebuild
+            # it. (An index that cannot be described is also not one this store
+            # can use to reject a vector usefully.)
+            return None
         return EMBEDDING_DIM
 
     def backfill_document_search_text(self) -> int:

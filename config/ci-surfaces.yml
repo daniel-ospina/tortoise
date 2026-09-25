@@ -1048,6 +1048,7 @@ surfaces:
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
+  - test_write_path_unreachable_seam_5148.py
   - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
@@ -1565,6 +1566,13 @@ carve_out:
 # collect it and SKIP every case via the marker hook, a permanently green and
 # permanently unexecuted gate on main (the #4047 shape).
 - test_vecf32_overwrite_seams_4524.py
+# #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`, so
+# without this registration every URI-set lane collects the file and SKIPS that
+# case via the marker hook — the SDK guard would be a permanently green and
+# permanently unexecuted gate (the same #4047/#4524 shape). The file's other
+# four cases need no DB, so they run here as well — a `carve_out` file is
+# excluded from EVERY docker leg, so this lane is the one that runs all five.
+- test_write_path_unreachable_seam_5148.py
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:

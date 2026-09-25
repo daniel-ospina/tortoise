@@ -110,20 +110,38 @@ class EventAPI:
         # live node and the journal agree by construction (one compute, not
         # two).
         if operator is None and isinstance(content, str) and content:
-            from .embeddings import encode_for_store, stamp_journal_embedding
             vec = None
             try:
-                vec = encode_for_store(
-                    content,
-                    getattr(self.projection, "required_embedding_dim", None))
+                from .embeddings import encode_for_store, stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100
-                vec = None
+                # #5148: the seam MODULE is unimportable AT THIS MOMENT. Note
+                # what this does NOT claim: `tortoise.embeddings` is imported
+                # transitively at package-import time (sdk -> cross_lens), and
+                # `numpy` is a core dependency, so a plain missing-dependency
+                # install never reaches here. What it covers is an import hook
+                # or an import environment that fails at the call site — and
+                # the principle that a WRITE must not depend on an import
+                # succeeding, which is the rule this block already follows for
+                # an unavailable EMBEDDER. PRESENCE IS OWNERSHIP holds
+                # regardless, and NOTHING is lost by skipping the stamp: with
+                # no vector, `stamp_journal_embedding` only re-sets `embedding`
+                # to the `None` written below, and its attestation block
+                # requires a vector to fire.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                try:
+                    vec = encode_for_store(
+                        content,
+                        getattr(self.projection, "required_embedding_dim", None))
+                except Exception:  # noqa: BLE001, RUF100
+                    vec = None
             # PRESENCE IS OWNERSHIP (#5004 round-3): the key is set EVEN when
             # the encode failed or the embedder is unavailable, so the replay
             # is told the journal owns this field for this id and must not
             # invent a vector the live node does not have.
             p["embedding"] = vec
-            stamp_journal_embedding(p, creating=True)
+            if stamp_journal_embedding is not None:
+                stamp_journal_embedding(p, creating=True)
         return p
 
     # -- ingest lifecycle / idempotency gate --------------------------------
@@ -180,12 +198,21 @@ class EventAPI:
         # `TortoiseSDK._sanitize_props` — so this path is reachable only from a
         # direct `EventAPI` caller, which never gets an MCP/SDK guarantee.)
         if "embedding" in fields:
-            from .embeddings import stamp_journal_embedding
             # The key stays PRESENT in both branches: an explicit None is the
             # journal saying "this id has no vector", which the replay must
-            # honour by leaving it unset rather than re-encoding.
+            # honour by leaving it unset rather than re-encoding. Set it FIRST,
+            # so presence holds even when the seam below is unreachable.
             p["embedding"] = fields["embedding"]
-            stamp_journal_embedding(p, creating=False)
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # #5148 review: the same import-at-the-call-site lane as
+                # `_point` — an unimportable seam must not fail a WRITE. Only
+                # the stamp's normalisation safety net is lost; the key is
+                # already present, so PRESENCE IS OWNERSHIP is intact.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                stamp_journal_embedding(p, creating=False)
         # #5004 round-7: the journal MARKERS are server-minted, and this is the
         # one producer that does not pass through `_sanitize_props` (an
         # internal ingest/mining/CLI seam). Allowing them through let a caller
