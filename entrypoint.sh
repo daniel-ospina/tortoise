@@ -76,6 +76,15 @@ _redact_uri() {
             if [ "$shaped" -eq 0 ]; then
                 if [ "$line" != "${line#*://}" ]; then
                     candidate="${line#*://}"
+                    # A single DB URI has one '://'. A SECOND '://' on a line
+                    # with no '@' cannot be predicated by this ^-anchored
+                    # helper without the embedded-URI handling the canonical
+                    # has, and a later `scheme://:pw` / `scheme://user:pw`
+                    # would otherwise ride through while the canonical masks it.
+                    # Fail closed rather than echo a later occurrence.
+                    if [ "$candidate" != "${candidate#*://}" ]; then
+                        shaped=1
+                    fi
                 else
                     # No scheme on this line. Only the empty-user tell is safe
                     # here: an arbitrary 'a:b' line is prose or a path, not a

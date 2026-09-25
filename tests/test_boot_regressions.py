@@ -268,6 +268,19 @@ def _redact(uri: str) -> str:
         # closed (the shell replaces it wholesale), so the canonical must not
         # keep the prefix.
         ("  rediss://:pw", "<uri-redacted-unrecognised-shape>"),
+        # A no-'@' credential behind a SECOND '://' on the no-'@' line: the
+        # ^-anchored shell predicated only the first occurrence and echoed the
+        # second. It now fails closed rather than echo it. (The canonical masks
+        # the second occurrence while preserving the first URI — a format
+        # asymmetry; neither leaks.)
+        (
+            "rediss://host:6379 rediss://:S3ntinel",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "rediss://host:6379 rediss://user:S3ntinel",
+            "<uri-redacted-unrecognised-shape>",
+        ),
     ],
 )
 def test_redactor_masks_userinfo_and_keeps_the_target(uri: str, expected: str):
@@ -606,6 +619,15 @@ def test_neither_masker_emits_a_no_at_credential():
         "://user:S3ntinel",
         "://:S3ntinel",
         "+://user:S3ntinel",
+        # A no-'@' credential behind a SECOND '://' on the line. The shell
+        # (^-anchored) predicated only the first occurrence and echoed the
+        # second; it now fails closed. The canonical masks the second while
+        # preserving the first URI, so the two differ in FORMAT here but neither
+        # leaks — hence these are in the leak-bar list, not the parity corpus.
+        "rediss://host:6379 rediss://:S3ntinel",
+        "rediss://host:6379 rediss://user:S3ntinel",
+        "rediss://host rediss://:S3ntinel",
+        "rediss://host:6379\trediss://:S3ntinel",
     ]
     # NOT asserted: a continuation line with a NON-empty user (`user:pw:6379`).
     # `_mask_uri_userinfo` cannot tell it from ordinary prose (`C:\foo`, an
