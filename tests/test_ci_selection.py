@@ -1898,6 +1898,148 @@ def test_track_b_docker_lane_sets_team_stray_opt_in():
         "test-track-b (dedicated docker lane) must set the team_* stray opt-in"
 
 
+_LEGACY_OPT_IN_VAR = "TORTOISE_TEST_SWEEP_LEGACY"
+_TEAM_OPT_IN_VAR = "TORTOISE_TEST_SWEEP_TEAM_STRAYS"
+
+
+def _env_map(container: object, where: str) -> dict:
+    """The ``env`` map of a workflow/job/step, or `{}` when absent.
+
+    A non-mapping container (a malformed workflow shape) is a hard error, not
+    a skip: this scanner backs a "the var is set by NO workflow" pin, so an
+    unreadable shape must fail closed with a clear message rather than crash
+    with an opaque `AttributeError` (or, worse, pass vacuously).
+    """
+    if not isinstance(container, dict):
+        raise AssertionError(
+            f"{where}: malformed workflow shape — expected a mapping, got "
+            f"{type(container).__name__}"
+        )
+    env = container.get("env")
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise AssertionError(f"{where}: `env` is not a mapping")
+    return env
+
+
+def _opt_in_sites(wf: dict, label: str, var: str) -> list[str]:
+    """Where ``wf`` sets env var ``var`` — structured, never a raw-text scan.
+
+    An ``env`` map key is a real setting at ANY of the three scopes GitHub
+    Actions inherits through — workflow-level, job-level, step-level (a
+    workflow-level token reaches every job and step, so scanning only the job
+    and step maps would leave the pin green while CI armed the opt-in); a
+    ``run`` script is inspected only after shell comments are stripped, so a
+    YAML or shell comment that merely NAMES the variable is not a hit. Returns
+    ``"<label>:<workflow>"`` / ``"<label>:<job>"`` / ``"<label>:<job> step N"``
+    labels for assertion messages.
+    """
+    sites: list[str] = []
+    if var in _env_map(wf, f"{label}:<workflow>"):
+        sites.append(f"{label}:<workflow>")
+    jobs = wf.get("jobs")
+    if jobs is None:
+        return sites
+    if not isinstance(jobs, dict):
+        raise AssertionError(f"{label}: `jobs` is not a mapping")
+    for job_name, job in jobs.items():
+        if var in _env_map(job, f"{label}:{job_name}"):
+            sites.append(f"{label}:{job_name}")
+        steps = job.get("steps")
+        if steps is None:
+            continue
+        if not isinstance(steps, list):
+            raise AssertionError(f"{label}:{job_name}: `steps` is not a list")
+        for i, step in enumerate(steps, start=1):
+            if var in _env_map(step, f"{label}:{job_name} step {i}"):
+                sites.append(f"{label}:{job_name} step {i}")
+            script = step.get("run")
+            if isinstance(script, str):
+                stripped = "\n".join(_strip_shell_comments(line)
+                                     for line in script.splitlines())
+                if var in stripped:
+                    sites.append(f"{label}:{job_name} step {i} (run)")
+    return sites
+
+
+def test_legacy_residue_opt_in_is_never_set_in_ci():
+    """#3634 Task 3: TORTOISE_TEST_SWEEP_LEGACY is a MANUAL operator opt-in and
+    is set by NO workflow — not just by the one python-ci.yml lane.
+
+    Contrast with the team-stray opt-in pinned just above: that pass is safe on
+    a dedicated, fresh-per-job container (nothing accumulates there without it),
+    so CI sets it inside the full==true docker gate. The legacy residue cohort
+    lives on a LONG-LIVED dev docker whose residue may include a live eval or
+    tenant name the next automated session does not own, so CI sets it on no
+    lane — a future edit that exports it (any workflow, any job, any gate) reds
+    by design.
+
+    SCOPE: EVERY file in `.github/workflows/` (`.yml` and `.yaml`, via
+    `_workflow_files`), parsed as YAML. The original python-ci.yml-only text pin
+    was too narrow: `post-merge-validation.yml` already sets the SIBLING
+    destructive opt-in (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`) and was unscanned, so
+    "nowhere in python-ci.yml" was not the claim the docstring made. Analysis is
+    structured, not raw text: the variable must not be a workflow/job/step
+    `env` key nor appear in a `run` script after comments are stripped, so a
+    comment that merely NAMES it does not red.
+    """
+    wf_dir = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    workflows = _workflow_files(wf_dir)
+    assert workflows, "no workflow files found — the scan would pass vacuously"
+    import yaml
+    parsed = [(p.name, yaml.safe_load(p.read_text()) or {}) for p in workflows]
+
+    # POSITIVE CONTROL — the same scanner must FIND the sibling destructive
+    # opt-in that CI deliberately sets; without it, a scanner (or a glob) that
+    # found nothing would satisfy this pin vacuously.
+    team_sites = [s for label, wf in parsed
+                  for s in _opt_in_sites(wf, label, _TEAM_OPT_IN_VAR)]
+    assert team_sites, (
+        "the scanner did not find TORTOISE_TEST_SWEEP_TEAM_STRAYS in any "
+        "workflow, though post-merge-validation.yml sets it — the scan is "
+        "vacuous, not clean"
+    )
+
+    offenders = [s for label, wf in parsed
+                 for s in _opt_in_sites(wf, label, _LEGACY_OPT_IN_VAR)]
+    assert not offenders, (
+        "the legacy residue opt-in is a manual operator action — never a CI "
+        "setting; found in " + ", ".join(offenders)
+    )
+
+
+def test_opt_in_scanner_reads_workflow_level_env():
+    """#3634 Task 3 (N1): `_opt_in_sites` must read the WORKFLOW-level `env:`
+    map, not only `jobs.<id>.env` / `jobs.<id>.steps[].env`.
+
+    GitHub Actions inherits a workflow-level `env` into every job and step, so
+    a top-level `TORTOISE_TEST_SWEEP_LEGACY: "1"` arms the destructive manual
+    opt-in on every lane while a jobs-only scan stays green — the exact bypass
+    the pin above exists to close. Synthetic, not the real files, so deleting
+    the workflow-level branch reds HERE directly.
+    """
+    wf = {"env": {_LEGACY_OPT_IN_VAR: "1"},
+          "jobs": {"test": {"steps": [{"run": "echo hi"}]}}}
+    assert _opt_in_sites(wf, "wf", _LEGACY_OPT_IN_VAR) == ["wf:<workflow>"], \
+        "the workflow-level `env` map is not scanned"
+    # Keyed, not prose: a sibling var is untouched, and a `run` comment that
+    # merely names the var is not a setting.
+    assert _opt_in_sites(wf, "wf", _TEAM_OPT_IN_VAR) == []
+    assert _opt_in_sites(
+        {"jobs": {"test": {"steps":
+                            [{"run": "true  # " + _LEGACY_OPT_IN_VAR}]}}},
+        "wf", _LEGACY_OPT_IN_VAR) == []
+    # A malformed shape fails closed and legibly — a clear AssertionError, not
+    # an AttributeError from `.get`/`.items` on a non-mapping.
+    import pytest as _pytest
+    for bad in ({"env": "x"}, {"jobs": []}, {"jobs": {"j": "x"}},
+                {"jobs": {"j": {"steps": "x"}}},
+                {"jobs": {"j": {"steps": ["x"]}}}):
+        with _pytest.raises(AssertionError):
+            _opt_in_sites(bad, "wf", _LEGACY_OPT_IN_VAR)
+
+
 def test_drift_gate_cannot_skip_the_test_matrix():
     """#2656: the manifest drift gate must never be a prerequisite of the test
     matrix.
