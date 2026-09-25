@@ -631,6 +631,33 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
     # #1642 FIX 4 review P2: keep the diagnostic signal real (was hardcoded
     # False after the pgrep-based foreign detection was removed).
     foreign = bool(foreign_matches)
+    # #1005 (epic #1647 E2E-7): close this process's OWN live embedded clients
+    # BEFORE the end-sweep probes the population. The sweep's `left` is a
+    # pgrep taken during fixture teardown; while the suite's own clients are
+    # still open, every server they hold reads as a live-client server and
+    # reap() declines it (embedded_reaper.py's 0-client gate) — so `left`
+    # measures the suite's own client count (147 in the post-#4927 CI
+    # sample) while the workflow's post-exit probe measures the residue (5).
+    # Comparing those two is not a same-seam comparison, so `COUNT <= left`
+    # is structurally incapable of failing on the leak it exists to catch.
+    # Closing through the SAME idempotent seams atexit uses
+    # (close_embedded_clients — the #1371 fast-close, the guarded `_t_close`,
+    # and the raw-client `_cleanup` fallback) disconnects the pools while the
+    # process is alive, so the sweep probe now measures the population the
+    # workflow probe will, and the bound becomes meaningful. This runs AFTER
+    # the other session finalizers: `_redislite_hygiene` tears down last
+    # (every fixture that depends on it, including `_server_graph_hygiene`,
+    # has already been finalized), so no finalizer is left holding a client
+    # it still needs. Best-effort: hygiene never fails the suite over this.
+    try:
+        from tortoise.embedded_lifecycle import close_embedded_clients
+        _pre_closed = close_embedded_clients()
+        if _pre_closed:
+            print(
+                "[redislite-hygiene] in-process close before end sweep: "
+                f"{_pre_closed} client(s)")
+    except Exception:
+        pass  # a failed close must not fail the suite (the sweep still runs)
     end_result = _sweep(only_safe=bool(others))
     print(f"[redislite-hygiene] end sweep (other-suites={len(others)}): "
           f"{end_result}")

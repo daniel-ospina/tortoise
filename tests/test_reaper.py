@@ -5399,3 +5399,147 @@ def test_conftest_sweep_returns_build_end_sweep_report():
         "a literal bypasses the builder and the gate would read it unpinned "
         f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
     )
+
+
+def test_conftest_closes_embedded_clients_before_the_end_sweep():
+    """#1005 (epic #1647 E2E-7): the end-sweep must probe a CLIENT-CLOSED seam.
+
+    The sweep's `left` is read during fixture teardown. While this process's
+    own embedded clients are still open, every server they hold reads as a
+    live-client server and `reap()` declines it — so `left` counted the
+    suite's own client population (147 in the post-#4927 CI sample) while the
+    workflow's post-exit probe measured the residue (5). `COUNT <= left` was
+    then structurally incapable of failing on the leak it exists to catch.
+
+    The fix is an ORDERING property of two statements in
+    `_redislite_hygiene`'s session-end teardown: `close_embedded_clients()`
+    (the existing idempotent seams atexit uses) must run BEFORE the
+    `end_result = _sweep(...)` assignment. Source order is execution order in
+    this straight-line teardown, so an index comparison over the fixture's own
+    top-level statements proves the property that a value-level AST pin
+    cannot: a `_sweep()` that runs first reads an inflated `left` no matter
+    what it returns.
+
+    The pin is scoped to the fixture's OWN body — a `close_embedded_clients()`
+    call nested in a helper def/lambda (e.g. `_atexit_cleanup`, which runs at
+    interpreter exit, long after the sweep) would satisfy a naive `ast.walk`
+    line comparison while not running before the sweep at all. Calls under a
+    statically-false guard are rejected too.
+
+    Reverting the conftest call (or re-ordering it after the sweep) fails
+    this test and the CI orphan gate silently loses its same-seam bound.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+
+    # Parent links so both the enclosing scope and the fixture's own
+    # top-level statement LIST are visible to the checks below.
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(fixture):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    nested_scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+    def nested_scope(node: ast.AST) -> ast.AST | None:
+        """The nearest helper scope between `node` and the fixture, if any."""
+        cur = parents.get(node)
+        while cur is not None and cur is not fixture:
+            if isinstance(cur, nested_scopes):
+                return cur
+            cur = parents.get(cur)
+        return None
+
+    def under_constant_false_guard(node: ast.AST) -> bool:
+        """True when `node` sits under a statically-false `if`."""
+        cur = parents.get(node)
+        while cur is not None and cur is not fixture:
+            if (
+                isinstance(cur, ast.If)
+                and isinstance(cur.test, ast.Constant)
+                and not cur.test.value
+            ):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    def top_level_statement(node: ast.AST) -> ast.stmt:
+        """The fixture's own top-level statement containing `node`."""
+        cur: ast.AST = node
+        while parents.get(cur) is not fixture:
+            cur = parents[cur]
+        assert isinstance(cur, ast.stmt)
+        return cur
+
+    def top_level_index(node: ast.AST) -> int:
+        # List.index uses identity under `==` for objects, but ast stmt
+        # equality is identity, so this is exact.
+        return fixture.body.index(top_level_statement(node))
+
+    close_calls = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "close_embedded_clients"
+    ]
+    assert len(close_calls) == 1, (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() exactly once (the session-end, "
+        "before-the-sweep close); found "
+        f"{len(close_calls)} call(s) — the end-sweep would otherwise probe a "
+        "population that still includes this process's own clients (#1005)"
+    )
+    close_call = close_calls[0]
+    assert nested_scope(close_call) is None, (
+        "close_embedded_clients() is called inside a nested function/lambda "
+        f"at line {nested_scope(close_call).lineno} — e.g. a helper that runs "
+        "at interpreter exit, AFTER the end-sweep. The session-end close must "
+        "be in _redislite_hygiene's own teardown body so it runs before the "
+        "sweep probes `left` (#1005)"
+    )
+    assert not under_constant_false_guard(close_call), (
+        "close_embedded_clients() sits under a statically-false `if` "
+        f"(line {close_call.lineno}) — the pin would read a dead call as the "
+        "live close (#1005)"
+    )
+
+    end_assigns = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "end_result"
+            for t in n.targets
+        )
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+        and n.value.func.id == "_sweep"
+    ]
+    assert len(end_assigns) == 1, (
+        "tests/conftest.py's _redislite_hygiene must run its session-end sweep "
+        f"as `end_result = _sweep(...)` exactly once; found {len(end_assigns)} "
+        "assignment(s) — the ordering pin needs the single session-end call "
+        "(#1005)"
+    )
+    end_assign = end_assigns[0]
+    assert nested_scope(end_assign) is None, (
+        "the session-end `end_result = _sweep(...)` sits inside a nested "
+        "scope; the pin must compare the fixture's own statements (#1005)"
+    )
+
+    assert top_level_index(close_call) < top_level_index(end_assign), (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() BEFORE `end_result = _sweep(...)`: the "
+        "end-sweep's `left` is read during fixture teardown, and while this "
+        "process's own clients are open every server they hold is declined by "
+        "reap()'s live-client gate — so `left` measures the suite's own "
+        "clients, not the residue, and the gate's `COUNT <= left` comparison "
+        "is not same-seam (#1005). Reorder the close before the sweep."
+    )
