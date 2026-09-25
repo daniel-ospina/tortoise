@@ -100,6 +100,35 @@ def _count_stub_nodes() -> int:
     return rows[0][0] if rows else 0
 
 
+def _about_object_targets(point_id: str) -> list:
+    """Every ``(p)-[:aboutObject]->(x)`` target of *point_id* as
+    ``[label, id]`` pairs — label-agnostic, so a wrong-label steal is visible."""
+    import tortoise.hosted_api as ha
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
+    proj = sdk._get_proj()
+    return proj.g.query(
+        "MATCH (p:Point {id:$pid})-[:aboutObject]->(x) "
+        "RETURN labels(x), x.id",
+        params={"pid": point_id},
+    ).result_set
+
+
+def _warm_data_graph():
+    """Open the org's data graph and return its SDK.
+
+    The #3834 transport wait bound (10s) measures the FIRST request that opens
+    the embedded graph; on a loaded box that open alone can exceed it, which
+    refuses an unrelated request with 504 (the #4098-class environment flake,
+    not a product failure). The regression test below calls the handler
+    coroutine directly instead of going through that middleware, and warms the
+    graph here so its assertion is about the edge, not about box load.
+    """
+    import tortoise.hosted_api as ha
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
+    sdk._get_proj().g.query("RETURN 1")
+    return sdk
+
+
 def _listed_key(client, kid, timeout: float = 3.0) -> dict:
     """Return the GET /v1/team/keys row for `kid`, tolerating the embedded
     lane's write-visibility lag (a just-minted node may not be visible on an
@@ -1535,6 +1564,43 @@ class TestTeamInfo:
         assert rows == 1, f"expected 1 aboutObject edge, got {rows}"
         # No stub Subject/operator nodes were minted.
         assert _count_stub_nodes() == 0, "stub nodes minted (#334 class)"
+
+    def test_point_about_object_rejects_wrong_label_target(self, client):
+        """#3586 review P2: ``about_object`` is an Object handle, so the edge
+        must never land on a non-Object node whose id happens to match.
+
+        The HTTP door forwards a CLIENT-SUPPLIED value straight to
+        ``create_about_edge``. Resolution there was label-agnostic (id OR
+        eventId across EVERY label), so passing a Subject id produced
+        ``(Point)-[:aboutObject]->(Subject)`` — a structurally invalid edge a
+        caller cannot tell from data, and the exact wrong-label steal the
+        ``target_label`` opt-in closes. The call site now scopes to Object.
+
+        The handler coroutine is invoked directly rather than over the ASGI
+        stack: the assertion is about the edge this call site wires, and the
+        shared transport middleware's 10s wait bound (#3834) measures a cold
+        embedded graph open — a box-load reading, not a product property.
+        """
+        import asyncio
+        from types import SimpleNamespace
+
+        import tortoise.hosted_api as ha
+
+        sdk = _warm_data_graph()
+        subj_id = sdk.create_subject("wrong-label-target",
+                                     subjectKind="company")["id"]
+        assert subj_id != "", "subject id must be minted"
+        body = ha.CreatePointRequest(
+            content="a point about_object-addressing a Subject id",
+            kind="statement", about_object=subj_id)
+        # A header-less request stand-in: `_async_audit` explicitly tolerates
+        # one (#2104) and nothing else in the handler reads the request.
+        request = SimpleNamespace(state=SimpleNamespace(), client=None)
+        out = asyncio.run(ha.create_point(body, request, org=dict(TEST_TEAM)))
+        # No aboutObject edge may exist at all: the value addresses a Subject,
+        # and no Object carries that id.
+        targets = _about_object_targets(out["id"])
+        assert targets == [], f"wrong-label steal: aboutObject -> {targets}"
 
 
     def test_team_info_fails_soft_when_graph_unavailable(self, client, monkeypatch):

@@ -6076,8 +6076,14 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
             if body.about_object:
                 # #1643: ID-based edge (never the name-resolution path, which
                 # mints Subject stubs on miss — #334 class).
+                # #3586: `about_object` is an Object handle, so scope the
+                # resolution to the Object label — the label-agnostic union
+                # (id OR eventId across EVERY label) let a client-supplied
+                # value that is a Subject/Event id silently produce
+                # ``(Point)-[:aboutObject]->(Subject)`` (a wrong-label steal).
                 sdk._get_proj().create_about_edge(
-                    out["id"], body.about_object, "aboutObject")
+                    out["id"], body.about_object, "aboutObject",
+                    target_label="Object")
             return out
 
         result = await asyncio.to_thread(_write_point)
