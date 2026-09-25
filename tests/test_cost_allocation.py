@@ -107,6 +107,24 @@ def test_malformed_env_override_fails_closed_instead_of_falling_back(monkeypatch
             f"detail must name the offending value, got {line.detail!r}")
 
 
+def test_line_total_cents_fails_closed_on_a_malformed_override(monkeypatch):
+    """The value-only accessor must not hand back the DECLARED DEFAULT for a
+    present-but-unusable override — that is exactly the silent fallback the
+    fail-closed rule forbids. It raises instead, so the contract of the accessor
+    matches the log line that claims the default is not used."""
+    fly = next(ln for ln in ca.declared_lines() if ln.name == "fly_base")
+    monkeypatch.setenv(fly.env_var, "oops")
+    with pytest.raises(ValueError, match=fly.env_var):
+        ca.line_total_cents(fly)
+
+
+def test_line_total_cents_still_returns_the_declared_default_when_unset():
+    """Unconfigured is not an error: an ABSENT variable yields the declared
+    default (only a PRESENT-but-unusable one fails closed)."""
+    fly = next(ln for ln in ca.declared_lines() if ln.name == "fly_base")
+    assert ca.line_total_cents(fly) == fly.total_cents
+
+
 def test_absent_override_uses_the_declared_default_without_an_error_state():
     """The fail-closed rule is about a PRESENT override; unset keeps the default
     and is not an error."""
@@ -329,7 +347,7 @@ def test_refresh_with_an_unreadable_basis_leaves_the_metric_untouched(monkeypatc
     monkeypatch.setenv(ph.env_var, "100")
     monkeypatch.setattr(
         ha, "_iter_registered_orgs",
-        lambda: [{"org_id": "org_a"}, {"org_id": "org_b"}])
+        lambda **_kw: [{"org_id": "org_a"}, {"org_id": "org_b"}])
 
     def _boom(_org_id):
         raise RuntimeError("window unreadable")
@@ -404,6 +422,49 @@ def test_nonzero_residual_is_published_and_sums_to_the_declared_total(monkeypatc
     assert sum(published.values()) == declared
 
 
+def test_a_successful_refresh_prunes_a_departed_org(monkeypatch):
+    """The pruner's removal branch must actually execute.
+
+    Every other publish test runs immediately after the ``_clean_metric``
+    autouse fixture cleared the family, so ``keep`` always equals the current
+    label set and ``prune_team_cost`` removes nothing. This test publishes a
+    GOOD snapshot over two orgs, then a second SUCCESSFUL snapshot over one, so
+    the child set legitimately SHRINKS. If the prune is replaced by a no-op,
+    ``org_b`` survives at its stale value and the published total no longer
+    equals the second snapshot's declared total.
+    """
+    fly = next(ln for ln in ca.declared_lines() if ln.name == "fly_base")
+    ph = next(ln for ln in ca.declared_lines() if ln.name == "posthog")
+    monkeypatch.setenv(fly.env_var, "300")
+    monkeypatch.setenv(ph.env_var, "100")
+
+    first = ca.evaluate_allocation(
+        ["org_a", "org_b"], weights_by_org={"org_a": 3, "org_b": 1})
+    assert first.state == ca.STATE_MEASURED
+    ca.publish(first)
+    assert ca.allocation_by_org().get("org_b", 0) > 0, (
+        "sanity: org_b must be published by the first snapshot")
+
+    # Second SUCCESSFUL snapshot: org_b is gone. org_a carries zero weight for
+    # the proportional line, so a non-zero residual bucket must survive.
+    second = ca.evaluate_allocation(["org_a"], weights_by_org={"org_a": 0})
+    assert second.state == ca.STATE_MEASURED
+    ca.publish(second)
+
+    published = ca.allocation_by_org()
+    # (a) the departed org is gone
+    assert "org_b" not in published, (
+        "a departed org must be PRUNED from the metric, not left stale")
+    # (b) the fixed residual child survives the prune (it is not an org)
+    assert published.get(ca.RESIDUAL_ORG, 0) > 0, (
+        "the residual bucket is a fixed child, not an org: it must survive")
+    # (c) the published set equals the SECOND snapshot's declared total
+    declared = sum(ln.total_cents for ln in second.lines
+                   if ln.state != ca.STATE_UNAVAILABLE)
+    assert sum(published.values()) == declared, (
+        "the published set must equal the SECOND snapshot's declared total")
+
+
 def test_reconcile_reads_the_published_metric_and_can_fire(caplog):
     """The reconciliation compares the PUBLISHED metric, not the snapshot's own
     shares (summing those made the mismatch branch unreachable — both sides came
@@ -424,6 +485,46 @@ def test_reconcile_is_silent_when_the_published_metric_matches(caplog):
         ca._reconcile_and_log(snap)
     assert not any("does NOT reconcile" in r.message for r in caplog.records), (
         caplog.text)
+
+
+def test_reconcile_log_names_the_window_the_published_values_belong_to(caplog):
+    """The INFO line must distinguish the ATTEMPTED window from the window the
+    values read back from the metric belong to. On a successful refresh the two
+    agree, so a reader can never attribute the published cents to the wrong
+    period."""
+    snap = ca.evaluate_allocation(
+        ["org_a"], now=datetime(2026, 9, 15, tzinfo=UTC),
+        weights_by_org={"org_a": 1})
+    ca.publish(snap)
+    with caplog.at_level("INFO", logger="tortoise.cost_allocation"):
+        ca._reconcile_and_log(snap)
+    msg = next(r.getMessage() for r in caplog.records
+               if "kind=allocation" in r.getMessage())
+    assert f"attempted_window={snap.window_start}..{snap.window_end}" in msg, msg
+    assert f"published_window={snap.window_start}..{snap.window_end}" in msg, msg
+
+
+def test_unavailable_warning_names_the_retained_window_not_the_attempted_one(caplog):
+    """Across a month rollover the metric still holds September's values while
+    the refresh attempts October. The warning must name SEPTEMBER — the window
+    the metric ACTUALLY carries — and must not imply October's numbers were
+    published."""
+    good = ca.evaluate_allocation(
+        ["org_a"], now=datetime(2026, 9, 15, tzinfo=UTC),
+        weights_by_org={"org_a": 1})
+    ca.publish(good)
+    assert good.window_start.startswith("2026-09")
+
+    unavailable = ca.evaluate_allocation([], now=datetime(2026, 10, 3, tzinfo=UTC))
+    assert unavailable.window_start.startswith("2026-10")
+    with caplog.at_level("WARNING", logger="tortoise.cost_allocation"):
+        ca.publish(unavailable)
+    msg = next(r.getMessage() for r in caplog.records
+               if "unavailable" in r.getMessage()
+               and "last-known-good" in r.getMessage())
+    assert good.window_start in msg and good.window_end in msg, msg
+    assert "PREVIOUS successful window" in msg, msg
+    assert "NOT published" in msg, msg
 
 
 def test_org_labels_are_bounded_with_a_fixed_overflow_child(monkeypatch):
@@ -465,7 +566,7 @@ def test_production_path_publishes_a_nonzero_value_for_a_real_org(monkeypatch):
     ('a test asserts the production call site, not just the counter object')."""
     monkeypatch.setattr(
         ha, "_iter_registered_orgs",
-        lambda: [{"org_id": "org_real_1"}, {"org_id": "org_real_2"}])
+        lambda **_kw: [{"org_id": "org_real_1"}, {"org_id": "org_real_2"}])
     monkeypatch.setattr(
         ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
 
@@ -515,54 +616,139 @@ def test_event_retention_loop_awaits_the_cost_refresh():
         "a DIRECT statement of the `while True:` body")
 
 
-def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch):
+def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch, caplog):
     def _boom(*_a, **_k):
         raise RuntimeError("allocator exploded")
 
     monkeypatch.setattr(ca, "refresh_and_publish", _boom)
-    monkeypatch.setattr(ha, "_iter_registered_orgs", lambda: [{"org_id": "o"}])
+    monkeypatch.setattr(
+        ha, "_iter_registered_orgs", lambda **_kw: [{"org_id": "o"}])
     # No real metering/DB round trip: this test verifies ONLY the swallow path.
     monkeypatch.setattr(
         ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
     # The retention loop has no per-iteration guard: this must NOT raise.
-    asyncio.run(ha._refresh_cost_allocation())
+    with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
+        asyncio.run(ha._refresh_cost_allocation())
+    # ... and the failure must have been OBSERVED and swallowed, not silently
+    # dropped: a bare no-op ``_refresh_cost_allocation`` used to pass this test.
+    assert any("cost allocation refresh failed" in r.getMessage()
+               and "allocator exploded" in r.getMessage()
+               for r in caplog.records), caplog.text
 
 
 def test_an_unconfirmed_empty_enumeration_fails_closed(monkeypatch):
     """``_iter_registered_orgs`` returns [] on ANY failure, so [] is 'unknown',
     not 'no orgs'. It must never be published as a fleet-wide zero."""
-    monkeypatch.setattr(ha, "_iter_registered_orgs", lambda: [])
+    monkeypatch.setattr(ha, "_iter_registered_orgs", lambda **_kw: [])
     asyncio.run(ha._refresh_cost_allocation())
     snap = ca.current_snapshot()
     assert snap is not None and snap.state == "unavailable"
     assert ca.allocation_by_org() == {}
 
 
-def test_truncated_supabase_org_enumeration_fails_closed(monkeypatch):
-    """#4493: ``query`` cannot distinguish a complete page from a truncated one,
-    so an enumeration that FILLS the explicit limit is INCOMPLETE and returns
-    [] (a partial fleet must never prune orgs from the published metric)."""
+class _FakeControlPlane:
+    """Supabase control-plane fake returning one fixed page for ``query``."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.limit_seen = None
+
+    def query(self, _table, **kw):
+        self.limit_seen = kw.get("limit")
+        return self._rows
+
+
+def _cap_rows():
+    return [{"id": f"org_{i}", "name": None}
+            for i in range(ha._ORG_ENUMERATION_MAX_ROWS)]
+
+
+class _FakeSweepSDK:
+    def _get_proj(self):
+        return object()
+
+
+def test_truncated_supabase_org_enumeration_fails_closed_for_the_cost_caller(monkeypatch):
+    """#4493/#5388: ``query`` cannot distinguish a complete page from a
+    truncated one, so a caller that needs the WHOLE fleet passes
+    ``require_complete=True`` and gets ``None`` when the page FILLS the limit
+    (a partial fleet must never prune orgs from the published metric)."""
     from tortoise import supabase_control as sc
 
-    class _FakeCP:
-        def __init__(self, rows):
-            self._rows = rows
-            self.limit_seen = None
-
-        def query(self, _table, **_kw):
-            self.limit_seen = _kw.get("limit")
-            return self._rows
-
-    rows = [{"id": f"org_{i}", "name": None}
-            for i in range(ha._ORG_ENUMERATION_MAX_ROWS)]
-    cp = _FakeCP(rows)
+    cp = _FakeControlPlane(_cap_rows())
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
 
-    assert ha._iter_registered_orgs() == []
+    assert ha._iter_registered_orgs(require_complete=True) is None
     assert cp.limit_seen == ha._ORG_ENUMERATION_MAX_ROWS, (
         "the enumeration must request an explicit limit — without one the "
         "server's db-max-rows truncation is invisible")
+
+
+def test_a_filled_page_is_still_returned_to_a_best_effort_caller(monkeypatch):
+    """The OTHER production caller — the fleet-wide event-retention sweep —
+    must process the page it received. Encoding "incomplete" as "[]" silently
+    turned retention into a no-op for the whole fleet at >=1000 orgs."""
+    from tortoise import supabase_control as sc
+
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(
+        sc, "get_control_plane", lambda: _FakeControlPlane(_cap_rows()))
+
+    rows = ha._iter_registered_orgs()
+    assert rows is not None, "a best-effort caller must still get its page"
+    assert len(rows) == ha._ORG_ENUMERATION_MAX_ROWS
+    assert rows[0] == {"org_id": "org_0", "name": None}
+
+
+def test_retention_sweep_processes_a_full_page_at_the_cap(monkeypatch):
+    """Behavioural pin for the sweep caller at the cap: it must actually sweep
+    the orgs in the page it received — the regression the shared helper's
+    ``[]``-on-truncation caused."""
+    from tortoise import event_store
+    from tortoise import supabase_control as sc
+
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(
+        sc, "get_control_plane", lambda: _FakeControlPlane(_cap_rows()))
+    monkeypatch.setattr(ha, "_make_sdk", lambda **_kw: _FakeSweepSDK())
+    swept: list[str] = []
+    monkeypatch.setattr(
+        event_store, "purge_expired",
+        lambda _proj, **_kw: swept.append("expired"))
+    monkeypatch.setattr(
+        event_store, "purge_overflow",
+        lambda _proj, **_kw: swept.append("overflow"))
+
+    ha._sweep_events()
+
+    assert swept.count("expired") == ha._ORG_ENUMERATION_MAX_ROWS, (
+        "the retention sweep must sweep the page it received, not nothing")
+    assert swept.count("overflow") == ha._ORG_ENUMERATION_MAX_ROWS
+
+
+def test_cost_refresh_at_the_enumeration_cap_keeps_last_known_good(monkeypatch):
+    """The cost caller at the cap: a possibly-truncated page is UNKNOWN, so the
+    refresh must leave the metric at last-known-good (never prune orgs beyond
+    the page)."""
+    from tortoise import supabase_control as sc
+
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(
+        sc, "get_control_plane", lambda: _FakeControlPlane(_cap_rows()))
+
+    good = ca.evaluate_allocation(["org_known"], weights_by_org={"org_known": 1})
+    ca.publish(good)
+    before = ca.allocation_by_org()
+    assert before, "sanity: last-known-good must be non-empty"
+
+    asyncio.run(ha._refresh_cost_allocation())
+
+    assert ca.allocation_by_org() == before, (
+        "an at-cap (possibly truncated) enumeration must leave the metric "
+        "untouched — never prune orgs beyond the page")
+    snap = ca.current_snapshot()
+    assert snap is not None and snap.state == ca.STATE_UNAVAILABLE
 
 
 def test_short_supabase_org_enumeration_is_returned(monkeypatch):
@@ -574,7 +760,9 @@ def test_short_supabase_org_enumeration_is_returned(monkeypatch):
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: _FakeCP())
-    assert ha._iter_registered_orgs() == [{"org_id": "org_a", "name": "A"}]
+    expected = [{"org_id": "org_a", "name": "A"}]
+    assert ha._iter_registered_orgs() == expected
+    assert ha._iter_registered_orgs(require_complete=True) == expected
 
 
 # ── Constraint (vii) + single writer · invariants that are ENFORCED ────────
@@ -622,9 +810,17 @@ def _metric_references(fn) -> set[str]:
 def test_publish_is_the_only_writer_of_the_team_cost_metric():
     """Assert on the METRIC, not a function name: a second caller of
     ``clear_team_cost``/``prune_team_cost`` — or a direct ``TEAM_COST`` write —
-    must be caught. Every reference to the family outside ``monitoring.py``
-    (its definitions) must sit inside ``publish`` (the one production writer),
-    with ``_reset_for_tests`` as the explicit test seam."""
+    must be caught.
+
+    SCOPE (exactly what this guard enforces, and no more): every reference to
+    the family INSIDE A FUNCTION BODY in ``tortoise/*.py`` outside
+    ``monitoring.py`` must sit inside ``publish`` (the one production writer)
+    or ``_reset_for_tests`` (the explicit test seam). References at MODULE
+    level, in a CLASS BODY, inside a ``lambda``, through an alias or through
+    ``getattr`` are NOT inspected, and ``monitoring.py`` is skipped wholesale
+    (it holds the definitions) — a NEW mutator defined there would not be
+    caught. The claim is stated at this strength, not a broader one, in
+    ``docs/ops/cost-allocation.md``."""
     offenders: dict[str, set[str]] = {}
     for path in (REPO / "tortoise").rglob("*.py"):
         if path.name == "monitoring.py":

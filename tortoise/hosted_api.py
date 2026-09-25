@@ -697,22 +697,29 @@ mcp_http_app = create_http_app(
 #: max_rows = 1000``). ``SupabaseControlPlane.query`` neither paginates nor
 #: reads ``Content-Range``, and PostgREST silently caps a row LIST at
 #: ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list with
-#: no error. For the cost-allocation caller that is dangerous: a partial list
-#: is read as the whole fleet and the orgs beyond the page would be PRUNED from
-#: the published metric. Requesting ``limit`` equal to the cap and treating "the
-#: result filled it" as INCOMPLETE → ``[]`` is the smallest safe containment.
-#: Fail closed (publishing nothing) rather than prune real orgs.
+#: no error. Requesting ``limit`` equal to the cap is the smallest containment:
+#: a result that FILLS it is treated as possibly-truncated.
 #:
-#: TODO(#5381-adjacent): this detects truncation only because the requested
-#: bound equals the configured cap. A server whose ``max_rows`` is LOWER than
-#: this constant would return a short page with no signal — the general fix
-#: reads ``Content-Range`` or paginates in ``supabase_control`` (or uses an
-#: ``array_agg`` RPC, the #3665 pattern), which is out of this PR's scope and
-#: must not be done by rewiring the shared helper here.
+#: The two callers need opposite things from that signal, so completeness is
+#: EXPLICIT via ``require_complete`` rather than encoded as an empty list
+#: (#5388):
+#:   * ``_refresh_cost_allocation`` passes ``require_complete=True`` — a partial
+#:     fleet must never PRUNE orgs from the published metric, so a filled page
+#:     returns ``None`` and the refresh keeps last-known-good.
+#:   * ``_sweep_events`` uses the default — a partial page is still worth
+#:     sweeping, so it processes the rows it received. Returning ``[]`` here
+#:     (the previous shape) silently skipped fleet-wide event retention at
+#:     >=1000 orgs.
+#:
+#: RESIDUAL LIMITATION (#5388): a genuinely COMPLETE 1000-org fleet is
+#: indistinguishable from a truncated page, so the cost refresh treats it as
+#: unavailable (fail closed — freezing the metric is safer than pruning). The
+#: general fix reads ``Content-Range`` or paginates in ``supabase_control`` (or
+#: uses an ``array_agg`` RPC, the #3665 pattern).
 _ORG_ENUMERATION_MAX_ROWS = 1000
 
 
-def _iter_registered_orgs() -> list[dict]:
+def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | None:
     """List registered orgs from the control plane (best-effort).
 
     Used by the event-retention sweep (#432 Task 7) — the boot pass and the
@@ -730,11 +737,17 @@ def _iter_registered_orgs() -> list[dict]:
     registry_control_plane graph via _make_sdk(namespace="registry").
     Returns [] on any failure — the sweep is best-effort.
 
-    #4493: the Supabase branch requests an explicit ``limit`` and returns ``[]``
-    when the result FILLS it, because ``query`` cannot distinguish a complete
-    page from a server-truncated one (no ``Content-Range`` read, no
-    pagination). A partial list must never be mistaken for the fleet — the
-    allocation path would prune every org beyond the page.
+    #4493/#5388: the Supabase branch requests an explicit ``limit`` and cannot
+    distinguish a complete page from a server-truncated one (no
+    ``Content-Range`` read, no pagination). Completeness is therefore an
+    EXPLICIT contract, not encoded as emptiness:
+
+    * ``require_complete=True`` (the cost-allocation caller) returns ``None``
+      when the page FILLS the limit — "the fleet could not be confirmed",
+      which the caller maps to its unavailable/last-known-good path.
+    * the default returns the rows received even when the page filled — the
+      best-effort retention sweep must process a partial page rather than
+      purge nothing for the whole fleet.
     """
     try:
         from tortoise.supabase_control import (
@@ -747,14 +760,20 @@ def _iter_registered_orgs() -> list[dict]:
                 filters=[("deleted_at", "is", None)],
                 limit=_ORG_ENUMERATION_MAX_ROWS,
             )
+            parsed = [{"org_id": r["id"], "name": r.get("name")} for r in rows]
             if len(rows) >= _ORG_ENUMERATION_MAX_ROWS:
+                # A filled page may be truncated (#5388): PostgREST caps a row
+                # list silently. Fail CLOSED for a caller that needs the whole
+                # fleet; let a best-effort caller process what it got.
                 _logger.warning(
-                    "org enumeration filled its explicit limit (%d rows) — "
-                    "treating it as INCOMPLETE and returning [] (fail-closed: a "
-                    "truncated page must never prune orgs from the cost metric)",
-                    _ORG_ENUMERATION_MAX_ROWS)
-                return []
-            return [{"org_id": r["id"], "name": r.get("name")} for r in rows]
+                    "org enumeration filled its explicit limit (%d rows) — a "
+                    "possibly-truncated page; require_complete=%s (fail-closed "
+                    "for the cost metric: a truncated page must never prune "
+                    "orgs)",
+                    _ORG_ENUMERATION_MAX_ROWS, require_complete)
+                if require_complete:
+                    return None
+            return parsed
 
         # #2251 (was #2179 follow-up): the old bare TortoiseSDK() read the
         # ns-less control_plane graph on resolve_db_path()'s ~/.tortoise DB
@@ -1069,7 +1088,15 @@ async def _refresh_cost_allocation() -> None:
     from tortoise.cost_allocation import refresh_and_publish
 
     def _run() -> None:
-        orgs = [o["org_id"] for o in _iter_registered_orgs() if o.get("org_id")]
+        rows = _iter_registered_orgs(require_complete=True)
+        if rows is None:
+            # The page filled its bound and ``query`` cannot tell a complete
+            # 1000-org fleet from a truncated one (#5388): the fleet is
+            # UNKNOWN, so publish an unavailable snapshot and leave the metric
+            # at last-known-good rather than pruning orgs beyond the page.
+            refresh_and_publish([])
+            return
+        orgs = [o["org_id"] for o in rows if o.get("org_id")]
         refresh_and_publish(orgs, weights_by_org=_measured_write_ops_basis(orgs))
 
     try:
