@@ -200,9 +200,23 @@ def _redact(uri: str) -> str:
         ),
         # An '@' BEFORE the scheme is not reached by the last-'@'-after-the-
         # scheme rule, so the canonical used to echo it. entrypoint.sh fails
-        # closed on any unmasked line carrying an '@'.
+        # closed on any unmasked line carrying an '@'. The pre-scheme '@' must
+        # fail closed even when the tail IS masked (or fail-closed), not only
+        # when the whole line is unchanged.
         (
             "user:S3npw@rediss://host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "user:S3npw@rediss://:S3ntinel",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "user:S3npw@rediss://user2:S3ntinel@host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "user:S3npw@1://host:6379",
             "<uri-redacted-unrecognised-shape>",
         ),
         # A scheme containing a non-ASCII letter is not a scheme
@@ -284,8 +298,13 @@ _BARE_URI_CORPUS = [
     "redis://:pw@db.example.com:6379/0?ssl=true",
     "docker://user:p@ss@host:7687/g#frag",
     "rediss://r-example.host.cloud:50317",
-    # the '@'-before-scheme shape (the canonical used to echo it verbatim)
+    # the '@'-before-scheme shape (the canonical used to echo it verbatim),
+    # including a tail that IS masked / fail-closed — the pre-scheme credential
+    # was re-emitted as a "prose prefix" in those cases.
     "user:S3npw@rediss://host:6379",
+    "user:S3npw@rediss://:S3ntinel",
+    "user:S3npw@rediss://user2:S3ntinel@host:6379",
+    "user:S3npw@1://host:6379",
     # non-ASCII scheme letter / non-ASCII bracketed port
     "r\u00e9diss://user:S3ntinel",
     "rediss://[::1]:\u0660",
@@ -491,8 +510,12 @@ _MALFORMED_VALUE_CORPUS = [
     "rediss://u:pw@h:1\nuser:S3ntinel@host",
     # leading whitespace before a no-'@' credential
     "  rediss://:S3ntinel",
-    # an '@' BEFORE the scheme (the last-'@'-after-the-scheme rule misses it)
+    # an '@' BEFORE the scheme (the last-'@'-after-the-scheme rule misses it),
+    # including tails that are masked / fail-closed
     "user:S3ntinel@rediss://host:6379",
+    "user:S3ntinel@rediss://:S3ntinel",
+    "user:S3ntinel@rediss://user2:S3ntinel@host:6379",
+    "user:S3ntinel@1://host:6379",
     # a scheme with a non-ASCII letter / a non-ASCII bracketed port
     "r\u00e9diss://user:S3ntinel",
     "r\u00e9diss://user:S3ntinel@host:6379",

@@ -4850,6 +4850,14 @@ def _mask_uri_userinfo(target: str) -> str:
             k = j
             while k > i and (line[k - 1].isalnum() or line[k - 1] in "+-."):
                 k -= 1
+            # entrypoint.sh masks only a line whose scheme is at the start
+            # (after optional whitespace); any OTHER line carrying an '@' fails
+            # closed. A pre-scheme '@' is therefore never part of a userinfo, so
+            # it must not ride through as a "prose prefix" while the tail is
+            # masked — `user:SECRETPW@rediss://user2:pw2@host` re-emitted
+            # `user:SECRETPW@` exactly that way.
+            if "@" in line[i:k]:
+                return "<uri-redacted-unrecognised-shape>"
             scheme = line[k:j]
             # "Bare" = nothing but whitespace precedes the scheme.
             # entrypoint.sh replaces such a line WHOLESALE with the sentinel,
@@ -4929,10 +4937,9 @@ def _mask_uri_userinfo(target: str) -> str:
             i = len(line)
         result = "".join(out)
         # Mirror entrypoint.sh's unconditional guard: a line the mask did not
-        # change that carries an '@' fails closed. The no-'://' branch above
-        # covers scheme-less lines; this covers an '@' BEFORE the scheme
-        # (`user:SECRETPW@rediss://host:6379`), which the last-'@'-after-the-
-        # scheme rule never reaches and used to echo verbatim.
+        # change that carries an '@' fails closed. The pre-scheme guard above
+        # catches an '@' before the scheme; this is the final catch-all for any
+        # other unmasked '@'.
         if result == line and "@" in line:
             return "<uri-redacted-unrecognised-shape>"
         return result

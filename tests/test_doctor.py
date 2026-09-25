@@ -402,6 +402,9 @@ class TestDoctorPath:
             "rediss://[::1]:6abc",
             # an '@' BEFORE the scheme / a non-ASCII scheme or port
             "T4ilPw@rediss://host:6379",
+            "user:T4ilPw@rediss://:S3ntinel",
+            "user:T4ilPw@rediss://user2:T4ilPw@host:6379",
+            "user:T4ilPw@1://host:6379",
             "r\u00e9diss://user:T4ilPw",
             "rediss://[::1]:\u0660",
         ):
