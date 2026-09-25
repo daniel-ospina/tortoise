@@ -1198,6 +1198,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
+from tortoise.fork_slot import is_fork_refusal  # noqa: E402
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
@@ -1215,19 +1216,23 @@ _WRITE_REFUSAL_MARKERS = (
 # #3634 — a probe can fail for reasons that are neither corruption nor a
 # maxmemory refusal, and each has its OWN remedy. Collapsing them (or letting
 # them fall through to the rebuild advice) misattributes the failure: a
-# still-hydrating server or a fork-starved container is NOT a broken graph.
+# still-hydrating server or a fork-refusing one is NOT a broken graph.
 #
-# The markers are deliberately long phrases, NOT bare cause words: a bare
-# ``"loading"`` or ``"fork"`` would swallow unrelated text (a path, a
-# docstring, a query mentioning a fork) and route it to the wrong remedy.
-# Ordered: first match wins.
+# The FORK family has exactly ONE classifier — ``fork_slot.is_fork_refusal``,
+# which owns the marker vocabulary (its single home) and walks the
+# ``__cause__``/``__context__`` chain — so this table carries only the LOADING
+# cause and ``_backend_failure_message`` delegates fork detection. Do NOT
+# restate fork markers here: a second, parallel list is how ``could not fork``
+# (FalkorDB's own reply, ``cmd_copy.c``) went unrecognised while the table
+# matched only the invented ``fork failed`` stem.
+#
+# The one marker is a deliberately long phrase, NOT a bare cause word: a bare
+# ``"loading"`` would swallow unrelated text (a path, a docstring) and route
+# it to the wrong remedy.
 #
 # (marker, cause_key)
 _BACKEND_FAILURE_MARKERS: tuple[tuple[str, str], ...] = (
     ("redis is loading the dataset", "loading"),  # LOADING reply — RDB/AOF hydrating
-    ("fork failed", "fork"),                      # BGSAVE/AOF-rewrite child refused
-    ("can't fork", "fork"),
-    ("cannot fork", "fork"),
 )
 
 # The per-cause body. Each NAMES its own cause and states what the cause
@@ -1238,18 +1243,26 @@ _BACKEND_FAILURE_REMEDIES: dict[str, str] = {
         "dataset (the Redis/FalkorDB reply is `LOADING Redis is loading "
         "the dataset in memory`). The graph is neither corrupt nor full — "
         "the server has not finished reading its snapshot. Wait for the "
-        "load to finish and retry; if it never completes, the dataset is "
-        "larger than the container's memory, so raise --maxmemory or "
-        "restore a smaller snapshot. Do NOT treat this as corruption. "
-        "See #3634."
+        "load to finish and retry. (Secondary note: a load that never "
+        "completes can mean the dataset exceeds the container's memory, "
+        "for which a smaller snapshot is the durable fix — but the remedy "
+        "for THIS failure is simply to wait.) Do NOT treat this as "
+        "corruption. See #3634."
     ),
     "fork": (
-        "DB health check failed on open: the server could not fork a "
-        "background child (the reply is `fork failed - got errno 17`). "
-        "The container has hit its process/address-space limit, so "
-        "snapshotting (BGSAVE) and append-only rewrites fail. The graph "
-        "is not corrupt — relieve the memory/process limit and retry. "
-        "See #3634."
+        "DB health check failed on open: the server refused a module fork "
+        "(FalkorDB replies `GRAPH.COPY failed, could not fork`). Redis "
+        "allows ONE module-fork child at a time, and a hung, un-reaped "
+        "`redis-module-fork` child still holds that slot — errno 17 is "
+        "EEXIST (the slot is occupied), NOT memory or process pressure. "
+        "This is a FalkorDB / macOS-libsystem defect, not ours, and the "
+        "graph is not corrupt. Free the slot with "
+        "`fork_slot.recover_fork_slot(db)` (it kills this daemon's own "
+        "hung child) or kill the lingering `redis-module-fork` child "
+        "directly; the refusal clears as soon as Redis reaps it. A refusal "
+        "carrying EAGAIN (`Resource temporarily unavailable`) is a "
+        "DIFFERENT mechanism — a real resource limit — and is not cleared "
+        "by reaping a child. Do NOT rebuild. See #3845 and #3634."
     ),
 }
 
@@ -2866,11 +2879,16 @@ class FalkorProjection(
         The maxmemory refusal has its own classifier (``_write_refusal_message``)
         and keeps its message verbatim; this covers the other causes that are
         still NOT corruption — a server that has not finished LOADING and a
-        container that cannot fork. Returns ``None`` when no cause matches, so
-        a genuine corruption failure still reaches the rebuild advice.
+        server refusing a module fork. Returns ``None`` when no cause matches,
+        so a genuine corruption failure still reaches the rebuild advice.
         """
         if exc is None:
             return None
+        # The fork family is classified by fork_slot's canonical predicate
+        # (P2-1): it walks the __cause__/__context__ chain and owns the marker
+        # vocabulary, so this call site and hosted_backup's can never drift.
+        if is_fork_refusal(exc):
+            return _BACKEND_FAILURE_REMEDIES["fork"]
         text = str(exc).lower()
         for marker, cause in _BACKEND_FAILURE_MARKERS:
             if marker in text:

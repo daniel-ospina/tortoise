@@ -127,23 +127,81 @@ def test_corruption_in_server_mode_still_advises_rebuild(monkeypatch):
 @pytest.mark.parametrize("cause,needle", [
     (_MAXMEMORY_ERROR, "maxmemory"),
     ("LOADING Redis is loading the dataset in memory", "loading"),
-    ("<module> fork failed - got errno 17", "fork"),
+    ("GRAPH.COPY failed, could not fork", "fork"),
 ])
-def test_each_backend_cause_names_itself(monkeypatch, cause, needle):
+def test_each_backend_cause_names_itself(cause, needle):
     """#3634 — each backend cause reports ITS OWN reason, not a neighbour's.
 
-    A maxmemory refusal, a still-hydrating `LOADING` reply and a fork/errno-17
-    failure are three different problems with three different remedies.
+    A maxmemory refusal, a still-hydrating `LOADING` reply and a module-fork
+    refusal are three different problems with three different remedies.
     Falling through to the rebuild advice (or borrowing the maxmemory
     message) would send an operator to destroy healthy data for a transient
     cause.
+
+    No `FLY_APP_NAME` dance: all three branches execute before the
+    `is_prod or not self._is_embedded` gate, so the env var cannot change the
+    outcome (P2-4).
     """
-    monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(cause))
     with pytest.raises(RuntimeError) as err:
         proj._auto_health_recover()
     assert needle in str(err.value).lower()
     assert "python -m tortoise rebuild" not in str(err.value)
+
+
+@pytest.mark.parametrize("cause", [
+    "GRAPH.COPY failed, could not fork",   # FalkorDB's reply (cmd_copy.c)
+    "Can't fork for module: File exists",  # redis module.c, errno 17 (EEXIST)
+])
+def test_documented_fork_wordings_route_to_the_fork_remedy(cause):
+    """P2-1 — the canonical classifier recognises the engine's REAL wordings.
+
+    The parallel table shipped in 0b9b78eb8 matched `fork failed`/`can't fork`
+    but MISSED `could not fork` — FalkorDB's own reply, and the exact string in
+    `tests/test_fork_slot_wedge_3845.py` — so a real fork refusal fell through
+    to the rebuild advice. Routing through `fork_slot.is_fork_refusal` closes
+    that gap; this test fails if that routing is removed.
+    """
+    proj = _projection(probe_error=RuntimeError(cause))
+    msg = proj._backend_failure_message(RuntimeError(cause))
+    assert msg is not None, cause
+    assert "recover_fork_slot" in msg, msg
+
+
+def test_fork_remedy_names_the_slot_cure_and_not_memory():
+    """P2-4 — the fork remedy must not repeat the misattribution it fixes.
+
+    errno 17 is EEXIST: a hung `redis-module-fork` child holds Redis's single
+    module-fork slot (fork_slot.py:23-30) — NOT memory/process pressure. The
+    remedy shipped in 0b9b78eb8 told the operator to relieve a memory limit,
+    which cannot clear a slot held by a hung child, and omitted the documented
+    cure. Pin both halves: the cure is named, the memory misattribution is not.
+    """
+    proj = _projection(probe_error=RuntimeError("GRAPH.COPY failed, could not fork"))
+    with pytest.raises(RuntimeError) as err:
+        proj._auto_health_recover()
+    msg = str(err.value)
+    assert "EEXIST" in msg, msg
+    assert "recover_fork_slot" in msg, msg
+    assert "redis-module-fork" in msg, msg
+    assert "not corrupt" in msg, msg
+    # The forbidden misattribution: no memory/process remedy may be prescribed.
+    assert "raise --maxmemory" not in msg, msg
+    assert "memory/process limit" not in msg, msg
+    assert "add memory" not in msg.lower(), msg
+
+
+def test_bare_fork_stem_is_not_a_refusal():
+    """P2-2 — a bare `fork` stem is not evidence of a module-fork refusal.
+
+    The removed parallel table matched `fork failed`/`can't fork`/`cannot
+    fork`; the canonical classifier requires one of the engine's actual
+    module-fork wordings. Unrelated text mentioning a fork can no longer be
+    routed to the fork remedy.
+    """
+    proj = _projection(probe_error=None)
+    assert proj._backend_failure_message(
+        RuntimeError("disk fork failed during compaction")) is None
 
 
 def test_write_refusal_only_matches_the_server_wording():
