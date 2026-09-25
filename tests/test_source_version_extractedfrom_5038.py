@@ -392,6 +392,27 @@ def test_journal_payload_omits_the_key_when_there_is_no_anchor(prov):
     assert "sourceVersionTransit" not in _journal_point(log, p["id"])
 
 
+def test_non_string_content_hash_is_honest_absent_not_a_crash(prov):
+    """Input: a ``:Source`` whose ``contentHash`` is NOT a string.
+
+    ``create_source`` does not type-validate ``contentHash``, so a non-string is
+    stored as-is; the anchor path must then be HONEST-ABSENT (no property, no
+    crash) rather than raise out of ``create_point``.
+
+    FAILS IF ``resolve_source_versions`` tests the hash without its
+    ``isinstance(h, str)`` guard: ``5.strip()`` raises ``AttributeError`` from a
+    plain SDK call, brought down by a value the SDK itself accepted.
+    """
+    sdk, _events, _log = prov
+    sdk.create_source(DOC, "document", contentHash=5)
+    p = sdk.create_point("statement", "claim", extractedFrom=DOC)
+
+    proj = _proj(sdk)
+    assert _has_edge(proj, p["id"], DOC), "guard: the edge itself must exist"
+    assert _edge_version(proj, p["id"], DOC) is None
+    assert _node_transit(proj, p["id"]) == "ABSENT"
+
+
 def test_transit_is_a_pair_list_for_a_hash_bearing_source(prov):
     """Scoped transit⇔edge invariant: for a Point created through
     ``create_point`` against a hash-bearing Source, the transit exists and is a
@@ -582,6 +603,26 @@ def test_eventapi_add_point_anchors_the_version(prov):
     assert _node_transit(proj, pid) == [[DOC, "h1"]]
 
 
+def test_eventapi_payload_omits_the_key_when_there_is_no_anchor(prov):
+    """``EventAPI`` sibling of
+    ``test_journal_payload_omits_the_key_when_there_is_no_anchor``.
+
+    The extractor lane's producer sets ``sourceVersionTransit`` only when it has
+    a non-None value, so a graph-attached ``add_point`` whose ref carries no hash
+    must journal NO key at all — never an explicit ``null``.
+
+    FAILS IF that ``is not None`` conditional is dropped: presence is ownership in
+    this journal, and ``sourceVersionTransit: null`` makes the replay treat a
+    field the writer never recorded as journal-owned.
+    """
+    sdk, _events, log_path = prov
+    api = EventAPI(EventLog(log_path), initiated_by="extractor",
+                   projection=_proj(sdk))
+    pid = api.add_point("claim with no hash", {"source_id": DOC},
+                        extractedFrom=DOC)
+    assert "sourceVersionTransit" not in _journal_point(log_path, pid)
+
+
 def test_eventapi_add_point_rejects_a_forged_source_version(prov):
     """``EventAPI`` does not pass through ``_sanitize_props`` — the reject is
     local to it. All three names (the plural is in the set but on a DIFFERENT
@@ -689,7 +730,9 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
     ``[[DOC, '']]`` must not leave the node carrier claiming a pair for DOC
     while ``_anchor_on_create`` nulls the edge — and a blank ``'   '`` must not
     stamp garbage on the authoritative edge (the CASE only matches ``''``).
-    Both writers must agree it is absent.
+    Both writers must agree it is absent. ``bad-nonstr-hash`` pins the TYPE half
+    of the member rule on the hash (``isinstance(pair[1], str)``): ``bad-numeric``
+    is ``[[1, 2]]``, which fails on ``pair[0]`` first and so never reaches it.
     """
     sdk, events, log_path = prov
     sdk.create_point("statement", "the good point")
@@ -700,6 +743,8 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
         ("bad-noniterable", {"sourceVersionTransit": 5}),
         ("bad-short-pair", {"sourceVersionTransit": [["only-one-element"]]}),
         ("bad-numeric", {"sourceVersionTransit": [[1, 2]]}),
+        ("bad-nonstr-hash", {"extractedFrom": DOC,
+                             "sourceVersionTransit": [[DOC, 2]]}),
         ("bad-empty-hash", {"extractedFrom": DOC,
                             "sourceVersionTransit": [[DOC, ""]]}),
         ("bad-blank-hash", {"extractedFrom": DOC,
