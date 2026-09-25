@@ -30,22 +30,30 @@ _SOURCE = (Path(__file__).resolve().parent.parent / "tortoise"
            / "extractor_v2.py")
 
 #: Raw `X.get(field, '')[:N]` slices deliberately NOT routed through `_clip`,
-#: keyed by (enclosing function, unparsed expression). They render S3
-#: GRAPH-search results — `search` is backend-returned graph content, which the
-#: write gate has already `str`-coerced — not model output, so they cannot
-#: raise on an LLM-emitted value. The FUNCTION is part of the key, so the
-#: same expression text appearing in another function still reds and needs
-#: its own reviewed entry.
+#: keyed `(enclosing function, unparsed expression) -> allowed occurrences`.
+#: They render S3 GRAPH-search results in `_render_search_results` — a path
+#: whose caller supplies graph content that `execute_embed`'s write gate has
+#: `str`-coerced (`content = str(p.get("content", "")).strip()[:1000]`). The
+#: slice itself is NOT inherently safe: called directly with a non-string
+#: `content` it raises. The FUNCTION is part of the key, so the same expression
+#: text appearing in another function still reds.
 #: Growth rule: an entry is added only with evidence that the site renders
 #: graph content — never to silence a real defect.
-_GRAPH_SIDE_RAW_SLICES = {
-    ("_render_search_results", "p.get('content', '')[:120]"),
-    ("_render_search_results", "e.get('content', '')[:120]"),
+_GRAPH_SIDE_RAW_SLICES: dict[tuple[str, str], int] = {
+    ("_render_search_results", "p.get('content', '')[:120]"): 1,
+    ("_render_search_results", "e.get('content', '')[:120]"): 1,
 }
 
-#: Non-string values an LLM can emit through `_parse_json_robust` rung 1
-#: (parsed JSON without `_validate_output_shape`).
-_NON_STRING_VALUES = [None, 0, 42, 1.5, False, [], {}]
+#: Values that REPRODUCE the #5060 defect: slicing each of these raised before
+#: the fix. Parsed JSON can carry any of them (an LLM emits `{"name": null}`).
+_DEFECT_VALUES = [None, 0, 42, 1.5, False, {}]
+
+#: Robustness-only: a list IS sliceable, so `[][:N]` never raised and these
+#: cases CANNOT red on #5060 — they only pin that a list value still survives
+#: the report instead of crashing elsewhere.
+_ROBUSTNESS_ONLY_VALUES = [[]]
+
+_NON_STRING_VALUES = _DEFECT_VALUES + _ROBUSTNESS_ONLY_VALUES
 
 
 def _embed(embed_list: dict) -> dict:
@@ -259,47 +267,106 @@ def _raw_get_slice_sites(tree: ast.Module) -> list[tuple[int, str, str]]:
     return sorted(hits)
 
 
+def _raw_get_slice_problems(tree: ast.Module) -> list[str]:
+    """Every reason `tree` violates the raw-slice rule, as readable strings.
+
+    Empty list = clean. A fresh AST is passed in (rather than read from disk)
+    so each branch below has a synthetic positive control.
+    """
+    raw = _raw_get_slice_sites(tree)
+    if not raw:
+        # Non-vacuity: an empty scan must be a problem (#4047's permanently
+        # green, unexecuted gate).
+        return ["the AST scan found no `.get(...)[:]` slice — guard is vacuous"]
+    counts = Counter((func, code) for _, func, code in raw)
+    problems: list[str] = []
+    for line, func, code in raw:
+        if (func, code) not in _GRAPH_SIDE_RAW_SLICES:
+            problems.append(
+                f"{line}: {code}  (in {func}) is not on the graph-side "
+                "allowlist — route it through `_clip` (#5060), or add a "
+                "reviewed entry with evidence that it renders graph content")
+    for (func, code), n in counts.items():
+        allowed = _GRAPH_SIDE_RAW_SLICES.get((func, code), 0)
+        if n > allowed:
+            problems.append(
+                f"{func}: {code} appears {n}x but the allowlist allows "
+                f"{allowed} — route the duplicate through `_clip` (#5060), or "
+                "raise the reviewed occurrence count if the second slice "
+                "really renders graph content")
+    for (func, code), allowed in _GRAPH_SIDE_RAW_SLICES.items():
+        if counts.get((func, code), 0) < allowed:
+            problems.append(
+                f"allowlist entry {func}: {code} expects {allowed} "
+                f"occurrence(s), found {counts.get((func, code), 0)} — "
+                "re-check whether the slice moved or a defect is being masked")
+    return problems
+
+
 def test_no_unallowlisted_raw_get_slice_in_the_module():
-    """An unallowlisted raw `X.get(...)[:]` slice in the module reds here.
+    """No raw `X.get(...)[:]` slice in the module outside the reviewed
+    graph-side allowance.
 
     Declared scan BOUNDARY — it matches ONE shape: a `Subscript` whose
     immediate value is a `.get(...)` call AND whose slice is an `ast.Slice`.
     It does NOT see an aliased/two-step form (`t = p.get('c', ''); t[:60]`),
     a walrus, or `p['c'][:60]`. Those stay the reviewer's job.
     """
-    tree = ast.parse(_SOURCE.read_text(encoding="utf-8"))
-    raw = _raw_get_slice_sites(tree)
-    # Non-vacuity: an empty scan must red loudly (#4047's permanently-green
-    # gate). The allowlist-liveness check below is the stronger half.
-    assert raw, "the AST scan found no `.get(...)[:]` slice — guard is vacuous"
-    counts = Counter((func, code) for _, func, code in raw)
-    found = set(counts)
-    unexpected = [f"{line}: {code}  (in {func})" for line, func, code in raw
-                  if (func, code) not in _GRAPH_SIDE_RAW_SLICES]
-    assert not unexpected, (
-        "raw `.get(...)[:]` slice not in the graph-side allowlist — route it "
-        "through `_clip`, or add a reviewed allowlist entry with evidence "
-        f"that it is graph content (#5060): {unexpected}")
-    # A set collapses identical slices, so a SECOND identical raw slice inside
-    # an already-allowlisted function would be excused by the one entry.
-    doubled = [f"{func}: {code} x{n}" for (func, code), n in counts.items()
-               if n > 1]
-    assert not doubled, (
-        "the same raw `.get(...)[:]` slice appears more than once — each "
-        "occurrence needs its own reviewed entry, or the duplicate is "
-        f"excused silently (#5060): {doubled}")
-    # A stale entry would WIDEN the allowlist silently, so it must red.
-    stale = _GRAPH_SIDE_RAW_SLICES - found
-    assert not stale, (
-        f"allowlist entries no longer exist as written — re-check whether "
-        f"the graph-side slice moved or a real defect is being masked: {stale}")
+    problems = _raw_get_slice_problems(
+        ast.parse(_SOURCE.read_text(encoding="utf-8")))
+    assert problems == []
+
+
+#: A synthetic module carrying exactly the two reviewed graph-side slices, so
+#: every branch of `_raw_get_slice_problems` has a positive control below.
+_GRAPH_SIDE_BASELINE = (
+    "def _render_search_results(search):\n"
+    "    for p in search['points']:\n"
+    "        yield p, p.get('content', '')[:120]\n"
+    "    for e in search['events']:\n"
+    "        yield e, e.get('content', '')[:120]\n"
+)
+
+
+def test_the_guard_accepts_the_graph_side_baseline():
+    assert _raw_get_slice_problems(ast.parse(_GRAPH_SIDE_BASELINE)) == []
+
+
+def test_the_guard_flags_an_unallowlisted_slice():
+    tree = ast.parse(_GRAPH_SIDE_BASELINE +
+                     "def _report(e):\n"
+                     "    return e.get('name', '')[:60]\n")
+    assert any("_report" in p and "not on the graph-side allowlist" in p
+               for p in _raw_get_slice_problems(tree))
+
+
+def test_the_guard_flags_a_duplicated_graph_side_slice():
+    tree = ast.parse(_GRAPH_SIDE_BASELINE.replace(
+        "        yield p, p.get('content', '')[:120]\n",
+        "        yield p, p.get('content', '')[:120]\n"
+        "        yield p, p.get('content', '')[:120]\n"))
+    assert any("appears 2x but the allowlist allows 1" in p
+               for p in _raw_get_slice_problems(tree))
+
+
+def test_the_guard_flags_a_missing_graph_side_slice():
+    tree = ast.parse(
+        "def _render_search_results(search):\n"
+        "    for p in search['points']:\n"
+        "        yield p, p.get('content', '')[:120]\n")
+    assert any("e.get('content', '')[:120] expects 1" in p
+               for p in _raw_get_slice_problems(tree))
+
+
+def test_the_guard_flags_an_empty_scan():
+    assert _raw_get_slice_problems(ast.parse("x = 1\n")) == [
+        "the AST scan found no `.get(...)[:]` slice — guard is vacuous"]
 
 
 def test_the_scanner_still_flags_a_violation():
-    """Positive control: proves the predicate still DETECTS the defect shape,
-    so a narrowed matcher reds here instead of passing silently (the two
-    permanently-present allowlisted hits would otherwise keep the scan
-    non-empty and the guard green)."""
+    """Positive control for the PREDICATE itself: a matcher narrowed to the
+    allowlist's shape would still pass the baseline above, so it is pinned
+    here against a plain defect-shape slice."""
     synthetic = ast.parse(
         "def _report(e):\n"
         "    return e.get('name', '')[:60]\n")
