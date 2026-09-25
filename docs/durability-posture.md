@@ -123,13 +123,19 @@ property). It gets its own declared sidecar sections instead:
   silently dropped the step edges, so the class rides a section **pair**: the
   node property maps, and `(org_id, step_id)` link pairs. The `onboards` edge
   to the org-anchor `:Subject` is restored from the captured
-  `org_subject_id` (the `:Subject` is journaled, so replay re-creates it);
-  the edge carries no section of its own. One deliberate scope limit: a
-  `COMPLETED_STEP` edge whose `step_id` is **outside the canonical vocabulary**
-  is not carried (the capture filters to canonical ids and logs a warning) —
-  every gate in `tortoise/onboarding/state.py` is a subset test over canonical
-  ids, so such an edge is inert, but it is reported rather than silently
-  dropped.
+  `org_subject_id`; the edge carries no section of its own, because it is
+  DERIVED from that property. The anchor is journaled on the normal path
+  (`sdk.create_subject` emits `SubjectAdded`), so replay re-creates it — but
+  `write_onboards_edge` MERGEs the anchor itself, so where a raw/hosted write
+  journaled nothing the anchor cannot be rebuilt; the restore then drops the
+  edge rather than minting an endpoint-less one, and reports it as
+  `onboarding_missing_onboards` (the edge is never silently assumed to have
+  survived). One deliberate scope limit: a `COMPLETED_STEP` edge whose
+  `step_id` is **outside the canonical vocabulary** is not carried (the
+  capture filters to canonical ids and logs a warning) — the gates in
+  `tortoise/onboarding/state.py` count an unrecognised id as an AGENT step,
+  so such an edge can only ever BLOCK a completion, never create one; it is
+  reported rather than silently dropped.
 - `:Batch` + the `Point.batch_id` membership — preserved by the
   `batch_snapshot` / `batch_point_links` sections (**#990**): the
   quarantine/commit marker is raw Cypher that rides no journal record, so the

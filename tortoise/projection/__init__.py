@@ -762,7 +762,9 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
     # carries no semantics and must not make the rescue file unloadable — but
     # its loss is LOGGED rather than left silent, so a live non-canonical edge
     # destroyed by the wipe is visible instead of passing as a clean restore
-    # (the post-restore comparison reads through this same filter).
+    # (the post-restore comparison reads through this same filter). Note it is
+    # NOT harmless: the gates count an unrecognised id as an AGENT step, so a
+    # dropped foreign edge can only ever BLOCK a completion, never create one.
     links = [(r[0], r[1]) for r in link_rows
              if isinstance(r[0], str) and isinstance(r[1], str)
              and r[1] in ONBOARDING_STEPS]
@@ -774,8 +776,9 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
             "rebuild: %d COMPLETED_STEP edge(s) carry a step id outside the "
             "canonical onboarding vocabulary (%s) — they are NOT carried "
             "into the pre-wipe snapshot. Every onboarding gate resolves "
-            "canonical ids, so such an edge is inert, but its loss is "
-            "recorded here rather than left silent (#4641).",
+            "canonical ids and treats an unrecognised id as an agent step, "
+            "so such an edge can only BLOCK a completion, never create one; "
+            "its loss is recorded here rather than left silent (#4641).",
             len(non_canonical), non_canonical[:5])
     return nodes, links
 
@@ -1319,6 +1322,12 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         oid = entry.get("org_id") if isinstance(entry, dict) else None
         return oid if isinstance(oid, str) else None
 
+    fresh_orgs: dict = {}
+    for entry in fresh.get("onboarding_snapshot") or []:
+        _foid = _org_key(entry)
+        if _foid is not None:
+            fresh_orgs.setdefault(_foid, entry)
+
     onboarding_nodes: list[dict] = []
     onboarding_seen: set = set()
     for entry in (list(leftover.get("onboarding_snapshot") or [])
@@ -1334,6 +1343,25 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             # Leftover-first iteration: the LEFTOVER entry is kept verbatim.
             continue
         onboarding_seen.add(oid)
+        # #4641 review round 3: the ONE field the verbatim rule must NOT
+        # swallow. The node rules above exist because a self-healed DEFAULT
+        # node (`_ensure_onboarding_node_after_provision`) can overwrite
+        # recovered truth — but NOTHING self-heals the org-ANCHOR pointer, it
+        # is the carrier of the `onboards` EDGE, and the post-restore check
+        # compares the rebuilt graph against THIS merged list. So a leftover
+        # entry that predates the org's anchor would drop the fresh
+        # `org_subject_id`, the restore would skip the edge, and the check
+        # would compare against the same stale set and report a clean, full
+        # restore while a LIVE anchor edge was destroyed. Carry it fresh-wins
+        # (fresh when it is a str, leftover otherwise); a fresh-only value
+        # means the anchor was linked after the interrupted run captured its
+        # sidecar, so it is the newer truth.
+        fresh_entry = fresh_orgs.get(oid)
+        fresh_sid = (fresh_entry.get("org_subject_id")
+                     if isinstance(fresh_entry, dict) else None)
+        if isinstance(fresh_sid, str) and \
+                entry.get("org_subject_id") != fresh_sid:
+            entry = {**entry, "org_subject_id": fresh_sid}
         onboarding_nodes.append(entry)
     # The LINK leg is `merge=False` like every other link section: an entry is
     # a two-element pair, not a property map, and leftover-first keeps the
@@ -3226,9 +3254,24 @@ class FalkorProjection(
                 from tortoise.consistency import recover_from_log
                 result = recover_from_log(events_dir, self)
                 if result.get("recovered"):
-                    logger.warning(
-                        "auto-recovered empty embedded DB from %s (%s events)",
-                        events_dir, result.get("log_points"))
+                    # #4641: a completed recovery can still have left an
+                    # onboarding state/edge gap it could not close (raw writes
+                    # no journal event carries). Reporting only the clean
+                    # "auto-recovered" line there IS the silent partial loss,
+                    # so name the gap on the same line the operator reads.
+                    if result.get("onboarding_gap"):
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events) BUT with %s onboarding state/edge "
+                            "restore gap(s) the replay could not close — "
+                            "re-run onboarding for the affected org(s) (#4641)",
+                            events_dir, result.get("log_points"),
+                            result.get("onboarding_gap"))
+                    else:
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events)",
+                            events_dir, result.get("log_points"))
                 elif result.get("reason"):
                     # Lost-graph case but recovery declined (ambiguous/unreadable
                     # log) — warn loudly instead of silently continuing with an
@@ -3238,7 +3281,15 @@ class FalkorProjection(
                         result.get("reason"))
 
     def _recover_or_raise(self, events_dir: str) -> None:
-        """Run recover_from_log and fail loud if it did not recover."""
+        """Run recover_from_log, fail loud if it did not recover.
+
+        A completed recovery with an onboarding gap is NOT a reason to refuse
+        to open the store (it is usable, and refusing would be strictly worse)
+        — but it must not pass unmentioned either, since this is the caller for
+        the unresponsive-graph path where no other surface reports it (#4641).
+        """
+        import logging
+
         from tortoise.consistency import recover_from_log
         result = recover_from_log(events_dir, self)
         if not result.get("recovered"):
@@ -3246,6 +3297,12 @@ class FalkorProjection(
                 f"DB health check failed and recovery did not complete: "
                 f"{result.get('reason')}. "
                 f"See operations/skills/tortoise-rebuild/SKILL.md")
+        if result.get("onboarding_gap"):
+            logging.getLogger(__name__).warning(
+                "recovery completed with %s onboarding state/edge restore "
+                "gap(s) the replay could not close — re-run onboarding for "
+                "the affected org(s) (#4641)",
+                result.get("onboarding_gap"))
 
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037
@@ -3875,8 +3932,9 @@ class FalkorProjection(
         # ── Onboarding state snapshot (#4641) ───────────────────────
         # `tortoise/onboarding/state.py` writes `:OnboardingState`,
         # `:OnboardingStep` and the `COMPLETED_STEP` edges with RAW Cypher —
-        # no journal record, and `rg OnboardingState tortoise/projection` is
-        # zero hits, so a replay cannot re-create any of it. The writers'
+        # no journal record, and (before this change) `rg OnboardingState
+        # tortoise/projection` was zero hits, so a replay cannot re-create any
+        # of it. The writers'
         # contracts make the loss visible rather than benign: `fork` is
         # set-once and never re-asked, `status` is server-owned and
         # gate-written. Captured as a SECTION pair (node maps + step links)
@@ -5511,6 +5569,14 @@ class FalkorProjection(
         # comparison cannot drift from the capture's scope. Never raise (this
         # runs after the wipe). A failed verification READ is treated as a
         # mismatch — "could not confirm" must not read as "confirmed".
+        #
+        # Placement: this runs HERE, before pass 2, while the analogous config
+        # verification runs after pass 2b. That is safe only because NO later
+        # pass touches this class — the only bulk delete (`:4251`) is
+        # label-scoped to Points, and every later `DELETE` is
+        # `:SUPERSEDES`-scoped. A future pass-2 change that touched
+        # `:OnboardingState` would silently green this check; move it to the
+        # end if that happens.
         onboarding_expected_orgs = {
             e.get("org_id") for e in onboarding_snapshot
             if isinstance(e, dict) and isinstance(e.get("org_id"), str)}
@@ -5557,26 +5623,41 @@ class FalkorProjection(
         if onboarding_restore_failures or not onboarding_verified or \
                 onboarding_missing_orgs or onboarding_missing_links or \
                 onboarding_missing_onboards:
-            logger.error(
-                "rebuild: onboarding-state post-restore verification FAILED "
-                "— %d restore failure(s); %d of %d expected org state(s), "
-                "%d of %d expected step edge(s) and %d of %d expected "
-                "`onboards` anchor edge(s) are ABSENT from the rebuilt "
-                "graph. This is a TRUE POSITIVE, not a silent success: the "
-                "wipe is unconditional and only the journal is replayed, so "
-                "those onboarding states/edges are gone. Re-run onboarding "
-                "for the affected org(s) — see #4641.",
-                onboarding_restore_failures,
-                len(onboarding_missing_orgs) if onboarding_verified
-                else len(onboarding_expected_orgs),
-                len(onboarding_expected_orgs),
-                len(onboarding_missing_links) if onboarding_verified
-                else len(onboarding_expected_links),
-                len(onboarding_expected_links),
-                len(onboarding_missing_onboards) if onboarding_verified
-                else len(onboarding_expected_onboards),
-                len(onboarding_expected_onboards),
-            )
+            if not onboarding_verified:
+                # "Could not confirm" must not be reported as "confirmed" in
+                # EITHER direction: the missing counts are None above, so this
+                # branch must not print the expected denominators as "ABSENT"
+                # and assert the data is gone — absence was never observed.
+                logger.error(
+                    "rebuild: onboarding-state post-restore verification "
+                    "COULD NOT RUN (%d restore failure(s)) — the rebuilt "
+                    "graph's onboarding state is UNVERIFIED: not confirmed "
+                    "intact, and NOT observed gone. Re-check the %d expected "
+                    "org state(s), step edge(s) and `onboards` anchor edge(s) "
+                    "before trusting them — see #4641.",
+                    onboarding_restore_failures,
+                    len(onboarding_expected_orgs),
+                    len(onboarding_expected_links),
+                    len(onboarding_expected_onboards),
+                )
+            else:
+                logger.error(
+                    "rebuild: onboarding-state post-restore verification "
+                    "FAILED — %d restore failure(s); %d of %d expected org "
+                    "state(s), %d of %d expected step edge(s) and %d of %d "
+                    "expected `onboards` anchor edge(s) are ABSENT from the "
+                    "rebuilt graph. This is a TRUE POSITIVE, not a silent "
+                    "success: the wipe is unconditional and only the journal "
+                    "is replayed, so those onboarding states/edges are gone. "
+                    "Re-run onboarding for the affected org(s) — see #4641.",
+                    onboarding_restore_failures,
+                    len(onboarding_missing_orgs),
+                    len(onboarding_expected_orgs),
+                    len(onboarding_missing_links),
+                    len(onboarding_expected_links),
+                    len(onboarding_missing_onboards),
+                    len(onboarding_expected_onboards),
+                )
 
         # ── #2814: restore the authoritative configuration ──────────────
         # After pass-1a (so a `:PackInstall` is not clobbered by a later replay

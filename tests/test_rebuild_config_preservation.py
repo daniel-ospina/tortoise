@@ -1060,6 +1060,10 @@ def test_cmd_rebuild_reports_config_state(tmp_path, capsys):
     # `or` here cannot fail and would not pin the counts the operator reads.
     assert "1 of 1" in out.out, out.out
     assert "1 authoritative entr" in out.out, out.out
+    # #4641: the onboarding counts get their own line, printed at zero expected
+    # too, so "there was no onboarding state to preserve" stays distinguishable
+    # from "preservation was not attempted".
+    assert "Onboarding: 0 of 0 org state(s) restored" in out.out, out.out
 
 
 def test_recover_from_log_refuses_nonempty_graph_with_config(graph):
@@ -1106,8 +1110,11 @@ def test_config_registry_doc_consistency():
     (`tests/test_durability_posture.py`) is a text-pattern check over the
     phrase "source of truth" and never reads a node class, so nothing else
     would catch a class silently leaving the operator-facing map. The audit
-    query is pinned ONE-directionally (every declared class/key appears), so a
-    newly enrolled class cannot leave the operator audit under-reporting.
+    query is pinned ONE-directionally (every REGISTRY-declared class/key
+    appears, plus the section-preserved classes this change declares), so a
+    newly enrolled class cannot leave the operator audit under-reporting. The
+    section-preserved container list is a hand-maintained presence check, not
+    an exhaustiveness proof — the doc says so explicitly.
     """
     import re
 
@@ -1476,8 +1483,11 @@ def test_onboarding_sidecar_malformed_entries_refused_before_wipe(tmp_path):
     """A planted/erroneous sidecar is refused PRE-wipe, not mid-restore.
 
     The step-id membership check is the load-bearing one: a `COMPLETED_STEP`
-    edge is what `completed_steps()` feeds into the completion gate, so a
-    foreign id would forge a completion rather than carry a stray property.
+    edge is what `completed_steps()` feeds into the completion gate, and the
+    gates count an unrecognised id as an AGENT step, so a foreign id can only
+    ever BLOCK a (grandfathered) completion — never forge one. What the check
+    actually buys is vocabulary hygiene plus a rescue file this build can load;
+    it is defence-in-depth, not the completion guard.
     """
     from tortoise.projection import _load_prewipe_snapshot
 
@@ -1534,6 +1544,79 @@ def test_onboarding_union_leftover_wins_and_keeps_unpaired_entries():
     assert [e["org_id"] for e in unpaired["onboarding_snapshot"]] == ["lonely"]
     assert [list(e) for e in unpaired["onboarding_step_links"]] == [
         ["ghost", "harness-connected"]]
+
+
+def test_onboarding_union_carries_the_anchor_fresh_wins():
+    """The ONE field the leftover-verbatim rule must not swallow (#4641).
+
+    The node leg keeps the leftover entry verbatim because a self-healed
+    DEFAULT node can clobber recovered truth. Nothing self-heals the org-ANCHOR
+    pointer: it is the carrier of the `onboards` edge, and the post-restore
+    check compares the rebuilt graph against THIS merged list. So a leftover
+    entry predating the org's anchor would drop the fresh `org_subject_id`, the
+    restore would skip the edge, and the check would compare against the same
+    stale set and report a clean full restore while a LIVE edge was destroyed.
+    """
+    from tortoise.projection import _SNAPSHOT_SECTIONS, _union_prewipe_snapshot
+
+    empty = {k: [] for k in _SNAPSHOT_SECTIONS}
+    # Leftover lacks the anchor; fresh has it -> the fresh value must survive.
+    merged = _union_prewipe_snapshot(
+        {"onboarding_snapshot": [{"org_id": "o", "status": "complete"}]},
+        {**empty, "onboarding_snapshot": [
+            {"org_id": "o", "status": "active",
+             "org_subject_id": "sub-fresh"}]})
+    nodes = {e["org_id"]: e for e in merged["onboarding_snapshot"]}
+    assert nodes["o"]["status"] == "complete", "progress stays leftover"
+    assert nodes["o"]["org_subject_id"] == "sub-fresh", (
+        "a fresh anchor must not be swallowed by the verbatim rule")
+
+    # Both present and DIFFERENT -> fresh wins (the anchor was re-linked after
+    # the interrupted run captured its sidecar).
+    reanchored = _union_prewipe_snapshot(
+        {"onboarding_snapshot": [{"org_id": "o", "status": "complete",
+                                  "org_subject_id": "sub-old"}]},
+        {**empty, "onboarding_snapshot": [
+            {"org_id": "o", "org_subject_id": "sub-new"}]})
+    assert {e["org_id"]: e for e in reanchored["onboarding_snapshot"]}[
+        "o"]["org_subject_id"] == "sub-new"
+
+    # Leftover-only stays authoritative: a fresh capture with no anchor (the
+    # post-wipe partial graph) must not DROP the recovered one.
+    kept = _union_prewipe_snapshot(
+        {"onboarding_snapshot": [{"org_id": "o", "status": "complete",
+                                  "org_subject_id": "sub-old"}]},
+        {**empty, "onboarding_snapshot": [{"org_id": "o"}]})
+    assert {e["org_id"]: e for e in kept["onboarding_snapshot"]}[
+        "o"]["org_subject_id"] == "sub-old"
+
+
+def test_leftover_sidecar_does_not_destroy_a_live_anchor(graph):
+    """The end-to-end form of the union carve-out, on the REAL wipe+replay.
+
+    A leftover (interrupted-run) sidecar entry that predates the org's anchor,
+    plus a live graph that HAS the anchor, must not end with the edge destroyed
+    and `onboarding_missing_onboards == 0` claiming a clean restore.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    anchor = sdk.create_subject("Leftover Anchor 4641",
+                                subjectKind="organisation")
+    _write_onboarding_state(sdk, "org-lo", fork="build",
+                            subject_id=anchor["id"])
+    assert _onboards_targets(sdk, "org-lo") == [anchor["id"]]
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-lo", "status": "complete"}],
+        onboarding_step_links=[]))
+
+    result = sdk._get_proj().rebuild_all(str(events))
+
+    assert _onboards_targets(sdk, "org-lo") == [anchor["id"]], (
+        "the live anchor edge must not be dropped by the verbatim node rule")
+    assert result["onboarding_missing_onboards"] == 0
+    assert result["onboarding_restore_failures"] == 0
+    node = _read_onboarding(sdk, "org-lo")[0]
+    assert node["status"] == "complete", "leftover progress still wins"
 
 
 def test_onboarding_capture_refuses_an_unloadable_node(graph):
@@ -1618,11 +1701,11 @@ def test_onboarding_onboards_edge_gap_is_reported_not_silent(graph):
         "precondition: the unjournaled anchor really is gone")
 
 
-def test_onboarding_gap_is_visible_to_automatic_recovery(graph):
-    """The embedded auto-recovery caller must not read a clean success.
+def test_onboarding_gap_is_visible_to_recover_from_log(graph):
+    """The automatic-recovery ENTRY POINT must not return a clean success.
 
-    The pending sidecar is retired after the replay by design (#4305), so
-    `reason` plus the `onboarding_gap` count are the only record
+    The pending sidecar is retired after the replay by design (#4305), so the
+    `onboarding_gap` count plus `reason` are the only record
     `consistency.recover_from_log` can hand its caller. `recovered` stays True
     (the rebuild DID complete — a post-wipe raise would strand the store empty,
     #2943), exactly as the sticky config-reset marker does.
@@ -1647,3 +1730,33 @@ def test_onboarding_gap_is_visible_to_automatic_recovery(graph):
         "a partial onboarding restore must be machine-visible to the "
         "auto-recovery caller")
     assert "onboarding" in rec["reason"]
+
+
+def test_onboarding_gap_warns_in_the_recover_or_raise_caller(graph, caplog):
+    """A producer signal with no consumer is the same log-only defect.
+
+    `_recover_or_raise` is the real caller on the unresponsive-graph path (it
+    is reached from `_auto_health_recover`); it must not silently discard the
+    gap. It must NOT raise for it either — the store is usable, so refusing to
+    open over an onboarding gap would be strictly worse — it warns.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-r", "status": "complete",
+                              "org_subject_id": "subj-never-journaled"}],
+        onboarding_step_links=[["org-r", "harness-connected"]]))
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        sdk._get_proj()._recover_or_raise(str(events))  # must not raise
+
+    # Assert the CALLER's own message, not just the substring "onboarding":
+    # `rebuild_all` already logs an ERROR naming onboarding on this path, so a
+    # looser match would pass even with the consumer removed (verified by
+    # mutation). `recovery completed with` is produced ONLY by this caller.
+    assert any("recovery completed with" in r.getMessage()
+               and "onboarding" in r.getMessage()
+               for r in caplog.records), (
+        f"the recovery caller discarded the onboarding gap: "
+        f"{[r.getMessage() for r in caplog.records]}")

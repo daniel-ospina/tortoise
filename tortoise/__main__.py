@@ -80,6 +80,27 @@ def _cmd_rebuild(args):
         # distinguishable from "preservation was not attempted".
         print(f"Config: {counts.get('config_restored', 0)} of "
               f"{counts.get('config_expected', 0)} authoritative entr(y/ies) restored")
+        # #4641: onboarding state rides the same rescue file but is not
+        # "config", so it gets its own line — printed at zero expected too, so
+        # "no onboarding state to preserve" is distinguishable from
+        # "preservation was not attempted", and non-zero when the replay could
+        # not close a gap (the operator-facing counterpart of the
+        # `onboarding_gap` key the embedded auto-recovery path now warns on).
+        onboarding_gap = (
+            (counts.get("onboarding_restore_failures") or 0)
+            + (counts.get("onboarding_missing_orgs") or 0)
+            + (counts.get("onboarding_missing_links") or 0)
+            + (counts.get("onboarding_missing_onboards") or 0))
+        print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
+              f"{counts.get('onboarding_expected', 0)} org state(s) restored")
+        if onboarding_gap:
+            print(
+                f"Onboarding: {onboarding_gap} state/edge restore "
+                f"gap(s) — the wipe is unconditional and only the journal is "
+                f"replayed, so those onboarding states/edges are gone. "
+                f"Re-run onboarding for the affected org(s) (#4641).",
+                file=sys.stderr,
+            )
         if counts.get("config_reset"):
             if counts.get("config_reset_read_failed"):
                 # `config_reset` is fail-SAFE, so it does not prove the marker
