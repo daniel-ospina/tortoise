@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
+import re
+import threading
 import time
 
 import pytest
@@ -297,6 +299,68 @@ class TestWriter:
         assert "tortoise_egress_bytes_total" in text
         assert ("org_a", "/v1/?bad", ORIGIN_ROUTE) in _bytes_by_child()
 
+    def test_org_overflow_sentinel_cannot_be_a_real_org_id(self):
+        """The org sentinel must not be reachable as a real org id.
+
+        The pattern is the one ``create_org`` validates against (hosted_api
+        ``_id_pattern``): a real org id starts alphanumeric, so an id can never
+        collide with the sentinel child.
+        """
+        pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
+        assert pattern.match(monitoring.EGRESS_OVERFLOW) is None
+
+    def test_unrouted_sentinel_is_not_a_reachable_label(self):
+        """The derived overflow child must not be a label a client can request.
+
+        Otherwise ``GET /__unrouted__`` pre-occupies the very bucket routine
+        folding writes into, and an operator cannot tell folded traffic from a
+        client-chosen path. It is unproducible BY CONSTRUCTION: the fallback
+        always emits a leading ``/``.
+        """
+        literal_path = "/" + monitoring.EGRESS_UNROUTED
+        monitoring.record_egress("", literal_path, 5, derived=True)
+
+        children = _bytes_by_child()
+        assert children[("", literal_path, ORIGIN_DERIVED)] == 5, (
+            "a request for the sentinel path must be an ordinary derived label")
+        assert ("", monitoring.EGRESS_UNROUTED, ORIGIN_DERIVED) not in children
+
+    def test_control_characters_are_stripped_from_labels(self):
+        """A percent-decoded path carries CR/NUL into the exposition otherwise.
+
+        ``prometheus_client`` escapes only ``\\``, ``\n`` and ``"``, so a bare
+        CR or NUL would ride into every series of the family; a scraper that
+        splits on CRLF (or validates control bytes) would drop or garble them.
+        """
+        monitoring.record_egress("", "/a\r\x00b", 5, derived=True)
+
+        assert ("", "/a??b", ORIGIN_DERIVED) in _bytes_by_child()
+        text = generate_latest().decode()
+        assert "\x00" not in text
+        assert "\r" not in text
+
+    def test_concurrent_admissions_stop_at_the_cap(self):
+        """The cap must hold under CONCURRENCY, not just in one thread.
+
+        The hot path is lock-free for an admitted label and takes the lock only
+        to admit; a missed re-check inside the lock would let a burst of
+        simultaneous first-sightings exceed the cap.
+        """
+        def _spray(base: int) -> None:
+            for i in range(200):
+                monitoring.record_egress("", f"/t{base}-{i}", 1, derived=True)
+
+        threads = [threading.Thread(target=_spray, args=(t,)) for t in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        derived = {path for _, path, origin in _bytes_by_child()
+                   if origin == ORIGIN_DERIVED}
+        assert len(derived) == monitoring.EGRESS_MAX_DERIVED_PATHS + 1
+        assert monitoring.EGRESS_UNROUTED in derived
+
     def test_record_egress_is_the_only_writer_of_the_metric(self):
         """The #501/#3677 house shape: callers never touch the metric directly.
 
@@ -403,12 +467,12 @@ class TestMiddleware:
         assert max(len(lab) for lab in labels) == len(longest)
 
     def test_unrouted_traffic_through_the_middleware_cannot_starve_templates(self):
-        """End-to-end version of the round-1 finding: real unauthenticated 404
-        requests fill the DERIVED budget, and a code-literal route template is
-        still admitted afterwards.
+        """The attacker side is end-to-end; the template side is a direct write.
 
-        This is the assertion the direct-call cap test above cannot make: it
-        drives the traffic through the middleware's own fallback path.
+        Real unauthenticated 404 requests through the middleware's own fallback
+        path fill the DERIVED budget — that is the side a client can reach. The
+        route template is then recorded through the single writer, which is the
+        only way to add one (nothing a client sends can create a template).
         """
         async def _not_found(scope, receive, send):
             await send({"type": "http.response.start", "status": 404,
@@ -475,6 +539,91 @@ class TestMiddleware:
             assert sum(
                 value for (_, _, origin), value in _bytes_by_child().items()
                 if origin == ORIGIN_ROUTE) == len(r.content)
+
+    def test_trailing_newline_path_keeps_the_route_label(self):
+        """Router parity: the label must agree with the router that served it.
+
+        Starlette compiles templates as ``^…$`` and matches with ``re.match``,
+        and Python's ``$`` matches just before a TRAILING NEWLINE — so
+        ``/v1/version\n`` is served by the ``/v1/version`` route. A stricter
+        matcher on our side would label a matched route as unrouted traffic and
+        hand an unauthenticated client a way to move a route's bytes onto the
+        untrusted axis (measured on both starlette versions).
+        """
+        inner = FastAPI()
+
+        @inner.get("/v1/version")
+        def _version():
+            return Response(content=b"ok")
+
+        sent: list[dict] = []
+
+        async def _receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def _send(message):
+            sent.append(message)
+
+        app = ha.EgressBytesMiddleware(inner)
+        scope = {
+            "type": "http", "http_version": "1.1", "method": "GET",
+            "path": "/v1/version\n", "root_path": "", "raw_path": b"/v1/version%0a",
+            "query_string": b"", "headers": [], "scheme": "http",
+            "server": ("testserver", 80), "client": ("1.2.3.4", 1234), "state": {},
+        }
+        asyncio.run(app(scope, _receive, _send))
+
+        assert sent[0]["status"] == 200  # the router really served it
+        assert ("", "/v1/version", ORIGIN_ROUTE) in _bytes_by_child(), (
+            "a route the router served was labelled as unrouted: "
+            f"{sorted(_bytes_by_child())!r}")
+
+    def test_dot_segment_path_does_not_borrow_the_mount_label(self):
+        """A traversal shape the mount does not serve is a 404, not the mount.
+
+        The declared-prefix rule reads the ARRIVAL path, so without this guard
+        ``/mcp/../v1/version`` (never routed to the mount) would carry the
+        mount's label.
+        """
+        scope = {"type": "http", "route": None}
+
+        label, derived = ha._egress_route_class(scope, entry_path="/mcp/../v1/version")
+
+        assert label != "/mcp", "a traversal path borrowed the mounted label"
+        assert derived is True
+
+    def test_route_with_a_raising_regex_falls_back(self):
+        """The totality arc: a predicate that cannot answer must not raise.
+
+        ``_route_describes`` is called from a ``finally`` block; a raise there
+        would escape as the request's failure. Any exception is a "no".
+        """
+        class _RaisingRegex:
+            def match(self, path):
+                raise ValueError("bad pattern")
+
+        class _Route:
+            path = "/v1/version"
+            path_regex = _RaisingRegex()
+
+        assert ha._route_describes(_Route(), "/v1/version") is False
+        assert ha._egress_route_class(
+            {"type": "http", "route": _Route()}, entry_path="/v1/version") == (
+                "/v1/version", True)
+
+    def test_declared_plain_route_paths_are_stamped_on_the_route_axis(self):
+        """FastAPI does not stamp plain Starlette routes, so they are declared.
+
+        ``/openapi.json`` is a 146 KB code-literal response served by a plain
+        ``Route``; without the declaration it would sit on the 8-slot untrusted
+        axis (starvable) with unknown traffic.
+        """
+        with TestClient(ha.app) as client:
+            r = client.get("/openapi.json")
+
+        assert r.status_code == 200
+        assert ("", "/openapi.json", ORIGIN_ROUTE) in _bytes_by_child()
+        assert monitoring.egress_bytes_by_org()[""] >= len(r.content)
 
     def test_middleware_labels_by_the_arrival_path_not_the_response_scope(self):
         """Version-independent pin of the arrival-path capture.
@@ -715,6 +864,18 @@ class TestWiring:
         assert set(ha._EGRESS_DECLARED_PREFIXES) == mounted, (
             "the egress declared-prefix list drifted from the app's mounts: "
             f"declared={ha._EGRESS_DECLARED_PREFIXES!r} mounted={sorted(mounted)!r}")
+
+    def test_declared_paths_match_the_apps_plain_routes(self):
+        """Pin the declared plain-Route paths against the real app.
+
+        FastAPI stamps ``APIRoute`` but not plain ``Route``, so a plain route
+        that is NOT declared falls to the request-derived axis, where unrelated
+        junk can fold it. A new plain route must therefore be declared.
+        """
+        plain = {route.path for route in ha.app.routes if type(route) is Route}
+        assert set(ha._EGRESS_DECLARED_PATHS) == plain, (
+            "the egress declared-path list drifted from the app's plain routes: "
+            f"declared={ha._EGRESS_DECLARED_PATHS!r} plain={sorted(plain)!r}")
 
     def test_real_app_request_records_its_response_bytes(self):
         """A real request through the real stack, with nothing stubbed.

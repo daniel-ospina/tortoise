@@ -528,14 +528,25 @@ LOOP_LAG = Histogram(
 #     label could be written into a template's series — and the histogram
 #     carries no org label, which made that contamination cross-tenant. The
 #     ``origin`` label below makes the same string two distinct children.
-#   * ``/mcp`` sat on the derived axis, where 8 cheap 404s on unrelated paths
-#     starved it for the process lifetime. A mount prefix is a code literal, so
-#     it is declared and admitted on the ROUTE axis: unrelated junk can no
-#     longer displace it, and no per-sub-route precision is claimed for it.
+#   * ``/mcp`` and the docs endpoints sat on the derived axis, where 8 cheap
+#     404s on unrelated paths starved them for the process lifetime. Both are
+#     code literals of the app (a ``Mount`` prefix, a plain ``Route`` path), so
+#     they are declared and admitted on the ROUTE axis: unrelated junk cannot
+#     displace them, and no per-sub-route precision is claimed for a sub-app
+#     whose inner routes this layer does not enumerate.
 # What remains on the derived axis is ONLY untrusted traffic, where losing
 # precision is the accepted price of boundedness (the ``_TELEMETRY_DROP_COUNTS``
 # doctrine in ``hosted_api``): no legitimate surface is starved to advantage an
 # attacker.
+#
+# DECLARED LIMIT (scale, not attack): admission is first-come and permanent, so
+# past ``EGRESS_MAX_ORGS`` the LATER orgs fold into ``EGRESS_OVERFLOW`` for the
+# process lifetime — with one shared ``""`` child consuming a slot, a fleet of
+# more than ~511 orgs would see its per-org figure degrade to one bucket. An
+# admitted label is never evicted, because eviction either drops accumulated
+# cost (removing the child) or grows the child set without bound (keeping it).
+# Choosing between those is the metering substrate's decision (#5045), not this
+# counter's.
 EGRESS_MAX_ORGS = 512
 #: The route axis — code literals, ~121 templates today (measured on the live
 #: app) plus the declared mount prefixes, so 512 is headroom for new routes
@@ -546,10 +557,12 @@ EGRESS_MAX_PATHS = 512
 #: this is the granularity worth paying for traffic that names its own label.
 EGRESS_MAX_DERIVED_PATHS = 8
 EGRESS_OVERFLOW = "__other__"
-#: Where excess REQUEST-DERIVED path labels fold. Distinct from
-#: ``EGRESS_OVERFLOW`` because it answers a different question: "traffic on
-#: paths that match no route", not "the cap was hit".
-EGRESS_UNROUTED = "/__unrouted__"
+#: Where excess REQUEST-DERIVED path labels fold. DELIBERATELY not a path: the
+#: fallback always emits a leading ``/``, so a value a client can request can
+#: never collide with this child — otherwise a client could pre-occupy the
+#: overflow bucket (``GET /__unrouted__``) and make routine folding
+#: indistinguishable from a real path.
+EGRESS_UNROUTED = "__unrouted__"
 # PAIR SPACE: the caps multiply — the worst case is EGRESS_MAX_ORGS x 2 origins x
 # (EGRESS_MAX_PATHS + EGRESS_MAX_DERIVED_PATHS + 2) children. The ORG axis is
 # deliberately generous because org attribution IS the measurement #4491 asks
@@ -588,8 +601,27 @@ _EGRESS_DERIVED_PATHS: set[str] = set()
 _EGRESS_LOCK = threading.Lock()
 
 
+#: Control characters a percent-DECODED path can carry (``%00``, ``%0d``,
+#: ``%1b``, …). ``prometheus_client`` escapes only ``\\``, ``\n`` and ``"``, so a
+#: bare CR/NUL would ride into the exposition on every series of the family.
+_EGRESS_LABEL_TRANSLATE = str.maketrans({c: "?" for c in (*range(0x20), 0x7F)})
+
+
 def _utf8_safe(label: str) -> str:
-    """Repair a label value that cannot be UTF-8 encoded (see ``record_egress``)."""
+    """Make a request-derived label safe to EMIT.
+
+    Control characters are replaced: the path is percent-decoded and
+    unauthenticated, and a scraper splitting on CRLF — or one validating control
+    bytes — would drop or garble the series (measured: ``*_bucket`` lines too).
+
+    A label that cannot be UTF-8 encoded is repaired. ``generate_latest()``
+    encodes label values, so ONE lone surrogate would make the whole
+    ``/metrics`` endpoint raise for the process lifetime, blinding every alert
+    rather than this one dimension. Not reachable from the HTTP path today
+    (uvicorn replaces invalid bytes; org ids are charset-validated — measured),
+    and this single writer is the only place that can enforce it.
+    """
+    label = label.translate(_EGRESS_LABEL_TRANSLATE)
     try:
         label.encode("utf-8")
     except UnicodeEncodeError:

@@ -2218,11 +2218,17 @@ _WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
 #: request under one is admitted on the ROUTE axis (see ``monitoring``'s
 #: two-axis note) rather than the request-derived one. That matters because a
 #: mounted surface is a primary read path: on the derived axis, eight cheap 404s
-#: on UNRELATED paths starve it for the process lifetime (measured), while here
-#: unrelated junk cannot touch it at all. The prefix is the label — no
-#: per-sub-route precision is claimed for a sub-app whose inner routes this
-#: layer does not enumerate.
+#: on UNRELATED paths starve it for the process lifetime (measured). The prefix
+#: is the label — no per-sub-route precision is claimed for a sub-app whose
+#: inner routes this layer does not enumerate.
 _EGRESS_DECLARED_PREFIXES = ("/mcp",)
+
+#: Exact paths of the app's PLAIN Starlette routes — CODE LITERALS that FastAPI
+#: does not stamp onto the scope (``APIRoute.matches`` sets ``scope["route"]``,
+#: plain ``Route.matches`` does not), so they would otherwise be labelled on the
+#: request-derived axis with unknown traffic. ``test_declared_paths_match...``
+#: pins the list against ``app.routes`` so it cannot drift.
+_EGRESS_DECLARED_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
 
 #: Bounds on the fallback (request-derived) route label. A FastAPI route
 #: template is a code literal and always short; the normalised fallback is not,
@@ -2240,6 +2246,13 @@ def _route_describes(route, path: str) -> bool:
     NOT describe the prefixed request path and is rejected — which is the point:
     the sub-route must not stand in for the surface the caller actually hit.
 
+    ``re.match``, NOT ``fullmatch``: the router matches with ``match`` against
+    ``^…$`` (``starlette.routing.compile_path``), and Python's ``$`` also matches
+    just before a TRAILING NEWLINE — so the router serves ``/v1/version\n`` with
+    the ``/v1/version`` route while ``fullmatch`` rejects it. That divergence
+    put a matched route's bytes on the untrusted axis (measured), which is
+    exactly the direction this predicate exists to prevent.
+
     TOTAL: any failure to answer is ``False`` (fall back to the request-derived
     label), never an exception a caller could turn into a failed request.
     """
@@ -2247,7 +2260,7 @@ def _route_describes(route, path: str) -> bool:
     if regex is None:
         return getattr(route, "path", None) == path
     try:
-        return regex.fullmatch(path) is not None
+        return regex.match(path) is not None
     except Exception:  # noqa: BLE001, RUF100 - a label is never worth a 500
         return False
 
@@ -2282,16 +2295,23 @@ def _egress_route_class(scope, entry_path: str) -> tuple[str, bool]:
     — for a ``Mount`` — would also pick up the mount prefix in ``root_path``
     once the sub-app has run.
 
-    A path under a declared mount prefix is a CODE-LITERAL label on the ROUTE
-    axis, and the ``derived`` flag marks the rest as REQUEST-DERIVED so
-    ``monitoring.record_egress`` can admit them into a separate, tightly capped
-    budget: unknown traffic can never consume the code-literal route budget and
-    fold real routes into overflow.
+    A DECLARED path (a ``Mount`` prefix or a plain ``Route`` path — the app's
+    code literals that Starlette does not stamp onto the scope) is a
+    CODE-LITERAL label on the ROUTE axis, and the ``derived`` flag marks the
+    rest as REQUEST-DERIVED so ``monitoring.record_egress`` can admit them into
+    a separate, tightly capped budget: unknown traffic can never consume the
+    code-literal route budget and fold real routes into overflow.
     """
     path = entry_path or ""
-    for prefix in _EGRESS_DECLARED_PREFIXES:
-        if path == prefix or path.startswith(prefix + "/"):
-            return prefix, False
+    if path in _EGRESS_DECLARED_PATHS:
+        return path, False
+    # A dot-segment means the arrival path is a traversal shape the mount does
+    # not actually serve (`/mcp/../v1/version` is a 404), so it must not carry
+    # the mount's label.
+    if "." not in path:
+        for prefix in _EGRESS_DECLARED_PREFIXES:
+            if path == prefix or path.startswith(prefix + "/"):
+                return prefix, False
     route = scope.get("route")
     template = getattr(route, "path", None)
     if isinstance(template, str) and template and _route_describes(route, path):
@@ -2318,9 +2338,17 @@ class EgressBytesMiddleware:
     writes ``org_id`` into (Starlette's ``request.state`` IS that dict, and
     ``Mount`` forwards the same mapping to the MCP sub-app) and it is read
     AFTER the app returns, so an org resolved mid-request is still attributed.
-    A request that never resolved one (a 401, a health probe, an MCP call whose
-    org lives in the MCP ContextVar this layer cannot see) is recorded as
-    unattributed (``""``) — never invented.
+    A request that never resolved one is recorded as unattributed (``""``).
+    WHICH lanes resolve one is a real limit, stated rather than implied:
+      * the API-KEY data-plane lanes publish the org (``state["org_id"]``);
+      * the SESSION-JWT lane resolves an org but deliberately does not publish
+        it — ``state["org_id"]`` is also what ``AnalyticsMiddleware`` reads to
+        fire the ``first_api_call`` activation event, so publishing here would
+        change analytics, not just measurement;
+      * an MCP call's org is set inside the mount by ``mcp_auth`` in a
+        ContextVar this layer does not own.
+    Both non-publishing lanes are therefore attributed to ``""``: honest, and
+    the reason the figure is not yet a complete per-org cost.
 
     WHAT IT DOES NOT COUNT, stated rather than assumed:
       * response headers — the body is the payload cost;
