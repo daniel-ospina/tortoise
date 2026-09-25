@@ -254,6 +254,40 @@ def test_source_with_no_hash_gets_no_anchor(prov):
     assert _node_transit(proj, p["id"]) == "ABSENT"
 
 
+def test_whitespace_hash_gets_no_anchor_and_survives_rebuild(prov):
+    """Input: a registered Source with a WHITESPACE-ONLY ``contentHash``.
+
+    The producer and replay halves must apply the SAME absent rule: a blank
+    hash is not a version. A truthiness test (``h`` is truthy for ``'   '``)
+    admitted it on the LIVE side only — the node carried ``[[DOC, '   ']]`` and
+    the edge ``r.sourceVersion='   '`` (``_anchor_on_create`` nulls only
+    ``''``) while the replay predicate dropped the pair, so ``rebuild_all``
+    produced a BARE edge: a ``derived = replay(journal)`` divergence reachable
+    from plain SDK calls (``create_source(url, kind, contentHash='   ')``).
+
+    FAILS IF ``resolve_source_versions`` reverts to a truthiness test (live
+    would anchor) or if the replay drops what live wrote (live≠replay).
+    """
+    sdk, events, log_path = prov
+    sdk.create_source(DOC, "document", contentHash="   ")
+    p = sdk.create_point("statement", "claim", extractedFrom=DOC)
+
+    proj = _proj(sdk)
+    assert _has_edge(proj, p["id"], DOC), "guard: the edge itself must exist"
+    assert _edge_version(proj, p["id"], DOC) is None, \
+        "a blank hash must never reach the authoritative edge"
+    assert _node_transit(proj, p["id"]) == "ABSENT"
+
+    # Live == replay: a full rebuild must reproduce the honest-absent state.
+    _rebuilt(sdk, events)
+    proj = _proj(sdk)
+    assert _edge_version(proj, p["id"], DOC) is None
+    assert _node_transit(proj, p["id"]) == "ABSENT"
+    from tortoise.consistency import check_consistency
+    result = check_consistency(str(log_path), proj)
+    assert result["ok"], result
+
+
 def test_unregistered_source_gets_no_anchor(prov):
     """Input: a ref with no ``:Source`` node at all (the stub is minted with
     ``contentHash=''``).
@@ -288,9 +322,9 @@ def test_transit_is_a_pair_list_for_a_hash_bearing_source(prov):
     list of 2-element ``[str, str]`` pairs — never a scalar, and its hash agrees
     with the edge's scalar.
 
-    FAILS IF the CREATE-map write is lost (no transit at all — M14), if an
-    empty transit is written instead of omitted (M3), or if a pair degenerates
-    to a scalar/list-of-scalars.
+    FAILS IF the CREATE-map write is lost (no transit at all), if an empty
+    transit is written instead of omitted, or if a pair degenerates to a
+    scalar/list-of-scalars.
 
     (The honest-absent case above is the deliberate exception: an edge with NO
     transit. ``EventAPI``'s ingest-connection leg is out of scope here.)
@@ -568,11 +602,12 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
     with no gate-compared record. It must produce NEITHER.
 
     The ``bad-empty-hash``/``bad-blank-hash`` cases pin the non-empty member
-    rule: an empty/blank hash is the producers' HONEST-ABSENT signal, so a
-    hand-written ``[[DOC, '']]`` must not leave the node carrier claiming a
-    pair for DOC while ``_anchor_on_create`` nulls the edge — and a blank
-    ``'   '`` must not stamp garbage on the authoritative edge (the CASE only
-    matches ``''``). Both writers must agree it is absent.
+    rule: an empty or blank hash is an ABSENT read version (the producers omit
+    both — ``resolve_source_versions`` strip-tests), so a hand-written
+    ``[[DOC, '']]`` must not leave the node carrier claiming a pair for DOC
+    while ``_anchor_on_create`` nulls the edge — and a blank ``'   '`` must not
+    stamp garbage on the authoritative edge (the CASE only matches ``''``).
+    Both writers must agree it is absent.
     """
     sdk, events, log_path = prov
     sdk.create_point("statement", "the good point")
