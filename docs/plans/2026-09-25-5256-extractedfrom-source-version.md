@@ -3,7 +3,7 @@
 **Issue:** #5256 (`complexity:complex`, Level: task, epic #5088) · **Repo:** `daniel-ospina/tortoise`
 **Branch:** `feat/5256-extractedfrom-anchor` · **Base:** `origin/docs/5199-version-scope @ 52e703f89` (STACKED on PR #5207)
 **Predecessor:** `docs/plans/2026-09-25-5038-source-version-anchor.md` (Task 1, branch `docs/5038-scoping`)
-**Review cycle:** 8 (see §10).
+**Review cycle:** 9 (see §10).
 
 ---
 
@@ -401,9 +401,25 @@ only unkilled line (`return kept` left all 28 tests green) —
 never `[]`; (2) the stray-carrier drop is a deliberate **gate-visibility** change (a green-but-unfaithful
 graph becomes a REPORTED divergence) and the stray test now asserts that call; (3) two over-claims
 corrected — `_point_source_transit`'s "cannot disagree" (true of the selected pair SET, not of per-pair
-VALUES) and two test docstrings still describing the pre-round-5 resolved-key contract. The round-6
+VALUES) and one test docstring still describing the pre-round-5 resolved-key contract. The round-6
 re-review then found two more P3s, folded here: the first variant test's scope note was itself **false** —
 mutation shows the resolved-key mutant reddens BOTH variant tests (the LIVE anchor lands, the REPLAY edge
 goes bare, because the round-5 own-ref filter drops a pair keyed by the live-time resolution), so the note
 no longer claims the sibling alone pins the loss; and this §10 ledger entry + the header cycle count were
-advanced, which round 6 had missed.
+advanced, which round 6 had missed. *(Cycle 9 corrected this entry's count: the round-6 diff touched
+three docstrings, but only `test_scalar_ref_records_the_version…` still asserted the pre-round-5
+resolved-key contract — the other two were the gate-visibility note and the false scope note.)*
+
+**Cycle 9 — code review round 8 (re-review of `13f3f093f`).** No P0/P1/P2; three P3s, all
+mutation-adequacy on the RECOVERY path (the hand-written/foreign-journal class) — i.e. guards nobody's
+producer can reach, which is exactly why each one needed a test. Folded: (1) the
+`isinstance(value, (list, tuple))` clause of `_valid_transit_pairs` was killed by no test — a
+non-iterable carrier (`{"sourceVersionTransit": 5}`) raises `TypeError` inside `rebuild_all` and would
+abort the very recovery path the malformed-carrier test exists to keep total; the existing `bad-scalar`
+case used a STRING, which is a truthy iterable the pair loop already rejects, so it never discriminated
+the clause — added `bad-noniterable`. (2) The blank-KEY rule (`pair[0].strip()`, not `pair[0]`) was
+likewise unkilled: a blank-but-truthy ref survives `_point_source_refs`' falsy filter, so without the
+rule a `[["   ","h9"]]` carrier is written AND anchored — added `test_blank_key_pair_is_dropped`. (3)
+`_link_source`'s resolved-first `versions.get(ref)` was killed by no test; added
+`test_link_source_accepts_a_registry_keyed_by_the_resolved_url`, which pins the defensive contract (with
+only the raw-ref lookup, a registry keyed by the resolved url leaves the edge bare).
