@@ -576,6 +576,93 @@ class TestObjectSubjectQuota:
             tenant.close()
 
 
+# ── #1977: direct event writes count against the quota cap ────────────────
+
+class TestEventQuota:
+    """#1977 (code-review gate on PR #1974, the #1911 fix):
+    ``tortoise_create_event`` is ``_quota_gated("points")``, but the points
+    count did not include the Event label — a DIRECT call defaults to
+    ``is_episodic=None`` and mints a flag-less Event that consumed zero
+    quota, so the gate could never refuse (its failure mode was
+    indistinguishable from its success mode). The count now includes
+    non-episodic Event nodes, mirroring the Point fail-closed R-18 rule;
+    capture-minted Events (stamped ``is_episodic: true``) stay excluded."""
+
+    def _tenant(self, reg_sdk, tmp_path):
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
+        import os
+        return TortoiseSDK(
+            os.path.join(tmp_path, "quota.db"),
+            namespace=_find_org_id(reg_sdk))
+
+    def test_direct_events_count_toward_points(self, reg_sdk, tmp_path):
+        """A direct ``create_event`` (the MCP tool's default shape,
+        ``is_episodic=None``) is a graph node and consumes the node cap."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_event("kickoff", "meeting")
+            tenant.create_event("deploy", "deployment")
+            assert count_org_usage(tid, "points", sdk=tenant) == 2
+        finally:
+            tenant.close()
+
+    def test_direct_event_write_402_at_cap(self, reg_sdk, tmp_path):
+        """The gate REFUSES — pre-fix it could never refuse, because the
+        count could not see the Event the write was about to add."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_event("e1", "meeting")
+            with pytest.raises(QuotaExceededError, match="points limit reached"):
+                enforce_org_limit(
+                    {"org_id": tid, "max_points": 1}, "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_event_write_passes_below_cap(self, reg_sdk, tmp_path):
+        """Below the cap the gate still ADMITS — the fix must not turn the
+        points gate into an unconditional refusal for event writers."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_event("e1", "meeting")
+            enforce_org_limit(
+                {"org_id": tid, "max_points": 2}, "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_episodic_event_is_excluded(self, reg_sdk, tmp_path):
+        """The discriminator is the ``is_episodic`` flag, not the label —
+        an episodic Event (what capture/transcript minting stamps) consumes
+        no quota, exactly as an episodic Point does not."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant._get_proj().g.query(
+                "CREATE (e:Event {id:'ep1', eventId:'ep1', "
+                "eventKind:'AgentSession', is_episodic:true})")
+            assert count_org_usage(tid, "points", sdk=tenant) == 0
+            # and a flag-less Event beside it counts once
+            tenant.create_event("direct", "meeting")
+            assert count_org_usage(tid, "points", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_capture_minted_events_stay_excluded(self, reg_sdk, tmp_path):
+        """Regression: the capture path stamps its Events episodic, so the
+        Event branch must not re-charge capture users (the count stays 2 =
+        1 value point + 1 minted Object, exactly as #1911 pinned)."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.capture_session(
+                [{"role": "user", "content": "okay"}], session_id="ev_s1")
+            assert count_org_usage(tid, "points", sdk=tenant) == 2
+        finally:
+            tenant.close()
+
+
 class TestIsEpisodicBackfill:
     """R-18 (DE2E-7 legacy fixture): legacy nodes lack is_episodic → the
     one-query backfill (graph-scripts/backfill_is_episodic.py) stamps them →
@@ -624,11 +711,15 @@ class TestIsEpisodicBackfill:
                 "CREATE (k1:Point {id:'legacy_k1', content:'we decided X', "
                 "pointKind:'decision', is_operator:false, status:'live'})")
             # Pre-backfill: missing flag counts as NON-episodic (fail-closed,
-            # R-18) → 3 legacy Points (p1, p2, k1) inflate the points quota.
-            assert count_org_usage(tid, "points", sdk=tenant) == 3
+            # R-18) → 4 legacy nodes (p1, p2, k1 plus the flag-less
+            # sessionCaptured EVENT — #1977 added the Event label to the
+            # points count under the same R-18 rule) inflate the points
+            # quota. The backfill's Event statement exists for exactly this
+            # kind, so the remedy below covers the Event branch too.
+            assert count_org_usage(tid, "points", sdk=tenant) == 4
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_org_limit(
-                    {"org_id": tid, "max_points": 3}, "points", sdk=tenant)
+                    {"org_id": tid, "max_points": 4}, "points", sdk=tenant)
             # Dry-run reports without writing (5 capture artifacts: s, e, src,
             # p1, p2 — NOT k1)
             report = run_backfill(proj, dry_run=True)
