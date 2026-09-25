@@ -11,11 +11,13 @@ superseded_by: premise-labs product/2026-09-22-tortoise-beta-plan.md
 
 # Tortoise Launch Roadmap
 
-> ⛔ **SUPERSEDED — history only. Do not plan or dispatch from this document.**
+> ⛔ **SUPERSEDED and ARCHIVED — history only. Do not plan or dispatch from this document.**
 >
 > The beta's current plan is **`premise-labs` `product/2026-09-22-tortoise-beta-plan.md`** — the
 > objectives, the lanes, and the §10 master list (every open issue, ranked by user impact) — with its
 > status companion **`premise-labs` `product/2026-09-22-tortoise-beta-roadmap.md`**.
+>
+> Moved to `product/archive/` on 2026-09-25 so that it is out of the way of current work.
 >
 > This is a **2026-08-10 snapshot**: it audited "~145 open issues" and laid out Waves 0–3 against an
 > MVP definition of its own. Every count in it is stale (the tracker now holds ~1,156 open issues),
