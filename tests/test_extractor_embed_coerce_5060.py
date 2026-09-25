@@ -20,9 +20,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
+
+#: Non-string values an LLM can emit through `_parse_json_robust` rung 1
+#: (parsed JSON without `_validate_output_shape`).
+_NON_STRING_VALUES = [None, 0, 42, 1.5, False, [], {}]
 
 
 def _embed(embed_list: dict) -> dict:
@@ -108,3 +114,48 @@ class TestClipHelper:
     def test_explicit_limit_and_non_string_value(self):
         assert v2._clip(0, 40) == "0"
         assert v2._clip("y" * 100, 40) == "y" * 40
+
+
+class TestEveryReportLaneCoerces5060:
+    """Class-level sweep: EVERY report lane × every non-string value.
+
+    The tests above pin the exact rendering per lane. THIS table is the
+    structural guard: it reds if a report lane is added (or a lane's field
+    changes) without the coercion, which is the failure mode that let this
+    class recur through three separate site-scoped fixes — each closing only
+    the instance it was shown.
+    """
+
+    @staticmethod
+    def _embed_list(lane: str, value: object) -> dict:
+        if lane == "entity":
+            return {"entities": [{"name": value, "kind": None}]}
+        if lane == "event":
+            return {"events": [{"content": value, "eventKind": "minted:x"}]}
+        return {"points": [{"content": value, "pointKind": "minted:kind"}]}
+
+    @pytest.mark.parametrize("lane", ["entity", "event", "point"])
+    @pytest.mark.parametrize("value", _NON_STRING_VALUES, ids=repr)
+    def test_payload_survives_and_the_report_degrades(self, lane, value):
+        out = _embed(self._embed_list(lane, value))
+        assert out["payload"] is not None
+        assert out["minted_kinds"], (
+            f"{lane} lane emitted no report entry for {value!r} — the coerced "
+            "text never reached the report")
+        assert str(value)[:60] in out["minted_kinds"][0]
+
+    @pytest.mark.parametrize("value", _NON_STRING_VALUES, ids=repr)
+    def test_operator_warning_lane_coerces(self, value):
+        """The fifth site: a non-string MITIGATES `src` whose `str()` resolves
+        to a numeric point content reaches the strength warning's slice."""
+        text = str(value)
+        out = _embed({
+            "points": [{"content": text, "pointKind": "statement"},
+                       {"content": "dst point", "pointKind": "statement"}],
+            "operators": [{"src": value, "dst": "dst point",
+                           "op_type": "MITIGATES", "strength": "n/a"}],
+        })
+        assert out["payload"] is not None
+        assert any("MITIGATES strength 'n/a' not numeric" in w
+                   for w in out["warnings"]), out["warnings"]
+        assert any(f"('{text}'" in w for w in out["warnings"]), out["warnings"]
