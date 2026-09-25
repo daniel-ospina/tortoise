@@ -1,5 +1,11 @@
 """Every tools/ + graph-scripts/ entry point refuses a <3.12 interpreter (#5128).
 
+Scope: tracked ``tools/**/*.py`` + ``graph-scripts/*.py`` — **not "every repo
+entry point"**. ``.github/scripts/*.py`` and ``validation/*.py`` are invoked by
+CI workflows and are declared residue, not silently assumed covered. Two
+reasoned, re-derived exclusions are subtracted (``UNGUARDABLE``,
+``RUNTIME_39``).
+
 Why
 ---
 The repo pins Python 3.12 (`pyproject` `requires-python`, `.python-version`), but
@@ -22,9 +28,11 @@ between fixing #5128 and fixing the class (#5128, #4848, and the next tool).
 
 Corpus == scope, by construction
 --------------------------------
-``_corpus()`` is the same glob the guards were applied to: every tracked
-``tools/**/*.py`` and ``graph-scripts/*.py`` that is an entry point. One
-definition, so the test's corpus and the guard's scope cannot drift.
+``_corpus()`` is the filesystem glob **intersected with `git ls-files`**, so the
+corpus IS the tracked, reviewable scope: an untracked stray (`tools/scratch.py`)
+cannot silently join the guard assertions — ``test_every_corpus_file_is_tracked``
+reds on it instead. Two reasoned exclusions are then subtracted, each re-derived
+by its own test below so neither can outlive its reason.
 
 What it verifies (per entry point, no old interpreter needed)
 -------------------------------------------------------------
@@ -37,9 +45,13 @@ What it verifies (per entry point, no old interpreter needed)
    ``SystemExit``.
 3. EXECUTING the guard node with ``sys.version_info`` monkeypatched to
    ``(3, 9, 6)`` raises ``SystemExit`` whose message names the floor, the
-   interpreter it actually got, the file, and the ``uv run python <file>``
-   invocation; at ``(3, 12, 0)`` it does not raise. The node is compiled and
-   exec'd, so the assertion is on BEHAVIOUR, not on the guard's text.
+   interpreter it actually got, the file, and the invocation that ACTUALLY
+   works: ``uv run python -m tools.<pkg>.<mod>`` for a package module, the
+   script form for a loose script, and NO run clause for a library module with
+   no CLI. A refusal that names an invocation which itself dies is a SECOND
+   unattributed error — the exact harm #5128 was filed for. At ``(3, 12, 0)``
+   the guard does not raise. The node is compiled and exec'd, so the assertion
+   is on BEHAVIOUR, not on the guard's text.
 
 Declared bounds — what this file does NOT verify
 ------------------------------------------------
@@ -59,6 +71,12 @@ Declared bounds — what this file does NOT verify
   COMPILE under the floor and no statement in it can run. Its failure is a
   SyntaxError carrying a line number, not an unattributed one.
   `test_the_unguardable_exclusion_is_accurate` re-derives that reason.
+* **`tools/tmpdir_sweep.py`** is deliberately 3.9-RUNNABLE (`RUNTIME_39`) and so
+  carries no guard. It does not crash on an old interpreter — it runs clean —
+  and its documented scheduled invocation is `/usr/bin/python3 …` (the only
+  interpreter a minimal-PATH cron is guaranteed). Guarding it would convert a
+  working scheduled job into a refusal with no diagnostic benefit.
+  `test_the_runtime_39_exclusion_is_accurate` re-derives the 3.9-clean claim.
 * **`tools/**/__init__.py`** are package markers, not entry points.
 """
 
@@ -93,25 +111,125 @@ UNGUARDABLE: dict[str, str] = {
     ),
 }
 
-#: A small floor: the corpus is the measured `tools/**/*.py` + `graph-scripts/*.py`
-#: set. A glob that silently stopped matching must fail, never pass vacuously.
+#: Files the guard is deliberately NOT applied to because guarding them would
+#: REMOVE a working capability rather than convert a crash into a named refusal.
+#: Re-derived by `test_the_runtime_39_exclusion_is_accurate`, which actually RUNS
+#: each entry under a real <3.12 interpreter — so the moment a file stops being
+#: 3.9-clean this reds and names it, and the exclusion cannot outlive its reason.
+RUNTIME_39: dict[str, str] = {
+    "tools/tmpdir_sweep.py": (
+        "deliberately 3.9-runnable: it is 3.9-clean and its documented scheduled "
+        "invocation is `/usr/bin/python3 tools/tmpdir_sweep.py` (the only "
+        "interpreter a minimal-PATH cron is guaranteed) — the guard would turn a "
+        "working scheduled job into a refusal with no diagnostic benefit"
+    ),
+}
+
+#: A small floor: the corpus is the measured tracked `tools/**/*.py` +
+#: `graph-scripts/*.py` set. A glob that silently stopped matching must fail,
+#: never pass vacuously. (142 at the #5128 head: 144 tracked entry points, minus
+#: `UNGUARDABLE`, minus `RUNTIME_39`.)
 MIN_CORPUS = 140
 
 
-def _corpus() -> list[Path]:
+def _git_lines(*args: str) -> list[str]:
+    """`git <args>` lines from ROOT. Loud on failure: a corpus derived from an
+    unreadable index must never silently fall back to a filesystem glob."""
+    proc = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+    assert proc.returncode == 0, f"git {' '.join(args)} failed:\n{proc.stderr}"
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def _tracked() -> set[str]:
+    """Every tracked .py under the corpus dirs — the reviewable scope."""
+    return {rel for rel in _git_lines("ls-files", "--", *CORPUS_DIRS) if rel.endswith(".py")}
+
+
+def _globbed() -> list[Path]:
     files: list[Path] = []
     for base in CORPUS_DIRS:
-        for path in sorted((ROOT / base).rglob("*.py")):
-            if "__pycache__" in path.parts or path.name in EXCLUDED_NAMES:
-                continue
-            if _rel(path) in UNGUARDABLE:
-                continue
-            files.append(path)
+        files.extend(sorted((ROOT / base).rglob("*.py")))
     return files
 
 
 def _rel(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
+
+
+def _corpus() -> list[Path]:
+    """corpus == glob ∩ tracked scope, minus the reasoned exclusions.
+
+    `git ls-files` is what makes the corpus reviewable scope: an untracked stray
+    cannot silently join the guard assertions (`test_every_corpus_file_is_tracked`
+    reds on one instead).
+    """
+    tracked = _tracked()
+    files: list[Path] = []
+    for path in _globbed():
+        if "__pycache__" in path.parts or path.name in EXCLUDED_NAMES:
+            continue
+        rel = _rel(path)
+        if rel not in tracked:
+            continue
+        if rel in UNGUARDABLE or rel in RUNTIME_39:
+            continue
+        files.append(path)
+    return sorted(files)
+
+
+def _package_module(rel: str) -> str | None:
+    """The dotted path this file is imported under, or None if it is a loose script.
+
+    A file is a PACKAGE MODULE when it sits below a directory chain in which every
+    directory has an ``__init__.py`` — i.e. ``tools.<pkg>.<mod>`` is a real import
+    path. Its only working invocation is ``python -m``: run as a script,
+    ``sys.path[0]`` is the module's own directory, so a relative import raises
+    ``ImportError`` and an absolute ``tools.*`` import raises ``ModuleNotFoundError``
+    (both measured at head, #5136). ``tools/experiments/extractor-v2/*.py`` is NOT a
+    package (no ``__init__.py``, and the directory name is not an identifier), so it
+    keeps the script form.
+    """
+    parts = Path(rel).parts
+    if parts[0] != "tools" or len(parts) < 3:
+        return None
+    for depth in range(2, len(parts)):
+        if not (ROOT / Path(*parts[:depth]) / "__init__.py").is_file():
+            return None
+    return ".".join((*parts[:-1], Path(rel).stem))
+
+
+def _has_cli(tree: ast.Module) -> bool:
+    """A module-level ``if __name__ == "__main__":`` — the file is runnable."""
+    return any(
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+        for node in tree.body
+    )
+
+
+def _expected_invocation(rel: str, tree: ast.Module) -> str | None:
+    """The invocation that ACTUALLY works, or None for a library module with no CLI
+    (the refusal must then carry NO run clause).
+
+    A PACKAGE module is addressed by its dotted path: ``-m`` when it has a CLI,
+    and no run clause at all when it is a library. A LOOSE script is run by path,
+    whether or not it gates on ``__main__`` — many ``graph-scripts/`` files are
+    one-shot scripts that do their work at module level.
+
+    `test_expected_invocation_matches_the_working_form` pins this decision, and
+    `test_the_dash_m_invocation_the_refusal_names_actually_resolves` proves the
+    ``-m`` path it names resolves.
+    """
+    dotted = _package_module(rel)
+    if dotted is not None:
+        return f"uv run python -m {dotted}" if _has_cli(tree) else None
+    return f"uv run python {rel}"
+
+
+def _dash_m_corpus() -> list[Path]:
+    return [path for path in _corpus() if _package_module(_rel(path)) is not None]
 
 
 # ── the detector ─────────────────────────────────────────────────────────────
@@ -246,10 +364,62 @@ def test_the_corpus_is_not_vacuously_empty():
 
 
 def test_every_corpus_file_is_tracked():
-    """The corpus is the SCOPE — an untracked stray must not silently join it."""
-    rels = {_rel(path) for path in _corpus()}
-    untracked = [rel for rel in sorted(rels) if not (ROOT / rel).is_file()]
-    assert not untracked, f"corpus entries with no file on disk: {untracked}"
+    """The corpus is the SCOPE — an untracked stray must not silently join it.
+
+    Both directions are real assertions now (the old version globbed the
+    filesystem and then asserted those same paths were files — it could never
+    fail). An untracked, non-ignored ``.py`` under the corpus dirs reds by name,
+    and a tracked file that has vanished from disk reds because the corpus can
+    no longer be asserted for it.
+    """
+    strays = [
+        rel
+        for rel in _git_lines(
+            "ls-files", "--others", "--exclude-standard", "--", *CORPUS_DIRS
+        )
+        if rel.endswith(".py") and Path(rel).name not in EXCLUDED_NAMES
+    ]
+    assert not strays, (
+        f"untracked .py under {CORPUS_DIRS} is not reviewable scope: {strays} — "
+        "commit it (so its guard is reviewed) or move it out of tools/ + graph-scripts/"
+    )
+    missing = [
+        rel for rel in sorted(_tracked()) if rel.endswith(".py") and not (ROOT / rel).is_file()
+    ]
+    assert not missing, f"tracked corpus files absent from disk: {missing}"
+
+
+def test_the_runtime_39_exclusion_is_accurate():
+    """The deliberate 3.9-runnable carve-out must still RUN under a real <3.12
+    interpreter.
+
+    This is the reason the guard is NOT applied to ``tools/tmpdir_sweep.py``: it
+    is 3.9-clean and its documented scheduled invocation is
+    ``/usr/bin/python3 tools/tmpdir_sweep.py`` — the only interpreter a
+    minimal-PATH cron is guaranteed. Guarding it would convert a working
+    scheduled job into a refusal. Re-derived, not asserted: the moment the file
+    stops being 3.9-clean this reds and names it, so the exclusion cannot
+    outlive its reason.
+
+    Declared bound: on a 3.12-only runner there is no pre-3.12 interpreter and
+    this SKIPS visibly rather than passing.
+    """
+    old = _pre_312_interpreter()
+    if old is None:
+        pytest.skip(
+            "no <3.12 interpreter on this box: cannot re-derive the deliberately "
+            "3.9-runnable exclusion (it runs wherever one exists)"
+        )
+    for rel, reason in RUNTIME_39.items():
+        assert reason, f"{rel}: the exclusion must carry its reason"
+        probe = subprocess.run(
+            [old, str(ROOT / rel), "--help"], capture_output=True, text=True
+        )
+        assert probe.returncode == 0, (
+            f"{rel} is excluded as deliberately 3.9-runnable ('{reason}') but {old} "
+            f"could not run it (rc={probe.returncode}) — guard it and delete the "
+            f"exclusion, or restate the exclusion:\n{probe.stderr}"
+        )
 
 
 def test_the_unguardable_exclusion_is_accurate():
@@ -390,11 +560,82 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(path: Path, monke
     message = str(refusal.value)
     assert ">= 3.12" in message, f"{rel}: refusal must name the floor: {message!r}"
     assert "(got 3.9)" in message, f"{rel}: refusal must name the interpreter it got: {message!r}"
-    assert "uv run python" in message, f"{rel}: refusal must name the working invocation: {message!r}"
     assert rel in message, f"{rel}: refusal must name the file: {message!r}"
+
+    invocation = _expected_invocation(rel, _parse(path))
+    dotted = _package_module(rel)
+    if invocation is None:
+        assert "run it as" not in message and "uv run python" not in message, (
+            f"{rel}: a library module with no CLI must not be told to RUN it — "
+            f"that invocation does not work: {message!r}"
+        )
+    else:
+        assert invocation in message, (
+            f"{rel}: refusal must name the invocation that WORKS "
+            f"(`{invocation}`): {message!r}"
+        )
+    if dotted is not None:
+        # #5136 P1: for a package module the SCRIPT form is a second
+        # unattributed error (ImportError / ModuleNotFoundError) — never name it.
+        assert f"uv run python {rel}" not in message, (
+            f"{rel}: refusal names the script form, which does NOT work for a "
+            f"package module (its relative / `tools.*` import dies): {message!r}"
+        )
 
     monkeypatch.setattr(sys, "version_info", (*FLOOR, 0))
     exec(code, namespace)  # at the floor the guard must be inert
+
+
+@pytest.mark.parametrize("path", _dash_m_corpus(), ids=_rel)
+def test_the_dash_m_invocation_the_refusal_names_actually_resolves(path: Path):
+    """★ #5136 P1: every `-m <dotted>` the refusal names must RESOLVE.
+
+    A refusal that names an invocation which itself dies is a SECOND
+    unattributed error — the exact harm #5128 was filed for. `find_spec` resolves
+    the dotted path from the repo root without importing the module (or its heavy
+    deps), so this is cheap and total: a renamed, moved, or un-packaged module
+    reds here instead of at the operator's terminal.
+    """
+    rel = _rel(path)
+    dotted = _package_module(rel)
+    assert dotted is not None, f"{rel}: not a package module"
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib.util, sys; "
+            "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)",
+            dotted,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, (
+        f"{rel} refusal names `uv run python -m {dotted}`, but that dotted path "
+        f"does not resolve from the repo root:\n{probe.stderr}"
+    )
+
+
+def test_expected_invocation_matches_the_working_form():
+    """Pin the decision the refusals are generated from.
+
+    `tools/longmem_eval/run.py` — package module with a CLI → `-m`.
+    `tools/longmem_eval/report.py` — package module with NO CLI → no run clause.
+    `tools/branch_reaper.py` — loose script → the script form.
+    """
+    assert _expected_invocation(
+        "tools/longmem_eval/run.py", _parse(ROOT / "tools/longmem_eval/run.py")
+    ) == "uv run python -m tools.longmem_eval.run"
+    assert (
+        _expected_invocation(
+            "tools/longmem_eval/report.py", _parse(ROOT / "tools/longmem_eval/report.py")
+        )
+        is None
+    )
+    assert _expected_invocation(
+        "tools/branch_reaper.py", _parse(ROOT / "tools/branch_reaper.py")
+    ) == "uv run python tools/branch_reaper.py"
 
 
 def _pre_312_interpreter() -> str | None:
