@@ -3081,6 +3081,78 @@ def _validate_mint_expiry(body: dict) -> str | None:
 _PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
 _PROBE_SDK_LOCK = threading.Lock()
 
+# ── #4608: a displaced probe handle is RETIRED, never closed under a live probe
+#
+# A probe fetches the cached handle, releases ``_PROBE_SDK_LOCK`` and queries it
+# (``probe_db``) with NO lock held, so a ``_probe_sdk_reset()`` or a target
+# change landing in that window used to CLOSE the handle underneath the live
+# query. The query then failed and its ``{ok: False}`` was recorded as the
+# CURRENT generation — a spurious ``degraded`` for a reachable graph. The
+# coordinator's own ``seq`` check cannot help here: a reset does not touch
+# ``HealthProbe._seq`` at all, and on this surface ``_HEALTH_PROBE`` and
+# ``_READY_PROBE`` share this ONE cache while keeping INDEPENDENT ``_seq``
+# counters, so a reset driven by either can close a handle the other's
+# in-flight worker is using with no generation protection whatsoever.
+#
+# So the close is DEFERRED while any probe is in flight: a displaced handle goes
+# on ``_PROBE_SDK_DEFERRED`` and the last probe episode to finish closes it.
+# ``_PROBE_SDK_EPISODES`` is taken under ``_PROBE_SDK_LOCK`` BEFORE the handle
+# is fetched — the same lock the retirement decision takes — so no reset or
+# rebuild can observe "no probe in flight" while a probe sits between its fetch
+# and its release.
+_PROBE_SDK_EPISODES = 0
+_PROBE_SDK_DEFERRED: list = []
+
+
+def _retire_probe_sdk_locked(sdk):
+    """Displace ``sdk`` from the cache and decide who closes it (#4608).
+
+    Returns ``sdk`` when the CALLER must close it (no probe is in flight), or
+    ``None`` when the close is deferred to the last in-flight probe. A
+    displaced handle is never handed out again, so exactly one path closes each
+    one. Caller holds ``_PROBE_SDK_LOCK``.
+    """
+    if sdk is None:
+        return None
+    if _PROBE_SDK_EPISODES == 0:
+        return sdk
+    _PROBE_SDK_DEFERRED.append(sdk)
+    return None
+
+
+def _close_probe_sdks(sdks) -> None:
+    """Close displaced probe handles, out of the lock, never raising."""
+    for sdk in sdks:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _probe_episode():
+    """Account for ONE probe execution against the cached handle (#4608).
+
+    Held across the whole of ``_probe_db`` — handle acquisition AND query — so
+    a reset/rebuild landing at any point in between defers the close instead of
+    pulling the connection out from under this probe. Opened under
+    ``_PROBE_SDK_LOCK`` before the handle is fetched; the last episode to
+    finish performs any deferred close.
+    """
+    global _PROBE_SDK_EPISODES
+    with _PROBE_SDK_LOCK:
+        _PROBE_SDK_EPISODES += 1
+    try:
+        yield
+    finally:
+        with _PROBE_SDK_LOCK:
+            _PROBE_SDK_EPISODES -= 1
+            deferred = (list(_PROBE_SDK_DEFERRED)
+                        if _PROBE_SDK_EPISODES == 0 else [])
+            if deferred:
+                _PROBE_SDK_DEFERRED.clear()
+        _close_probe_sdks(deferred)
+
 
 def _probe_sdk_key() -> tuple:
     """Identity of the DB target the cached probe SDK is bound to.
@@ -3098,16 +3170,19 @@ def _probe_sdk_key() -> tuple:
 
 
 def _probe_sdk_reset() -> None:
-    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    """Close + drop the cached probe SDK (app startup / tests / ops).
+
+    #4608: the close is DEFERRED while a probe is in flight — the handle is
+    dropped from the cache immediately, but a live query keeps the connection
+    it is using until it releases it.
+    """
     with _PROBE_SDK_LOCK:
         sdk = _PROBE_SDK_CACHE.get("sdk")
         _PROBE_SDK_CACHE["sdk"] = None
         _PROBE_SDK_CACHE["key"] = None
-    if sdk is not None:
-        try:  # noqa: SIM105 — a stale temp DB may already be gone
-            sdk.close()
-        except Exception:
-            pass
+        close_now = _retire_probe_sdk_locked(sdk)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
 
 
 def _probe_sdk() -> TortoiseSDK:
@@ -3138,11 +3213,11 @@ def _probe_sdk() -> TortoiseSDK:
         sdk = _make_sdk(namespace=None)
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
-    if old is not None:
-        try:  # noqa: SIM105
-            old.close()
-        except Exception:
-            pass
+        # #4608: a target change displaces ``old``; close it only when no probe
+        # is still querying it.
+        close_now = _retire_probe_sdk_locked(old)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
     return sdk
 
 
@@ -3169,12 +3244,15 @@ def _probe_db() -> dict:
     registry_control_plane on every health check.
     """
     from tortoise.monitoring import probe_db
-    try:
-        sdk = _probe_sdk()
-    except Exception as exc:
-        _probe_sdk_reset()
-        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return probe_db(sdk)
+    # #4608: the episode spans the handle fetch AND the query, so a reset or a
+    # target change cannot close this handle mid-query.
+    with _probe_episode():
+        try:
+            sdk = _probe_sdk()
+        except Exception as exc:
+            _probe_sdk_reset()
+            return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
+        return probe_db(sdk)
 
 
 # The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
