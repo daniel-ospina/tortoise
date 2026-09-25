@@ -86,6 +86,11 @@ OAUTH_CODE_RETENTION_S = 86400
 OAUTH_ACCESS_RETENTION_S = 86400
 OAUTH_REFRESH_RETENTION_S = 86400
 
+# Upper bound on any retention window (10 years). A larger override is
+# indistinguishable from "retention off" AND overflows the cutoff arithmetic
+# (``timedelta`` raises OverflowError), which would skip that table forever.
+_MAX_RETENTION_S = 10 * 365 * 86400
+
 
 def _retention_seconds(env_name: str, default: int) -> int:
     """Resolve a retention window from the environment, fail-safe (#3036).
@@ -95,19 +100,23 @@ def _retention_seconds(env_name: str, default: int) -> int:
     This matters because the window is SUBTRACTED from ``now`` to form a
     DELETE cutoff — a negative or malformed value would otherwise delete live
     rows (or raise at import, silently disabling retention).
+
+    The parse is deliberately STRICT — ASCII ``str.isdigit`` — because bare
+    ``int()`` also accepts a sign (``+5``), underscore separators (``1_0``)
+    and non-ASCII digit forms (``٣`` = 3). None of those is a window a human
+    meant, and the last two resolve to a far shorter window than intended.
     """
     raw = os.environ.get(env_name)
     if raw is None:
         return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        logger.warning("oauth: %s=%r is not an integer — using %ss",
+    if not (raw.isascii() and raw.isdigit()):
+        logger.warning("oauth: %s=%r is not a positive integer — using %ss",
                        env_name, raw, default)
         return default
-    if value <= 0:
-        logger.warning("oauth: %s=%r must be positive — using %ss",
-                       env_name, raw, default)
+    value = int(raw)
+    if value <= 0 or value > _MAX_RETENTION_S:
+        logger.warning("oauth: %s=%r outside 1..%d — using %ss",
+                       env_name, raw, _MAX_RETENTION_S, default)
         return default
     return value
 # Distinct prefixes so the MCP auth middleware can route Bearer tokens without
@@ -1906,9 +1915,18 @@ def sweep_oauth_retention(cp, *, now: datetime | None = None) -> dict[str, int]:
     looks up the live access row by ``refresh_token_id`` to revoke it): an
     access row is reaped before any refresh row it points at, so the
     ``ON DELETE SET NULL`` action added by migration 20260925000001 is a safety
-    net for an out-of-band / manual delete, not this path. The invariant this
-    relies on is ``ACCESS_TOKEN_TTL_S + access window <= REFRESH_TOKEN_TTL_S +
-    refresh window`` — true for the defaults and independent of any override.
+    net for an out-of-band / manual delete, not this path.
+
+    The invariant that makes the order sufficient is ``ACCESS_TOKEN_TTL_S +
+    access window <= REFRESH_TOKEN_TTL_S + refresh window``. It HOLDS for the
+    shipped defaults; it is NOT enforced, so an operator override that inverts
+    the two TTLs relative to the two windows can leave a LIVE access row
+    pointing at a reap-eligible refresh row, and this sweep then NULLs that
+    back-link via the FK. That is a PROVENANCE loss, not a revocation gap: no
+    read path treats a NULL pointer as a live grant (``refresh_grant``
+    resolves the refresh row by hash first and only then dereferences; the
+    rotation path cannot run once the parent row is gone), and the access
+    token still carries its own ``expires_at``/``revoked_at`` check.
 
     Each table is swept INDEPENDENTLY: a failure on one table is recorded and
     the other two are still attempted, so a persistent query fault cannot
@@ -1956,5 +1974,6 @@ def sweep_oauth_retention(cp, *, now: datetime | None = None) -> dict[str, int]:
                            table, exc)
     if failures:
         raise RuntimeError(
-            f"oauth retention sweep failed for {sorted(failures)}")
+            "oauth retention sweep failed for "
+            + ", ".join(f"{t}: {failures[t][:200]}" for t in sorted(failures)))
     return observed

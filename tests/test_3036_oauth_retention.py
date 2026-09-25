@@ -118,8 +118,12 @@ def test_one_table_failure_does_not_starve_the_others():
         _seed_three(cp, table, retention_s)
     cp.fail_query(table="oauth_access_tokens", method="GET")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         sweep_oauth_retention(cp, now=NOW)
+    # The error must NAME the failing table and carry a reason — a bare
+    # `sorted(failures)` (table names only) is un-diagnosable in a log.
+    assert "oauth_access_tokens" in str(excinfo.value)
+    assert str(excinfo.value) != "oauth retention sweep failed for ['oauth_access_tokens']"
 
     # The two healthy tables were swept despite the access-table fault.
     assert {row["id"] for row in cp.tables["oauth_refresh_tokens"]} == {
@@ -136,21 +140,61 @@ def test_retention_windows_are_positive():
 
 def test_negative_retention_override_never_deletes_live_rows(monkeypatch):
     """A negative window would move the cutoff INTO THE FUTURE and delete live
-    credentials. The resolver must fall back to the safe default instead."""
+    credentials. The resolver must fall back to the safe DEFAULT instead — and
+    the test must prove the FALLBACK, not merely survival: a row expired 30
+    minutes ago is KEPT (a `max(0, abs(-3600))` reading would delete it)."""
     monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", "-3600")
     monkeypatch.setenv("TORTOISE_OAUTH_REFRESH_RETENTION_S", "not-a-number")
     monkeypatch.setenv("TORTOISE_OAUTH_CODE_RETENTION_S", "0")
     cp = FakeControlPlane()
     for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
-        cp.seed(table, [{"id": f"{table}-live",
-                         "expires_at": _iso(NOW + timedelta(hours=1))}])
+        cp.seed(table, [
+            {"id": f"{table}-live",
+             "expires_at": _iso(NOW + timedelta(hours=1))},
+            # Expired 30 min ago — inside the 86400s default and outside every
+            # bad override, so only a true fallback keeps it.
+            {"id": f"{table}-grace",
+             "expires_at": _iso(NOW - timedelta(minutes=30))},
+        ])
 
     observed = sweep_oauth_retention(cp, now=NOW)
 
     assert observed == {"oauth_access_tokens": 0, "oauth_refresh_tokens": 0,
                         "oauth_codes": 0}
     for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
-        assert [row["id"] for row in cp.tables[table]] == [f"{table}-live"]
+        assert {row["id"] for row in cp.tables[table]} == {
+            f"{table}-live", f"{table}-grace"}
+
+
+def test_a_valid_positive_override_is_applied(monkeypatch):
+    """The mirror of the fallback test: a well-formed override really is used
+    (otherwise `_retention_seconds` could ignore the env entirely)."""
+    monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", "600")
+    cp = FakeControlPlane().seed("oauth_access_tokens", [
+        {"id": "access-past",
+         "expires_at": _iso(NOW - timedelta(minutes=30))},   # outside 600s
+        {"id": "access-inwindow",
+         "expires_at": _iso(NOW - timedelta(minutes=5))},    # inside 600s
+    ])
+
+    assert sweep_oauth_retention(cp, now=NOW)["oauth_access_tokens"] == 1
+    assert [r["id"] for r in cp.tables["oauth_access_tokens"]] == [
+        "access-inwindow"]
+
+
+@pytest.mark.parametrize("raw", [
+    "+5", "1_0", "\u0663", "0", "", " 5", "5 ", "1e9",
+    "99999999999999999999",  # ascii digits but astronomically large
+])
+def test_retention_override_rejects_anything_not_a_plain_positive_int(raw, monkeypatch):
+    """Strict parse: `int()` alone accepts ``+5``, ``1_0`` and non-ASCII digits
+    (``\u0663`` = 3), each of which silently yields a window far shorter than
+    intended; a huge value overflows the cutoff arithmetic."""
+    from tortoise.oauth import _retention_seconds
+
+    monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", raw)
+    assert _retention_seconds("TORTOISE_OAUTH_ACCESS_RETENTION_S",
+                              OAUTH_ACCESS_RETENTION_S) == OAUTH_ACCESS_RETENTION_S
 
 
 # ── the caller / scheduling wiring ──────────────────────────────────────────

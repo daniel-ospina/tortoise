@@ -469,6 +469,17 @@ SOURCE_PATTERNS = {
             # its pinning tests are registered across api, core AND ep, so the
             # named-surface match must not drop `core` (see CORE_ALSO).
             "tortoise/api.py",
+            # #3036: tortoise/oauth.py is the hosted OAuth implementation, and
+            # its pinning tests are `api`-registered (test_oauth_mcp.py,
+            # test_oauth_token_fault.py, test_3036_oauth_retention.py,
+            # test_attribution_actor.py, test_user_identity_authority.py) plus
+            # `api`+`core` (test_control_plane_offload_3498.py). Without this
+            # entry an oauth.py-only change selected no named surface and fell
+            # through to `core`, silently skipping ALL of those — the
+            # #2938/#3154/#4367 silent-drop class, on the file a retention- or
+            # token-flow fix must change. Paired with CORE_ALSO so the
+            # core-registered half is not dropped by the named-surface match.
+            "tortoise/oauth.py",
             # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
             # and `test_bridge_table.py` (registered in `api`) is the drift gate
             # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
@@ -562,7 +573,12 @@ SOURCE_PATTERNS = {
 # tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
-             "tools/tmpdir_sweep.py")
+             "tools/tmpdir_sweep.py",
+             # #3036: oauth.py is pinned by BOTH api-registered tests
+             # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
+             # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
+             # `api` match must not drop the core half.
+             "tortoise/oauth.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (

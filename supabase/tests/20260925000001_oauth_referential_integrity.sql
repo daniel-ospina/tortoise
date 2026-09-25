@@ -46,26 +46,34 @@ INSERT INTO public.oauth_clients (id, client_name)
 VALUES ('3036-client', '3036-client');
 
 -- ── 1. Both constraints exist with the deliberate ON DELETE SET NULL policy ─
+-- Table-QUALIFIED: PostgreSQL scopes constraint/index names per table, so a
+-- same-named object on another table must not be able to satisfy these probes.
 SELECT tests.assert(
   (SELECT count(*) FROM pg_constraint
     WHERE conname IN ('fk_oauth_access_tokens_refresh_token',
-                      'fk_oauth_refresh_tokens_rotated_from')) = 2,
+                      'fk_oauth_refresh_tokens_rotated_from')
+      AND conrelid IN ('public.oauth_access_tokens'::regclass,
+                       'public.oauth_refresh_tokens'::regclass)) = 2,
   '3036: both OAuth FK constraints exist');
 
 SELECT tests.assert(
   (SELECT confdeltype FROM pg_constraint
-    WHERE conname = 'fk_oauth_access_tokens_refresh_token') = 'n',
+    WHERE conname = 'fk_oauth_access_tokens_refresh_token'
+      AND conrelid = 'public.oauth_access_tokens'::regclass) = 'n',
   '3036: refresh_token_id FK is ON DELETE SET NULL (not CASCADE)');
 
 SELECT tests.assert(
   (SELECT confdeltype FROM pg_constraint
-    WHERE conname = 'fk_oauth_refresh_tokens_rotated_from') = 'n',
+    WHERE conname = 'fk_oauth_refresh_tokens_rotated_from'
+      AND conrelid = 'public.oauth_refresh_tokens'::regclass) = 'n',
   '3036: rotated_from FK is ON DELETE SET NULL (not CASCADE)');
 
 -- ── 2. Retention-sweep indexes on expires_at exist (all three tables) ──────
 SELECT tests.assert(
   (SELECT count(*) FROM pg_indexes
     WHERE schemaname = 'public'
+      AND tablename IN ('oauth_codes', 'oauth_access_tokens',
+                        'oauth_refresh_tokens')
       AND indexname IN ('idx_oauth_codes_expires',
                         'idx_oauth_access_tokens_expires',
                         'idx_oauth_refresh_tokens_expires')) = 3,

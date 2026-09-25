@@ -28,9 +28,13 @@
 --     point at, and rotation can only run while the refresh row still exists —
 --     but the safety of that order rests on an explicit invariant:
 --     ACCESS_TOKEN_TTL_S + the access window <= REFRESH_TOKEN_TTL_S + the
---     refresh window. Removing a dead refresh row must not revoke a live access
---     token (CASCADE would) nor block GC of the dead row (RESTRICT would).
---     SET NULL drops the provenance back-link and nothing else.
+--     refresh window. The DEFAULTS satisfy it; it is NOT enforced, so an
+--     operator override that inverts the two TTLs relative to the two windows
+--     can NULL a LIVE access row's back-link (a provenance loss only — see the
+--     ``sweep_oauth_retention`` docstring). Removing a dead refresh row must
+--     not revoke a live access token (CASCADE would) nor block GC of the dead
+--     row (RESTRICT would). SET NULL drops the provenance back-link and
+--     nothing else.
 --
 --   * rotated_from. This forms a rotation CHAIN (each new refresh row points at
 --     the row it replaced), so ON DELETE CASCADE would delete the entire
@@ -39,10 +43,10 @@
 --     descendant survives, so a revoked row could never be reaped. SET NULL
 --     keeps every surviving row and loses at most one back-link.
 --
--- In practice a live access row never references a reap-eligible refresh row:
--- access rows expire in ACCESS_TOKEN_TTL_S and are reaped long before refresh
--- rows (REFRESH_TOKEN_TTL_S). The FK action is the safety net for a manual /
--- admin delete, not a routine path.
+-- In practice a live access row never references a reap-eligible refresh row
+-- with the shipped DEFAULTS: access rows expire in ACCESS_TOKEN_TTL_S and are
+-- reaped long before refresh rows (REFRESH_TOKEN_TTL_S). The FK action is the
+-- safety net for a manual / admin delete, not a routine path.
 --
 -- BACKFILL REPAIR: the FKs are added only after nulling any PRE-EXISTING
 -- dangling pointer (a row whose target id no longer exists). Production should
@@ -50,8 +54,11 @@
 -- the deploy on the first dangling row, so the repair is unconditional and
 -- idempotent. It touches no other column and moves no data.
 --
--- Additive only: two NULL-able FK constraints. No column added/dropped, no row
--- inserted/updated except the dangling-pointer repair above.
+-- Additive only: two NULL-able FK constraints + three `expires_at` indexes.
+-- No column added/dropped, no row inserted/updated except the dangling-pointer
+-- repair above. Each CREATE INDEX is NON-concurrent, so it takes a write lock
+-- on its token table for the duration of the build — noted because a plain
+-- "additive" header under-counts a migration's lock footprint.
 -- ============================================================================
 
 -- 1) Repair dangling pointers so the constraints can be added and validated.
