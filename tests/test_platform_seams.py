@@ -598,6 +598,99 @@ def test_install_codex_leaves_foreign_volunteer_hook_untouched(tmp_path):
     assert len(cfg["hooks"]["UserPromptSubmit"]) == 1
 
 
+def test_uninstall_never_deletes_config_the_installer_did_not_write(tmp_path):
+    """#2383 (weak ownership markers): ``--uninstall`` must delete ONLY
+    registrations this installer can PROVE it wrote.
+
+    The old ownership marker was a substring (``"volunteer-turn.sh" in
+    command``), so ``--uninstall`` silently DESTROYED config the install half
+    explicitly refuses to rewrite (R2):
+
+      * a user's WRAPPER of the script (firejail / venv-pinned),
+      * another product's LIVE ``volunteer-turn.sh`` at a different path,
+      * a cline hook that merely MENTIONS the script name in a comment.
+
+    MUST NEVER HAPPEN: an uninstall never removes a registration it cannot
+    prove it created.  The positive control (our own registration is still
+    removed) is the other half of the pin — a refusal that also refuses our
+    own hook would pass every survival assertion while breaking the command.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # (a) codex: a user WRAPPER of our script survives --uninstall.
+    wrap_dir = tmp_path / "wrap"
+    wrapped = ("'/usr/local/bin/firejail' "
+               "'/opt/tortoise/volunteer-turn.sh' codex")
+    wrap_cfg = {"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": wrapped}]}]}}
+    (wrap_dir / ".codex").mkdir(parents=True)
+    (wrap_dir / ".codex" / "hooks.json").write_text(json.dumps(wrap_cfg))
+    r = _run(["install", "codex", "--dir", str(wrap_dir), "--uninstall"],
+             env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert json.loads((wrap_dir / ".codex" / "hooks.json").read_text()) \
+        == wrap_cfg, "a user wrapper was destroyed by --uninstall"
+
+    # (b) codex: another product's LIVE hook at a different path survives.
+    biz_dir = tmp_path / "foreign"
+    foreign_dir = biz_dir / "gbrain"
+    foreign_dir.mkdir(parents=True)
+    foreign_script = foreign_dir / "volunteer-turn.sh"
+    foreign_script.write_text("#!/usr/bin/env bash\n")
+    foreign = f"'{foreign_script}' codex"
+    foreign_cfg = {"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": foreign}]}]}}
+    (biz_dir / ".codex").mkdir()
+    (biz_dir / ".codex" / "hooks.json").write_text(json.dumps(foreign_cfg))
+    r = _run(["install", "codex", "--dir", str(biz_dir), "--uninstall"], env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert json.loads((biz_dir / ".codex" / "hooks.json").read_text()) \
+        == foreign_cfg, "another product's live hook was destroyed"
+
+    # (c) cline: a user hook that merely MENTIONS the script survives.
+    men_dir = tmp_path / "mention"
+    men_hook = men_dir / ".cline" / "hooks" / "UserPromptSubmit"
+    men_hook.parent.mkdir(parents=True)
+    user_text = ("#!/usr/bin/env bash\n"
+                 "# I also have the tortoise volunteer-turn.sh installed\n"
+                 'echo "my own logging hook"\n')
+    men_hook.write_text(user_text)
+    r = _run(["install", "cline", "--dir", str(men_dir), "--uninstall"], env)
+    assert "Traceback" not in r.stderr
+    assert r.returncode == 1, r.stdout
+    assert men_hook.exists() and men_hook.read_text() == user_text, \
+        "a user cline hook was destroyed by a mention of our script name"
+
+    # (d) positive control — OUR OWN registrations are still removed.
+    own_dir = tmp_path / "own"
+    for harness in ("codex", "claude"):
+        assert _run(["install", harness, "--dir", str(own_dir)],
+                    env).returncode == 0
+        r = _run(["install", harness, "--dir", str(own_dir), "--uninstall"],
+                 env)
+        assert r.returncode == 0, (harness, r.stderr)
+    own_cfg = json.loads(
+        (own_dir / ".codex" / "hooks.json").read_text())
+    assert "UserPromptSubmit" not in (own_cfg.get("hooks") or {}), own_cfg
+    # claude keeps the capture seam's own per-turn hook (#3963) — the read
+    # half alone must be gone.
+    cl_cfg = json.loads(
+        (own_dir / ".claude" / "settings.json").read_text())
+    cmds = [h.get("command", "")
+            for e in cl_cfg.get("hooks", {}).get("UserPromptSubmit", [])
+            for h in e.get("hooks", [])]
+    assert not any("volunteer-turn.sh" in c for c in cmds), cmds
+    own_cline = tmp_path / "own-cline"
+    assert _run(["install", "cline", "--dir", str(own_cline)],
+                env).returncode == 0
+    r = _run(["install", "cline", "--dir", str(own_cline), "--uninstall"],
+             env)
+    assert r.returncode == 0, r.stderr
+    assert not (own_cline / ".cline" / "hooks" / "UserPromptSubmit").exists()
+
+
 # ── #3808 R27 — the read-half failure boundary is TOTAL, not a list ──────
 # The boundary that turns a read-half failure into a populated "Install
 # failed" refusal is a catch-all, not an exception enumeration.  The

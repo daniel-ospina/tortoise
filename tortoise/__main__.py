@@ -2834,8 +2834,14 @@ def _install_read_hook_impl(args) -> int:
       hooks are merged key-wise; codex hooks.json entries are appended only
       when our registration is absent; an existing cline UserPromptSubmit hook
       that is not ours is REFUSED (printed conflict), never overwritten.
-    - --uninstall removes ONLY registrations whose command references
-      volunteer-turn.sh (wrapper-aware for both flat and claude shapes).
+    - --uninstall removes ONLY registrations this installer can PROVE it
+      wrote: the exact shipped registration (``<shipped volunteer-turn.sh>
+      <harness>``), or a structurally identical 2-token registration whose
+      script path is DEAD (the stale remnant of a relocated install — the
+      same case the install-side repair claims). A user wrapper, a comment
+      mention, another product's LIVE volunteer-turn.sh at a different path,
+      and malformed commands are NOT ours and are left untouched: an
+      uninstall must never delete config it cannot prove it created (#2383).
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
@@ -2950,6 +2956,33 @@ def _install_read_hook_impl(args) -> int:
         print(f"No {harness} registration at {target} — nothing to remove.")
         return 0
 
+    def _cline_marker_owns(text: str) -> bool:
+        """True iff ``text`` carries OUR registration LINE — ``exec
+        <…volunteer-turn.sh> cline`` — not merely a mention of the script.
+
+        The line is shlex-parsed (so the quoted shipped path matches), a
+        leading ``exec`` shell keyword is stripped, and ownership requires the
+        exact shipped path OR a DEAD path (a stale marker from a relocated
+        install — cline's self-heal rewrites it). A comment/echo mention, a
+        different product's LIVE hook, and malformed lines are NOT ours.
+        """
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                toks = _shlex.split(line)
+            except ValueError:
+                continue
+            if toks and toks[0] == "exec":
+                toks = toks[1:]
+            if (len(toks) == 2 and toks[1] == harness
+                    and toks[0].endswith("volunteer-turn.sh")
+                    and (toks[0] == str(script)
+                         or not Path(toks[0]).exists())):
+                return True
+        return False
+
     if harness == "cline":
         # Cline hooks are files at .cline/hooks/<EventName> (project) or
         # ~/.cline/hooks (global); hooks must also be enabled in settings.
@@ -2961,18 +2994,22 @@ def _install_read_hook_impl(args) -> int:
         if target.exists():
             existing_text = target.read_text(
                 encoding="utf-8", errors="replace")
-            if uninstall:
-                if "volunteer-turn.sh" not in existing_text:
-                    print(f"{target} is not a volunteer-turn.sh hook — refusing "
-                          "to delete it.", file=_sys.stderr)
-                    return 1
-            else:
-                if "volunteer-turn.sh" not in existing_text:
-                    print(f"{target} already exists and is not a "
+            # #2383: ownership is the registration LINE, not a substring.
+            # The old check (``"volunteer-turn.sh" in existing_text``)
+            # treated a user hook that merely MENTIONS the script name — in a
+            # comment or an echo — as ours, and silently OVERWROTE it on
+            # install / DELETE it on uninstall. A marker-line match cannot
+            # fire on a mention.
+            if not _cline_marker_owns(existing_text):
+                if uninstall:
+                    print(f"{target} is not our volunteer-turn.sh hook — "
+                          "refusing to delete it.", file=_sys.stderr)
+                else:
+                    print(f"{target} already exists and is not our "
                           "volunteer-turn.sh hook — refusing to overwrite it. "
                           "Remove it manually or install into another dir.",
                           file=_sys.stderr)
-                    return 1
+                return 1
         if dry:
             print(f"[dry-run] would write {target}:")
             print(marker_content.rstrip())
@@ -3003,6 +3040,54 @@ def _install_read_hook_impl(args) -> int:
             return inner if isinstance(inner, str) else ""
         return ""
 
+    def _cmd_dict(e):
+        """The dict whose command carries the command, for either the flat
+        or the nested claude wrapper shape (or None)."""
+        if isinstance(e, dict) and isinstance(e.get("command"), str):
+            return e
+        if isinstance(e, dict):
+            hs = e.get("hooks")
+            if (isinstance(hs, list) and hs
+                    and isinstance(hs[0], dict)
+                    and isinstance(hs[0].get("command"), str)):
+                return hs[0]
+        return None
+
+    # The registration THIS build writes. '' only if the shape ever changes.
+    desired = _entry_command(registration[0])
+
+    def _entry_is_ours(e) -> bool:
+        """POSITIVE ownership: the only entries ``--uninstall`` may delete.
+
+        True only for a registration this build provably wrote:
+
+        * the EXACT shipped registration (``<shipped volunteer-turn.sh>
+          <harness>``), which is what a real install leaves behind; or
+        * a structurally identical 2-token registration whose script path is
+          DEAD — the stale remnant of a relocated install, the same case the
+          install-side repair claims.
+
+        Everything else is NOT ours and must never be deleted: a user wrapper
+        (``firejail … volunteer-turn.sh …``), a comment mention (the old
+        substring marker), another product's LIVE ``volunteer-turn.sh`` at a
+        different path, and malformed / non-str commands. ``#2383``: the
+        install half already refuses to rewrite these very entries, so an
+        uninstall that deletes them destroys config it did not create.
+        """
+        cmd_d = _cmd_dict(e)
+        if cmd_d is None:
+            return False
+        cmd = cmd_d["command"]
+        if desired and cmd == desired:
+            return True
+        try:
+            toks = _shlex.split(cmd)
+        except ValueError:
+            return False
+        return (len(toks) == 2 and toks[1] == harness
+                and "volunteer-turn.sh" in toks[0]
+                and not Path(toks[0]).exists())
+
     existing = target.read_text(encoding="utf-8") if target.exists() else None
     if existing is not None:
         try:
@@ -3031,13 +3116,27 @@ def _install_read_hook_impl(args) -> int:
         ups = ups or []
         ours = [e for e in ups if "volunteer-turn.sh" in _entry_command(e)]
         if uninstall:
-            if not ours:
+            # #2383: delete only what we can PROVE we wrote. `ours` (above)
+            # stays the broad "mentions our script" list — the install half
+            # uses it to decide "the hook is already wired, don't add a
+            # duplicate" — but DELETION needs positive ownership, because the
+            # broad marker also matches a user wrapper and another product's
+            # live hook, which install deliberately leaves untouched.
+            deletable = [e for e in ups if _entry_is_ours(e)]
+            if not deletable:
+                if ours:
+                    print(f"{target} has volunteer-turn.sh registration(s) "
+                          "that this installer did not write — refusing to "
+                          "remove them (a wrapper, a foreign hook, or a "
+                          "malformed entry). Remove the entry manually if "
+                          "you want it gone.", file=_sys.stderr)
+                    return 1
                 # #2383: nothing of ours present — never rewrite the file
                 # and claim "Uninstalled".
                 print(f"No volunteer-turn.sh registration in {target} — "
                       "nothing to remove.")
                 return 0
-            remaining = [e for e in ups if e not in ours]
+            remaining = [e for e in ups if e not in deletable]
             if remaining:
                 hooks["UserPromptSubmit"] = remaining
             else:
@@ -3071,20 +3170,6 @@ def _install_read_hook_impl(args) -> int:
             # volunteer-turn.sh, live-but-moved installs — are left
             # untouched: rewriting them silently strips the security wrapper
             # or hijacks a foreign hook (R2 finding).
-            desired = _entry_command(registration[0])
-            def _cmd_dict(e):
-                """The dict whose command carries the command, for either
-                the flat or the nested claude wrapper shape (or None)."""
-                if isinstance(e, dict) and isinstance(e.get("command"), str):
-                    return e
-                if isinstance(e, dict):
-                    hs = e.get("hooks")
-                    if (isinstance(hs, list) and hs
-                            and isinstance(hs[0], dict)
-                            and isinstance(hs[0].get("command"), str)):
-                        return hs[0]
-                return None
-
             repaired = 0
             live_ours = 0
             foreign = []
@@ -7777,7 +7862,9 @@ def main(argv: list[str] | None = None) -> int:
     inst.add_argument(
         "--uninstall", action="store_true",
         help="Remove the per-turn read-hook (volunteer-turn.sh) registration "
-             "for the harness — the capture seam is left in place")
+             "for the harness — only registrations this installer wrote are "
+             "removed (a user wrapper or a foreign hook is refused, not "
+             "deleted); the capture seam is left in place")
     # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
     # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
     # (re-copies the scripts AND merges the settings.json timeout). Also
