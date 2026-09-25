@@ -342,10 +342,12 @@ def test_read_path_materialization_never_clobbers_a_concurrent_write(
 # cases run against a local double that models the ONLY PostgREST behaviour
 # the CAS depends on: a PATCH applies IFF its version guard matches, and
 # `return=representation` yields an EMPTY row list on a refused guard. The
-# shared `tests/fake_control_plane.py` double CANNOT model this (it dict-gets
-# the raw `onboarding_state->>state_version` column string), so a test built on
-# it would pass/fail for the wrong reason. The guard encoding this exercises is
-# the first `->>` path filter in the repo.
+# shared `tests/fake_control_plane.py` double ALSO resolves a `base->>key` path
+# selector as of this change, so the behaviour is exercised there too (the W6
+# onboarding lane drives a version 0→1→2 sequence through it); this local
+# double is retained because these cases need to RECORD the exact filter list
+# and drive a refused guard deterministically. The guard encoding this
+# exercises is the first `->>` path filter in the repo.
 
 class _FakeSupabaseControlPlane:
     """In-memory `organizations` table with a faithful jsonb-path guard."""

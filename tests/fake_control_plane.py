@@ -7,9 +7,11 @@ verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 (plan Task 5 / P1-3): an adapter exposing query() over in-memory rows.
 
 Filter ops: eq | neq | is (None → IS NULL) | gt | gte | lt | lte (all ordered
-ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
-rows; POST appends a row (return=representation semantics); DELETE
-removes matching rows (mirrors PostgREST service-role deletes, #302).
+ops NULL-excluding, SQL semantics), over plain columns or a jsonb path selector
+``base->>key`` (text extraction, as PostgREST's ``->>`` does). PATCH applies
+json_body to matching rows; POST appends a row (return=representation
+semantics); DELETE removes matching rows (mirrors PostgREST service-role
+deletes, #302).
 
 ``rpc(fn, body)`` simulates PostgREST RPC calls — ``provision_team``
 (#765 plan Task 8: the atomic teams + org_memberships + api_keys upsert,
@@ -23,6 +25,7 @@ mirroring the SQL semantics the real functions execute
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC
 from typing import Any
@@ -829,32 +832,38 @@ class FakeControlPlane:
         rows = [dict(r) for r in self.tables.get(table, [])]
         for col, op, value in filters or []:
             if op == "eq":
-                rows = [r for r in rows if r.get(col) == value]
+                rows = [r for r in rows if _col_value(r, col) == value]
             elif op == "neq":
                 # SQL semantics: `col <> value` is NULL (not TRUE) when either
                 # side is NULL, so a NULL column (or a NULL comparison value)
-                # never matches. Python's bare `r.get(col) != value` would
-                # KEEP the NULL row — a dialect divergence that would hide an
-                # over-exemption regression (e.g. a `created_via=neq.bootstrap`
-                # filter silently exempting legacy NULL rows — #4140 T4).
+                # never matches. Python's bare `!=` would KEEP the NULL row — a
+                # dialect divergence that would hide an over-exemption
+                # regression (e.g. a `created_via=neq.bootstrap` filter silently
+                # exempting legacy NULL rows — #4140 T4).
                 rows = ([] if value is None else
                         [r for r in rows
-                         if r.get(col) is not None and r.get(col) != value])
+                         if _col_value(r, col) is not None
+                         and _col_value(r, col) != value])
             elif op == "is":
-                rows = [r for r in rows if (r.get(col) is None) == (value is None)]
+                rows = [r for r in rows
+                        if (_col_value(r, col) is None) == (value is None)]
             elif op == "gt":
                 # SQL semantics: NULL never matches an ordered comparison
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) > value]
+                        if _col_value(r, col) is not None
+                        and _col_value(r, col) > value]
             elif op == "gte":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) >= value]
+                        if _col_value(r, col) is not None
+                        and _col_value(r, col) >= value]
             elif op == "lt":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) < value]
+                        if _col_value(r, col) is not None
+                        and _col_value(r, col) < value]
             elif op == "lte":
                 rows = [r for r in rows
-                        if r.get(col) is not None and r.get(col) <= value]
+                        if _col_value(r, col) is not None
+                        and _col_value(r, col) <= value]
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if method == "GET":
@@ -884,22 +893,52 @@ class FakeControlPlane:
         raise ValueError(f"unsupported method {method!r}")
 
 
+def _col_value(row: dict, col: str):
+    """Resolve a PostgREST column selector against a stored row.
+
+    A plain column is ``row[col]``. A jsonb path selector ``base->>key`` (#3553
+    is the first one in the repo: the onboarding-state CAS guard) extracts the
+    nested value as TEXT — PostgREST's ``->>`` returns text-or-NULL, so a stored
+    numeric ``1`` compares equal to the client's string ``"1"``. Resolving the
+    path here (rather than dict-getting the literal ``"base->>key"`` string) is
+    what makes the fake faithful: without it the guard no-matches forever and
+    the caller's bounded retry exhausts into a spurious conflict."""
+    if "->>" not in col:
+        return row.get(col)
+    base, _, key = col.partition("->>")
+    container = row.get(base)
+    if isinstance(container, str):
+        # A jsonb column may be stored as its wire JSON string; PostgREST
+        # parses at the DB, so tolerate both shapes here.
+        try:
+            container = json.loads(container)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(container, dict):
+        return None
+    val = container.get(key)
+    if val is None:
+        return None
+    return val if isinstance(val, str) else json.dumps(val)
+
+
 def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
-        if op == "eq" and row.get(col) != value:
+        actual = _col_value(row, col)
+        if op == "eq" and actual != value:
             return False
-        if op == "neq" and (value is None or row.get(col) is None
-                            or row.get(col) == value):
+        if op == "neq" and (value is None or actual is None
+                            or actual == value):
             return False
-        if op == "is" and (row.get(col) is None) != (value is None):
+        if op == "is" and (actual is None) != (value is None):
             return False
-        if op == "gt" and (row.get(col) is None or row.get(col) <= value):
+        if op == "gt" and (actual is None or actual <= value):
             return False
-        if op == "gte" and (row.get(col) is None or row.get(col) < value):
+        if op == "gte" and (actual is None or actual < value):
             return False
-        if op == "lt" and (row.get(col) is None or row.get(col) >= value):
+        if op == "lt" and (actual is None or actual >= value):
             return False
-        if op == "lte" and (row.get(col) is None or row.get(col) > value):
+        if op == "lte" and (actual is None or actual > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
         if op not in ("eq", "neq", "is", "gt", "gte", "lt", "lte"):
