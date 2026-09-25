@@ -27,6 +27,10 @@ with the R2 create-once object as the dedup LINEARIZATION POINT:
   ``resolve_incident_state`` is the same operation reporting WHICH fact it
   established (:class:`ResolveOutcome`: RESOLVED / ABSENT / SKIPPED_FRESH) —
   the bool form stays for the callers that only branch on it (#3820 cycle-7).
+  A close that FAILS is neither announced nor deleted-to-resolve: the failure
+  is recorded on the sentinel, the incident stays OPEN, and the failure is
+  propagated (``CloseCooldown`` once the bounded retry window is active) so a
+  caller cannot read it as a clean resolution (#5143, ADR-011).
 - ``incident_open`` is a read-only presence check on the same dedup object —
   no close, no delete — so a caller holding an armed alert window can ask
   whether the incident behind it still exists (#3820 cycle-9 P1). It consults
@@ -136,6 +140,31 @@ def _write_json(storage, key: str, data: dict[str, Any]) -> None:
     storage.upload(key, json.dumps(data, indent=2).encode("utf-8"), content_type="application/json")
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse a stored ISO timestamp, normalising it to aware UTC.
+
+    A naive stamp (written by an older revision) is read as UTC so the close
+    cooldown's age arithmetic cannot raise ``TypeError``.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)  # noqa: UP017
+
+
+class CloseCooldown(RuntimeError):
+    """Raised when a close is SKIPPED because a recent attempt failed (#5143).
+
+    Not an error condition: the incident is simply still open and the caller
+    must keep treating the subject as unresolved, retrying after the bounded
+    backoff. A distinct type so containment layers can report it as
+    "still open, backing off" rather than as a crash.
+    """
+
+
 class ResolveOutcome(Enum):
     """The three facts a resolve attempt can establish (#3820 cycle-7).
 
@@ -203,6 +232,7 @@ class AlertStore:
         repo: str,
         assignee: str | None = None,
         now: datetime | None = None,
+        close_cooldown_min: float = 60.0,
     ) -> None:
         self._storage = storage
         self._file = file_issue
@@ -222,6 +252,9 @@ class AlertStore:
         self._repo = repo
         self._assignee = assignee
         self._now = now or (lambda: datetime.now(timezone.utc))  # noqa: UP017
+        # #5143: bounded retry — how long a failed issue-close is left alone
+        # before it is attempted again (ADR-011: the next healthy run closes it).
+        self._close_cooldown_min = close_cooldown_min
 
     def _clock(self) -> datetime:
         """Current time — evaluated per call so time-based suppression expires
@@ -590,6 +623,16 @@ class AlertStore:
         issue it described — each letting a non-owner clear a kind it has no
         evidence about. Authority is decided by KIND_OWNERS alone; the `writer`
         field is diagnostic only.
+
+        #5143 / ADR-011: a close that did NOT happen is not a resolution. If
+        ``close_issue`` fails, the failure is recorded on the sentinel
+        (``close_failed_at`` / ``close_failures``), nothing is announced, the
+        object is NOT deleted, and the exception propagates so the caller keeps
+        the subject pending. A retry inside ``close_cooldown_min`` is SKIPPED and
+        raises :class:`CloseCooldown` (still open, backing off). ADR-011: "A blip
+        must not re-file; a permanent failure must not be silent" and "the
+        incident stays open with no writer able to close it. That is correct
+        rather than a defect … The driver's next healthy run closes it."
         """
         states = self._alias_states(kind, org_id)
         if not states:
@@ -615,8 +658,10 @@ class AlertStore:
                     kind, owner, writer,
                 )
                 return ResolveOutcome.SKIPPED_FRESH
-        numbers: list[int] = []
-        for _, state in states:
+        # number -> every sentinel that names it (a pre-#2844 incident has two
+        # spellings and therefore two issues).
+        numbers: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+        for key, state in states:
             try:
                 number = int(state.get("issue_number"))
             except (TypeError, ValueError):
@@ -627,13 +672,53 @@ class AlertStore:
                     "skipping its close", kind, state.get("issue_number"),
                 )
                 continue
-            if number not in numbers:
-                numbers.append(number)
-        for number in numbers:
+            numbers.setdefault(number, []).append((key, state))
+        for number, holders in numbers.items():
+            # #5143: bounded retry. A close that failed recently is not
+            # re-attempted until its cooldown passes, so a GitHub outage cannot
+            # make every poll hammer the close endpoint. Raised as a distinct
+            # type so a caller keeps the subject PENDING rather than reading a
+            # falsy return as "nothing was open".
+            failed_at = next(
+                (t for t in (_parse_iso(s.get("close_failed_at")) for _, s in holders)
+                 if t is not None),
+                None,
+            )
+            if failed_at is not None:
+                age_min = (self._clock() - failed_at).total_seconds() / 60.0
+                if age_min < self._close_cooldown_min:
+                    raise CloseCooldown(
+                        f"{kind} #{number}: last close attempt failed "
+                        f"{age_min:.0f} min ago — retrying after "
+                        f"{self._close_cooldown_min:.0f} min"
+                        + (f" ({org_id})" if org_id else "")
+                    )
+        for number, holders in numbers.items():
             try:
                 self._close(number, "Resolved — condition cleared.")
             except Exception as e:
-                logger.warning("issue close failed for %s #%s: %s", kind, number, e)
+                # The close did NOT happen. Record the failure (so the retry backs
+                # off) and RE-RAISE — the whole fix (#5143): nothing is announced
+                # and nothing is deleted, so the incident stays OPEN until its
+                # close is OBSERVED. This is ADR-011's "a blip must not re-file; a
+                # permanent failure must not be silent" (and the runbook's
+                # close-then-delete order: delete-to-resolve must never precede a
+                # successful close). Pre-fix, this warned and fell through to the
+                # push + delete, reporting RESOLVED for a still-open issue.
+                for key, state in holders:
+                    state["close_failed_at"] = self._clock().isoformat()
+                    state["close_failures"] = int(state.get("close_failures") or 0) + 1
+                    try:
+                        _write_json(self._storage, key, state)
+                    except Exception:
+                        logger.exception("could not record a close failure for %s", key)
+                logger.warning(
+                    "issue close failed for %s #%s: %s — leaving the incident OPEN "
+                    "(no resolution announced, sentinel kept); retrying after "
+                    "%.0f min",
+                    kind, number, e, self._close_cooldown_min,
+                )
+                raise
         if numbers:
             if len(numbers) > 1:
                 logger.warning(
@@ -683,8 +768,9 @@ class AlertStore:
         and ``ABSENT`` read as success. The tri-state fact lives in
         :meth:`resolve_incident_state`; this is its ``is RESOLVED``.
 
-        ``before`` bounds WHICH incident may be resolved — see
-        :meth:`resolve_incident_state`, which owns the semantics.
+        ``before`` bounds WHICH incident may be resolved, and a failed close
+        RAISES rather than reporting a clean resolution — see
+        :meth:`resolve_incident_state`, which owns both semantics.
         """
         return (
             self.resolve_incident_state(kind, org_id, before=before, writer=writer)
