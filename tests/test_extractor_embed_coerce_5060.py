@@ -12,9 +12,6 @@ raise did not crash the session — it set `payload = None` and discarded the
 WHOLE session's extraction, not just the one odd item. `_parse_json_robust`
 rung 1 returns parsed JSON without `_validate_output_shape`, so such values
 reach these sites from real model output.
-
-Every per-lane case below reds with `TypeError` under pre-fix semantics,
-EXCEPT the `[]` cases — a list IS sliceable, so `[][:60]` never raised.
 """
 from __future__ import annotations
 
@@ -35,10 +32,11 @@ _SOURCE = (Path(__file__).resolve().parent.parent / "tortoise"
 #: keyed by (enclosing function, unparsed expression). They render S3
 #: GRAPH-search results — `search` is backend-returned graph content, which the
 #: write gate has already `str`-coerced — not model output, so they cannot
-#: raise on an LLM-emitted value. The FUNCTION is part of the key: the same
-#: expression text appearing elsewhere still reds (it would be model-supplied).
-#: Growth rule: an entry is added only under a recorded decision, never to
-#: silence a real defect.
+#: raise on an LLM-emitted value. The FUNCTION is part of the key, so the
+#: same expression text appearing in another function still reds and needs
+#: its own reviewed entry.
+#: Growth rule: an entry is added only with evidence that the site renders
+#: graph content — never to silence a real defect.
 _GRAPH_SIDE_RAW_SLICES = {
     ("_render_search_results", "p.get('content', '')[:120]"),
     ("_render_search_results", "e.get('content', '')[:120]"),
@@ -230,15 +228,12 @@ def _raw_get_slice_sites(tree: ast.Module) -> list[tuple[int, str, str]]:
 
 
 def test_no_raw_get_slice_on_a_model_supplied_field():
-    """A raw `X.get(...)[:]` slice on a model-supplied field reds here.
+    """An unallowlisted raw `X.get(...)[:]` slice in the module reds here.
 
     Declared scan BOUNDARY — it matches ONE shape: a `Subscript` whose
     immediate value is a `.get(...)` call AND whose slice is an `ast.Slice`.
     It does NOT see an aliased/two-step form (`t = p.get('c', ''); t[:60]`),
-    a walrus, or `p['c'][:60]`. Those stay the reviewer's job. This guard
-    exists because three site-scoped fixes in a row each closed only the
-    instance they were shown: no test could see the sites nobody had looked
-    at yet.
+    a walrus, or `p['c'][:60]`. Those stay the reviewer's job.
     """
     tree = ast.parse(_SOURCE.read_text(encoding="utf-8"))
     raw = _raw_get_slice_sites(tree)
@@ -249,8 +244,9 @@ def test_no_raw_get_slice_on_a_model_supplied_field():
     unexpected = [f"{line}: {code}  (in {func})" for line, func, code in raw
                   if (func, code) not in _GRAPH_SIDE_RAW_SLICES]
     assert not unexpected, (
-        "raw `.get(...)[:]` slice on a model-supplied field — route it "
-        f"through `_clip` so the report cannot raise (#5060): {unexpected}")
+        "raw `.get(...)[:]` slice not in the graph-side allowlist — route it "
+        "through `_clip`, or add a reviewed allowlist entry with evidence "
+        f"that it is graph content (#5060): {unexpected}")
     # A stale entry would WIDEN the allowlist silently, so it must red.
     stale = _GRAPH_SIDE_RAW_SLICES - found
     assert not stale, (
