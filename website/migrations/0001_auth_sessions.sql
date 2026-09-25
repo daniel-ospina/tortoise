@@ -8,7 +8,7 @@
 --  website/apps/dashboard/functions/_shared/auth/ keeps the same shape idempotently —
 --  `ensureSchema()` for this table, `ensureSchemaTokenColumns()` (token.ts) for the three
 --  token-cache columns, and the per-route flow-table bootstraps in `auth/start.ts` /
---  `auth/confirm.ts` for `auth_flows` / `recovery_flows` — so a fresh local database is
+--  `auth/confirm.ts` for `auth_flows` / `email_flow_pending` — so a fresh local database is
 --  self-establishing.)
 
 CREATE TABLE IF NOT EXISTS sessions (

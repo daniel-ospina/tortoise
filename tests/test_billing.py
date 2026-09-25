@@ -886,6 +886,227 @@ class TestCheckoutPortal:
         assert r.status_code == 404, r.text
 
 
+class TestBillingSupabaseStore:
+    """#4640 — Supabase mode: the orgs row is the authority (#669) and the
+    registry graph is DELETED there. The checkout sync-persist and the portal
+    read must both use the row; the pre-fix code wrote and read the registry,
+    so a just-subscribed org's portal-open 404'd with "no Stripe customer".
+
+    The registry-SDK spy is load-bearing: constructing a registry-namespaced
+    SDK here would be the #878 resurrection vector and raises. Non-registry
+    constructions are left to the real factory.
+    """
+
+    ORG_ID = "org_sb_4640"
+
+    @pytest.fixture
+    def sb(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        # PIN the lane: is_supabase_enabled() would otherwise honour an ambient
+        # TORTOISE_CONTROL_PLANE=registry and flip these tests to selfhost.
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+        monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(VALID_CATALOG))
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        fake = FakeControlPlane({"organizations": [{
+            "id": self.ORG_ID, "name": "sb", "tier": "solo",
+            "email": "owner@example.com",
+            "stripe_customer_id": None, "subscription_status": None,
+            "customer_email": None,
+        }], "webhook_events": []})
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        _orig_make_sdk = ha._make_sdk
+
+        def _spy_make_sdk(*a, **kw):
+            if kw.get("namespace") == "registry":
+                raise AssertionError(
+                    "registry SDK constructed in Supabase mode (#878)")
+            return _orig_make_sdk(*a, **kw)
+
+        monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
+
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": "owner@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        try:
+            yield TestClient(ha.app), fake
+        finally:
+            ha.app.dependency_overrides.pop(ha.get_current_org_session, None)
+
+    def test_portal_opens_right_after_a_successful_checkout(self, monkeypatch, sb):
+        """The checkout write lands on the orgs row; the portal reads it back
+        and passes the authoritative customer id to Stripe."""
+        tc, fake = sb
+        seen: dict = {}
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, email: "cus_sb_1")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb1")
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: seen.update(cid=cid) or
+            "https://billing.stripe.com/p/sb1")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_sb_1"
+        assert row["customer_email"] == "owner@example.com"
+
+        r2 = tc.post("/v1/billing/portal")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["portal_url"] == "https://billing.stripe.com/p/sb1"
+        assert seen["cid"] == "cus_sb_1"
+
+    def test_portal_404_when_genuinely_no_customer(self, monkeypatch, sb):
+        """No customer binding on the authoritative row → the 404 still fires,
+        and no Stripe portal call is made."""
+        tc, _fake = sb
+        called: list = []
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: called.append(cid) or "u")
+        r = tc.post("/v1/billing/portal")
+        assert r.status_code == 404, r.text
+        assert "no Stripe customer" in r.json()["detail"]
+        assert called == []
+
+    def test_checkout_400_when_resolved_org_has_no_email(self, monkeypatch, sb):
+        """Supabase mode with no email link: the resolved org dict carries no
+        email and there is no session email → the terminal 400 (the `sdk=None`
+        fall-through), never an AttributeError 500, and no Stripe call."""
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        called: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append("list_subscriptions") or [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: called.append("create_checkout_session") or "u")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 400, r.text
+        assert "No customer email" in r.json()["detail"]
+        assert called == []
+
+    def test_webhook_written_binding_opens_the_portal(self, monkeypatch, sb):
+        """The exact production path: `checkout.session.completed` writes the
+        binding through the webhook's `update_org_billing` seam, and the
+        portal's `org_billing_state` read finds the same column."""
+        tc, fake = sb
+        org_id = self.ORG_ID
+        monkeypatch.setattr(
+            billing.StripeClient, "verify_webhook_signature",
+            lambda self, raw, sig: {
+                "id": "evt_sb_1", "type": "checkout.session.completed",
+                "data": {"object": {
+                    "client_reference_id": org_id,
+                    "customer": "cus_wh_1",
+                    "customer_details": {"email": "owner@example.com"},
+                    "subscription": None}}})
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: f"https://billing.stripe.com/p/{cid}")
+
+        r = tc.post("/webhooks/stripe", content=b"{}",
+                    headers={"stripe-signature": "t=1,v1=x"})
+        assert r.status_code == 200, r.text
+        assert fake.tables["organizations"][0]["stripe_customer_id"] == "cus_wh_1"
+
+        r2 = tc.post("/v1/billing/portal")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["portal_url"] == "https://billing.stripe.com/p/cus_wh_1"
+
+    def test_checkout_reuses_the_stored_customer(self, monkeypatch, sb):
+        """The stored-mirror guard reads the orgs row: a bound customer is
+        reused (never a second Stripe customer) and its email is preserved."""
+        tc, fake = sb
+        fake.tables["organizations"][0]["stripe_customer_id"] = "cus_existing"
+        fake.tables["organizations"][0]["customer_email"] = "stored@example.com"
+        created: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_new")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb2")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == [], "a stored customer must be reused, not re-created"
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_existing"
+        assert row["customer_email"] == "stored@example.com"
+
+    def test_checkout_backfills_a_missing_customer_email(self, monkeypatch, sb):
+        """A row with a bound customer but no stored email is backfilled
+        (the mixed case of the reuse rule)."""
+        tc, fake = sb
+        fake.tables["organizations"][0]["stripe_customer_id"] = "cus_existing"
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: "cus_new")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb3")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        row = fake.tables["organizations"][0]
+        assert row["stripe_customer_id"] == "cus_existing"
+        assert row["customer_email"] == "owner@example.com"
+
+    def test_org_email_beats_the_session_email(self, monkeypatch, sb):
+        """#4508 precedence: the authoritative org row's email wins over the
+        clicking member's session email."""
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": "org@example.com",
+               "session_user_email": "member@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        created: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_p")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/sb4")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert created == ["org@example.com"]
+
+    def test_checkout_409_when_row_already_active(self, monkeypatch, sb):
+        """The stored-mirror guard reads subscription_status from the row and
+        rejects BEFORE any Stripe call."""
+        tc, fake = sb
+        fake.tables["organizations"][0]["subscription_status"] = "active"
+        called: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append("list_subscriptions") or [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: called.append("create_checkout_session") or "u")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 409, r.text
+        assert called == [], "the active-status guard must reject before any Stripe call"
+
+
 class TestWebhook:
     """POST /webhooks/stripe — 4-event semantics, dedup, security (Task 7)."""
 
@@ -1412,9 +1633,182 @@ class TestTeamInfoBillingSurface:
         assert body["checkout_price_id"] is None
         assert body["checkout_price_ids"] == {}
 
+    def test_team_info_catalog_failure_logged_once(self, billing_client,
+                                                    monkeypatch, caplog):
+        """#4335: an unconfigured/broken catalog must be OBSERVABLE — exactly
+        ONE WARNING naming the exception class, cached so a second /v1/team
+        does not re-log. The message never carries the secret value."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.delenv("STRIPE_PRICE_IDS", raising=False)
+        # The latch is process-global; start this test from a clean state.
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r1 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+            r2 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+        assert r1.status_code == 200, r1.text
+        assert r2.status_code == 200, r2.text
+        warnings = [rec for rec in caplog.records
+                    if "checkout price catalog unavailable" in rec.getMessage()]
+        assert len(warnings) == 1, (
+            f"expected exactly one cached WARNING, got {len(warnings)}")
+        assert "BillingConfigError" in warnings[0].getMessage()
+
+    def test_team_info_catalog_failure_log_scrubs_secret_value(
+            self, billing_client, monkeypatch, caplog):
+        """#4335: a malformed catalog can carry a secret-shaped value (a Stripe
+        key — or credentials-in-URI — pasted into a price-id slot).
+        PriceCatalog quotes the offending id in its error, so the WARNING must
+        scrub it through the composite redactor — the secret must never reach
+        the log."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        for secret in ("sk_live_SUPERSECRET1234567890", "docker://user:pass@host"):
+            bad = json.loads(json.dumps(VALID_CATALOG))
+            bad["solo"]["monthly"]["id"] = secret
+            monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(bad))
+            monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                                raising=False)
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+                r = billing_client["client"].get("/v1/team",
+                                                 headers=billing_client["headers"])
+            assert r.status_code == 200, r.text
+            warnings = [rec.getMessage() for rec in caplog.records
+                        if "checkout price catalog unavailable" in rec.getMessage()]
+            assert len(warnings) == 1, warnings
+            msg = warnings[0]
+            assert secret not in msg, msg
+            assert "***" in msg, f"expected redaction for {secret!r}: {msg}"
+            assert "BillingError" in msg, msg
+
+    def test_checkout_catalog_latch_clears_after_success(self, billing_client,
+                                                         monkeypatch):
+        """#4335: a success resets the latch, so a NEW outage after a recovery
+        is reported again instead of being silently absorbed forever."""
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", True,
+                            raising=False)
+        assert hosted_api._checkout_price_ids()  # valid catalog from the fixture env
+        assert hosted_api._checkout_catalog_failure_logged is False
+
+    def test_team_info_empty_paid_catalog_logged_once(self, billing_client,
+                                                      monkeypatch, caplog):
+        """#4335: a catalog that PARSES but resolves no paid tier is a total
+        checkout outage — it must be reported once, and the latch must survive
+        a second request (the missing default price must not re-arm it)."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(
+            {"free": VALID_CATALOG["free"]}))
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r1 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+            r2 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+        assert r1.status_code == 200, r1.text
+        assert r2.status_code == 200, r2.text
+        assert r1.json()["checkout_price_ids"] == {}
+        warnings = [rec.getMessage() for rec in caplog.records
+                    if "no paid checkout tier" in rec.getMessage()]
+        assert len(warnings) == 1, (
+            f"expected exactly one zero-paid-tier WARNING, got {warnings}")
+
+    def test_team_info_partial_paid_catalog_stays_silent(self, billing_client,
+                                                         monkeypatch, caplog):
+        """#2789: a deployment may sell a subset of tiers (solo/team only, no
+        pro). That is a supported configuration, not a catalog failure — it
+        must NOT warn."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        partial = {k: v for k, v in VALID_CATALOG.items() if k != "pro"}
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(partial))
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = billing_client["client"].get("/v1/team",
+                                             headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["checkout_price_ids"] == {
+            "solo": VALID_CATALOG["solo"]["monthly"]["id"],
+            "team": VALID_CATALOG["team"]["monthly"]["id"],
+        }
+        assert body["checkout_price_id"] is None  # pro absent — default CTA disabled
+        assert not [rec for rec in caplog.records
+                    if "checkout price catalog unavailable" in rec.getMessage()], \
+            "a legitimately partial catalog must not warn"
+
     def test_team_info_subscription_status_none_when_unset(self, billing_client):
         """Node field unset → None (the Billing page renders 'Free plan')."""
         r = billing_client["client"].get("/v1/team",
                                          headers=billing_client["headers"])
         assert r.status_code == 200, r.text
         assert r.json()["subscription_status"] is None
+
+    def test_team_info_exposes_nodes_used_and_max_nodes(self, billing_client, tmp_path):
+        """#4331: /v1/team carries the node figure the cap ACTUALLY gates
+        (`count_org_usage(org, 'points')`: non-episodic Points + Object +
+        Subject, #1911) and the org's enforced node cap (`max_points`).
+        `point_count` is NOT that figure — it is :Point-only."""
+        org_id = billing_client["org_id"]
+        from tortoise.sdk import TortoiseSDK
+        tenant = TortoiseSDK(os.path.join(tmp_path, "billing_api.db"),
+                             namespace=org_id)
+        try:
+            tenant.create_object("acme", objectKind="org")
+            r = billing_client["client"].get(
+                "/v1/team", headers=billing_client["headers"])
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["nodes_used"] == 1          # the Object counts
+            assert body["point_count"] == 0         # :Point-only stays 0
+            assert body["max_nodes"] == 10000       # free tier default
+        finally:
+            tenant.close()
+
+    def test_team_info_max_nodes_honors_stored_override(self, billing_client):
+        """#4331: `max_nodes` is the org's OWN cap (`max_points`), not the
+        tier's nominal default — a stored override must be what the display
+        compares against, because it is what the write gate enforces."""
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_points = 12345",
+            params={"id": billing_client["org_id"]})
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        assert r.json()["max_nodes"] == 12345
+
+    def test_team_info_nodes_used_fails_soft(self, monkeypatch, billing_client):
+        """#4331: a quota-read failure must NOT 500 /v1/team — the node stat
+        degrades to None (unknown; a failed read is never a genuine 0) while
+        the rest of the billing surface still renders."""
+        import tortoise.quota as quota
+
+        def _boom(*a, **kw):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(quota, "count_org_usage", _boom)
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # None, not 0: a failed read must not look like a genuinely empty org
+        # (the client renders no figure for None).
+        assert body["nodes_used"] is None
+        assert body["max_nodes"] == 10000
+        assert body["tier"] == "free"

@@ -209,3 +209,77 @@ def test_marker_strings_via_full_scan_decoration(sdk):
 
     new_hit = next(r for r in results if r["id"] == new["id"])
     assert "[valid since 2026-06-14]" in _validity_marker(new_hit)
+
+
+def test_provenance_flag_is_absent_by_default_and_additive_when_on(sdk, monkeypatch):
+    """Objectives 5/9 + owner decision #3837 (source + when learned + confidence).
+
+    The additive ``provenance`` block (source + captured_at) is OFF by default —
+    a default full-scan result is byte-identical to pre-change output (no key).
+    With ``TORTOISE_SEARCH_PROVENANCE`` set, every other key/value is unchanged
+    and exactly the ``provenance`` block is added.
+    """
+    p = sdk.create_point(
+        "statement",
+        "beta ships in October",
+        extractedFrom="https://example.com/beta-plan",
+    )
+
+    monkeypatch.delenv("TORTOISE_SEARCH_PROVENANCE", raising=False)
+    off = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert "provenance" not in off, "flag OFF must not add a response field"
+
+    monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
+    on = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    prov = on.pop("provenance")
+    assert prov["source"] == "https://example.com/beta-plan"
+    assert prov["captured_at"], "capture time must be present"
+    assert on == off, "the flag must be purely additive — every other key is byte-identical"
+
+
+def test_provenance_flag_on_still_carries_capture_time_for_unlinked_points(sdk, monkeypatch):
+    """An unlinked point has no SOURCE to add, but its capture time is always
+    present — so with the flag ON the block IS present and omits only ``source``
+    (never an empty shell).
+
+    The flag is additive, not conditional on the point being linked: it emits
+    whatever provenance the point actually has, and a point is always created
+    with a ``createdAt``.
+    """
+    p = sdk.create_point("statement", "orphan claim with no source")
+    monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
+    hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert "provenance" in hit
+    assert "source" not in hit["provenance"]
+    assert hit["provenance"]["captured_at"]
+
+
+def test_provenance_flag_is_point_only(sdk, monkeypatch):
+    """The flag enriches POINT searches only — the other documented boundary.
+
+    The flag-gated fetch and the two columns it reads live in the project
+    search's ``if entity_type == "point":`` branch (``tortoise/sdk.py``), while
+    ``SearchResult`` is constructed for every entity type.  So a non-degraded
+    ``document``/``event``/``subject`` search carries no ``source_ref`` /
+    ``captured_at`` and ``to_dict`` emits no ``provenance`` block, however the
+    flag is set.  This is the second HALF of the boundary documented on
+    ``search_engine.search_provenance_enabled``; the degraded-fallback half is
+    the other.  Both directions are asserted, so the test cannot pass vacuously
+    on an empty result set.
+    """
+    monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
+    p = sdk.create_point("statement", "beta ships in October",
+                         extractedFrom="https://example.com/beta-plan")
+    doc = sdk.create_document("Beta plan", "memo", content="beta memo body")
+
+    point_hits = sdk.tortoise_fts_query(query=None, kind="statement",
+                                        entity_type="point", limit=10)
+    point_hit = next(r for r in point_hits if r["id"] == p["id"])
+    assert "provenance" in point_hit, "the point leg must be enriched (non-vacuous)"
+
+    doc_hits = sdk.tortoise_fts_query(query=None, kind="memo",
+                                      entity_type="document", limit=10)
+    doc_hit = next(r for r in doc_hits if r["id"] == doc["id"])
+    assert "provenance" not in doc_hit, (
+        "a non-Point hit gained a provenance block — the flag is documented as "
+        "point-only; update the boundary note with the change")

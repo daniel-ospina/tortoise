@@ -529,3 +529,148 @@ def test_parallel_worker_usage_sink_attached_and_attributed(monkeypatch):
     assert bucket["calls"] == n
     assert bucket["prompt_tokens"] == 10 * n
     assert bucket["completion_tokens"] == 4 * n
+
+
+# ── 8. the extractor's warnings survive into the stats (#2873) ────────────
+
+
+def test_extractor_warnings_folded_into_stats(monkeypatch):
+    """#2873: ``ingest_v2.py`` used to contain ZERO occurrences of the
+    string ``warnings`` — a session whose extractor emitted warnings was
+    byte-indistinguishable in the stats/report from a clean one. Every
+    session's ``out["warnings"]`` must be counted, deduplicated, and
+    sampled into the per-question stats (parity with the product lane's
+    ``meta["warnings"]`` contract, sdk.py:4503 → :4933)."""
+    per_session = {"payload": {}, "minted_kinds": [], "supersessions": [],
+                   "errors": [], "error_census": {},
+                   "warnings": ["R8: no prior matches — skipped (fail-open)",
+                                "Tier-A: ambiguous (2 priors) — never guess"],
+                   "stats": {}}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _extract_factory(result=per_session))
+    n = 3
+    stats = ingest_haystack_v2(_FakeSDK(), _question(n_sessions=n), object())
+    w = stats["warnings"]
+    assert w["count"] == 2 * n, "every occurrence must be counted"
+    assert w["distinct"] == 2, "the sample is distinct, not per-occurrence"
+    assert w["sample"] == ["R8: no prior matches — skipped (fail-open)",
+                           "Tier-A: ambiguous (2 priors) — never guess"]
+
+
+def test_extractor_warnings_roll_up_across_parallel_sessions(monkeypatch):
+    """The parallel driver (A-all → B-parallel → C-all) must roll the
+    warnings up the same way the interleaved sequential path does — a
+    warning on ANY session is visible."""
+    def _fake(model, conversation, *, sdk=None, session_id=None,
+              session_date=None):
+        return {"payload": {}, "minted_kinds": [], "supersessions": [],
+                "errors": [], "error_census": {},
+                "warnings": [f"warning for {session_id}"], "stats": {}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+    n = 4
+    stats = ingest_haystack_v2(_FakeSDK(), _question(n_sessions=n), object(),
+                               session_workers=n,
+                               model_factory=lambda: object())
+    assert stats["warnings"]["count"] == n
+    assert stats["warnings"]["distinct"] == n
+    assert len(stats["warnings"]["sample"]) == n
+
+
+def test_extractor_warnings_zero_on_clean_run(monkeypatch):
+    """A clean run must self-declare zero warnings — the key is ALWAYS
+    present (additive contract), never absent-as-silent-clean."""
+    monkeypatch.setattr(ev2, "extract_session_v2", _extract_factory())
+    stats = ingest_haystack_v2(_FakeSDK(), _question(n_sessions=2), object())
+    assert stats["warnings"] == {"count": 0, "distinct": 0, "sample": []}
+
+
+def test_extractor_warning_sample_is_capped(monkeypatch):
+    """The report carries at most ``WARNING_SAMPLE_CAP`` distinct warnings —
+    the count stays exact while the sample is a first-N window (an unbounded
+    warning list must not bloat the per-question stats / checkpoint)."""
+    from tools.longmem_eval.ingest_v2 import WARNING_SAMPLE_CAP
+    many = [f"w{i}" for i in range(WARNING_SAMPLE_CAP + 5)]
+    per_session = {"payload": {}, "minted_kinds": [], "supersessions": [],
+                   "errors": [], "error_census": {}, "warnings": many,
+                   "stats": {}}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _extract_factory(result=per_session))
+    stats = ingest_haystack_v2(_FakeSDK(), _question(n_sessions=1), object())
+    w = stats["warnings"]
+    assert w["count"] == len(many)
+    assert w["distinct"] == len(many)
+    assert w["sample"] == many[:WARNING_SAMPLE_CAP]
+
+
+def test_warning_sample_cap_matches_report_surface():
+    """#2873: the ingest lane and the report rollup each bound the sample
+    window; the constants are duplicated to keep the report import light, so
+    pin them equal (a silent divergence would make the report's 'first N' a
+    different N from the per-question stats')."""
+    from tools.longmem_eval.ingest_v2 import WARNING_SAMPLE_CAP
+    from tools.longmem_eval.report import EXTRACTOR_WARNING_SAMPLE_CAP
+    assert WARNING_SAMPLE_CAP == EXTRACTOR_WARNING_SAMPLE_CAP
+
+
+def test_extractor_warnings_non_list_is_ignored(monkeypatch):
+    """#2873 (review P2): the producer contract is ``list[str]``; a
+    malformed non-list value must fail CLOSED (treated as empty) rather
+    than be iterated char/key-wise and inflate the counts."""
+    per_session = {"payload": {}, "minted_kinds": [], "supersessions": [],
+                   "errors": [], "error_census": {},
+                   "warnings": "not-a-list", "stats": {}}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _extract_factory(result=per_session))
+    stats = ingest_haystack_v2(_FakeSDK(), _question(n_sessions=2), object())
+    assert stats["warnings"] == {"count": 0, "distinct": 0, "sample": []}
+
+
+def test_extractor_warnings_reach_the_report_end_to_end(monkeypatch):
+    """#2873 (review P2): cross-layer parity — the key the report reads must
+    be the SAME key the ingest lane writes. Runs the real ingest with a
+    warning-emitting fake, wraps the returned stats into a run outcome
+    exactly as run.py does (``outcome["ingest"] = ingest_stats``), and
+    asserts the report surfaces a non-zero warning count — so a rename on
+    either side of the boundary cannot stay green."""
+    from tools.longmem_eval.dataset_audit import audit_dataset
+    from tools.longmem_eval.report import build_report
+
+    warning = "R8: no prior matches — skipped (fail-open)"
+    per_session = {"payload": {}, "minted_kinds": [], "supersessions": [],
+                   "errors": [], "error_census": {}, "stats": {},
+                   "warnings": [warning]}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _extract_factory(result=per_session))
+    q = _question(n_sessions=2)
+    stats = ingest_haystack_v2(_FakeSDK(), q, object())
+    assert stats["warnings"]["count"] == 2
+
+    outcome = {
+        "question_id": q["question_id"], "question_type": "single-session-user",
+        "question_date": "2026-09-01", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0}, "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0, "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0, "valid": True,
+        "error_classes": {}, "leg_mix": {"tfidf": 2},
+        "leg_mix@k": {"5": {"tfidf": 2}}, "pool_size": 5,
+        "evidence_written": 1, "evidence_retrieved@k": {"5": 1},
+        "ingest_latency_ms": 1.0, "gate_reasons": [], "ingest": stats,
+    }
+    audit = audit_dataset([{
+        "question_id": "q-audit", "haystack_session_ids": ["s0"],
+        "answer_session_ids": ["s0"],
+        "haystack_sessions": [[{"role": "user", "content": "x",
+                                "has_answer": True}]],
+    }])
+    report = build_report(
+        [outcome], dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+        reader_model="mock-reader", judge_model="mock-judge",
+        extraction_approach="v2 extractor", ingest_mode="v2", ks=(5,),
+        top_k=5, dataset_semantics_audit=audit, integrity_threshold=0.0)
+    ew = report["integrity"]["extractor_warnings"]
+    assert ew["count"] == 2
+    assert ew["questions_with_warnings"] == 1
+    assert ew["sample"] == [warning]
