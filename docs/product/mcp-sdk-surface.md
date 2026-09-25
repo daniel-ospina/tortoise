@@ -126,6 +126,7 @@ the gate *fails* on — not about what goes *unrecorded*.
 | Response | Field | Emitted when | Unchanged when off |
 |---|---|---|---|
 | `tortoise_analyze` | `why` | TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off) | yes — the response is byte-identical when the flag is off |
+| `tortoise_search` | `status` | the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available/empty/degraded/unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9) | yes — results and count stay byte-identical and the key is absent |
 
 A field belongs in that table from the moment it is added — an off-by-default field that is
 not recorded here has no approval behind it, and the carve-out does not cover it.

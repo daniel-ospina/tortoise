@@ -75,9 +75,12 @@ from .status_vocabulary import (
 )
 from .status_vocabulary import classify as classify_condition
 
-READ_STATUSES: tuple[str, ...] = CLIENT_STATUS_TERMS
+# #4097: the truthy vocabulary has ONE declared home — importing it here rather
+# than re-declaring the literal is what keeps the read-path flag consistent with
+# every other boolean env read in the tree.
+from .env_truthy import TRUTHY
 
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
+READ_STATUSES: tuple[str, ...] = CLIENT_STATUS_TERMS
 
 #: Leg-trace reasons (the R3 #1542 D4 shape) that prove the store ANSWERED the
 #: query. ``index_missing`` / ``no_embeddings`` still mean the server replied —
@@ -96,7 +99,7 @@ def read_status_enabled() -> bool:
     (``1``/``true``/``yes``/``on``) turns it on; unset or ``0`` leaves every
     response byte-identical.
     """
-    return os.environ.get("TORTOISE_READ_STATUS", "").strip().lower() in _TRUTHY
+    return os.environ.get("TORTOISE_READ_STATUS", "").strip().lower() in TRUTHY
 
 
 def classify_read_status(*, reached: bool, hit_count: int, degraded: bool,
