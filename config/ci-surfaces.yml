@@ -851,6 +851,7 @@ surfaces:
   - test_from_uri_userinfo.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
+  - test_graph_delete_guard.py       # #2961: race-safe GRAPH.DELETE guard + poisoned-AOF detection (hermetic, no DB)
   - test_graph_diagnostics.py
   - test_guard.py
   - test_hard_reject.py
@@ -1836,6 +1837,18 @@ durations:
   # run that includes it (#4817/#4729).
   test_org_graph_open_tripwire.py: 13.8
   test_backup_e2e.py: 13.1
+  # #2961: newly-declared fast file — placed at its value-ordered slot rather
+  # than the map's tail, because main's #3400 refresh appends there and a tail
+  # insert conflicts on every rebase. This PR's base sat ON the #3400 coverage
+  # floor (544/604 = 90.07% PASS), so the one file it adds to the fast pool
+  # dropped it to 544/605 = 89.9% and reddened `manifest-integrity`
+  # (tools/ci_selection.py --integrity) and `test (b)`
+  # (test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic)
+  # from that single condition. Measured 23 tests / 13.12s local (10.0s of it the
+  # deliberate lock-deadline sleep, so it is load-insensitive); the base has no
+  # junit for a file it introduces. Supersede from the first post-merge main run
+  # that includes it (#4817/#4729).
+  test_graph_delete_guard.py: 13.1
   test_commit_endpoint.py: 13.0
   test_invites_http.py: 13.0
   test_relationships_bounded.py: 12.7
