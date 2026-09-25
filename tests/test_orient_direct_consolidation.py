@@ -14,6 +14,7 @@ Runnable with: python -m pytest tests/test_orient_direct_consolidation.py -v
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -220,6 +221,10 @@ class TestOverviewDefaultSummary:
         assert isinstance(result["taxonomy"], dict)
         assert isinstance(result["status"], dict)
         assert result["taxonomy"]["Point"] >= 3
+        # #3510 — `sources` is still present, but summarised to counts; the
+        # unbounded [{url, sourceKind, points}] array is opt-in.
+        assert isinstance(result["sources"], dict)
+        assert not isinstance(result["sources"], list)
 
     def test_default_matches_individual_sections(self, sdk, mcp_sdk):
         """Combined summary values equal the single-section calls."""
@@ -240,9 +245,91 @@ class TestOverviewDefaultSummary:
                                 if k != "latency_ms"}
             return d
 
-        for sec in ("taxonomy", "structure", "pointkinds", "tags", "sources",
+        for sec in ("taxonomy", "structure", "pointkinds", "tags",
                     "namespaces", "graphs", "health", "status", "stale"):
             assert _stable(combined[sec]) == _stable(tortoise_overview(section=sec)), sec
+        # `sources` is deliberately NOT in the loop above. Byte-equality with
+        # section="sources" IS today's unbounded shape (one row per registered
+        # URL, growing with ingestion history), which #3510 removes from the
+        # no-arg payload; the count-summary below replaces that assertion
+        # rather than re-baselining it. The full rows stay reachable via the
+        # explicit section. See TestOverviewSourcesSummary.
+        assert combined["sources"] == {"total": 1, "with_points": 1,
+                                       "by_kind": {"document": 1}}
+        assert len(tortoise_overview(section="sources")) == 1
+
+
+class TestOverviewSourcesSummary:
+    """#3510 — the no-arg default must not volunteer the unbounded rows."""
+
+    def test_default_sources_is_a_counts_summary_not_the_rows(
+            self, sdk, mcp_sdk):
+        from tortoise.mcp_server import tortoise_overview
+        _seed_graph(sdk)
+        summary = tortoise_overview()["sources"]
+        assert isinstance(summary, dict), "the raw rows array is unbounded"
+        assert set(summary) == {"total", "with_points", "by_kind"}
+        assert summary["total"] == 1
+        assert summary["with_points"] == 1
+        assert summary["by_kind"] == {"document": 1}
+        # The bound that matters is the PAYLOAD, not the field names: the
+        # summary is counts, so its size does not track the registry size
+        # (asserted at 1,000 rows in the next test).
+        assert len(json.dumps(summary)) < 200
+
+    def test_default_sources_payload_does_not_grow_with_the_registry(
+            self, sdk, mcp_sdk, monkeypatch):
+        """Boundedness, not just presence: 100x the sources, ~same bytes.
+
+        Before #3510 the no-arg payload carried every row (~117 bytes each,
+        measured), so this difference was ~115 kB and the assertion failed.
+        """
+        import tortoise.mcp_server as mcp_mod
+        from tortoise.mcp_server import tortoise_overview
+
+        def _rows_for(n):
+            def _rows():
+                return [{"url": f"https://example.com/{i}",
+                         "sourceKind": "github_pr" if i % 2 else "document",
+                         "points": 1 if i < 5 else 0}
+                        for i in range(n)]
+            return _rows
+
+        sizes: dict[int, int] = {}
+        for n in (10, 1000):
+            monkeypatch.setattr(mcp_mod, "tortoise_list_sources",
+                                _rows_for(n))
+            default = tortoise_overview()
+            sizes[n] = len(json.dumps(default["sources"]))
+            assert default["sources"]["total"] == n
+            assert default["sources"]["with_points"] == 5
+            # the explicit opt-in is UNCHANGED — all rows, still unbounded
+            assert len(tortoise_overview(section="sources")) == n
+        assert sizes[10] < 200, sizes
+        assert sizes[1000] - sizes[10] < 64, sizes
+
+    def test_sources_summary_folds_a_huge_kind_vocabulary(
+            self, sdk, mcp_sdk, monkeypatch):
+        """`by_kind` is bounded too — a caller can register any kind string."""
+        import tortoise.mcp_server as mcp_mod
+        from tortoise.mcp_server import _SOURCES_SUMMARY_TOP_KINDS, tortoise_overview
+        monkeypatch.setattr(mcp_mod, "tortoise_list_sources", lambda: [
+            {"url": f"https://example.com/{i}", "sourceKind": f"kind-{i}",
+             "points": 0} for i in range(500)])
+        summary = tortoise_overview()["sources"]
+        assert summary["total"] == 500
+        assert len(summary["by_kind"]) == _SOURCES_SUMMARY_TOP_KINDS + 1
+        assert summary["by_kind"]["other"] == 500 - _SOURCES_SUMMARY_TOP_KINDS
+        assert sum(summary["by_kind"].values()) == 500
+        assert len(json.dumps(summary)) < 900
+
+    def test_sources_summary_passes_through_an_error_envelope(
+            self, sdk, mcp_sdk, monkeypatch):
+        import tortoise.mcp_server as mcp_mod
+        from tortoise.mcp_server import tortoise_overview
+        monkeypatch.setattr(mcp_mod, "tortoise_list_sources",
+                            lambda: {"error": "boom"})
+        assert tortoise_overview()["sources"] == {"error": "boom"}
 
 
 # ── get: type routing + auto-detect ────────────────────────────────

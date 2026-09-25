@@ -2985,6 +2985,48 @@ _OVERVIEW_SECTIONS = (
 )
 
 
+#: #3510 — in the no-arg combined summary, `sources` is reported as counts,
+#: never the full [{url, sourceKind, points}] array. Source registration is the
+#: one orient section whose size grows with INGESTION HISTORY rather than graph
+#: shape (one row per registered URL, nearly all `points: 0`), so returning it
+#: wholesale made the orientation call more expensive than the list_* calls it
+#: was built to replace — measured 35,190 of 36,498 bytes (96.4%) on a
+#: 300-source graph. The full array stays reachable via section='sources'.
+_SOURCES_SUMMARY_TOP_KINDS = 20
+
+
+def _sources_summary(rows: Any) -> Any:
+    """Bounded counts summary of the sources section (#3510).
+
+    Returns {total, with_points, by_kind} — never the rows. `by_kind` keeps
+    the _SOURCES_SUMMARY_TOP_KINDS largest kinds (ties broken by name) and
+    folds any remainder into "other", so the payload is bounded by the kind
+    vocabulary rather than by the source registry.
+
+    A non-list input is an error envelope from _safe (or a mocked shape) and
+    is passed through unchanged.
+    """
+    if not isinstance(rows, list):
+        return rows
+    with_points = 0
+    kinds: dict[str, int] = {}
+    for row in rows:
+        row = row if isinstance(row, dict) else {}
+        points = row.get("points")
+        if isinstance(points, (int, float)) and points > 0:
+            with_points += 1
+        kind = row.get("sourceKind")
+        key = kind if isinstance(kind, str) and kind else "unknown"
+        kinds[key] = kinds.get(key, 0) + 1
+    top = sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))
+    by_kind = dict(top[:_SOURCES_SUMMARY_TOP_KINDS])
+    rest = sum(n for _, n in top[_SOURCES_SUMMARY_TOP_KINDS:])
+    if rest:
+        by_kind["other"] = by_kind.get("other", 0) + rest
+    return {"total": len(rows), "with_points": with_points,
+            "by_kind": by_kind}
+
+
 def _overview_section(section: str, entity_id: str | None,
                       days: int, limit: int) -> Any:
     """Dispatch one overview section to its original tool body."""
@@ -3031,7 +3073,11 @@ def tortoise_overview(section: str | None = None,
     Each section returns exactly what the legacy tool returned.
 
     Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id).
+    section except topics (which requires entity_id). `sources` is the one
+    section whose size grows with ingestion history rather than graph shape,
+    so the combined summary returns COUNTS for it — {total, with_points,
+    by_kind}, never the rows (#3510). Pass section='sources' for the full
+    unbounded [{url, sourceKind, points}] array.
 
     topics: entityProfile lite for an entity — requires entity_id.
     stale: Points not updated in N days — honors days/limit.
@@ -3041,7 +3087,11 @@ def tortoise_overview(section: str | None = None,
         for sec in _OVERVIEW_SECTIONS:
             if sec == "topics":
                 continue  # requires entity_id — not part of the default summary
-            combined[sec] = _overview_section(sec, entity_id, days, limit)
+            result = _overview_section(sec, entity_id, days, limit)
+            if sec == "sources":
+                # #3510: bounded counts, not the unbounded rows.
+                result = _sources_summary(result)
+            combined[sec] = result
         return combined
     if not isinstance(section, str):
         return {"error": f"overview: section must be a string, got {type(section).__name__}"}
