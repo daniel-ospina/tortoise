@@ -395,11 +395,15 @@ class TestDoctorPath:
             "://user:T4ilPw",
             "://:T4ilPw",
             "+://user:T4ilPw",
-            "rediss://user:\npw@host",
+            "rediss://user:\nS3ntinelpw@host",
             "rediss://u:pw@h:1\nuser:T4ilPw@host",
             "  rediss://:T4ilPw",
             "rediss://[::1]:6379:S3n",
             "rediss://[::1]:6abc",
+            # an '@' BEFORE the scheme / a non-ASCII scheme or port
+            "T4ilPw@rediss://host:6379",
+            "r\u00e9diss://user:T4ilPw",
+            "rediss://[::1]:\u0660",
         ):
             out = _mask_uri_userinfo(value)
             assert "T4ilPw" not in out and "S3n" not in out, \

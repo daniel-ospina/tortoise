@@ -198,6 +198,18 @@ def _redact(uri: str) -> str:
             "rediss://u:pw@h:1\nuser:pw@host",
             "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
         ),
+        # An '@' BEFORE the scheme is not reached by the last-'@'-after-the-
+        # scheme rule, so the canonical used to echo it. entrypoint.sh fails
+        # closed on any unmasked line carrying an '@'.
+        (
+            "user:S3npw@rediss://host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        # A scheme containing a non-ASCII letter is not a scheme
+        # (`str.isalpha()` would accept it, the shell's `[a-zA-Z]` does not).
+        ("r\u00e9diss://user:pw", "<uri-redacted-unrecognised-shape>"),
+        # A bracketed IPv6 port that is a non-ASCII digit is not a port.
+        ("rediss://[::1]:\u0660", "<uri-redacted-unrecognised-shape>"),
         # ...including a continuation line with NO scheme and no '@' — the
         # empty user before the ':' is the only safe tell on such a line.
         (
@@ -265,6 +277,11 @@ _BARE_URI_CORPUS = [
     "redis://:pw@db.example.com:6379/0?ssl=true",
     "docker://user:p@ss@host:7687/g#frag",
     "rediss://r-example.host.cloud:50317",
+    # the '@'-before-scheme shape (the canonical used to echo it verbatim)
+    "user:S3npw@rediss://host:6379",
+    # non-ASCII scheme letter / non-ASCII bracketed port
+    "r\u00e9diss://user:S3ntinel",
+    "rediss://[::1]:\u0660",
     "docker://:falkordb@localhost:6379/tortoise_test_matrix",
     # #2987: the no-'@' credential shapes (and the port-retaining variant).
     # These MUST be in the parity list — a corpus that omits the shapes the PR
@@ -463,10 +480,15 @@ _MALFORMED_VALUE_CORPUS = [
     "://:S3ntinel",
     "+://user:S3ntinel",
     # a scheme-less continuation line with a non-empty user and an '@'
-    "rediss://user:\npw@host",
+    "rediss://user:\nS3ntinelpw@host",
     "rediss://u:pw@h:1\nuser:S3ntinel@host",
     # leading whitespace before a no-'@' credential
     "  rediss://:S3ntinel",
+    # an '@' BEFORE the scheme (the last-'@'-after-the-scheme rule misses it)
+    "user:S3ntinel@rediss://host:6379",
+    # a scheme with a non-ASCII letter / a non-ASCII bracketed port
+    "r\u00e9diss://user:S3ntinel",
+    "rediss://[::1]:\u0660",
 ]
 
 

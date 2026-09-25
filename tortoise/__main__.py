@@ -585,7 +585,9 @@ def _cmd_init(args):
     except ValueError as e:
         # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
         # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
-        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (a plain path with no
+        # '@' passes through unchanged; #2987 fails closed on any other.
+        # scheme-less line carrying an '@').
         print(f"  ❌ Invalid DB path: {_mask_uri_userinfo(str(e))}")
         return 1
 
@@ -4746,9 +4748,11 @@ def _mask_uri_userinfo(target: str) -> str:
 
     Both implementations are held to one rule at the LINE level: a malformed or
     absent scheme is treated as "no scheme" (predicate the text after the first
-    '://'), an '@' anywhere on a scheme-less line fails closed (a continuation
-    line may carry the userinfo while the scheme sits on an earlier line), and
-    the authority cut set is the same explicit ASCII set. (RESIDUAL,
+    '://'), an '@' anywhere on a line the mask did not otherwise change fails
+    closed (a continuation line may carry the userinfo while the scheme sits on
+    an earlier line; an '@' may also precede the scheme, where the
+    last-'@'-after-the-scheme rule never looks), and the authority cut set is
+    the same explicit ASCII set. (RESIDUAL,
     #2987-followup: a continuation line with a NON-empty user, e.g.
     `user:pw:6379`, is not distinguishable from prose (`C:\foo`, an exception
     containing a colon) in this helper, so it is emitted — recorded on the issue
@@ -4923,7 +4927,15 @@ def _mask_uri_userinfo(target: str) -> str:
             out.append(line[i:k])
             out.append(f"{scheme}://:***@{authority[at + 1:]}")
             i = len(line)
-        return "".join(out)
+        result = "".join(out)
+        # Mirror entrypoint.sh's unconditional guard: a line the mask did not
+        # change that carries an '@' fails closed. The no-'://' branch above
+        # covers scheme-less lines; this covers an '@' BEFORE the scheme
+        # (`user:SECRETPW@rediss://host:6379`), which the last-'@'-after-the-
+        # scheme rule never reaches and used to echo verbatim.
+        if result == line and "@" in line:
+            return "<uri-redacted-unrecognised-shape>"
+        return result
 
     return "\n".join(_mask_line(_line) for _line in target.split("\n"))
 
