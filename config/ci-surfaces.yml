@@ -1013,6 +1013,16 @@ surfaces:
   - test_4999_vector_mechanism.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
+  # #4199: the dense leg's material is judged against the READ's own kind
+  # scope, not the whole label. Registered here because this file pins the
+  # unpatterned engine module `tortoise/search_engine.py`
+  # (`run_vector_query` / `declared_degraded_read`), which matches no
+  # SOURCE_PATTERNS entry and so falls to the `core` fallback — same
+  # rationale as `test_turn_embedding_write_path_4194.py` above. Runs in
+  # BOTH the docker and the embedded carve-out lane (the mechanism key
+  # differs, the contract does not), so it is deliberately NOT carve_out:
+  # registering it there would exclude it from every docker leg.
+  - test_4199_dense_scope_coverage.py
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
@@ -1413,6 +1423,7 @@ surfaces:
   - bench/test_roundrobin.py
   - bench/test_smoke_embedded.py
   - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
+  - test_4199_dense_scope_coverage.py  # #4199: dual with `core` — this file's outcome records are gated on `tortoise/embeddings.py`'s embedder singleton (a healthy embedder over an un-embedded scope is the defect), and that module selects the eval surface
   - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
   - test_analytics_write_path_resolution.py  # #3677: tools/capture_cost_report.py is an eval-surfaced source (the eval half of the cost measurement), so a read-path change there must run the guard that pins its resolved destination — dual-registered with `api`/`core`
   - test_analytics_fallback_alert.py  # #3820: triple-registered with `api`/`core` for the same reason as the #3677 file above — the outcome counter it pins lives in `tortoise/monitoring.py`, which the eval lane's cost measurement also reads

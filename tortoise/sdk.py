@@ -14513,6 +14513,14 @@ class TortoiseSDK:
             # Only request the floored-leg report when a floor is active, so a
             # floor-off call keeps `trace_active` False (pre-#4028 shape).
             floored_legs=(_floored_legs if _vector_floor is not None else None),
+            # #4199: the read's OWN kind scope. Only ever supplied when a
+            # trace is being recorded (it decides a DECLARATION, never which
+            # rows are returned), so a leg_trace=None production caller pays
+            # neither the extra scope count nor any behavior change.
+            scope_kinds=(
+                tuple(expanded_kinds)
+                if leg_trace is not None and query_vec is not None
+                and expanded_kinds else None),
         )
 
         if not raw_results:
