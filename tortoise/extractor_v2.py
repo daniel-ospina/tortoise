@@ -67,6 +67,7 @@ import warnings
 import weakref
 from typing import Any
 
+from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
@@ -310,7 +311,7 @@ def _s2s4_rules() -> str:
 
 
 CORE_OBJECT_KEYS = (
-    "core:Project", "core:WorkItem", "core:Problem", "core:document", "core:tag",
+    "core:Project", "core:WorkItem", "core:Problem", "core:tag",
     "core:user", "core:skill", "core:tool", "core:agent",
     "core:workflow", "core:agreement", "core:standard", "core:other",
     "core:strategy", "core:plan", "core:goal", "core:target",
@@ -536,6 +537,21 @@ def _vet_enabled() -> bool:
     (``#1695`` Task 5), so the rate effect is measurable before it is trusted.
     Value matching goes through the declared truthy contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_VET"))
+
+
+def _value_gate_enabled() -> bool:
+    """#4899: the S2.2b mechanical identifier-only predicate toggle.
+
+    ⚠️ **Subordinate to VET, and that is why it is folded into ``vet_enabled``.**
+    The predicate runs *inside* :func:`vet_gate.vet_candidates`, so this flag on
+    its own would be **inert** — it would change nothing and an operator
+    measuring the rate effect (``#4899`` safeguard 1) would read zero firings
+    and wrongly conclude the predicate never fires. With ``arbiter=None`` (the
+    production state) the VET pass's only effect *is* this predicate, so
+    switching VET on is the smallest correct subordination.
+
+    Value matching goes through the declared truthy contract (#4097)."""
+    return _value_gate.value_gate_enabled()
 
 
 def _default_kind_classifier(model):
@@ -5813,7 +5829,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_later_init_failed")
     # #5005: S2.2 VET — off unless TORTOISE_VET (or an injected arbiter).
-    vet_enabled = vet_arbiter is not None or _vet_enabled()
+    # #4899: the mechanical predicate lives inside that pass, so its flag must
+    # switch the pass on too or it would be inert (see `_value_gate_enabled`).
+    vet_enabled = (vet_arbiter is not None or _vet_enabled()
+                   or _value_gate_enabled())
     vet_warnings: list[str] = []
     edus = _edus_from_conversation(conversation)
     if not edus:

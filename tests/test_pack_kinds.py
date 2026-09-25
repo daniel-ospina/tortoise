@@ -1270,15 +1270,15 @@ class TestCanonicalObjectKindAlignment:
 
         Loads a real pack subclassing each newly added kind rather than asserting
         the constant against itself — ``expand_kind`` returns ``[kind]`` for an
-        unknown kind, so an identity check would pass vacuously. Also pins the
-        `document` (objectKind) vs `Document` (core entity type) duality: both
-        validate as parents and expand SEPARATELY (the expansion keys on the
-        literal string).
+        unknown kind, so an identity check would pass vacuously. The pre-D10
+        `document` (objectKind) vs `Document` (core entity type) duality pin is
+        REPLACED by the decision that retired it: D10 (#5013, ONTOLOGY v3.15,
+        #5022) made a document a `:Source`, so lowercase `document` no longer
+        validates as a parent while `Document` still expands.
         """
         manifests = {
             "tranche": "target", "northStar": "goal", "roadmap": "plan",
-            "playbook": "strategy", "label": "tag",
-            "lowerDoc": "document", "upperDoc": "Document",
+            "playbook": "strategy", "label": "tag", "upperDoc": "Document",
         }
         pack_dir = tmp_path / "alignment"
         pack_dir.mkdir()
@@ -1295,10 +1295,68 @@ class TestCanonicalObjectKindAlignment:
         assert not registry.errors, registry.errors
         for kind, parent in manifests.items():
             assert f"alignment:{kind}" in registry.expand_kind(parent), parent
-        # The duality: lowercase objectKind and PascalCase entity type are
-        # distinct expansion roots — neither absorbs the other's subclasses.
-        assert "alignment:upperDoc" not in registry.expand_kind("document")
-        assert "alignment:lowerDoc" not in registry.expand_kind("Document")
+        # D10: lowercase `document` is no longer a canonical objectKind, so it is
+        # not a subclassable parent; `Document` (the core expansion root the
+        # documentKinds genre axis subclasses) is unaffected.
+        assert "document" not in CANONICAL_OBJECT_KINDS
+        assert "alignment:upperDoc" in registry.expand_kind("Document")
+        retired_root = tmp_path / "retired_root"
+        retired_root.mkdir()
+        _write_pack(retired_root, "retired", {
+            "namespace": "retired", "name": "Retired",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["lowerDoc"],
+                "subclassOf": {"lowerDoc": "document"},
+            },
+        })
+        retired = PackRegistry(retired_root)
+        assert retired.load_all() == 0
+        assert "retired" in retired.errors
+
+    def test_a_pack_cannot_re_register_the_retired_kind(self, tmp_path):
+        """D10 must hold on the pack-manifest WRITE side too.
+
+        `_validate`'s collision check reads the SAME axis
+        (`CANONICAL_KINDS[kind_field]`) — so once `document` left
+        ``CANONICAL_OBJECT_KINDS`` a pack could declare ``objectKinds: [document]``
+        and validate clean. That is not inert: ``pack.object_kinds`` is unioned
+        into ``extractor_v2``'s writable kind forms and the classification index,
+        so the retirement became bypassable through the manifest path. The check
+        therefore also reads ``registered_source_types()`` — the axis D10 moved
+        the word TO. Declaring it THERE stays legal.
+
+        This pins the invariant for real. The module's ``__main__`` self-check
+        asserts the same thing, but nothing executes it (no test and no workflow
+        runs ``python -m tortoise.pack_registry``), and it rotted silently once
+        already when `document` left the canonical object set.
+        """
+        from tortoise.pack_registry import registered_source_types
+
+        assert "document" in registered_source_types()  # the axis D10 moved it to
+
+        sneaky_root = tmp_path / "sneaky_root"
+        sneaky_root.mkdir()
+        _write_pack(sneaky_root, "sneaky", {
+            "namespace": "sneaky", "name": "Sneaky",
+            "ontology": {"extends": "core", "objectKinds": ["document"]},
+        })
+        sneaky = PackRegistry(sneaky_root)
+        assert sneaky.load_all() == 0
+        assert any("canonical" in e for e in sneaky.errors.get("sneaky", [])), sneaky.errors
+
+        # Positive control: the same word on the SOURCE axis is legal, so the
+        # clause above rejects the collision and not the word itself.
+        legal_root = tmp_path / "legal_root"
+        legal_root.mkdir()
+        _write_pack(legal_root, "srcs", {
+            "namespace": "srcs", "name": "Sources",
+            "ontology": {"extends": "core", "objectKinds": ["widget"]},
+            "extraction": {"active": True, "sourceTypes": ["document"]},
+        })
+        legal = PackRegistry(legal_root)
+        assert legal.load_all() == 1, legal.errors
+        assert not legal.errors, legal.errors
 
     def test_legacy_extractor_vocab_is_a_documented_subset(self):
         """The legacy Phase-2 entity stage pins a NARROWER object-kind vocab
