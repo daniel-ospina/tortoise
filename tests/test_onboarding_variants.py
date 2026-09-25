@@ -159,9 +159,9 @@ def test_parity_gate_fails_closed_on_a_missing_or_unreadable_copy(tmp_path):
 
 def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
     """#4365/#2698: the served document's §2 note must not send a ChatGPT user to
-    the dashboard's "ChatGPT tab" — #2698 removed it from the chooser
-    (HARNESS_FAMILIES has no chatgpt entry). Reverting the note to the retired
-    tab tripped no test at all (mutation-verified, #4365 review round 4).
+    the dashboard's "ChatGPT tab" — #2698 deleted that tab, and #2912's
+    four-family HARNESS_FAMILIES has no chatgpt entry. Reverting the note to the
+    retired tab tripped no test at all (mutation-verified, #4365 review round 4).
 
     Canonical only: the mirror is pinned byte-identical by
     `test_m8_deploy_mirror_matches_canonical`, so this covers both copies."""

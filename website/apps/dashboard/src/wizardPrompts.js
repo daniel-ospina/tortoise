@@ -51,8 +51,7 @@ export function wizardPromptText(harness, step, key, mode) {
   // connector leaves (Claude Desktop/Web — which never ran the installer and
   // have no skills directory) get it in the workflows prompt body
   // (wizardWorkflowsText). ChatGPT has NO surface in this chooser (#2912's
-  // HARNESS_FAMILIES excludes it — #2698 had already deleted its flat tab; a
-  // persisted 'chatgpt' is reset to 'pi' above),
+  // HARNESS_FAMILIES excludes it — #2698 had already deleted its flat tab),
   // so its URL rides the exported UNIVERSAL_COMMAND.chatgpt for roundtrip/
   // total-loop consumers only — not a delivery path in THIS wizard. Its LIVE
   // carrier is the public setup docs page (#4836): website/docs.html#chatgpt.

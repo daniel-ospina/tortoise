@@ -618,15 +618,14 @@ export function preferredSurface(family, current) {
 // skill) is the agent-side self-adjudication source (the chooser's
 // successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the chooser can never
 // select it: #2698 deleted its dashboard tab and #2912's 4-family
-// HARNESS_FAMILIES excluded it (the mount effect also resets a persisted
-// 'chatgpt' to a valid family). Its LIVE carrier is the public setup docs page
+// HARNESS_FAMILIES excluded it. Its LIVE carrier is the public setup docs page
 // (#4836): website/docs.html#chatgpt names the Developer-mode path, the
 // canonical connector URL and the onboarding instructions URL, so a ChatGPT user
 // is not left with only a test-consumed constant. The block below and that page
 // hand over different INSTRUCTIONS, not different paths — both enrol the same
 // Developer-mode OAuth connector; this block embeds the workflows prompt and asks
-// an in-chat question, the page hands over the onboarding document, whose §4
-// verifies with `tortoise_health`. The block must not name `tortoise_health`
+// an in-chat question, the page hands over the onboarding document, whose verify
+// step calls `tortoise_health`. The block must not name `tortoise_health`
 // (pinned in harnesses.test.js); that is a property of THIS copy, not evidence
 // about what ChatGPT can call. Reachability of each `chatgpt` leaf below is a
 // `grep` question, deliberately not restated here.
