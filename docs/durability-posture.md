@@ -180,6 +180,39 @@ property). It gets its own declared sidecar sections instead:
   re-derived by `projection`.
 <!-- config-registry:end -->
 
+### The one carried high-water mark: `:GraphEventMeta`
+
+The map above is keyed on **node classes**; this entry is a single **counter**,
+and it is carried for a different reason. The rebuild wipe destroys
+`:GraphEventMeta`, whose `last_seq` is the per-graph allocator handed to
+`event_store.next_seq` — and it is **not re-derivable**: `rebuild_all` does not
+replay `:GraphEvent` rows at all (**#4664**, consolidated into #5048, unfixed)
+and the JSONL journal carries no `seq`, so a post-replay scan reads `null`. Left
+uncarried, the next emit MERGEs a fresh counter at 1 and hands out a `seq` the
+graph already issued; because `read_after` is `seq > cursor`, every subscriber
+holding a cursor at or above the restart **silently under-counts**. That is the
+identical harm `hosted_backup._restore_event_meta` (#3902) already prevents on
+the backup/restore path.
+
+<!-- config-registry:watermark -->
+| Carried class | Carried field | Restore rule after replay |
+|---|---|---|
+| `:GraphEventMeta` | `last_seq` (high-water mark) | `max(carried, max(:GraphEvent.seq))`; `first_seq` is re-derived as `min(:GraphEvent.seq)`, or `last_seq + 1` when the log is empty |
+
+Defect and vehicle: this entry was added by **#4653**; the durable carrier is
+the #2943 pre-wipe sidecar's `event_meta` section, re-established by
+`event_store.reestablish_watermark` after every replay pass.
+<!-- config-registry:end -->
+
+`first_seq` is deliberately **not** carried — it is fully re-derivable from the
+surviving log, and `last_seq + 1` is the truthful floor once the log is empty
+(the stream was truncated, so `events_poll` answers 410 instead of returning
+`[]` forever to a subscriber parked above the fresh counter). The carrier is the
+durable #2943 pre-wipe sidecar (`event_meta` section), **not** the config
+registry above: this class has no identity property to key a node-class entry
+on, and snapshotting it as configuration would restore a value as if it were
+authored configuration rather than a monotonic counter. **#4653** is the defect.
+
 <!-- config-registry:unenrolled -->
 - `:TeamMeta` — written with a bare `CREATE` and no uniqueness guarantee
   (`sdk.py`, `hosted_api.py`), so a graph can legitimately hold several and
@@ -189,16 +222,15 @@ property). It gets its own declared sidecar sections instead:
   load-bearing, not bookkeeping. Preserving an at-most-one-per-graph,
   label-wide class is its own design step — declared deliberately **not
   preserved here**, with the class as a known residual. **#5353**
-- `:GraphEventMeta` — an event watermark that **is** re-derivable, so it is
-  re-derived post-replay rather than snapshotted; today it is reset, which
-  collides the next `next_seq` with replayed sequence numbers. **#4653**
 <!-- config-registry:end -->
 
 **Operator audit** — read-only; it enumerates the configuration classes the
-registry declares **and** the container nodes the declared sidecar sections
-preserve (`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), so an
-operator can tell what survived a rebuild. The onboarding rows are pinned by
-the doc-consistency test (a section's classes must appear here); the container
+registry declares, the container nodes the declared sidecar sections preserve
+(`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), and the one
+carried counter (`:GraphEventMeta`) by the query's last leg, so an operator
+can tell what survived a rebuild and the query cannot silently under-report
+after a class is added. The onboarding rows are pinned by the
+doc-consistency test (a section's classes must appear here); the container
 rows are hand-maintained there too, but as a presence check — the test does
 not prove the list is exhaustive, and the per-Point membership edges
 (`batch_point_links`, `session_point_links`) are not enumerated here.
@@ -220,6 +252,9 @@ MATCH (n:OnboardingState) RETURN 'OnboardingState' AS cls, n.org_id AS ident
 UNION ALL
 MATCH (:OnboardingState)-[:COMPLETED_STEP]->(s:OnboardingStep)
 RETURN 'OnboardingStep' AS cls, s.org_id + '/' + s.step_id AS ident
+UNION ALL
+MATCH (m:GraphEventMeta)
+RETURN 'GraphEventMeta' AS cls, toString(m.last_seq) AS ident
 ```
 <!-- config-registry:end -->
 
