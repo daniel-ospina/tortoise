@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from tortoise import hook_install
 from tortoise.capture_install import install_capture
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.session_verify import (
@@ -1166,8 +1167,10 @@ def test_pi_stale_install_is_reported_not_unverifiable(hosted, setup):
     home, _bindir, _fake = setup
     root = _install(home, "pi")
     # The pre-contract shape: a REAL installed seam with its marker stripped —
-    # exactly the Sep-17 seam #4680 was filed about (present, ours, unmarkered).
-    seam = root / "tortoise-capture.ts"
+    # present, ours, unmarkered.  The basename is DERIVED from the contract
+    # registry, never re-typed, so a rename of the artifact cannot leave this
+    # test writing a file the installer/detector do not use (#4680 review).
+    seam = root / hook_install.ARTIFACT_CONTRACTS["pi"].install_name
     seam.write_text(
         "\n".join(line for line in seam.read_text(encoding="utf-8").splitlines()
                   if not line.startswith("// tortoise-hook-version:")) + "\n",

@@ -3235,8 +3235,8 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
-# #4680 the Pi seam carried no marker at all, which is why a Sep-17 installed
-# copy read as merely UNVERIFIABLE while capturing two-week-old logic.
+# #4680 the Pi seam carried no marker at all, which is why a two-week-old
+# installed copy read as merely UNVERIFIABLE while capturing the old logic.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2, "pi": 1}
 
 
@@ -3251,9 +3251,11 @@ def test_shipped_install_contract_generations(harness):
     detail, so they are pinned once and explicitly.
 
     `pi` (#4680) reaches the same table through the ARTIFACT half of the
-    contract: it ships a TypeScript extension, has no `HarnessLayout` by the
-    #4544 ruling, and is pinned by ``contract_version_for`` — the ONE accessor
-    that answers for a shell-hook layout and a non-shell artifact alike.
+    contract: it ships a TypeScript extension and has no `HarnessLayout` —
+    the no-fake-layout ruling documented on
+    ``hook_install.get_layout_optional`` — so it is pinned by
+    ``contract_version_for``, the ONE accessor that answers for a shell-hook
+    layout and a non-shell artifact alike.
     """
     shipped = hook_install.contract_version_for(harness)
     assert shipped == _EXPECTED_INSTALL_CONTRACT[harness], (
@@ -3265,11 +3267,11 @@ def test_shipped_install_contract_generations(harness):
 def _pi_seam_without_marker() -> str:
     """The shipped Pi seam with its contract marker stripped.
 
-    Models the real pre-contract population (the Sep-17 seam #4680 was filed
-    about): a functioning Tortoise seam that declares no generation.  The
-    BODY is kept intact on purpose, because ownership is sniffed from it — a
-    synthetic body without a Tortoise signature would model a FOREIGN file,
-    not a pre-contract copy of ours.
+    Models the real pre-contract population #4680 was filed about: a
+    functioning Tortoise seam that declares no generation.  The BODY is kept
+    intact on purpose, because ownership is sniffed from it — a synthetic body
+    without a Tortoise signature would model a FOREIGN file, not a
+    pre-contract copy of ours.
     """
     return "\n".join(
         line for line in _PI_SRC.read_text(encoding="utf-8").splitlines()
@@ -3296,11 +3298,15 @@ def test_pi_contract_is_pinned_to_the_installer_artifact():
     """The contract registry names the SAME file the installer writes, so the
     drift detector can never inspect a path the installer does not produce.
 
-    Mutation: point ``ARTIFACT_CONTRACTS['pi'].install_name`` (or its source)
-    at a different basename than ``capture_install`` installs — the parity
-    assertions below RED.
+    Mutation: hardcode a literal in ``capture_install.PI_EXTENSION_NAME``
+    (drop the derivation from the registry) and change the registry basename —
+    parity REDs.  The derivation is what makes them one fact; the equality
+    below is the assertion that it is still there.
     """
     contract = hook_install.ARTIFACT_CONTRACTS["pi"]
+    assert contract.install_name == contract.source.name, (
+        "the detector must probe the shipped artifact's own basename, or it "
+        "inspects a file the installer would never write")
     assert contract.install_name == capture_install.PI_EXTENSION_NAME
     assert contract.source == _PI_SRC
     assert contract.source.relative_to(_REPO_ROOT).as_posix() == (
@@ -3348,7 +3354,7 @@ def test_pi_stale_installed_seam_is_reported_not_silent(home):
 
     # (b) the pre-contract copy: a REAL seam with its marker stripped, so it
     # is ours by body signature (`_looks_like_our_script`) but declares no
-    # generation — exactly the Sep-17 shape #4680 was filed about.
+    # generation — the population #4680 was filed about.
     installed.write_text(_pi_seam_without_marker(), encoding="utf-8")
     findings = hook_install.detect_artifact_install(root, "pi")
     blocking = [f for f in findings if f.blocking]

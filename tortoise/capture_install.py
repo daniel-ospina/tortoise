@@ -89,7 +89,8 @@ Relationship to ``tortoise/hook_install.py`` (PR #3866)
 -------------------------------------------------------
 #3866 adds the **drift/repair** path — ``tortoise hooks status|upgrade`` — over
 a ``HarnessLayout`` registry, and versions the contract with a
-``# tortoise-hook-version: N`` marker inside each shipped script.  This module
+``tortoise-hook-version: N`` marker inside each shipped artifact (``#`` for a
+shell hook, ``//`` for the Pi TypeScript extension, #4680).  This module
 deliberately does **not** re-declare any of that: it installs the shipped
 artifacts *verbatim* (no marker is injected, no version constant is declared)
 and emits exactly the settings shape #3866's ``_entry_command_dicts`` /
@@ -98,7 +99,9 @@ holds ``{"type": "command", "command": ".claude/hooks/<name>", "timeout": 60}``.
 The artifact an install produces is therefore one ``tortoise hooks status``
 reads as current, and a stale install is repaired by ``tortoise hooks
 upgrade`` — #3808 is the mechanism #3795/#3801 operate through.  There is one
-version contract, and it lives in the shipped script.
+version contract, and it lives in the shipped artifact: the shell half in
+``HARNESS_LAYOUTS``, the Pi artifact half in
+``hook_install.ARTIFACT_CONTRACTS["pi"]``.
 
 Because the two modules answer the same question — "is this entry ours?" —
 :func:`_is_our_script_command` here **delegates** to #3866's

@@ -120,6 +120,14 @@ KIND_CAPTURE_FAILURE = "capture-failure"
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific
 #: (a bare word ``tortoise`` would match a foreign hook that merely mentions
 #: it) — the pre-#3795 un-markered hooks contain several of these.
+#:
+#: ``tortoise-capture`` is the Pi seam's CODE-stable anchor (its shipped log
+#: prefix is ``[tortoise-capture]``).  Without it the only matches in the Pi
+#: seam are PROSE in comments, so a future doc-comment rewording would flip an
+#: unmarkered pre-contract seam from ``unversioned-artifact`` to
+#: ``foreign-artifact`` — the class whose repair instruction is wrong (#4680
+#: review).  The other identifiers stay executable/prose-stable for the shell
+#: hooks.
 _TORTOISE_SIGNATURES = (
     "tortoise context",
     "tortoise session",
@@ -129,6 +137,7 @@ _TORTOISE_SIGNATURES = (
     "import tortoise",
     "tortoise.__main__",
     "tortoise/claude-hooks",
+    "tortoise-capture",
 )
 
 
@@ -331,11 +340,11 @@ def read_hook_version(path: str | os.PathLike[str]) -> int | None:
     """Return the canonical marker value in ``path``, or ``None``.
 
     ``None`` means "no readable canonical marker" — the file is missing, a
-    directory, or carries no column-0 ``# tortoise-hook-version: N`` line.  A
-    pre-#3795 install (no marker on ``session-start.sh``) is exactly this
-    case, so ``None`` is a first-class *stale* signal, never an error.  The
-    ``is_file`` gate also keeps a FIFO/socket at the path from blocking on
-    ``read_text``.
+    directory, or carries no column-0 ``# tortoise-hook-version: N`` (shell) or
+    ``// tortoise-hook-version: N`` (TypeScript) line.  A pre-#3795 install (no
+    marker on ``session-start.sh``) is exactly this case, so ``None`` is a
+    first-class *stale* signal, never an error.  The ``is_file`` gate also
+    keeps a FIFO/socket at the path from blocking on ``read_text``.
     """
     p = Path(path)
     if not p.is_file():
@@ -598,16 +607,17 @@ class ArtifactContract:
     """A shipped capture seam that is NOT a shell hook.
 
     ``HarnessLayout`` describes a hooks *directory* plus a registration *file*
-    — neither of which a non-shell seam has, and #4544 rules that inventing a
-    fake layout for one is wrong.  What the VERSION CONTRACT needs from such a
-    seam is only the shipped artifact and the name it installs under, so that
-    is all this carries; the marker's comment prefix is the READER's business
+    — neither of which a non-shell seam has, and the no-fake-layout ruling
+    documented on :func:`get_layout_optional` says inventing one for it is
+    wrong.  What the VERSION CONTRACT needs from such a seam is only the
+    shipped artifact and the name it installs under, so that is all this
+    carries; the marker's comment prefix is the READER's business
     (``read_hook_version`` accepts a shell ``#`` or a TS ``//`` column-0
     marker), never restated per artifact.
 
     This is deliberately NOT a ``HarnessLayout`` and must never grow into one:
     a layout-shaped stand-in would claim a ``hooks_dir`` and a registration
-    file the seam does not have, which is the exact fake #4544 rejected.
+    file the seam does not have, which is the exact fake that ruling rejects.
     """
 
     harness: str
@@ -627,10 +637,15 @@ def _pi_artifact_contract() -> ArtifactContract:
 
 #: Shipped non-shell seams, by harness.  The version contract is the
 #: harness-agnostic half of this module: a shell-hook seam answers through
-#: ``HARNESS_LAYOUTS``, a non-shell seam through this registry, and every
-#: consumer (``contract_version_for`` / ``detect_artifact_install``) is the
-#: same code either way — so ``pi`` is drift-checked without a fake layout
-#: (#4680, #4544).
+#: ``HARNESS_LAYOUTS``, a non-shell seam through this registry, and the
+#: version ACCESSOR (``contract_version_for``) is the same call either way —
+#: so ``pi`` is pinned by the same test table as its siblings without a fake
+#: layout.  Detection has two siblings instead (``detect_install`` for shell
+#: hooks, ``detect_artifact_install`` for artifacts): they cannot share one
+#: body because the shell half needs a ``hooks_dir``, a registration file and
+#: an exec bit, none of which apply here — so they are kept in lockstep
+#: deliberately (same ``read_hook_version``, same ``Finding`` vocabulary),
+#: not by delegation (#4680).
 ARTIFACT_CONTRACTS: dict[str, ArtifactContract] = {
     "pi": _pi_artifact_contract(),
 }
@@ -700,7 +715,9 @@ def contract_version_for(harness: str) -> int | None:
     is a shell hook (answered by ``contract_version`` over a ``HarnessLayout``)
     or a non-shell artifact (answered from :data:`ARTIFACT_CONTRACTS`), so
     ``pi`` is pinned by the SAME test table as its three shell siblings instead
-    of falling outside the machinery (#4680).
+    of falling outside the machinery (#4680).  Its production consumers are
+    the two freshness surfaces that must not skip a non-layout seam —
+    ``tortoise hooks status`` and ``tortoise doctor`` step 7.
 
     ``None`` means "no contract is registered for this harness" or "the
     shipped tree is unmarkered/self-inconsistent".  The former is the normal
@@ -2073,11 +2090,21 @@ def detect_artifact_install(root: str | os.PathLike[str],
     settings, exec bit) do not apply.  The checks it DOES share are the same
     ones: missing / not-a-regular-file / not-readable / foreign / unversioned /
     stale / ahead / modified — the same classification ``detect_install``
-    applies (the kind names end ``-artifact`` rather than ``-script``, because
-    a caller may key on which seam class a finding belongs to), so ``session
-    verify`` reports a stale Pi seam exactly as it reports a stale Claude one
-    (#4680) instead of the old presence-only check that could not tell them
-    apart.
+    applies, so ``session verify`` reports a stale Pi seam exactly as it
+    reports a stale Claude one (#4680) instead of the old presence-only check
+    that could not tell them apart.
+
+    Kind names are suffixed ``-artifact`` rather than ``-script`` ONLY for the
+    seam-specific kinds (``unversioned``/``stale``/``ahead``/``modified``/
+    ``symlinked``/``foreign``); the structural kinds ``not-a-regular-file`` and
+    ``not-readable`` are shared verbatim with ``detect_install`` on purpose, so
+    the CLI's manual-fix kind set keeps matching both seam classes.
+
+    KNOWN LIMITATION (tracked by #3713, not this detector's fix): only the one
+    artifact file is inspected, so an ACTIVE legacy ``tortoise-capture/``
+    directory beside it — the double-producer collision ``_install_pi``
+    disables on install — is not reported here.  A shell seam has no such
+    directory-shaped duplicate, so ``detect_install`` has no peer check.
 
     Read-only, like its shell sibling.  Returns ``[]`` for a harness with no
     registered artifact (the normal answer for a harness this module does not

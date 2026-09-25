@@ -3177,7 +3177,7 @@ def _cmd_hooks(args) -> int:
     from pathlib import Path as _P
 
     from tortoise.hook_install import (
-        contract_version,
+        contract_version_for,
         default_root,
         detect_install,
         get_layout,
@@ -3263,7 +3263,7 @@ def _cmd_hooks(args) -> int:
             print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
                   file=_sys.stderr)
             return 1
-        version = contract_version(layout)
+        version = contract_version_for(args.harness)
         if getattr(args, "json", False):
             import json as _json
             print(_json.dumps({
@@ -6364,24 +6364,45 @@ def _cmd_doctor(args):
     # no-capture the row exists to catch.
     try:
         from tortoise.hook_install import (
-            contract_version,
+            contract_version_for,
             default_root,
+            detect_artifact_install,
             detect_install,
-            get_layout,
+            get_layout_optional,
             is_installed,
         )
-        for _harness in ("claude", "codex", "cursor"):
-            _layout = get_layout(_harness)
-            # Claude is project-scoped (`root_env is None`) and ignores this
-            # argument; a `None` home (step 6 could not resolve it) is given
-            # the cwd so a codex layout still refuses as a populated
-            # `ValueError` rather than raising `TypeError` on `Path(None)`.
-            _root = default_root(_layout, home if home is not None else Path("."))
-            if not is_installed(_root, _harness):
-                continue
-            findings = detect_install(_root, _harness)
+        # `pi` is a non-shell artifact seam: it has NO `HarnessLayout`, so it
+        # cannot go through `default_root`/`detect_install`, and omitting it
+        # here left step 6's green "Pi (extension found)" as the ONLY Pi
+        # signal — a stale or unmarkered seam exited 0 with no freshness row
+        # at all, which is the silent state #4680 exists to remove.  Keyed on
+        # `get_layout_optional`, and the version comes from
+        # `contract_version_for`, so one loop covers both seam classes.
+        for _harness in ("claude", "codex", "cursor", "pi"):
+            _layout = get_layout_optional(_harness)
+            if _layout is not None:
+                # Claude is project-scoped (`root_env is None`) and ignores
+                # this argument; a `None` home (step 6 could not resolve it)
+                # is given the cwd so a codex layout still refuses as a
+                # populated `ValueError` rather than raising `TypeError` on
+                # `Path(None)`.
+                _root = default_root(
+                    _layout, home if home is not None else Path("."))
+                if not is_installed(_root, _harness):
+                    continue
+                findings = detect_install(_root, _harness)
+            else:
+                # No home to anchor an artifact install, so there is nothing
+                # to probe (step 6 already warned that home did not resolve).
+                if home is None:
+                    continue
+                _root = pi_home(home)
+                _artifact = _root / PI_EXTENSION_NAME
+                if not (_artifact.exists() or _artifact.is_symlink()):
+                    continue
+                findings = detect_artifact_install(_root, _harness)
             blocking = [f for f in findings if f.blocking]
-            version = contract_version(_layout)
+            version = contract_version_for(_harness)
             label = ("Capture hooks" if _harness == "claude"
                      else f"Capture hooks ({_harness})")
             if not blocking:
@@ -6389,11 +6410,16 @@ def _cmd_doctor(args):
                                 f"install current (contract v{version})"))
             else:
                 first = blocking[0]
+                # The repair command differs by seam class: `hooks upgrade`
+                # does not cover a non-layout seam (#5351), so Pi's is the
+                # installer that owns its artifact.
+                _repair = (f"tortoise hooks status --harness {_harness}"
+                           if _layout is not None
+                           else f"tortoise install {_harness}")
                 results.append((
                     label, "❌",
-                    f"{len(blocking)} stale issue(s) — run `tortoise hooks "
-                    f"status --harness {_harness}` for the repair path "
-                    f"({first.kind}: {first.detail})",
+                    f"{len(blocking)} stale issue(s) — run `{_repair}` for the "
+                    f"repair path ({first.kind}: {first.detail})",
                 ))
     except Exception as e:
         results.append(("Capture hooks", "⚠️",

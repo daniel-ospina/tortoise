@@ -568,10 +568,17 @@ class TestDoctorPreInit:
     def test_no_flags_fresh_machine_reports_not_set_up(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """The canonical first-run scenario: no flags, no env, no ~/.tortoise
         → doctor reports 'not set up yet — run tortoise init' (rc 0) instead
-        of the raw embedded-redis FATAL CONFIG error."""
+        of the raw embedded-redis FATAL CONFIG error.
+
+        HOME is isolated because "fresh machine" includes the HOME-scoped
+        capture seams: since #4680 doctor grades the installed Pi extension's
+        GENERATION, so an ambient stale seam under the developer's real HOME
+        would legitimately FAIL this rc-0 assertion.
+        """
         from tortoise import config as _config
         canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
         monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         rc = _run_doctor([])
         out = capsys.readouterr().out
@@ -867,3 +874,72 @@ class TestOnboardDoctorCall:
         assert rc == 0
         assert "Step 5/5: Health check" in out
         assert "'Namespace' object has no attribute" not in out
+
+
+class TestDoctorPiSeamFreshness:
+    """#4680: `doctor` must grade the Pi seam's GENERATION, not its presence.
+
+    Pi is the one wizard-offered harness with no `HarnessLayout`, so step 6's
+    "Pi (extension found)" used to be the only Pi row — a stale or
+    markerless seam exited 0 with no freshness row at all (the review-P1
+    finding). Step 7 now drives both seam classes through
+    `contract_version_for` / `detect_artifact_install`.
+
+    `--path relative.db` pins an invalid DB target so the graph checks fail
+    fast and no embedded server is started; steps 6/7 still run.
+    """
+
+    @staticmethod
+    def _seam(home, text: str):
+        from tortoise import hook_install
+        root = home / ".pi" / "agent" / "extensions"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / hook_install.ARTIFACT_CONTRACTS["pi"].install_name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _pi_row(out: str) -> str:
+        return next(line for line in out.splitlines() if "Capture hooks (pi)" in line)
+
+    def test_doctor_fails_a_stale_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A markerless (pre-contract) Pi seam is a FAIL row naming the repair.
+
+        Mutation: drop "pi" from step 7's loop — the green "Pi (extension
+        found)" row stands alone and this REDs (no ❌ row, rc 0 for this seam).
+        """
+        home = tmp_path / "home"
+        from tortoise import hook_install
+        shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source.read_text(
+            encoding="utf-8")
+        # The body is the SHIPPED seam with its marker stripped, so it is ours
+        # by signature but declares no generation — the pre-contract shape.
+        self._seam(home, "\n".join(
+            line for line in shipped.splitlines()
+            if not line.startswith("// tortoise-hook-version:")) + "\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "unversioned-artifact" in row, row
+        assert "tortoise install pi" in row, row
+
+    def test_doctor_passes_a_current_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The shipped bytes installed verbatim are "current" — doctor must not
+        nag a healthy Pi install (the failure mode that would train users to
+        ignore the row)."""
+        from tortoise import hook_install
+        home = tmp_path / "home"
+        self._seam(home, hook_install.ARTIFACT_CONTRACTS["pi"].source
+                   .read_text(encoding="utf-8"))
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "✅" in row, row
+        assert "install current" in row, row

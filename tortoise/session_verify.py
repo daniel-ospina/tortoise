@@ -72,6 +72,11 @@ is loaded and fired by the node probe in
 ``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); the residual (a real
 ``pi`` process loading the installed extension against the live API) is
 manual-only.  A link is only ever ``PROVEN`` when the path actually ran.
+
+UNVERIFIABLE is NOT "unjudgeable": the static leg still runs, and since #4680
+Pi's installed artifact is graded by the same version contract as the shell
+seams, so a missing / unmarkered / stale / edited Pi seam is a hard ``FAIL``
+here — it is only the LIVE-FIRE leg that stays ``UNVERIFIABLE-IN-CI``.
 """
 from __future__ import annotations
 
@@ -252,7 +257,12 @@ def _static_findings(harness: str, root: Path) -> list[dict[str, Any]]:
     delegates to the ARTIFACT half — ``hook_install.detect_artifact_install``
     — which is why a stale Pi seam is now reportable rather than only its
     absence (#4680).  Keyed on the registry, never on a literal ``"pi"``, so a
-    future non-shell seam is covered without a second branch here.
+    seam registered in ``ARTIFACT_CONTRACTS`` is graded here with no edit; a
+    seam class the registry does not know still falls through to
+    ``detect_install`` (and its repair path may equally carry its own
+    hard-coded harness names — ``resolve_install_root`` does that for ``pi``
+    today — so registry membership is what keeps THIS branch generic, not a
+    guarantee about every branch downstream).
     """
     if harness in hook_install.ARTIFACT_CONTRACTS:
         return [
