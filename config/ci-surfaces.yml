@@ -623,6 +623,14 @@ surfaces:
   # select the `core` surface, so the guard for the anchor runs with the code it
   # guards. Hermetic (embedded DB per test, no URI).
   - test_source_version_references_5199.py
+  # #5256 (extracted from #5038): the `extractedFrom` READ-VERSION anchor —
+  # `sourceVersion` on the Point's provenance edge, carried in the node's own
+  # journaled snapshot. Hermetic (embedded DB per test: an explicit `db_path`
+  # wins over `TORTOISE_DB_URI`, and the JSONL journal + `rebuild_all` are
+  # exercised in-process). `tortoise/projection/edges.py` selects `ep`+
+  # `core`, `api.py` selects `api`+`core`; `sdk.py`, `projection/__init__.py`
+  # and `mcp_server.py` are SHARED_MODULEs (already the full matrix).
+  - test_source_version_extractedfrom_5038.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -1175,6 +1183,7 @@ surfaces:
   - test_pointinvalidated_rebuild.py
   - test_lifecycle_guards.py        # #2498: shared supersede/retract/invalidate terminal+operator guard (status x transition matrix)
   - test_provenance_extractedfrom_3263.py  # #3263: extractedFrom inferred from the write context + live==rebuild parity (docker-lane)
+  - test_source_version_extractedfrom_5038.py  # #5256: extractedFrom read-version anchor -- dual-registered with core (edges.py is the ep source pattern); per-link scalar on the edge + journaled node transit
   - test_weights_mitigation.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
@@ -2514,6 +2523,7 @@ durations:
   test_product_rerank.py: 0.2
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.6
+  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 21 tests, hermetic embedded DB per test; locally measured
   test_rebuild_turn_points_3947.py: 4.4
   test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8

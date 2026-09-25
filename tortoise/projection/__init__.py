@@ -4160,10 +4160,20 @@ class FalkorProjection(
                     # node does not (the #330/#3312 parity break), and a leaked
                     # `true` would make a later re-emit store the new vector
                     # RAW and skip the R1 attestation.
+                    #
+                    # #5256: `sourceVersion` is wiped here for the SAME reason —
+                    # it is a declared NODE property whose clause (`SET
+                    # n.sourceVersion=$sv`) is only emitted when the payload
+                    # carries one, so without this a re-creation with no
+                    # `extractedFrom` would inherit the dead incarnation's
+                    # transit and the rebuilt node would diverge from live.
+                    # (The dead incarnation's `extractedFrom` EDGE is a
+                    # separate, PRE-EXISTING pass-2 resurrection — see the
+                    # change's residual note; this wipe is the node-prop half.)
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
-                        "    n.embedding_verbatim = NULL",
+                        "    n.embedding_verbatim = NULL, n.sourceVersion = NULL",
                         params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,

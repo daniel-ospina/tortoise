@@ -467,6 +467,16 @@ class _EntityHandlers:
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
         "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # #5256: a DECLARED node property (own conditional clause below), the
+        # extractedFrom READ-VERSION transit. It rides on the NODE because
+        # `extractedFrom` is a replay-derived projection (the `#4042` recreate
+        # wipe clears only node props, and pass 2 boots edges from scratch) —
+        # the edge is authoritative, but the value must survive in the Point's
+        # own journaled snapshot for pass 2 to re-stamp it without reading the
+        # Source (whose in-place contentHash bump is unjournalled, #5024).
+        # Handled because its own clause owns it — the open-set passthrough
+        # must not also write it.
+        "sourceVersion",
         # #2958 review: written by its own explicit clause in
         # `_upsert_point_props` (`SET n.provenanceSource=$sid`), gated on
         # provenance.source_id — the open passthrough must not supply it when
@@ -771,6 +781,16 @@ class _EntityHandlers:
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
             "now": _now_iso(),
         }
+        # #5256: the extractedFrom read-version transit. Written ONLY when the
+        # payload carries a non-empty list of [source_url, contentHash] pairs —
+        # an un-sourced Point, or one whose Source has no recorded hash, carries
+        # NO property (never '' and never []: honest-absent, because '' compares
+        # equal to a Source's '' and reads as a false CURRENT). `coalesce` is
+        # deliberately NOT used: the value is a recorded FACT of the reading,
+        # not a derived value to preserve across re-emits.
+        if p.get("sourceVersion"):
+            set_clauses.append("n.sourceVersion=$sv")
+            params["sv"] = p["sourceVersion"]
         # A10 operator-scoped replay extension (cycle-22/23): the OperatorAdded
         # point snapshot carries `direction` (stored ALWAYS) + `label` (stored
         # when truthy) on the node — the fixed SET list above drops them,
@@ -914,9 +934,26 @@ class _EntityHandlers:
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
         # out to N edges (ontology §3.3 amended to many→many).
+        # #5256: the read-version anchor travels in the SAME payload as the
+        # ref, on the node's own `sourceVersion` transit list. We hand it to the
+        # writer as a {resolved_key: hash} map — this fold NEVER reads
+        # `s.contentHash` (the Source may have advanced since live time). A
+        # malformed/falsy payload contributes NO anchor rather than crashing
+        # `dict(...)` or stamping a non-str value.
         source_ref = p.get("extractedFrom")
         if source_ref:
-            self._link_source(p["id"], source_ref)
+            source_versions = None
+            sv = p.get("sourceVersion")
+            if isinstance(sv, (list, tuple)):
+                pairs = [
+                    (pair[0], pair[1]) for pair in sv
+                    if isinstance(pair, (list, tuple)) and len(pair) == 2
+                    and isinstance(pair[0], str) and isinstance(pair[1], str)
+                ]
+                if pairs:
+                    source_versions = dict(pairs)
+            self._link_source(p["id"], source_ref,
+                              source_versions=source_versions)
         # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
         # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
         # member of the deferred generic direct-edge replay (#1048: caller-
