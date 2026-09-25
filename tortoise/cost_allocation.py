@@ -275,8 +275,8 @@ def _resolve_line_total(line: LineSpec, *, observed_as_of: str) -> LineTotal:
                     False, None)
     detail = f"{line.env_var} {reason}"
     logger.error(
-        "%s — line %s reported %s (fail-closed; the declared default is NOT "
-        "used)", detail, line.name, STATE_UNAVAILABLE)
+        "%s — line %s reported %s (fail-closed; the declared default is not "
+        "used as an allocated total)", detail, line.name, STATE_UNAVAILABLE)
     return LineTotal(line.total_cents, line.source, line.as_of,
                      line.is_estimate, detail)
 
@@ -284,13 +284,22 @@ def _resolve_line_total(line: LineSpec, *, observed_as_of: str) -> LineTotal:
 def line_total_cents(line: LineSpec) -> int:
     """The effective monthly total in cents for *line* (value-only accessor).
 
-    A malformed override is NOT accepted as a value here —
-    :func:`evaluate_allocation` resolves the same override through
-    :func:`_resolve_line_total` and reports the line ``unavailable`` (the
-    fail-closed path). This accessor exists for a caller that only wants the
-    number; use :func:`_resolve_line_total` when the state matters.
+    FAIL-CLOSED: a present-but-unusable override **raises** ``ValueError``
+    (carrying the same detail :func:`_resolve_line_total` logs) rather than
+    returning the DECLARED DEFAULT. The default is not a usable total here —
+    for four of the five lines it is 0, i.e. indistinguishable from
+    "unconfigured", so silently returning it would make a misconfiguration look
+    like an ordinary number. "Unconfigured" (the variable absent) still yields
+    the declared default, and is not an error.
+
+    Callers that must OBSERVE the state rather than handle an error should use
+    :func:`evaluate_allocation`, which reports the line ``unavailable`` with no
+    share emitted (the same fail-closed path).
     """
-    return _resolve_line_total(line, observed_as_of=line.as_of).cents
+    resolved = _resolve_line_total(line, observed_as_of=line.as_of)
+    if resolved.error is not None:
+        raise ValueError(resolved.error)
+    return resolved.cents
 
 
 @dataclass(frozen=True)
@@ -580,6 +589,19 @@ def _bounded_org_labels(labels: Iterable[str]) -> dict[str, str]:
 
 _lock = threading.Lock()
 _last_snapshot: AllocationSnapshot | None = None
+#: The window of the values CURRENTLY in the metric — i.e. of the last
+#: SUCCESSFUL publish. Deliberately distinct from ``_last_snapshot`` (the last
+#: ATTEMPT, which may itself be ``unavailable``): on an unavailable refresh the
+#: metric keeps last-known-good values, so only a successful publish moves this.
+#: It exists so a log line can name the period a figure actually belongs to
+#: instead of the period that was attempted (a reader correlating logs with
+#: values would otherwise be misled across a month rollover).
+_last_published_window: tuple[str, str] | None = None
+
+
+def _retained_window() -> tuple[str, str]:
+    """The window the metric's current values belong to (or placeholders)."""
+    return _last_published_window or ("unknown", "unknown")
 
 
 def publish(snapshot: AllocationSnapshot) -> None:
@@ -597,19 +619,25 @@ def publish(snapshot: AllocationSnapshot) -> None:
     simply vanishes, with no state on the metric to say so), which reads
     exactly like "this org's cost fell" — the failure this module exists to
     avoid. The warning distinguishes the two shapes via
-    ``enumeration_available``.
+    ``enumeration_available`` AND names the window the retained values belong
+    to (the PREVIOUS successful one) — the attempted window is explicitly NOT
+    the one the metric carries.
 
     On success the new children are recorded FIRST and only the children no
     longer present are pruned, so a concurrent ``/metrics`` scrape served by
     another thread can never observe an empty or partial family (a
     clear-then-set would expose exactly that gap on every refresh).
     """
-    global _last_snapshot
+    global _last_snapshot, _last_published_window
     if snapshot.state == STATE_UNAVAILABLE:
+        retained_start, retained_end = _retained_window()
         logger.warning(
             "cost allocation refresh unavailable (enumeration_available=%s) — "
-            "metric left at last-known-good (window %s→%s)",
+            "metric left at last-known-good (values still belong to the "
+            "PREVIOUS successful window %s→%s; attempted window %s→%s was NOT "
+            "published)",
             snapshot.enumeration_available,
+            retained_start, retained_end,
             snapshot.window_start, snapshot.window_end)
         with _lock:
             _last_snapshot = snapshot
@@ -635,6 +663,8 @@ def publish(snapshot: AllocationSnapshot) -> None:
     for label, cents in sorted(merged.items()):
         monitoring.record_cost(label, cents)
     monitoring.prune_team_cost(set(merged))
+    with _lock:
+        _last_published_window = (snapshot.window_start, snapshot.window_end)
 
 
 def refresh_and_publish(
@@ -684,10 +714,20 @@ def _reconcile_and_log(snapshot: AllocationSnapshot) -> None:
     overflow = published_by_org.get(ORG_OVERFLOW, 0)
     orgs = len([k for k in published_by_org
                 if k not in (RESIDUAL_ORG, ORG_OVERFLOW)])
+    # ``attempted_window`` is the window this refresh evaluated;
+    # ``published_window`` is the window the values READ BACK from the metric
+    # belong to. They are equal on a successful refresh, and differ on an
+    # unavailable one (where the metric still carries the last-known-good
+    # values) — naming both means a reader can never attribute a stale figure
+    # to the attempted period.
+    attempted_start, attempted_end = snapshot.window_start, snapshot.window_end
+    retained_start, retained_end = _retained_window()
     logger.info(
-        "cost allocation refresh kind=allocation state=%s window=%s..%s "
+        "cost allocation refresh kind=allocation state=%s "
+        "attempted_window=%s..%s published_window=%s..%s "
         "lines=%d orgs=%d published_cents=%d residual_cents=%d overflow_cents=%d",
-        snapshot.state, snapshot.window_start, snapshot.window_end,
+        snapshot.state, attempted_start, attempted_end,
+        retained_start, retained_end,
         len(snapshot.lines), orgs, published, residual, overflow,
     )
     if snapshot.state == STATE_UNAVAILABLE:
@@ -718,7 +758,8 @@ def allocation_by_org() -> dict[str, int]:
 
 def _reset_for_tests() -> None:
     """Test seam: clear the process-global metric and the snapshot cache."""
-    global _last_snapshot
+    global _last_snapshot, _last_published_window
     monitoring.clear_team_cost()
     with _lock:
         _last_snapshot = None
+        _last_published_window = None

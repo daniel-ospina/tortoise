@@ -107,7 +107,11 @@ An unreadable input is **never** reported as `0`:
 
 * the org enumeration (`_iter_registered_orgs`) returns `[]` on *any* failure,
   so an empty list is treated as **unavailable**, never as "a fleet with no
-  orgs";
+  orgs". The cost caller additionally passes `require_complete=True`: when the
+  Supabase page fills its explicit limit an incomplete/possibly-truncated page
+  returns `None` (the fleet is UNKNOWN, so the metric stays last-known-good),
+  while the best-effort event-retention sweep still processes the page it
+  received (#5388 tracks the residual exactly-at-the-cap ambiguity);
 * the proportional basis is read with `metering.measure_write_ops`, which
   **raises** on an unreadable window or read (unlike `get_current_usage`, which
   degrades to a zero view — the reason it is not used here: its failure path is
@@ -138,10 +142,15 @@ Three read paths, no dashboard:
 
 1. **`fly logs`** — the refresh emits one `INFO` line per cycle
    (`tortoise.cost_allocation`): `cost allocation refresh kind=allocation
-   state=… window=… lines=… orgs=… published_cents=… residual_cents=…
-   overflow_cents=…`. This is the production-readable path today (nothing
-   scrapes `/metrics` in production). The `published_cents` figure is read back
-   from the METRIC itself (`allocation_by_org()`), not from the in-memory
+   state=… attempted_window=… published_window=… lines=… orgs=…
+   published_cents=… residual_cents=… overflow_cents=…`. This is the
+   production-readable path today (nothing scrapes `/metrics` in production).
+   `attempted_window` is the window this refresh evaluated; `published_window`
+   is the window the values READ BACK from the metric belong to — the two agree
+   on a successful refresh and differ on an `unavailable` one (where the metric
+   still carries the last-known-good window), so a reader can never attribute a
+   stale figure to the attempted period. The `published_cents` figure is read
+   back from the METRIC itself (`allocation_by_org()`), not from the in-memory
    shares, so the reconciliation warning compares what was actually published
    against the declared totals and can fire.
 2. **PromQL** — `tortoise_team_cost_cents{team="<org>"}` once a scraper exists.
@@ -178,6 +187,9 @@ declared total is 0 (unconfigured) or no org carries weight.
   `tortoise.cost_allocation.refresh_and_publish` → `publish`. In that path
   `monitoring.record_cost` is the setter and `monitoring.prune_team_cost` the
   pruner; both are called only from there, plus the test seams
-  (`_reset_for_tests` / `clear_team_cost`). A test asserts this on the METRIC
-  (every non-`monitoring.py` reference to `TEAM_COST` and its mutators must sit
-  inside `publish`), not on a function-name substring.
+  (`_reset_for_tests` / `clear_team_cost`). A test asserts this on the METRIC,
+  not on a function-name substring, and the assertion's scope is exactly:
+  **every reference to `TEAM_COST` and its mutators inside a FUNCTION BODY in
+  `tortoise/*.py` outside `monitoring.py`** must sit inside `publish` or the
+  test seam. Module-level, class-body, `lambda`, alias and `getattr` references
+  are outside that scope, and `monitoring.py` (the definitions) is skipped.
