@@ -230,11 +230,33 @@ class EventAPI:
                           # rides the journal and makes the replay report a
                           # model change that never happened.
                           "embedding_model", "embedding_revision",
-                          "embedding_text_hash"})
+                          "embedding_text_hash",
+                          # #5256: the `extractedFrom` read-version anchor is
+                          # server-derived (resolved from the :Source below).
+                          # Accepting it would let this non-SDK seam forge the
+                          # provenance record, and the same reason the SDK and
+                          # MCP boundaries reject it applies here.
+                          "sourceVersion", "sourceVersions"})
         if _forged:
             raise ValueError(
                 f"{_forged} are server-managed embedding journal fields and "
                 "cannot be set via add_point(fields=...)")
+        # #5256: resolve the extractedFrom read-version from the :Source on the
+        # LIVE path and put it in the payload, so the Point's OWN journaled
+        # snapshot carries it and the replay never re-reads the Source (whose
+        # in-place contentHash bump is unjournalled, #5024). `getattr` — not
+        # `self.projection.g` — is load-bearing: this producer runs in
+        # projection-less extraction lanes (`projection=None`) and against the
+        # in-memory double (no `.g`), and neither has a Source to read. There
+        # the field simply stays absent; the point itself still journals.
+        if p.get("extractedFrom"):
+            _g = getattr(self.projection, "g", None)
+            if _g is not None:
+                from .projection.edges import _source_version_transit, resolve_source_versions
+                _sv = _source_version_transit(
+                    resolve_source_versions(_g, p["extractedFrom"]))
+                if _sv is not None:
+                    p["sourceVersion"] = _sv
         # P1 #49: mark events with projection_version=2 so the projection gate
         # (Task 1.6) knows to strip context from v2 events.
         self._emit("PointAdded", point=p, corrects=corrects, projection_version=2)
