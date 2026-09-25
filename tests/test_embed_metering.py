@@ -178,34 +178,90 @@ class TestMeted:
         assert len(calls) == 1 and calls[0]["calls"] == 1
 
     def test_async_flush_is_offloaded_off_the_event_loop(self, monkeypatch):
-        # Mutation: awaiting the blocking writer on the loop → the loop-blocking
-        # assertion fires. Proven by making the writer block and checking the
-        # loop keeps ticking while it does.
-        import threading
-        ticks: list[int] = []
+        """The async arm must hand the blocking ledger write to ANOTHER thread.
 
-        def _blocking(org_id, **kw):
-            threading.Event().wait(0.15)     # simulate a blocking ledger write
+        Mutation proven RED: awaiting the writer inline on the loop. Asserted by
+        THREAD IDENTITY, not by timing — the previous version of this test
+        started its spinner AFTER the ``async with`` block, so its 30 ticks were
+        produced under either behaviour and the assertion was invariant under
+        the mutation (the fleet's dominant defect class: a guard that cannot
+        fail).
+        """
+        import threading
+        seen: dict = {}
+        loop_thread = threading.get_ident()
+
+        def _writer(org_id, **kw):
+            seen["thread"] = threading.get_ident()
             return None
 
-        monkeypatch.setattr(metering, "record_embedding_usage", _blocking)
-
-        async def _spin():
-            for _ in range(30):
-                ticks.append(1)
-                await asyncio.sleep(0.01)
+        monkeypatch.setattr(metering, "record_embedding_usage", _writer)
 
         async def _run():
             async with em.meted(ORG):
-                em.note_encode(texts=1, chars=1, wall_ms=0.0)
-            await _spin()
+                em.note_encode(texts=5, chars=50, wall_ms=7.0)
 
         asyncio.run(_run())
-        # If the flush had run ON the loop, the 150 ms write would have
-        # serialised ahead of the spinner and this would be a full 15 ticks'
-        # worth of delay — still true. What distinguishes them is that the loop
-        # was free during the write: assert the write overlapped the spinner.
-        assert len(ticks) == 30
+        assert seen, "the writer never ran"
+        assert seen["thread"] != loop_thread, (
+            "the flush ran ON the event loop — it must be offloaded")
+
+    def test_sync_arm_offloads_when_called_from_the_loop(self, monkeypatch):
+        """The SYNC arm is invoked from on-loop callers (the seed runners, and
+        FastMCP's direct sync tool dispatch), so it must not run the blocking
+        ledger write under the loop either. Off the loop it stays inline (the
+        pool-thread case), which the sibling tests cover.
+
+        Mutation: ``_finish`` calling ``flush_tally`` inline unconditionally →
+        the writer's thread is the loop thread → RED.
+        """
+        import threading
+        seen: dict = {}
+        loop_thread = threading.get_ident()
+
+        def _writer(org_id, **kw):
+            seen["thread"] = threading.get_ident()
+            return None
+
+        monkeypatch.setattr(metering, "record_embedding_usage", _writer)
+
+        async def _run():
+            with em.meted(ORG):          # sync CM, entered from a coroutine
+                em.note_encode(texts=1, chars=1, wall_ms=1.0)
+            await asyncio.sleep(0.05)    # let the scheduled task run
+
+        asyncio.run(_run())
+        assert seen, "the writer never ran"
+        assert seen["thread"] != loop_thread, (
+            "the sync arm blocked the event loop")
+
+    def test_concurrent_take_and_flush_writes_exactly_once(self, monkeypatch):
+        """Two boundaries (a runner and the request middleware) can reach the
+        same tally from different threads. The consumed transition must be
+        atomic, or the ledger gets a double-write.
+
+        Mutation: the check-then-set outside ``_LOCK`` → the barrier-synchronised
+        pair both observe ``consumed == False`` and write twice → RED.
+        """
+        import threading
+        calls: list = []
+        monkeypatch.setattr(
+            metering, "record_embedding_usage",
+            lambda org_id, **kw: calls.append(org_id))
+        tally = em.EmbedTally(calls=1, texts=4, chars=40, wall_ms=1.0,
+                              org_id=ORG)
+        barrier = threading.Barrier(2)
+
+        def _race():
+            barrier.wait()
+            em.flush_tally(tally, ORG)
+
+        threads = [threading.Thread(target=_race) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(calls) == 1, calls
 
     def test_meted_flushes_even_when_the_body_raises(self, monkeypatch):
         # Mutation: only flushing on the happy path → no write after the raise.
@@ -337,7 +393,7 @@ class TestEmbeddingsHook:
         assert out and out[0] == [0.0, 0.0, 0.0]
         assert em.current_tally() is None
 
-    def test_tfidf_fallback_is_not_counted(self, monkeypatch):
+    def test_tfidf_fallback_is_not_counted_as_an_encode(self, monkeypatch):
         # Mutation: noting the encode BEFORE the model call (so a failed encode
         # is counted as work that never happened).
         import tortoise.embeddings as emb
@@ -346,6 +402,9 @@ class TestEmbeddingsHook:
         t = em.arm(ORG)
         assert emb.compute_embeddings(["x"]) == [None]
         assert (t.calls, t.texts) == (0, 0)
+        # ... and it is counted as SKIPPED, so the figure (0 calls, 0 skipped)
+        # cannot be confused with "no embedder ran" (#4488's failure-mode table).
+        assert t.skipped == 1
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -465,6 +524,25 @@ class TestRegistryLane:
                                         wall_ms=float("nan"), model="m-A")
         assert metering.get_embedding_usage(tid)["embed_wall_ms"] == 0.0
 
+    def test_spend_ceiling_cannot_see_the_embed_columns(self, reg_org):
+        """#4488 is a MEASUREMENT, not a billing change. The spend ceiling must
+        not move when embedding workload is recorded.
+
+        Mutation: including the embed columns in the cohort aggregate → the
+        assertion would fire only if they carried a cost, which they do not —
+        so this pins the CONSTRUCTION (the aggregate's column set), not a
+        coincidence of units.
+        """
+        import inspect
+        sdk, tid = reg_org
+        _anchor(sdk._get_registry(), tid, None, None, sub_id=None)
+        metering.record_embedding_usage(tid, calls=9, texts=900, chars=9000,
+                                        wall_ms=1234.5, model="m-A")
+        src = inspect.getsource(metering.get_cohort_spend_usd)
+        assert "embed_" not in src, "the spend ceiling reads an embed column"
+        # ... and the figure really did land on the row the ceiling reads.
+        assert metering.get_embedding_usage(tid)["embed_calls"] == 9
+
     def test_reader_degrades_on_unresolvable_window(self, reg_org, monkeypatch):
         # #923: the READ never raises. An unresolvable window has no row, so
         # the degradation is the zero view — never a month key.
@@ -568,6 +646,20 @@ class TestSupabaseLane:
         assert got["embed_identity_mixed"] is True
         assert got["embed_model"] == "m-B"
         assert got["embed_skipped"] == 3
+
+    def test_fake_route_refuses_a_degenerate_window(self, monkeypatch):
+        # Mutation: no guard in the fake → a window production RAISES on is
+        # accepted and asserted green (the SQL never runs in CI, so the fake is
+        # the only behavioural proxy for this lane).
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+        fake = FakeControlPlane()
+        start = "2026-09-01T00:00:00+00:00"
+        with pytest.raises(Exception, match="period_end must be after"):
+            sc.metering_increment_embedding(fake, ORG, start, start, calls=1)
+        with pytest.raises(Exception, match="period_end must be after"):
+            sc.metering_increment_embedding(
+                fake, ORG, "2026-10-01T00:00:00+00:00", start, calls=1)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -739,6 +831,47 @@ class TestTeamRoute:
 # Work-owning runner wiring (decorator + write-op boundary)
 # ════════════════════════════════════════════════════════════════════════════
 
+class TestSessionLaneAttribution:
+    """#4488 P1 (code-review cycle 1): the SESSION-auth lane resolved an org
+    WITHOUT stamping ``request.state.org_id``, so ``EmbedMeteringMiddleware``
+    could not attribute the tally on any dashboard write — every session
+    ``POST /v1/points`` / ``/v1/objects`` / ``/v1/subjects`` that encoded was
+    dropped AND misreported as a bookkeeping fault (UNMETERED_INCREMENT on a
+    perfectly resolvable org).
+    """
+
+    def test_session_lane_stamps_the_org_on_request_state(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        monkeypatch.setattr(sc, "user_memberships",
+                            lambda cp, uid: [{"org_id": ORG, "role": "owner"}])
+        monkeypatch.setattr(sc, "_orgs_row_fail_soft",
+                            lambda cp, oid, **kw: {"tier": "free"})
+        monkeypatch.setattr(ha, "_org_node_sync_limits", lambda oid: {})
+
+        async def _noop(*a, **kw):
+            return None
+
+        monkeypatch.setattr(ha, "_abuse_post_auth", _noop)
+
+        class _Req:
+            def __init__(self):
+                self.query_params: dict = {}
+                self.state = type("S", (), {})()
+
+        req = _Req()
+        org = asyncio.run(ha._session_user_org(req, {"user_id": "u1"}))
+        assert org["org_id"] == ORG
+        # Mutation: dropping the stamp line → AttributeError here (and, in
+        # production, an unattributable tally + a spurious operator incident).
+        assert req.state.org_id == ORG
+
+
 class TestRunnerWiring:
     def test_decorator_attributes_the_runner_org_sync(self, monkeypatch):
         # Mutation: relying on the middleware only → the session-auth and
@@ -795,6 +928,33 @@ class TestRunnerWiring:
         with pytest.raises(RuntimeError, match="runner failed"):
             _runner("org-R")
         assert calls and calls[0]["texts"] == 3
+
+    def test_mcp_quota_gated_without_org_does_not_alert(self, monkeypatch):
+        """The stdio transport has NO org (``_enforce_quota`` says so), and every
+        sibling writer exempts ``not org_id``. Arming a tally with no org would
+        make every stdio write that encodes fire an UNMETERED_INCREMENT incident
+        telling the operator to investigate a window that was never
+        unresolvable.
+
+        Mutation: arming unconditionally → alerts fires → RED.
+        """
+        import tortoise.mcp_auth as mcp_auth
+        import tortoise.mcp_server as mcp
+        calls = _capture_writer(monkeypatch)
+        alerts = _capture_alert(monkeypatch)
+        monkeypatch.setattr(mcp, "_enforce_quota", lambda resource: None)
+        monkeypatch.setattr(mcp_auth, "_current_org_id",
+                            contextvars.ContextVar("t", default=None))
+        monkeypatch.setattr(mcp_auth, "_current_org_limits",
+                            contextvars.ContextVar("l", default=None))
+
+        def _write():
+            em.note_encode(texts=3, chars=3, wall_ms=1.0)
+            return "written"
+
+        assert mcp._quota_gated(_write, resource="points")() == "written"
+        assert calls == []
+        assert alerts == []
 
     def test_record_write_op_does_not_add_a_second_ledger_write(self, monkeypatch):
         """#4488: the write path must NOT gain a SECOND blocking ledger write.

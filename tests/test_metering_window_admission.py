@@ -1,6 +1,6 @@
 """#3981 — the metering-window raise is a SIGNAL; the seven absorbing call sites each report an unmetered increment.
 
-THE COVERAGE PROOF IS COMPLETENESS — SIX SITES, NOT FOUR
+THE COVERAGE PROOF IS COMPLETENESS — SEVEN SITES, NOT FOUR
 --------------------------------------------------------
 #3825 made ``metering._require_period`` raise ``QuotaCheckError`` when an org's
 metering window is unresolvable, and its docstring claimed that refusal "REFUSES
@@ -17,6 +17,14 @@ and report an unmetered increment:
   4. ``hosted_api.create_subject``          → lane=subject_write_op
   5. ``mcp_server._quota_gated`` (inner)    → lane=mcp_write_op
   6. ``ask_lane.run_ask_lane`` step 7        → lane=ask_ledger
+  7. ``embed_metering._report``             → lane=embed  (#4488)
+
+Site 7 is #4488's embedding-encode measurement: its ``flush_tally`` absorbs a
+failed increment (and an unattributable non-empty tally) and reports it on the
+``embed`` lane. It is the only lane whose census depends on the call FORM —
+``_report`` passes ``lane=`` as a KEYWORD, because the fence below matches only
+that form. A positional call would make the lane invisible here, which is the
+opposite of the intent, so the form is load-bearing.
 
 Sites 3 and 4 are the two the issue body missed. They are a *second-line*
 handler around the already-absorbing ``_record_write_op``: normal traffic
