@@ -422,7 +422,8 @@ class TestDocsPageAndSkillConfig:
     # heading (not a bare "Codex"/"Pi" substring) so deleting a row fails.
     ROW_HEADINGS = ("<h4>Claude Code</h4>", "<h4>Cursor", "<h4>Pi",
                     "<h4>Codex CLI</h4>", "<h4>Codex Desktop (no terminal)</h4>",
-                    "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>")
+                    "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>",
+                    '<h4 id="chatgpt">ChatGPT (Developer mode)</h4>')
 
     def _mcp_section(self) -> str:
         text = self.DOCS.read_text(encoding="utf-8")
@@ -471,14 +472,58 @@ class TestDocsPageAndSkillConfig:
         assert "bearer_token_env_var" in desktop
         assert "does <em>not</em> read shell exports" in desktop
 
+    # The dashboard's harness table: it pins the connector URL the ChatGPT row
+    # must teach (#2864) and the chooser §2's note has to agree with.
+    HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
+
+    @classmethod
+    def _read_harnesses(cls) -> str:
+        """One reader for `harnesses.js`, so the parses below cannot drift."""
+        return cls.HARNESSES.read_text(encoding="utf-8")
+
+    @classmethod
+    def _dashboard_constant(cls, name: str) -> str:
+        """The dashboard's exported string constant `name`."""
+        m = re.search(rf"^export const {name} =\s*\n?\s*'([^']+)'",
+                      cls._read_harnesses(), re.M)
+        assert m, f"{name} must be an exported string constant in harnesses.js"
+        return m.group(1)
+
+    @classmethod
+    def _harness_families(cls) -> str:
+        """The `HARNESS_FAMILIES` array literal.
+
+        Both anchors are asserted BEFORE slicing: if either moves, the slice
+        silently widens to the end of the file and the negative assertion below
+        would be satisfied by unrelated trailing prose — the widening failure
+        the #4365 review caught in this same file.
+        """
+        src = cls._read_harnesses()
+        decl = "export const HARNESS_FAMILIES"
+        assert decl in src, "harnesses.js lost HARNESS_FAMILIES"
+        rest = src.split(decl, 1)[1]
+        assert "\n])" in rest, (
+            "HARNESS_FAMILIES' close is no longer column-0 — re-anchor the "
+            "guard's terminator before trusting the slice below")
+        return rest.split("\n])", 1)[0]
+
     def test_4836_docs_page_is_the_live_chatgpt_carrier(self):
         """#4836: ChatGPT has no dashboard surface (#2912's 4-family chooser keeps
         it out; #2698 deleted the flat tab first), so the public docs page is its
         live carrier — it is the surface that already CLAIMED to describe ChatGPT
         connection. That claim was false ("the dashboard's ChatGPT tab") and must
-        not come back, and the row it points at must carry the served onboarding
-        instructions URL — otherwise that URL is reachable only from a
-        test-consumed constant, which is the reach gap this issue is."""
+        not come back.
+
+        The row is the JOURNEY a ChatGPT user performs, so the assertions below
+        are per-step: a `/docs#chatgpt` visitor has to reach a verified
+        connection, not just a URL. Dropping a step, or replacing one with a
+        claim that is false for ChatGPT (a pasted key, "any plan"), must fail
+        here rather than ship.
+        """
+        canonical = self._dashboard_constant("CANONICAL_MCP_URL")
+        instructions_url = self._dashboard_constant("ONBOARDING_INSTRUCTIONS_URL")
+        slashed = self._dashboard_constant("MCP_URL")
+        assert slashed == canonical + "/", "MCP_URL is the slashed keyed-row form"
         docs = self.DOCS.read_text(encoding="utf-8")
         assert "ChatGPT tab" not in docs, (
             "docs.html must not send a ChatGPT user to the retired dashboard tab")
@@ -487,39 +532,104 @@ class TestDocsPageAndSkillConfig:
         section = self._mcp_section()
         start = section.find('<h4 id="chatgpt">')
         assert start != -1, "docs #mcp must carry a ChatGPT carrier row (#4836)"
-        # Bound the slice to the next heading so the URL cannot be satisfied by a
-        # row elsewhere in the section (the `_row` id is un-anchored because the
-        # docs indent their `<h4>` rows).
-        rest = section[start:]
-        for delim in ("<h3", "<h4"):
-            cut = rest.find(delim, 1)
+        # Bound the slice to the row's own end — the next heading OR the hosted
+        # card's callout, which follows the row and carries the slashed form —
+        # so the literals below cannot be satisfied elsewhere in the section
+        # (the id is un-anchored because the docs indent their `<h4>` rows).
+        row = section[start:]
+        for delim in ('<p class="callout">', "<h3", "<h4"):
+            cut = row.find(delim, 1)
             if cut != -1:
-                rest = rest[:cut]
-        assert "chatgpt.com/plugins" in rest, (
-            "the ChatGPT row must name its Developer-mode entry point")
-        assert ("https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
-                in rest), (
-            "the ChatGPT row must carry the onboarding instructions URL — it is "
-            "the live carrier #4836 requires")
+                row = row[:cut]
+        # ...then to the ordered list INSIDE that row. `row` extends past
+        # `</ol>` into the row's closing prose, where a stray copy of a literal
+        # would satisfy an assertion without any user-facing step carrying it
+        # (the pre-fix docs.html kept the instructions URL only in that prose).
+        assert "<ol>" in row and "</ol>" in row, (
+            "the ChatGPT row must carry the ordered procedure the user performs")
+        steps = row.split("<ol>", 1)[1].split("</ol>", 1)[0]
+        for step in (
+            "Security and login",   # 1 — where the Developer-mode toggle lives
+            "chatgpt.com/plugins",  # 2 — the Developer-mode app entry point
+            "Scan Tools",           # 4 — OAuth enrolment
+            "Authorize",            # 4 — consent (key-less connect completes here)
+            "paste the document",   # 5 — the hand-off fallback if it can't fetch
+            "tortoise_health",      # 6 — the journey's outcome: a verified link
+            "first memory",         # 6 — ...and a first filed memory
+            "on your ChatGPT plan",  # 6 — which tools appear is plan-dependent
+        ):
+            assert step in steps, (
+                f"the ChatGPT row must keep step {step!r} — a /docs#chatgpt "
+                "visitor follows this list to a verified connection (#4836)")
+        assert steps.count("<li>") == 6, (
+            "the ChatGPT procedure is 6 steps; if you deliberately changed the "
+            "journey, update this count and the per-step literals together")
+        # The URL the row teaches must be the CONNECTOR form. harnesses.js pins
+        # CANONICAL_MCP_URL for every connector surface (the two Claude leaves +
+        # ChatGPT) so the value matches the OAuth resource indicator byte-for-
+        # byte (#2864/#2849); the keyed rows keep the slashed MCP_URL.
+        assert f"<code>{canonical}</code>" in steps, (
+            f"the ChatGPT row must teach the canonical connector URL {canonical}")
+        assert f"<code>{canonical}/</code>" not in steps, (
+            "the ChatGPT row must not teach the slashed form (CANONICAL_MCP_URL)")
+        assert "no trailing slash" in steps, (
+            "the row must SAY the URL is slash-free — the OAuth resource "
+            "indicator is exact, so a user who adds `/` gets a mismatch (#2864)")
+        # The carrier LINKS the SERVED instructions document (the reach claim is
+        # that a user can open it), and it is the same constant the dashboard
+        # serves — a second hard-coded copy on a static page is only safe while
+        # a test ties it to the constant.
+        assert f'href="{instructions_url}"' in steps, (
+            "the ChatGPT row must LINK the onboarding instructions URL — it is "
+            "the live carrier #4836 requires, not a bare mention")
 
-    def test_4836_document_section2_names_the_chatgpt_carrier(self):
+    def test_4836_document_section2_and_the_chooser_agree_on_chatgpt(self):
         """#4836 acceptance: `SKILL.md` §2's 7th-harness note and
         `HARNESS_FAMILIES` must agree — a ChatGPT user can choose nothing from the
         dashboard chooser, and the note must name the surface that actually
-        carries the instructions instead of leaving that to a test constant."""
+        carries the instructions instead of leaving that to a test constant.
+
+        `tests/test_onboarding_variants.py::test_4365_served_document_sends_
+        chatgpt_to_a_path_that_exists` owns the retired-tab pins for the whole
+        served document; this test re-pins those same three literals SCOPED TO
+        §2 (a tighter surface — §2 could keep the retired tab while the rest of
+        the document is clean) and owns the carrier name + the note↔chooser
+        agreement.
+        """
         skill = self.SKILL.read_text(encoding="utf-8")
         marker = "> **#1701 —"
         assert marker in skill, "SKILL.md lost the §2 7th-harness note"
-        note = skill.split(marker, 1)[1].split(
-            "\n\n## 3. Install + connect", 1)[0]
-        assert "https://tortoise.premiselabs.co/docs#chatgpt" in note, (
+        terminator = "\n\n## 3. Install + connect"
+        assert terminator in skill, (
+            "SKILL.md lost §2's terminator — the slice would run to EOF and the "
+            "assertions below could be satisfied from any later section")
+        note = skill.split(marker, 1)[1].split(terminator, 1)[0]
+        carrier = "https://tortoise.premiselabs.co/docs#chatgpt"
+        assert carrier in note, (
             "§2's note must name the live ChatGPT carrier (the public docs page)")
+        # Reachability: the note SENDS a user to that URL, so pin that the path
+        # still resolves to the docs page and the fragment exists on it. Either
+        # half being renamed would leave the note pointing at nothing (#4836).
+        base, _, fragment = carrier.partition("/docs#")
+        assert (base, fragment) == ("https://tortoise.premiselabs.co", "chatgpt")
+        assert '<h4 id="chatgpt">' in self.DOCS.read_text(encoding="utf-8"), (
+            "the note's carrier fragment must exist on the docs page")
+        redirects = (REPO_ROOT / "website" / "_redirects").read_text(encoding="utf-8")
+        assert re.search(r"^/docs\.html\s+/docs(\s+\d+)?\s*$", redirects, re.M), (
+            "the carrier URL's path must keep resolving to docs.html")
         assert "chatgpt.com/plugins" in note, (
             "§2's note must keep naming the ChatGPT Developer-mode path")
         assert "ChatGPT tab" not in note, (
             "§2's note must not name the retired dashboard ChatGPT tab")
         assert "no ChatGPT surface in the dashboard chooser" in note, (
             "§2's note must state there is no ChatGPT chooser surface")
+        # ...and the chooser must actually agree with that sentence. Match the
+        # entry SHAPE, not the bare word: a family added as `id: 'ChatGPT'`
+        # would evade a case-sensitive substring test while still adding one.
+        assert not re.search(r"id:\s*['\"]chatgpt['\"]",
+                             self._harness_families(), re.I), (
+            "§2 says there is no ChatGPT chooser surface, but HARNESS_FAMILIES "
+            "now carries one — the document and the chooser disagree")
 
     def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
         section = self._mcp_section()

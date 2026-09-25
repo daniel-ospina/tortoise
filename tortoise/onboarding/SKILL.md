@@ -103,12 +103,14 @@ mode → teach-human fallback).
 > **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
 > key-less through OpenAI's Developer-mode OAuth connector (chatgpt.com →
 > Settings → Security and login → Developer mode, then chatgpt.com/plugins →
-> new app → MCP server URL → OAuth → Scan Tools → paste the workflows prompt).
+> new app → MCP server URL → OAuth → Scan Tools → then give it THIS document as
+> its onboarding instructions).
 > There is no ChatGPT surface in the dashboard chooser (#2698), so this is the
 > path a ChatGPT user takes; its LIVE carrier is the public setup docs page at
 > https://tortoise.premiselabs.co/docs#chatgpt — that page names the steps
 > above and this document's URL. It has no local filesystem, shell, or skill
-> installer, so it never runs these instructions and has no row here — these
+> installer, so it never runs the self-install steps in sections 3 and 3a — it
+> reads these instructions instead and has no row here — these
 > six rows are the harnesses this document covers (4 config-writing, 2
 > teach-human). (If you
 > are ChatGPT and already have the
