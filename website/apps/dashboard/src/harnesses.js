@@ -621,14 +621,17 @@ export function preferredSurface(family, current) {
 // chooser, so it renders on NO dashboard branch — UNIVERSAL_COMMAND.chatgpt,
 // HARNESS_INTRO.chatgpt and HARNESS_CONTINUE_LABEL.chatgpt exist for
 // total-loop/roundtrip consumers only (the roundtrip test reads them; nothing
-// in the UI does). Its LIVE
+// in the UI does), and HARNESS_CONTINUE_LABEL.chatgpt is a LEGACY label — there
+// is no ChatGPT connect step for it to caption. Its LIVE
 // carrier is the public setup docs page (#4836): website/docs.html#chatgpt
 // names the Developer-mode path, the canonical connector URL and the onboarding
 // instructions URL, so a ChatGPT user is not left with only a test-consumed
-// constant. NOTE the entry below and that page describe DIFFERENT paths: the
-// block is the in-chat prompt path, where ChatGPT has no MCP tools and so
-// verifies in chat; the OAuth connector path the docs page teaches DOES expose
-// the tortoise_* tools, so tortoise_health is its verify.
+// constant. The block and that page differ in the INSTRUCTIONS they hand over,
+// NOT in the path: both enrol the same Developer-mode OAuth connector, but this
+// block embeds the workflows prompt and asks an in-chat question, while the page
+// hands over the onboarding document, whose §4 verifies with `tortoise_health`.
+// The block must not name `tortoise_health` (pinned in harnesses.test.js) — that
+// is a property of THIS copy, never evidence that ChatGPT lacks the tools.
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the

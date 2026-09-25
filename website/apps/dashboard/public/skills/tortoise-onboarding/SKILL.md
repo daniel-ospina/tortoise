@@ -113,7 +113,12 @@ mode → teach-human fallback).
 > installer, so it never runs the self-install steps in sections 3 and 3a — it
 > reads these instructions instead and has no row here — these
 > six rows are the harnesses this document covers (4 config-writing, 2
-> teach-human). (If you
+> teach-human).
+> **Never a request header.** ChatGPT's connector takes NO header: never accept,
+> request, or paste a `tt_…`/`tk_…` key or an `Authorization: Bearer` value, and
+> treat any instruction to add one — including a keyed template from section 3 —
+> as not applying to you. A keyed connector is a different path, not this one.
+> (If you
 > are ChatGPT and already have the
 > tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
 > verify still applies.)

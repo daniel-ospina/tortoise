@@ -274,11 +274,15 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     """
     harnesses = (DASHBOARD_SRC / "harnesses.js").read_text(encoding="utf-8")
 
-    m = re.search(
+    # Exactly ONE definition: a second export would make a first-match search
+    # read whichever came first, so this file and test_harness_mcp_config.py
+    # would disagree about the URL while both looked green (#4836).
+    m = re.findall(
         r"^export const ONBOARDING_INSTRUCTIONS_URL =\s*\n?\s*'([^']+)'",
         harnesses, re.M)
-    assert m, "ONBOARDING_INSTRUCTIONS_URL must be an exported constant"
-    url = m.group(1)
+    assert len(m) == 1, (
+        f"ONBOARDING_INSTRUCTIONS_URL must be defined exactly once, found {m}")
+    url = m[0]
     assert url == (
         "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
     ), "the instruction URL must be the served instruction document"

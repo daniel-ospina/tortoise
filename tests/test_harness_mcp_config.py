@@ -594,10 +594,15 @@ class TestDocsPageAndSkillConfig:
             "the live carrier #4836 requires, not a bare mention")
         # Handing a cloud agent the whole document must not become a key leak:
         # the document's teach-human recipes carry `Bearer <TORTOISE_API_KEY>`,
-        # so the row has to say the key-less path is the only one.
-        assert "never paste a <code>tt_" in row, (
+        # so the row has to say the key-less path is the only one. The warning
+        # names BOTH minted prefixes (`tk_` for scoped/graph-bound keys,
+        # `tt_` for legacy shapes — hosted_api.py).
+        assert "left the OAuth path" in row, (
             "the ChatGPT row must warn that no key/Authorization header belongs "
             "in ChatGPT — the OAuth path is the only one")
+        assert "<code>tk_…</code>" in row, (
+            "the warning must name the tk_ prefix too — a scoped key is tk_, and "
+            "a warning that only says tt_ reads as not applying to its holder")
 
     def test_4836_document_section2_and_the_chooser_agree_on_chatgpt(self):
         """#4836 acceptance: `SKILL.md` §2's 7th-harness note and
@@ -639,6 +644,12 @@ class TestDocsPageAndSkillConfig:
             "§2's note must not name the retired dashboard ChatGPT tab")
         assert "no ChatGPT surface in the dashboard chooser" in note, (
             "§2's note must state there is no ChatGPT chooser surface")
+        # The document ITSELF is what a ChatGPT agent receives, so the key
+        # prohibition has to travel with it — not only on the human-facing page
+        # (docs.html), whose warning the pasted document never carries.
+        assert "Never a request header" in note, (
+            "§2's note must forbid a key/Authorization header — the agent that "
+            "receives this document has to be told, not just the human")
         # ...and the chooser must actually agree with that sentence. Match the
         # entry SHAPE, not the bare word: a family added as `id: 'ChatGPT'`
         # would evade a case-sensitive substring test while still adding one.
