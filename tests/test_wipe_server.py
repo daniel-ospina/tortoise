@@ -846,6 +846,129 @@ def test_sweep_partial_delete_failure_keeps_journal(tmp_path):
     assert not journal.exists()
 
 
+def test_sweep_preserves_non_owned_graphs(monkeypatch, tmp_path):
+    """#7795 fail-closed: the sweep may only DETACH+DELETE the name families
+    it owns (``test_``/``tortoise_test``/``team_``/``org_``). A shared graph
+    name that reached the journal because a test drove PRODUCT code with a
+    shared path (e.g. ``doctor --db docker://…/tortoise`` — the doctor CLI
+    runs in-process, so its ``from_uri`` journals from the test frame) must
+    be PRESERVED: a test run may never wipe the dev/compose graph.
+
+    ``TORTOISE_DB_URI`` is CLEARED: with it naming a pathless graph (e.g.
+    ``…/tortoise``), ``_uri_default_graph_name()`` returns that name and the
+    URI-default ``continue`` fires BEFORE this gate — ``tortoise`` would
+    then never reach ``preserved`` and this pin would false-fail on an
+    ambient URI (review P1). The sibling
+    ``test_sweep_skips_uri_default_graph`` sets the URI explicitly."""
+    from tests._embedded import _uri_default_graph_name
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert _uri_default_graph_name() is None, \
+        "this pin must not depend on an ambient TORTOISE_DB_URI"
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text("test_ws_ours\nteam_acme\ntortoise\nx\n")
+    db = _FakeDb()
+    res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["dropped"] == ["test_ws_ours", "team_acme"]
+    assert res["preserved"] == ["tortoise", "x"]
+    assert res["failed"] == []
+    # Retrying a non-owned name cannot help — the journal is still consumed.
+    assert res["journal_removed"] is True
+    assert db.deleted == ["test_ws_ours", "team_acme"]
+    assert "tortoise" not in db.detached and "x" not in db.detached
+
+
+def test_sweep_preserved_warning_reports_journal_kept(
+        monkeypatch, tmp_path, caplog):
+    """#7795 review P2-1: the PRESERVED warning is the operator's ONLY record
+    of a non-owned name, and it must not claim the journal was consumed when
+    an OWNED drop failure KEPT it — that sends the operator away from the
+    file that still holds the drop-set bookkeeping. Mixed case: one
+    non-owned name (preserved) + one owned name whose drop raises."""
+    import logging
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text("test_ws_bad\ntortoise\n")
+    db = _FakeDb(fail_delete={"test_ws_bad"})
+    with caplog.at_level(logging.WARNING):
+        res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["preserved"] == ["tortoise"]
+    assert res["failed"] == ["test_ws_bad"]
+    assert res["journal_removed"] is False
+    assert journal.exists(), "an owned drop failure KEEPS the journal"
+    warned = [r.getMessage() for r in caplog.records
+              if "PRESERVED" in r.getMessage()]
+    assert warned, "a preserved name must be surfaced to the operator"
+    assert "KEPT" in warned[0], \
+        f"the KEPT branch must be stated, not the consumed branch: {warned[0]!r}"
+    assert "retrying cannot reclaim them" not in warned[0], \
+        "false in the mixed case — the journal was kept"
+
+
+def test_sweep_preserved_warning_reports_journal_consumed(
+        monkeypatch, tmp_path, caplog):
+    """#7795 review P2-1 (clean branch): with no owned drop failure the
+    journal IS removed and the names become unreclaimable, so the warning
+    must say so — the counterpart pin to the mixed case above."""
+    import logging
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text("tortoise\n")
+    db = _FakeDb()
+    with caplog.at_level(logging.WARNING):
+        res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["preserved"] == ["tortoise"]
+    assert res["failed"] == []
+    assert res["journal_removed"] is True
+    assert not journal.exists()
+    warned = [r.getMessage() for r in caplog.records
+              if "PRESERVED" in r.getMessage()]
+    assert warned, "a preserved name must be surfaced to the operator"
+    assert "retrying cannot reclaim them" in warned[0]
+    assert "KEPT" not in warned[0], \
+        "the journal WAS removed — the message must not say it was kept"
+
+
+def test_sweep_owns_org_namespace_by_name(monkeypatch, tmp_path):
+    """#7795 review P1: ``org_`` — the CURRENT product-namespace spelling
+    (#3543 tenancy rename) — must be in the sweep's owned set BY THAT NAME,
+    and a journaled ``org_*`` graph must be DROPPED, not preserved.
+
+    The journal IS the ownership record for a product-side mint
+    (``_journal_append_product`` at the hosted ``org_create`` sites:
+    ``hosted_api.provision_tenant``, ``hosted_api.register_user`` (both the
+    Supabase and registry lanes), and
+    ``hosted_api._eager_provision_org_graph``), so a journaled
+    ``org_*`` graph is demonstrably ours — each of those sites journals only
+    a graph the call itself minted. The earlier pins exercised
+    ``team_`` only — the PRE-rename spelling — which is exactly why the
+    missing ``org_`` slipped through: an ``org_`` name took the
+    ``preserved`` branch while the empty ``failed`` list still removed the
+    journal, destroying the only record that could reclaim it."""
+    from tests._embedded import _SWEEP_OWNED_PREFIXES
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert "org_" in _SWEEP_OWNED_PREFIXES, \
+        "the product-namespace spelling org_ (#3543) must be owned by name"
+    journal = tmp_path / "session.graphs.jsonl"
+    journal.write_text(
+        "test_something_ours\n"
+        "org_journalled\n"
+        "org_acme\n"
+        "team_ws_journal_drop\n"
+    )
+    db = _FakeDb()
+    res = _sweep_drop(_FakeProj(db), str(journal), drop=True)
+    assert res["dropped"] == [
+        "test_something_ours", "org_journalled", "org_acme",
+        "team_ws_journal_drop"]
+    assert res["preserved"] == [], \
+        "journaled org_* graphs are OWNED — they must never be preserved"
+    assert res["failed"] == []
+    assert res["journal_removed"] is True
+    assert db.deleted == res["dropped"]
+
+
 def test_sweep_skips_uri_default_graph(monkeypatch, tmp_path):
     """Cycle-4 P2-2 / cycle-8 P1-1 (review P1-2): the shared URI-default
     graph is swept ONLY by the last-suite-standing full sweep — a session's
@@ -998,10 +1121,12 @@ def test_allow_remote_session_teardown_green(tmp_path):
 
 
 def test_session_end_sweep_drops_journaled_team_graph(uri_env, monkeypatch, tmp_path):
-    """#1686: team_* graphs (hosted parity — NEVER test-prefixed) reach the
-    sweep ONLY via the journal: _sweep_drop drops any journaled name except
-    the URI-default, so a journaled team_<name> is deleted at session end
-    (this is the mechanism that stops team_* accumulation on the docker)."""
+    """#1686: product-namespace graphs (hosted parity — NEVER test-prefixed)
+    reach the sweep ONLY via the journal: _sweep_drop drops every journaled
+    name in its owned set (``test_``/``tortoise_test``/``team_``/``org_``),
+    skipping only the URI-default, so a journaled team_<name> is deleted at
+    session end (this is the mechanism that stops product-namespace
+    accumulation on the docker)."""
     from tests._embedded import _session_end_own_sweep
     from tortoise.projection import FalkorProjection, _journal_append_product
 
@@ -1124,4 +1249,180 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
     finally:
         proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
         proj.db.select_graph(stray).delete()
+        proj.close()
+
+
+# ── #3634 Task 3: the opt-in, journal-blind LEGACY RESIDUE sweep ───────────
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, False), ("", False), ("0", False), ("true", False),
+    ("yes", False), ("1 ", False), ("01", False), ("1", True),
+])
+def test_legacy_sweep_gate_is_narrow_by_design(monkeypatch, value, expected):
+    """The gate requires the EXACT string "1" — every other spelling refuses.
+
+    `_legacy_sweep_allowed` is the sole authorization for an irreversible
+    journal-blind DETACH DELETE + GRAPH.DELETE, so it must not ride the
+    truthy-set contract (#4097) that `is_truthy` declares. This parametrized
+    matrix is the executable statement of that narrowing.
+    """
+    from tests._embedded import _legacy_sweep_allowed
+
+    if value is None:
+        monkeypatch.delenv("TORTOISE_TEST_SWEEP_LEGACY", raising=False)
+    else:
+        monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", value)
+    assert _legacy_sweep_allowed() is expected
+
+
+# The fixture is DERIVED from `_LEGACY_RESIDUE_PREFIXES` — each name is either
+# an exact residue prefix or a name that must be refused for a stated reason.
+# NOTE (Task 1 narrowing): "askshape_b6" was in the plan text but is NOT a
+# residue prefix (Task 1 narrowed it to the census name
+# `askshape_b6_live_1_33760_21`), so the fixture uses the full census name.
+_RESIDUE_FIXTURE = [
+    "test_a", "tortoise_test_b", "registry_test_c_control_plane",
+    "v10fix_c1", "ttm_a1", "review_rw_probe", "askshape_b6_live_1_33760_21",
+    "legbudget_25979_txrx",
+    "registry_tortoise", "registry_control_plane", "tortoise_test_matrix",
+    "tortoise_restored_20260101", "org_x", "team_y", "totally_unrelated", "t",
+]
+
+
+def test_legacy_sweep_off_deletes_nothing(monkeypatch):
+    """AC3: with the opt-in unset, the sweep is a pure no-op on GRAPH.LIST."""
+    from tests._embedded import _sweep_legacy_strays
+
+    monkeypatch.delenv("TORTOISE_TEST_SWEEP_LEGACY", raising=False)
+    db = _FakeDb()
+    db.graphs = list(_RESIDUE_FIXTURE)
+    _sweep_legacy_strays(_FakeProj(db), default_graph="tortoise_test_matrix")
+    assert db.detached == []
+    assert db.deleted == []
+
+
+def test_legacy_sweep_on_reclaims_only_the_residue(monkeypatch):
+    """AC2/AC3: opted in, the sweep reclaims EXACTLY the declared residue.
+
+    Every shared/preserved name in the fixture is asserted to survive: the
+    shared registries, the URI default, a `tortoise_restored_*` snapshot, the
+    owned families, and an unrelated name. The residue set is derivable from
+    `_LEGACY_RESIDUE_PREFIXES` (see the fixture comment).
+    """
+    from tests._embedded import _sweep_legacy_strays
+
+    monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", "1")
+    db = _FakeDb()
+    db.graphs = list(_RESIDUE_FIXTURE)
+    _sweep_legacy_strays(_FakeProj(db), default_graph="tortoise_test_matrix")
+    assert set(db.detached) == {
+        "registry_test_c_control_plane", "v10fix_c1", "ttm_a1",
+        "review_rw_probe", "askshape_b6_live_1_33760_21",
+        "legbudget_25979_txrx",
+    }
+    assert db.deleted == db.detached, \
+        "every detached residue graph must also be GRAPH.DELETEd"
+    for protected in ("registry_tortoise", "registry_control_plane",
+                      "tortoise_test_matrix", "tortoise_restored_20260101",
+                      "org_x", "team_y", "test_a", "tortoise_test_b",
+                      "totally_unrelated", "t"):
+        assert protected not in db.detached, protected
+        assert protected not in db.deleted, protected
+
+
+def test_legacy_sweep_protects_the_default_graph_itself(monkeypatch):
+    """The `default_graph` pass-through is load-bearing, not incidental.
+
+    `registry_test_shared` is residue AND unowned, so the shape alone reclaims
+    it UNLESS it IS the URI default graph. The two halves below isolate the
+    `default_graph` branch: the same name survives when it is the default and
+    is residue when the default is something else. A mutant that hardcodes
+    `default_graph=None` in the sweep fails the first half.
+    """
+    from tests._embedded import _sweep_legacy_strays
+
+    monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", "1")
+    db = _FakeDb()
+    db.graphs = ["registry_test_shared"]
+    _sweep_legacy_strays(_FakeProj(db), default_graph="registry_test_shared")
+    assert db.detached == []
+    assert db.deleted == []
+
+    # the same name with a DIFFERENT default IS residue
+    db2 = _FakeDb()
+    db2.graphs = ["registry_test_shared"]
+    _sweep_legacy_strays(_FakeProj(db2), default_graph="tortoise_test_matrix")
+    assert db2.detached == ["registry_test_shared"]
+
+
+def test_legacy_sweep_refuses_non_loopback_host(monkeypatch):
+    """#3634: the residue pass is loopback-only — a remote host refuses.
+
+    `_sweep_drop` receives `skip_on_non_loopback` from its callers and
+    `_sweep_team_strays` inherits `_leftover_sweep`'s guard; this pass has NO
+    caller, so it must carry the guard itself. Modeled on
+    `test_allow_remote_session_teardown_green`: the sweep SKIPS (returns ``[]``)
+    and every candidate graph — even ones the residue shape would reclaim — is
+    left untouched, opt-in or not.
+    """
+    from tests._embedded import _sweep_legacy_strays
+
+    monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", "1")  # even OPTED IN
+    db = _FakeDb()
+    db.graphs = ["v10fix_c1", "ttm_a1"]  # both reclaimed on loopback
+    proj = types.SimpleNamespace(_host="db.internal.example.com", db=db)
+    dropped = _sweep_legacy_strays(proj, default_graph="tortoise_test_matrix")
+    assert dropped == []
+    assert db.detached == []
+    assert db.deleted == []
+
+
+def test_legacy_sweep_reclaims_on_live_server(uri_env, monkeypatch):
+    """#3634 Task 3 Step 7: the residue pass reclaims on a REAL server, and a
+    shared-registry-shaped name survives.
+
+    Run-unique names, per this file's own convention (see
+    `test_wipe_server_clears_only_test_prefixed`): the fixed literals
+    `registry_tortoise`/`registry_control_plane` are SHARED graphs — seeding
+    and GRAPH.DELETE on them would damage peer sessions' / the dev docker's
+    data. The property under test is name-SHAPE based, so a unique
+    `registry_ws_<uuid>_control_plane` (same `registry_*` family, no residue
+    prefix) proves it identically and leaves the shared names untouched.
+    """
+    from tests._embedded import _sweep_legacy_strays, is_legacy_residue
+    from tortoise.projection import FalkorProjection
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", "1")
+    residue = f"registry_test_{uuid.uuid4().hex}_control_plane"
+    shared = f"registry_ws_{uuid.uuid4().hex}_control_plane"
+    assert is_legacy_residue(residue, default_graph="tortoise_test_matrix")
+    assert not is_legacy_residue(shared, default_graph="tortoise_test_matrix")
+    proj = FalkorProjection.from_uri(
+        "docker://:falkordb@localhost:6379", graph_name="test_ws_legacy_probe")
+    try:
+        for name in (residue, shared):
+            proj.db.select_graph(name).query("CREATE (:Registry {id:'probe'})")
+        before = proj.db.list_graphs() or []
+        assert residue in before and shared in before
+        dropped = _sweep_legacy_strays(
+            proj, default_graph="tortoise_test_matrix")
+        assert residue in dropped, f"expected {residue} reclaimed, got {dropped!r}"
+        assert shared not in dropped, \
+            f"the shared-registry shape must survive: {dropped!r}"
+        after = proj.db.list_graphs() or []
+        assert residue not in after, "the residue graph must be GRAPH.DELETEd"
+        assert shared in after, "the shared-registry-shaped name must survive"
+    finally:
+        # the survivor is deliberately never swept (fail-closed by shape); the
+        # residue one is already gone. Delete both so a dev docker does not
+        # accumulate one graph per run.
+        for name in (residue, shared):
+            try:  # noqa: SIM105
+                proj.db.select_graph(name).delete()
+            except Exception:
+                pass
         proj.close()

@@ -68,16 +68,31 @@ from __future__ import annotations  # noqa: I001
 import math
 import os
 import contextlib
+import fcntl
+import logging
 
 import shutil
 import signal
 import socket
+import stat
 import sys
 import tempfile
 import time
 
-from tortoise.embedded_reaper import OWNERS_DIRNAME, _is_ephemeral_dir
+from tortoise.embedded_reaper import (
+    OWNERS_DIRNAME,
+    OWNER_LOCK_NAME,
+    _is_ephemeral_dir,
+)
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
+
+# #4879: this module was silent at every decision. The dead-socket guard below
+# STOPS a process and REMOVES a registry, and its loud branch deliberately
+# PRESERVES a failure — two outcomes a reader of a CI run must be able to tell
+# apart. Without these lines, "the lane is green" cannot be distinguished from
+# "the lane is green because the loud branch fired and the original defect is
+# still armed".
+logger = logging.getLogger(__name__)
 
 # ── #4214: the exit seam must not stat the temp root once per client ───────
 #
@@ -572,6 +587,11 @@ def cotenant_holds_server(client) -> bool:
     - in-process: the #3599 per-process owner refcount counts THIS process's
       live clients on the socket (recorded at construction, released at every
       close seam). ``> 1`` -> the process itself holds a co-tenant.
+    - in-process, MID-CONSTRUCTION: a redislite construction that is still
+      inside ``__init__`` and has already committed to replaying this socket
+      is a co-tenant before it can record itself (``_in_flight_replays``,
+      #4879). Its claim is registered before the replay can block, so the
+      socket it is about to ping is never read as "last client".
     - cross-process: the #3599 per-server owner RECORDS name every owning
       process; ``live_owners > 1`` -> another process holds a co-tenant.
     - an uninstrumented spawn (no owner-record dir) cannot be reasoned about
@@ -606,6 +626,17 @@ def cotenant_holds_server(client) -> bool:
             return True  # an in-process co-tenant holds the server
     except Exception:
         return True  # cannot reason about sharing -> fail closed
+    # #4879: a construction that is MID-REPLAY in this process is a co-tenant
+    # the refcount above cannot see yet — its claim is only written after
+    # `RedisMixin.__init__` returns (`_in_flight_replays`). It has not finished
+    # attaching, but it HAS committed to this socket, so tearing the server
+    # down here unlinks the socket it is about to ping (the deterministic
+    # `Error 2 connecting to .../redis.socket. No such file or directory` of
+    # test_pack_state.py). This is a proven co-tenant, not a hedge: a claim is
+    # only ever registered for a construction whose OWN registry resolves to
+    # this exact socket.
+    if _inflight_replay_holds(key):
+        return True
     from tortoise.embedded_reaper import (
         _client_list,
         _owner_records,
@@ -1221,6 +1252,106 @@ def owner_record_dir(socket_file: str) -> str:
 #: record is only dropped when the last of them closes).
 _owner_refcounts: dict[str, int] = {}
 
+#: #4577: per-process fd holding the SHARED ``flock`` on each socket's owner
+#: dir ``.lock``, keyed by the same abspath key as `_owner_refcounts`. The fd
+#: is kept OPEN for the process lifetime and closed only when the refcount
+#: reaches 0, so the kernel holds the lock exactly as long as this process is
+#: a live owner. Kept in lockstep with `_owner_refcounts` so no fd leaks
+#: (every key is popped and closed on the last `forget_owner`; the at-fork
+#: hook re-acquires fresh descriptors, see `_adopt_owner_records_after_fork`).
+_owner_lock_fds: dict[str, int] = {}
+
+
+def _acquire_owner_lock(socket_file: str) -> int | None:
+    """Take and HOLD a shared ``flock`` on the owner dir's ``.lock`` (#4577).
+
+    The reaper's liveness question ("does this server still have a live
+    owner?") becomes a KERNEL FACT when it is answered by a held lock: the
+    kernel releases the lock when the last fd referring to the open file
+    description is closed, i.e. when this process dies. That is strictly
+    stronger than the pid+start inference (#3599 / #1642 FIX 5), which needs
+    a ``ps`` read and still has a recycled-pid / unreadable-start failure
+    class (an inference can be wrong; a held lock cannot).
+
+    ``O_NOFOLLOW`` so a symlink planted at ``.lock`` in a shared tempdir is
+    never followed (#4098 discipline): the open fails with ELOOP and this
+    process simply carries no lock, which the reader treats as "unknown" and
+    falls back to the records. Never raises — a lock we cannot take is a
+    missing optimisation, never a construction failure.
+
+    Returns the held fd (the caller keeps it open for the process lifetime)
+    or None when no lock could be taken.
+    """
+    path = os.path.join(owner_record_dir(socket_file), OWNER_LOCK_NAME)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    try:
+        # #4577 review, #4098 discipline: reject a planted NON-REGULAR file.
+        # On Linux `flock` on a FIFO SUCCEEDS, so without this the writer
+        # would "hold" a lock the reader must then refuse to open (which,
+        # unguarded, blocks forever). No lock -> the records stay the
+        # fallback signal.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            return None
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+    except OSError:
+        # A lock we cannot take is "no lock"; close the fd rather than leak
+        # it — the record files remain the fallback liveness signal.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None
+    return fd
+
+
+def _release_owner_lock(key: str) -> None:
+    """Drop this process's shared ``flock`` for ``key`` (last owner only).
+
+    Closing the fd is what releases the lock (the kernel drops it with the
+    open file description); the explicit ``LOCK_UN`` just makes the release
+    immediate and self-documenting. Never raises.
+
+    Then reclaim the ``.lock`` file so the owner dir can be removed when this
+    process was the LAST owner on the host — otherwise every close would
+    strand a ``.lock``-only ``.tortoise-owners`` dir (the temp-dir leak class
+    #3599 exists to fight). The reclaim is gated on an EXCLUSIVE
+    non-blocking lock taken AFTER our own release: a competing live owner's
+    shared lock makes the attempt fail, and the file is then left in place
+    for it. (Unlinking would be safe even then — a live owner always has a
+    record file, which is the fallback signal — but keeping the stronger
+    signal whenever any other owner exists is strictly better.)
+    """
+    fd = _owner_lock_fds.pop(key, None)
+    if fd is None:
+        return
+    with contextlib.suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    with contextlib.suppress(OSError):
+        os.close(fd)
+    path = os.path.join(owner_record_dir(key), OWNER_LOCK_NAME)
+    try:
+        probe = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        return  # already gone / unreadable — nothing to reclaim
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # another live owner still holds it -> leave the file
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(probe)
+
 #: Cache of THIS process's start time, keyed by pid (#4487).
 #: `record_owner` runs on EVERY construction now, and `_process_start_time`
 #: shells out to `ps` — a fork+exec per client, which on a loaded runner is
@@ -1273,9 +1404,36 @@ def _adopt_owner_records_after_fork() -> None:
     _own_start_cache.clear()
     inherited = list(_owner_refcounts)
     _owner_refcounts.clear()
-    for sock in inherited:
+    # #4879: a forked child inherits no THREADS, so no in-flight replay claim
+    # can belong to it. `_in_flight_replays` is copied into the child by the
+    # fork, but the thread that registered a claim (one still inside
+    # `RedisMixin.__init__`) does not exist here — nothing can ever release it,
+    # so `cotenant_holds_server` would read "co-tenant" forever and the socket
+    # would never be torn down (a leaked server + socket dir, the failure mode
+    # #4879 exists to prevent). Drop the inherited claims exactly like the
+    # inherited refcounts above.
+    _in_flight_replays.clear()
+    # #4577: the child inherits the parent's lock fds, which refer to the
+    # SAME open file descriptions. Those must not stay in the child's map:
+    # `flock(LOCK_UN)` on a duplicate releases the lock for the PARENT too
+    # (a lock belongs to the open file description, not the fd), so a child
+    # `forget_owner` could unlock a still-live parent's server — the exact
+    # #1557 fail-open this lock exists to prevent. Re-acquire a fresh
+    # description for every inherited socket FIRST (a second SHARED lock is
+    # compatible, so it succeeds while the inherited one is still held),
+    # then close the inherited fds — which never leaves a free-lock window
+    # for a concurrent reaper.
+    inherited_locks = dict(_owner_lock_fds)
+    _owner_lock_fds.clear()
+    # Re-acquire for the union: a held fd whose refcount entry was somehow
+    # missing must still get a fresh descriptor, or the child would drop a
+    # lock it inherited without replacing it.
+    for sock in dict.fromkeys([*inherited, *inherited_locks]):
         with contextlib.suppress(Exception):
             record_owner(sock)
+    for fd in inherited_locks.values():
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 if hasattr(os, "register_at_fork"):  # POSIX; absent on Windows
@@ -1347,6 +1505,14 @@ def record_owner(socket_file: str | None) -> bool:
     except OSError:
         return False
     _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
+    # #4577: hold the shared liveness lock alongside the record file. The
+    # `key not in` guard keeps the fd map consistent with the refcount map —
+    # re-acquiring when a descriptor is already held would overwrite (and
+    # leak) it. A None fd is "no lock": the records stay the fallback.
+    if key not in _owner_lock_fds:
+        fd = _acquire_owner_lock(socket_file)
+        if fd is not None:
+            _owner_lock_fds[key] = fd
     return True
 
 
@@ -1367,6 +1533,12 @@ def forget_owner(socket_file: str | None) -> bool:
         _owner_refcounts[key] = held - 1
         return False  # another client in this process still owns it
     _owner_refcounts.pop(key, None)
+    # #4577: the LAST client in this process drops this process's shared
+    # lock — the kernel-visible signal that this owner is gone. Released
+    # here (after the count, before the record unlink) so the migration of
+    # the two signals always overlaps; either order is safe because a free
+    # lock only ever falls back to the records.
+    _release_owner_lock(key)
     d = owner_record_dir(socket_file)
     try:
         names = os.listdir(d)
@@ -1414,15 +1586,122 @@ def forget_owner(socket_file: str | None) -> bool:
 _ORIGINAL_REDISLITE_INIT = None
 
 
+# ── #4879: a construction that is MID-REPLAY is already a co-tenant ───────
+#
+# `cotenant_holds_server` is the last-client test every teardown seam
+# consults, and its in-process branch reads `_owner_refcounts` — which the
+# `_init` patch below only increments AFTER `original(...)` returns. A
+# construction that is still INSIDE `original(...)` has therefore already
+# read the registry and adopted its socket while remaining invisible to that
+# test. In that window a GC pass that collects an earlier client reads "one
+# claim" as "last client", runs redislite's destructive `_cleanup` (SHUTDOWN
+# + rmtree), and unlinks the socket the in-flight construction is about to
+# ping — the deterministic `Error 2 connecting to .../redis.socket. No such
+# file or directory` of
+# `tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target`.
+#
+# Close the ORDERING hole by registering the claim BEFORE `original(...)`:
+# the socket a construction is about to replay is already on disk, in the
+# same `<dbdir>/<dbfilename>.settings` registry redislite is about to load,
+# so it is resolvable without redislite having run. The claim is held for the
+# whole construction and released in a `finally`, so an aborted construction
+# releases it and the hand-off to `record_owner` is seamless (one claim is
+# live at every instant).
+#
+# Deliberately kept SEPARATE from `_owner_refcounts`: that map is
+# reference-counted per process and decremented by `forget_owner` at every
+# close seam, so pre-claiming in it would have to be reconciled against the
+# post-`original` record on every path — and a double-count there means the
+# record is never dropped and the shared server is NEVER torn down. A
+# distinct in-flight counter has no reconciliation: it is registered and
+# released exactly once, around the one call it describes.
+_in_flight_replays: dict[str, int] = {}
+
+
+def _replay_socket_for_init(args, kwargs) -> str | None:
+    """The socket a pending `RedisMixin.__init__` will REPLAY, or None (#4879).
+
+    Mirrors redislite's own registry-path derivation (client.py:415-447) and
+    returns `settings['unixsocket']` only for the shape that actually takes
+    the registry-load branch (client.py:449 — `_is_redis_running()` and no
+    `socket_file`). Anything else yields None: a `host`/`port` construction
+    has no embedded child, an explicit `unix_socket_path` makes
+    `not self.socket_file` False, and a missing/unparseable registry has no
+    socket to replay.
+
+    Never raises — the patch must never break construction. (The docstring
+    said so before the code did: a `bytes` `dbfilename` reaches redislite's
+    own `os.path.join(str, bytes)` TypeError, client.py:432; that path is
+    caught below and yields None, which is the right answer because redislite
+    aborts that construction too — there is no replay to claim.)
+    """
+    if "host" in kwargs or "port" in kwargs:
+        return None
+    if kwargs.get("unix_socket_path"):
+        return None  # client.py:449 requires `not self.socket_file`
+    # Mirror redislite EXACTLY (client.py:415-428): a positional `args[0]` is
+    # the db filename only while the `dbfilename` KEYWORD is ABSENT. When the
+    # keyword is present redislite overrides the positional UNCONDITIONALLY —
+    # `if 'dbfilename' in kwargs.keys(): db_filename = kwargs['dbfilename']`
+    # — so `Redis(path, dbfilename=None)` leaves `db_filename` None, never
+    # populates `settingregistryfile`, and never replays. Falling back to
+    # `args[0]` there would register a claim for a construction that takes no
+    # replay (the F4 false positive).
+    if "dbfilename" in kwargs:
+        db_filename = kwargs["dbfilename"]
+    elif args:
+        db_filename = args[0]
+    else:
+        db_filename = None
+    try:
+        db_filename = os.fspath(db_filename)
+    except TypeError:
+        return None
+    if not db_filename:
+        return None
+    try:
+        if db_filename == os.path.basename(db_filename):
+            db_filename = os.path.join(os.getcwd(), db_filename)
+        registry = repr(os.path.join(
+            os.path.dirname(db_filename),
+            os.path.basename(db_filename) + ".settings")).strip("'")
+    except TypeError:
+        # A `bytes` filename: redislite's own `os.path.join(str, bytes)`
+        # (client.py:432) raises and aborts construction, so there is no
+        # replay to claim.
+        return None
+    settings = _registry_settings(registry)
+    if settings is None:
+        return None
+    sock = settings.get("unixsocket")
+    return sock if isinstance(sock, str) and sock else None
+
+
+def _inflight_replay_holds(key: str) -> bool:
+    """True when a construction in THIS process is mid-replay on `key` (#4879).
+
+    Fail CLOSED on any doubt, exactly like the refcount branch beside it in
+    `cotenant_holds_server`: the cost is a socket dir left for the reaper, the
+    cost of failing open is the #3653 data loss.
+    """
+    try:
+        return _in_flight_replays.get(key, 0) > 0
+    except Exception:
+        return True
+
+
 def _install_owner_record_patch() -> None:
     """#4487: record an owner for every redislite construction (once).
 
     Wraps `RedisMixin.__init__` so that a client constructed by ANY caller —
     guarded or raw — records this process as an owner of the server it just
     started. Runs AFTER the original init (redislite sets `socket_file`
-    inside it); a construction that aborts mid-init records nothing, matching
-    the guard's previous behaviour. Never raises — a `record_owner` I/O
-    failure must never break client construction.
+    inside it); a construction that aborts mid-init leaves no owner RECORD,
+    matching the guard's previous behaviour. The #4879 in-flight claim that
+    spans the call is released in the same `finally` on the abort and on a
+    successful hand-off; if the HAND-OFF itself raises it is deliberately KEPT
+    (fail CLOSED — the client is alive but unrecorded). Never raises — a
+    `record_owner` I/O failure must never break client construction.
     """
     global _ORIGINAL_REDISLITE_INIT
     try:
@@ -1435,29 +1714,497 @@ def _install_owner_record_patch() -> None:
     _ORIGINAL_REDISLITE_INIT = original
 
     def _init(self, *args, **kwargs):
-        original(self, *args, **kwargs)
-        # `record_owner` / `owner_socket_of` are defined above and resolved
-        # at call time; the guard keeps construction unconditional.
+        # #4879: claim the socket this construction is about to REPLAY before
+        # `original` can block inside the replay (and before any GC pass can
+        # collect an earlier client and read this construction as absent) —
+        # see `_in_flight_replays`. Held across the whole construction and
+        # handed off to the owner RECORD written below, with no instant in
+        # which neither claim is live.
         #
-        # Resolve the socket from the object we are patching FIRST: this
-        # seam fires on the object that OWNS the server (redislite's `Redis`,
-        # including the inner client a `FalkorDB` wrapper builds), whose own
-        # `.socket_file` is authoritative. `owner_socket_of` is the fallback
-        # for any wrapper shape — it is NOT the primary read here because an
-        # inner embedded `Redis` carries its own `.client` attribute, and
-        # `owner_socket_of`'s `getattr(client, 'client', ...)` would then
-        # follow that to a client with no `socket_file` and wrongly report
-        # None (measured: the first cut of this patch wrote no record).
+        # The claim's lifetime is explicit so the invariant is readable. A
+        # claim is RELEASED only when the construction left no live claim
+        # behind: it either aborted inside `original(...)` (`release_claim`
+        # stays True), or the owner record was written successfully. A
+        # HAND-OFF that did not record the client — `record_owner` returned
+        # falsy (its documented I/O-failure mode) OR raised — is deliberately
+        # NOT released: the client is alive but UNRECORDED, so dropping the
+        # claim would make the last-client decision blind to a live client
+        # (the #3653 failure this guard exists to stop), while a claim left
+        # behind only costs a socket dir left for the reaper (the guard's
+        # documented cheaper error). The increment is OUTSIDE the `try`, so
+        # the counter can never underflow: the release below runs only under
+        # `claimed`.
         try:
-            sock = getattr(self, "socket_file", None)
-            if not (isinstance(sock, str) and sock):
-                sock = owner_socket_of(self)
-            record_owner(sock)
+            pending = _replay_socket_for_init(args, kwargs)
         except Exception:
-            pass
+            pending = None
+        inflight_key = os.path.abspath(pending) if pending else None
+        claimed = inflight_key is not None
+        if claimed:
+            _in_flight_replays[inflight_key] = (
+                _in_flight_replays.get(inflight_key, 0) + 1)
+            # F2: the dead-socket guard's #4879 gate line is gated on THIS
+            # claim being live, so it can never fire on a close-path call
+            # whose `socket_file` merely happens to be empty. Stash the key
+            # on the object the guard will see (the same `self`).
+            self._tortoise_inflight_replay_key = inflight_key
+        release_claim = True
+        try:
+            original(self, *args, **kwargs)
+            # `record_owner` / `owner_socket_of` are defined above and resolved
+            # at call time; the guard keeps construction unconditional.
+            #
+            # Resolve the socket from the object we are patching FIRST: this
+            # seam fires on the object that OWNS the server (redislite's `Redis`,
+            # including the inner client a `FalkorDB` wrapper builds), whose own
+            # `.socket_file` is authoritative. `owner_socket_of` is the fallback
+            # for any wrapper shape — it is NOT the primary read here because an
+            # inner embedded `Redis` carries its own `.client` attribute, and
+            # `owner_socket_of`'s `getattr(client, 'client', ...)` would then
+            # follow that to a client with no `socket_file` and wrongly report
+            # None (measured: the first cut of this patch wrote no record).
+            try:
+                sock = getattr(self, "socket_file", None)
+                if not (isinstance(sock, str) and sock):
+                    sock = owner_socket_of(self)
+                # `record_owner` is documented NEVER-RAISE, so its RETURN
+                # VALUE — not the `except` below — is the real failure
+                # signal; the exception branch is a net, not the contract.
+                # The value is AMBIGUOUS on its own: `False` means BOTH "this
+                # process ALREADY owns the record" (the refcount was STILL
+                # incremented — recorded) AND "no record could be written"
+                # (`os.makedirs`/`os.open` OSError — the refcount is UNTOUCHED
+                # — NOT recorded). Read the refcount to tell them apart: this
+                # client is recorded exactly when it advanced. Anything else
+                # (a falsy socket, or a failed write) is live-but-UNRECORDED
+                # and must KEEP the claim (fail CLOSED, lifetime note above).
+                owner_key = (
+                    os.path.abspath(sock)
+                    if isinstance(sock, str) and sock else None)
+                before = (_owner_refcounts.get(owner_key, 0)
+                          if owner_key else 0)
+                record_owner(sock)
+                recorded = (
+                    owner_key is not None
+                    and _owner_refcounts.get(owner_key, 0) > before)
+                if not recorded:
+                    release_claim = False
+            except Exception:
+                # Fail CLOSED: the client is live but has no owner record, so
+                # keep the in-flight claim (the lifetime note above).
+                release_claim = False
+        finally:
+            if claimed and release_claim:
+                try:
+                    remaining = _in_flight_replays.get(inflight_key, 0) - 1
+                    if remaining > 0:
+                        _in_flight_replays[inflight_key] = remaining
+                    else:
+                        _in_flight_replays.pop(inflight_key, None)
+                except Exception:
+                    _in_flight_replays.pop(inflight_key, None)
 
     RedisMixin.__init__ = _init
     RedisMixin._tortoise_owner_record_patch = True
+
+
+# ── #4879: a DEAD recorded socket must not be replayed ────────────────────
+#
+# redislite's `RedisMixin._is_redis_running()` (client.py:305-332) answers
+# "is a server here?" from THREE checks only: the `<db>.settings` registry
+# exists, the recorded `pidfile` exists, and that pid is live. It NEVER
+# validates the recorded `unixsocket`, and `_load_setting_registry()`
+# (client.py:351-378) then assigns `self.socket_file = settings['unixsocket']`
+# UNCONDITIONALLY (client.py:376). So a registry + pidfile that SURVIVE a
+# previous construction — with a still-live pid — while the socket FILE is
+# gone makes the predicate True: the dead path is replayed, `__init__`
+# (client.py:449-450) loads it, `_wait_for_server_start()` pings it, and the
+# caller dies with the deterministic main-branch failure
+#     redis.exceptions.ConnectionError: Error 2 connecting to
+#     /tmp/tmpXXXX/redis.socket. No such file or directory.
+# (tests/test_pack_state.py::TestBackfillScript::test_apply_writes_to_introspection_read_target).
+#
+# WHY "THE RECORDED SOCKET IS GONE" ALONE MUST NOT ANSWER False — the
+# #4879-review hole: answering False routes `__init__` into its `else:`
+# branch (client.py:454-462), which calls `_create_redis_directory_tree()`
+# (client.py:203-216 — a NEW mkdtemp, pidfile, logfile and socket, but the
+# SAME dbdir) and then `_start_redis()` (client.py:218-236), whose kwargs
+# pass `'dbdir': self.dbdir, 'dbfilename': self.dbfilename`
+# (client.py:234-235) straight through. That is THE SAME RDB FILE, and
+# nothing in redislite guards "a server is already live on this dbdir". The
+# registry file lives at `<dbdir>/<dbfilename>.settings`, so a registry that
+# exists belongs to THIS dbdir — and it can be left behind by a server that
+# is STILL ALIVE holding that RDB. Answering False there starts a SECOND
+# redis-server against the same dbfilename: two writers on one RDB,
+# last-writer-wins on SAVE, one server's in-memory writes clobbering the
+# other's — a SILENT divergence, strictly worse than the loud
+# ConnectionError it removes.
+#
+# So the repair is ORDERED — prove, stop, drop — and it is the only thing
+# this patch does on that state: the recorded pid is proven to be this
+# registry's own live server, that server is stopped GRACEFULLY, and only
+# then is the stale registry removed so redislite starts clean. That ordering is
+# safe against the holder THIS PATCH PROVED — the RDB is released before the
+# record is dropped — and nothing wider: there is still no per-<dbdir>/
+# <dbfilename> construction lock, so a second construction racing here can also
+# start a server over the same RDB (tortoise#4921). Both provenance legs
+# exist because the recorded pid may be a recycled number pointing at an
+# unrelated process — and signalling THAT, or starting a second server while
+# the real holder lives, are the two ways this predicate can do harm.
+_ORIGINAL_REDISLITE_IS_RUNNING = None
+
+#: Bounded graceful-stop budget: SIGTERM, then wait this long before
+#: `embedded_reaper._kill` escalates to SIGKILL.
+_STALE_HOLDER_SIGTERM_TIMEOUT = 5.0
+#: `_kill` fires its SIGKILL and returns WITHOUT waiting for the death
+#: (#1383's primitive is fire-and-forget there), so the exit is awaited here
+#: with its own bound before this patch may conclude the pid is gone.
+_STALE_HOLDER_DEATH_TIMEOUT = 5.0
+#: Start-time slack for the pidfile-mtime provenance leg — the same 2 s
+#: tolerance `embedded_reaper._pid_identity_matches` uses.
+_STALE_HOLDER_START_SLACK = 2.0
+
+
+def _registry_settings(registry_path: str | None) -> dict | None:
+    """Parse a redislite `.settings` registry; None when unreadable.
+
+    None (not {}) for every failure — a missing file, an OSError, unparseable
+    JSON, or a JSON value that is not an object — because the caller must be
+    able to tell "nothing was proven" from "proven empty". Never raises.
+    """
+    import json as _json
+    if not registry_path:
+        return None
+    try:
+        with open(registry_path) as file_handle:
+            settings = _json.load(file_handle)
+    except Exception:  # the patch must never raise
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def _registry_still_records(registry: str | None, pidfile: str,
+                            pid: int) -> bool:
+    """True when `registry` STILL records the proven `pidfile`/`pid`.
+
+    #4879 review: the repair reads the registry, then spends up to
+    `_STALE_HOLDER_SIGTERM_TIMEOUT + _STALE_HOLDER_DEATH_TIMEOUT` (~10 s)
+    proving and stopping the holder, and only THEN unlinks it. A concurrent
+    construction on the same `<dbdir>/<dbfilename>` can, inside that window,
+    stop the same holder and rewrite the registry with a NEW, live
+    pidfile/socket; unlinking THAT would destroy the concurrent construction's
+    registry and let this one start a second writer over the same RDB — the
+    exact divergence this patch exists to prevent. So the registry is re-read
+    at the last moment and the unlink proceeds only while it still matches
+    what was proven.
+
+    The recorded pid is compared only while the pidfile is still READABLE:
+    redis-server unlinks its own pidfile on the graceful SIGTERM shutdown
+    `_stop_proven_holder` performs, so an absent pidfile is the expected
+    post-stop state, not evidence of a change. A registry that vanished or
+    cannot be parsed, a different `pidfile`, or a pidfile rewritten with a
+    DIFFERENT pid is a change. Never raises.
+    """
+    fresh = _registry_settings(registry)
+    if fresh is None or fresh.get("pidfile") != pidfile:
+        return False
+    try:
+        with open(pidfile) as file_handle:
+            fresh_pid = int(file_handle.read().strip())
+    except Exception:  # own graceful stop removed it, or unreadable
+        return True
+    return fresh_pid == pid
+
+
+def _proven_stale_holder_pid(settings: dict) -> int | None:
+    """The registry's recorded server pid, ONLY when provenance proves it.
+
+    Two independent legs, BOTH required — either alone can name an innocent
+    process, and the caller SIGTERMs whatever this returns:
+
+    1. **Start time.** The registry records no start time, so the derivable
+       anchor is the pidfile's own mtime: redis-server writes that file at
+       startup, so a live pid whose process STARTED after it was written
+       cannot be the process that wrote it — the number was recycled (the
+       #1642 FIX 5 pid-reuse class). Reuses `embedded_reaper.
+       _process_start_time` (embedded_reaper.py:663, via `_parse_lstart`
+       :638) — the repo's existing portable start-time helper — with the same
+       2 s tolerance `_pid_identity_matches` (:711) uses. A start time we
+       cannot derive fails closed.
+
+    2. **argv binding.** The live process must be a redis-server
+       (`_pid_is_redis`, embedded_reaper.py:688) whose own argv — or the
+       config file that argv names — names the RECORDED SOCKET's directory,
+       via `_pid_cmdline_names_dir` (embedded_reaper.py:298), the unforgeable
+       provenance binding #4136 built for exactly this socket-less kill arm.
+       NOTE the directory compared is the recorded socket's, NOT
+       `settings['dbdir']`: redislite starts the server as
+       `redis-server unixsocket:<socket_dir>/redis.socket` (or
+       `<socket_dir>/redis.config`), so the argv carries the SOCKET tempdir
+       and never the RDB dir — `_pid_cmdline_names_dir(pid, dbdir)` is False
+       for every genuine server (verified against a live one). The recorded
+       socket is the tighter binding in any case: the registry records that
+       exact socket, so it ties the process to THIS registry.
+       `_pid_cmdline_names_dir` never resolves its own dbdir argument (by
+       design, #4136), so the recorded side is canonicalised here first.
+
+    Returns None — never raises — whenever either leg is unproven or anything
+    is unreadable; the caller must then refuse to signal.
+    """
+    from tortoise.embedded_reaper import (
+        _pid_alive,
+        _pid_cmdline_names_dir,
+        _pid_is_redis,
+        _process_start_time,
+    )
+    pidfile = settings.get("pidfile")
+    recorded_socket = settings.get("unixsocket")
+    if not pidfile or not recorded_socket:
+        return None
+    try:
+        with open(pidfile) as file_handle:
+            pid = int(file_handle.read().strip())
+        pidfile_written = os.path.getmtime(pidfile)
+        socket_dir = os.path.dirname(os.path.realpath(recorded_socket))
+    except Exception:  # unreadable/unparseable evidence
+        return None
+    if pid <= 0 or not _pid_alive(pid) or not _pid_is_redis(pid):
+        return None
+    started = _process_start_time(pid)
+    if started is None or started > pidfile_written + _STALE_HOLDER_START_SLACK:
+        return None  # recycled pid (or undeterminable start) — not ours
+    if not socket_dir or not _pid_cmdline_names_dir(pid, socket_dir):
+        return None  # a live redis-server, but not THIS registry's
+    return pid
+
+
+def _stop_proven_holder(pid: int) -> bool:
+    """Stop a provenance-proven recorded server; True once the pid is gone.
+
+    GRACEFUL by default: `embedded_reaper._kill` (embedded_reaper.py:2257) is
+    the repo's one bounded stop primitive — SIGTERM, poll for a bounded
+    budget, escalate to SIGKILL only if that budget expires — and it is what
+    the reaper uses on every live orphan, so this inherits its semantics
+    (including redis's own SIGTERM shutdown, which SAVES when save points are
+    configured).
+
+    The SIGKILL escalation is a DELIBERATE choice with a known cost: it
+    abandons the server's own save, so whatever it held only in memory since
+    its last save point is lost. The alternative — leaving a PROVEN holder of
+    this RDB alive — is the two-writer divergence the caller exists to
+    prevent, and the process is unreachable by path (its socket is gone), so
+    the graceful SHUTDOWN-over-socket path (#1371) is not available here.
+
+    `_kill` does not wait out its own SIGKILL, so the death is awaited here
+    under its own bound: reporting a false "still alive" would send the
+    caller to the loud-failure branch with the server already dying. Never
+    raises.
+    """
+    from tortoise.embedded_reaper import _kill, _pid_alive
+    try:
+        _kill(pid, _STALE_HOLDER_SIGTERM_TIMEOUT)
+    except Exception:
+        return False
+    deadline = time.monotonic() + _STALE_HOLDER_DEATH_TIMEOUT
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not _pid_alive(pid)
+
+
+def _install_dead_socket_guard() -> None:
+    """#4879: never replay a DEAD recorded socket; repair instead (once).
+
+    Wraps `RedisMixin._is_redis_running` (client.py:305-332) on the same
+    patch seam as #4487's `RedisMixin.__init__` wrapper. The ORIGINAL
+    predicate stays authoritative for "is there a live server"; this adds the
+    socket-file check the original omits AND, for a recorded socket that is
+    GONE under a live pid, the ordered repair (prove -> stop -> drop the
+    stale registry) that keeps redislite from REPLAYING that dead socket. It is
+    safe against the holder THIS REPAIR PROVED, and nothing wider: without a
+    per-<dbdir>/<dbfilename> construction lock, a construction racing here can
+    also start a server over the same RDB (tortoise#4921). Idempotent, and never
+    raises: a patch that broke construction would be worse than the bug.
+    """
+    global _ORIGINAL_REDISLITE_IS_RUNNING
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to patch
+        return
+    if getattr(RedisMixin, "_tortoise_dead_socket_guard", False):
+        return
+    original = RedisMixin._is_redis_running
+    _ORIGINAL_REDISLITE_IS_RUNNING = original
+
+    def _is_redis_running(self):
+        registry = getattr(self, "settingregistryfile", None)
+        if registry and os.path.exists(registry):
+            # Shape guard, BEFORE the original: a registry that parses but
+            # carries NO `pidfile` can be neither assessed nor REPLAYED —
+            # `_load_setting_registry` returns early (client.py:369-374) and
+            # leaves `socket_file` at None, which would hand the construction
+            # to redis-py's TCP defaults: a SILENT cross-connection to whatever
+            # listens on localhost:6379. There is no replay here to repair (and
+            # no holder record to protect): start clean. (Not a shape redislite
+            # writes; it is the first cut's behaviour for a corrupt/hand-made
+            # registry.)
+            pre = _registry_settings(registry)
+            if pre is not None and not pre.get("pidfile"):
+                return False
+        # The ORIGINAL is otherwise authoritative and is consulted next: it is
+        # the one that reports "there is no registry here at all" (the
+        # overwhelmingly common construction, short-circuited at
+        # client.py:310/333 before any registry read) and it owns the pid
+        # liveness verdict.
+        try:
+            running = original(self)
+        except Exception:
+            # The registry exists but the original could not read it as a
+            # holder record (client.py:314-315/317/320-322): unparseable
+            # (possibly a registry a live server is MID-WRITE — `json.dump` is
+            # not atomic), a mangled pid, an unreadable pidfile, or a psutil
+            # AccessDenied. Answer True, NEVER False: False would START a
+            # server over an RDB whose holder we could not rule out
+            # (client.py:454-462), while True lets the replay re-raise the same
+            # error (client.py:356/363-366) — the UNPATCHED loud failure, with
+            # no server started.
+            return True
+        if not running:
+            return False
+        # #4879 gate visibility: once the ORIGINAL says a server is there, the
+        # DEAD-SOCKET GUARD's own gates decide whether a REPLAY is allowed or
+        # repaired. Every "allow" leaves this function through `_allow_replay`,
+        # which emits one DEBUG naming the gate that let the replay through —
+        # without it a guard that never fired is indistinguishable from a guard
+        # that had nothing to do ("no branch fired" with no way to tell which
+        # gate stopped it).
+        #
+        # DEBUG, not WARNING: as a WARNING this line collided with an
+        # UNRELATED test's `caplog` filter (#4954). At the time,
+        # `tests/test_metering.py::TestThresholdEvents::test_no_threshold_for_free_tier`
+        # filtered every captured record by the bare substring "threshold",
+        # and pytest names that test's tmpdir `test_no_threshold_for_free_tie0`,
+        # so the registry PATH embedded in this line matched it. (#4957/#4964
+        # has since scoped that capture to the `tortoise.metering` logger.)
+        # At DEBUG the line is not captured by a WARNING-level `caplog` filter.
+        #
+        # The DEBUG is gated on THIS construction's claim actually being live
+        # in `_in_flight_replays` (the key the `RedisMixin.__init__` patch
+        # stashed on `self`), NOT on `socket_file` being empty: redislite nulls
+        # `socket_file` in `_cleanup` (client.py:146) BEFORE `pidfile`
+        # (client.py:181), so a mid-teardown `_cleanup` -> `_connection_count`
+        # -> here also has an empty `socket_file` and used to log a replay it
+        # was not part of. Only the construction that registered the claim
+        # logs, at most once. `replaying_here` remains the (unchanged) test for
+        # whether redislite can take the registry-load branch below.
+        replaying_here = not getattr(self, "socket_file", None)
+        claim_key = getattr(self, "_tortoise_inflight_replay_key", None)
+
+        def _allow_replay(gate: str, **detail) -> bool:
+            if (claim_key
+                    and not getattr(self, "_tortoise_replay_logged", False)
+                    and _in_flight_replays.get(claim_key, 0) > 0):
+                self._tortoise_replay_logged = True
+                logger.debug(
+                    "#4879: replay allowed for registry %s — gate=%s%s"
+                    " (this construction holds the in-flight replay claim)",
+                    registry, gate,
+                    "".join(f" {k}={v!r}" for k, v in detail.items()))
+            return True
+
+        # The original returned True, so the registry exists, parses, carries a
+        # pidfile whose file exists, and that pid is live (client.py:313-332).
+        settings = _registry_settings(registry)
+        if settings is None:
+            # vanished/mutated between the two reads -> unproven
+            return _allow_replay("registry-vanished")
+        recorded_socket = settings.get("unixsocket")
+        if not recorded_socket:
+            return _allow_replay("no-recorded-socket")
+        if os.path.exists(recorded_socket):
+            return _allow_replay("recorded-socket-present",
+                                 recorded_socket=recorded_socket)
+        if not replaying_here:
+            # This client already has a socket, so `__init__` (client.py:449:
+            # `... and not self.socket_file`) can NEVER take the registry-load
+            # branch: there is no replay here to repair. Keep the original
+            # answer — `_cleanup` asks this predicate through
+            # `_connection_count` (client.py:188), and a predicate must not
+            # kill a live server on a path that is not about to start one
+            # (the #3653 fail-open class).
+            return True
+        # Registry present + recorded socket GONE + pid LIVE (the original
+        # said so). Repair only a PROVEN holder; otherwise fail loud.
+        pid = _proven_stale_holder_pid(settings)
+        if pid is None:
+            # DELIBERATE, not a fall-through. The evidence cannot prove the
+            # live pid is this registry's server, and THIS is the branch that
+            # could double-start: a second redis-server on the same
+            # dbfilename while an unproven live process may still hold it.
+            # Answering True keeps TODAY's behaviour — redislite replays the
+            # registry and the ping fails LOUDLY with the ConnectionError
+            # above, with no server started and nothing signalled. An
+            # unrepaired loud failure is recoverable; a silent two-writer
+            # divergence is not. (The failed construction leaves a
+            # partially-built client whose own atexit `_cleanup` also meets
+            # the dead socket — today's behaviour, unchanged.)
+            logger.warning(
+                "#4879: registry %s records a socket that is gone (%s) with a "
+                "live pid, but the holder could not be PROVEN this registry's "
+                "server — NOT repairing (a double-start over a live RDB is "
+                "worse than a loud failure); the replay will fail loudly",
+                registry, recorded_socket)
+            return True
+        proven_pidfile = settings.get("pidfile")
+        if not _stop_proven_holder(pid):
+            logger.warning(
+                "#4879: stale holder pid %s was proven ours but did not stop; "
+                "not rebuilding (never double-start over its RDB)", pid)
+            return True  # proven ours but not stopped -> never double-start
+        # Last-moment re-validation (see `_registry_still_records`): the
+        # window between the registry read above and this unlink is up to
+        # `_STALE_HOLDER_SIGTERM_TIMEOUT + _STALE_HOLDER_DEATH_TIMEOUT` (~10 s),
+        # long enough for a concurrent construction on the same
+        # `<dbdir>/<dbfilename>` to stop the same holder and install a NEW,
+        # live registry. Unlinking THAT would make this construction start a
+        # second writer over the same RDB — the divergence this patch exists
+        # to prevent. An unchanged registry (or one whose pidfile the stopped
+        # server removed on its way out) is still ours to drop.
+        if not _registry_still_records(registry, proven_pidfile, pid):
+            logger.warning(
+                "#4879: registry %s changed while proven holder pid %s was "
+                "being stopped — it is no longer this repair's stale record "
+                "(a concurrent construction owns it); leaving it alone and "
+                "NOT starting a server (never double-start over its RDB)",
+                registry, pid)
+            return True
+        try:
+            os.remove(registry)
+        except OSError as exc:
+            # Still there -> it would replay the dead socket, so do not let a
+            # server be started yet.
+            logger.warning(
+                "#4879: stopped stale holder pid %s but could not remove the "
+                "registry %s (%s); not rebuilding", pid, registry, exc)
+            return True
+        # The recorded server is confirmed dead (the RDB is released) and the
+        # stale registry is gone: `__init__`'s else branch starts a clean
+        # server over the same dbdir/dbfilename. What this closes is the
+        # REGISTRY REPLAY — a proven-dead holder's stale record — and nothing
+        # wider. It does NOT make this construction the only writer: redislite
+        # still has no per-<dbdir>/<dbfilename> construction lock, so two
+        # constructions racing between this unlink and the start below can
+        # each bring up a server over one RDB (tortoise#4921).
+        logger.warning(
+            "#4879: REPAIRED a stale embedded-redis registry %s — stopped the "
+            "proven holder pid %s (recorded socket %s was gone) and removed "
+            "the registry; the construction rebuilds over the same RDB",
+            registry, pid, recorded_socket)
+        return False
+
+    RedisMixin._is_redis_running = _is_redis_running
+    RedisMixin._tortoise_dead_socket_guard = True
 
 
 # Installed at import, at the END of the module so `record_owner` and
@@ -1465,3 +2212,4 @@ def _install_owner_record_patch() -> None:
 # module before it defines the guarded `FalkorDB`, so the patch is always in
 # place before any tortoise construction.
 _install_owner_record_patch()
+_install_dead_socket_guard()

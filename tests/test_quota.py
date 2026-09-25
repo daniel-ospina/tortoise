@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from tortoise.quota import (
+    QUOTA_REFUSAL_CODE,
     QuotaCheckError,
     QuotaExceededError,
     count_org_usage,
     enforce_org_limit,
+    quota_refusal_payload,
     resolve_org_limits,
 )
 
@@ -85,8 +88,18 @@ class TestEnforceTeamLimit:
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
         limits = {"org_id": "team1", "max_points": 1}
-        with pytest.raises(QuotaExceededError):
+        with pytest.raises(QuotaExceededError) as exc_info:
             enforce_org_limit(limits, "points", sdk=sdk)
+        # #4614: the generic branch reports the resource and the values it
+        # compared — the payload is not a capture-path special case.
+        assert (exc_info.value.resource, exc_info.value.used,
+                exc_info.value.limit) == ("points", 1, 1)
+        payload = quota_refusal_payload(exc_info.value)
+        assert payload["code"] == QUOTA_REFUSAL_CODE
+        assert payload["resource"] == "points"
+        assert payload["used"] == 1 and payload["limit"] == 1
+        assert payload["message"] == "Team points limit reached (1). " \
+            "Upgrade your plan to increase it."
         sdk.close()
 
     def test_below_limit_passes(self, tmp_path):
@@ -381,6 +394,35 @@ class TestDocumentsQuota:
             for i in range(3):
                 self._seed_doc(tenant, i, kind=None)
             assert count_org_usage(tid, "documents", sdk=tenant) == 3
+        finally:
+            tenant.close()
+
+    def test_the_refusal_reports_the_derived_limit(self, reg_sdk, tmp_path):
+        """#4614: the documents cap is DERIVED (`max_points x factor`) and is
+        deliberately NOT in `_RESOURCE_LIMIT_KEYS` — so its refusal must carry
+        the limit the branch actually compared. Reporting the raw `max_points`
+        would understate the bound by the factor, and reporting nothing would
+        leave the caller to prose-match its way to a number.
+        """
+        from tortoise.quota import _DOCUMENTS_FROM_POINTS_FACTOR
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            limit = 1 * _DOCUMENTS_FROM_POINTS_FACTOR
+            for i in range(limit):
+                self._seed_doc(tenant, i, kind="brief")
+            with pytest.raises(QuotaExceededError) as exc_info:
+                enforce_org_limit(
+                    {"org_id": tid, "max_points": 1}, "documents", sdk=tenant)
+            err = exc_info.value
+            assert err.resource == "documents"
+            assert err.limit == limit, (
+                f"reported {err.limit!r}, but the gate compared {limit!r} "
+                f"(max_points x {_DOCUMENTS_FROM_POINTS_FACTOR})")
+            assert err.used == limit
+            payload = quota_refusal_payload(err)
+            assert payload["code"] == QUOTA_REFUSAL_CODE
+            assert payload["resource"] == "documents"
+            assert payload["limit"] == limit and payload["used"] == limit
         finally:
             tenant.close()
 
@@ -706,3 +748,260 @@ def test_ask_exec_floor_guarantees_execution(monkeypatch):
     with pytest.raises(quota_mod.AskBoundedTimeoutError):
         asyncio.run(_queue_and_release(2.5))
     assert calls["n"] == 0
+
+
+# ── #4355: the single-slot predicate must agree with the count, both lanes ──
+
+class TestApiKeySlotParity:
+    """`api_key_occupies_slot` is NOT a fourth count — it is the api_keys cap
+    predicate applied to ONE id, and the rotate primitive credits a slot on the
+    strength of it. The credit is only sound if the predicate accepts EXACTLY
+    the rows `_count_resource(org, 'api_keys')` charges for. These tests pin
+    that identity on both lanes over the whole state space that matters:
+    live-durable, live-bootstrap (cap-exempt), revoked, expired, and the
+    legacy NULL `created_via` (durable, must count — fail-closed).
+    """
+
+    def test_registry_lane_count_equals_accepted_ids(self, reg_sdk):
+        from tortoise.quota import _count_resource, api_key_occupies_slot
+
+        tid = _find_org_id(reg_sdk)
+        reg = reg_sdk._get_registry()
+        now = datetime.now(UTC)
+        states = {
+            "live-durable": {"revoked_at": None, "created_via": "dashboard",
+                             "expires_at": None},
+            "live-bootstrap": {"revoked_at": None, "created_via": "bootstrap",
+                               "expires_at": (now + timedelta(hours=24)).isoformat()},
+            "live-legacy-null": {"revoked_at": None, "created_via": None,
+                                 "expires_at": None},
+            "revoked": {"revoked_at": now.isoformat(), "created_via": "dashboard",
+                        "expires_at": None},
+            "expired": {"revoked_at": None, "created_via": "dashboard",
+                        "expires_at": (now - timedelta(days=1)).isoformat()},
+            "expired-bootstrap": {"revoked_at": None, "created_via": "bootstrap",
+                                  "expires_at": (now - timedelta(days=1)).isoformat()},
+        }
+        for name, s in states.items():
+            reg.query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$h, "
+                "key_prefix:$kp, created_by:'u1', created_at:$ca, "
+                "revoked_at:$ra, expires_at:$ea, created_via:$cv})",
+                params={"id": f"k-{name}", "tid": tid, "h": f"h-{name}",
+                        "kp": f"p-{name}", "ca": now.isoformat(),
+                        "ra": s["revoked_at"], "ea": s["expires_at"],
+                        "cv": s["created_via"]},
+            )
+
+        count = _count_resource(tid, "api_keys", sdk=reg_sdk)
+        accepted = [k for k in states if api_key_occupies_slot(tid, f"k-{k}",
+                                                              sdk=reg_sdk)]
+        assert count == len(accepted), (
+            f"count={count} but the slot predicate accepts {accepted}"
+        )
+        assert set(accepted) == {"live-durable", "live-legacy-null"}, (
+            "the predicate must charge live durable + live legacy-NULL rows "
+            f"and nothing else, got {accepted}"
+        )
+
+    def test_registry_lane_unknown_and_empty_ids_are_false(self, reg_sdk):
+        from tortoise.quota import api_key_occupies_slot
+
+        tid = _find_org_id(reg_sdk)
+        assert api_key_occupies_slot(tid, "no-such-key", sdk=reg_sdk) is False
+        assert api_key_occupies_slot("", "k", sdk=reg_sdk) is False
+        assert api_key_occupies_slot(tid, "", sdk=reg_sdk) is False
+
+    def test_supabase_lane_count_equals_accepted_ids(self, monkeypatch):
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.quota import _count_resource, api_key_occupies_slot
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://slot-parity.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        now = datetime.now(UTC)
+        tid = "team-slot-parity"
+        rows = [
+            {"id": "k-live-durable", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": None, "expires_at": None},
+            {"id": "k-live-bootstrap", "org_id": tid, "created_via": "bootstrap",
+             "revoked_at": None,
+             "expires_at": (now + timedelta(hours=24)).isoformat()},
+            {"id": "k-live-legacy-null", "org_id": tid, "created_via": None,
+             "revoked_at": None, "expires_at": None},
+            {"id": "k-revoked", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": now.isoformat(), "expires_at": None},
+            {"id": "k-expired", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": None,
+             "expires_at": (now - timedelta(days=1)).isoformat()},
+        ]
+        fake.seed("api_keys", rows)
+
+        count = _count_resource(tid, "api_keys")
+        accepted = [r["id"] for r in rows if api_key_occupies_slot(tid, r["id"])]
+        assert count == len(accepted), (
+            f"count={count} but the slot predicate accepts {accepted}"
+        )
+        assert set(accepted) == {"k-live-durable", "k-live-legacy-null"}, accepted
+
+    def test_credit_widens_the_gate_by_exactly_one(self, reg_sdk):
+        """`enforce_org_limit(slot_credit=1)` moves the boundary by exactly
+        one slot — it is a credit, not an exemption: at 2/2 the plain gate
+        refuses, the credited gate admits, and a THIRD live key makes the
+        credited gate refuse again.”"""
+        from tortoise.quota import _count_resource
+
+        tid = _find_org_id(reg_sdk)
+        reg = reg_sdk._get_registry()
+        limits = {"org_id": tid, "max_api_keys": 2}  # free tier
+
+        def _seed(kid: str) -> None:
+            reg.query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$h, "
+                "key_prefix:$kp, created_by:'u1', created_at:$ca, "
+                "revoked_at:NULL, expires_at:NULL, created_via:'dashboard'})",
+                params={"id": kid, "tid": tid, "h": f"h-{kid}",
+                        "kp": f"p-{kid}", "ca": datetime.now(UTC).isoformat()},
+            )
+
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk)          # 0/2
+        _seed("slot-1")
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk)          # 1/2
+        assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 1
+        _seed("slot-2")
+        with pytest.raises(QuotaExceededError) as unc:                    # 2/2 → over
+            enforce_org_limit(limits, "api_keys", sdk=reg_sdk)
+        # #4614: the refusal carries the numbers the gate COMPARED, so a
+        # caller can act on it without parsing the message. `used` is the
+        # counted value at the raise, and `resource`/`limit` name what was
+        # exhausted.
+        assert (unc.value.resource, unc.value.used, unc.value.limit) == (
+            "api_keys", 2, 2)
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk,
+                          slot_credit=1)                              # 2-1 → ok
+        assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 2
+        _seed("slot-3")
+        with pytest.raises(QuotaExceededError) as credited:           # 3-1 → over
+            enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=1)
+        # The payload follows the CREDIT (`count - slot_credit`), not the raw
+        # count — it reports the left-hand side of the comparison that
+        # actually produced the refusal. Reporting the raw 3 here would
+        # describe a decision the gate did not make.
+        assert (credited.value.used, credited.value.limit) == (2, 2)
+        # The credit is applied LITERALLY (`count - slot_credit >= limit`) — it
+        # is not clamped, so ONLY the caller's occupancy proof bounds it at 1.
+        # Over-crediting admits (the free-slot hazard); under-crediting
+        # over-tightens (fail-closed). Pinned here so the shape cannot drift
+        # silently; the guard itself is the single caller + test_rotate_key's
+        # revoked/expired/bootstrap refusals.
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=4)
+
+
+# ── #4614: the refusal is a distinguishable STATE, not a sentence ──────────
+
+
+class TestStructuredRefusal:
+    """A quota refusal must carry a machine-readable category (#4614).
+
+    The gate answered with a bare prose ``detail``, so no caller could tell a
+    quota refusal from any other 402 without matching the message text — and
+    our own clients are documented as forbidden from doing exactly that
+    (``capture_spool.classify_failure``: *"a capacity/billing refusal is a
+    category, not a string"*). These pin the house payload shape (#2789,
+    `_one_free_org_detail`) so the category cannot be flattened back to prose.
+    """
+
+    def test_carries_the_code_and_the_numbers(self):
+        exc = QuotaExceededError(
+            "Team points limit reached (25000). Upgrade your plan to increase it.",
+            resource="points", used=24965, limit=25000, estimate=1044)
+        payload = quota_refusal_payload(exc)
+        assert payload["code"] == QUOTA_REFUSAL_CODE == "quota_exceeded"
+        assert payload["resource"] == "points"
+        assert payload["used"] == 24965
+        assert payload["limit"] == 25000
+        assert payload["estimate"] == 1044
+        # The prose survives verbatim inside the payload: a human reader — and
+        # the dashboard's `Last attempt — <detail>` sub-line, which flattens a
+        # dict detail to its `message` — loses nothing.
+        assert payload["message"] == str(exc)
+
+    def test_omits_only_what_the_raise_site_did_not_know(self):
+        """An absent number beats a fabricated one.
+
+        The dashboard falls back to `/v1/team`'s allowance when a refusal
+        carries none (`keyAllowance.capLimitFrom`), so inventing a figure
+        would REPLACE a real one with a lie. But a present 0 is a real value
+        (a 0-cap plan refuses every write) and must be kept — dropping it
+        would hide an absolute cap.
+        """
+        payload = quota_refusal_payload(
+            QuotaExceededError("Team graphs limit reached (1)."))
+        assert payload == {
+            "code": QUOTA_REFUSAL_CODE,
+            "message": "Team graphs limit reached (1).",
+        }
+        zero = quota_refusal_payload(
+            QuotaExceededError("Team points limit reached (0).",
+                               resource="points", used=0, limit=0))
+        assert zero["used"] == 0 and zero["limit"] == 0
+
+    def test_a_subclass_category_survives_the_generic_builder(self):
+        """The code lives on the EXCEPTION, so a generic caller cannot
+        mislabel a subclass's refusal as the base category.
+
+        A cohort SPEND cap and a plan NODE cap are both 402s. Reading the
+        first as `quota_exceeded` would send the user to buy a bigger plan
+        that cannot lift it — which is the whole reason the payload exists.
+        """
+        from tortoise.cohort_cost import (
+            COHORT_COST_REFUSAL_CODE,
+            CohortCostCapExceeded,
+        )
+
+        payload = quota_refusal_payload(
+            CohortCostCapExceeded("cohort spend cap reached"))
+        assert payload["code"] == COHORT_COST_REFUSAL_CODE == "cohort_cost_cap"
+        assert payload["code"] != QUOTA_REFUSAL_CODE
+        # It names no resource/limit — and must not invent one.
+        assert "resource" not in payload and "limit" not in payload
+        assert payload["message"] == "cohort spend cap reached"
+
+    def test_the_fields_are_keyword_only(self):
+        """A raise site that knows only its message still works.
+
+        Positional construction would let a message be silently dropped into a
+        numeric field by a caller who did not read the signature.
+        """
+        with pytest.raises(TypeError):
+            QuotaExceededError("msg", "points", 1, 2)
+
+    def test_the_payload_stringifies_to_the_message(self):
+        """#4614: a consumer that only has `str(detail)` must see the sentence.
+
+        The MCP capture twin reads `getattr(e, "detail", ...)` and stringifies
+        it. Editing that handler would red `surface-guard` (CONTRIBUTING: add
+        response fields in the assembly layer, not inside a tool function), so
+        the payload answers `str()` here instead. JSON serialization must be
+        unchanged — `json.dumps` still emits an object.
+        """
+        import json
+
+        payload = quota_refusal_payload(QuotaExceededError(
+            "Team points limit reached (1). Upgrade your plan to increase it.",
+            resource="points", used=1, limit=1))
+        assert isinstance(payload, dict)
+        assert str(payload) == (
+            "Team points limit reached (1). Upgrade your plan to increase it.")
+        assert json.loads(json.dumps(payload)) == {
+            "code": QUOTA_REFUSAL_CODE,
+            "resource": "points",
+            "used": 1,
+            "limit": 1,
+            "message": "Team points limit reached (1). Upgrade your plan "
+                       "to increase it.",
+        }
