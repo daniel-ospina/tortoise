@@ -41,9 +41,14 @@ _log = logging.getLogger(__name__)
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
 
-    Only sets environment keys that are empty/unset, so an explicit
-    TORTOISE_DB_URI in the process env always wins. Mirrors the hosted
-    entrypoint philosophy: the DB target must be explicit, never accidental.
+    Only sets environment keys that are ABSENT from ``os.environ`` — a key
+    that is explicitly set, even to the empty string, is never overridden.
+    That presence test is load-bearing: ``tools/ask_shape_rate.py`` narrows
+    the non-pinned provider keys to ``""`` (present-but-unkeyed) so a later
+    ``_load_dotenv()`` cannot re-arm them and defeat the reader pin (#4582).
+    An explicit TORTOISE_DB_URI in the process env always wins. Mirrors the
+    hosted entrypoint philosophy: the DB target must be explicit, never
+    accidental.
     """
     if path is None:
         path = os.path.join(
