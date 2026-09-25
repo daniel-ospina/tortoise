@@ -134,26 +134,50 @@ def test_three_causes_are_pairwise_distinguishable():
     assert seen[RAW_OFFLINE].retryable is True
     assert seen[RAW_DELETED].retryable is False, "a deleted raw must not invite a retry"
     assert seen[RAW_ACCESS_REVOKED].retryable is False
-    assert all(s.absent for s in seen.values())
-    # And none of the three is the present state.
-    assert RAW_PRESENT not in set(seen)
+    # The flag a caller actually branches on, and a genuine cross-check
+    # against the present state. (`RAW_PRESENT not in seen` would be trivially
+    # true — `seen` is keyed BY the causes — which is a test that cannot
+    # fail; this asserts the distinction instead.)
+    present = raw_availability(None)
+    assert present.absent is False
+    assert all(s.absent is True for s in seen.values())
+    assert present.state not in {s.state for s in seen.values()}
+    assert present.label not in {s.label for s in seen.values()}
 
 
 def test_no_recorded_state_reads_as_present():
     """The default is the SHAPE OF THE RECORD, not a stored string.
+
+    ⚠️ ``""`` is deliberately NOT in this set — see
+    ``test_empty_string_is_a_recorded_value_not_the_absence_of_one``.
 
     (1) FAILS if a source with no recorded state resolves absent, or if
         ``None``/``{}`` raise.
     (2) REACHABLE: ``{}`` is the exact shape every pre-#3998 :Source has —
         the whole existing corpus.
     """
-    for empty in ({}, {RAW_STATE_PROP: None}, {RAW_STATE_PROP: ""}, None, ""):
+    for empty in ({}, {RAW_STATE_PROP: None}, None):
         r = raw_availability(empty)
         assert r.state == RAW_PRESENT, empty
         assert r.absent is False
         assert r.permanent is False
     # A mapping that simply does not carry the key.
     assert raw_availability({"url": RAW_URL, "contentHash": "abc"}).state == RAW_PRESENT
+
+
+def test_empty_string_is_a_recorded_value_not_the_absence_of_one():
+    """``""`` is a value SOMEONE WROTE, so it is not "nothing recorded", and
+    we cannot tell what it says — so it must not read as reachable.
+
+    (1) FAILS for ``if value is None or value == "": return PRESENT`` (the
+        first form of this code): an empty stored state then asserts the raw
+        is reachable, contradicting the module's own fail-closed guarantee.
+        The graph CAN hold ``""`` — unlike null, which Cypher removes.
+    (2) REACHABLE: both spellings are constructed below.
+    """
+    assert raw_availability({"rawState": ""}).state == RAW_UNRECOGNISED
+    assert raw_availability({"rawState": ""}).absent is True
+    assert raw_availability("").state == RAW_UNRECOGNISED
 
 
 def test_unrecognised_recorded_state_does_not_read_as_present():
@@ -245,10 +269,37 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
     assert raw["label"] and raw["message"], "a cause must be SAYABLE"
 
     # And the causes are distinguishable THROUGH THE READ PATH, not just in
-    # the pure resolver — this is the assertion the trap is about.
-    others = [c for c in RAW_ABSENT_STATES if c != cause]
-    assert all(raw["raw_state"] != o for o in others)
+    # the pure resolver — this is the assertion the trap is about. Compared
+    # against the resolved state for THIS cause, so a generic "missing" label
+    # (the collapse the contract forbids) fails rather than passes.
+    expected = raw_availability({RAW_STATE_PROP: cause})
+    assert raw["label"] == expected.label
+    assert raw["message"] == expected.message
     assert raw["permanent"] == (cause == RAW_DELETED)
+    assert raw["retryable"] == (cause == RAW_OFFLINE)
+
+
+def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
+    """The whole deliverable, asserted on the READ path rather than the pure
+    resolver: read the SAME memory back under each cause and require the three
+    reports to differ. A not-null check would pass for a collapsed "missing".
+
+    (1) FAILS if any two causes report the same state, label, message, or
+        ``(permanent, retryable)`` pair through the provenance read.
+    (2) REACHABLE: all three causes are written to the live Source and read
+        back through the real ``extractedFrom`` edge.
+    """
+    s, _events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    pid = _memory(s)
+    seen = {}
+    for cause in RAW_ABSENT_STATES:
+        s.create_source(RAW_URL, "conversation", raw_state=cause)
+        seen[cause] = s.get_provenance_chain(pid)[0]["raw"]
+    assert len({r["raw_state"] for r in seen.values()}) == 3
+    assert len({r["label"] for r in seen.values()}) == 3
+    assert len({r["message"] for r in seen.values()}) == 3
+    assert len({(r["permanent"], r["retryable"]) for r in seen.values()}) == 3
 
 
 def test_reads_do_not_raise_when_the_raw_is_unreachable(sdk):
@@ -276,6 +327,29 @@ def test_reads_do_not_raise_when_the_raw_is_unreachable(sdk):
     orphan = s.create_point("statement", "orphan claim")["id"]
     assert s.get_provenance_chain(orphan) == []
     assert "raw" not in s.provenance(orphan)
+
+
+def test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge(sdk):
+    """The other half of the silence fix: a source with no ``:references``
+    edge must still report its provenance, with the SAME key set, so a caller
+    that iterates a non-empty chain cannot ``KeyError`` on the shape that used
+    to return ``[]``.
+
+    (1) FAILS if the entity half is OMITTED rather than null (the first form
+        of this change) — a consumer reading ``item["entity"]`` on a chain it
+        used to receive as ``[]`` now raises KeyError.
+    (2) REACHABLE: no ``references`` edge is wired below — the shape of a raw
+        indexed before extraction.
+    """
+    s, _events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_OFFLINE)
+    pid = _memory(s)
+    chain = s.get_provenance_chain(pid)
+    assert len(chain) == 1, "a source with no entity must not silence the chain"
+    assert set(chain[0]) >= {"source", "raw", "entity", "labels"}
+    assert chain[0]["entity"] is None
+    assert chain[0]["labels"] == []
+    assert chain[0]["raw"]["raw_state"] == RAW_OFFLINE
 
 
 def test_absence_is_preserved_by_a_later_upsert_that_carries_none(sdk):
@@ -348,33 +422,61 @@ def test_graph_holds_an_index_entry_not_a_copy(sdk):
     """Criterion (3) and (4) together: the graph keeps identity + version +
     availability, and **0 raw payload bytes**, for a raw hosted elsewhere.
 
-    (1) FAILS if any property value on the :Source carries the raw body — the
-        moment someone "helpfully" starts storing the fetch result on the node
-        (the `:Document.content` mistake D10 removes), or if the node is
-        missing one of the three values.
-    (2) REACHABLE: a 2 KB body is constructed and ONLY its sha256 is passed —
-        the realistic hosted-elsewhere shape, where the client fetched the raw
-        and sent us the hash.
+    (1) FAILS if the props route accepts a payload prop (part (a), which is
+        what makes part (b) non-vacuous), or if any property value on the
+        :Source carries the body.
+    (2) REACHABLE: a 2 KB body is built and handed to the code — first through
+        the props route (refused), then only its sha256 through the sanctioned
+        route (the realistic hosted-elsewhere shape).
+
+    ⛔ This test was DECORATIVE in its first form. It asserted the payload was
+    absent while never handing a payload to the code, so the assertion held
+    for EVERY implementation — the doctrine's "a test that cannot fail". It
+    was falsified by MEASUREMENT: the first form of ``create_source`` accepted
+    ``content=<2 KB body>`` through the props passthrough and persisted the
+    body verbatim on the :Source node, so target 4 was false while the suite
+    was green.
     """
     s, _events = sdk
     body = ("MEETING TRANSCRIPT — " + "the raw conversation body. " * 80).strip()
     assert len(body) > 2000
     digest = hashlib.sha256(body.encode()).hexdigest()
 
+    # (a) the payload route is REFUSED — this is what makes (b) a real test:
+    #     the same body IS offered to the code, and rejected.
+    for key in ("content", "body", "raw", "payload", "raw_content", "rawContent"):
+        with pytest.raises(ValueError):
+            s.create_source(RAW_URL, "conversation", contentHash=digest, **{key: body})
+
+    # (b) the sanctioned route: identity + version + availability, no bytes.
     s.create_source(RAW_URL, "conversation", contentHash=digest, raw_state=RAW_OFFLINE,
                     title="Weekly sync")
 
     props = _source_props(s)
-    # (3) the index entry is exactly identity + version + availability
     assert props["url"] == RAW_URL
     assert props["contentHash"] == digest
     assert props[RAW_STATE_PROP] == RAW_OFFLINE
-    # (4) and NOT the bytes
     for key, value in props.items():
         text = value if isinstance(value, str) else str(value)
         assert body not in text, f"{key} carries the raw payload"
         assert "the raw conversation body." not in text, f"{key} carries raw payload fragments"
-    assert not any(k.lower() == "content" for k in props), sorted(props)
+    assert not any(k.lower() in ("content", "body", "payload", "raw") for k in props), sorted(props)
+
+
+def test_the_raw_payload_guard_is_not_vacuous(sdk):
+    """Contrast that keeps the guard above load-bearing: assert the refusal is
+    the props route's own work (the message names the reason), and that the
+    refused call created nothing at all.
+
+    (1) FAILS if the guard is removed: the ``pytest.raises`` never fires.
+    (2) REACHABLE: ``content`` is one of the six refused spellings.
+    """
+    s, _events = sdk
+    with pytest.raises(ValueError, match="raw payload"):
+        s.create_source(RAW_URL, "conversation", content="body bytes")
+    assert not s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN count(s)", params={"u": RAW_URL}
+    ).result_set[0][0]
 
 
 def test_index_entry_shape_carries_no_payload_field():

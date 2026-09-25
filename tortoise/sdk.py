@@ -21932,6 +21932,22 @@ class TortoiseSDK:
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
                 )
+        # #3998 (D30): the graph INDEXES the raw; it is NOT the raw store. A
+        # payload-bearing prop here would put raw bytes on the :Source node and
+        # break the two-store model outright — measured BEFORE this guard:
+        # ``create_source(url, "conversation", content=<2 KB body>)`` persisted
+        # the body verbatim on the node, so "0 raw payload bytes retained"
+        # (the issue's target 4) was simply false for the props route. The
+        # bytes belong in the raw store, reached through the source's identity;
+        # what the graph keeps is identity + version + availability.
+        for _k in ("content", "body", "raw", "payload", "raw_content", "rawContent"):
+            if _k in props:
+                raise ValueError(
+                    f"{_k!r} carries raw payload and cannot be stored on a "
+                    f":Source — the graph INDEXES the raw, it is not the raw "
+                    f"store (D30/#3919, #3998). Put the bytes in the raw store "
+                    f"and pass contentHash= instead."
+                )
         ev = {
             "url": url,
             "sourceKind": sourceKind,
@@ -22517,6 +22533,9 @@ class TortoiseSDK:
         an exception. A source whose raw is gone still returns HERE — the node
         and the ``extractedFrom`` edge are graph facts and do not depend on
         the bytes.
+
+        The key set is STABLE: ``entity``/``labels`` are always emitted, never
+        omitted, so a caller iterating a non-empty chain cannot ``KeyError``.
         """
         proj = self._get_proj()
         r = proj.g.query(
@@ -22532,15 +22551,13 @@ class TortoiseSDK:
             {
                 "source": dict(row[0]),
                 "raw": raw_entry(row[0], source_id=(row[0] or {}).get("url")),
-                # #3998: the raw is the addition here; the entity/labels half
-                # is main's OPTIONAL + coalesce unchanged — a source with no
-                # reference yields the SOURCE itself as the terminal
-                # provenance, never a dropped row.
-                **(
-                    {"entity": dict(row[1]), "labels": list(row[2])}
-                    if row[1] is not None
-                    else {}
-                ),
+                # #3998: the raw is the addition. entity/labels keep main's
+                # OPTIONAL + coalesce semantics (a source with no reference
+                # yields the SOURCE as its own terminal provenance) but are
+                # ALWAYS emitted, so the key set is stable and a caller
+                # iterating a non-empty chain cannot ``KeyError``.
+                "entity": dict(row[1]) if row[1] is not None else None,
+                "labels": list(row[2]) if row[2] is not None else [],
             }
             for row in r.result_set
         ]

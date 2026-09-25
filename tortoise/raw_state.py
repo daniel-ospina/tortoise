@@ -45,7 +45,8 @@ is **a third value on that record, not a fourth kind of source**.
     recorded" is not the same claim as "the raw is reachable". The safe
     default (no property written at all) is :data:`RAW_PRESENT`: no absence has
     been recorded, which is the shape of every source that has never been
-    observed to be absent.
+    observed to be absent. An empty string is a *recorded value*, not the
+    absence of one, so it resolves to :data:`RAW_UNRECOGNISED` as well.
 """
 from __future__ import annotations
 
@@ -57,7 +58,6 @@ __all__ = [
     "RAW_DELETED",
     "RAW_OFFLINE",
     "RAW_PRESENT",
-    "RAW_STATES",
     "RAW_STATE_AT_PROP",
     "RAW_STATE_PROP",
     "RAW_UNRECOGNISED",
@@ -87,8 +87,6 @@ RAW_UNRECOGNISED = "unrecognised"
 
 #: The three causes the contract names — distinguishable on purpose.
 RAW_ABSENT_STATES: tuple[str, ...] = (RAW_DELETED, RAW_OFFLINE, RAW_ACCESS_REVOKED)
-#: Every state the resolver can return.
-RAW_STATES: tuple[str, ...] = (RAW_PRESENT, *RAW_ABSENT_STATES, RAW_UNRECOGNISED)
 #: Every state a WRITER may set (``RAW_UNRECOGNISED`` is read-side only).
 WRITABLE_RAW_STATES: tuple[str, ...] = (RAW_PRESENT, *RAW_ABSENT_STATES)
 
@@ -126,16 +124,6 @@ class RawState:
     def retryable(self) -> bool:
         """True when reaching the raw might succeed later (offline only)."""
         return self.state == RAW_OFFLINE
-
-    def to_dict(self) -> dict:
-        return {
-            "state": self.state,
-            "absent": self.absent,
-            "permanent": self.permanent,
-            "retryable": self.retryable,
-            "label": self.label,
-            "message": self.message,
-        }
 
 
 #: state → the claim it makes. The message is the user-facing sentence: it is
@@ -211,24 +199,24 @@ def raw_availability(props: object) -> RawState:
 
     * a mapping of ``:Source`` node properties (reads :data:`RAW_STATE_PROP`);
     * a bare state string;
-    * ``None`` / ``""`` ⇒ :data:`RAW_PRESENT` (nothing recorded);
-    * **anything else — including a mapping whose lookup raises — ⇒
-      :data:`RAW_UNRECOGNISED`**, which is ``absent``. We cannot tell what it
-      says, so we do not claim the raw is reachable.
-
-    A recorded value outside the vocabulary resolves to
-    :data:`RAW_UNRECOGNISED` for the same reason.
+    * ``None`` ⇒ :data:`RAW_PRESENT` — NOTHING is recorded, which is the shape
+      of every source that has never been observed to be absent;
+    * **anything else — a recorded ``""``, a value outside the vocabulary, a
+      non-string, or a mapping whose lookup raises — ⇒
+      :data:`RAW_UNRECOGNISED`**, which is ``absent``. ``""`` is deliberate:
+      it is a *recorded value*, so it is NOT "nothing recorded", and we cannot
+      tell what it says, so we do not claim the raw is reachable.
     """
     if props is None:
         return _STATES[RAW_PRESENT]
     if isinstance(props, str):
-        return _STATES.get(props, _STATES[RAW_UNRECOGNISED]) if props else _STATES[RAW_PRESENT]
+        return _STATES.get(props, _STATES[RAW_UNRECOGNISED])
     if isinstance(props, dict):
         try:
             value = props.get(RAW_STATE_PROP)
         except Exception:  # noqa: BLE001, RUF100 — a hostile mapping must not fail OPEN
             return _STATES[RAW_UNRECOGNISED]
-        if value is None or value == "":
+        if value is None:
             return _STATES[RAW_PRESENT]
         if isinstance(value, str):
             return _STATES.get(value, _STATES[RAW_UNRECOGNISED])
@@ -240,22 +228,33 @@ def raw_entry(
     props: object,
     *,
     source_id: str | None = None,
-    content_hash: str | None = None,
 ) -> dict:
     """The graph's **index entry** for a raw — a reference, never a copy.
 
     This is the load-bearing shape of D30: what the graph keeps about a raw is
     *identity + version + availability*, and never the bytes. ``content_hash``
-    is a hash, so it is not a payload; there is no field here that a raw's
-    bytes could be written into.
+    is a hash, so it is not a payload; there is no field here a raw's bytes
+    could be written into.
+
+    Never raises, for the same reason the resolver does not: a read path calls
+    this unconditionally, so a hostile or malformed ``props`` must degrade to
+    ``None`` fields rather than propagate.
     """
     resolved = raw_availability(props)
-    src = props if isinstance(props, dict) else {}
+
+    def _lookup(key: str):
+        if not isinstance(props, dict):
+            return None
+        try:
+            return props.get(key)
+        except Exception:  # noqa: BLE001, RUF100 — mirrors raw_availability's guard
+            return None
+
     return {
-        "source_id": source_id if source_id is not None else src.get("url"),
-        "content_hash": content_hash if content_hash is not None else src.get("contentHash"),
+        "source_id": source_id if source_id is not None else _lookup("url"),
+        "content_hash": _lookup("contentHash"),
         "raw_state": resolved.state,
-        "raw_state_at": src.get(RAW_STATE_AT_PROP),
+        "raw_state_at": _lookup(RAW_STATE_AT_PROP),
         "available": not resolved.absent,
         "permanent": resolved.permanent,
         "retryable": resolved.retryable,

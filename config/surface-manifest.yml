@@ -34,7 +34,7 @@ response_fields:
 - response: sdk:get_provenance_chain
   field: raw
   emitted_when: 'always, on every returned item — the same index entry (the chain is the Source link, which exists whether or not the raw does)'
-  unchanged_when_off: 'n/a — not flag-gated; a source with no :references edge still returns the SOURCE itself as the terminal entity/labels, so the chain is never dropped'
+  unchanged_when_off: 'n/a — not flag-gated; a source with no :references edge still returns the SOURCE itself as the terminal entity/labels (both keys always emitted), so the chain is never dropped'
 counts:
   tools: 82
   sdk_public_methods: 150
