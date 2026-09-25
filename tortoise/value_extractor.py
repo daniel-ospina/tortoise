@@ -22,7 +22,17 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                         tenant_manifests: dict[str, str] | None = None,
                         installed_namespaces: Collection[str] | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
-    The same source the prompts and the enforcer validate against.
+
+    The brief the PROMPTS are compiled from. It is graph-gated only when a
+    caller passes ``installed_namespaces`` — the ENFORCER is not: the
+    deterministic enforcer (``validate_summary`` → ``_object_kind_vocab``),
+    the Layer-1 write gate (``commit_schema.get_vocab`` /
+    ``refresh_vocab``) and the classify-later index
+    (``compile_kind_index_spec``) all still compile the UNGATED catalog
+    union, so a gated graph's prompt offers a narrower vocabulary than what
+    the system will ACCEPT or CLASSIFY INTO until that plumbing lands —
+    the three callers #5163 tracks. Do not read "gated brief" as "gated
+    system".
 
     ``tenant_manifests`` (#2031 — hosted per-tenant custom packs) is an
     ADDITIVE overlay: ``{namespace: full manifest yaml}`` compiled through

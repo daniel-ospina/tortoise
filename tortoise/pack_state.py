@@ -413,12 +413,25 @@ def graph_kind_namespaces(g) -> frozenset[str]:
                         "that key's namespaces are omitted from the "
                         "back-compat union: %s", key, e)
             continue
-        for row in rows:
-            val = row[0] if row else None
-            if isinstance(val, str) and ":" in val:
-                ns = val.split(":", 1)[0].strip()
-                if ns:
-                    out.add(ns)
+        try:
+            for row in rows:
+                val = row[0] if row else None
+                if isinstance(val, str) and ":" in val:
+                    ns = val.split(":", 1)[0].strip()
+                    if ns:
+                        out.add(ns)
+        except Exception as e:  # noqa: BLE001, RUF100
+            # The DECODE is inside the same NARROWING guard as the scan: a
+            # row we cannot decode (a non-subscriptable row, a None
+            # result_set) contributes nothing, and everything decoded so
+            # far stays. Letting it escape would break the contract the
+            # FAILURE DIRECTION note above states — and, because
+            # graph_installed_namespaces does not catch it, would abort the
+            # approval-set read rather than narrow it.
+            log.warning("pack_state: kind-namespace row decode failed for "
+                        "%s — the remaining rows for that key are omitted "
+                        "from the back-compat union: %s", key, e)
+            continue
     return frozenset(out)
 
 

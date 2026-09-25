@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -75,6 +76,7 @@ ontology:
   extends: core
   objectKinds:
   - contract
+  memory_granularity: 'Durable: contract terms.'
 """
 
 
@@ -87,6 +89,21 @@ def _brief_namespaces(brief: dict) -> set[str]:
 def _master_namespaces(master: dict) -> set[str]:
     """The pack namespaces a master list exposes as pack_kinds."""
     return {k.split(":", 1)[0] for k in master.get("pack_kinds", {})}
+
+
+def _dev_manifest_ontology() -> dict:
+    """The dev pack's ``ontology:`` block — the ORACLE for kind-level checks.
+
+    Read from the manifest (the compile INPUT), never from either compile
+    output: an oracle that agrees with the implementation by construction
+    cannot catch the implementation drifting from the decision.
+    """
+    import yaml
+
+    from tortoise.pack_registry import default_packs_dir
+    data = yaml.safe_load(
+        (Path(default_packs_dir()) / DEV / "manifest.yaml").read_text())
+    return data["ontology"]
 
 
 def _seed_install(sdk, namespace: str, *, status: str = "active",
@@ -113,8 +130,10 @@ def sdk(tmp_path):
     """A dedicated embedded graph per test (its own namespace ⇒ its own graph).
 
     Never a shared graph name: this file is about per-graph state, so a shared
-    graph would make the isolation assertions unfalsifiable (and would trip
-    the select_graph literal guard)."""
+    graph would make the isolation assertions unfalsifiable. (No literal
+    guard is in play either way: the value is ``test_``-prefixed, which the
+    namespace guard skips, and this fixture makes no ``select_graph`` call,
+    which is all the select_graph guard looks at.)"""
     return TortoiseSDK(db_path=str(tmp_path / "l7-vocab-gating.db"),
                        namespace=f"test_l7_vocab_{uuid.uuid4().hex[:8]}")
 
@@ -139,19 +158,32 @@ class TestCompileValueBriefGating:
         }, "the default brief must still compile the whole catalog"
 
     def test_explicit_none_is_byte_identical_to_the_default(self):
-        """`installed_namespaces=None` is the union fallback, verbatim.
+        """``installed_namespaces=None`` means NO GATE, not an empty gate.
 
-        FAIL-ON: a default-argument change (e.g. `[]` instead of `None`)
-        silently gating every existing caller.
-        REACHABLE: two real compiles of the same catalog — the comparison has
-        a value on both sides. Asserted on the KEY ORDER too: the brief's
-        order is prompt-visible downstream (extractor_v2's pack_kinds keeps
-        the brief's insertion order).
+        FAIL-ON: ``None`` starts behaving like the empty set (narrowing every
+        existing caller to core), or a default-argument change (e.g. ``[]``
+        instead of ``None``) silently gates them.
+        REACHABLE: three real compiles — the ungated brief carries the real
+        catalog's 5 namespaces, and the empty-gate brief is genuinely
+        narrower, so the equality is distinguished from a trivial one. The
+        KEY ORDER is asserted too: the brief's order is prompt-visible
+        downstream (extractor_v2's pack_kinds keeps the brief's insertion
+        order).
         """
         default = compile_value_brief()
         explicit = compile_value_brief(installed_namespaces=None)
         assert list(explicit) == list(default)
         assert explicit == default
+        # The contrast that gives the equality its value: an EMPTY gate is a
+        # different thing from None. Without this, the assertion above is a
+        # tautology (None IS the default argument).
+        empty_gate = compile_value_brief(installed_namespaces=frozenset())
+        assert _brief_namespaces(default) == {
+            DEV, MARKETING, "product-strategy", "pm", "agent-ops",
+        }, "fixture: the ungated brief must be non-trivially populated"
+        assert _brief_namespaces(empty_gate) == set(), \
+            "an EMPTY gate must narrow to core — otherwise None gates nothing"
+        assert set(empty_gate) < set(default)
 
     def test_gate_narrows_the_brief_to_the_installed_namespace(self):
         """Indicator 1 at the seam: N installed ⇒ exactly those namespaces.
@@ -185,19 +217,24 @@ class TestCompileValueBriefGating:
         FAIL-ON: the tenant overlay bypasses the gate, so a stored-but-not-
         installed tenant pack leaks kinds into the prompt. (Before the fix the
         overlay loop had no gate at all.)
-        REACHABLE: the overlay fixture declares ``orphan-ops:contract``, so
-        with ``orphan-ops`` NOT in the gate the kind is genuinely absent, and
-        with it IN the gate the kind is genuinely present — the positive
-        control proves the assert can distinguish the two implementations.
+        REACHABLE: the overlay fixture declares ``orphan-ops:contract`` AND a
+        ``memory_granularity``, so with ``orphan-ops`` NOT in the gate both
+        legs are genuinely absent, and with it IN the gate both are
+        genuinely present — the positive control proves the assert can
+        distinguish the two implementations. (The granularity leg was
+        previously untested under a gate; the fixture is what made it so.)
         """
         manifests = {"orphan-ops": TENANT_MANIFEST}
         gated_out = compile_value_brief(
             tenant_manifests=manifests, installed_namespaces={DEV})
         assert not any(k.startswith("orphan-ops:") for k in gated_out)
+        assert "orphan-ops" not in gated_out["memory_granularity"], \
+            "the overlay's memory_granularity must be gated with its kinds"
         installed = compile_value_brief(
             tenant_manifests=manifests,
             installed_namespaces={DEV, "orphan-ops"})
         assert "orphan-ops:contract" in installed
+        assert installed["memory_granularity"]["orphan-ops"]
 
     def test_granularity_follows_the_gate(self):
         """memory_granularity is compiled per namespace and must be gated too.
@@ -359,23 +396,41 @@ class TestGraphInstalledNamespaces:
         assert MARKETING_OBJECT not in master["pack_kinds"]
 
     def test_prompt_set_and_write_gate_set_agree(self, sdk):
-        """The two seams read ONE resolver — a mismatch is a bug.
+        """The two seams read ONE resolver — a KIND-level mismatch is a bug.
 
-        FAIL-ON: the prompt offers a kind the write gate then rejects (the
-        extractor mints a 422) or the gate accepts a kind the prompt never
-        shows. Both are drift between two compiles of the same decision.
-        REACHABLE: both sides are non-empty and namespaced in this fixture, so
-        agreement is a real equality and not two empty sets.
+        The 422 hazard is directional: a kind the PROMPT offers and the write
+        gate then REJECTS is an extraction the graph cannot store. A
+        namespace-prefix comparison cannot see it (mutation-verified: dropping
+        ``dev:requirement`` from the gate's point leg left a prefix-only
+        version of this test green), so the POINT leg — the one whose value
+        the payload's ``pointKind`` is checked against — is pinned BY KIND.
+
+        FAIL-ON: any ``pointKinds`` entry the pack manifest declares is
+        missing from the prompt, or from the write gate's point leg.
+        REACHABLE: the dev manifest declares three pointKinds
+        (requirement/risk/technicalDebt), all of which the ungated compile
+        really carries — so both sides have rows, and dropping any one of
+        them from the gate reds this test.
+
+        Residual (stated, not implied): the object/document legs are NOT
+        compared. They are validated by the deterministic enforcer, which is
+        still ungated (#5163), so there is no write gate to agree WITH yet.
         """
         _seed_install(sdk, DEV)
+        declared_points = {f"{DEV}:{k}"
+                           for k in _dev_manifest_ontology()["pointKinds"]}
+        assert declared_points, "fixture: the dev manifest declares pointKinds"
         installed = graph_installed_namespaces(sdk)
         master = build_master_list(sdk=sdk)
         vocab = compile_vocab(installed_namespaces=installed)
-        offered = _master_namespaces(master)
-        writable = {k.split(":", 1)[0] for k in vocab.point_kinds
-                    if ":" in k}
-        assert offered and writable, "fixture: neither side may be empty"
-        assert writable == offered
+        offered = set(master["pack_kinds"])
+        assert declared_points <= offered, (
+            "the prompt omits a kind its own installed pack declares")
+        rejected = declared_points - set(vocab.point_kinds)
+        assert not rejected, (
+            "the prompt offers point kinds the write gate rejects (the "
+            f"extractor would mint a 422): {sorted(rejected)}"
+        )
 
     def test_historical_kind_namespaces_are_unioned_back(self, sdk):
         """Indicator 2's back-compat clause: data already using a namespace
@@ -480,16 +535,26 @@ class _FakeGraph:
     """A graph stub whose per-property kind scans are scripted, so the
     FAILURE direction of ``graph_kind_namespaces`` is testable without a DB."""
 
-    def __init__(self, rows_by_key: dict, *, fail_key: str | None = None):
+    def __init__(self, rows_by_key: dict, *, fail_key: str | None = None,
+                 bad_row_key: str | None = None,
+                 none_result_key: str | None = None):
         self._rows = rows_by_key
         self._fail_key = fail_key
+        self._bad_row_key = bad_row_key
+        self._none_result_key = none_result_key
 
     def query(self, cypher, params=None):
         if self._fail_key and f"n.{self._fail_key} IS NOT NULL" in cypher:
             raise RuntimeError("scripted scan failure")
         for key, values in self._rows.items():
             if f"n.{key} IS NOT NULL" in cypher:
-                return _FakeResult([[v] for v in values])
+                if self._none_result_key == key:
+                    return _FakeResult(None)
+                rows = [[v] for v in values]
+                if self._bad_row_key == key:
+                    # An un-subscriptable "row" between two real ones.
+                    rows.insert(1, 1)
+                return _FakeResult(rows)
         return _FakeResult([])
 
 
@@ -525,6 +590,67 @@ class TestKindScanFailureDirection:
             "a scan failure must never WIDEN the back-compat union"
         assert narrowed == frozenset(), \
             "the failed key's namespaces must drop out of the union"
+
+    def test_kind_property_set_is_pinned_against_an_independent_oracle(self):
+        """The scanned property set is a CONTRACT, not the loop's own variable.
+
+        ``test_every_key_is_scanned_and_only_ns_kinds_count`` iterates
+        ``_KIND_PROP_KEYS`` — the same tuple the implementation iterates — so
+        dropping a member removes it from the code AND from the test's
+        expectation and the test stays green (mutation-verified: removing
+        ``subjectKind`` left the whole file green). A namespace carried only
+        by the dropped property then becomes undiscoverable to the
+        back-compat union — data the graph already holds stops being writable
+        (indicator 2's "accepted if historical" clause) with no red test.
+
+        FAIL-ON: any member is dropped from or added to ``_KIND_PROP_KEYS``
+        without this canonical list and the writer-side twin moving with it.
+        REACHABLE: the tuple is non-empty and the canonical set is compared as
+        a SET, so an omission and an addition are both observable.
+        """
+        # Hard-coded HERE, deliberately independent of the implementation:
+        # two copies of the same knowledge, one of which (this one) the
+        # implementation cannot mutate along with its own loop.
+        canonical = {
+            "objectKind", "pointKind", "eventKind", "sourceKind",
+            "documentKind", "subjectKind", "actionKind", "kind",
+        }
+        assert set(_KIND_PROP_KEYS) == canonical, (
+            "the scanned kind-property set drifted; a namespace carried only "
+            "by a dropped property is invisible to the back-compat union"
+        )
+        # The writer-side twin must agree (#3977: a second copy drifts from
+        # the first). Imported lazily — hosted_api is a heavy import and this
+        # is a static-constant comparison.
+        from tortoise.hosted_api import _KIND_PROP_KEYS as _hosted_keys
+        assert set(_hosted_keys) == canonical, (
+            "hosted_api._KIND_PROP_KEYS drifted from the union's scan set"
+        )
+
+    def test_undecodable_row_narrows_instead_of_escaping(self):
+        """A row the decode loop cannot read must NARROW, not escape.
+
+        FAIL-ON: the decode loop sits outside the narrowing guard, so one
+        un-subscriptable row (or a ``None`` result_set) raises out of
+        ``graph_kind_namespaces`` — and because ``graph_installed_namespaces``
+        does not catch it, the whole tenant view goes down instead of the
+        union narrowing.
+        REACHABLE: the stub returns a real decodable row BEFORE the bad one
+        and a second one AFTER it, so "the bad row is skipped" and "the read
+        continues" are both observable.
+        """
+        rows = {"objectKind": ["marketing:campaign", "dev:code"]}
+        complete = graph_kind_namespaces(_FakeGraph(rows))
+        assert complete == frozenset({MARKETING, DEV}), \
+            "fixture: the complete scan must find both namespaces"
+        truncated = graph_kind_namespaces(
+            _FakeGraph(rows, bad_row_key="objectKind"))
+        assert truncated == frozenset({MARKETING}), \
+            "the rows before the bad one must survive; it must not raise"
+        assert truncated <= complete, "decode failure must not widen"
+        assert graph_kind_namespaces(
+            _FakeGraph(rows, none_result_key="objectKind")) == frozenset(), \
+            "a None result_set must narrow to nothing, not raise"
 
     def test_every_key_is_scanned_and_only_ns_kinds_count(self):
         """All eight kind properties are scanned; non-namespaced values and
