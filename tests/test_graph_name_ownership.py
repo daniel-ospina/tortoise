@@ -190,8 +190,8 @@ _LEGACY_SWEEP_NAME = "_sweep_legacy_strays"
 def _calls_in(path: Path) -> list[int]:
     """Line numbers of every Call to the legacy sweep in ``path``.
 
-    A RECURSIVE walk over every child node that matches both a bare ``Name``
-    (``_sweep_legacy_strays(...)``) and an ``Attribute``
+    A RECURSIVE walk over every child node that matches either a bare ``Name``
+    (``_sweep_legacy_strays(...)``) or an ``Attribute``
     (``_embedded._sweep_legacy_strays(...)``). The walk recurses into lambda
     bodies, so an ``atexit.register(lambda: _sweep_legacy_strays(...))`` call
     site is not missed.

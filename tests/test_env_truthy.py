@@ -470,20 +470,24 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 
 #: Narrow `== "1"` reads that REMAIN after #4097, with their site COUNT as an UPPER
 #: BOUND. Widening the #4128 ones is a fail-open loosening (truthy relaxes a guard,
-#: grants trust, or silences a protective mechanism), so each needs its own decision; the
-#: first entry is the deliberate OVERRIDES exception above. A new `(module, name)` pair
-#: reds; an EXTRA read of a listed pair reds (the count); a pair with ZERO sites left reds
-#: as closed and must be deleted — so the ledger can only shrink, and shrinking it is
-#: part of closing #4128.
+#: grants trust, or silences a protective mechanism), so each needs its own decision.
+#: THE GOVERNING RULE: the ledger shrinks by DEFAULT — adding an entry requires its own
+#: recorded decision (`OVERRIDES:`) and is itself a change to this contract. A new
+#: `(module, name)` pair reds; an EXTRA read of a listed pair reds (the count); a pair
+#: with ZERO sites left reds as closed and must be deleted, and deleting it is part of
+#: closing #4128.
 #:
-#: THE ONE DELIBERATE EXCEPTION — the ledger GREW once (#3634 Task 3,
-#: `TORTOISE_TEST_SWEEP_LEGACY`). The rule is "shrink by default; a new entry requires its
-#: own recorded decision", and this one has it: the read is the SOLE authorization for an
-#: irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the residue cohort, exactly
-#: the fail-open surface the ledger exists to freeze, so narrowing it is the safe policy
-#: and it is marked OVERRIDES. It is recorded on issue #3634 and in the epic CI-Fix
-#: Changelog, and pinned by
-#: tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design.
+#: THE DELIBERATE EXCEPTIONS — the ledger has GROWN twice, both under a recorded
+#: `OVERRIDES` (not by accident): the tenant-namespace opt-in pinned above
+#: (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`; #1686/#1884) and `TORTOISE_TEST_SWEEP_LEGACY`
+#: (#3634 Task 3). Each read is the SOLE authorization for an irreversible
+#: journal-blind DETACH DELETE + GRAPH.DELETE of a cohort the journal cannot
+#: attribute — exactly the fail-open surface the ledger exists to freeze — so
+#: narrowing it is the safe policy. The #3634 entry is recorded on issue #3634 and in
+#: the epic CI-Fix Changelog, and pinned by
+#: tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design. A future
+#: entry needs the same three: a recorded decision, an `OVERRIDES:` reason, and its
+#: changelog row.
 _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
     ("tests/_embedded.py", "TORTOISE_TEST_SWEEP_TEAM_STRAYS"):
         (1, "OVERRIDES — sole authorization for an irreversible tenant-namespace delete"),

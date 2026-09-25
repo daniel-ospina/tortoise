@@ -1331,6 +1331,53 @@ def test_legacy_sweep_on_reclaims_only_the_residue(monkeypatch):
         assert protected not in db.deleted, protected
 
 
+def test_legacy_sweep_protects_the_default_graph_itself(monkeypatch):
+    """The `default_graph` pass-through is load-bearing, not incidental.
+
+    `registry_test_shared` is residue AND unowned, so the shape alone reclaims
+    it UNLESS it IS the URI default graph. The two halves below isolate the
+    `default_graph` branch: the same name survives when it is the default and
+    is residue when the default is something else. A mutant that hardcodes
+    `default_graph=None` in the sweep fails the first half.
+    """
+    from tests._embedded import _sweep_legacy_strays
+
+    monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", "1")
+    db = _FakeDb()
+    db.graphs = ["registry_test_shared"]
+    _sweep_legacy_strays(_FakeProj(db), default_graph="registry_test_shared")
+    assert db.detached == []
+    assert db.deleted == []
+
+    # the same name with a DIFFERENT default IS residue
+    db2 = _FakeDb()
+    db2.graphs = ["registry_test_shared"]
+    _sweep_legacy_strays(_FakeProj(db2), default_graph="tortoise_test_matrix")
+    assert db2.detached == ["registry_test_shared"]
+
+
+def test_legacy_sweep_refuses_non_loopback_host(monkeypatch):
+    """#3634: the residue pass is loopback-only — a remote host refuses.
+
+    `_sweep_drop` receives `skip_on_non_loopback` from its callers and
+    `_sweep_team_strays` inherits `_leftover_sweep`'s guard; this pass has NO
+    caller, so it must carry the guard itself. Modeled on
+    `test_allow_remote_session_teardown_green`: the sweep SKIPS (returns ``[]``)
+    and every candidate graph — even ones the residue shape would reclaim — is
+    left untouched, opt-in or not.
+    """
+    from tests._embedded import _sweep_legacy_strays
+
+    monkeypatch.setenv("TORTOISE_TEST_SWEEP_LEGACY", "1")  # even OPTED IN
+    db = _FakeDb()
+    db.graphs = ["v10fix_c1", "ttm_a1"]  # both reclaimed on loopback
+    proj = types.SimpleNamespace(_host="db.internal.example.com", db=db)
+    dropped = _sweep_legacy_strays(proj, default_graph="tortoise_test_matrix")
+    assert dropped == []
+    assert db.detached == []
+    assert db.deleted == []
+
+
 def test_legacy_sweep_reclaims_on_live_server(uri_env, monkeypatch):
     """#3634 Task 3 Step 7: the residue pass reclaims on a REAL server, and a
     shared-registry-shaped name survives.

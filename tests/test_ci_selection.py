@@ -1898,22 +1898,81 @@ def test_track_b_docker_lane_sets_team_stray_opt_in():
         "test-track-b (dedicated docker lane) must set the team_* stray opt-in"
 
 
+_LEGACY_OPT_IN_VAR = "TORTOISE_TEST_SWEEP_LEGACY"
+_TEAM_OPT_IN_VAR = "TORTOISE_TEST_SWEEP_TEAM_STRAYS"
+
+
+def _opt_in_sites(wf: dict, label: str, var: str) -> list[str]:
+    """Where ``wf`` sets env var ``var`` — structured, never a raw-text scan.
+
+    An ``env`` map key is a real setting (job-level or step-level); a ``run``
+    script is inspected only after shell comments are stripped, so a YAML or
+    shell comment that merely NAMES the variable is not a hit. Returns
+    ``"<label>:<job>"`` / ``"<label>:<job> step N"`` labels for assertion
+    messages.
+    """
+    sites: list[str] = []
+    for job_name, job in (wf.get("jobs") or {}).items():
+        job = job or {}
+        if var in (job.get("env") or {}):
+            sites.append(f"{label}:{job_name}")
+        for i, step in enumerate(job.get("steps") or [], start=1):
+            step = step or {}
+            if var in (step.get("env") or {}):
+                sites.append(f"{label}:{job_name} step {i}")
+            script = step.get("run")
+            if isinstance(script, str):
+                stripped = "\n".join(_strip_shell_comments(line)
+                                     for line in script.splitlines())
+                if var in stripped:
+                    sites.append(f"{label}:{job_name} step {i} (run)")
+    return sites
+
+
 def test_legacy_residue_opt_in_is_never_set_in_ci():
     """#3634 Task 3: TORTOISE_TEST_SWEEP_LEGACY is a MANUAL operator opt-in and
-    must appear NOWHERE in python-ci.yml.
+    is set by NO workflow — not just by the one python-ci.yml lane.
 
     Contrast with the team-stray opt-in pinned just above: that pass is safe on
     a dedicated, fresh-per-job container (nothing accumulates there without it),
     so CI sets it inside the full==true docker gate. The legacy residue cohort
     lives on a LONG-LIVED dev docker whose residue may include a live eval or
     tenant name the next automated session does not own, so CI sets it on no
-    lane — a future edit that exports it (any lane, any gate) reds by design.
+    lane — a future edit that exports it (any workflow, any job, any gate) reds
+    by design.
+
+    SCOPE: EVERY file in `.github/workflows/` (`.yml` and `.yaml`, via
+    `_workflow_files`), parsed as YAML. The original python-ci.yml-only text pin
+    was too narrow: `post-merge-validation.yml` already sets the SIBLING
+    destructive opt-in (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`) and was unscanned, so
+    "nowhere in python-ci.yml" was not the claim the docstring made. Analysis is
+    structured, not raw text: the variable must not be a job/step `env` key nor
+    appear in a `run` script after comments are stripped, so a comment that
+    merely NAMES it does not red.
     """
-    wf_path = (Path(__file__).resolve().parents[1]
-               / ".github" / "workflows" / "python-ci.yml")
-    text = wf_path.read_text()
-    assert "TORTOISE_TEST_SWEEP_LEGACY" not in text, \
-        "the legacy residue opt-in is a manual operator action — never a CI env var"
+    wf_dir = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    workflows = _workflow_files(wf_dir)
+    assert workflows, "no workflow files found — the scan would pass vacuously"
+    import yaml
+    parsed = [(p.name, yaml.safe_load(p.read_text()) or {}) for p in workflows]
+
+    # POSITIVE CONTROL — the same scanner must FIND the sibling destructive
+    # opt-in that CI deliberately sets; without it, a scanner (or a glob) that
+    # found nothing would satisfy this pin vacuously.
+    team_sites = [s for label, wf in parsed
+                  for s in _opt_in_sites(wf, label, _TEAM_OPT_IN_VAR)]
+    assert team_sites, (
+        "the scanner did not find TORTOISE_TEST_SWEEP_TEAM_STRAYS in any "
+        "workflow, though post-merge-validation.yml sets it — the scan is "
+        "vacuous, not clean"
+    )
+
+    offenders = [s for label, wf in parsed
+                 for s in _opt_in_sites(wf, label, _LEGACY_OPT_IN_VAR)]
+    assert not offenders, (
+        "the legacy residue opt-in is a manual operator action — never a CI "
+        "setting; found in " + ", ".join(offenders)
+    )
 
 
 def test_drift_gate_cannot_skip_the_test_matrix():

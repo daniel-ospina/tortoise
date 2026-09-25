@@ -1374,7 +1374,7 @@ def _legacy_sweep_allowed() -> bool:
     # cohort, and widening a destructive opt-in surface is not a
     # vocabulary-coherence win. Pinned by
     # tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design, and
-    # its deliberate divergence from the ledger's "can only shrink" invariant is
+    # its deliberate `OVERRIDES` against the ledger's shrink-by-default rule is
     # recorded as a `_KNOWN_NARROW_READS` entry in tests/test_env_truthy.py and
     # an OVERRIDES comment on issue #3634.
     return os.environ.get("TORTOISE_TEST_SWEEP_LEGACY") == "1"
@@ -1395,8 +1395,39 @@ def _sweep_legacy_strays(proj, *, default_graph: str | None) -> list[str]:
     Predicate: ``is_legacy_residue(name, default_graph=default_graph)`` — the
     prefix list lives ONLY in ``_LEGACY_RESIDUE_PREFIXES`` (do not re-list it
     here). ``default_graph`` is the URI-path default (or None) so the shared
-    default graph is refused exactly as in the journal path. DETACH+DELETE per
-    graph, log-and-continue; returns the dropped names."""
+    default graph is refused exactly as in the journal path. LOOPBACK ONLY: a
+    non-loopback host refuses before any DETACH/DELETE and returns ``[]`` (this
+    pass has no caller to inherit the guard from, unlike ``_sweep_drop`` /
+    ``_sweep_team_strays``). DETACH+DELETE per graph, log-and-continue; returns
+    the dropped names.
+
+    OPERATOR INVOCATION — the AST pin guarantees no default call site, so this
+    is the only path; it is opt-in, loopback-only, and prints what it
+    reclaimed (names the predicate refuses are skipped, not printed)::
+
+        import os
+        from tests._embedded import (
+            _sweep_legacy_strays, _sweep_proj, _uri_default_graph_name,
+        )
+
+        os.environ["TORTOISE_TEST_SWEEP_LEGACY"] = "1"   # the explicit opt-in
+        uri = os.environ["TORTOISE_DB_URI"]              # loopback only
+        with _sweep_proj(uri) as proj:
+            dropped = _sweep_legacy_strays(
+                proj, default_graph=_uri_default_graph_name())
+        print("reclaimed:", dropped)
+
+    Pass ``default_graph=_uri_default_graph_name()`` (the URI-path default, or
+    None when no URI is set) — any other value un-protects the shared default
+    graph. On a loopback host the opt-in logger line names the required env
+    var when it is unset."""
+    from tortoise.projection import _is_loopback_host
+    host = _projection_host(proj)
+    if not _is_loopback_host(host):
+        logging.getLogger(__name__).info(
+            "legacy residue pass SKIPPED non-loopback host %r — refusing to "
+            "delete on a remote server", host)
+        return []
     if not _legacy_sweep_allowed():
         logging.getLogger(__name__).info(
             "legacy residue pass SKIPPED — set TORTOISE_TEST_SWEEP_LEGACY=1 "
