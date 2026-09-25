@@ -141,10 +141,10 @@ lives independently on an installed client and a deployed server. A skew — an 
 upgraded server, which is the direction a table extension moves — makes a turn with a shape the two
 disagree on compare unequal, so its `capture_spool` entry returns the retryable verdict, defers with
 backoff, and never terminalises (the #4675 symptom, re-entered through version skew rather than through
-the writer/reader mismatch #4923 fixed). Filed as its own issue with the reproduction rather than
+the writer/reader mismatch #4923 fixed). Filed as #5394 with a verified reproduction rather than
 fixed here: the fix (accept a served body that differs from the expectation only where a
 `[REDACTED:<kind>]` span stands in for text the other side holds) loosens the exact-match guard, so it
-needs its own review rather than riding a bounded security cycle. Also filed alongside it: the #3086
+needs its own review rather than riding a bounded security cycle. Also recorded in #5394: the #3086
 guard (`tests/test_capture_loop_responsiveness.py`) counts on-loop QUERIES and is structurally blind
 to a query-free CPU regression, which is exactly why the on-loop scrub above shipped green.
 
