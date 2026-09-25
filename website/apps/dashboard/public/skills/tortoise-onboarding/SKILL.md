@@ -460,11 +460,12 @@ Guide the human through:
      — the poll runs only on the done step, so the user still clicks
      Continue/Skip to leave the connect step. Never tell the human a click
      connects them.
-   - ChatGPT: same server-side checkpoint as Claude Desktop/Web, but you have
-     **no chooser surface and therefore no connect step at all** (#2912) — so
-     the Continue/Skip sentence above does not describe your path. File a first
-     memory and the server writes `harness-connected` itself. This document is
-     your live path (#4836).
+   - ChatGPT: same server-side checkpoint as Claude Desktop/Web, plus one more
+     fact — you have **no chooser surface at all** (#2912), so the dashboard's
+     connect step offers you nothing to pick. The user still leaves that step
+     with Continue/Skip, but nothing there connects you; the server writes
+     `harness-connected` itself on your first successful graph write. This
+     document is your live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —
    never from a dashboard click (lane B3, 2026-09-16).

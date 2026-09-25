@@ -563,7 +563,7 @@ class TestDocsPageAndSkillConfig:
             "chatgpt.com/plugins",  # 2 — the Developer-mode app entry point
             "Scan Tools",           # 4 — OAuth enrolment
             "Authorize",            # 4 — consent (key-less connect completes here)
-            "paste the document",   # 5 — the hand-off fallback if it can't fetch
+            "paste it into that chat",  # 5 — the hand-off to the agent
             "tortoise_health",      # 6 — the journey's outcome: a verified link
             "first memory",         # 6 — ...and a first filed memory
             "plan-dependent",       # 6 — which tools appear is plan-dependent

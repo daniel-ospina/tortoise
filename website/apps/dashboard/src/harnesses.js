@@ -621,13 +621,16 @@ export function preferredSurface(family, current) {
 // chooser, so it renders on NO CHOOSER/connect branch. It is NOT absent from the
 // dashboard: the LIVE Memory-sources capture panel maps HARNESS_ORDER (which
 // includes it) and reads HARNESS_NAMES/HARNESS_CAPTURE_REASON to list it as
-// unsupported-with-a-reason. UNIVERSAL_COMMAND.chatgpt, HARNESS_STEPS.chatgpt,
-// HARNESS_INSTALL.chatgpt, HARNESS_INTRO.chatgpt, HARNESS_COPY_LABEL.chatgpt and
+// unsupported-with-a-reason. HARNESS_STEPS.chatgpt, HARNESS_INSTALL.chatgpt,
+// HARNESS_INTRO.chatgpt, HARNESS_COPY_LABEL.chatgpt and
 // HARNESS_CONTINUE_LABEL.chatgpt are reachable only from the ARCHIVED
-// LEGACY_WIZARD_ARCHIVED render (the #2827 note above — that A0 rollback gate
-// must stay OFF for the chooser to keep #2912's four families) and from the
-// roundtrip test. HARNESS_CONTINUE_LABEL.chatgpt is therefore a LEGACY label:
-// there is no ChatGPT connect step for it to caption. Its LIVE
+// LEGACY_WIZARD_ARCHIVED render (main.jsx indexes them by `wizardHarness`; that
+// A0 rollback surface must stay OFF for the chooser to keep #2912's four
+// families) and from the roundtrip test — so HARNESS_CONTINUE_LABEL.chatgpt is a
+// LEGACY label: there is no ChatGPT connect step for it to caption.
+// UNIVERSAL_COMMAND.chatgpt is narrower still: no render indexes UNIVERSAL_COMMAND
+// by harness (main.jsx reads only `.codexDesktop`), so it is reachable only from
+// the roundtrip test and the wizard-prompts snapshot. Its LIVE
 // carrier is the public setup docs page (#4836): website/docs.html#chatgpt
 // names the Developer-mode path, the canonical connector URL and the onboarding
 // instructions URL, so a ChatGPT user is not left with only a test-consumed
