@@ -538,6 +538,23 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 **Both are reads; only one has an anchor.** That is the whole gap — and it is why the fix is a field on an edge, not a new subsystem.
 
+#### ⭐ Scope of the anchor — a **Point-level guarantee**, and the `:Object`/`:Event` half is OPEN
+
+`sourceVersion` rides on `extractedFrom`, which is declared **`Point → Source`** (`ONTOLOGY.md` §3.3) — so **a class whose provenance does not pass through an `extractedFrom` link carries no recorded version read at all.** `:Object` and `:Event` are reached from a source through the `references` edge (`ONTOLOGY.md` §3.4), not through `extractedFrom`, so **neither is version-scoped today** (§4.6).
+
+**This is not a storage omission and it is not decided.** §12.1's cost question is *where* bytes live; this is *whether the anchor exists*. Two facts follow for sizing, recorded here so they are not discovered later:
+
+- **`references` carries more than one meaning, so the gap is not uniform.** Its declared target set is `Event | Object | Source` (§3.4), and the in-repo writers do not all mean the same thing by it:
+  - **identity / mention** — a connector `Object` materialized at the projection choke point (`projection/entities.py:2285`; `connectors/github.py:305` mirrors it idempotently). The Source's `url` **is** the artifact. The Source still has versions, but the target is **not read from** them, so a recorded version here would be a non-answer rather than a stale mark.
+  - **derivation** — an `Event` built from a source's content: the connector path materializes the link at the projection choke point (`projection/entities.py:2236`), and the meeting path writes the same edge at `mining.py:621` (the choke point's gate excludes mining events — `ONTOLOGY.md` §3.4). Here the target **is** read from the content, and there is no recorded version to compare against — this is the live half of the gap.
+  - **referential containment** — `Source → Source` (`hosted_api.py:11563`). A provenance chain, not a derivation of either target's content.
+
+  ⇒ **The version question is a property of what the link means, not of the target's label.** That is why a blanket `sourceVersion` on every `references` edge is the wrong shape: it would stamp a non-answer on the identity and containment forms.
+
+- **So the cost of closing it falls on the derivation links only** — one hash each, since a version is three timestamps + a hash and never a content copy (D30). ⚠️ **No total is derivable without a census**: the derivation-link count is its own quantity (the connector paths mint per-`Event` links for events that may yield no Point), so it is **not** bounded by the `extractedFrom` count. **Not measured** — the shared instance refused reads when this was written.
+
+**Open and tracked:** `#5199` (scope + decision; `#5038` is the model's home). Closing it would add a field to a declared relation — i.e. it edits `ONTOLOGY.md` §3.4 — so it is the **owner's call, not an implementation choice**.
+
 #### ⭐ The policy — **B: mark stale now, supersede on re-inference** (owner)
 
 When a re-fetched source's content differs, the old version's entities are **marked stale immediately** and **superseded when re-inference produces their successors**.
