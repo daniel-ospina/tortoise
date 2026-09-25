@@ -20,7 +20,7 @@ auth pages, dashboard, and billing. Written 2026-08-14 from the current
 | Host | Serves | Deployment |
 | --- | --- | --- |
 | `premiselabs.co` | Company page (`website/index.html`) | Cloudflare Pages project `premise-labs` |
-| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session ever**; the auth surfaces 301 to the app origin | Cloudflare Pages project `premise-labs` (same project, host-routed) |
+| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session is minted here**; the admin-gated blog Functions (`/blog/api/purge`, `generate-seo`, `generate-cover`) still *accept* the legacy `sb-tortoise-auth-token` cookie on a fallback path (see the auth bullet below). The auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
 | `app.premiselabs.co` | **The one session-bearing origin (#4054):** the BFF, the dashboard SPA, `/auth*`, `/welcome`, `/invite-accept`, `/admin`, `/api/v1`, `/blog/api` | Cloudflare Pages project `tortoise-dashboard` (separate) |
 | `api.premiselabs.co` | Hosted API (FastAPI, `tortoise/hosted_api.py`) | Fly.io app `tortoise-y4mjjq` |
 
@@ -34,11 +34,15 @@ Host routing lives in `website/functions/_middleware.ts`:
 - `tortoise.*` root → `product.html` (rewritten), everything else serves its own asset
 - `premiselabs.co` + preview hosts root → `index.html` (company page)
 - `/product` on non-tortoise hosts → 404 (product page never leaks onto the company host)
-- **auth surfaces 301 to the app origin — and WHICH layer does it depends on the host:**
+- **auth surfaces redirect to the app origin — and WHICH layer does it depends on the host:**
   - the middleware's `APP_ONLY` branch (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`),
-  - `/auth` and `/auth.html` 301 **unconditionally**, and `/admin` 301s **unconditionally** (those
-    cover `tortoise.*` and previews/dev, so a request never falls through to a deleted asset),
+  - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
+    it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
+    **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
+    `tortoise.*` and previews/dev, so a request never falls through to a deleted asset). A NEW
+    branch for a moved surface is 302, not 301: a 301 is browser-persistent and deploy-unreachable.
+    Three surfaces, two answers, and the difference is deliberate
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
     tortoise host — the middleware does not cover it.
@@ -49,23 +53,34 @@ Host routing lives in `website/functions/_middleware.ts`:
 ### Auth backbone
 
 - Supabase project `ybetwichurajbfswfeqa.supabase.co` — PKCE OAuth (GitHub + Google) + email/password
-- **Session (current, #4054):** a server-side BFF on the app origin. The browser holds only an opaque
+- **Session (current, #4054):** a server-side BFF on the app origin. **As its BFF session**, the
+  browser holds only an opaque
   **`__Host-session`** cookie — `HttpOnly; Secure; SameSite=Lax; Path=/`, and **no `Domain`
   attribute**, so the `__Host-` prefix makes it host-only by construction and it can never
-  authenticate a second subdomain. The access/refresh tokens live server-side in D1 (the `SESSIONS`
-  binding) and never reach the browser; revoking a session marks its row revoked (`revoked = 1`) —
-  the row is retained, not deleted. Issued by
-  `website/apps/dashboard/functions/_shared/auth/session.ts`.
+  authenticate a second subdomain. The BFF's access/refresh tokens live server-side in D1 (the
+  `SESSIONS` binding) and never reach the browser; revoking a session marks its row revoked
+  (`revoked = 1`) — the row is retained, not deleted. Issued by
+  `website/apps/dashboard/functions/_shared/auth/session.ts`. A **separate legacy** JS-readable
+  parent-domain cookie is still issued and still accepted — see the ruling bullet below.
 - **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
   every subdomain — is **rejected**. It is JS-reachable from any subdomain and forfeits the `__Host-`
   prefix; one session-bearing origin is worth the extra 301. The recorded ruling is the auth-topology
   decision on **#3501 / #4054** (full rationale: the private `premise-labs` repo,
   `engineering/auth/SCOPE.md` §3, §4 W6, §13 — cited across this repo's Functions the same way, and
   deliberately marked as outside this one). The JS-readable bridge
-  (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) is RETAINED as the parity
-  target for the consent-page port and the non-secret claim-marker helpers, and **no page loads
-  it** (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`) — it is **not** the session
-  backbone.
+  (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) is
+  **not** the session backbone: **no BFF page loads** it
+  (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`). That is not the
+  whole story though — the cookie is still **issued** by the MCP consent page in
+  `tortoise/oauth.py` (`/oauth/authorize` on `api.premiselabs.co`,
+  `Domain=.premiselabs.co`, JS-readable) and still **accepted** by two live
+  surfaces: the blog-admin console's supabase-js data layer
+  (`website/apps/blog-admin/src/lib/supabase.ts`, which recovers the session from
+  it on init) and `website/functions/blog/_shared/admin-auth.ts`'s legacy cookie
+  fallback (Bearer first, then the cookie). So a JS-readable parent-domain session is in play, which is exactly
+  what this `OVERRIDES` ruling exists to prevent. Stop issuing: **#3524**. Stop
+  accepting: **#4178**. See `docs/auth-architecture.md` §2.1 “Legacy cohort” and
+  §4 item 1 (which is OPEN, not closed).
 - The raw API key (`tt_…`) **never** leaves app-origin (sessionStorage on `app.premiselabs.co` only)
 
 ---
@@ -75,7 +90,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Page | File | Purpose |
 | --- | --- | --- |
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
-| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
+| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Builder/Team), self-hosted section |
 | Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, daemon, onboarding, MCP connect, role memory); guarded by `test_harness_mcp_config.py`, crawled by `tests/e2e/test_legal_pages.py` |
 | Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `website/functions/blog/sitemap.xml.ts` (`/blog/sitemap.xml`) · `website/functions/blog/feed.xml.ts` (`/blog/feed.xml`) · `website/functions/blog/api/posts/[[path]].ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
@@ -168,10 +183,10 @@ are canonical in `product/pricing.json`:
 | --- | --- | --- | --- | --- | --- |
 | Free | 0 | 1 | 1 | 2 | 10k |
 | Solo | 9 | 2 | 1 | 5 | 10k |
-| Pro | 25 | ∞ | 2 | 10 | 50k |
+| Builder | 25 | ∞ | 2 | 10 | 50k |
 | Team | 149 | ∞ | ∞ | 20 | 200k |
 
-Overage: $5 per additional 10k write ops (Pro + Team). Billing is **per team**,
+Overage: $5 per additional 10k write ops (Builder + Team). Billing is **per team**,
 not per seat (#310/#432).
 
 ---
@@ -206,9 +221,10 @@ The user-approved end state for the auth/marketing surfaces:
 `.github/workflows/deploy-pages.yml` (on push to main touching `website/**`,
 `tortoise/onboarding/**`, `product/pricing.json`, or the workflow file itself):
 
-1. **deploy** — verifies the onboarding skill mirror, syncs DNS, deploys
+1. **deploy** — verifies the onboarding instructions mirror, syncs DNS, deploys
    `website/` → Pages project `premise-labs`. `admin/` is **not** staged here: the
-   middleware 301s `/admin` to the app origin before any asset is read (#4171).
+   middleware 302s `/admin` to the app origin before any asset is read (#4171;
+   the status is 302 not 301 per `SCOPE.md` §12 — #4409).
 2. **deploy-dashboard** — two separate builds: `npm ci && npm run build` in
    `website/apps/dashboard` (the dashboard SPA), then the **blog admin** SPA in
    `website/apps/blog-admin`, copied into `website/apps/dashboard/dist/admin/`

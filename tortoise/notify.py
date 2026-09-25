@@ -50,6 +50,11 @@ KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "bill
          # #1709: recovery-velocity (keyless recovery mints per IP per window)
          "abuse_recovery_velocity"}
 
+# Ops incident KINDs (the alert_store sink) — deliberately NOT members of KINDS.
+# KINDS names business EVENTS; these name a failed DELIVERY of one. Keeping them
+# separate stops an egress outage from being deduped against a billing event.
+_BILLING_SEND_FAILED_KIND = "BILLING_SEND_FAILED"
+
 _skip_logged: set[str] = set()
 
 
@@ -75,6 +80,39 @@ def _skip_channel(channel: str, secret: str) -> bool:
             logger.warning("billing notify: %s channel skipped — secret not set", channel)
         return True
     return False
+
+
+def file_incident(kind: str, org_id: str = "", detail: dict | None = None) -> bool:
+    """File (or REUSE) an ops incident on the shared sink. NEVER raises.
+
+    The swallow is the point: every caller is a FAILURE path that must still
+    complete (a best-effort send leg), so a dead alert channel — sink disabled,
+    R2/GitHub/Telegram down — degrades to the log line the caller already
+    wrote rather than propagating. Returns True only when THIS call was the
+    filer; a dedup hit returns False, which is not an error.
+
+    Dedup is ``AlertStore.open_incident``'s per-``(kind, org_id)`` create-once
+    object, so a repeated failure of the same channel files ONE issue; recovery
+    deletes the object (delete-to-resolve), so a later outage is a NEW incident.
+    That is why repeated failures must not be filed by the caller — pass a
+    SUBJECT that identifies the outage, not the individual send.
+
+    Mirrors the ``abuse_suspended`` call site below (same
+    ``_backup_config_safe`` → ``_alert_store_from`` → ``open_incident`` path),
+    factored out because more than one send leg now needs it. The hosted_api
+    import is function-level for the reason stated at that call site: hosted_api
+    imports notify, so a module-level import would cycle.
+    """
+    try:
+        from tortoise import hosted_api as _ha
+        cfg = _ha._backup_config_safe()
+        if cfg is None:
+            return False  # sink disabled — the caller's own log is the record
+        store = _ha._alert_store_from(cfg)
+        return bool(store.open_incident(kind, org_id, detail or {}))
+    except Exception as e:  # noqa: BLE001, RUF100
+        logger.warning("notify: %s incident filing failed (%s)", kind, redact_safe(e))
+        return False
 
 
 def _email_text(kind: str, org: dict, details: dict) -> str:
@@ -135,6 +173,17 @@ def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> N
             _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("billing notify: resend failed (%s)", redact_safe(e))
+            # Ops incident (GH issue + Telegram) — a billing notification that
+            # never left the building was previously visible only in a log
+            # line. Platform subject ("") on purpose: ONE Resend account serves
+            # every team, so keying by team would file one issue per affected
+            # team for a single outage. The team is still in the detail.
+            file_incident(_BILLING_SEND_FAILED_KIND, "", {
+                "channel": "resend",
+                "event_kind": kind,
+                "org_id": org.get("org_id", "?"),
+                "error": redact_safe(e),
+            })
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     chat_id = _env("TELEGRAM_CHAT_ID")

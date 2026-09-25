@@ -69,8 +69,11 @@ WARNING (80%) or ERROR (100%). This feeds into the existing alerting
 pipeline (Resend + Telegram — see #310 billing notifications).
 
 Thresholds are checked **post-increment** on every write for orgs on
-overage-eligible tiers (pro, org). Free and Solo tiers have no overage
-and never trigger threshold events — they simply hit the hard quota limit.
+overage-eligible tiers. WHICH tiers those are is deliberately not restated
+here: it is read from ``product/pricing.json::billing.overage_tiers`` via
+``tortoise.pricing.has_overage()``, so an enumeration in this docstring
+could only go stale (#4815 taught solo, previously a "hard-cap" tier, is
+metered).
 
 Usage exposure
 ~~~~~~~~~~~~~~
@@ -379,7 +382,11 @@ def report_unmetered_increment(lane: str, org_id: str | None,
     ``mcp_write_op`` and ``ask_ledger``.
 
     Never raises: the alert itself must not become a new failure path (a signal
-    that can raise is a refusal by another name).
+    that can raise is a refusal by another name). The incident — a GitHub issue
+    plus Telegram, deduped per (kind, org) — is the durable operator signal; the
+    ERROR record below is the local one. The increment still reads short on the
+    ledger: this makes the drop VISIBLE, it does not repair it (leg 2 of the
+    ruling is tracked separately, see the plan doc / #3981).
     """
     with contextlib.suppress(Exception):  # the alert must never raise
         _logger.error(
@@ -390,6 +397,9 @@ def report_unmetered_increment(lane: str, org_id: str | None,
             lane, org_id or "<none>", type(error).__name__, error,
             exc_info=error,
         )
+        from tortoise.operator_alert import alert_unmetered_increment
+
+        alert_unmetered_increment(lane, org_id, error)
 
 
 def _display_period_label() -> str:
@@ -566,8 +576,11 @@ def _check_thresholds(
 ) -> None:
     """Emit log events if write_ops crossed an 80% or 100% threshold.
 
-    Only fires for overage-eligible tiers (pro, org). Each threshold fires
-    at most once per (org_id, period, pct) per process lifetime.
+    Only fires for overage-eligible tiers — the set is
+    ``product/pricing.json::billing.overage_tiers``, read through
+    ``tortoise.pricing.has_overage()``; it is not restated here. Each
+    threshold fires at most once per (org_id, period, pct) per process
+    lifetime.
     """
     if not tier or not result.get("overage_eligible"):
         return

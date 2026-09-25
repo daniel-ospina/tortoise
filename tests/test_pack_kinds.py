@@ -16,10 +16,11 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
-from tortoise.pack_registry import PackManifest, PackRegistry
+from tortoise.pack_registry import CANONICAL_OBJECT_KINDS, PackManifest, PackRegistry
 
 
-REPO_PACKS_DIR = Path(__file__).resolve().parents[1] / "packs"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_PACKS_DIR = REPO_ROOT / "packs"
 
 
 # ── Manifest v3 fixtures (research-r6 §3/§4, epic #909) ───────────────────
@@ -231,6 +232,68 @@ class TestSubclassValidation:
             }
         })
         assert errors
+
+    def test_subclass_commitment_state_parents_accepted(self, tmp_path):
+        """#2727: ONTOLOGY §5 commitment-state kinds are valid subclass parents.
+
+        These are the lowercase half of the core object vocabulary, so the
+        PascalCase heuristic must not reject them (venture pack: tranche →
+        target).
+        """
+        for parent in ("strategy", "plan", "goal", "target"):
+            registry = PackRegistry(tmp_path)
+            errors = registry._validate({
+                "namespace": "venture", "name": "Venture",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["tranche"],
+                    "subclassOf": {"tranche": parent},
+                },
+            })
+            assert not errors, (parent, errors)
+
+    def test_subclass_tag_parent_accepted(self, tmp_path):
+        """#2727: `tag` is a §5 core object kind (was the other silent omission)."""
+        registry = PackRegistry(tmp_path)
+        errors = registry._validate({
+            "namespace": "dev", "name": "Dev",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["label"],
+                "subclassOf": {"label": "tag"},
+            },
+        })
+        assert not errors
+
+    def test_subclass_lowercase_non_canonical_still_rejected(self, tmp_path):
+        """#2727 scoping guard: the PascalCase relaxation covers ONLY canonical
+        object kinds — a camelCase typo still fails shape validation."""
+        registry = PackRegistry(tmp_path)
+        errors = registry._validate({
+            "namespace": "dev", "name": "Dev",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["epic"],
+                "subclassOf": {"epic": "workItem"},
+            },
+        })
+        assert any("must be PascalCase" in e for e in errors)
+
+    def test_subclass_parent_non_string_is_a_shape_error(self, tmp_path):
+        """A malformed manifest value (list/int) must land on the shape-error
+        path, not raise TypeError out of ``_validate`` (which load_all records as
+        an opaque dropped-pack error)."""
+        registry = PackRegistry(tmp_path)
+        for bad in (["target"], 5):
+            errors = registry._validate({
+                "namespace": "dev", "name": "Dev",
+                "ontology": {
+                    "extends": "core",
+                    "objectKinds": ["epic"],
+                    "subclassOf": {"epic": bad},
+                },
+            })
+            assert any("must be PascalCase" in e for e in errors), bad
 
 
 class TestEquivalenceValidation:
@@ -786,6 +849,91 @@ class TestV3ExtractionValidation:
         raw["extraction"] = {"sourceTypes": ["email"]}
         assert not registry._validate(raw)
 
+    def test_meeting_capture_source_types_accepted(self, tmp_path):
+        """#2726: registered meeting-capture kinds are valid pack sourceTypes."""
+        registry = PackRegistry(tmp_path)
+        raw = self._base()
+        raw["extraction"] = {
+            "sourceTypes": ["meeting_transcript", "meeting_minutes"],
+        }
+        assert not registry._validate(raw)
+
+    def test_registered_source_kinds_accepted(self, tmp_path):
+        """#2726 drift class: every registered source kind is a pack sourceType.
+
+        Before the registry union these kinds (github_pr, linear_cycle,
+        meeting_transcript, meeting_minutes, agentSession, meeting_summary)
+        were valid in create_source/commit_schema but rejected here. Every kind
+        listed now comes from ``SOURCE_KIND_DEFAULTS`` — no hardcoded literals —
+        so membership cannot depend on ``file_indexer``'s import order (the
+        subprocess test below proves that independence).
+        """
+        registry = PackRegistry(tmp_path)
+        for kind in ("github_pr", "linear_cycle", "meeting_transcript",
+                     "meeting_minutes", "agentSession", "meeting_summary"):
+            raw = self._base()
+            raw["extraction"] = {"sourceTypes": [kind]}
+            assert not registry._validate(raw), kind
+
+    def test_agent_session_valid_without_file_indexer_import(self, tmp_path):
+        """#2726 × #909 §4.3 #6: the operational-capture kinds must validate in a
+        FRESH interpreter. Their registrations used to live in file_indexer's
+        import-time block, so a same-process assertion here would pass vacuously
+        once any test imported file_indexer. Run the check in a subprocess that
+        never imports file_indexer.
+        """
+        import subprocess
+
+        code = "\n".join([
+            "import sys",
+            "import tortoise.pack_registry as pr",
+            "assert 'tortoise.file_indexer' not in sys.modules",
+            "for kind in ('agentSession', 'meeting_summary',",
+            "             'meeting_transcript', 'meeting_minutes'):",
+            "    assert kind in pr.registered_source_types(), kind",
+            "    raw = {",
+            "        'namespace': 'ps', 'name': 'PS',",
+            "        'ontology': {'extends': 'core', 'objectKinds': ['product']},",
+            "        'extraction': {'sourceTypes': [kind]},",
+            "    }",
+            "    assert not pr.PackRegistry(sys.argv[1])._validate(raw), kind",
+            "print('OK')",
+        ])
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path)],
+            capture_output=True, text=True, cwd=str(REPO_ROOT), check=False,
+        )
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        assert "OK" in proc.stdout
+
+    def test_unregistered_source_type_still_rejected(self, tmp_path):
+        """#2726 scoping guard: the union does not disable typo protection."""
+        registry = PackRegistry(tmp_path)
+        raw = self._base()
+        raw["extraction"] = {"sourceTypes": ["meeting_transcripts"]}
+        errors = registry._validate(raw)
+        assert any("not a known source type" in e and "meeting_transcripts" in e
+                   for e in errors)
+
+    def test_runtime_registered_source_type_accepted(self, tmp_path):
+        """The registry union is a LIVE view — a kind registered after import
+        (e.g. a connector's ``register_source_kind_default`` at load time)
+        validates with no pack_registry reload. A snapshot at import would
+        reintroduce the same import-order drift #2726 closes."""
+        from tortoise.source_credibility import (
+            SOURCE_KIND_DEFAULTS,
+            register_source_kind_default,
+        )
+
+        register_source_kind_default("jira_ticket", None)
+        try:
+            registry = PackRegistry(tmp_path)
+            raw = self._base()
+            raw["extraction"] = {"sourceTypes": ["jira_ticket"]}
+            assert not registry._validate(raw)
+        finally:
+            SOURCE_KIND_DEFAULTS.pop("jira_ticket", None)
+
     def test_source_types_must_be_list(self):
         registry = PackRegistry("/tmp/nonexistent")
         raw = self._base()
@@ -1067,3 +1215,163 @@ def test_dangling_cross_pack_ref_after_drop(tmp_path):
     assert n == 0, f"expected no healthy packs (badpack dropped, dependent dangling), got {n}"
     assert "dependent" not in reg.packs
     assert "dependent" in reg.errors
+
+
+# ── Ontology vocabulary alignment (#2727 object kinds, #2726 source kinds) ──
+
+_OBJECT_KIND_SECTION = "### Object Kind Vocabulary (core)"
+
+
+def _ontology_object_kinds() -> set[str]:
+    """Parse ONTOLOGY §5's Object Kind Vocabulary fenced block.
+
+    Comments (``# …``) and the trailing prose are stripped — the block is a
+    comma/whitespace separated list of kind names.
+    """
+    text = (REPO_ROOT / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
+    section = text.split(_OBJECT_KIND_SECTION, 1)[1]
+    block = section.split("```", 2)[1]
+    kinds: set[str] = set()
+    for line in block.splitlines():
+        line = line.split("#", 1)[0]
+        kinds.update(tok for tok in line.replace(",", " ").split() if tok)
+    return kinds
+
+
+class TestCanonicalObjectKindAlignment:
+    """#2727: ONTOLOGY §5 ⋈ extractor CORE_OBJECT_KEYS ⋈ CANONICAL_OBJECT_KINDS.
+
+    The three-way diff was non-empty (the runtime set omitted `tag` + the
+    commitment-state family), which is why a pack could not declare
+    ``subclassOf: target``. This is the drift guard: it fails if any of the
+    three surfaces moves without the others.
+    """
+
+    def test_three_way_diff_empty(self):
+        from tortoise.extractor_v2 import CORE_OBJECT_KEYS
+
+        ontology = _ontology_object_kinds()
+        extractor = {k.split("core:", 1)[1] for k in CORE_OBJECT_KEYS}
+        runtime = set(CANONICAL_OBJECT_KINDS)
+        assert ontology == runtime == extractor, (
+            f"object-kind drift — ontology-vs-runtime: "
+            f"{sorted(ontology ^ runtime)}; runtime-vs-extractor: "
+            f"{sorted(runtime ^ extractor)}"
+        )
+
+    def test_commitment_state_family_present(self):
+        for kind in ("tag", "strategy", "plan", "goal", "target"):
+            assert kind in CANONICAL_OBJECT_KINDS, kind
+
+    def test_added_kinds_expand_as_subclass_roots(self, tmp_path):
+        """A new canonical kind must also be an expansion root (§6) — else it
+        validates as a parent but ``expand_kind`` silently drops its pack
+        subclasses (the R6 §6.2a failure mode).
+
+        Loads a real pack subclassing each newly added kind rather than asserting
+        the constant against itself — ``expand_kind`` returns ``[kind]`` for an
+        unknown kind, so an identity check would pass vacuously. The pre-D10
+        `document` (objectKind) vs `Document` (core entity type) duality pin is
+        REPLACED by the decision that retired it: D10 (#5013, ONTOLOGY v3.15,
+        #5022) made a document a `:Source`, so lowercase `document` no longer
+        validates as a parent while `Document` still expands.
+        """
+        manifests = {
+            "tranche": "target", "northStar": "goal", "roadmap": "plan",
+            "playbook": "strategy", "label": "tag", "upperDoc": "Document",
+        }
+        pack_dir = tmp_path / "alignment"
+        pack_dir.mkdir()
+        kinds_yaml = "\n".join(f"  - {k}" for k in manifests)
+        subs_yaml = "\n".join(f"    {k}: {p}" for k, p in manifests.items())
+        (pack_dir / "manifest.yaml").write_text(
+            "namespace: alignment\nname: Alignment\nversion: 0.1.0\ntier: free\n"
+            f"ontology:\n  extends: core\n  objectKinds:\n{kinds_yaml}\n"
+            f"  subclassOf:\n{subs_yaml}\n",
+            encoding="utf-8",
+        )
+        registry = PackRegistry(tmp_path)
+        assert registry.load_all() == 1
+        assert not registry.errors, registry.errors
+        for kind, parent in manifests.items():
+            assert f"alignment:{kind}" in registry.expand_kind(parent), parent
+        # D10: lowercase `document` is no longer a canonical objectKind, so it is
+        # not a subclassable parent; `Document` (the core expansion root the
+        # documentKinds genre axis subclasses) is unaffected.
+        assert "document" not in CANONICAL_OBJECT_KINDS
+        assert "alignment:upperDoc" in registry.expand_kind("Document")
+        retired_root = tmp_path / "retired_root"
+        retired_root.mkdir()
+        _write_pack(retired_root, "retired", {
+            "namespace": "retired", "name": "Retired",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["lowerDoc"],
+                "subclassOf": {"lowerDoc": "document"},
+            },
+        })
+        retired = PackRegistry(retired_root)
+        assert retired.load_all() == 0
+        assert "retired" in retired.errors
+
+    def test_a_pack_cannot_re_register_the_retired_kind(self, tmp_path):
+        """D10 must hold on the pack-manifest WRITE side too.
+
+        `_validate`'s collision check reads the SAME axis
+        (`CANONICAL_KINDS[kind_field]`) — so once `document` left
+        ``CANONICAL_OBJECT_KINDS`` a pack could declare ``objectKinds: [document]``
+        and validate clean. That is not inert: ``pack.object_kinds`` is unioned
+        into ``extractor_v2``'s writable kind forms and the classification index,
+        so the retirement became bypassable through the manifest path. The check
+        therefore also reads ``registered_source_types()`` — the axis D10 moved
+        the word TO. Declaring it THERE stays legal.
+
+        This pins the invariant for real. The module's ``__main__`` self-check
+        asserts the same thing, but nothing executes it (no test and no workflow
+        runs ``python -m tortoise.pack_registry``), and it rotted silently once
+        already when `document` left the canonical object set.
+        """
+        from tortoise.pack_registry import registered_source_types
+
+        assert "document" in registered_source_types()  # the axis D10 moved it to
+
+        sneaky_root = tmp_path / "sneaky_root"
+        sneaky_root.mkdir()
+        _write_pack(sneaky_root, "sneaky", {
+            "namespace": "sneaky", "name": "Sneaky",
+            "ontology": {"extends": "core", "objectKinds": ["document"]},
+        })
+        sneaky = PackRegistry(sneaky_root)
+        assert sneaky.load_all() == 0
+        assert any("canonical" in e for e in sneaky.errors.get("sneaky", [])), sneaky.errors
+
+        # Positive control: the same word on the SOURCE axis is legal, so the
+        # clause above rejects the collision and not the word itself.
+        legal_root = tmp_path / "legal_root"
+        legal_root.mkdir()
+        _write_pack(legal_root, "srcs", {
+            "namespace": "srcs", "name": "Sources",
+            "ontology": {"extends": "core", "objectKinds": ["widget"]},
+            "extraction": {"active": True, "sourceTypes": ["document"]},
+        })
+        legal = PackRegistry(legal_root)
+        assert legal.load_all() == 1, legal.errors
+        assert not legal.errors, legal.errors
+
+    def test_legacy_extractor_vocab_is_a_documented_subset(self):
+        """The legacy Phase-2 entity stage pins a NARROWER object-kind vocab
+        (``extractor._OBJECT_KIND_VOCAB``): ``_intersect_object_kinds`` filters
+        domain_loader's canonical kinds down to it and ``_normalize_object_kind``
+        collapses the rest to 'other'. That exclusion is DELIBERATE — the legacy
+        entity stage predates the state-centric model, and the commitment-state
+        kinds are extraction surfaces of ``extractor_v2.CORE_OBJECT_KEYS`` — so
+        this pins exactly which four kinds are excluded and forbids the gap from
+        growing (or the excluded set from vanishing) silently.
+        """
+        from tortoise.extractor import _OBJECT_KIND_VOCAB
+
+        canonical_lower = {k.lower() for k in CANONICAL_OBJECT_KINDS}
+        assert canonical_lower >= _OBJECT_KIND_VOCAB
+        assert canonical_lower - _OBJECT_KIND_VOCAB == {
+            "strategy", "plan", "goal", "target",
+        }

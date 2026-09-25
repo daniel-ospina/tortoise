@@ -1,7 +1,8 @@
 """Server-side PostHog analytics events (#528) — account/usage telemetry.
 
 Consent framing: the events emitted here (tenant_provisioned,
-api_key_created, first_api_call) are account/usage telemetry for the
+api_key_created, first_api_call, onboarding_seed_complete,
+onboarding_decide_complete) are account/usage telemetry for the
 tenant lifecycle — covered by the privacy policy, with PostHog as a
 disclosed data processor (US Cloud project, see website/privacy.html +
 website/dpa.html). They are NOT gated by the web consent banner: the
@@ -22,6 +23,22 @@ Identity: distinct_id is the Supabase user UUID wherever it is resolvable
 (created_by on provision, key creator on first_api_call), falling back to
 the org id — this joins the web funnel (user_signed_up with
 distinct_id = user UUID) to server events.
+
+Once-only events have TWO shapes here, and which one applies is a property
+of the DOMAIN fact, not of this module:
+  * ``first_api_call`` — no durable once-only fact exists in the graph, so
+    it keeps an in-process set (see the single-worker caveat documented on
+    ``_first_api_call_seen`` below).
+  * ``onboarding_seed_complete`` / ``onboarding_decide_complete`` (#2006
+    W11) — the durable once-only fact ALREADY exists: the ``COMPLETED_STEP``
+    edge's new creation, returned as ``created`` by
+    ``onboarding.state.write_completed_step``. The CALLER emits only when it
+    observed that ``created=True``, so these are exact-once per edge
+    creation by construction — restart-safe and multi-worker-safe, with no
+    second dedup store, no threshold and no in-process set. (The one W11
+    edge with a sanctioned REMOVAL path is ``decide-completed`` — the #3912
+    false-completion repair — after which a genuine re-completion creates
+    the edge again and re-emits; see ``onboarding_decide_complete``.)
 """
 from __future__ import annotations
 
@@ -124,4 +141,57 @@ def first_api_call(
         "first_api_call",
         distinct_id,
         {"org_id": org_id, "endpoint": endpoint, "method": method},
+    )
+
+
+def onboarding_seed_complete(
+    distinct_id: str, org_id: str, source: str
+) -> None:
+    """Onboarding funnel: the seed step completed (#2006 W11).
+
+    EMIT ONLY when the caller observed the ``first-points-filed``
+    ``COMPLETED_STEP`` edge being NEWLY created — i.e. gated on
+    ``onboarding.state.write_completed_step(...)["created"]``. That
+    edge-creation transition IS the once-only fact, so this event is
+    exact-once per edge creation by construction (restart-safe,
+    multi-worker-safe). There is deliberately NO in-process dedup set here
+    (unlike ``first_api_call``) and no threshold: a replay that reports
+    ``created=False`` must emit nothing.
+
+    ``source`` names the write path that observed the creation
+    ('seed' | 'starter_seed' | 'checkpoint' | 'mcp_auto' | 'state_router')
+    so the funnel read can attribute the entry point.
+    """
+    capture(
+        "onboarding_seed_complete",
+        distinct_id,
+        {"org_id": org_id, "source": source},
+    )
+
+
+def onboarding_decide_complete(
+    distinct_id: str, org_id: str, source: str
+) -> None:
+    """Onboarding funnel: the decide step completed (#2006 W11).
+
+    EMIT ONLY when the caller observed the ``decide-completed``
+    ``COMPLETED_STEP`` edge being NEWLY created — the same structural gate
+    as ``onboarding_seed_complete`` (see it for the full contract).
+    ``decide-completed`` is the self-fork display row; the build fork's
+    ``catalog-presented`` carries no W11 event, and ``harness-connected`` and
+    ``connection-written`` (#3451 — a client-side config-write trace, not a
+    funnel transition) are deliberately uninstrumented.
+
+    CAVEAT — ``decide-completed`` is the one W11 edge with a sanctioned
+    REMOVAL path (the #3912 false-completion repair, an operator-only
+    ``graph-scripts`` tool). After such a repair the next genuine decide
+    write recreates the edge and reports ``created=True`` again, so the org
+    re-emits. The invariant is exact-once per EDGE CREATION, not per org
+    forever: the funnel read should therefore dedupe this event per org
+    when a repaired cohort is in scope.
+    """
+    capture(
+        "onboarding_decide_complete",
+        distinct_id,
+        {"org_id": org_id, "source": source},
     )

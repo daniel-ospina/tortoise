@@ -8,7 +8,9 @@ deployed surface:
          /blogpost /blog-extra NOT redirected
   E2E-11 /blog/feed.xml + /blog/sitemap.xml valid XML (published-only)
   E2E-12 /admin/* → 302 /auth?next=<path> (no session; no content leaked;
-         #3080 return-to so login comes BACK to the console)
+         #3080 return-to so login comes BACK to the console). Asserted on the
+         APP origin — the console's home since #4171 (#4409); the marketing
+         host's own `302 → app.*/admin` hand-off is asserted separately.
   E2E-8  agent API rejects bad actors (401 no/invalid key; no anonymous write)
   E2E-14 sanitized SSR (no <script> in rendered post bodies)
   robots.txt lists the blog sitemap
@@ -16,16 +18,26 @@ deployed surface:
 Harness contract (follows test_legal_pages.py):
   - RUN_BLOG_E2E=1 REQUIRED — first statement is a runtime module skip; bare
     collection never errors.
-  - BASE_URL / TORTISE_HOST env (defaults point at production; local runs pass
-    http://127.0.0.1:8788 and TORTISE_HOST=http://127.0.0.1:8788).
+  - BASE_URL / TORTISE_HOST / APP_HOST env (BASE_URL and TORTISE_HOST default
+    to http://127.0.0.1:8788; APP_HOST defaults to https://app.premiselabs.co,
+    so a LOCAL run MUST pass it — otherwise the ALLOW_PROD guard skips the module
+    rather than letting it call production).
 
-Run locally against a wrangler pages dev preview:
+Run locally against a `wrangler pages dev` preview of the MARKETING project:
   RUN_BLOG_E2E=1 BASE_URL=http://127.0.0.1:8788 \
-    TORTISE_HOST=http://127.0.0.1:8788 pytest tests/e2e/test_blog.py -v
+    TORTISE_HOST=http://127.0.0.1:8788 APP_HOST=http://127.0.0.1:8788 \
+    pytest tests/e2e/test_blog.py -v
+
+  That covers the blog legs only. The two ADMIN-GATE probes assert on the origin
+  that SERVES the gate; the marketing preview does not (its `/admin` branch
+  redirects to the hardcoded `APP_ORIGIN`), so they self-skip when APP_HOST and
+  TORTISE_HOST are the same server. To exercise the gate, run the dashboard
+  harness instead: `tests/e2e/auth/test_admin_app_origin.py`.
 
 Post-deploy (CI / manual):
   RUN_BLOG_E2E=1 BASE_URL=https://premiselabs.co \
-    TORTISE_HOST=https://tortoise.premiselabs.co pytest tests/e2e/test_blog.py -v
+    TORTISE_HOST=https://tortoise.premiselabs.co \
+    APP_HOST=https://app.premiselabs.co pytest tests/e2e/test_blog.py -v
 
 Write-path tests (#4220): the two tests that CREATE rows are marked
 ``blog_write`` and are NOT run by the deploy job — a deploy must not mutate
@@ -43,7 +55,7 @@ from __future__ import annotations
 import contextlib
 import os
 import xml.etree.ElementTree as ET
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import pytest
 import requests
@@ -54,11 +66,29 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Harness contract (test_legal_pages.py convention): no production assertions
-# pre-merge — ALLOW_PROD=1 is required to point at https:// URLs.
+# pre-merge — ALLOW_PROD=1 is required to point at https:// URLs. APP is in this
+# guard because it is the only origin whose DEFAULT is an https production URL:
+# a local run that passes only BASE_URL/TORTISE_HOST would otherwise keep its
+# default and make live calls to app.premiselabs.co.
 COMPANY = os.environ.get("BASE_URL", "http://127.0.0.1:8788").rstrip("/")
 TORTISE = os.environ.get("TORTISE_HOST", "http://127.0.0.1:8788").rstrip("/")
-if os.environ.get("ALLOW_PROD") != "1" and (COMPANY.startswith("https://") or TORTISE.startswith("https://")):
-    pytest.skip("ALLOW_PROD=1 required for https targets (no production assertions pre-merge)")
+# The BFF/session origin (#4054/#4171). The admin console is SERVED here — the
+# marketing origin only redirects to it — so any assertion about the gate's
+# behaviour belongs on this origin. Local runs point every host at one wrangler
+# server (APP_HOST=http://127.0.0.1:8788), in which case the host split does not
+# exist and the cross-host leg is skipped (see `_SEPARATE_HOSTS`).
+APP = os.environ.get("APP_HOST", "https://app.premiselabs.co").rstrip("/")
+_SEPARATE_HOSTS = APP != TORTISE
+if os.environ.get("ALLOW_PROD") != "1" and any(
+    h.startswith("https://") for h in (COMPANY, TORTISE, APP)
+):
+    # `allow_module_level` is REQUIRED: without it pytest raises
+    # "Using pytest.skip outside of a test" and INTERRUPTS collection, so a local
+    # run that omitted APP_HOST errored out instead of running (or skipping).
+    pytest.skip(
+        "ALLOW_PROD=1 required for https targets (no production assertions pre-merge)",
+        allow_module_level=True,
+    )
 SESSION = requests.Session()
 SESSION.headers["User-Agent"] = "tortoise-blog-e2e"
 
@@ -147,13 +177,25 @@ def test_robots_txt_lists_blog_sitemap() -> None:
     assert f"{TORTISE}/blog/sitemap.xml" in r.text
 
 
+@pytest.mark.skipif(
+    not _SEPARATE_HOSTS,
+    reason="APP_HOST == TORTISE_HOST: that one server is the marketing project, "
+    "which does not serve the admin gate (it redirects /admin to APP_ORIGIN)",
+)
 def test_admin_gate_redirects_unauthenticated() -> None:
-    """E2E-12 + #3080: /admin/* without a session → 302 /auth?next=<path>.
+    """E2E-12 + #3080: the ADMIN GATE, /admin/* without a session → 302 /auth?next=<path>.
+
+    Asserted on the APP origin: that is where the console is served since #4171
+    (`website/apps/dashboard/functions/admin/[[path]].ts`). This test used to hit
+    the MARKETING host and expect the bounce — that stopped being true when the
+    gate moved (#4171), and it spent the interval failing on `status != 302`.
+    Repointed at the origin that owns the behaviour so the assertion tests the
+    gate rather than the redirect in front of it (#4409).
 
     The return-to is load-bearing: without it the post-login redirect always
     landed on the app root, so /admin was unreachable by navigation.
     """
-    r = SESSION.get(f"{TORTISE}/admin/blog", timeout=20, allow_redirects=False)
+    r = SESSION.get(f"{APP}/admin/blog", timeout=20, allow_redirects=False)
     assert r.status_code == 302
     loc = r.headers.get("location", "")
     assert "/auth" in loc
@@ -163,15 +205,56 @@ def test_admin_gate_redirects_unauthenticated() -> None:
     assert nxt == "/admin/blog", f"unexpected return-to: {nxt!r}"
     # Open-redirect guard: a path, never an absolute or protocol-relative URL.
     assert nxt.startswith("/") and not nxt.startswith("//"), f"unsafe return-to: {nxt!r}"
-    # No admin content in the redirect target body
-    a = SESSION.get(loc, timeout=20)
+    # No admin content in the redirect target body (loc is root-relative, so
+    # resolve it against APP — requests needs an absolute URL).
+    a = SESSION.get(urljoin(f"{APP}/", loc), timeout=20)
     assert "Review queue" not in a.text
 
 
+@pytest.mark.skipif(
+    not _SEPARATE_HOSTS,
+    reason="APP_HOST == TORTISE_HOST (local single-server run): no host split to assert",
+)
+def test_marketing_admin_redirects_to_the_app_origin() -> None:
+    """#4171/#4409: the marketing host hands /admin to the origin that serves it.
+
+    Single hop (W2 forbids a chain) and a 302, not a 301 (§12: a new branch for a
+    moved surface must stay reclaimable). The destination is the console ROOT, so
+    a deep path is normalised rather than carried — the console's own routes are
+    hash-based (`#/edit/:id`), and a fragment is preserved by the user agent
+    across the redirect.
+    """
+    r = SESSION.get(f"{TORTISE}/admin/blog", timeout=20, allow_redirects=False)
+    assert r.status_code == 302, (
+        f"marketing /admin/blog -> {r.status_code}; want a single-hop 302 "
+        "(§12: a NEW branch for the moved surface is 302, never 301)"
+    )
+    loc = r.headers.get("location", "")
+    assert loc == f"{APP}/admin", (
+        f"marketing /admin/blog -> {loc!r}; want exactly {APP + '/admin'!r} "
+        "(a chained or off-origin target is the failure this guards)"
+    )
+    # The console is reachable at the destination (the gate answers, not 404).
+    a = SESSION.get(f"{APP}/admin", timeout=20, allow_redirects=False)
+    assert a.status_code in (200, 302), f"{APP}/admin -> {a.status_code}, console unreachable"
+
+
+@pytest.mark.skipif(
+    not _SEPARATE_HOSTS,
+    reason="APP_HOST == TORTISE_HOST: that one server is the marketing project, "
+    "which does not serve the admin gate (it redirects /admin to APP_ORIGIN)",
+)
 def test_admin_gate_return_to_is_scoped_to_admin() -> None:
-    """#3080: the return-to allowlist only ever yields a same-origin /admin path."""
+    """#3080: the return-to allowlist only ever yields a same-origin /admin path.
+
+    Asserted on the APP origin for the same reason as its sibling above: the
+    `next=` return-to is minted by the admin GATE, which lives on the app origin.
+    The marketing host answers `/admin*` with a bare `Location: <app>/admin` and
+    no query, so probing it here could never satisfy `nxt.startswith("/admin")`
+    (#4409).
+    """
     for path in ("/admin", "/admin/", "/admin/blog", "/admin/assets/x.js"):
-        r = SESSION.get(f"{TORTISE}{path}", timeout=20, allow_redirects=False)
+        r = SESSION.get(f"{APP}{path}", timeout=20, allow_redirects=False)
         assert r.status_code == 302, f"{path} → {r.status_code}"
         loc = r.headers.get("location", "")
         nxt = parse_qs(urlparse(loc).query).get("next", [""])[0]

@@ -81,19 +81,33 @@ def rerank_enabled(flag: bool | None = None) -> bool:
     return is_truthy(os.environ.get(ASK_RERANK_ENV))
 
 
-def _env_int(name: str, default: int) -> int:
-    """Ask-lane env int with clamp: garbage or out-of-range (< 1) values fall
-    back to the default — never a crash."""
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
+def _clamp_int(raw: str | int | None, default: int) -> int:
+    """Ask-lane int clamp — the ONE implementation shared by the env read
+    (``_env_int``) and any caller holding an explicit value that must resolve
+    IDENTICALLY to it (#2513): garbage, non-integer, blank or out-of-range
+    (< 1) values fall back to the default — never a crash. Accepting an
+    already-parsed int (as well as the env's str) is what lets the run path
+    clamp an explicit knob through the same function instead of re-deriving
+    the rule."""
+    if raw is None:
+        return default
+    text = str(raw).strip()
+    if not text:
         return default
     try:
-        value = int(raw.strip())
+        value = int(text)
     except ValueError:
         return default
     if value < 1:
         return default
     return value
+
+
+def _env_int(name: str, default: int) -> int:
+    """Ask-lane env int with clamp: garbage or out-of-range (< 1) values fall
+    back to the default — never a crash. Thin wrapper over ``_clamp_int`` so
+    the env path and an explicit-value caller can never diverge."""
+    return _clamp_int(os.environ.get(name), default)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -404,9 +418,14 @@ def context_budget_overrun(
     set fits. Pure; the caller decides how to degrade (the ask lane degrades
     to the untouched pool — never a silent truncation of the reranked set).
     """
-    from .retrieval import estimate_tokens, render_context
+    from .retrieval import estimate_tokens_ask, render_context
     text = render_context(hits, question_date=question_date)
-    tokens = estimate_tokens(text)
+    # #4105: assembly charges the non-ASCII surcharge (`_ask_token_surcharge`),
+    # so the guard must read the SAME estimator or it is no longer "never less
+    # strict than assembly" on CJK/emoji pools — a set this guard accepts
+    # would then be whole-hit-dropped at assembly, the silent truncation the
+    # guard exists to forbid. Identical to `estimate_tokens` for ASCII text.
+    tokens = estimate_tokens_ask(text)
     nbytes = len(text.encode("utf-8"))
     reasons: list[str] = []
     if max_context_tokens is not None and tokens > max_context_tokens:
@@ -445,10 +464,12 @@ def ask_lane_rerank(
     supplied the reranked set is checked against them and the WHOLE PASS is
     refused (degrade to the unreranked order, ``degrade_reason`` starting
     ``reranked-set-exceeds-context-budget``) rather than silently truncated
-    to fit. The caps are the same ones ``assemble_context`` enforces (the
-    byte check adds the same +2 framing slack, so the guard is never less
-    strict than assembly), so the default path and the guard agree by
-    construction. The check runs BEFORE the A8 evidence package — which can
+    to fit. The caps are the same ones ``assemble_context`` enforces and the
+    token leg reads the SAME estimator assembly charges
+    (``estimate_tokens_ask``, surcharge included — #4105), while the byte
+    check adds the same +2 framing slack, so the guard is never less strict
+    than assembly; the default path and the guard agree by construction. The
+    check runs BEFORE the A8 evidence package — which can
     only shrink the pool — so it is deliberately conservative: it may
     over-refuse, never under-refuse.
     """

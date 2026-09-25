@@ -12,10 +12,12 @@
 // the exact premiselabs.co hostname, where the tortoise-only pages 301 to
 // their canonical (host consolidation, 2026-08-17; see the TORTOISE_ONLY
 // block below). The AUTH surface (auth, signup, welcome, invite-accept) moved
-// to the app origin — issue #4054 — and 301s to app.premiselabs.co instead.
+// to the app origin — issue #4054 — and redirects there instead: the bare
+// `/auth` with the grandfathered 301, the `/auth/*` subtree with a 302
+// (#4346 — a NEW branch is 302 per `SCOPE.md` §12/F12).
 // The blog admin console moved to the app origin too — issue #4171 — because
 // its session (`__Host-session`) is host-only on app.premiselabs.co; a single
-// unconditional /admin 301 lives below.
+// unconditional /admin 302 lives below (#4409 resolved it from 301).
 //
 // The product page lives ONLY on the tortoise host (served at its root via
 // the rewrite below). The raw /product and /product.html paths are static
@@ -28,6 +30,8 @@
 // context.next() are covered by website/_headers). Value matches the API
 // (tortoise/hosted_api.py): max-age=31536000; includeSubDomains — no
 // `preload` yet, soak first per #1003 §1.
+import { RELAXED_CSP } from "./_shared/security-headers.ts";
+
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
 export const onRequest: PagesFunction = async (context) => {
@@ -56,7 +60,7 @@ export const onRequest: PagesFunction = async (context) => {
   // host=127.0.0.1) and *.pages.dev previews keep the pass-through so the
   // legal E2E suite can run against a dev server and previews stay
   // navigable (neither is indexed; no SEO impact). Runtime fetches (the
-  // tortoise-onboarding skill at app.premiselabs.co/skills/...) are not in the
+  // tortoise-onboarding instructions at app.premiselabs.co/skills/...) are not in the
   // set. The auth surface has its own origin split — see APP_ONLY below.
   // The auth surface moved to the APP origin (#4054): `tortoise-dashboard`
   // (app.premiselabs.co) owns the BFF and the three pages it serves
@@ -155,6 +159,34 @@ export const onRequest: PagesFunction = async (context) => {
     });
   }
 
+  // ── The BFF's OWN endpoints, same move (#4054) ────────────────────────
+  // `/auth/start`, `/auth/callback`, `/auth/confirm`, `/auth/update-password`,
+  // `/auth/reset`, `/auth/resend`, `/auth/link`, `/auth/api-key` and
+  // `/auth/set-email` moved to the app origin with the BFF. The exact-path rule
+  // above does NOT cover them, so without this branch they fall through to a
+  // DELETED asset and answer 404 — which is what a stale bookmark, a
+  // pre-cutover email link, or a relative link resolved against the marketing
+  // host used to hit.
+  //
+  // 302, NOT 301 — a deliberate departure from the ordinary "moved ⇒ 301"
+  // practice, which is why the OVERRIDES marker for it lives on #3501 / #3521 /
+  // #4409 and in `SCOPE.md` §12: a 301 is browser-persistent and CANNOT be
+  // reclaimed by a later deploy, so every NEW branch for the moved surface is 302
+  // (`SCOPE.md` §12 “302, never a new 301”). The `/auth` 301 directly above is
+  // the one #4054 shipped and is deliberately left alone — it is already in
+  // browsers' caches, so changing it is its own decision.
+  //
+  // Query-preserving and single-hop, both per W2. The bare `/auth/` collapses
+  // onto `/auth` here rather than bouncing through `_redirects` first, which
+  // also removes the old two-hop chain (`/auth/` → `/auth` → app).
+  if (url.pathname.startsWith("/auth/")) {
+    const path = url.pathname === "/auth/" ? "/auth" : url.pathname;
+    return new Response(null, {
+      status: 302,
+      headers: { Location: APP_ORIGIN + path + url.search, ...HSTS },
+    });
+  }
+
   // ── The blog admin console lives on the APP origin (#4171) ────────────
   // #4054 moved the BFF (and the `__Host-session` cookie) to
   // app.premiselabs.co, but the console stayed on this project — so its
@@ -162,19 +194,33 @@ export const onRequest: PagesFunction = async (context) => {
   // page), the operator was bounced to sign-in, and the app-origin host-only
   // cookie could never authenticate the `/blog/api/*` calls it makes against
   // tortoise.*. The console's decided home is the session origin (`SCOPE.md`
-  // §1.5, §3), so it is served there now and this is a SINGLE-HOP 301 to
-  // app.premiselabs.co/admin — never a chained permanent redirect
-  // (`SCOPE.md` §4 W2 / F12). `/blog/api/*` is deliberately untouched: it does
-  // not match `/admin` and must keep reaching this project (see the blog rule
-  // above — a redirect would drop a POST body). Hash routes (`#/edit/:id`) are
-  // carried by the user agent across the 301, so deep links survive.
+  // §1.5, §3), so it is served there now and this is a SINGLE-HOP redirect to
+  // app.premiselabs.co/admin — never a chained one (`SCOPE.md` §4 W2 / F12).
+  // `/blog/api/*` is deliberately untouched: it does not match `/admin` and must
+  // keep reaching this project (see the blog rule above — a redirect would drop
+  // a POST body). Hash routes (`#/edit/:id`) are carried by the user agent
+  // across the redirect, so deep links survive.
+  //
+  // 302, NOT 301 — RESOLVED in #4409. This branch was added under a rule that
+  // already existed: §12 of the auth decision record (`premise-labs`
+  // `engineering/auth/SCOPE.md`) reads “302, never a new 301”, with no “chained”
+  // qualifier, and §1's in-scope list names `/admin` among the surfaces moving
+  // to `app.*`. This rule therefore fixes the status of a NEW branch, and the
+  // OVERRIDES marker on #3501/#3521 states it plainly ("New branches: 302").
+  // The shipped 301 read W2's “never a chained new 301” as forbidding only
+  // *chained* 301s; that reading does not survive §12's plain text. The marker
+  // post-dates this branch, so the misreading was genuinely available at the
+  // time — it is recorded here because the next lane should not re-make it.
+  // The rationale applies in full here: `/admin` is an authenticated operator
+  // surface with no SEO stake, so a permanent signal buys nothing and the
+  // irreversibility is paid for nothing.
   if (
     url.pathname === "/admin" ||
     url.pathname === "/admin/" ||
     url.pathname.startsWith("/admin/")
   ) {
     return new Response(null, {
-      status: 301,
+      status: 302,
       headers: { Location: APP_ORIGIN + "/admin" + url.search, ...HSTS },
     });
   }
@@ -210,6 +256,7 @@ export const onRequest: PagesFunction = async (context) => {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
+        "Content-Security-Policy": RELAXED_CSP,
         ...HSTS,
       },
     });

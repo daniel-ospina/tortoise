@@ -18,6 +18,16 @@
 // with `new Function(...)` over stub deps, and runs the actual paths. The text
 // pins at the bottom stay only as cheap backstops for the DOM gate (a
 // behaviour test cannot see JSX).
+//
+// #4359 (this file's second class). #4330 above closed the FALSY mint failure;
+// a TRUTHY-but-unrevealable plaintext was still latched by three seams, because
+// `!plaintext` and `typeof x === 'string'` both accept `42`, `{}`, `[]` and
+// `'   '`. The same file now drives every create/connect reveal seam through
+// the #4342 `revealablePlaintext` predicate (non-empty, non-blank STRING) and
+// asserts the truthy-unrevealable shapes at each one: the create latch
+// (`createKey`), the create render gate (`newKeyReveal`), the create copy
+// (`copyNewKey`), the create dismiss/feed (`dismissKeyModal`), and the connect
+// latch (`wizardMintDurableKey`).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -126,6 +136,10 @@ function createEnv(overrides = {}) {
     mintKey: async () => ({ key: 'tt_ok', expires_at: '2026-10-20T00:00:00+00:00' }),
     loadAll: async () => { calls.loadAll++ },
     upgradeNoticeFrom,
+    // #4335: the cap-notice copy's upgrade-tail gate; the sandbox must provide
+    // it because createKey passes it. `true` keeps the existing tail asserted
+    // below (`/limit of 2 API keys/`).
+    teamHasUpgrade: () => true,
     setCapNotice: (v) => calls.capNotice.push(v),
     setKeyModalCapNotice: (v) => calls.keyModalCapNotice.push(v),
     setError: (v) => calls.error.push(v),
@@ -138,7 +152,7 @@ function createEnv(overrides = {}) {
     setNewKeyExpiryDate: () => {},
     ...overrides,
   }
-  return { deps, calls, createKey: build(deps, ['async function createKey']).createKey }
+  return { deps, calls, createKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function createKey']).createKey }
 }
 
 test('#4330: a 402 mint returns falsy — the caller cannot advance to the reveal', async () => {
@@ -177,7 +191,10 @@ test('#4330: any other mint failure returns falsy and surfaces its message as an
   const out = await createKey()
   assert.ok(!out)
   assert.deepEqual(calls.newKey, [], 'a 401 must never write the reveal plaintext')
-  assert.deepEqual(calls.error, ['', 'Unauthorized'], 'the leading empty write is the open-time clear')
+  // #4639: the banner state now carries the STRUCTURED error object (so the
+  // nudge gate can read its HTTP status), so pin the surfaced MESSAGE.
+  assert.deepEqual(calls.error.map((e) => (e instanceof Error ? e.message : e)), ['', 'Unauthorized'],
+    'the leading empty write is the open-time clear')
   assert.deepEqual(calls.capNotice, [''], 'a non-cap failure must not claim a cap')
 })
 
@@ -200,6 +217,95 @@ test('#4330: a successful mint returns the plaintext and writes the reveal', asy
   assert.equal(out, 'tt_ok')
   assert.deepEqual(calls.newKey, ['tt_ok'])
   assert.equal(calls.loadAll, 1, 'a successful mint refreshes the table (the new row appears)')
+})
+
+test('#4359: a truthy-but-unrevealable create mint is refused too (number / object / blank)', async () => {
+  // The #4330 guard was a bare `!plaintext`: `mk.key = 42`, `{}`, `[]` and
+  // `'   '` are all NON-falsy, so the modal advanced to 'done' with a
+  // non-string (a silent mint — the key is live, never shown, and a second
+  // click mints another) or with whitespace (a blank `.key-value` box and a
+  // `writeText('   ')` plus a false "Copied ✓").
+  for (const bad of [42, {}, [], '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad', '\u061c', '\u180e', '\ufe0f', '\u200b\u2800 ']) {
+    for (const field of ['key', 'api_key']) {
+      const { calls, createKey } = createEnv({ mintKey: async () => ({ [field]: bad }) })
+      const out = await createKey()
+      assert.ok(!out, `a mint carrying ${field}=${JSON.stringify(bad)} must return falsy, got ${JSON.stringify(out)}`)
+      assert.deepEqual(calls.newKey, [],
+        `a mint carrying ${field}=${JSON.stringify(bad)} must never latch the reveal`)
+      const msg = calls.error.filter(Boolean).at(-1) || ''
+      assert.match(msg, /cannot be shown/, `the failure must be surfaced for ${field}=${JSON.stringify(bad)}`)
+      assert.equal(calls.loadAll, 1, 'the row IS created server-side, so the list must be refreshed')
+    }
+  }
+})
+
+test('#4359: the reveal predicate accepts every legitimate key shape (prefix / api_key fallback)', async () => {
+  // Positive control for the `prefix`/`mk.api_key` fallback the issue warns
+  // about: a real `tt_`/`tk_` key must still pass, including via the API_KEY
+  // leg and when the primary leg is an empty string.
+  const { calls, createKey } = createEnv({ mintKey: async () => ({ key: 'tt_live_key_value' }) })
+  assert.equal(await createKey(), 'tt_live_key_value')
+  assert.deepEqual(calls.newKey, ['tt_live_key_value'])
+
+  const fallback = createEnv({ mintKey: async () => ({ api_key: 'tk_durable_value' }) })
+  assert.equal(await fallback.createKey(), 'tk_durable_value')
+  assert.deepEqual(fallback.calls.newKey, ['tk_durable_value'])
+
+  const emptyPrimary = createEnv({ mintKey: async () => ({ key: '', api_key: 'tt_from_api_key' }) })
+  assert.equal(await emptyPrimary.createKey(), 'tt_from_api_key')
+  assert.deepEqual(emptyPrimary.calls.newKey, ['tt_from_api_key'])
+})
+
+test('#4359: a failing refresh cannot overwrite the create refusal', async () => {
+  // `loadAll` owns the same `error` slot and writes it from its own catch, so a
+  // compound failure (the mint carried no revealable plaintext AND the follow-up
+  // read failed) would REPLACE the one message that tells the user a live,
+  // unrevoked key exists. The refusal is therefore surfaced AFTER the refresh —
+  // the identical fix #4342 made on rotate.
+  const { calls, createKey } = createEnv({
+    mintKey: async () => ({ id: 'kid', key_prefix: 'tt_abc' }),
+    loadAll: async () => { calls.loadAll++; calls.error.push('NetworkError: Failed to fetch') },
+  })
+  await createKey()
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /cannot be shown/, 'the refusal must survive a failing refresh')
+  assert.match(msg, /revoke any unlabeled key/, 'the remedy must survive too')
+  assert.doesNotMatch(msg, /Failed to fetch/, 'a network error must not replace the create truth')
+})
+
+test('#4359: a revealable fallback is not shadowed by an unrevealable primary', async () => {
+  // `mk.key || mk.api_key` selected the truthy primary first, so a malformed
+  // `key` shadowed a valid `api_key` and the refusal claimed "the server did not
+  // return the value" while a valid value was in hand.
+  const mixed = createEnv({ mintKey: async () => ({ key: {}, api_key: 'tt_valid' }) })
+  assert.equal(await mixed.createKey(), 'tt_valid')
+  assert.deepEqual(mixed.calls.newKey, ['tt_valid'])
+  assert.deepEqual(mixed.calls.error, [''], 'no refusal — a valid value existed')
+
+  const blankPrimary = createEnv({ mintKey: async () => ({ key: '   ', api_key: 'tk_valid' }) })
+  assert.equal(await blankPrimary.createKey(), 'tk_valid')
+
+  const wizardMixed = wizardEnv({ mintKey: async () => ({ key: [], api_key: 'tk_connect' }) })
+  await wizardMixed.wizardMintDurableKey()
+  assert.deepEqual(wizardMixed.calls.wizardDurableKey, ['tk_connect'])
+  assert.deepEqual(wizardMixed.calls.error, [''], 'no refusal on the connect latch either')
+})
+
+test('#4359: a team switch during the refusal refresh suppresses the refusal', async () => {
+  // The refusal refreshes FIRST and then re-checks identity: its message names
+  // THIS team's live, unrevoked key, so it must not land under the new team's
+  // header after a switch mid-refresh.
+  const orgIdRef = { current: 'org-A' }
+  const { calls, createKey } = createEnv({
+    orgIdRef,
+    mintKey: async () => ({ id: 'kid', key_prefix: 'tt_abc' }),
+    loadAll: async () => { calls.loadAll++; orgIdRef.current = 'org-B' },
+  })
+  const out = await createKey()
+  assert.equal(out, null, 'a stale refusal still refuses (no reveal)')
+  assert.deepEqual(calls.error.filter(Boolean), [],
+    'a refusal whose team changed mid-refresh must not be surfaced under the new team')
+  assert.equal(calls.loadAll, 1, 'the refresh still happened')
 })
 
 // ── copyNewKey ──────────────────────────────────────────────────────────────
@@ -229,7 +335,7 @@ function copyEnv(newKey, clipboard) {
     setKeyCopied: (v) => flags.copied.push(v),
     setKeyCopyFailed: (v) => flags.failed.push(v),
   }
-  return { written, flags, selected, fakeEl, copyNewKey: build(deps, ['async function copyNewKey']).copyNewKey }
+  return { written, flags, selected, fakeEl, copyNewKey: build(deps, ['function revealablePlaintext', 'async function copyNewKey']).copyNewKey }
 }
 
 test('#4330: the clipboard is NEVER handed a non-string (writeText(null) copies "null")', async () => {
@@ -264,15 +370,32 @@ test('#4330: a refused clipboard keeps the key on screen and SELECTS it for a ma
   assert.equal(selected.removeAllRanges, 1, 'any stale selection is cleared first')
 })
 
+test('#4359: a whitespace-only newKey is never copied and never claims "Copied ✓"', async () => {
+  // Pre-fix: `typeof newKey === 'string' ? newKey : ''` let `'   '` through —
+  // `writeText('   ')` RESOLVES (a clipboard holding whitespace), the connect
+  // step was fed whitespace, and the handler set `keyCopied = true`: a false
+  // "Copied ✓".
+  const writes = []
+  for (const blank of ['   ', '\n\t', ' \n ', '\u200b', '\u3164', '\u2800', '\u00ad', '\u061c', '\u180e', '\ufe0f']) {
+    const { written, flags, copyNewKey } = copyEnv(blank, { writeText: async (v) => writes.push(v) })
+    await copyNewKey()
+    assert.deepEqual(written, [], `writeText must not be reached with ${JSON.stringify(blank)}`)
+    assert.deepEqual(flags.copied, [], `never claim a copy of ${JSON.stringify(blank)}`)
+    assert.deepEqual(flags.failed, [], 'a no-write is not a clipboard failure either')
+  }
+  assert.deepEqual(writes, [], 'the clipboard must stay untouched')
+})
+
 // ── dismissKeyModal ─────────────────────────────────────────────────────────
 function dismissEnv(newKey, keyCopied, confirmReturn) {
   const closed = []
   const prompts = []
+  const fed = []
   const deps = {
     newKey,
     keyCopied,
     window: { confirm: (msg) => { prompts.push(msg); return confirmReturn } },
-    setWizardDurableKey: () => {},
+    setWizardDurableKey: (v) => fed.push(v),
     setKeyModalOpen: (v) => closed.push(v),
     setNewKey: () => {},
     setNewKeyExpiresAt: () => {},
@@ -280,7 +403,7 @@ function dismissEnv(newKey, keyCopied, confirmReturn) {
     setKeyCopyFailed: () => {},
     setKeyModalCapNotice: () => {},
   }
-  return { closed, prompts, deps, confirmed: () => prompts.length, dismissKeyModal: build(deps, ['function dismissKeyModal']).dismissKeyModal }
+  return { closed, prompts, fed, deps, confirmed: () => prompts.length, dismissKeyModal: build(deps, ['function revealablePlaintext', 'function dismissKeyModal']).dismissKeyModal }
 }
 
 test('#4330: Done without a copy cannot silently destroy a shown-once key', () => {
@@ -308,6 +431,107 @@ test('#4330: Done without a copy cannot silently destroy a shown-once key', () =
   const failedMint = dismissEnv(null, false, false)
   failedMint.dismissKeyModal()
   assert.equal(failedMint.confirmed(), 0, 'an empty reveal carries no secret to protect')
+})
+
+test('#4359: a blank newKey is not a secret — no confirm, no connect-step feed', () => {
+  for (const blank of ['   ', '\n\t', '', '\u200b', '\u2800', '\u061c', '\ufe0f']) {
+    const env = dismissEnv(blank, false, false)
+    env.dismissKeyModal()
+    assert.equal(env.confirmed(), 0, `a blank reveal (${JSON.stringify(blank)}) carries no secret to protect`)
+    assert.deepEqual(env.fed, [],
+      `a blank (${JSON.stringify(blank)}) must not be fed to the connect step`)
+    assert.deepEqual(env.closed, [false], 'and it closes without a prompt')
+  }
+  // Positive control: a real key IS fed (the #2735 contract this guard sits
+  // beside) — without this the guard could be satisfied by never feeding at all.
+  const real = dismissEnv('tt_live_key', true, false)
+  real.dismissKeyModal()
+  assert.deepEqual(real.fed, ['tt_live_key'], 'a copied real key is handed to the connect step')
+})
+
+// ── wizardMintDurableKey (the connect-step latch, #4359) ────────────────────
+function wizardEnv(overrides = {}) {
+  const calls = { wizardDurableKey: [], error: [], capped: [], paste: [], loadAll: 0 }
+  const deps = {
+    calls,
+    wizardDurableBusy: false,
+    setWizardDurableBusy: () => {},
+    setWizardDurableError: (v) => calls.error.push(v),
+    setWizardDurableCapped: (v) => calls.capped.push(v),
+    setWizardShowPaste: (v) => calls.paste.push(v),
+    setWizardDurableKey: (v) => calls.wizardDurableKey.push(v),
+    currentOrgId: 'org-A',
+    orgIdRef: { current: 'org-A' },
+    welcomeTeamReady: false,
+    welcomeOrgName: '',
+    team: { org_name: 'Team A' },
+    teams: [],
+    keys: [],
+    isBuildFork: false,
+    // Pure naming helper — irrelevant to the plaintext guard; a stub keeps this
+    // file free of its own dependencies.
+    durableKeyName: () => 'key for Team A 2026-01-01 00:00 UTC',
+    mintKey: async () => ({ key: 'tt_connect_ok' }),
+    loadAll: async () => { calls.loadAll++ },
+    ...overrides,
+  }
+  return { deps, calls, wizardMintDurableKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function wizardMintDurableKey']).wizardMintDurableKey }
+}
+
+test('#4359: the connect mint latches only a revealable plaintext (truthy non-string / blank refused)', async () => {
+  // Pre-fix this was `setWizardDurableKey((mk && (mk.key || mk.api_key)) || '')`
+  // — no guard at all. `42` was stored verbatim, embedded in the connect
+  // snippet, and read downstream by `.startsWith(...)`: the row-truth effect
+  // throws `TypeError: …startsWith is not a function` as soon as the mint's own
+  // refresh publishes a non-empty `keys`, and the revoke prefix-clear is a
+  // second reader of the same state.
+  for (const bad of [42, {}, [], '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad', '\u061c', '\u180e', '\ufe0f']) {
+    for (const field of ['key', 'api_key']) {
+      const { calls, wizardMintDurableKey } = wizardEnv({
+        mintKey: async () => ({ [field]: bad }),
+      })
+      // Must not reject — the refusal is a surfaced error, not a throw.
+      await wizardMintDurableKey()
+      assert.deepEqual(calls.wizardDurableKey, [],
+        `a mint carrying ${field}=${JSON.stringify(bad)} must not be stored as the connect key`)
+      const msg = calls.error.filter(Boolean).at(-1) || ''
+      assert.match(msg, /cannot be shown/, `the failure must be surfaced for ${field}=${JSON.stringify(bad)}`)
+      // The remedy must name the row the mint actually created: the connect
+      // mint ALWAYS labels it (`durableKeyName`), so pointing at "an unlabeled
+      // key" (the create-path wording) would be false here.
+      assert.match(msg, /key for Team A 2026-01-01 00:00 UTC/,
+        'the connect refusal must name the created row, not an unlabeled key')
+      assert.doesNotMatch(msg, /unlabeled/,
+        'the create-path "unlabeled key" remedy is false on the labeled connect mint')
+      assert.equal(calls.loadAll, 1, 'the row IS created server-side, so the list must be refreshed')
+    }
+  }
+  const missing = wizardEnv({ mintKey: async () => undefined })
+  await missing.wizardMintDurableKey()
+  assert.deepEqual(missing.calls.wizardDurableKey, [], 'a missing response must not latch a key')
+  assert.match(missing.calls.error.filter(Boolean).at(-1) || '', /cannot be shown/)
+})
+
+test('#4359: the connect mint still latches every legitimate key shape', async () => {
+  const keyed = wizardEnv({ mintKey: async () => ({ key: 'tt_new_connect_key' }) })
+  await keyed.wizardMintDurableKey()
+  assert.deepEqual(keyed.calls.wizardDurableKey, ['tt_new_connect_key'])
+  assert.equal(keyed.calls.loadAll, 1)
+
+  const fallback = wizardEnv({ mintKey: async () => ({ api_key: 'tk_durable_connect' }) })
+  await fallback.wizardMintDurableKey()
+  assert.deepEqual(fallback.calls.wizardDurableKey, ['tk_durable_connect'])
+  assert.ok(fallback.calls.wizardDurableKey.every((v) => typeof v === 'string'),
+    'the connect latch is always a string, so `startsWith` on it can never throw')
+})
+
+test('#4359: the connect refusal does not clear a plaintext already held (#2735 class)', async () => {
+  // The refusal returns BEFORE the latch — it must not write '' either, which
+  // would destroy a shown-once key a previous mint/paste put in memory.
+  const { calls, wizardMintDurableKey } = wizardEnv({ mintKey: async () => ({ key: '   ' }) })
+  await wizardMintDurableKey()
+  assert.deepEqual(calls.wizardDurableKey, [],
+    'no empty-string write may drop the previously-held plaintext')
 })
 
 // ── static backstops for the parts execution cannot reach (JSX) ─────────────
@@ -343,10 +567,12 @@ test('#4330: the reveal renders iff a live non-empty key exists, and carries sep
   const modal = createKeyModalJsx()
   // ONE derivation gates the reveal, and the FORM is its else-branch — so no
   // state (including a team switch that nulls `newKey` mid-reveal) can render
-  // a content-free dialog or an empty `.key-value` box.
+  // a content-free dialog or an empty `.key-value` box. #4359: the derivation
+  // reads the shared predicate, so a truthy non-string / whitespace-only value
+  // is the form branch too.
   assert.match(mainJsxCode,
-    /const newKeyReveal = \(keyModalStage === 'done' && typeof newKey === 'string' && newKey\) \|\| ''/,
-    'the reveal key must be derived once from a non-empty string')
+    /const newKeyReveal = \(keyModalStage === 'done' && revealablePlaintext\(newKey\)\) \|\| ''/,
+    'the reveal key must be derived once from a non-blank string')
   assert.match(modal, /\{!newKeyReveal && \(/, 'the form must be the no-key branch')
   assert.match(modal, /\{newKeyReveal && \(/, 'the reveal must be the has-key branch')
   // The fused control is gone: copy and dismiss are two separate controls.
@@ -401,4 +627,73 @@ test('#4330: the cap notice renders INSIDE the create-key modal from its OWN slo
     'the create-key modal must render the cap notice (a 402 must not be invisible behind the dialog)')
   assert.doesNotMatch(createKeyModalJsx(), /<CapNotice text=\{capNotice\}/,
     'the dialog must not read the shared tab notice (rotate-specific advice)')
+})
+
+test('#4359: every create/connect reveal seam reads the shared predicate', () => {
+  // SCOPE — this asserts the DECLARED surface (the create/connect seams), not
+  // the whole file. Same-class writers outside it are tracked in #4370.
+  const createBody = extractDeclaration(mainJsx, 'async function createKey')
+  assert.match(createBody,
+    /const plaintext = revealableMintPlaintext\(mk\)/,
+    'createKey must latch through the shared predicate')
+  assert.match(createBody, /if \(!plaintext\) \{/, 'createKey must refuse a non-revealable mint')
+
+  const connectBody = extractDeclaration(mainJsx, 'async function wizardMintDurableKey')
+  assert.match(connectBody,
+    /const plaintext = revealableMintPlaintext\(mk\)/,
+    'the connect latch must read the shared predicate, not a bare `|| \'\'`')
+  assert.match(connectBody, /if \(!plaintext\) \{/,
+    'the connect mint must refuse a non-revealable response instead of storing it')
+  assert.equal((connectBody.match(/setWizardDurableKey\(\(mk && \(mk\.key \|\| mk\.api_key\)\) \|\| ''\)/g) || []).length, 0,
+    'the unguarded connect latch shape must be gone')
+
+  const copyBody = extractDeclaration(mainJsx, 'async function copyNewKey')
+  assert.match(copyBody, /const plaintext = revealablePlaintext\(newKey\)/,
+    'copyNewKey must read the same predicate as the gate')
+  const dismissBody = extractDeclaration(mainJsx, 'function dismissKeyModal')
+  assert.match(dismissBody, /const plaintext = revealablePlaintext\(newKey\)/,
+    'dismissKeyModal must read the same predicate as the gate')
+
+  // No create-reveal seam may keep the weaker `typeof x === 'string'` check
+  // (which accepts whitespace) — the predicate replaced every one of them.
+  assert.equal((mainJsxCode.match(/typeof newKey === 'string'/g) || []).length, 0,
+    'no create-reveal seam may keep the weaker typeof check')
+})
+
+test('#4359: the shared predicate refuses every visually-blank shape and never mutates a real key', () => {
+  // The single gateway, exercised directly. `trim()` alone is not a blankness
+  // test: a mint carrying only a zero-width / invisible / visually-blank
+  // character must not latch a reveal, render a blank `.key-value`, or set
+  // `keyCopied`. The class is the Unicode FORMAT + DEFAULT-IGNORABLE properties
+  // plus BRAILLE PATTERN BLANK (U+2800), which is in neither property.
+  const { revealablePlaintext, revealableMintPlaintext } =
+    build({}, ['function revealablePlaintext', 'function revealableMintPlaintext'])
+  const blanks = ['', '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad',
+    '\u061c', '\u180e', '\u115f', '\u1160', '\uffa0', '\ufe0f', '\u200b\u2800 ']
+  for (const blank of blanks) {
+    assert.equal(revealablePlaintext(blank), '',
+      `${JSON.stringify(blank)} must not be revealable`)
+  }
+  for (const bad of [null, undefined, 42, {}, [], false, NaN]) {
+    assert.equal(revealablePlaintext(bad), '', `${JSON.stringify(bad)} is not a revealable string`)
+  }
+  // A real key passes VERBATIM — the decision uses the stripped copy, the
+  // returned value is always the secret (never a mutated one).
+  for (const key of ['tt_live_key', 'tk_durable', 'tt_abc-123_XYZ', '  tt_padded  ']) {
+    assert.equal(revealablePlaintext(key), key, `${key} must pass verbatim`)
+  }
+  assert.equal(revealablePlaintext('tt_ok\u200b'), 'tt_ok\u200b',
+    'a real key carrying an invisible char is returned verbatim, not stripped')
+
+  // Leg composition: the `key` leg wins when revealable, and an UNREVEALABLE
+  // primary falls through to `api_key` instead of shadowing it (and falsely
+  // reporting "the server did not return the value").
+  assert.equal(revealableMintPlaintext({ key: 'tt_a', api_key: 'tt_b' }), 'tt_a')
+  for (const primary of [{}, [], '   ', 42, '\u2800']) {
+    assert.equal(revealableMintPlaintext({ key: primary, api_key: 'tt_b' }), 'tt_b',
+      `an unrevealable primary (${JSON.stringify(primary)}) must not shadow the fallback`)
+  }
+  for (const missing of [null, undefined, {}, { key: '' }]) {
+    assert.equal(revealableMintPlaintext(missing), '', `${JSON.stringify(missing)} carries no plaintext`)
+  }
 })

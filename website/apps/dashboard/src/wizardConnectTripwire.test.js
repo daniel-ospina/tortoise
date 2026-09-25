@@ -22,6 +22,9 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+// #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
+// the guards below can assert the RENDERED prompt instead of parsing source.
+import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, wizardPromptText } from './wizardPrompts.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -280,8 +283,10 @@ test('#2711: every shown-once key row can break/shrink its token', () => {
 
 // ── #2755: one explicit copy control, no nested interactive ────────────────
 test('#2755: WizardPromptCard is a plain region with exactly one copy button', () => {
+  // #4880: the end marker was `function wizardPromptText(` — that builder now
+  // lives in wizardPrompts.js, so the slice ends at the next component instead.
   const card = slice('function WizardPromptCard({ text, label })',
-                     'function wizardPromptText(', 'WizardPromptCard')
+                     'function WizardBlock(', 'WizardPromptCard')
   assert.doesNotMatch(card, /role="button"/,
     'the container must NOT be an interactive role (nested-interactive WCAG 4.1.2)')
   // #2912: the CARD container is still not a tab stop — the explicit button is
@@ -430,8 +435,13 @@ test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
   const desktop = src.slice(i, desktopEnd)
   // the merged block dropped the only unrecoverable-key cue on this surface
   // (HARNESS_INTRO.codexDesktop / UNIVERSAL_COMMAND.codexDesktop never say it)
-  assert.match(desktop, /Your API key is inside the block below — keep it private\./,
+  // #4880: the advisory is now DATA in wizardPrompts.js (it was the last live
+  // caption no invariant could observe), so assert it is the rendered string
+  // the JSX interpolates rather than a literal in the source text.
+  assert.match(desktop, /\{WIZARD_CAPTIONS\.keyPrivate\}/,
     'the Desktop surface must still say the key is private')
+  assert.match(WIZARD_CAPTIONS.keyPrivate, /keep it private/,
+    'the key-private advisory must still say the key is private')
   // #3218: this surface has no key ROW, so the shared visibility + recovery
   // note must render here too (the caption alone says neither).
   assert.match(desktop, /<p className="wizard-note">\{KEY_VISIBILITY_NOTE\}<\/p>/,
@@ -491,8 +501,8 @@ test('#3428: the connect-step advance no longer writes the harness-connected che
 // replacement scans EVERY non-test source module under src/, collapses literal
 // string concatenation first, and judges the serialized body by its VALUE (not
 // by deep-equality against the duplicated pair), so a whitespace reformat or a
-// behaviour-identical DRY dedupe of the two `catalog-presented` bodies stays
-// green while a split URL or a parameterized step does not.
+// behaviour-identical reformat of the fork body stays green while a split URL,
+// a parameterized step, or a reinstated catalog-presented write does not.
 function sourceModules() {
   const files = []
   const walk = (dir) => {
@@ -526,14 +536,14 @@ function normalizeBodyValue(v) {
   return v.replace(/['"`\s]/g, '')
 }
 
-test('#3428/#2937: exactly the three known checkpoint call sites may exist, each with an allowlisted body', () => {
+test('#3428/#2937 / #3913: exactly ONE checkpoint call site may exist across src/ — the fork write', () => {
   // review cycle 7 (item 1-ii): the dist-level probe audits ONE serialized
   // literal, so a writer can be reinstated by moving the POST into a small
   // helper — the body becomes `{step:r}`, the exact probe never appears, and a
   // reviewer BUILT that mutation: 33/33 tripwire + 4/4 distBundle green with the
   // click-writer fully reinstated. This is the SOURCE-side backstop, hardened in
   // review cycle 8 (items 3 + 4): cross-file, concatenation-collapsed, and
-  // VALUE-based. MUTATIONS that fail here: a 4th site; a split URL
+  // VALUE-based. MUTATIONS that fail here: a 2nd site; a split URL
   // ('/v1/onboarding/' + 'state/checkpoint'); a step carried as a value
   // (['harness','connected'].join('-') or a `{ step: param }` object); a writer in
   // a sibling module; `JSON.stringify(checkpointBody(step))` (uninspectable).
@@ -544,14 +554,16 @@ test('#3428/#2937: exactly the three known checkpoint call sites may exist, each
       sites.push({ file: mod.file, index: m.index, window: mod.src.slice(m.index, m.index + 400) })
     }
   }
-  assert.equal(sites.length, 3,
-    `exactly THREE /v1/onboarding/state/checkpoint call sites may exist across src/ — found ` +
+  assert.equal(sites.length, 1,
+    `exactly ONE /v1/onboarding/state/checkpoint call site may exist across src/ — found ` +
     `${sites.length} (${[...new Set(sites.map((s) => s.file.replace(`${here}/`, '')))].join(', ') || 'none'}). ` +
     // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
-    // even when the count was LOWER than three, describing the wrong failure.
-    (sites.length > 3
-      ? 'A 4th means a checkpoint writer was re-introduced'
-      : 'Fewer than three means a legitimate checkpoint site is missing (or the src walk lost a module)'))
+    // even when the count was LOWER than expected, describing the wrong failure.
+    // #3913 removed the render-time catalog-presented effect AND the build-fork
+    // pick handler's mark, leaving the fork write alone.
+    (sites.length > 1
+      ? 'A 2nd means a checkpoint STEP writer was re-introduced — #3913 removed both the render effect and the build-fork pick mark'
+      : 'Zero means the fork write is missing (or the src walk lost a module)'))
   for (const site of sites) {
     const rel = site.file.replace(`${here}/`, '')
     assert.doesNotMatch(site.window, /harness-connected/,
@@ -581,22 +593,21 @@ test('#3428/#2937: exactly the three known checkpoint call sites may exist, each
     value = collapseStringConcat(value)
     const norm = normalizeBodyValue(value)
     const step = norm.match(/step:([^,}]+)/)
-    if (step) {
-      assert.equal(step[1], 'catalog-presented',
-        `${rel}:${site.index} serializes a step other than catalog-presented (${norm}) — ` +
-        'the click-writer is back (#3428/#2937)')
-    } else {
-      assert.match(norm, /fork/,
-        `${rel}:${site.index} checkpoint body is neither a catalog-presented step nor the fork write`)
-      assert.doesNotMatch(norm, /harness-connected/,
-        `${rel}:${site.index} checkpoint body serializes harness-connected`)
-    }
+    assert.equal(step, null,
+      `${rel}:${site.index} serializes a checkpoint step (${norm}) — #3913 deleted every ` +
+      'client step writer; the only checkpoint left is the fork pick itself')
+    assert.match(norm, /fork/,
+      `${rel}:${site.index} checkpoint body is not the fork write`)
+    assert.doesNotMatch(norm, /harness-connected/,
+      `${rel}:${site.index} checkpoint body serializes harness-connected`)
   }
   // the fork site's `body` derivation, so re-pointing the variable at a
   // harness-connected step cannot hide behind the allowlisted `body` name
   const src = sourceModules().map((m) => m.src).join('\n')
   assert.match(src, /const body = forkId === 'unsure' \? \{ fork_unsure_at: true \} : \{ fork: forkId \}/,
     'the fork checkpoint body is the fork write, never a harness-connected step')
+  assert.doesNotMatch(src, /catalog-presented/,
+    'no src module may serialize a catalog-presented checkpoint — #3913 removed the dashboard writer')
 })
 
 test('#3428/#2937 (cycle 8 item 4, M4): completed_steps is never written client-side', () => {
@@ -1280,23 +1291,61 @@ test('#3218: the prompt-card labels describe the prompt, never a rival step numb
   const owner = ownerBranch()
   assert.doesNotMatch(owner, /'Copy step \d prompt'/,
     'no card label may carry its own step number once the circles own the order')
-  assert.match(owner, /label="Copy the connect prompt"/, 'the block-2 card names the connect prompt')
-  assert.match(owner, /label="Copy the verify prompt"/, 'the block-3 card names the verify prompt')
-  assert.match(owner, /label="Copy the workflows prompt"/,
+  // #4880: the labels are DATA in wizardPrompts.js — assert both that the JSX
+  // renders them and that they still describe the prompt they sit on.
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.connectLabel\}/, 'the block-2 card names the connect prompt')
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.verifyLabel\}/, 'the block-3 card names the verify prompt')
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.workflowsLabel\}/,
     'the Claude Web/Desktop block-3 card names the workflows prompt')
+  assert.equal(WIZARD_CAPTIONS.connectLabel, 'Copy the connect prompt')
+  assert.equal(WIZARD_CAPTIONS.verifyLabel, 'Copy the verify prompt')
+  assert.equal(WIZARD_CAPTIONS.workflowsLabel, 'Copy the workflows prompt')
 })
 
 // #3218 (item 4): the agent is told to install the skills BEFORE it is told to
 // restart — the old order (restart, then install) made an agent that acted on
 // the cue load the skills directory before the skills existed.
 test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart note', () => {
-  const fn = slice('function wizardPromptText(', 'function wizardWorkflowsText(', 'wizardPromptText')
-  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Pi\./,
-    'Pi: skills install first, restart note last')
-  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Cursor\./,
-    'Cursor: skills install first, restart note last')
-  assert.doesNotMatch(fn, /\$\{twoStepNote\} (Pi|Cursor)\.\\nThen install the Tortoise skills/,
-    'the restart-before-skills order must not come back')
+  // #4365/#4880: asserted on the RENDERED prompt. The builders moved to
+  // wizardPrompts.js — an importable, JSX-free module — so this now reads what
+  // the agent actually receives. The former source-shape read could not
+  // distinguish a reordered interpolation from a rendered reorder, and that
+  // mechanism is what produced five false greens (#4880).
+  for (const h of ['pi', 'cursor']) {
+    const p = wizardPromptText(h, 1, 'tk_test', 'included')
+    // the rendered body reads "Then install the Tortoise skills (…)" — the
+    // capitalised form belongs to the universal command's claim line.
+    const INSTALL = /install the Tortoise skills/i
+    const iInstall = p.search(INSTALL)
+    const iOnboarding = p.indexOf(ONBOARDING_INSTRUCTIONS)
+    const iRestart = p.indexOf('Tell me when to restart')
+    assert.ok(iInstall > -1, `${h}: the step-1 prompt tells the agent to install the skills`)
+    assert.ok(iOnboarding > iInstall,
+      `${h}: the skills install must precede the onboarding instructions`)
+    // #4365: the restart cue is a hand-back an agent may stop at, so the
+    // onboarding document — what it follows to finish setup — must not sit
+    // after it, and nothing actionable may follow it.
+    assert.ok(iRestart > iOnboarding,
+      `${h}: the onboarding instructions must precede the restart cue`)
+    assert.ok(p.slice(iRestart).startsWith(
+      `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`),
+      `${h}: the restart cue names the harness`)
+    // "Nothing actionable may follow the cue" — IMPLEMENTED, not just claimed:
+    // the cue is a hand-back, so what follows it is pinned exactly (the docs
+    // line and nothing else). A note inserted after it ("Then delete ~/.pi")
+    // was GREEN against an earlier revision that only rejected the install
+    // phrase while its comment claimed this stronger property.
+    // Line-based, not byte-exact: a trailing newline renders harmlessly and must
+    // not be a false red, while an inserted actionable note still fails.
+    const tailLines = p.slice(iRestart).split('\n')
+    assert.equal(tailLines[0], `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`,
+      `${h}: the restart cue names the harness`)
+    assert.deepEqual(tailLines.slice(1).filter((line) => line.trim() !== ''),
+      ['Docs: https://tortoise.premiselabs.co/docs'],
+      `${h}: the restart cue must be the last actionable line — only the docs line may follow it`)
+    assert.ok(!INSTALL.test(p.slice(iRestart)),
+      `${h}: the restart-before-skills order must not come back`)
+  }
 })
 
 // ── #2865: key-less OAuth on the LIVE Claude Desktop / Claude Web leaves ───
@@ -1419,8 +1468,13 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   // the mint is DEMOTED and its cost named
   assert.match(connect, /Create a new key instead/,
     'a fresh mint is still offered, but as an explicit secondary choice')
-  assert.match(connect, /spends another of your plan&apos;s key slots/,
-    'the copy names the allowance cost of the fresh mint')
+  // #4353: the allowance-cost sentence moved into keyAllowance.js
+  // (`existingKeyNoteFrom`) so the at-cap arm returns the canonical remedy
+  // instead of the rotate instruction. The runtime STRING (including the cost
+  // clause) is executed in keyAllowance.test.js; here we pin that the
+  // affordance renders the derivation rather than an inline literal.
+  assert.match(connect, /\{existingKeyNoteFrom\(team, keys\)\}/,
+    'the note renders the derived copy (never an inline literal sentence)')
   // review P1: the BUILD fork's step-2 no-key branch rendered its OWN raw mint
   // CTA (and its own member dead-end copy) — the arm the first fix missed, so an
   // owner whose org already held a usable durable row still burned a second slot
@@ -1521,4 +1575,89 @@ test('#3783: the API Keys table names the auto-provisioned key instead of render
     'the keys table resolves a display name before falling back to the dash')
   assert.match(src, /import \{ isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName \} from '\.\/sessionKey\.js'/,
     'the display-name helper is imported from the pure module')
+})
+
+// ── #4353: the wizard's at-cap remedy must be ACHIEVABLE ──────────────────
+// Rotate mints the REPLACEMENT through the SAME capped POST /v1/team/keys
+// before revoking the old row, so at the cap the rotate leg 402s and the old
+// key is never revoked — the user dead-ends. Revoke DOES work: a revoked row
+// leaves the mint gate's count (tortoise/quota.py `_count_resource('api_keys')`
+// counts only non-revoked, non-expired rows), freeing a slot. #2699 fixed this
+// on the create/rotate notices (keyAllowance.js) but deliberately left the
+// wizard/connect surfaces — this pins those two sites. The RUNTIME behaviour of
+// the note's derivation is EXECUTED in keyAllowance.test.js
+// (`existingKeyNoteFrom`); these are the cheap structural backstops.
+
+test('#4353: the wizard mint 402 copy offers revoke, never regenerate', () => {
+  // The 402 handler's ternary. Marker-guarded on both ends — a renamed/removed
+  // arm fails loudly instead of silently widening to neighbouring handlers.
+  const cap402 = slice('setWizardDurableError(isBuildFork', '\n      } else {',
+                       'wizard mint 402 copy')
+  // MUTATION: `regenerate` back into either arm fails here. Asserted FIRST so
+  // this negative owns its own RED, independent of the copy-literal assertions
+  // below (which would also fail for an unrelated reword).
+  assert.doesNotMatch(cap402, /regenerate/i,
+    'no 402 arm may offer regenerate — at the cap the rotate mint rides the same capped route')
+  // "above", not "below": the 402 handler opens the paste row, and the error
+  // renders from wizardPasteRow's own trailing block — i.e. BELOW the input.
+  assert.doesNotMatch(cap402, /paste a key below/i,
+    'the paste field renders above this message — "below" was the wrong direction')
+  // build-fork arm: byte-identical. The build fork DOES render a paste row
+  // (wizardKeyAffordance → wizardNoKeyAffordance → the paste disclosure), so
+  // this pin is about the copy staying unchanged, not about that row being
+  // unreachable. Named by symbol: a line citation here stales on the next edit.
+  assert.match(cap402,
+    /\? 'You\\'ve reached your plan\\'s limit of API keys — free a slot in the API Keys tab, then create a key here\.'/,
+    'the build-fork arm is unchanged (it names only affordances its branch renders)')
+  // non-build-fork arm: the achievable remedy.
+  assert.match(cap402,
+    /: 'You\\'ve reached your plan\\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above\.'/,
+    'the non-build-fork arm names revoke (which frees a slot) and the paste escape')
+})
+
+test('#4353: the connect step’s existing-key note is DERIVED, not an inline literal', () => {
+  // The whole affordance const; the slice ends at the next affordance definition.
+  const affordance = slice('const wizardExistingKeyAffordance = (',
+                           'const wizardLoadingKeyAffordance = (', 'wizardExistingKeyAffordance')
+  assert.match(affordance, /\{existingKeyNoteFrom\(team, keys\)\}/,
+    'the note renders the pure derivation (so the at-cap arm cannot desync from keyAllowance.js)')
+  // MUTATION: inlining the old sentence again fails here.
+  assert.doesNotMatch(affordance, /Rotate the existing key in the API Keys tab/,
+    'the rotate sentence must live in keyAllowance.js, never inline in main.jsx')
+  assert.match(mainJsx,
+    /import \{[^}]*existingKeyNoteFrom[^}]*\} from '\.\/keyAllowance\.js'/,
+    'the derivation is imported from the pure module')
+})
+
+test('#4353: the paste-validation owner remedies APPEND the at-cap clause', () => {
+  // wizardPasteRow's "Use this key" handler has four owner/admin remedies
+  // (unknown / bootstrap / expiring / revoked-disabled). Each names a route —
+  // create or rotate — that needs a slot the gate has spent at the cap, so
+  // each must append the pure clause rather than promise a mint that 402s. The
+  // slice is marker-guarded on both ends (a renamed/removed handler fails
+  // loudly instead of silently widening).
+  const paste = slice('const wizardPasteRow = (', 'const wizardNoKeyAffordance = (',
+                      'wizardPasteRow handler')
+  // MUTATION: dropping the interpolation from one arm fails its own assert.
+  assert.match(paste,
+    /or create one here\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the unknown rejection’s owner remedy must append the at-cap clause')
+  assert.match(paste,
+    /'Create a new key in the API Keys tab\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the bootstrap rejection’s owner remedy must append the at-cap clause')
+  assert.match(paste,
+    /'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the expiring rejection’s owner remedy must append the at-cap clause')
+  assert.match(paste,
+    /'Create or rotate a key in the API Keys tab and paste the new one\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the revoked/disabled rejection’s owner remedy must append the at-cap clause')
+  // The member arms route to an owner/admin — the only actor who can revoke,
+  // and the actor who then sees the corrected at-cap remedy on the key
+  // surfaces — so they must NOT carry the clause: exactly four occurrences,
+  // one per owner arm.
+  assert.equal((paste.match(/capRevokeFirstClause\(team, keys\)/g) || []).length, 4,
+    'exactly the four owner/admin remedies carry the clause (member arms do not)')
+  assert.match(mainJsx,
+    /import \{[^}]*capRevokeFirstClause[^}]*\} from '\.\/keyAllowance\.js'/,
+    'the clause is imported from the pure module')
 })

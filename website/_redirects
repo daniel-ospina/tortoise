@@ -17,12 +17,16 @@
 #    there in #4054); the extensionless and .html forms are pinned because the
 #    middleware only 301s them on the exact company host.
 
-# /auth is owned by the middleware on every host (301 → app.premiselabs.co in
-# #4054). /signup, /welcome and /invite-accept moved with the BFF to the app
-# origin and 301 there. /signin and its variants 301 to /auth — the old
-# standalone login screen is gone. Trailing-slash variants are pinned 301s (the
-# file's standardization contract; Pages' built-in 308s are not relied on):
-/auth/   /auth  301
+# /auth and the /auth/* subtree are owned by the middleware on every host (#4054
+# for the page, #4346 for the endpoints): the page is a grandfathered 301 →
+# app.premiselabs.co, the subtree is a 302 (SCOPE.md §12/F12 — a NEW branch for
+# the moved surface is 302, never a 301). The middleware runs BEFORE this file,
+# so a `/auth/` rule here would be unreachable; it is deliberately absent rather
+# than left as a contradicting second copy. /signup, /welcome and /invite-accept
+# moved with the BFF to the app origin and 301 there. /signin and its variants
+# 301 to /auth — the old standalone login screen is gone. Trailing-slash variants
+# are pinned 301s (the file's standardization contract; Pages' built-in 308s are
+# not relied on):
 /signup  https://app.premiselabs.co/signup  301
 /signup/  https://app.premiselabs.co/signup  301
 /signup.html  https://app.premiselabs.co/signup  301
@@ -37,6 +41,7 @@
 /invite-accept.html  https://app.premiselabs.co/invite-accept  301
 
 # Trailing-slash → canonical
+/contact/  /contact  301
 /privacy/  /privacy  301
 /tos/      /tos      301
 /license/  /license  301
@@ -51,6 +56,7 @@
 /index.html  /  301
 
 # .html extension duplicates (non-auth only)
+/contact.html  /contact  301
 /docs.html  /docs          301
 /faq.html   /faq           301
 /self-hosted.html  /self-hosted  301

@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 """The D2 expansion gate for the agent-facing surface (#3863).
 
-WHAT THIS STOPS
-    A new MCP tool, or a new public SDK method, appearing without an explicit
-    human decision. The MCP tool surface and the SDK endpoints are the contract
-    every agent depends on; growing them silently is the defect this gate
-    exists to prevent.
+WHAT THIS CATCHES
+    An UNRECORDED change to the agent-facing surface: a new (or removed, or
+    re-bound, or re-served) MCP tool or public SDK method that the approved
+    baseline in `config/surface-manifest.yml` does not declare. The MCP tool
+    surface and the SDK endpoints are the contract every agent depends on;
+    drifting in a diff nobody reads is the defect this gate exists to prevent.
+
+WHAT THIS DOES NOT DO — READ IT BEFORE TRUSTING A GREEN RUN
+    It does NOT prove that a human approved an expansion. It compares two
+    artifacts, so an expansion that updates the registry AND the baseline
+    consistently PASSES it — the gate cannot tell an approved addition from an
+    unapproved one. The approval itself is carried by the #4282 mandate
+    (approval from Daniel FIRST; see `tortoise/tool_registry.py`,
+    `tortoise/sdk.py` and `CONTRIBUTING.md`) and by Daniel's review. A green run
+    is a consistency result, never consent. Do not add a machine control
+    (repository ruleset, CODEOWNERS, required reviewer) in place of the mandate:
+    the owner REJECTED that direction on #4282 as over-engineering.
 
 HOW IT WORKS
     It EXECUTES the declaration (imports TOOL_REGISTRY, introspects
@@ -16,8 +28,16 @@ HOW IT WORKS
 
     The baseline is FROZEN. This gate deliberately does not regenerate it: if it
     did, a new registry entry would enter the baseline by itself and the gate
-    could never go red. Regenerating is a human act (`tools/surface_manifest.py
-    cut`), reviewed in a PR that carries the owner's approval.
+    could never go red. A re-cut (`tools/surface_manifest.py cut`) is a human act
+    that must follow the #4282 mandate — approval from Daniel FIRST — and it
+    resets every `approval` field, so an old approval cannot be inherited.
+
+    RETIRED NAMES (#3883)
+    A retired name is removed from `TOOL_REGISTRY` but must still RESOLVE, and must
+    still WARN the caller with the replacement. This gate therefore checks the
+    `retired:` block of the baseline too: a name recorded as retired must resolve
+    through the warning shim, must not be advertised any more, and may not enter or
+    leave the retired set without a re-cut.
 
 FAIL-CLOSED
     A missing, unreadable or malformed manifest is a FAILURE, not a skip. A gate
@@ -26,7 +46,8 @@ FAIL-CLOSED
 
     Exit 0 = declaration matches the approved baseline.
     Exit 1 = expansion, removal, a served-surface change, an exemption
-             transition, an unapproved row, or unreadable evidence.
+             transition, an unapproved row, an unresolvable retired name, or
+             unreadable evidence.
 
 Usage:
     python3 tools/surface-guard.py [--manifest config/surface-manifest.yml]
@@ -130,11 +151,65 @@ def main(argv: list[str]) -> int:
     if malformed:
         return die(f"malformed row(s) in the baseline: {malformed!r:.200}")
 
+    # A ROW'S NAME IS THE KEY EVERY COMPARISON BELOW USES, so it must be a non-empty
+    # STRING before anything dereferences it. `name: null` (or an int, or a list)
+    # reached `.startswith` at the served-surface check and `{r["name"]}` at
+    # `baseline_tools`, and escaped as a bare AttributeError/TypeError traceback — and
+    # a traceback is not the fail-closed `die` this file promises. Verified: a row with
+    # `name: null`, `name: 1` and `name: [a, b]` each crashed the gate.
+    bad_name = [r for r in rows if not isinstance(r.get("name"), str) or not r["name"]]
+    if bad_name:
+        return die(
+            "malformed row name(s) in the baseline: every row's `name` must be a non-empty "
+            f"string, got {[(r.get('name'), type(r.get('name')).__name__) for r in bad_name][:5]}."
+        )
+
+    # A DUPLICATE NAME is unverified content, not a harmless repetition. The rows below are
+    # keyed by name (`baseline_tools`) and the SDK rows by `method` (`baseline_sdk`), and a
+    # name-keyed comparison silently DROPS all but the last — a doctored duplicate left the
+    # guard green while the baseline carried fabricated content. The predicate is
+    # deliberately IDENTICAL to `tools/surface_manifest.py::_read_manifest` (including its
+    # `str()` coercion): two readers that disagree about what a duplicate IS are one gate
+    # with a gap, and the divergence (a truthiness filter here vs. none there) was measured.
+    for field in ("rows", "retired"):
+        entries = doc.get(field)
+        if not isinstance(entries, list):
+            continue  # absence/shape is reported by the dedicated checks
+        names = [str(r.get("name")) for r in entries if isinstance(r, dict)]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            return die(
+                f"the approved baseline's `{field}` carries duplicate name(s): {duplicates[:5]}. "
+                "A name-keyed comparison drops all but the last, so the duplicate is content "
+                "no check here verifies. Re-cut the baseline."
+            )
+
+    # AN SDK ROW IS `sdk:<method>` — THE NAME IS NOT FREE TEXT. `baseline_sdk` (below) is a
+    # set of `method`s, so a row whose NAME is new but whose METHOD already exists adds
+    # nothing to the comparison: a fabricated row for a brand-new public SDK method passed
+    # this gate (verified — `name: sdk:totally_new_and_unapproved` with an existing `method`
+    # and `exemption: true` → exit 0, while the same method WITHOUT the row was refused), and
+    # so did renaming a real SDK row. The derivation emits the name as `sdk:<method>` exactly
+    # (verified for all 150 rows), so that identity is enforced here, before the sets are
+    # built. It SUBSUMES a duplicate-`method` check: two rows can only share a method if a
+    # name is not its method (caught here) or a name repeats (caught above).
+    sdk_rows = [r for r in rows if r["name"].startswith("sdk:")]
+    stray = [r["name"] for r in sdk_rows if not r.get("method")]
+    if stray:
+        return die(f"SDK row(s) in the baseline carry no `method`: {stray[:5]}.")
+    mismatched = [r["name"] for r in sdk_rows if r["name"] != f"sdk:{r['method']}"]
+    if mismatched:
+        return die(
+            f"SDK row name(s) that do not identify their method: {mismatched[:5]}. An SDK row "
+            "is `sdk:<method>` — the derivation emits it that way, and a name that differs from "
+            "its method is a row no comparison here can tie to a real method."
+        )
+
     # --- execute the declaration (never read it as text) ---------------------
     try:
         from tortoise import mcp_server
         from tortoise.sdk import TortoiseSDK
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
     except Exception as exc:
         return die(f"could not import the surface declaration: {exc}")
 
@@ -413,10 +488,25 @@ def main(argv: list[str]) -> int:
             f"{type(exc).__name__}: {exc}. The gate cannot verify which tools are "
             "reachable, so it must not report success."
         )
+    SERVED_VALUES = ("http", "stdio-only")
     for row in rows:
-            name = row.get("name", "")
-            if name.startswith("sdk:") or not row.get("served"):
+            name = row["name"]
+            if name.startswith("sdk:"):
+                if row.get("served") != "sdk":
+                    return die(
+                        f"`{name}`: an SDK row must be `served: sdk`, got {row.get('served')!r}."
+                    )
                 continue
+            # A FALSY `served` USED TO SKIP THIS CHECK. `not row.get("served")` `continue`d,
+            # so `served: null` (or `""`) turned the served-surface comparison OFF and the
+            # gate still printed OK — the same defect class this file already fixed for a
+            # broken import. A value the check cannot classify is malformed EVIDENCE.
+            if row.get("served") not in SERVED_VALUES:
+                return die(
+                    f"`{name}`: `served` must be one of {list(SERVED_VALUES)}, got "
+                    f"{row.get('served')!r}. A value this comparison cannot classify must not "
+                    "be skipped."
+                )
             now = "http" if name in served_http else "stdio-only"
             if now != row["served"]:
                 problems.append(
@@ -458,7 +548,95 @@ def main(argv: list[str]) -> int:
                 "remove the exemption rather than letting it stand."
             )
 
-    # --- 5. approval, once the list has been approved ----------------------
+    # --- 5. retired names (#3883): a retired name RESOLVES and WARNS ---------
+    # Retiring a name is a surface change like adding one, so the name must be in the
+    # approved baseline's `retired:` block or the gate reds. The inverse matters more:
+    # #3883 makes the WARNING the contract. If a name is recorded as retired and
+    # `get_tool` no longer resolves it, a caller gets a bare "tool not found" — the
+    # silent removal this mechanism exists to prevent. So the gate EXECUTES the
+    # declaration's resolution path and refuses to pass on a phantom. (That the shim
+    # then puts the warning IN the answer is pinned by tests/test_retired_tools.py,
+    # which can build a ToolResult without a database; this check pins the wiring:
+    # the tool resolves, and the function served behind it is the shim, not the
+    # original handler.)
+    declared_retired = {
+        e.name: (getattr(e, "retired_use_instead", None) or "") for e in RETIRED_TOOL_REGISTRY
+    }
+    baseline_retired = doc.get("retired")
+    if not isinstance(baseline_retired, list):
+        return die(
+            "the baseline carries no `retired:` list, so the guard cannot tell which names "
+            "are retired. Re-cut the baseline (tools/surface_manifest.py cut)."
+        )
+    baseline_retired_map: dict[str, str] = {}
+    for _row in baseline_retired:
+        if not isinstance(_row, dict) or not isinstance(_row.get("name"), str) or not _row["name"]:
+            return die(f"malformed retired row in the baseline: {_row!r:.200}")
+        baseline_retired_map[_row["name"]] = str(_row.get("use_instead") or "")
+
+    for name in sorted(set(declared_retired) - set(baseline_retired_map)):
+        problems.append(
+            f"NEW RETIRED TOOL `{name}` is declared retired but is not in the approved "
+            "baseline's `retired:` block. Retiring a name removes it from every agent's "
+            "surface; it needs an explicit human decision (#3863)."
+        )
+    for name in sorted(set(baseline_retired_map) - set(declared_retired)):
+        problems.append(
+            f"`{name}` is retired in the approved baseline but NOT declared retired. "
+            "An approved retirement that was reverted is a surface change; re-cut the baseline."
+        )
+    for name, use_instead in sorted(declared_retired.items()):
+        if not use_instead:
+            problems.append(
+                f"retired tool `{name}` names no replacement. #3883 requires the warning to "
+                "name the replacement where one exists."
+            )
+        if name in served_tools:
+            problems.append(
+                f"retired tool `{name}` is still ADVERTISED by the MCP server. A retired name "
+                "must be resolvable on call but absent from `tools/list`."
+            )
+        try:
+            tool = asyncio.run(mcp_server.mcp.get_tool(name))
+        except Exception as exc:
+            problems.append(
+                f"could not resolve retired tool `{name}`: {type(exc).__name__}: {exc}. "
+                "A retired name must resolve so the caller gets a warning, not a bare "
+                '"tool not found" (#3883).'
+            )
+            continue
+        if tool is None:
+            problems.append(
+                f"retired tool `{name}` does NOT resolve — a caller invoking it would get a "
+                'silent "tool not found" instead of the #3883 warning.'
+            )
+            continue
+        marker = ((getattr(tool, "meta", None) or {}).get("tortoise") or {}).get("retired") or {}
+        if marker.get("retired") is not True:
+            problems.append(
+                f"retired tool `{name}` resolves but carries no retirement marker, so it would "
+                "answer without warning the caller. Serve it through the #3883 shim."
+            )
+        elif str(marker.get("use_instead") or "") != use_instead:
+            problems.append(
+                f"retired tool `{name}` warns to use {marker.get('use_instead')!r} but the "
+                f"declaration records {use_instead!r}."
+            )
+        if not (getattr(getattr(tool, "fn", None), "__doc__", "") or "").startswith(
+            "RETIRED"
+        ):
+            problems.append(
+                f"retired tool `{name}` resolves to its ORIGINAL handler, not the #3883 shim, "
+                "so a caller would get no warning. Serve retired names through "
+                "_RetiredToolTransform."
+            )
+        if baseline_retired_map.get(name) != use_instead:
+            problems.append(
+                f"retired tool `{name}`'s use_instead {use_instead!r} does not match the "
+                f"baseline's {baseline_retired_map.get(name)!r}."
+            )
+
+    # --- 6. approval, once the list has been approved ----------------------
     status = doc.get("approval_status")
     if status not in ("pending-owner-approval", "approved"):
         problems.append(
@@ -467,7 +645,13 @@ def main(argv: list[str]) -> int:
             "surface has been approved, so it must not pass."
         )
     if status == "approved":
-        for row in rows:
+        # A RETIREMENT is a surface change too (#3883/#3863): it SHRINKS the
+        # agent-facing surface, and `retired:` is not part of `rows` — so an
+        # approval loop over `rows` alone left every retired name exempt from
+        # the one human-approval control (the same exempt-class defect an
+        # earlier round fixed for the `sdk:` rows).
+        retired_rows = doc.get("retired") or []
+        for row in [*rows, *retired_rows]:
             if not isinstance(row, dict):
                 problems.append(f"malformed row (not a mapping): {row!r}")
                 continue

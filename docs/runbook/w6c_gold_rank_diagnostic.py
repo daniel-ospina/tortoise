@@ -3,8 +3,10 @@
 window-miss questions, measured twice on the SAME graph shape:
 
   * ``capture`` arm — the frozen instrument's own seeder
-    (``ask_spotcheck._seed_memory``), which #4194 deliberately leaves
-    WITHOUT turn embeddings (the pre-#4194 / un-backfilled store shape).
+    (``ask_spotcheck._seed_memory``) seeded ``embed=False``: the pre-#4194 /
+    un-backfilled store shape. Pinned EXPLICITLY because since W7A the
+    seeder's default is ``embed=True`` — an un-pinned call would silently
+    collapse this arm into the ``dense`` one.
   * ``dense`` arm — the identical graph, with the turn Points' ``embedding``
     set by the PRODUCT'S OWN ``tortoise.embeddings.compute_embeddings`` over
     the PRODUCT'S OWN stored-turn text (``sdk._capture_turn_texts``) — i.e.
@@ -88,7 +90,7 @@ def measure(q: dict, dense: bool) -> dict:
     db = os.path.join(tempfile.mkdtemp(prefix="w6c_rank_"), "t.db")
     sdk = TortoiseSDK(db)
     try:
-        _seed_memory(sdk, q)
+        _seed_memory(sdk, q, embed=False)
         attach = _attach_dense_vectors(sdk) if dense else None
         leg_trace: list[dict] = []
         hits = sdk.tortoise_fts_query(

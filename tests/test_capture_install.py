@@ -29,6 +29,8 @@ import pytest
 from tortoise import capture_install, hook_install
 from tortoise.capture_install import (
     CAPTURE_SEAM,
+    CLAUDE_CAPTURE_HOOKS,
+    CLAUDE_PER_TURN_TIMEOUT,
     CLAUDE_TIMEOUT,
     install_capture,
 )
@@ -1239,7 +1241,14 @@ def test_codex_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
     `get_layout("codex")` raises `unknown harness 'codex'`, so a stale
     installed hook is never flagged or repaired, and this REDs."""
     layout = hook_install.get_layout("codex")
-    assert hook_install.contract_version(layout) == 1, (
+    # The contract must be READABLE, not a particular generation: a literal
+    # here (this asserted ``== 1`` until #4544) goes stale silently on every
+    # deliberate install-contract bump — which is how this branch left two red
+    # assertions behind. Readability still REDs on the mutation the docstring
+    # names, and also if the marker is dropped or the layout's scripts disagree
+    # (`contract_version` -> ``None``). The shipped GENERATIONS are pinned
+    # deliberately, once, by `test_shipped_install_contract_generations`.
+    assert hook_install.contract_version(layout) is not None, (
         "the shipped codex hook carries no readable install contract")
 
     res = install_capture("codex", home=home)
@@ -2070,7 +2079,10 @@ def test_cursor_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
     `get_layout("cursor")` raises `unknown harness 'cursor'`, so a stale
     installed hook is never flagged or repaired, and this REDs."""
     layout = hook_install.get_layout("cursor")
-    assert hook_install.contract_version(layout) == 1, (
+    # Readable, not a literal generation — same reasoning as the codex seam
+    # above (#4544: cursor was bumped 1 -> 2 by #4314). The generations are
+    # pinned deliberately by `test_shipped_install_contract_generations`.
+    assert hook_install.contract_version(layout) is not None, (
         "the shipped cursor hook carries no readable install contract")
 
     res = install_capture("cursor", home=home)
@@ -2611,9 +2623,10 @@ def test_cli_install_claude_uninstall_discloses_the_live_capture_seam(cli):
     "Uninstalled volunteer-turn.sh".
 
     Mutation: drop the disclosure print after `_install_read_hook` (the output
-    reads as a full uninstall while `session-start.sh`/`session-end.sh` and
-    their SessionStart/SessionEnd registrations remain live), or delete those
-    artifacts (the disclosure becomes false) — either way this turns RED."""
+    reads as a full uninstall while the capture scripts and their
+    SessionStart/SessionEnd/UserPromptSubmit registrations remain live), or
+    delete those artifacts (the disclosure becomes false) — either way this
+    turns RED."""
     run, root, _home = cli
     first = run("install", "claude", "--dir", str(root))
     assert first.returncode == 0, first.stderr
@@ -2626,14 +2639,29 @@ def test_cli_install_claude_uninstall_discloses_the_live_capture_seam(cli):
     assert "left in place" in r.stdout, r.stdout
     assert "session-start.sh" in r.stdout and "session-end.sh" in r.stdout, (
         r.stdout)
+    # The disclosure must name EVERY surviving script: announcing two of three
+    # reads as a complete accounting while the third's registration stays live
+    # and unmentioned (#3963).
+    assert "session-turn.sh" in r.stdout, r.stdout
     assert "settings.json" in r.stdout, r.stdout
-    # ...and it is TRUE: only the read-hook half was removed.
+    # ...and it is TRUE: only the read-hook half was removed.  EVERY capture
+    # script survives, including the per-turn one (#3963).
     hooks = root / ".claude" / "hooks"
     assert (hooks / "session-start.sh").is_file()
     assert (hooks / "session-end.sh").is_file()
+    assert (hooks / "session-turn.sh").is_file()
     cfg = _settings(root)["hooks"]
     assert "SessionStart" in cfg and "SessionEnd" in cfg, cfg
-    assert "UserPromptSubmit" not in cfg, "the read hook was not removed"
+    # The read hook's REGISTRATION is gone.  Absence of the event KEY was only
+    # ever a proxy for that: since #3963 the capture seam registers its own
+    # per-turn hook on the SAME ``UserPromptSubmit`` event, and that one must
+    # SURVIVE ``--uninstall`` (the disclosure promises the seam is left in
+    # place) — so requiring the key to be absent now fails a CORRECT uninstall.
+    read_cmds = [h.get("command")
+                 for e in cfg.get("UserPromptSubmit", [])
+                 for h in e.get("hooks", [])]
+    assert not any("volunteer-turn.sh" in (c or "") for c in read_cmds), (
+        f"the read hook was not removed: {read_cmds}")
 
 
 def test_install_uninstall_help_does_not_overpromise(cli):
@@ -3088,14 +3116,73 @@ def test_capture_seam_matches_the_dashboard_seam_map_and_timeout():
     # fragment must register BOTH scripts — a single `"timeout": 60` substring
     # check passes while the sibling script's timeout has drifted to anything.
     timeouts = re.findall(r'"timeout":\s*(\d+)', fragment)
-    assert len(timeouts) == 2, (
+    # Derive the expectation from the installer's OWN declaration (#3971): a
+    # hardcoded count cannot see a script the installer ships but the dashboard
+    # never registers — it stays GREEN while the copy-paste block is missing a
+    # hook entirely, which is exactly the drift this guard exists to catch.
+    expected_timeouts = [str(budget) for _, _, budget in CLAUDE_CAPTURE_HOOKS]
+    assert len(timeouts) == len(CLAUDE_CAPTURE_HOOKS), (
         f"the dashboard capture block declares {len(timeouts)} timeout(s), "
-        "expected one per script")
-    assert all(int(v) == CLAUDE_TIMEOUT for v in timeouts), (
+        f"expected one per script ({len(CLAUDE_CAPTURE_HOOKS)})")
+    assert timeouts == expected_timeouts, (
         f"the dashboard capture block emits timeout(s) {timeouts}, expected "
-        f"{CLAUDE_TIMEOUT} — the installer and the copy-paste block disagree")
-    assert ".claude/hooks/session-start.sh" in fragment
-    assert ".claude/hooks/session-end.sh" in fragment
+        f"{expected_timeouts} — the installer and the copy-paste block "
+        "disagree")
+    for script_name, event, _ in CLAUDE_CAPTURE_HOOKS:
+        assert f".claude/hooks/{script_name}" in fragment, (
+            f"the dashboard capture block never registers {script_name} "
+            f"({event})")
+
+
+def test_installer_declares_registers_and_detects_one_script_set():
+    """The three surfaces that define a Claude install must name the SAME set.
+
+    ``CLAUDE_CAPTURE_HOOKS`` (what is copied + registered), ``CLAUDE_SCRIPTS``
+    (the copy loop's list), and ``hook_install``'s layout — what
+    ``detect_install`` demands and ``upgrade_install`` repairs — are three
+    separate surfaces, and nothing pinned them together (#3971 merge): the
+    installer copied TWO scripts while the layout demanded THREE, so a fresh
+    install was reported by detection as ``missing-script: session-turn.sh``
+    — broken by construction, and nothing could name the cause.
+
+    Mutation: hardcode ``CLAUDE_SCRIPTS`` back to the pair (the copy leg REDs)
+    or drop the ``session-turn.sh`` spec from the layout (the detect leg REDs).
+    LEGITIMATE GREEN: adding a script to ``CLAUDE_CAPTURE_HOOKS`` AND the
+    layout — which is how the per-turn hook was declared.
+    """
+    layout = hook_install.get_layout("claude")
+    declared = [(name, event) for name, event, _ in CLAUDE_CAPTURE_HOOKS]
+    assert list(capture_install.CLAUDE_SCRIPTS) == [n for n, _ in declared], (
+        "CLAUDE_SCRIPTS drifted from CLAUDE_CAPTURE_HOOKS — the installer "
+        f"copies {list(capture_install.CLAUDE_SCRIPTS)} while the seam "
+        f"declares {[n for n, _ in declared]}")
+    assert [(s.name, s.event) for s in layout.scripts] == declared, (
+        "the layout detect_install uses names different (script, event) "
+        f"pairs than the installer registers: "
+        f"{[(s.name, s.event) for s in layout.scripts]} vs {declared}")
+    assert [s.timeout for s in layout.scripts] == [
+        t for _, _, t in CLAUDE_CAPTURE_HOOKS], (
+        "the layout's per-script budgets differ from CLAUDE_CAPTURE_HOOKS — "
+        "detect/upgrade then disagree about a script whose budget is not the "
+        "default")
+
+
+def test_a_fresh_claude_install_is_reported_complete(tmp_path):
+    """The observable the merge broke: install, then ASK detection.
+
+    Mutation: make the installer skip one ``CLAUDE_CAPTURE_HOOKS`` script (the
+    #3971 defect) → ``detect_install`` returns a blocking ``missing-script``
+    finding → RED.
+    """
+    install_capture("claude", root=tmp_path)
+
+    assert hook_install.detect_install(tmp_path, "claude") == []
+    # The per-turn hook (#3963) landed under its OWN event and its OWN budget —
+    # not silently rendered as a second SessionEnd at the 60 s default.
+    inner = [h for e in _settings(tmp_path)["hooks"]["UserPromptSubmit"]
+             for h in e.get("hooks", [])]
+    assert {"type": "command", "command": ".claude/hooks/session-turn.sh",
+            "timeout": CLAUDE_PER_TURN_TIMEOUT} in inner, inner
 
 
 def test_every_capture_artifact_ships_in_the_wheel():
@@ -3133,3 +3220,38 @@ def test_every_capture_artifact_ships_in_the_wheel():
         assert covered(rel), (
             f"{artifact} is not matched by any package-data pattern "
             f"{patterns} — a wheel install would fail resolving it")
+
+
+# The shipped install-contract generations, one per harness that ships SHELL
+# hooks.  The marker is what makes a stale installed hook detectable, so it MUST
+# be bumped when what a hook writes changes, and bumping must be DELIBERATE.
+# Pinning the values here, ONCE, is what makes a revert RED (a silently reverted
+# marker mis-classifies current installs as stale, or stale ones as current) and
+# makes the next bump a deliberate edit of this table.  A literal at each
+# install assertion does neither: it goes stale silently, which is exactly how
+# #4314 left two red assertions behind (#4545).
+# claude 5→6 is the #3615 consent gate merged over main's 5 (the hooks changed
+# behaviour again, so an already-installed copy must read as stale).
+_EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2}
+
+
+@pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
+def test_shipped_install_contract_generations(harness):
+    """#4314 changes what an installed hook writes (a capture-error breadcrumb)
+    and what the installer records, so every shipped generation moved — claude
+    3→4, codex 1→2, cursor 1→2.  #3971 then changed the claude hooks'
+    BEHAVIOUR again (the CWE-427 sys.path scrub), so claude moved 4→5: an
+    already-installed copy must be detected as stale, otherwise the security
+    fix never reaches it.  Those numbers are a reviewed decision, not a
+    detail, so they are pinned once and explicitly.
+
+    `pi` is absent by construction: it ships a TypeScript extension rather than
+    shell hooks, declares no install contract, and has no `HarnessLayout`.
+    """
+    layout = hook_install.get_layout(harness)
+    assert hook_install.contract_version(layout) == (
+        _EXPECTED_INSTALL_CONTRACT[harness]), (
+        f"{harness} ships contract generation "
+        f"{hook_install.contract_version(layout)}, expected "
+        f"{_EXPECTED_INSTALL_CONTRACT[harness]} — if that bump was deliberate, "
+        f"update _EXPECTED_INSTALL_CONTRACT; if not, this is the revert")
