@@ -37,10 +37,27 @@
 queue_rules:
   - name: main
     # Entry gate — evaluated against the PR, before it is queued.
+    #
+    # ⛔ THE HEAVY CHECK IS DELIBERATELY ABSENT HERE — do not add it back.
+    # A verdict's durability depends on what it is a FUNCTION OF:
+    #   * the five below are DIFF-DERIVED (path-selected by tools/ci_selection.py),
+    #     so they stay true while main moves — a PR earns them once and keeps them;
+    #   * `python-ci-gate` is TREE-DERIVED (it observes the test legs on the merged
+    #     tree, #5227), so it is void the moment main advances. Requiring it here
+    #     forces EVERY PR to re-validate on EVERY main change — the treadmill that
+    #     made the queue look broken while it was working correctly.
+    # It is enforced in `merge_conditions` below, against the queue branch — the
+    # tree that will actually merge. That is the one durable validation, and
+    # validating the same change twice buys nothing the second time.
+    #
+    # Contract note: the file's "every named check must also be required" rule is
+    # satisfied — `python-ci-gate` remains NAMED, in `merge_conditions`.
+    # Verified before this change: the five below report `success` (never
+    # `skipped`) across every sampled PR, so `check-success` cannot deadlock entry
+    # for a PR whose diff does not select their surfaces.
     queue_conditions:
       - base=main
       - -draft
-      - check-success=python-ci-gate
       - check-success=pricing-artifact
       - check-success=docs
       - check-success=test-isolation
@@ -59,10 +76,20 @@ queue_rules:
       - check-success=python-ci-gate
     merge_method: squash
     # Speculative batching: PRs that merge cleanly together are tested as one
-    # group, so a single CI cycle can certify several merges. Deliberately
-    # conservative at 2 until this repo's batch-failure behaviour is observed —
-    # a failing batch is re-tested bisected, so a large batch is a slow failure.
-    batch_size: 2
+    # group, so a single CI cycle can certify several merges.
+    #
+    # Raised 2 -> 6 (2026-09-25) now that the behaviour the old value was waiting
+    # on HAS BEEN OBSERVED. Both of the first two batches died on a RED BASE
+    # (`test (a)`/`test (b)` — main's own red, on a batch of ONE), not on a bad
+    # PR. So BASE HEALTH, not batch size, is the batch-failure driver — which
+    # frees batch size to be the throughput dial it is meant to be.
+    #
+    # Sizing: a CI cycle is ~26-31 min, so batch 6 sustains ~11 merges/hour (≈ the
+    # 200/day target, #5215); batch 2 sustained ~4. A failing batch is re-tested
+    # bisected, so WATCH THE BISECTION RATE at this size: if failures stop being
+    # base-driven and bisection starts dominating, drop back to 4. Batch 8 is the
+    # Shopify-scale figure and the next step if 6 stays clean.
+    batch_size: 6
     batch_max_wait_time: 5 min
 
 pull_request_rules:
