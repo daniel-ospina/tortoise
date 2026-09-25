@@ -1,3 +1,18 @@
+---
+title: "Bound the FalkorDB graph leak (#3634) — Implementation Plan"
+type: engineering
+domain: platform
+status: live
+created: 2026-09-24
+updated: 2026-09-24
+ownedBy: organisation-design-team
+subjects:
+  team: organisation-design-team
+doc_status: live
+aboutSubjects: test-infrastructure, graph ownership
+aboutObjects: tests/_embedded.py, tests/conftest.py, tortoise/sdk.py, tortoise/projection/__init__.py
+---
+
 <!-- research-path: issue #3634 scoping comments (Phase 1.5 external research) -->
 <!-- plan-review: cycles=3 status=converged reviewers=1,2,5 final-verification=run(7 residuals, all applied) tier=standard date=2026-09-24 | cycle1=2xP0+17xP1 cycle2=4xP0+11xP1 cycle3=0xP0+1xP1+7xP2 | escalate: convergence exit at the Low-Medium cap — no issue left unresolved, but the last application was not re-reviewed -->
 
