@@ -52,10 +52,10 @@ Surfaces (7 rows; 6 are hit-capable, the 7th is the keyword source)
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body only as a closing
                                                          reference)
-  recently-closed PRs       gh api --paginate REST    (title / headRef;
-                            /repos/<owner>/<repo>/pulls   body only as a
+  recently-closed PRs       gh api REST, ONE request   (title / headRef;
+  · ADVISORY ·              /repos/<owner>/<repo>/pulls   body only as a
                                                          closing reference)
-                                                         (#3587)
+                                                         (#5251)
   local branches            git for-each-ref refs/heads
   remote branches           git for-each-ref refs/remotes   (all remotes)
   local worktrees           git worktree list --porcelain   (UNTRUNCATED)
@@ -241,33 +241,54 @@ EXIT_USAGE = 3
 
 DEFAULT_TIMEOUT = 60.0
 # PR caps are completeness bounds, not sampling windows: OPEN PRs are fetched
-# with `--limit cap+1`, CLOSED PRs are fetched to exhaustion with
-# `gh api --paginate` (#3587) and the cap is applied to the full result — either
-# way a list longer than its cap is reported TRUNCATED -> INCOMPLETE.
-# `gh pr list --search` is deliberately never used: the search API silently
-# caps at 1000 results (observed on this repo's closed surface), which is the
-# exact partial-query failure mode this tool exists to prevent.
+# with `--limit cap+1` and the cap is applied to the full result, so a list
+# longer than its cap is reported TRUNCATED.
 PR_LIMIT = 1000
-CLOSED_PR_LIMIT = 5000
 
-# The closed-PR surface is enumerated over the GitHub REST API with
-# ``gh api --paginate``, NOT the ``gh pr list`` GraphQL path, which resets
-# deterministically on this host (``read: connection reset by peer``) while
-# REST works (#3587). REST enumeration is inherently MULTI-REQUEST, so this
-# surface gets its own wall-clock budget: a single GraphQL call's 60 s budget
-# would falsely report a large repo's COMPLETE enumeration as INCOMPLETE. This
-# is a budget, not a completeness relaxation — exceeding it is still
-# INCOMPLETE (exit 2), never CLEAN. The cap and the budget bound different
-# things: `--closed-pr-limit` truncates the SCAN of the fully-fetched list,
-# while this budget bounds the FETCH — lowering the cap cannot shorten (or
-# fail fast) the enumeration.
-CLOSED_PR_TIMEOUT = 600.0
-# REST page size. A page is one HTTP response; the issue's suggested
-# ``per_page=100`` resets on this host (3/3 runs, ~40 s) while ``per_page=20``
-# completes a full 356-PR enumeration under the same transport. Completeness
-# comes from ``--paginate`` following the ``Link: rel="next"`` chain, never
-# from this number.
-REST_PAGE_SIZE = 20
+# The closed-PR surface is a BOUNDED SAMPLE fetched in exactly ONE request
+# (#5251), and it is the tool's only ADVISORY surface.
+#
+# WHY ONE REQUEST. Since #5129 every match on a TERMINAL PR is `weak`, and
+# `format_report` decides on `strong` -> `keyword_hits` -> `incomplete` — so
+# this surface's hits cannot block a dispatch, and its failure cannot conceal a
+# collision. Enumerating it to exhaustion (~19 requests at per_page=100 here;
+# measured `Link: rel="last"` = page 19 of 1,848) paid a multi-request cost for
+# a verdict-inert signal, and that cost lands on the SECONDARY rate limiter,
+# which GitHub documents as unobservable ("There is not a way to check the
+# status of your secondary rate limit"). ~93 calls at per_page=20 per lane, run
+# by many lanes at once, blow it COLLECTIVELY — which is how one lane's run
+# failed and halted its dispatch.
+#
+# COMPLETENESS IS STILL OBSERVABLE. The response's own `Link: rel="last"`
+# header gives the total on the SAME call, so the surface reports
+# "100 of 1,848" and marks itself a partial sample. It never presents 100 as
+# everything — the exact failure mode this tool exists to prevent.
+#
+# SORT. The default (created, desc) is used deliberately: `sort=updated` reads
+# the events log and drifts from the returned `updated_at` (#5251), while
+# `created` is a field of the payload itself.
+#
+# `gh pr list --search` / `search/issues` are NEVER used: the search API caps
+# at 1000 results, and `search/issues` returns ISSUE-shaped results carrying no
+# `head.ref` — silently disabling this surface's branch-name leg. Both verified
+# against the live API (#5251). `per_page=100` also no longer resets on this
+# host (3/3 runs returned 100 items), so one page can be a full one.
+CLOSED_PR_LIMIT = 100
+
+# One request's wall-clock budget. The multi-request enumeration this replaced
+# needed 600 s; a single call must finish well inside the default.
+CLOSED_PR_TIMEOUT = 60.0
+
+# ── surface authority (#5251) ────────────────────────────────────────────────
+# A BLOCKING surface can prevent a duplicate, so its failure carries
+# information and sets INCOMPLETE (fail closed). An ADVISORY surface cannot:
+# its hits never reach the verdict and its failure conceals nothing, so making
+# it INCOMPLETE would only halt a dispatch for no reason — the defect #5251
+# removes. Authority is a PROPERTY OF THE SURFACE, not of its data: deriving
+# the demotion from a payload field (e.g. dropping `state`) silently promotes
+# an advisory hit back to `strong`, which is #5129's data-dependent shape.
+AUTHORITY_BLOCKING = "blocking"
+AUTHORITY_ADVISORY = "advisory"
 
 DEFAULT_MIN_KEYWORDS = 2
 MAX_HITS_SHOWN = 20
@@ -292,6 +313,11 @@ ALL_SURFACES = (
     SURFACE_ISSUE,
     SURFACE_KEYWORDS,
 )
+
+# Surfaces whose hits and failures CANNOT affect the verdict (#5251). They are
+# still queried and still reported; they just cannot block a dispatch or force
+# INCOMPLETE. Membership here is the ONE place the demotion is expressed.
+ADVISORY_SURFACES = frozenset({SURFACE_CLOSED_PRS})
 
 # ── target-repo resolution (#4027) ───────────────────────────────────────────
 # `--repo` accepts `owner/name` OR a directory path. The slug is what every
@@ -556,6 +582,10 @@ class Surface:
     note: str = ""
     truncated: bool = False
     truncation_note: str = ""
+    # Whether this surface's hits and failures can affect the VERDICT.
+    # `advisory` surfaces are still queried, still reported, and still HIT —
+    # they simply cannot block a dispatch and cannot force INCOMPLETE (#5251).
+    authority: str = AUTHORITY_BLOCKING
     # The surface was QUERIED but has no signal to offer (e.g. a title whose
     # every term is generic, so the keyword dimension is empty). Not INCOMPLETE
     # — number matching still works — but the verdict must say the surface is
@@ -1331,88 +1361,83 @@ def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
         ) from exc
 
 
-def _gh_json_stream(gh_bin: str, args: list[str], repo: str, timeout: float) -> list:
-    """Like `_gh_json`, but for a stream of CONCATENATED JSON values.
-
-    `gh api --paginate --jq …` emits one JSON value (a page array) per page.
-    Parsing is deliberately strict, and partial output is NEVER salvaged: a
-    non-zero exit is a failure even when earlier pages were printed, and a
-    truncated value raises rather than yielding a silently-shorter list. That
-    is the difference between a loud INCOMPLETE and a false CLEAN — the exact
-    failure class this tool exists to prevent.
-    """
-    rc, out, err, timed_out = _run([gh_bin, *args], repo, timeout)
-    if rc != 0:
-        why = "timeout" if timed_out else f"exit {rc}"
-        raise SurfaceError(f"gh {' '.join(args)} failed ({why}): {_one_line(err or out)}")
-    values: list = []
-    decoder = json.JSONDecoder()
-    idx, end = 0, len(out)
-    while True:
-        while idx < end and out[idx] in " \t\r\n":
-            idx += 1
-        if idx >= end:
-            break
-        try:
-            value, idx = decoder.raw_decode(out, idx)
-        except json.JSONDecodeError as exc:
-            raise SurfaceError(
-                f"gh {' '.join(args)} returned a truncated/malformed JSON stream "
-                f"at offset {idx}: {exc}"
-            ) from exc
-        values.append(value)
-    if not values:
-        # An rc-0 transport that prints nothing must never read as a complete,
-        # EMPTY enumeration: `_gh_json` rejects empty output (`json.loads("")`
-        # raises), and this path must not be weaker than the one it parallels.
-        # A genuinely exhausted list still emits one `[]` page, so this cannot
-        # reject a legitimate empty result.
-        raise SurfaceError(
-            f"gh {' '.join(args)} returned no JSON values (empty output) — "
-            "refusing to read an empty stream as a complete enumeration"
-        )
-    return values
+_LINK_LAST_RE = re.compile(r'[?&]page=(\d+)>;\s*rel="last"')
 
 
-def _closed_pr_list_rest(gh_bin: str, slug: str | None, cwd: str,
-                         timeout: float) -> list[dict]:
-    """Enumerate ALL closed PRs over the REST API (#3587).
+def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
+                      timeout: float, sample: int) -> tuple[list[dict], int | None]:
+    """Fetch the closed-PR surface in ONE bounded request (#5251).
 
-    `gh pr list --state closed` (GraphQL) resets on this host while the REST
-    endpoint works, so this surface is fetched as
-    `GET /repos/{owner}/{repo}/pulls?state=closed&per_page=N` with
-    `--paginate`. Completeness lives in `--paginate`: gh follows the
-    `Link: rel="next"` chain to exhaustion, and without it only the first page
-    would be returned — a short enumeration wearing a complete face. `--jq`
-    projects exactly the fields the surface consumes; REST nests the branch
-    under `head.ref`, so it is re-keyed to `headRefName` to keep
-    `scan_pr_surface` transport-agnostic.
+    Returns ``(prs, approx_total)``. ``approx_total`` comes from the response's
+    OWN ``Link: rel="last"`` header, so completeness is observable on the same
+    call that fetches the sample: the caller reports "100 of ~1,848" instead of
+    silently presenting 100 as everything. It is ``None`` when the header is
+    absent — which is itself the meaningful answer "this page IS the whole
+    list".
 
-    The path is built from the RESOLVED `owner/name` literally. It deliberately
-    does NOT use gh's `{owner}/{repo}` placeholders: those resolve from the
-    CURRENT DIRECTORY, which is exactly how the cross-repo false CLEAN of
-    #4027 happened (`gh api` has no `--repo` flag).
+    ``--paginate`` is deliberately absent. Following the ``rel="next"`` chain
+    to exhaustion cost ~19 requests on this repo (measured ``Link: rel="last"``
+    = page 19 of 1,848 at ``per_page=100``; ~93 at ``per_page=20``) to compute a
+    signal that, since #5129, cannot reach the verdict. That cost lands on the
+    SECONDARY rate limiter, which GitHub documents as unobservable and which
+    many lanes therefore blow COLLECTIVELY — how one lane's run failed and
+    halted its dispatch. One page plus its header's total is strictly more
+    information per request than N pages were.
+
+    The path is built from the RESOLVED ``owner/name`` literally. It does NOT
+    use gh's ``{owner}/{repo}`` placeholders: those resolve from the CURRENT
+    DIRECTORY, which is exactly how the cross-repo false CLEAN of #4027
+    happened (``gh api`` has no ``--repo`` flag).
     """
     if not slug:
         raise SurfaceError(
             "target-repo-unresolved: no owner/name for the target repo — "
             "refusing to query the closed-PR surface against an unknown repo"
         )
+    page_size = max(1, int(sample))
     args = [
-        "api", "--paginate",
-        f"repos/{slug}/pulls?state=closed&per_page={REST_PAGE_SIZE}",
+        "api", "-i",
+        f"repos/{slug}/pulls?state=closed&per_page={page_size}",
         "--jq",
-        "map({number, title, body, state, url, headRefName: .head.ref, mergedAt: .merged_at})",
+        "map({number, title, body, state, url, "
+        "headRefName: .head.ref, mergedAt: .merged_at})",
     ]
-    prs: list[dict] = []
-    for page in _gh_json_stream(gh_bin, args, cwd, timeout):
-        if not isinstance(page, list):
-            raise SurfaceError(
-                f"gh {' '.join(args)} returned a non-list page: "
-                f"{_one_line(json.dumps(page))}"
-            )
-        prs.extend(page)
-    return prs
+    rc, out, err, timed_out = _run([gh_bin, *args], cwd, timeout)
+    if rc != 0:
+        why = "timeout" if timed_out else f"exit {rc}"
+        raise SurfaceError(f"gh {' '.join(args)} failed ({why}): {_one_line(err or out)}")
+    # `-i` prints the status line and headers, then a blank line, then the body.
+    # The wire separator is CRLF; LF is accepted too because a proxy or a future
+    # gh may normalise it. If neither is found the header/body split is
+    # ambiguous, so the surface fails loudly rather than parsing a guess.
+    head, sep, body = out.partition("\r\n\r\n")
+    if not sep:
+        head, sep, body = out.partition("\n\n")
+    if not sep:
+        raise SurfaceError(
+            "gh api -i produced no header/body separator — cannot derive the "
+            "closed-PR total, so the sample's completeness is unknowable; "
+            "refusing to present a partial list as complete"
+        )
+    try:
+        prs = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise SurfaceError(
+            f"gh {' '.join(args)} returned a non-JSON body: {exc}: {_one_line(body)}"
+        ) from exc
+    if not isinstance(prs, list):
+        raise SurfaceError(
+            f"gh {' '.join(args)} returned a non-list body: {_one_line(body)}"
+        )
+    # The total is derived from the LAST PAGE NUMBER the response advertises —
+    # NOT from `total_count`, which belongs to the search API and is unavailable
+    # here (search cannot return `head.ref`, so using it would silently disable
+    # this surface's branch-name leg). `last_page * page_size` is an UPPER bound
+    # on the true count, so it is reported with a `~`: the surface never claims a
+    # precise total it did not measure.
+    match = _LINK_LAST_RE.search(head)
+    approx_total = int(match.group(1)) * page_size if match else None
+    return prs, approx_total
 
 
 def _pr_ref(pr: dict) -> str:
@@ -1911,7 +1936,16 @@ def run_preflight(
     identity: Identity | None = None,
 ) -> tuple[list[Surface], str | None, list[str], int, bool]:
     identity = identity or Identity()
-    surfaces: dict[str, Surface] = {name: Surface(name) for name in ALL_SURFACES}
+    surfaces: dict[str, Surface] = {
+        name: Surface(
+            name,
+            authority=(
+                AUTHORITY_ADVISORY if name in ADVISORY_SURFACES
+                else AUTHORITY_BLOCKING
+            ),
+        )
+        for name in ALL_SURFACES
+    }
     cwd = target.path or os.getcwd()
     slug = target.slug
 
@@ -2025,12 +2059,33 @@ def run_preflight(
             continue
         try:
             if state == "closed":
-                prs = _closed_pr_list_rest(gh_bin, slug, cwd, closed_pr_timeout)
-            else:
-                args = ["pr", "list", "--state", state, "--repo", slug,
-                        "--limit", str(limit + 1),
-                        "--json", "number,title,body,headRefName,state,url,mergedAt"]
-                prs = _gh_json(gh_bin, args, cwd, timeout)
+                # ONE request, and the response's own Link header supplies the
+                # total — so a partial sample stays OBSERVABLE, never silent
+                # (#5251). This surface is ADVISORY: it cannot block, and its
+                # partiality must not set INCOMPLETE (see ADVISORY_SURFACES and
+                # the advisory-aware accounting in `format_report`).
+                prs, approx_total = _closed_pr_sample(
+                    gh_bin, slug, cwd, closed_pr_timeout, limit,
+                )
+                scan_pr_surface(surface, prs, issue, keywords, min_keywords)
+                if approx_total is not None and approx_total > len(prs):
+                    surface.mark_truncated(
+                        f"sampled the most recent {len(prs)} of ~{approx_total} "
+                        "closed PR(s) in ONE request; the remainder were NOT "
+                        "scanned. This surface is ADVISORY — the sample cannot "
+                        "block a dispatch, and its partiality does NOT make the "
+                        "run INCOMPLETE. Widen with --closed-pr-limit."
+                    )
+                else:
+                    surface.note = (
+                        f"{len(prs)} closed PR(s) in one request "
+                        "(this page is the complete list)"
+                    )
+                continue
+            args = ["pr", "list", "--state", state, "--repo", slug,
+                    "--limit", str(limit + 1),
+                    "--json", "number,title,body,headRefName,state,url,mergedAt"]
+            prs = _gh_json(gh_bin, args, cwd, timeout)
             if not isinstance(prs, list):
                 raise SurfaceError(f"gh {state}-PR enumeration returned non-list JSON")
             if len(prs) > limit:
@@ -2120,9 +2175,29 @@ def format_report(
     _assert_all_surfaces(ordered)
 
     hits = [h for s in ordered for h in s.hits]
-    incomplete = [s for s in ordered if s.status == STATUS_INCOMPLETE or s.truncated]
-    strong = [h for h in hits if h.strength == "strong"]
-    keyword_hits = [h for h in hits if h.strength == "keyword"]
+    # ── authority (#5251) ───────────────────────────────────────────────────
+    # ONLY a BLOCKING surface can decide the verdict. An advisory surface is
+    # still queried, still hit, and still reported — it simply cannot block a
+    # dispatch, and its failure cannot conceal a collision, so it must not set
+    # INCOMPLETE either. Filtering by SURFACE (not by hit strength) is what
+    # makes the demotion STRUCTURAL: were an advisory surface to emit a `strong`
+    # hit, it still could not block — the guarantee #5129's data-dependent shape
+    # could not give, where dropping a payload field promoted a hit back to
+    # `strong`.
+    advisory = [s for s in ordered if s.authority == AUTHORITY_ADVISORY]
+    advisory_names = {s.name for s in advisory}
+    blocking = [s for s in ordered if s.authority != AUTHORITY_ADVISORY]
+    incomplete = [
+        s for s in blocking if s.status == STATUS_INCOMPLETE or s.truncated
+    ]
+    strong = [
+        h for h in hits
+        if h.surface not in advisory_names and h.strength == "strong"
+    ]
+    keyword_hits = [
+        h for h in hits
+        if h.surface not in advisory_names and h.strength == "keyword"
+    ]
     weak = [h for h in hits if h.strength == "weak"]
 
     lines: list[str] = []
@@ -2157,8 +2232,17 @@ def format_report(
     for surface in ordered:
         note = surface.note or ""
         if surface.truncated:
-            note = (note + " " if note else "") + "⚠ TRUNCATED — list is partial"
-        status = ("BLIND" if surface in blind else surface.status)
+            note = (note + " " if note else "") + (
+                "⚠ PARTIAL — advisory sample, cannot block"
+                if surface.authority == AUTHORITY_ADVISORY
+                else "⚠ TRUNCATED — list is partial"
+            )
+        if surface in blind:
+            status = "BLIND"
+        elif surface.authority == AUTHORITY_ADVISORY:
+            status = "ADVISORY"
+        else:
+            status = surface.status
         lines.append(f"{surface.name:<24} {status:<11} {len(surface.hits):<5} {note}")
     if hits:
         lines.append("")
@@ -2193,6 +2277,31 @@ def format_report(
         lines.append("INCOMPLETE SURFACES")
         for surface in incomplete:
             lines.append(f"  [{surface.name}] {surface.truncation_note or surface.note}")
+    if advisory:
+        lines.append("")
+        lines.append(
+            "ADVISORY SURFACES — reported only; these cannot block a dispatch"
+        )
+        for surface in advisory:
+            detail = ""
+            if surface.truncated:
+                detail = " — " + (surface.truncation_note or "partial sample")
+            elif surface.status == STATUS_INCOMPLETE:
+                detail = " — " + (surface.note or "could not be queried")
+            lines.append(f"  [{surface.name}] {len(surface.hits)} hit(s){detail}")
+        if any(s.hits for s in advisory):
+            lines.append(
+                f"  NOTE: a match here is on a TERMINAL PR — immutable history, "
+                f"not in-flight work — so it does NOT block #{issue}. Verify it "
+                "by hand before treating the issue as already done."
+            )
+        if any(s.status == STATUS_INCOMPLETE or s.truncated for s in advisory):
+            lines.append(
+                "  NOTE: an advisory surface being partial or unqueryable is NOT "
+                "an INCOMPLETE run — it cannot conceal a collision, so it cannot "
+                "force exit 2 (the fail-closed posture is kept for every surface "
+                "whose failure COULD)."
+            )
     lines.append("")
     if strong:
         lines.append(
@@ -2443,9 +2552,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--closed-pr-limit",
                         default=os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", CLOSED_PR_LIMIT),
                         metavar="N",
-                        help="closed-PR completeness cap applied to the full REST enumeration; a "
-                             "longer list is TRUNCATED/INCOMPLETE. It truncates the SCAN, not the "
-                             "fetch — the enumeration itself is bounded only by --closed-pr-timeout "
+                        help="closed-PR SAMPLE size (per_page of the single "
+                             "request). The response's own Link header gives the "
+                             "total, so a sample smaller than the total is "
+                             "reported as ~N but is NOT INCOMPLETE — this surface "
+                             "is ADVISORY and cannot block a dispatch "
                              f"(default {CLOSED_PR_LIMIT}; env COLLISION_PREFLIGHT_CLOSED_PR_LIMIT)")
     # Deliberately NO ``type=float`` here. A bad value must be EXIT_USAGE, and
     # neither argparse's own error path (exits 2 == EXIT_INCOMPLETE) nor an
@@ -2454,8 +2565,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--closed-pr-timeout",
         default=os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT", CLOSED_PR_TIMEOUT),
         metavar="SECS",
-        help="wall-clock budget (secs) for the closed-PR REST enumeration, which is "
-             f"multi-request (default {CLOSED_PR_TIMEOUT:g}; env "
+        help="wall-clock budget (secs) for the single closed-PR request"
+             f" (default {CLOSED_PR_TIMEOUT:g}; env "
              "COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT)")
     args = parser.parse_args(argv)
 
