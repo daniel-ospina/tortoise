@@ -185,6 +185,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The pin also switches `python3` off the runner's ambient interpreter,
+      # which ships PyYAML, onto the tool-cache one, which does not --
+      # ci_selection.py imports yaml locally, so the dependency must be
+      # installed explicitly (same remedy as the manifest-integrity job below).
+      - name: Install pyyaml
+        run: pip install pyyaml==6.0.2
       - name: Tiered selection
         id: select
         run: |
