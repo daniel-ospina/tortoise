@@ -185,6 +185,24 @@ def _redact(uri: str) -> str:
             "rediss://u:pw@h:1\n:secretpw@h:2",
             "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
         ),
+        # ...including a continuation line with NO scheme and no '@' — the
+        # empty user before the ':' is the only safe tell on such a line.
+        (
+            "rediss://u:pw@h:1\n:S3ntinelpw",
+            "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
+        ),
+        # A whole value with no scheme and no '@' but an empty user.
+        (":S3ntinelpw", "<uri-redacted-unrecognised-shape>"),
+        # The `@host` copy-paste that KEPT the port: two ':' is not a
+        # host:port (a genuine one has exactly one), so it is credential
+        # material. This is the variant both maskers used to leak.
+        ("rediss://user:pw:6379", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://:pw:6379", "<uri-redacted-unrecognised-shape>"),
+        # A trailing ':' with no port is not a port — fail closed.
+        ("rediss://host:", "<uri-redacted-unrecognised-shape>"),
+        # ...while a bracketed IPv6 host (with or without a numeric port) is a
+        # recognised-safe target and keeps printing unchanged.
+        ("rediss://[::1]:6379/tortoise", "rediss://[::1]:6379/tortoise"),
     ],
 )
 def test_redactor_masks_userinfo_and_keeps_the_target(uri: str, expected: str):
@@ -216,6 +234,24 @@ _BARE_URI_CORPUS = [
     "docker://user:p@ss@host:7687/g#frag",
     "rediss://r-example.host.cloud:50317",
     "docker://:falkordb@localhost:6379/tortoise_test_matrix",
+    # #2987: the no-'@' credential shapes (and the port-retaining variant).
+    # These MUST be in the parity list — a corpus that omits the shapes the PR
+    # changes cannot pin the predicate it changed (PR #2984's review recorded
+    # that exact defect as "over-claimed parity").
+    "rediss://:falkordb",
+    "rediss://user:pw",
+    "rediss://:pw:6379",
+    "rediss://user:pw:6379",
+    "rediss://host:",
+    ":S3ntinelpw",
+    # A multi-line value: both implementations now walk lines, so parity holds
+    # here too (it did not before #2987 — the shell masked per line while the
+    # canonical's last-'@' rule consumed the whole message).
+    "rediss://u:pw@h:1\n:secretpw@h:2",
+    "rediss://u:pw@h:1\nrediss://:secretpw",
+    # ...and the recognised-safe shapes that must stay unchanged.
+    "rediss://127.0.0.1:7687/tortoise",
+    "rediss://[::1]:6379/tortoise",
 ]
 
 
@@ -229,18 +265,16 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
     as equivalent and was not.
 
     Scope: parity holds over the corpus below, which enumerates the bare-URI
-    shapes the entrypoint can receive. One deliberate, documented asymmetry:
-    the canonical helper additionally masks every `scheme://` occurrence inside
-    a longer message; the shell helper is `^`-anchored and does not, by design.
+    shapes the entrypoint can receive. One documented asymmetry remains: the
+    canonical helper additionally masks every `scheme://` occurrence inside a
+    longer message; the shell helper is `^`-anchored and does not, by design.
     Both now fail closed on a '?'/'#', a bare '://', or an '@' inside a
     password (#2983), and on a no-'@' credential shape (#2987).
 
-    #2987 — one divergence is stated rather than shared: the shell masks PER
-    LINE (the unit the boot log emits), while the canonical last-'@' rule
-    consumes a whole message and therefore masks a multi-line value ACROSS its
-    newline. Both outputs are leak-free and they are not byte-identical, so the
-    corpus below holds single-line values only; the multi-line behaviour of each
-    is pinned by its own test.
+    #2987: parity now ALSO holds for multi-line values. The shell masks per
+    line and so does the canonical helper, and the corpus carries multi-line
+    shapes — a single-line-only corpus is what let the two predicates diverge
+    on `rediss://user:pw:6379` while this test stayed green.
     """
     from tortoise.__main__ import _mask_uri_userinfo
 
@@ -271,13 +305,8 @@ def test_redactor_fails_closed_per_line_on_a_multiline_value():
     assert _redact("rediss://u:pw@h:1\n") == "rediss://:***@h:1\n"
 
 
-def test_multiline_divergence_is_stated_and_neither_masker_leaks():
-    """#2987 — the one deliberate asymmetry, named rather than accidental.
-
-    The shell masks per line; the canonical helper's last-'@' rule consumes a
-    whole message and so masks a multi-line value across its newline. The
-    outputs differ and BOTH must be leak-free — which is why this asymmetry is
-    asserted here instead of being silently excluded from the parity corpus.
+def test_multiline_values_are_masked_and_agree_across_both_maskers():
+    """#2987 — the leak was a LINE, not a value; both maskers now walk lines.
 
     Class B: (1) the marker pair `S3n`/`tinel` makes this fail if either
     implementation emits the second line's password; (2) reachable — the boot
@@ -285,18 +314,144 @@ def test_multiline_divergence_is_stated_and_neither_masker_leaks():
     """
     from tortoise.__main__ import _mask_uri_userinfo
 
-    uri = "rediss://u:S3npw@h:1\n:S3ntinelpw@h:2"
-    shell = _redact(uri)
-    canonical = _mask_uri_userinfo(uri)
+    for uri in (
+        "rediss://u:S3npw@h:1\n:S3ntinelpw@h:2",
+        "rediss://u:S3npw@h:1\n:S3ntinelpw",
+        "rediss://u:S3npw@h:1\nrediss://:S3ntinelpw",
+    ):
+        shell = _redact(uri)
+        canonical = _mask_uri_userinfo(uri)
+        for out, label in ((shell, "shell"), (canonical, "canonical")):
+            assert "S3n" not in out, f"{label} leaked the password marker: {out!r}"
+            assert "tinel" not in out, f"{label} leaked the password marker: {out!r}"
+        assert shell == canonical, (
+            f"maskers disagree on the multi-line value {uri!r}: "
+            f"shell={shell!r} canonical={canonical!r}"
+        )
 
-    for out, label in ((shell, "shell"), (canonical, "canonical")):
-        assert "S3n" not in out, f"{label} leaked the password marker: {out!r}"
-        assert "tinel" not in out, f"{label} leaked the password marker: {out!r}"
-    assert shell != canonical, (
-        "the per-line / whole-message divergence no longer exists — if the two "
-        "implementations now agree on multi-line values, fold the shape into "
-        "_BARE_URI_CORPUS and delete this test"
+
+def _redact_many(values: list[str]) -> list[str]:
+    """Run the shipped shell redactor over many values in ONE bash invocation.
+
+    Batching is what makes the grammar test below affordable: it enumerates
+    hundreds of values, and a subprocess per value would be seconds of process
+    churn. Values are NUL-delimited — a DB URI never contains a NUL, and it is
+    the only delimiter that survives both a newline-bearing value and `read -r`.
+    """
+    script = (
+        "set -euo pipefail\n"
+        + _redactor_body()
+        + "\nwhile IFS= read -r -d '' v; do _redact_uri \"$v\"; printf '\\0'; done\n"
     )
+    payload = b"".join(value.encode() + b"\0" for value in values)
+    proc = subprocess.run(["bash", "-c", script], input=payload, capture_output=True)
+    assert proc.returncode == 0, f"redactor failed: {proc.stderr.decode()}"
+    chunks = proc.stdout.split(b"\0")
+    assert chunks[-1] == b"", "the redactor's NUL framing was lost"
+    return [chunk.decode() for chunk in chunks[:-1]]
+
+
+# A grammar over the AUTHORITY (the text after `<scheme>://`), enumerated so
+# the parity assertion cannot be satisfied by a human-chosen spot-check list.
+# It deliberately mixes the recognised-safe shapes with every way a dropped
+# '@host' can present: empty user, non-numeric tail, multi-':' credential,
+# trailing ':', bracketed IPv6, and an '@' that has been left in place.
+_AUTHORITY_GRAMMAR = [
+    "",
+    "user",
+    "host",
+    "host:6379",
+    "host:notaport",
+    "host:",
+    "127.0.0.1:7687",
+    "[::1]",
+    "[::1]:6379",
+    "[::1]:notaport",
+    "[::1",
+    "[S3ntinel",
+    ":S3ntinel",
+    ":S3ntinel:6379",
+    ":S3ntinel:notaport",
+    ":6379",
+    ":",
+    "::",
+    "user:S3ntinel",
+    "user:S3ntinel:6379",
+    "user:S3ntinel:notaport",
+    "user:6379",
+    "user:",
+    "user:pw",
+    "a:b:c:d",
+    "@host",
+    "user:S3ntinel@host:6379",
+    ":S3ntinel@host:6379",
+    "host:6379/db",
+    "host:6379?x",
+    "host:6379#y",
+    "host:6379'x",
+    "[::1]:6379/tortoise",
+]
+
+
+def test_shell_and_canonical_agree_over_an_enumerated_authority_grammar():
+    """#2987 — parity is pinned by a grammar, not by a spot-check list.
+
+    Class B: (1) this fails on any authority where the shell and the canonical
+    helper disagree — e.g. `rediss://user:pw:6379` before the fix, where the
+    shell failed closed and the canonical printed the password; (2) reachable:
+    each enumerated authority is a value an operator can put in
+    `TORTOISE_DB_URI` / `--db`, and both mask functions are on that path.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    values = [
+        f"{scheme}://{authority}"
+        for scheme in ("rediss", "docker", "bolt")
+        for authority in _AUTHORITY_GRAMMAR
+    ]
+    shells = _redact_many(values)
+    assert len(shells) == len(values)
+    for value, shell in zip(values, shells, strict=True):
+        canonical = _mask_uri_userinfo(value)
+        assert shell == canonical, (
+            f"maskers disagree on {value!r}: shell={shell!r} canonical={canonical!r}"
+        )
+
+
+def test_neither_masker_emits_a_no_at_credential():
+    """#2987 — the leak bar: the password marker never survives either masker.
+
+    Class B: (1) the marker pair `S3n`/`tinel` makes this fail on any shape that
+    still prints its credential; (2) each shape is a copy-paste an operator can
+    produce by dropping the `@host` tail (with or without the port), and each is
+    reachable through `TORTOISE_DB_URI` at boot and through the CLI error paths.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    shapes = [
+        "rediss://:S3ntinel",
+        "rediss://user:S3ntinel",
+        "rediss://:S3ntinel:6379",
+        "rediss://user:S3ntinel:6379",
+        "rediss://:S3ntinel:notaport",
+        "rediss://user:S3ntinel:notaport",
+        "rediss://user:S3ntinel'",
+        "rediss://:S3ntinel'",
+        ":S3ntinel",
+        "rediss://u:pw@h:1\n:S3ntinel",
+        "rediss://u:pw@h:1\nrediss://:S3ntinel",
+    ]
+    # NOT asserted: a continuation line with a NON-empty user (`user:pw:6379`).
+    # `_mask_uri_userinfo` cannot tell it from ordinary prose (`C:\foo`, an
+    # exception containing a colon), so both maskers leave it — a recorded
+    # residual, not a silent one (see the #2987 follow-up issue).
+    for value in shapes:
+        for label, out in (
+            ("shell", _redact(value)),
+            ("canonical", _mask_uri_userinfo(value)),
+        ):
+            assert "S3n" not in out, f"{label} leaked {value!r} -> {out!r}"
+            assert "tinel" not in out, f"{label} leaked {value!r} -> {out!r}"
 
 
 def _extract_boot_db_block(source: str) -> str:
@@ -346,6 +501,10 @@ def test_boot_db_block_never_emits_the_password(secret: str, branch: str):
         # residual 2: no '@' at all — the copy-paste that dropped '@host'.
         ("rediss://:S3ntinelPw", "S3ntinelPw"),
         ("rediss://Tortoise2:S3ntinelPw", "S3ntinelPw"),
+        # residual 2 with the PORT kept: two ':' is not a host:port.
+        ("rediss://Tortoise2:S3ntinelPw:6379", "S3ntinelPw"),
+        # residual 1 with a continuation line that has NO scheme and no '@'.
+        ("rediss://Tortoise2:hunter2@r-example.host.cloud:50317\n:S3ntinelPw", "S3ntinelPw"),
         # no scheme at all, but userinfo: the pre-existing guard's shape.
         (":S3ntinelPw@r-example.host.cloud:50317", "S3ntinelPw"),
     ],

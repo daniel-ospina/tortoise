@@ -46,8 +46,18 @@ set -euo pipefail
 # scheme and echoed the rest, and (2) the guard never fired because line 1 had
 # already changed the comparison. A line is the unit the boot log emits, so a
 # line must be safe on its own.
+#
+# #2987 second residual — the guard's only userinfo marker was '@', but '@' is
+# not the only credential shape. A copy-paste that drops the '@host' tail leaves
+# `scheme://:pw` (empty user) or `scheme://user:pw`; a copy-paste that keeps the
+# port leaves `scheme://user:pw:6379`. The fail-closed predicate below mirrors
+# `tortoise/__main__.py::_credential_shaped` exactly (see the parity test), and a
+# line may only stay unmasked when it is a RECOGNISED-SAFE shape: empty, a plain
+# host with no ':', a single-':' host:port with a NUMERIC port, or a bracketed
+# IPv6 host with an optional numeric port. Everything else fails closed.
 _redact_uri() {
-    local uri="${1:-}" masked line out="" first=1 shaped=0 authority before after
+    local uri="${1:-}" masked line out="" first=1 shaped=0 candidate \
+          tail before rest
     if [ -z "$uri" ]; then
         return 0
     fi
@@ -58,36 +68,61 @@ _redact_uri() {
             # redaction exists to preserve is gone with no signal.
             masked="<unprintable-uri>"
         elif [ "$masked" = "$line" ]; then
-            # Fail closed on a line this rule cannot recognise. '@' is the usual
-            # marker (a copy-paste that dropped the scheme, say). It is NOT the
-            # only one: `rediss://:pw` and `rediss://user:pw` are credentials
-            # whose '@host' tail was dropped, and the mask above cannot see them
-            # because it requires an '@'. The absence of a maskable form is
-            # therefore treated as its own failure mode rather than as "nothing
-            # to mask".
             shaped=0
             case "$line" in
                 *@*) shaped=1 ;;
             esac
-            if [ "$shaped" -eq 0 ] && [ "$line" != "${line#*://}" ]; then
-                authority="${line#*://}"
+            candidate=""
+            if [ "$shaped" -eq 0 ]; then
+                if [ "$line" != "${line#*://}" ]; then
+                    candidate="${line#*://}"
+                else
+                    # No scheme on this line. Only the empty-user tell is safe
+                    # here: an arbitrary 'a:b' line is prose or a path, not a
+                    # credential, and the canonical helper sees such text in
+                    # error messages. A continuation line of a multi-line
+                    # credential is exactly `:password`.
+                    case "$line" in
+                        :*) candidate="$line" ;;
+                    esac
+                fi
                 # Bound the authority at the first path/query/fragment
-                # delimiter: everything after it is not the authority.
-                authority="${authority%%[/?#]*}"
-                if [ "$authority" != "${authority#*:}" ]; then
-                    before="${authority%%:*}"
-                    after="${authority##*:}"
-                    if [ -z "$before" ]; then
-                        shaped=1
-                    else
-                        # A NUMERIC field after the last ':' is a port
-                        # (host:6379), not a credential — so a password-less
-                        # target keeps printing unchanged rather than being
-                        # replaced wholesale.
-                        case "$after" in
-                            *[!0-9]*) shaped=1 ;;
-                        esac
-                    fi
+                # delimiter, quote or whitespace: everything after it is not the
+                # authority. Keep `tortoise/__main__.py::_authority_region` in
+                # sync with this set — a different cut set is a divergence.
+                candidate="${candidate%%[/?#[:space:]]*}"
+                candidate="${candidate%%\'*}"
+                candidate="${candidate%%\"*}"
+                if [ -n "$candidate" ]; then
+                    case "$candidate" in
+                        \[*)
+                            # A bracketed IPv6 host is recognised-safe with an
+                            # optional numeric port; a malformed bracket is not.
+                            tail="${candidate#*\]}"
+                            case "$tail" in
+                                ''|:[0-9]*) ;;
+                                *) shaped=1 ;;
+                            esac
+                            ;;
+                        *:*)
+                            before="${candidate%%:*}"
+                            rest="${candidate#*:}"
+                            if [ -z "$before" ] || [ "$rest" != "${rest#*:}" ]; then
+                                # empty user before the first ':' (a dropped
+                                # '@host'), or more than one ':' — a genuine
+                                # host:port has exactly one.
+                                shaped=1
+                            else
+                                # A NUMERIC field after the ':' is a port, not a
+                                # credential, so a password-less target keeps
+                                # printing unchanged. An empty or non-numeric
+                                # tail is credential material.
+                                case "$rest" in
+                                    ''|*[!0-9]*) shaped=1 ;;
+                                esac
+                            fi
+                            ;;
+                    esac
                 fi
             fi
             if [ "$shaped" -eq 1 ]; then

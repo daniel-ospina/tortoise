@@ -4731,11 +4731,18 @@ def _mask_uri_userinfo(target: str) -> str:
 
     #2987 fail-closed, no-'@' form: '@' is the usual userinfo marker, but it
     is not the only credential shape. A copy-paste that dropped the '@host'
-    tail leaves `rediss://:pw` (empty user) or `rediss://user:pw`, and the
-    last-'@' boundary finds nothing in either — so both used to pass through
-    verbatim and print the password. Entrypoint.sh::_redact_uri mirrors this
-    predicate per line; tests/test_boot_regressions.py pins the two together
-    over the single-line corpus.
+    tail leaves `rediss://:pw` (empty user) or `rediss://user:pw`; one that
+    kept the port leaves `rediss://user:pw:6379`. The last-'@' boundary finds
+    nothing in any of them, so all used to pass through verbatim and print
+    the password. The predicate below fails closed on every shape that is not
+    a RECOGNISED-SAFE host; entrypoint.sh::_redact_uri mirrors it, and
+    tests/test_boot_regressions.py pins the two together over an enumerated
+    authority grammar.
+
+    Processing is PER LINE: a line is the unit the boot log emits, so a line
+    must be safe on its own. (The last-'@' rule used to consume a multi-line
+    value ACROSS its newline, masking one line while echoing another, which is
+    exactly the leak #2987 records; both implementations now walk lines.)
     """
     from urllib.parse import urlsplit
 
@@ -4748,99 +4755,128 @@ def _mask_uri_userinfo(target: str) -> str:
         """The authority portion of `rest` (everything after '://').
 
         #2987: bounded by the first path/query/fragment delimiter, quote or
-        whitespace. It is deliberately NOT bounded by ':' or '@' — those are
-        the credential's own shape markers — and the quote/whitespace stops
-        keep a URI embedded in an error message from swallowing the prose
-        that follows it.
+        whitespace — the SAME cut set as entrypoint.sh::_redact_uri's
+        `${candidate%%[/?#[:space:]]*}` followed by its quote strips. It is
+        deliberately NOT bounded by ':' or '@' (the credential's own shape
+        markers), so the two implementations bound the same region on every
+        input.
         """
         for idx, char in enumerate(rest):
             if char in "/?#\"' \t\n\r":
                 return rest[:idx]
         return rest
 
-    def _credential_shaped(authority: str) -> bool:
-        """True when a no-'@' authority is a credential, not `host:port`.
+    def _credential_shaped(region: str) -> bool:
+        """True unless a no-'@' authority is a RECOGNISED-SAFE shape.
 
-        #2987: a missing '@' does not prove there is no password. An empty
-        user before the first ':' (`rediss://:pw`) is the `rediss://:pw@host`
-        form with its tail dropped; a non-numeric field after the last ':'
-        (`rediss://user:pw`) cannot be a port, so it is password material.
-        A non-empty host with a numeric port is the ONLY shape that returns
-        False — i.e. a genuine password-less target stays readable.
+        #2987: a missing '@' does not prove there is no password. A copy-paste
+        that dropped the '@host' tail leaves `rediss://:pw` (empty user) or
+        `rediss://user:pw`; one that kept the port leaves
+        `rediss://user:pw:6379`. All are credentials. Only these pass
+        unchanged: the empty region, a plain host with no ':', a single-':'
+        `host:port` whose port is NUMERIC, or a bracketed IPv6 host (`[::1]`)
+        with an optional numeric port. Mirrors entrypoint.sh::_redact_uri's
+        predicate exactly.
         """
-        if ":" not in authority:
+        if not region:
             return False
-        user, _, port = authority.rpartition(":")
-        return (not user) or (not port.isdigit())
+        if region.startswith("["):
+            _, sep, rest = region[1:].partition("]")
+            safe = bool(sep) and (
+                rest == "" or (rest.startswith(":") and rest[1:].isdigit())
+            )
+            return not safe
+        if ":" not in region:
+            return False
+        user, _, tail = region.partition(":")
+        if not user:
+            return True  # empty user before the first ':' — a dropped '@host'
+        if ":" in tail:
+            return True  # a genuine host:port has exactly one ':'
+        return not tail.isdigit()  # a non-numeric (or empty) tail is not a port
 
-    out: list[str] = []
-    i = 0
-    while True:
-        j = target.find("://", i)
-        if j < 0:
-            out.append(target[i:])
-            break
-        # Recover the scheme token by walking back from '://' over scheme
-        # characters (stops at prose when the URI is embedded in a message).
-        k = j
-        while k > i and (target[k - 1].isalnum() or target[k - 1] in "+-."):
-            k -= 1
-        scheme = target[k:j]
-        if not _scheme_ok(scheme):
-            out.append(target[i:j + 3])
-            i = j + 3
-            continue
-        if i == 0 and k == 0:
-            # Bare URI — urlsplit is the authoritative scheme parse.
-            try:
-                if not urlsplit(target).scheme:
-                    out.append(target[i:])
-                    break
-            except ValueError:
-                pass  # malformed authority (e.g. unmatched '[') — mask below
-        # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
-        # everything that follows the scheme. A password may contain '?',
-        # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
-        # region on any of those truncates it before the real '@' and
-        # re-emits credential material. Masking to the last '@' can
-        # over-reach — past a genuine query/fragment, or across later prose
-        # or a second URI in the same message — which loses diagnosability
-        # but never leaks, and mirrors entrypoint.sh::_redact_uri. For
-        # well-formed URIs (delimiters only after the userinfo '@') the
-        # output is unchanged.
-        rest_start = j + 3
-        authority = target[rest_start:]
-        at = authority.rfind("@")
-        if at < 0:
-            # #2987 fail-closed, no-'@' form: the last-'@' boundary found
-            # nothing, but a credential may still be there (`rediss://:pw`, or
-            # `rediss://user:pw`). Replace the credential-shaped URI rather
-            # than echoing it — the app rejects a malformed URI, but only AFTER
-            # an error path may already have printed it. A password-less
-            # `host:port` is not credential-shaped and is left byte-identical.
-            region = _authority_region(authority)
-            if _credential_shaped(region):
-                if i == 0 and k == 0:
-                    # Bare URI (the whole target): the sentinel replaces it,
-                    # identical to entrypoint.sh::_redact_uri's per-line
-                    # fail-closed output on the same value.
-                    out.append("<uri-redacted-unrecognised-shape>")
-                else:
-                    # Embedded in a message: replace only the URI so the prose
-                    # around it stays diagnosable.
-                    out.append(
-                        target[i:k] + target[k:rest_start]
-                        + "<uri-redacted-unrecognised-shape>"
-                        + target[rest_start + len(region):]
-                    )
+    def _mask_line(line: str) -> str:
+        # A continuation line of a multi-line credential — the scheme was on an
+        # earlier line. Only the empty-user tell is safe here: an arbitrary
+        # 'a:b' line is prose or a path (`C:\foo`), not a credential, and this
+        # helper sees such text in error messages. (RESIDUAL, #2987-followup: a
+        # continuation line with a NON-empty user, e.g. `user:pw:6379`, is not
+        # distinguishable from prose here and is emitted — recorded on the
+        # issue rather than guessed at.)
+        if ("://" not in line and line.startswith(":")
+                and _credential_shaped(_authority_region(line))):
+            return "<uri-redacted-unrecognised-shape>"
+        out: list[str] = []
+        i = 0
+        while True:
+            j = line.find("://", i)
+            if j < 0:
+                out.append(line[i:])
                 break
-            out.append(target[i:j + 3])
-            i = j + 3
-            continue
-        out.append(target[i:k])
-        out.append(f"{scheme}://:***@{authority[at + 1:]}")
-        i = len(target)
-    return "".join(out)
+            # Recover the scheme token by walking back from '://' over scheme
+            # characters (stops at prose when the URI is embedded in a message).
+            k = j
+            while k > i and (line[k - 1].isalnum() or line[k - 1] in "+-."):
+                k -= 1
+            scheme = line[k:j]
+            if not _scheme_ok(scheme):
+                out.append(line[i:j + 3])
+                i = j + 3
+                continue
+            if i == 0 and k == 0:
+                # Bare URI — urlsplit is the authoritative scheme parse.
+                try:
+                    if not urlsplit(line).scheme:
+                        out.append(line[i:])
+                        break
+                except ValueError:
+                    pass  # malformed authority (unmatched '[') — mask below
+            # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
+            # everything that follows the scheme. A password may contain '?',
+            # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
+            # region on any of those truncates it before the real '@' and
+            # re-emits credential material. Masking to the last '@' can
+            # over-reach — past a genuine query/fragment, or across later prose
+            # or a second URI in the same message — which loses diagnosability
+            # but never leaks, and mirrors entrypoint.sh::_redact_uri. For
+            # well-formed URIs (delimiters only after the userinfo '@') the
+            # output is unchanged.
+            rest_start = j + 3
+            authority = line[rest_start:]
+            at = authority.rfind("@")
+            if at < 0:
+                # #2987 fail-closed, no-'@' form: the last-'@' boundary found
+                # nothing, but a credential may still be there (`rediss://:pw`,
+                # `rediss://user:pw`, `rediss://user:pw:6379`). Replace the
+                # credential-shaped URI rather than echoing it — the app
+                # rejects a malformed URI, but only AFTER an error path may
+                # already have printed it. A recognised-safe target (a plain
+                # host, `host:port`, bracketed IPv6) is left byte-identical.
+                region = _authority_region(authority)
+                if _credential_shaped(region):
+                    if i == 0 and k == 0:
+                        # Bare URI (the whole line): the sentinel replaces it,
+                        # identical to entrypoint.sh::_redact_uri's per-line
+                        # fail-closed output on the same value.
+                        out.append("<uri-redacted-unrecognised-shape>")
+                    else:
+                        # Embedded in a message: replace only the URI so the
+                        # prose around it stays diagnosable.
+                        out.append(
+                            line[i:k] + line[k:rest_start]
+                            + "<uri-redacted-unrecognised-shape>"
+                            + line[rest_start + len(region):]
+                        )
+                    break
+                out.append(line[i:j + 3])
+                i = j + 3
+                continue
+            out.append(line[i:k])
+            out.append(f"{scheme}://:***@{authority[at + 1:]}")
+            i = len(line)
+        return "".join(out)
+
+    return "\n".join(_mask_line(_line) for _line in target.split("\n"))
 
 
 def _index_github_child_cmd(target: str, repo_root: str,
