@@ -1237,6 +1237,47 @@ _BACKEND_FAILURE_MARKERS: tuple[tuple[str, str], ...] = (
 
 # The per-cause body. Each NAMES its own cause and states what the cause
 # actually means, so the operator does not act on a neighbour's remedy.
+#
+# The FORK remedy is the one cause whose body is not a single literal. Its
+# refusal has TWO mechanically distinct causes with a BYTE-IDENTICAL reply
+# (`GRAPH.COPY failed, could not fork` — see tools/embedded_evidence.py): a
+# background RDB/AOF child in the fork slot, and a hung un-reaped
+# `redis-module-fork` child from a PREVIOUS fork (#3845). And its slot cure
+# exists only on the EMBEDDED lane. Asserting one cause, or prescribing
+# `recover_fork_slot` where `socket_path_of(db)` is None, is wrong on both
+# counts. The body is therefore built from a shared cause-analysis prefix
+# plus a lane-specific action, selected by `_backend_failure_message`'s
+# `embedded` flag (the call site's own `_is_embedded and not is_prod`
+# reading), so a server-lane operator is never handed an embedded-only call.
+_FORK_REMEDY_CAUSE_ANALYSIS = (
+    "DB health check failed on open: the server refused a module fork "
+    "(FalkorDB replies `GRAPH.COPY failed, could not fork`). Redis allows "
+    "ONE module-fork child at a time, and that refusal has TWO mechanically "
+    "distinct causes with a byte-identical reply: an in-flight background "
+    "RDB save (or AOF rewrite) child occupies the slot, OR a hung, "
+    "un-reaped `redis-module-fork` child from a PREVIOUS fork still holds "
+    "it. errno 17 is EEXIST (the slot is occupied), NOT memory or process "
+    "pressure; the graph is not corrupt. Discriminate before acting: if no "
+    "hung `redis-module-fork` child is found, the slot is held by an "
+    "in-flight save — wait for it to finish and retry. A refusal carrying "
+    "EAGAIN (`Resource temporarily unavailable`) is a DIFFERENT mechanism — "
+    "a real resource limit — and is not cleared by reaping a child. "
+)
+_FORK_REMEDY_EMBEDDED = _FORK_REMEDY_CAUSE_ANALYSIS + (
+    "[embedded lane] Free a hung child with "
+    "`fork_slot.recover_fork_slot(db)` (it kills this daemon's own hung "
+    "child) or kill the lingering `redis-module-fork` child directly; the "
+    "refusal clears as soon as Redis reaps it. Do NOT rebuild. See #3845 "
+    "and #3634."
+)
+_FORK_REMEDY_SERVER = _FORK_REMEDY_CAUSE_ANALYSIS + (
+    "[server lane — remote/docker FalkorDB] The client-side slot cure is "
+    "embedded-only: this is not an embedded unix-socket server, so there is "
+    "no local daemon whose hung child could be reaped. On the SERVER's host, "
+    "reap the lingering `redis-module-fork` child or restart the FalkorDB "
+    "server; the refusal clears as soon as Redis reaps it. Do NOT rebuild. "
+    "See #3845 and #3634."
+)
 _BACKEND_FAILURE_REMEDIES: dict[str, str] = {
     "loading": (
         "DB health check failed on open: the server is still LOADING its "
@@ -1248,21 +1289,6 @@ _BACKEND_FAILURE_REMEDIES: dict[str, str] = {
         "for which a smaller snapshot is the durable fix — but the remedy "
         "for THIS failure is simply to wait.) Do NOT treat this as "
         "corruption. See #3634."
-    ),
-    "fork": (
-        "DB health check failed on open: the server refused a module fork "
-        "(FalkorDB replies `GRAPH.COPY failed, could not fork`). Redis "
-        "allows ONE module-fork child at a time, and a hung, un-reaped "
-        "`redis-module-fork` child still holds that slot — errno 17 is "
-        "EEXIST (the slot is occupied), NOT memory or process pressure. "
-        "This is a FalkorDB / macOS-libsystem defect, not ours, and the "
-        "graph is not corrupt. Free the slot with "
-        "`fork_slot.recover_fork_slot(db)` (it kills this daemon's own "
-        "hung child) or kill the lingering `redis-module-fork` child "
-        "directly; the refusal clears as soon as Redis reaps it. A refusal "
-        "carrying EAGAIN (`Resource temporarily unavailable`) is a "
-        "DIFFERENT mechanism — a real resource limit — and is not cleared "
-        "by reaping a child. Do NOT rebuild. See #3845 and #3634."
     ),
 }
 
@@ -2873,7 +2899,9 @@ class FalkorProjection(
             "the shared-lane form of this."
         )
 
-    def _backend_failure_message(self, exc: BaseException | None) -> str | None:
+    def _backend_failure_message(
+        self, exc: BaseException | None, *, embedded: bool = False
+    ) -> str | None:
         """Cause-specific error for a recognised NON-corruption failure.
 
         The maxmemory refusal has its own classifier (``_write_refusal_message``)
@@ -2881,6 +2909,12 @@ class FalkorProjection(
         still NOT corruption — a server that has not finished LOADING and a
         server refusing a module fork. Returns ``None`` when no cause matches,
         so a genuine corruption failure still reaches the rebuild advice.
+
+        ``embedded`` selects the lane-specific FORK remedy (the slot cure is
+        embedded-only). Its default is ``False`` — the conservative lane: a
+        caller that has not stated its lane is never told to call an
+        embedded-only function. ``_auto_health_recover`` passes its own
+        ``self._is_embedded and not is_prod`` reading.
         """
         if exc is None:
             return None
@@ -2888,7 +2922,7 @@ class FalkorProjection(
         # (P2-1): it walks the __cause__/__context__ chain and owns the marker
         # vocabulary, so this call site and hosted_backup's can never drift.
         if is_fork_refusal(exc):
-            return _BACKEND_FAILURE_REMEDIES["fork"]
+            return _FORK_REMEDY_EMBEDDED if embedded else _FORK_REMEDY_SERVER
         text = str(exc).lower()
         for marker, cause in _BACKEND_FAILURE_MARKERS:
             if marker in text:
@@ -2941,7 +2975,10 @@ class FalkorProjection(
                 raise RuntimeError(refusal)
             # #3634 — the other NON-corruption causes keep their own remedy
             # instead of falling through to the rebuild advice.
-            cause_message = self._backend_failure_message(self._probe_error)
+            cause_message = self._backend_failure_message(
+                self._probe_error,
+                embedded=self._is_embedded and not is_prod,
+            )
             if cause_message is not None:
                 raise RuntimeError(cause_message)
             if is_prod or not self._is_embedded:

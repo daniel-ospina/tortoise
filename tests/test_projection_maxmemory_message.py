@@ -161,14 +161,17 @@ def test_documented_fork_wordings_route_to_the_fork_remedy(cause):
     `tests/test_fork_slot_wedge_3845.py` — so a real fork refusal fell through
     to the rebuild advice. Routing through `fork_slot.is_fork_refusal` closes
     that gap; this test fails if that routing is removed.
+
+    `embedded=True` pins the embedded-lane variant, whose action names the
+    slot cure. The server-lane variant is pinned separately (below).
     """
     proj = _projection(probe_error=RuntimeError(cause))
-    msg = proj._backend_failure_message(RuntimeError(cause))
+    msg = proj._backend_failure_message(RuntimeError(cause), embedded=True)
     assert msg is not None, cause
     assert "recover_fork_slot" in msg, msg
 
 
-def test_fork_remedy_names_the_slot_cure_and_not_memory():
+def test_fork_remedy_names_the_slot_cure_and_not_memory(monkeypatch):
     """P2-4 — the fork remedy must not repeat the misattribution it fixes.
 
     errno 17 is EEXIST: a hung `redis-module-fork` child holds Redis's single
@@ -176,8 +179,15 @@ def test_fork_remedy_names_the_slot_cure_and_not_memory():
     remedy shipped in 0b9b78eb8 told the operator to relieve a memory limit,
     which cannot clear a slot held by a hung child, and omitted the documented
     cure. Pin both halves: the cure is named, the memory misattribution is not.
+
+    Pinned on the EMBEDDED lane (`_is_embedded=True`, no FLY_APP_NAME) — the
+    only lane where `recover_fork_slot` applies.
     """
-    proj = _projection(probe_error=RuntimeError("GRAPH.COPY failed, could not fork"))
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(
+        probe_error=RuntimeError("GRAPH.COPY failed, could not fork"),
+        embedded=True,
+    )
     with pytest.raises(RuntimeError) as err:
         proj._auto_health_recover()
     msg = str(err.value)
@@ -189,6 +199,79 @@ def test_fork_remedy_names_the_slot_cure_and_not_memory():
     assert "raise --maxmemory" not in msg, msg
     assert "memory/process limit" not in msg, msg
     assert "add memory" not in msg.lower(), msg
+
+
+def test_fork_remedy_names_both_causes_and_the_discriminator(monkeypatch):
+    """P2 — one refusal, TWO mechanically distinct causes; do not assert one.
+
+    `GRAPH.COPY failed, could not fork` is emitted both when a background
+    RDB/AOF child holds the slot (transient, healthy) and when a previous
+    module fork never exited (#3845). A remedy that asserts only the hang is
+    false in the save case — and its prescribed `recover_fork_slot` is a NO-OP
+    there (it is socket-scoped to `redis-module-fork`, so it returns
+    `recovered=False`). Pin both causes and the discriminating action.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(
+        probe_error=RuntimeError("GRAPH.COPY failed, could not fork"),
+        embedded=True,
+    )
+    msg = str(proj._backend_failure_message(
+        RuntimeError("GRAPH.COPY failed, could not fork"), embedded=True))
+    # (a) BOTH causes are named — the message must not claim a single cause.
+    assert "TWO" in msg, msg
+    assert "background RDB save" in msg or "background\nRDB save" in msg, msg
+    assert "hung" in msg and "redis-module-fork" in msg, msg
+    # The old single-cause assertion, verbatim — must be gone.
+    assert "a hung, un-reaped `redis-module-fork` child still holds that slot" not in msg, msg
+    # (b) The discriminating action: when no hung child is found, the slot is
+    #     held by an in-flight save — wait, don't reap.
+    assert "if no hung" in msg, msg
+    assert "wait for it to finish and retry" in msg, msg
+    # The EEXIST / EAGAIN distinction is retained.
+    assert "EAGAIN" in msg, msg
+
+
+def test_fork_remedy_on_server_lane_does_not_prescribe_the_embedded_cure(monkeypatch):
+    """P2 — `_auto_health_recover` emits the FORK remedy BEFORE the
+    `is_prod or not self._is_embedded` gate, so a remote/docker operator must
+    not be handed an embedded-only call. There `socket_path_of(db)` is None and
+    `recover_fork_slot` returns 'not an embedded unix-socket server'.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(
+        probe_error=RuntimeError("GRAPH.COPY failed, could not fork"),
+        embedded=False,  # remote/docker FalkorDB
+    )
+    with pytest.raises(RuntimeError) as err:
+        proj._auto_health_recover()
+    msg = str(err.value)
+    # (c) the embedded-only cure is NOT prescribed on this lane...
+    assert "recover_fork_slot" not in msg, msg
+    # ...the server-mode action IS...
+    assert "server" in msg.lower(), msg
+    assert "restart" in msg.lower(), msg
+    # ...and the two-cause analysis + discriminator still apply on every lane.
+    assert "TWO" in msg, msg
+    assert "wait for it to finish and retry" in msg, msg
+    assert "EEXIST" in msg, msg
+    assert "not corrupt" in msg, msg
+    assert "python -m tortoise rebuild" not in msg, msg
+
+
+def test_fork_remedy_on_production_lane_names_the_server_action(monkeypatch):
+    """FLY_APP_NAME=production is the other non-embedded lane; same split."""
+    monkeypatch.setenv("FLY_APP_NAME", "tortoise-test")
+    proj = _projection(
+        probe_error=RuntimeError("GRAPH.COPY failed, could not fork"),
+        embedded=True,  # even an embedded handle is prod-gated here
+    )
+    with pytest.raises(RuntimeError) as err:
+        proj._auto_health_recover()
+    msg = str(err.value)
+    assert "recover_fork_slot" not in msg, msg
+    assert "server" in msg.lower(), msg
+    assert "python -m tortoise rebuild" not in msg, msg
 
 
 def test_bare_fork_stem_is_not_a_refusal():
