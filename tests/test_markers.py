@@ -57,6 +57,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
     "test_capture_session.py": {"registry": "session-capture"},
+    # #5222 — the backfill-ghost guard PROVES the `namespace="registry"`
+    # constructor resolves to `registry_control_plane`; the literal IS the
+    # prod resolution under test (a test_* rename would assert the wrong
+    # graph). Registered here because #5222 shipped the file without a
+    # declaration, reddening this guard on main (repair carried by #4937).
+    "test_backfill_ghost_members_guard.py": {"registry": "prod-coupled"},
     # #3665: `_provision` seeds the org's REAL `created_at` into the registry
     # graph (the column the cohort is derived from) and the cap's cohort
     # resolution reads that same graph, so the literal IS the seed→resolution

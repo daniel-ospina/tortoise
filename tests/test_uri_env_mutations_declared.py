@@ -239,6 +239,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # where the URI literal sits on the following line.
     "test_backup.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
+    # ── #5222 guard-test files, triaged into this table (repair carried by
+    #    #4937; #5222 shipped them unregistered, reddening this guard on main).
+    #    DELIBERATE_URI — the env control IS the input in both:
+    #    test_backfill_ghost_members_guard delenv's the URI so the guard must
+    #    key on the SDK-RESOLVED graph name rather than a test-prefixed URI
+    #    path (the #5188 bypass); test_server_hygiene_gate force-sets the
+    #    docker lane for the reaper teardown fixtures.
+    "test_backfill_ghost_members_guard.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    "test_server_hygiene_gate.py": [
+        r'monkeypatch\.setenv\(\s*$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
