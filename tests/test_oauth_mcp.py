@@ -1283,8 +1283,15 @@ class TestCodeExchange:
 
     def test_consume_code_claim_via_fake(self, api_client, session_user):
         """The atomic claim updates in place: after a successful consume the
-        row carries used_at, and a second consume raises invalid_grant even
-        when called directly (no HTTP layer involved)."""
+        row carries used_at AND the durable 'claimed' state, and a second consume
+        cannot double-issue.
+
+        #3027: the second consume of a code whose first claim has no recorded
+        OUTCOME is terminal `invalid_grant` — the claim is consumed by an attempt
+        that may still be running, and a different request must neither re-arm it
+        (two live families) nor report it retryable (the retry can terminate).
+        The reconciler settles the residue; a code that MINTED is terminal too —
+        see `test_code_is_single_use` / `test_code_claim_is_atomic`."""
         from tortoise.oauth import OAuthError, _consume_code
         tc, cp = api_client
         session_user(_U1)
@@ -1294,6 +1301,11 @@ class TestCodeExchange:
             flow["code"].encode()).hexdigest()
         stored = cp.tables["oauth_codes"][0]
         assert stored["used_at"] is not None  # claimed in place
+        assert stored["redemption_state"] == "claimed"
+        # #3027: the second consume is TERMINAL, not retryable — the retry can
+        # terminate (the first attempt may settle `minted`), and advertising it as
+        # retryable is the untruthful signal #2863 removed. A code that actually
+        # MINTED is also terminal — see `test_code_is_single_use`.
         with pytest.raises(OAuthError) as exc:
             _consume_code(cp, flow["code"])
         assert exc.value.status == 400

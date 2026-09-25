@@ -339,11 +339,6 @@ def test_behavioural_cases_declare_their_invariants() -> None:
     """
     _, rows = _load()
     by_case = {r["case"]: r for r in rows}
-    behavioural = (
-        "doc-reingest-unchanged",
-        "doc-reingest-changed",
-        "doc-aboutDocument-roundtrip",
-    )
     checked: set[tuple[str, str]] = set()
 
     def declared(case: str, key: str):
@@ -354,7 +349,7 @@ def test_behavioural_cases_declare_their_invariants() -> None:
         return exp[key]
 
     # ── re-ingest unchanged: a no-op ──────────────────────────────────────
-    unc, unc_in = by_case["doc-reingest-unchanged"], by_case["doc-reingest-unchanged"]["input"]
+    unc_in = by_case["doc-reingest-unchanged"]["input"]
     assert declared("doc-reingest-unchanged", "reingest_result") == "unchanged"
     assert declared("doc-reingest-unchanged", "version_bumped") is False
     assert declared("doc-reingest-unchanged", "version_after") == unc_in["prior_version"]
@@ -368,7 +363,7 @@ def test_behavioural_cases_declare_their_invariants() -> None:
     )
 
     # ── re-ingest changed: version +1, stale, additive supersession ───────
-    chg, chg_in = by_case["doc-reingest-changed"], by_case["doc-reingest-changed"]["input"]
+    chg_in = by_case["doc-reingest-changed"]["input"]
     assert declared("doc-reingest-changed", "version_bumped") is True
     assert declared("doc-reingest-changed", "version_after") == chg_in["prior_version"] + 1, (
         "version bumps by exactly 1"
@@ -389,7 +384,7 @@ def test_behavioural_cases_declare_their_invariants() -> None:
     assert chg_in["prior_hash"] != chg_in["reingested_hash"], "the changed case must differ"
 
     # ── the aboutDocument round-trip: label AND key move together ─────────
-    rt, rt_in = by_case["doc-aboutDocument-roundtrip"], by_case["doc-aboutDocument-roundtrip"]["input"]
+    rt_in = by_case["doc-aboutDocument-roundtrip"]["input"]
     assert declared("doc-aboutDocument-roundtrip", "resolved_target_label") == "Source"
     assert declared("doc-aboutDocument-roundtrip", "resolved_by") == "url"
     assert declared("doc-aboutDocument-roundtrip", "resolved_key_value") == rt_in["target"]["url"], (
