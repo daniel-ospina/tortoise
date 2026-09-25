@@ -235,13 +235,14 @@ class TestMeted:
         assert seen["thread"] != loop_thread, (
             "the sync arm blocked the event loop")
 
-    def test_concurrent_take_and_flush_writes_exactly_once(self, monkeypatch):
-        """Two boundaries (a runner and the request middleware) can reach the
-        same tally from different threads. The consumed transition must be
-        atomic, or the ledger gets a double-write.
+    def test_concurrent_flush_writes_exactly_once(self, monkeypatch):
+        """CONTRACT test: two boundaries racing the same tally write ONE row.
 
-        Mutation: the check-then-set outside ``_LOCK`` → the barrier-synchronised
-        pair both observe ``consumed == False`` and write twice → RED.
+        This pins the contract, not the mechanism. The critical section is a
+        single contiguous GIL-bound span, so even with the lock REMOVED this
+        structure usually still writes once — measured: 5000/5000 single writes
+        against a no-op `_LOCK`. The lock itself is pinned deterministically by
+        `test_the_consumed_transition_is_inside_the_critical_section`.
         """
         import threading
         calls: list = []
@@ -262,6 +263,40 @@ class TestMeted:
         for t in threads:
             t.join()
         assert len(calls) == 1, calls
+
+    def test_the_consumed_transition_is_inside_the_critical_section(
+            self, monkeypatch):
+        """The mechanism, pinned deterministically.
+
+        `_LOCK` is replaced by a probe that records the tally's state at BOTH
+        ends of the critical section. Mutation: moving the
+        `if tally.consumed / tally.consumed = True` pair out of the lock → the
+        transition is ALREADY observable at `__enter__` → RED. (Timing-based
+        concurrency tests cannot see this: the span is one GIL slice, so the
+        barrier test above passes 5000/5000 even with the lock removed.)
+        """
+        import threading
+        monkeypatch.setattr(
+            metering, "record_embedding_usage", lambda org_id, **kw: None)
+        tally = em.EmbedTally(calls=1, texts=1, chars=1, wall_ms=1.0,
+                              org_id=ORG)
+        observed: list = []
+        real = threading.Lock()
+
+        class _ProbeLock:
+            def __enter__(self):
+                real.acquire()
+                observed.append(("enter", tally.consumed))
+                return self
+
+            def __exit__(self, *exc):
+                observed.append(("exit", tally.consumed))
+                real.release()
+                return False
+
+        monkeypatch.setattr(em, "_LOCK", _ProbeLock())
+        assert em.flush_tally(tally, ORG) is None      # writer returns None
+        assert observed == [("enter", False), ("exit", True)], observed
 
     def test_meted_flushes_even_when_the_body_raises(self, monkeypatch):
         # Mutation: only flushing on the happy path → no write after the raise.
