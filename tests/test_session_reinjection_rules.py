@@ -685,7 +685,7 @@ def test_annotate_pool_additions_is_whole_dict_identical_except_leg():
     base = _annotate_hits([dict(hits[0])], props, dates)[0]
     added = annotate_pool_additions(
         [dict(hits[0])], props, dates, match_source="session")[0]
-    assert len(base) == 17 and len(added) == 17
+    assert len(base) == 18 and len(added) == 18  # +status (C6 #2520)
     assert set(base) == set(added)
     for key in base:
         if key == "match_source":

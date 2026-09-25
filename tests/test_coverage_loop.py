@@ -251,7 +251,7 @@ def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     base_hit = next(h for h in on["hits"] if h["id"] == SEED_ID)
     inj_hit = next(h for h in on["hits"] if h["id"] == JOIN_ID)
     assert set(inj_hit) == set(base_hit)
-    assert len(inj_hit) == 17
+    assert len(inj_hit) == 18  # +status (C6 #2520)
     # session_date is derived from the QUESTION's haystack_dates, indexed by
     # the point's lme_session_index — a driver that drops ``dates`` (or the
     # props) leaves it empty. Both sessions are pinned.
