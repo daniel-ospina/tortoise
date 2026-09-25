@@ -616,9 +616,11 @@ export function preferredSurface(family, current) {
 // stay the single 7-harness vocabulary; the harness table in the SERVED
 // onboarding instructions (#4365: an instruction document, not an installed
 // skill) is the agent-side self-adjudication source (the chooser's
-// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the chooser can never
-// select it: #2698 deleted its dashboard tab and #2912's 4-family
-// HARNESS_FAMILIES excluded it. Its LIVE carrier is the public setup docs page
+// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the live chooser can
+// never select it: #2698 deleted its dashboard tab and #2912's 4-family
+// HARNESS_FAMILIES excluded it. (The gates are the LIVE ones — the archived
+// #1643 render named at the bottom of this block maps the full HARNESS_ORDER,
+// chatgpt included, so it can select it while that rollback is switched on.) Its LIVE carrier is the public setup docs page
 // (#4836): website/docs.html#chatgpt names the Developer-mode path, the
 // canonical connector URL and the onboarding instructions URL, so a ChatGPT user
 // is not left with only a test-consumed constant. The block below and that page
