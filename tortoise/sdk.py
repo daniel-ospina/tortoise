@@ -14775,22 +14775,52 @@ class TortoiseSDK:
                 # identity so ``SearchResult.session_id`` / the wire
                 # ``sessionId`` is populated for points (it was hardcoded ""
                 # — the capture-metadata columns were only read for
-                # entity_type="document"). Two ordered graph-derived sources,
-                # never a guess: the Point's own camel ``sessionId`` prop,
-                # else the ``:Session`` ``CONTAINS`` edge the capture loop
-                # writes for every turn Point (whose ``:Session`` id IS the
-                # session identity for a captured session); a Point contained
-                # by several ``:Session`` nodes resolves to the deterministic
+                # entity_type="document"). Three ordered graph-derived
+                # sources, never a guess: the Point's own camel ``sessionId``
+                # prop, ELSE the Point's own snake ``session_id`` prop, ELSE
+                # the ``:Session`` ``CONTAINS`` edge the capture loop writes
+                # for every turn Point (whose ``:Session`` id IS the session
+                # identity for a captured session); a Point contained by
+                # several ``:Session`` nodes resolves to the deterministic
                 # minimum of them.
                 #
-                # ⛔ Deliberately NOT read: the snake ``n.session_id`` prop.
-                # It is the identity ``create_point(session_id=…`` writes, but
-                # reading it changes the rendered evidence of the R17
-                # assembly goldens (``tests/test_assembly_sdk.py``, whose
-                # ``_FROZEN_CHUNKS`` content record is contractually never
-                # re-captured) — a separate, policy-governed change. Tracked
-                # as #3804; this PR stays identity-only for the captured-turn
-                # surface the defect measured.
+                # #3804: the snake ``n.session_id`` prop IS read here. It is
+                # the Point-level identity ``create_point(session_id=…`` and
+                # the LongMemEval ingest write (``tools/longmem_eval/
+                # ingest.py`` / ``ingest_v2.py`` — snake on POINTS; their camel
+                # ``sessionId`` goes on Document/Event nodes), and before this
+                # it was read by NO search/ask path — so a Point created
+                # through the SDK's own documented path came back
+                # ``"sessionId": ""`` and rendered ``[session ?]``. Both
+                # spellings are EXPLICIT Point-level identity and either
+                # outranks the derived ``CONTAINS`` edge; between the two the
+                # camel ``sessionId`` wins because it is the WIRE spelling —
+                # ``SearchResult.to_dict()`` emits ``sessionId`` and the
+                # hosted/API contract is expressed in it — so a Point that
+                # carries it explicitly is speaking the wire's own vocabulary.
+                # The WRITE side is deliberately NOT unified into one spelling:
+                # the snake prop is already persisted on existing rows (and
+                # written by the eval ingest), so a read path must accept both
+                # regardless — teaching the read side both spellings is the
+                # narrower change than a prop migration.
+                #
+                # ⛔ KNOWN LIMITATION — this read is the PROJECT-search point
+                # path only. The two degraded fallback tiers
+                # (``fallback_snapshot.search_snapshot`` / ``fallback_tfidf``)
+                # build their ``SearchResult``s and RETURN before this fetch
+                # runs, and the snapshot keeps a deliberately LEAN projection
+                # (``fallback_snapshot._SNAPSHOT_QUERY`` — no session column),
+                # so a degraded hit still carries ``sessionId == ""`` and
+                # renders ``[session ?]``. Widening that cached corpus is the
+                # same separate, policy-governed change
+                # ``search_provenance_enabled`` already declares for
+                # provenance — a declared boundary, not an oversight of #3804.
+                #
+                # R17 (``tests/test_assembly_sdk.py``): naming these rows is a
+                # DELIBERATE content change, so the assembly goldens were
+                # re-captured and ``_FROZEN_CHUNKS`` updated under that
+                # module's own "documented, reviewed content change" clause —
+                # #3804 is that record.
                 _prov = search_provenance_enabled()
                 _prov_cols = ", n.extractedFrom, n.createdAt" if _prov else ""
                 rows = graph.query(
@@ -14798,7 +14828,7 @@ class TortoiseSDK:
                     "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
                     "       coalesce(n.has_answer, false), n.sessionId, "
-                    "       sess.id" + _prov_cols,
+                    "       n.session_id, sess.id" + _prov_cols,
                     params={"ids": result_ids},
                 ).result_set
                 # A Point contained by MORE THAN ONE :Session yields one row
@@ -14819,33 +14849,46 @@ class TortoiseSDK:
                         # so the lane's evidence boost has material.
                         "has_answer": bool(row[3]),
                         "sessionId": (row[4] or "") if len(row) > 4 else "",
+                        # #3804: the snake spelling ``create_point(
+                        # session_id=…)`` writes — read here as the second
+                        # explicit identity source, never emitted raw (the
+                        # wire key stays camel ``sessionId``).
+                        "session_id": (row[5] or "") if len(row) > 5 else "",
                     }
                     if _prov:
                         # Provenance (#3837): the Source/document ref and the
                         # capture time — additive, read ONLY when the flag is
                         # set so the default query is unchanged.
                         entity_data[pid]["source_ref"] = (
-                            row[6] if len(row) > 6 else None
+                            row[7] if len(row) > 7 else None
                         )
                         entity_data[pid]["captured_at"] = (
-                            (row[7] or "") if len(row) > 7 else ""
+                            (row[8] or "") if len(row) > 8 else ""
                         )
-                    edge_sid = (row[5] or "") if len(row) > 5 else ""
+                    edge_sid = (row[6] or "") if len(row) > 6 else ""
                     if edge_sid:
                         edge_sids.setdefault(pid, []).append(edge_sid)
                 for pid, entry in entity_data.items():
                     # D3: no fabrication, and an EXPLICIT identity wins: the
-                    # Point's own ``sessionId`` prop is taken when it is
-                    # renderable, else the deterministic minimum of the
-                    # :Session CONTAINS edge ids (sanitized BEFORE the pick —
-                    # a lexicographic minimum over raw ids could select an
-                    # unrenderable one and blank a value that had a perfectly
-                    # good sibling). The wire is filtered through the SAME
+                    # Point's own ``sessionId`` (camel) prop, else its own
+                    # ``session_id`` (snake) prop — #3804 — else the
+                    # deterministic minimum of the :Session CONTAINS edge ids
+                    # (sanitized BEFORE the pick — a lexicographic minimum
+                    # over raw ids could select an unrenderable one and blank
+                    # a value that had a perfectly good sibling). CAMEL FIRST:
+                    # it is the WIRE spelling (``to_dict()`` emits
+                    # ``sessionId``), so it is the one a Point carrying both
+                    # spellings intends. The wire is filtered through the SAME
                     # sanitizer the reader tag uses: ``/v1/search`` output is
                     # agent-consumed and may be re-embedded into a
                     # line-oriented prompt, so it must not hand back a
                     # structure-breaking id.
-                    own = _safe_session_tag(entry["sessionId"])
+                    own = (_safe_session_tag(entry["sessionId"])
+                           or _safe_session_tag(entry["session_id"]))
+                    # the raw snake spelling is an INTERNAL read; only the
+                    # camel wire key survives on the entry (it feeds
+                    # ``SearchResult.session_id`` → ``to_dict()["sessionId"]``)
+                    entry.pop("session_id", None)
                     if own:
                         entry["sessionId"] = own
                     else:
