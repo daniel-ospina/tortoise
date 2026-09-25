@@ -672,6 +672,7 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  - test_drift_guard.py  # #4174: the branch-drift gate must FETCH before it measures (a stale `origin/main` is not a pass) and must fail on a conflict-free revert, reporting paths + line counts
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py
@@ -2201,6 +2202,7 @@ durations:
   # 0.9007 (584, 58) against the 0.90 floor, leaving 0.4 files of margin; with
   # this entry it is 0.9024 (1.4 files). See #4348 for the `--register` gap.
   test_ci_guard_invocation.py: 0.4
+  test_drift_guard.py: 0.4  # #4174: 5 hermetic local-git fixtures (~1s each)
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1
