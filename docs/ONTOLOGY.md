@@ -888,7 +888,7 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 ```
 > **Legacy extraction path (pinned, #2727):** the Phase-2 entity stage in
 > `tortoise/extractor.py` (`_OBJECT_KIND_VOCAB`) intentionally supports a
-> narrower 13-kind subset only — it omits the four commitment-state kinds
+> narrower 12-kind subset only — it omits the four commitment-state kinds
 > (`strategy`/`plan`/`goal`/`target`), which are extraction surfaces of
 > `extractor_v2.CORE_OBJECT_KEYS` (state-centric); `_intersect_object_kinds`
 > drops them from the prompt vocabulary and `_normalize_object_kind` collapses

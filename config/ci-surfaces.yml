@@ -263,6 +263,8 @@ surfaces:
   - test_metering.py
   - test_oauth_mcp.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
+  - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
+  - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
@@ -1063,6 +1065,11 @@ surfaces:
   # (the sibling pack tests are here), embedded-graph lane.
   - test_vocab_gating_by_graph.py
   - test_vet_gate_5005.py
+  # #4899: the S2.2b mechanical value gate (`tortoise/value_gate.py`, the
+  # identifier-only DISCARD predicate) and its S2.2b wiring in `vet_gate.py`
+  # + the `vet_enabled` fold in `extractor_v2.py`. Registered beside its
+  # sibling `test_vet_gate_5005.py` because it guards the same seam.
+  - test_value_gate_4899.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
@@ -1914,6 +1921,8 @@ durations:
   test_init_apikey_validation.py: 4.2
   test_orient_direct_consolidation.py: 4.2
   test_oauth_mcp.py: 4.1
+  test_oauth_redemption_state.py: 3.2  # #3027: local estimate (25 fake-CP tests, no live DB) — superseded once CI measures it.
+  test_3036_oauth_retention.py: 0.2
   test_mcp_server.py: 4.0
   test_dashboard_login.py: 3.8
   test_capture_phase_d_dedup.py: 3.7

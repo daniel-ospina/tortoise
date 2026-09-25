@@ -1,7 +1,7 @@
 """#5188 — the invite-ghost backfill gates on the graph it ACTUALLY writes.
 
 ``graph-scripts/backfill_invite_ghost_members.py`` sweeps the registry
-namespace, which ``TortoiseSDK(namespace="registry")`` resolves to
+namespace, which the SDK resolves ``namespace="registry"`` to
 ``registry_control_plane`` regardless of the URI path. Gating on the URI-path
 name meant a test-prefixed ``--uri`` auto-approved a DETACH+DELETE sweep of the
 shared registry graph — the bypass #5188 tracks.
