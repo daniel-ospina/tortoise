@@ -218,13 +218,42 @@ class TestToolGroupFiltering:
         return [t["name"] for t in body.get("result", {}).get("tools", [])]
 
     def test_group_memory_lists_only_memory_tools(self, make_client):
-        from tortoise.tool_registry import GROUP_BY_NAME
+        # The oracle is the group the registry APPLIED to the entry — the same
+        # single lookup the server filter reads (#3877). It used to be
+        # `GROUP_BY_NAME.get(n)`, which asserts `served ⊆ map`: true only while the
+        # map happens to list every served name, and never a statement about the
+        # served group. The 8 names the map does not list are served by their
+        # applied group, so that subset assertion pinned the very disagreement
+        # #3877 is about.
+        from tortoise.tool_registry import get_tool_by_name
 
+        entries = get_tool_by_name()
         tc = make_client(auth_mode="none", tool_group="memory")
         names = self._list_tool_names(tc)
         assert names, "expected tools"
-        assert all(GROUP_BY_NAME.get(n) == "memory" for n in names)
+        assert all(entries[n].group == "memory" for n in names)
         assert len(names) <= 24  # memory group size (grew with #888/#913 consolidation train; #939)
+
+    def test_group_scoped_server_serves_every_declared_member(self, make_client):
+        """#3877 regression: a group-scoped server advertises EVERY member the
+        registry assigns to that group and marks HTTP-eligible.
+
+        The defect was that the filter re-derived the group from `GROUP_BY_NAME`
+        with no default, so the 8 names the map does not list resolved to None and
+        were dropped from `tools/list` on EVERY group-scoped server — while the
+        registry had already assigned them "memory". Reachability is asserted on
+        the real path (a scoped server's advertised surface), not on the map.
+        """
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        declared = {t.name for t in TOOL_REGISTRY if t.group == "memory" and t.http_policy}
+        assert declared, "the memory group must be non-empty"
+        tc = make_client(auth_mode="none", tool_group="memory")
+        served = set(self._list_tool_names(tc))
+        missing = sorted(declared - served)
+        assert not missing, (
+            f"declared memory tools not served on a memory-scoped server: {missing}"
+        )
 
     def test_no_group_lists_all_http_tools(self, make_client):
         tc = make_client(auth_mode="none")
