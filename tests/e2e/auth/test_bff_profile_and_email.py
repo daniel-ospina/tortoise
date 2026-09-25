@@ -1,8 +1,8 @@
 """
 Clickthrough verification for BFF profile + email change (#4054).
 
-Routes under test (both resolve the session server-side from the opaque
-`__Host-session` handle; the browser holds no token):
+Routes under test (both resolve the BFF session server-side from the opaque
+`__Host-session` handle; for that session the browser holds no token):
   GET/POST/PATCH /api/profile   — read the profile; update the display name
   POST           /auth/set-email — request an email change via GoTrue
 

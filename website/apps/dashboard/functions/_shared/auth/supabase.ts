@@ -23,7 +23,46 @@ export interface TokenResponse {
 
 export type SupabaseResult<T> =
   | { ok: true; data: T }
-  | { ok: false; status: number; error: string; retryable: boolean };
+  | { ok: false; status: number; error: string; retryable: boolean }
+
+/** The session-bearing fields a caller may act on, after shape validation. */
+export interface VerifiedSession {
+  userId: string;
+  refreshToken: string;
+  email: string | null;
+}
+
+/**
+ * Narrow a provider token response to the fields the session path needs.
+ *
+ * `call()` classifies success by STATUS alone — any 2xx becomes `{ ok: true, data }`.
+ * A call's declared `T` is a claim about the body, not a check of it, so a
+ * malformed or partial 2xx (a proxy error page with a 200, a truncated body, an
+ * upstream shape change) would reach `.user.id` / `.refresh_token` and throw a
+ * TypeError. That surfaces as an unhandled **500**, which the auth routes' status
+ * discipline (§8.2) reserves for nothing — an infrastructure fault must be a
+ * **503**, indistinguishable by design from a route crash it is not (#4160).
+ *
+ * Returns `null` when the body cannot be trusted, so the caller answers 503
+ * `provider_unavailable` and mints nothing. `/auth/password`, `/auth/signup` and
+ * `/auth/api-key` each carry a hand-copied version of the same predicate;
+ * `/auth/confirm` (rewritten in the PR that added them) and `/auth/callback`
+ * were missed and are the two callers here. Collapsing those copies onto this
+ * helper is deliberately NOT done in the same change. ⚠️
+ * `/auth/v1/token?grant_type=refresh_token` in `_shared/auth/token.ts` still
+ * dereferences its response unvalidated and is the same class of bug — filed as
+ * **#4632**.
+ */
+export function requireUserSession(
+  data: Partial<TokenResponse> | null | undefined,
+): VerifiedSession | null {
+  const userId = data?.user?.id;
+  const refreshToken = data?.refresh_token;
+  if (typeof userId !== "string" || !userId) return null;
+  if (typeof refreshToken !== "string" || !refreshToken) return null;
+  const email = data?.user?.email;
+  return { userId, refreshToken, email: typeof email === "string" ? email : null };
+};
 
 async function call<T>(
   env: SupabaseEnv,

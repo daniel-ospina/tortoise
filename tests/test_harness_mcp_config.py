@@ -178,6 +178,12 @@ class TestClaudeHookTimeouts:
     3. `session-end.sh` header — the in-repo install comment
     4. `session-start.sh` header — the in-repo install comment
 
+    Issue #3963 adds a FIFTH registration to the two `harnesses.js` copies: the
+    `UserPromptSubmit` per-turn capture (`session-turn.sh`).  It is pinned by
+    the same tables — a copy that loses its `timeout` re-opens #3754 on that
+    surface alone, and the turn hook is the one whose cancellation loses a
+    session outright (SessionEnd never fires on a kill).
+
     Each is JSON-PARSED back out of the file rather than substring-matched (a
     `"timeout": 60` sitting anywhere else in the file, or on the wrong event,
     must not pass), and the per-surface event counts are pinned — a new copy
@@ -191,13 +197,20 @@ class TestClaudeHookTimeouts:
     # 60 seconds"). SessionStart 600 = the documented command-hook DEFAULT, and
     # the bound this guard holds SessionStart to — the platform states no
     # ceiling there, so claiming 60 for it was a false invariant.
-    MAX_TIMEOUT_S: ClassVar[dict[str, int]] = {"SessionEnd": 60, "SessionStart": 600}
+    MAX_TIMEOUT_S: ClassVar[dict[str, int]] = {
+        "SessionEnd": 60, "SessionStart": 600, "UserPromptSubmit": 60}
     # #3754: what each figure above IS, quoted into the failure message — a
     # documented DEFAULT must never be reported as a ceiling (the exact
     # overclaim this guard was corrected for).
     ENVELOPE_KIND: ClassVar[dict[str, str]] = {
         "SessionEnd": "the documented shared-budget cap",
         "SessionStart": "the documented command-hook default",
+        # #3963: UserPromptSubmit carries no event-specific platform figure in
+        # this repo, so its bound is the SAME per-hook raise cap #3754
+        # established for the shared budget (the budget rises to the highest
+        # per-hook `timeout`, "up to 60 seconds") rather than a second,
+        # invented envelope.
+        "UserPromptSubmit": "the #3754 documented per-hook budget cap",
     }
     # #3754: floors are MEASUREMENTS, and only SessionEnd has one (a real hosted
     # run with the seam-literal settings). SessionStart carries the guard's upper
@@ -205,7 +218,8 @@ class TestClaudeHookTimeouts:
     MEASURED_S: ClassVar[dict[str, float]] = {"SessionEnd": 9.26}
     # surface → {event: number of snippets carrying that event}
     SURFACES: ClassVar[dict[str, dict[str, int]]] = {
-        "harnesses.js": {"SessionStart": 2, "SessionEnd": 2},
+        "harnesses.js": {"SessionStart": 2, "SessionEnd": 2,
+                         "UserPromptSubmit": 2},
         "session-end.sh": {"SessionEnd": 1},
         "session-start.sh": {"SessionStart": 1},
     }
@@ -325,6 +339,27 @@ class TestSelfHostedStdioShapes:
         assert 'type: "stdio"' in cursor_block
         claude_block = html.split('claude: () => JSON.stringify({', 1)[1].split('}, null, 2)', 1)[0]
         assert 'type:' not in claude_block
+
+    def test_self_hosted_page_sends_the_onboarding_instructions(self):
+        """#4365: this served page must hand the reader the onboarding INSTRUCTIONS
+        (a document the agent reads), not a skill to install — and must not
+        resurrect the retired Q&A "onboarding prompt" framing. Pinned because
+        reverting the copy left the whole suite green."""
+        html = (REPO_ROOT / "website" / "self-hosted.html").read_text()
+        low = html.lower()
+        assert "install the tortoise-onboarding skill" not in low, (
+            "self-hosted.html must not tell the reader to install onboarding")
+        assert ("https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
+                in html), ("self-hosted.html must link the served instructions")
+        assert "never an installed skill" in low, (
+            "self-hosted.html must say onboarding is not an installed skill")
+        # The retired framing must stay retired — the meta description and the
+        # step-3 note both carried it, three lines from the note above, and
+        # reverting them tripped no assertion at all (mutation-verified).
+        assert "5-question" not in low, (
+            "self-hosted.html still advertises the retired 5-question prompt")
+        assert "canonical onboarding prompt" not in low, (
+            "self-hosted.html still calls it the canonical onboarding prompt")
 
 
 class TestPrintHarnessInstructions:
