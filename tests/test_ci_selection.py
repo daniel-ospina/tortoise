@@ -2047,57 +2047,108 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         "python-ci-gate must join `needs.*.result` — reading a subset means a "
         "red drift never reaches the check (#2656)")
 
-    # Render the GitHub expression into literal results and actually RUN the
+    # Render the GitHub expressions into literal results and actually RUN the
     # aggregate's script: this is what turns "the words are present" into "a
     # failed drift really exits non-zero". (Guarded: the assertion is about the
     # shell logic, which is the thing that has to be right on the runner.)
     if shutil.which("bash"):
-        def _verdict(*results: str) -> int:
-            rendered = script.replace("${{ join(needs.*.result, ' ') }}",
-                                      " ".join(results))
-            return subprocess.run(["bash", "-c", rendered],
+        job_names = list(jobs["python-ci-gate"].get("needs") or [])
+        # The legs whose job-level `if:` is a selector output — the ones that
+        # may legitimately skip — and the output that selects each.
+        DECLINABLE = {"test": "python", "test-slow": "slow_run",
+                      "test-carve-out": "carve_out_run",
+                      "test-concurrency-falkor": "python",
+                      "packs-compile": "python", "test-track-b": "python"}
+        # Default is "selected": an unexpected `skipped` is then a LOST shard,
+        # which is the polarity #5219 is about.
+        SELECTED = {out: "true" for out in DECLINABLE.values()}
+
+        def _render(results: dict, selected: dict) -> str:
+            rendered = script.replace(
+                "${{ join(needs.*.result, ' ') }}",
+                " ".join(results.get(name, "skipped") for name in job_names))
+            # `needs.<job>.result` renders as EMPTY when <job> is absent from
+            # `needs:` — GitHub's own semantics, and the reason a leg dropped
+            # from the required check's list must fail closed here rather than
+            # quietly vanish.
+            rendered = re.sub(r"\$\{\{\s*needs\.([\w-]+)\.result\s*\}\}",
+                              lambda m: results.get(m.group(1), ""), rendered)
+            rendered = re.sub(
+                r"\$\{\{\s*needs\.changes\.outputs\.(\w+)\s*\}\}",
+                lambda m: selected.get(m.group(1), ""), rendered)
+            unrendered = re.findall(r"\$\{\{[^}]*\}\}", rendered)
+            assert not unrendered, (
+                "this harness must render every GitHub expression the aggregate "
+                f"uses, or it proves nothing; unrendered: {unrendered}")
+            return rendered
+
+        def _verdict(results: dict, selected: dict | None = None) -> int:
+            sel = dict(SELECTED if selected is None else selected)
+            return subprocess.run(["bash", "-c", _render(results, sel)],
                                   capture_output=True).returncode
 
-        count = len(jobs["python-ci-gate"].get("needs") or [])
-        green = ["success"] * count
-        assert _verdict(*green) == 0, (
+        green = {name: "success" for name in job_names}
+        assert _verdict(green) == 0, (
             "an all-green matrix must pass the required check")
+        # EVERY leg, not just the last one: a required check that cannot red on
+        # a given leg is a check that does not observe it (#5219).
         for red in ("failure", "cancelled"):
-            assert _verdict(*green[:-1], red) == 1, (
-                f"a `{red}` need must FAIL python-ci-gate — otherwise a drift "
-                "does not block the merge (#2656)")
-        assert _verdict(*green[:-1], "skipped") == 0, (
-            "a skipped need is not a failure (docs-only PRs skip the matrix)")
+            for leg in job_names:
+                bad = dict(green)
+                bad[leg] = red
+                assert _verdict(bad) == 1, (
+                    f"a `{red}` for `{leg}` must FAIL python-ci-gate — a leg "
+                    "the required check does not observe is a leg it cannot "
+                    "block (#5219)")
+        # A docs-only diff selects nothing, so every declinable leg skips and
+        # the required check stays green (the gate must not block docs PRs).
+        declined_all = dict(green)
+        for leg in DECLINABLE:
+            declined_all[leg] = "skipped"
+        assert _verdict(declined_all,
+                        {out: "false" for out in DECLINABLE.values()}) == 0, (
+            "an all-declined (docs-only) diff must stay green")
+        # ... but a leg the selector DID select reporting `skipped` is a lost
+        # shard, and must red the required check (#5219).
+        for leg in DECLINABLE:
+            lost = dict(green)
+            lost[leg] = "skipped"
+            assert _verdict(lost) == 1, (
+                f"`{leg}` skipped although the selector SELECTED it is a lost "
+                "shard — the required check must not certify it (#5219)")
+        # And the shape #5219 was actually about: a leg dropped from `needs:`
+        # must fail closed instead of vanishing.
+        dropped = dict(green)
+        dropped.pop("test")
+        assert _verdict(dropped) == 1, (
+            "a leg REMOVED from `needs:` must fail closed, not disappear — "
+            "that is the exact #5219 shape")
 
 
-def test_required_gate_excludes_the_long_legs():
-    """The required check's transitive `needs:` closure IS the merge-path
-    critical path (a job's `if:` is evaluated only AFTER its `needs` complete).
+def test_required_gate_covers_the_long_legs():
+    """#5219: the required check must OBSERVE every shard it certifies.
 
-    This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
-    (strict up-to-date protection + `gh pr merge --auto --merge`, see
-    commit-workflow `04-merge-deploy.md`), so `python-ci-gate` going green is
-    what releases the merge — the workflow run does not have to finish. When
-    the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
-    ~30m on a green run, against a ~20m main-merge cadence) the head went
-    BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
-    must NOT depend on the >15m legs — directly OR transitively — and those legs
-    must still EXIST: they move out of the gate, they are not deleted, and they
-    keep running pre-merge (advisory) and post-merge on main.
+    `python-ci-gate` is a REQUIRED status check AND the only `merge_condition`
+    of the Mergify merge queue, so its `needs:` list IS its whole claim: a leg
+    absent from it is a leg the gate cannot block, however red the run is.
 
-    The TRANSITIVE half is load-bearing, not pedantry: an earlier version of
-    this change left the push-only `canary-streak` in `needs:`, and because
-    `canary-streak` `needs: test`, the *skipped* job still held the aggregate
-    for the whole ~30m `test` leg on every PR (run 35960027173: the gate was
-    not scheduled while `test (a)` ran, though every short leg had completed).
-    A direct-`needs` assertion cannot see that shape.
+    From 2026-09-24T15:25Z (#5017) until #5219 the list omitted `test`,
+    `test-slow` and `test-carve-out`, and the hole was not theoretical: on the
+    MERGED heads of #4838 (30c5b45) and #4633 (81401cc), `test (a)`, `test (b)`
+    and `test-carve-out` were all `completed/failure` while `python-ci-gate`
+    was `completed/success`. Across PRs at the time, the only thing separating
+    a gate that reddened on a failing `test` from one that passed was WHICH
+    VERSION of the workflow the PR head carried — heads with the pre-#5017 list
+    failed the gate, heads with the post-#5017 list passed it.
 
-    Keeping them running on the PR lane (rather than skipping them there) is
-    deliberate and belongs to the same contract: the `--admin` rail requires
-    the PR lane to EXECUTE every test shard main's lane executes
-    (`scripts/admin-merge.sh` lane parity, tortoise #4263/#4457) — a `skipped`
-    shard is not coverage — so a push-only leg would make every `--admin` merge
-    refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
+    #5017 removed those legs DELIBERATELY to cut merge-path latency (`test (a)`
+    measured 30.0–31.5m against a ~20m main-merge cadence, so heads went BEHIND
+    before the merge could land — 0/41 PRs ever CLEAN). #5219 reverses that
+    trade on the owner's call: the integrity of the required check over
+    merge-path latency. This test pins the reversal so the shards cannot be
+    quietly dropped again — and it pins the DIRECT edge, not only the closure:
+    a transitive path is the `canary-streak` → `test` shape that satisfies a
+    closure-only assertion while nullifying the intent.
     """
     workflow = _load_python_ci()
     jobs = workflow["jobs"]
@@ -2116,21 +2167,22 @@ def test_required_gate_excludes_the_long_legs():
 
     for leg in ("test", "test-slow", "test-carve-out"):
         assert leg in jobs, (
-            f"{leg} must still RUN — the latency fix removes it from the "
-            "required aggregate, it does not delete the leg")
-        assert leg not in closure, (
-            f"{leg} is a >15m leg reachable from `python-ci-gate` through "
-            "`needs:` — directly or transitively — which re-adds the ~30m "
-            "merge-path latency this change removes. A skipped intermediate "
-            "job does NOT break the chain: its own `needs:` still hold the "
-            "aggregate (the `canary-streak` → `test` shape).")
+            f"{leg} must exist — the required check must aggregate it, not "
+            "replace it")
+        assert leg in direct, (
+            f"{leg} must be a DIRECT need of `python-ci-gate`. The required "
+            "check — and the merge queue, whose only `merge_condition` it is — "
+            "must observe the shard it certifies; a gate that goes green while "
+            "this leg is red is the #5219 defect")
+        assert leg in closure
     assert "manifest-integrity" in closure, (
         "the required aggregate must still include the manifest drift gate, "
         "or a drift stops blocking merges (#2656)")
 
-    # `leg in jobs` alone only proves the leg is DEFINED. The fix's disclosure
-    # leans on the legs still EXECUTING (advisory on PRs, detection on main), so
-    # pin that too: both triggers must remain, and no leg may be silenced.
+    # `leg in jobs` alone only proves the leg is DEFINED. The contract leans on
+    # the legs still EXECUTING on the PR lane — the `--admin` rail's lane parity
+    # requires the PR lane to have run every shard main's lane runs — so pin
+    # that too: both triggers must remain, and no leg may be silenced.
     triggers = workflow.get("on", workflow.get(True)) or {}
     assert "push" in triggers and "pull_request" in triggers, (
         "the long legs must still run on push (post-merge detection on main) "
