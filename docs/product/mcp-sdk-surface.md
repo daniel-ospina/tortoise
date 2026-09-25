@@ -126,6 +126,8 @@ the gate *fails* on — not about what goes *unrecorded*.
 | Response | Field | Emitted when | Unchanged when off |
 |---|---|---|---|
 | `tortoise_analyze` | `why` | TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off) | yes — the response is byte-identical when the flag is off |
+| `sdk:provenance` | `raw` | the point has an extractedFrom :Source — the index entry for the raw: source_id, content_hash, raw_state, raw_state_at, available, permanent, retryable, label, message | n/a — not flag-gated; the key is absent when the point has no source, so a sourceless response is byte-identical |
+| `sdk:get_provenance_chain` | `raw` | always, on every returned item — the same index entry (the chain is the Source link, which exists whether or not the raw does) | n/a — not flag-gated; the ENTITY half also changed: a source with no :references edge now returns one item with entity=None/labels=[] instead of silently returning [] (the key set stays stable, so no consumer KeyErrors) |
 
 A field belongs in that table from the moment it is added — an off-by-default field that is
 not recorded here has no approval behind it, and the carve-out does not cover it.
