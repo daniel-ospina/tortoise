@@ -143,15 +143,24 @@ a caller branching on `code` to *skip* a write — is not reachable, because the
    `tests/test_hosted_api.py` (the live capture 402, the updated
    `TestKeyAllowance3874`, and the dict-detail flattening in
    `_record_capture_last_error`).
+6. `tortoise/mcp_server.py` — the MCP capture twin surfaces the refusal's
+   `message` from the structured detail to both sinks, instead of
+   stringifying the dict into a Python repr.
+7. `website/apps/dashboard/src/upsellGate.js` — `shouldNudgeUpgrade` no longer
+   upsells a `cohort_cost_cap` (a spend cap an upgrade cannot lift);
+   `normalizeError` exposes the refusal `code`.
 
 ### Deliberately NOT in this change (recorded, not overlooked)
 
-- **Dashboard / client code is untouched.** Not a convenience decision: the
+- **Dashboard reader code is unchanged except one deliberate branch.** The
   prose is preserved *inside* the payload, so every existing reader keeps
   working — `main.jsx`'s `api()` maps `detail.message` -> `err.message` and
   `detail.code` -> `err.code` for any object detail, `apiErrorText` renders
   `detail.message`, and `keyAllowance.capLimitFrom` regexes that message for the
-  number. Changing a reader would be motion without effect.
+  number. The exception is `website/apps/dashboard/src/upsellGate.js`:
+  `shouldNudgeUpgrade` treated *any* 402 as a plan limit (its rule predates the
+  category), so a `cohort_cost_cap` spend refusal would have offered an upgrade
+  that cannot lift it. It now excludes the non-plan 402 code (#4614).
 - **The capture clients' 402 classification is NOT narrowed.** A structured
   `code` now exists that *could* mark a quota refusal terminal, and acting on
   it would re-open the very data loss #4714 closed (a permanent classification
@@ -173,6 +182,7 @@ a caller branching on `code` to *skip* a write — is not reachable, because the
 | api_keys race backstops + `/v1/session/key` recovery | API | `_key_limit_refusal()` | ✅ |
 | Cohort spend cap 402 | API | `CohortCostCapExceeded` code override | ✅ |
 | Dashboard at-cap notice (api_keys) | UI | unchanged — `api()` + `capLimitFrom` read `detail.message` | ✅ |
+| Dashboard upgrade nudge on a spend cap | UI | `upsellGate.shouldNudgeUpgrade` excludes `cohort_cost_cap` | ✅ |
 | Dashboard `Last attempt — <detail>` | UI | unchanged — `_record_capture_last_error` flattens to `message` | ✅ |
 | Python + Pi capture clients | client | unchanged by design — body stored verbatim; 402 stays `retry` | ✅ |
 | `users`/member-limit + tier/entitlement 402 doors | API | filed as **#5208** (different category, own code vocabulary) | ⚠️ filed |

@@ -3787,20 +3787,30 @@ def tortoise_session_capture(conversation: list[dict],
     except Exception as e:
         status = getattr(e, "status_code", 500)
         detail = getattr(e, "detail", str(e))
+        # #4614: a quota refusal is now a STRUCTURED detail (a dict with a
+        # `message`). Surface that message — never the Python repr of the
+        # dict — to BOTH sinks: the dashboard sub-line and the MCP tool
+        # result. Stringifying first would bypass
+        # `_record_capture_last_error`'s own dict flattening and paint
+        # `{'code': 'quota_exceeded', …}` on the dashboard.
+        detail_text = (
+            detail["message"]
+            if isinstance(detail, dict) and isinstance(detail.get("message"), str)
+            else str(detail))
         # #3060: the capacity 429 is a SERVER condition, not an org capture
         # failure — never paint it on the dashboard (REST does the same).
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
-                and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+                and detail_text != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             with contextlib.suppress(Exception):
-                _record_capture_last_error(org_id, harness, str(detail))
+                _record_capture_last_error(org_id, harness, detail_text)
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
         # ERR_QUOTA code rather than making the caller interpret a bare status.
         # One mapping site covers every 402 this impl can raise, so REST and
         # MCP cannot drift on the class of a refusal.
-        out = {"error": str(detail), "status": status}
+        out = {"error": detail_text, "status": status}
         if status == 402:
             out["code"] = ERR_QUOTA
         return out

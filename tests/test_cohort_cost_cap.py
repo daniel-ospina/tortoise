@@ -622,7 +622,14 @@ def test_mcp_capture_reports_err_quota_when_cohort_is_over_cap(
 
     assert result["status"] == 402, result
     assert result["code"] == ERR_QUOTA, result
-    assert "Cohort LLM spend cap reached" in result["error"], result
+    # #4614: the MCP twin must surface the refusal's MESSAGE, never the Python
+    # repr of the structured detail — stringifying the dict first bypassed
+    # `_record_capture_last_error`'s flattening and painted a repr on the
+    # dashboard sub-line and in the MCP tool result.
+    assert result["error"].startswith("Cohort LLM spend cap reached"), result
+    assert "{" not in result["error"] and "'code'" not in result["error"], (
+        f"the MCP error text is a repr of the structured detail: "
+        f"{result['error']!r}")
     assert _session_count(COHORT_ORG) == 0
 
 
