@@ -428,6 +428,12 @@ def test_cp_offload_routes_best_effort_to_the_telemetry_pool(monkeypatch):
 #: sites; the structural test below fails if one loses the flag.
 _NEVER_RAISE_OPS = frozenset({
     "update_last_used", "analytics_event", "github_repos_count",
+    # #4456: ``notify_billing_event`` is documented never-raise
+    # (tortoise/notify.py). Routing it through the seam gives it a NEW failure
+    # mode (a missed bound / a saturated telemetry backlog); ``best_effort``
+    # keeps that from mapping onto the webhook's 500, which would strand a
+    # claimed Stripe event whose payment was already taken.
+    "billing_notify",
 })
 
 

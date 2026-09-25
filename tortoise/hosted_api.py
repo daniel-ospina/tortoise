@@ -27641,10 +27641,41 @@ async def webhooks_stripe(request: Request):
             # the webhook AND strand the notification — follow it. (#4352 had
             # already moved the analytics POST behind ``_cp_offload``; what
             # this change adds here is the notify-first order and the guards.)
-            notify_billing_event(
-                notify_kind, {"org_id": org_id, "tier": tier},
-                {"subscription_status": etype},
-            )
+            #
+            # #4456: the notify ITSELF is blocking sync HTTP — Resend via
+            # ``httpx.post(..., timeout=15.0)`` plus Telegram on its own 15 s
+            # timeout (tortoise/notify.py) — and ``hosted_api`` runs a SINGLE
+            # uvicorn worker, so calling it inline held the one event loop for
+            # up to ~30 s and stalled EVERY concurrent request (the #2988 /
+            # #3498 class). It is routed through the #3498 seam rather than
+            # the issue's proposed ``asyncio.to_thread`` DELIBERATELY:
+            # ``to_thread`` submits to the loop's SHARED default executor,
+            # whose workers are NON-daemon and are JOINED at shutdown (#2850),
+            # so a black-holed socket would delay uvicorn's shutdown — and a
+            # notify would park one of the six workers the /health probe and
+            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # on the capture-cost lane). The telemetry pool is a
+            # process-lifetime DAEMON pool with a bounded backlog, so a wedged
+            # notify is abandoned at the seam's wait bound instead of
+            # delaying shutdown, and it can never occupy an auth slot.
+            #
+            # ``best_effort=True`` + the guard keep the never-raise contract
+            # AT THE HAND-OFF: an offload failure (missed bound / saturated
+            # backlog) is swallowed by the seam, and — because a hand-off is a
+            # NEW failure mode the inline call did not have — any raise is
+            # caught here rather than reaching the handler's
+            # ``except Exception`` → 500, which would strand a claimed event
+            # and cost the payment's ack.
+            try:
+                await _cp_offload(
+                    lambda: notify_billing_event(
+                        notify_kind, {"org_id": org_id, "tier": tier},
+                        {"subscription_status": etype}),
+                    op="billing_notify", best_effort=True)
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning(
+                    "webhook: billing notify failed (non-fatal): %s",
+                    _safe_log(exc))
             try:
                 await _async_audit(
                     request, org_id, notify_kind,
