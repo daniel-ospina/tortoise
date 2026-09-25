@@ -4,18 +4,21 @@
 WHY THESE EXIST
 ---------------
 `welcome.html` used to decide in the browser whether a visitor was signed in, via
-a hard gate calling `readValidSession()`. Under the BFF there is no JS-readable
-session, so that returned null on EVERY load and bounced signed-in users to /auth
-— the #3485 loop, reproduced for every user.
+a hard gate calling `readValidSession()`. That function reads the legacy
+parent-domain `sb-tortoise-auth-token` cookie — after first migrating any legacy
+localStorage session into it — and a BFF login writes only the HttpOnly
+`__Host-session`, so a browser holding no legacy session read as signed OUT and
+was bounced to /auth: the #3485 loop.
 
 The fix is that the server decides. These tests pin that decision, because the
-failure mode (a client that cannot see the session, bouncing anyway) is invisible
+failure mode (a client with no session it can see, bouncing anyway) is invisible
 to every other test in the suite: the unit tests all passed while /welcome was
 broken.
 
 They also pin the reset flow, which could not survive the migration untouched:
 the form used to call `supabaseClient.auth.updateUser()` from the browser, which
-can never work when the browser holds no session.
+can never work when the BFF session cookie is HttpOnly and the page has no
+client-readable BFF credential.
 """
 from __future__ import annotations
 
@@ -162,7 +165,8 @@ def test_anonymous_welcome_redirects_to_auth(stack):
     """Genuinely signed out -> /auth. This is a 302 from the SERVER.
 
     It must not be a rendered page that then decides — that was the old design,
-    and the client could not see the session, so it always decided "signed out".
+    and a browser holding no legacy session had no credential the client could see,
+    so the client gate decided "signed out".
     """
     status, _, headers = _req("/welcome")
     assert status == 302, f"anonymous /welcome must redirect, got {status}"
@@ -174,8 +178,9 @@ def test_anonymous_welcome_redirects_to_auth(stack):
 def test_signed_in_welcome_redirects_to_the_app(stack):
     """Signed in -> straight to the app. NOT back to /auth.
 
-    This is the #3485 regression test: the old client gate sent a signed-in user
-    to /auth on every load, because it could never observe the session.
+    This is the #3485 regression test: the old client gate sent a browser holding
+    no legacy session to /auth on every load, because it could never observe the
+    BFF session.
     """
     cookie = _session_cookie()
     status, _, headers = _req("/welcome", cookie=cookie)

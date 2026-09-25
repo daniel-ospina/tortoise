@@ -53,6 +53,8 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
+
 __all__ = ["AssemblyShape", "classify_question", "extract_subject_terms"]
 
 # public shape vocabulary (Task 6's fired branch keys on these)
@@ -681,7 +683,7 @@ def _tier_and_date(row: dict) -> tuple[str, _date | None]:
 def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
                    shape: AssemblyShape | None,
                    question_date=None,
-                   per_subject_cap: int = 200) -> AssemblySlices:
+                   per_subject_cap: int = PER_ENTITY_FANOUT_CAP) -> AssemblySlices:
     """One batched typed walk over the resolved subjects → typed slices.
 
     State rows come back in a SINGLE port.state_rows call (one statement —
@@ -696,6 +698,13 @@ def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
     """
     if not candidates:
         return AssemblySlices()
+    # #5010: clamp ONCE, before the fetch AND before the accounting below —
+    # the port now returns at most the adopted cap, so `rows_requested` and
+    # the post-fetch `truncated` verdict must be derived from the SAME
+    # effective bound the port used. (Deriving them from the unclamped request
+    # silently dropped rows with `truncated=False` for any caller above the
+    # cap — `resolve_limit_from_caps` accepts up to 10000.)
+    per_subject_cap = bounded_fanout(per_subject_cap)
     object_ids = [c.object_id for c in candidates]
     state_rows = list(port.state_rows(object_ids) or [])
     spine_raw = list(port.spine_rows(object_ids, per_subject_cap) or [])
@@ -776,13 +785,17 @@ def docker_walker_port(sdk) -> WalkerPort:
                  "superseded_by": r[3], "superseded_at": r[4]} for r in rows]
 
     def spine_rows(object_ids: list[str],
-                   per_subject_cap: int = 200) -> list[dict]:
+                   per_subject_cap: int = PER_ENTITY_FANOUT_CAP) -> list[dict]:
         # Deterministic + PER-SUBJECT-FAIR: one ORDER BY id LIMIT query per
         # subject per kind (bounded: 2 kinds x len(subjects) — never per-row
         # N+1). A shared LIMIT over the subject set would let a hub starve a
         # co-subject and make the surviving rows engine-order-dependent.
+        # #5010: the adopted fan-out cap (STORAGE-ARCHITECTURE.md §11.5) is a
+        # hard per-entity ceiling, so a caller may LOWER this bound but not
+        # raise it past the cap.
         if not object_ids:
             return []
+        cap = bounded_fanout(per_subject_cap)
         out: list[dict] = []
         for oid in object_ids:
             prow = proj.g.query(
@@ -792,7 +805,7 @@ def docker_walker_port(sdk) -> WalkerPort:
                 "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
                 "p.search_keys, p.eventId, p.lme_session_index "
                 "ORDER BY p.id LIMIT $cap",
-                params={"oid": oid, "cap": per_subject_cap}).result_set
+                params={"oid": oid, "cap": cap}).result_set
             for r in prow:
                 # validTo/expiredAt mirror the FTS-hit shape (validity-window
                 # marker parity — P1-2: [valid X -> Y] vs a misleading
@@ -810,7 +823,7 @@ def docker_walker_port(sdk) -> WalkerPort:
                 "RETURN 'event' AS kind, e.eventId, e.name, e.startedAt, "
                 "e.status, e.lme_event_id, e.lme_session_index "
                 "ORDER BY e.eventId LIMIT $cap",
-                params={"oid": oid, "cap": per_subject_cap}).result_set
+                params={"oid": oid, "cap": cap}).result_set
             for r in erow:
                 # the Event node stores its human text under `name`
                 # (create_event's first arg) — NOT `content`

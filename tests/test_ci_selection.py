@@ -8,6 +8,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 """
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import shutil
@@ -93,6 +94,47 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert r["carve_out_run"] is False
         assert r["slow_selected"] == []
         assert "test_website_docs_consistency.py" in r["test_files"], changed
+
+
+def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
+    """#3673 indicator (2): the parity gate runs on every PR touching either copy.
+
+    The gate is `test_onboarding_variants.py::test_m8_deploy_mirror_matches_canonical`.
+    Before this entry existed, `website/apps/dashboard/public/skills/` matched NO
+    SOURCE_PATTERNS entry, so an edit to the SERVED copy alone produced
+    `surfaces=[]` and the parity test ran only through the tier-1 fallback —
+    coverage that held by accident and that would vanish the moment the file left
+    `tier1`. For the installer the consequence was worse: its guard,
+    `test_installer_preserves_foreign_skill_content.py`, is on `core` and NOT in
+    `tier1`, so an installer-only PR ran no guard for the installer at all — the
+    #1349/#3332/#3616 silent-drop class this file exists to prevent.
+
+    Asserted on the SURFACE, not merely on the test-file list: the tier-1
+    fallback also puts `test_onboarding_variants.py` in `test_files`, so a
+    test-file-only assertion passes with the wiring absent — a gate that can only
+    ever pass. Watched RED before the SOURCE_PATTERNS entries existed, GREEN
+    after, which is the only evidence that distinguishes the two.
+    """
+    cases = (
+        # the two tracked copies whose byte-identity IS the parity contract
+        ("tortoise/onboarding/SKILL.md", "test_onboarding_variants.py"),
+        ("website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md",
+         "test_onboarding_variants.py"),
+        # a served sibling — the same directory, the same gate
+        ("website/apps/dashboard/public/skills/how-to-use-tortoise/SKILL.md",
+         "test_onboarding_variants.py"),
+        # the installer whose SKILLS=(...) the dashboard's claim is pinned against
+        ("website/apps/dashboard/public/install-tortoise-skills.sh",
+         "test_installer_preserves_foreign_skill_content.py"),
+    )
+    root = Path(__file__).resolve().parents[1]
+    for changed, guard in cases:
+        assert (root / changed).exists(), f"guarded path is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — its guard runs only via the "
+            f"tier-1 fallback, which is not a wiring")
+        assert guard in r["test_files"], f"{changed} does not select {guard}"
 
 
 def test_every_source_pattern_is_selectable():
@@ -251,6 +293,65 @@ def test_shared_module_goes_full():
     assert r["test_files"] == "ALL"
     r2 = _sel(["tests/conftest.py"])
     assert r2["full"] is True
+
+
+def test_every_conftest_module_level_tests_import_is_shared():
+    """#4069: a `tests/` helper conftest imports at MODULE level is suite-wide.
+
+    `tests/conftest.py` re-exports suite-wide fixtures, so a `tests/` helper it imports at
+    module level runs for EVERY surface's tests; the manifest never classifies it (it is
+    not a `test_*.py` file), so unless it is in `SHARED_MODULES` a change to it selects
+    `core` only and an api/onboarding/battery break it induces never runs on the PR that
+    made it (the #1349/#3332/#3910 silent-under-selection class).
+
+    Scope is deliberately `tests.*` only: this criterion justifies a *test helper* being
+    suite-wide, not a product module (whose classification is its own path pattern plus
+    the cross-cutting judgment list `SHARED_MODULES` carries). The product modules conftest
+    imports at module level are therefore NOT covered here; that residual is measured on
+    #4486, not asserted away.
+
+    The import set is read from the AST and the walk is GENERIC: it recurses into every
+    nested statement container (class bodies, `match` cases, `except*` blocks, with/for
+    bodies, ...) and stops only at function-like nodes, whose bodies are not module level.
+    Enumerating the containers to descend into is what let an earlier version of this ratchet
+    be narrower than the rule it documents, so there is no such list here. Relative imports
+    (`from . import _x`) are deliberately unmatched: `tests/` has no `__init__.py`, so they
+    cannot appear at conftest module level today, and this test states that rather than
+    pretending they are covered.
+    """
+    conftest_path = Path(__file__).resolve().parent / "conftest.py"
+    module = ast.parse(conftest_path.read_text())
+    imported: set[str] = set()
+
+    def walk(node) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue  # a function-local import is not module level
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    if alias.name == "tests" or alias.name.startswith("tests."):
+                        imported.add(alias.name)
+                continue
+            if isinstance(child, ast.ImportFrom):
+                if child.level == 0 and child.module == "tests":
+                    for alias in child.names:
+                        imported.add(f"tests.{alias.name}")
+                elif child.level == 0 and child.module and child.module.startswith("tests."):
+                    imported.add(child.module)
+                continue
+            walk(child)
+
+    walk(module)
+    assert imported, "expected tests/conftest.py to import a tests.* module at module level"
+    for module in sorted(imported):
+        rel = module.replace(".", "/") + ".py"
+        assert rel in SHARED_MODULES, (
+            f"{rel} is imported at conftest MODULE level (so it runs for every "
+            f"surface's tests) but is not in SHARED_MODULES — a change to it would "
+            f"select core only")
+        result = _sel([rel])
+        assert result["full"] is True, result
+        assert result["test_files"] == "ALL", result
 
 
 def test_every_shared_module_entry_selects_the_full_matrix():
@@ -466,6 +567,23 @@ def test_gen_ask_transcripts_change_selects_sdk_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
+    # #4069: tools/tmpdir_sweep.py owns tests/test_tmpdir_sweep.py and
+    # tests/test_tmpdir_hygiene.py. The mechanism is the CORE_ALSO entry:
+    # `_selection_relevant()` consults it, so the `tools/` path survives the
+    # flat NON_PYTHON_PREFIXES filter, and the match loop then adds `core` and
+    # marks the path found — so a tool-only change selects `core` instead of
+    # tier-1 smoke or the unknown-path full matrix. Mutation check: removing
+    # the CORE_ALSO entry filters the path out (docs-only early return → empty
+    # surfaces, tier-1 smoke), which fails asserts 2–5 below.
+    r = _sel(["tools/tmpdir_sweep.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_tmpdir_sweep.py" in r["test_files"], r
+    assert "test_tmpdir_hygiene.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
@@ -477,6 +595,22 @@ def test_collision_preflight_tool_change_fails_closed_to_full():
     # No SOURCE_PATTERNS entry matches the path, so it takes the unknown-path
     # branch -> full matrix (fail closed), exactly like tools/ci_selection.py.
     r = _sel(["tools/collision_preflight.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
+def test_run_with_eval_keys_tool_change_fails_closed_to_full():
+    # #2718/#4860: tools/run-with-eval-keys.sh owns
+    # tests/test_run_with_eval_keys.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/"
+    # NON_PYTHON_PREFIXES entry swallows a `.sh` path, so without a
+    # TOOL_CARVEOUTS entry `changed` is empty and select() takes the docs-only
+    # return (surfaces=[], tier-1 smoke only) — a wrapper-only change (a new
+    # managed key, a fingerprint-format edit) would ship without its guard
+    # suite ever running. No SOURCE_PATTERNS entry matches a `.sh` path, so it
+    # lands in the unknown-path fail-closed branch -> FULL matrix + both legs.
+    r = _sel(["tools/run-with-eval-keys.sh"])
     assert r["full"] is True
     assert r["test_files"] == "ALL"
     assert "core" in r["surfaces"]
@@ -1016,18 +1150,34 @@ def test_push_legs_partitions_every_classified_file():
     # pre-#1485 form of this check required a bench file in half_b SPECIFICALLY
     # and re-staled the moment a pool change moved one (#3811: adding a single
     # classified file flipped all three bench files into half_a, reddening an
-    # unrelated PR). Assert the invariant the code actually provides — every
-    # bench file reaches a half (the partition assertion above), and
-    # `push_extra`, when non-empty, reaches BOTH rather than being dumped on
-    # one.
+    # unrelated PR). Assert the invariant the code actually provides HERE: every
+    # bench file reaches a half (the partition assertion above). The push_extra
+    # spread rule is not asserted against this manifest — the shipped
+    # `push_extra` is empty, so it would be vacuous — it is pinned on a
+    # SYNTHETIC manifest by test_push_legs_distributes_push_extra_across_halves
+    # below (#2988/#3243).
     assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
         "no bench file reached the push legs at all"
-    push_extra = {f.replace(".py", "") for f in m.get("push_extra", [])}
-    if push_extra:
-        assert push_extra & set(legs["half_a"]), \
-            "push_extra lost its even spread (#1485): none in half a"
-        assert push_extra & set(legs["half_b"]), \
-            "push_extra lost its even spread (#1485): none in half b"
+
+
+def test_push_legs_distributes_push_extra_across_halves():
+    """#1485: ``push_extra`` is spread across the halves (even index -> half_a,
+    odd -> half_b), never dumped on one.
+
+    Pinned on a SYNTHETIC manifest: the shipped ``push_extra`` is empty (the
+    bench files are classified under the `eval` surface and packed by LPT), so
+    asserting this against the real manifest is vacuous — and pinning which
+    half a *bench* file lands on was a function of the duration estimates, not
+    a designed invariant (#2988/#3243 corrected the stale
+    test_selfhost_health_probe_executor.py weight, which flipped it).
+    """
+    from tools.ci_selection import push_legs
+
+    m = dict(load_manifest())
+    m["push_extra"] = ["bench/synthetic_a.py", "bench/synthetic_b.py"]
+    legs = push_legs(m)
+    assert "bench/synthetic_a" in legs["half_a"], legs["half_a"]
+    assert "bench/synthetic_b" in legs["half_b"], legs["half_b"]
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
@@ -1124,11 +1274,12 @@ def test_duration_integrity():
     from tools.ci_selection import duration_issues, load_manifest
     m = load_manifest()
     assert duration_issues(m) == []
-    # a slow-file key must fail
-    bad = dict(m)
-    bad["durations"] = {"test_about_edges.py": 10.0}  # a slow file
-    assert duration_issues(bad) != []
-    # an unclassified key must fail
+    slow_now_ok = dict(m)
+    slow_now_ok["durations"] = {"test_about_edges.py": 10.0}  # a slow file
+    assert duration_issues(slow_now_ok) == []
+    carve_ok = dict(m)
+    carve_ok["durations"] = {"test_reaper.py": 195.9}
+    assert duration_issues(carve_ok) == []
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
@@ -1240,7 +1391,6 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map: 502/520 fast files measured (96.5%)
     assert duration_coverage_issues(load_manifest()) == []
 
 
@@ -1568,9 +1718,17 @@ def test_diff_gated_jobs_consume_changes_outputs():
     # committed matrix rows remain literal file lists (drift-guard pinned)
     rows = wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]
     assert len(rows) == 2
+    from tools.ci_selection import TESTS_DIR
+    _slow = set(load_manifest()["slow_files"])
     for row in rows:
-        assert row["files"].startswith("test_"), \
-            "test-slow leg rows must stay the committed literal lists (#1471)"
+        tokens = row["files"].split()
+        assert tokens, "test-slow leg row must be a literal file list (#1471)"
+        for token in tokens:
+            rel = f"{token}.py"
+            assert (TESTS_DIR / rel).exists(), \
+                f"test-slow leg entry {rel} does not exist under tests/"
+            assert rel in _slow, \
+                f"test-slow leg entry {rel} is not declared in slow_files"
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():
@@ -1910,6 +2068,103 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 "does not block the merge (#2656)")
         assert _verdict(*green[:-1], "skipped") == 0, (
             "a skipped need is not a failure (docs-only PRs skip the matrix)")
+
+
+def test_required_gate_excludes_the_long_legs():
+    """The required check's transitive `needs:` closure IS the merge-path
+    critical path (a job's `if:` is evaluated only AFTER its `needs` complete).
+
+    This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
+    (strict up-to-date protection + `gh pr merge --auto --merge`, see
+    commit-workflow `04-merge-deploy.md`), so `python-ci-gate` going green is
+    what releases the merge — the workflow run does not have to finish. When
+    the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
+    ~30m on a green run, against a ~20m main-merge cadence) the head went
+    BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
+    must NOT depend on the >15m legs — directly OR transitively — and those legs
+    must still EXIST: they move out of the gate, they are not deleted, and they
+    keep running pre-merge (advisory) and post-merge on main.
+
+    The TRANSITIVE half is load-bearing, not pedantry: an earlier version of
+    this change left the push-only `canary-streak` in `needs:`, and because
+    `canary-streak` `needs: test`, the *skipped* job still held the aggregate
+    for the whole ~30m `test` leg on every PR (run 35960027173: the gate was
+    not scheduled while `test (a)` ran, though every short leg had completed).
+    A direct-`needs` assertion cannot see that shape.
+
+    Keeping them running on the PR lane (rather than skipping them there) is
+    deliberate and belongs to the same contract: the `--admin` rail requires
+    the PR lane to EXECUTE every test shard main's lane executes
+    (`scripts/admin-merge.sh` lane parity, tortoise #4263/#4457) — a `skipped`
+    shard is not coverage — so a push-only leg would make every `--admin` merge
+    refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
+    """
+    workflow = _load_python_ci()
+    jobs = workflow["jobs"]
+
+    def _needs(name: str) -> list[str]:
+        n = jobs[name].get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
+
+    direct = list(_needs("python-ci-gate"))
+    closure, frontier = set(direct), list(direct)
+    while frontier:
+        for parent in _needs(frontier.pop()):
+            if parent not in closure:
+                closure.add(parent)
+                frontier.append(parent)
+
+    for leg in ("test", "test-slow", "test-carve-out"):
+        assert leg in jobs, (
+            f"{leg} must still RUN — the latency fix removes it from the "
+            "required aggregate, it does not delete the leg")
+        assert leg not in closure, (
+            f"{leg} is a >15m leg reachable from `python-ci-gate` through "
+            "`needs:` — directly or transitively — which re-adds the ~30m "
+            "merge-path latency this change removes. A skipped intermediate "
+            "job does NOT break the chain: its own `needs:` still hold the "
+            "aggregate (the `canary-streak` → `test` shape).")
+    assert "manifest-integrity" in closure, (
+        "the required aggregate must still include the manifest drift gate, "
+        "or a drift stops blocking merges (#2656)")
+
+    # `leg in jobs` alone only proves the leg is DEFINED. The fix's disclosure
+    # leans on the legs still EXECUTING (advisory on PRs, detection on main), so
+    # pin that too: both triggers must remain, and no leg may be silenced.
+    triggers = workflow.get("on", workflow.get(True)) or {}
+    assert "push" in triggers and "pull_request" in triggers, (
+        "the long legs must still run on push (post-merge detection on main) "
+        "AND on pull requests (advisory pre-merge) — dropping either trigger "
+        "silently deletes a leg the disclosure depends on")
+    for leg in ("test", "test-slow", "test-carve-out"):
+        spec = jobs[leg]
+        assert spec.get("steps"), (
+            f"{leg} must still have steps — an empty job would 'run' nothing")
+        assert not spec.get("continue-on-error"), (
+            f"{leg} must not be continue-on-error — its failure must stay "
+            "visible, or the post-merge detection is silent")
+        assert spec.get("if") not in ("false", False), (
+            f"{leg} must not be unconditionally disabled")
+        # NOT push-only: the workflow's own comment cites the `--admin` rail's
+        # lane parity as the reason these legs are not skipped on PRs, so a
+        # per-leg `github.event_name` filter is the exact regression to refuse.
+        # And job-level `continue-on-error` is not enough — a silenced STEP
+        # inside the job produces the same missing signal.
+        assert "github.event_name" not in str(spec.get("if") or ""), (
+            f"{leg} must not carry an event filter (e.g. push-only): a "
+            "`skipped` shard is not coverage, and the `--admin` rail's lane "
+            "parity (`ADMIN_MERGE_LANE_PARITY=require`) refuses a merge when "
+            "the PR lane did not execute a shard main's lane executes "
+            "(#4263/#4457)")
+        pytest_steps = [s for s in spec.get("steps", [])
+                        if "pytest" in (s.get("run") or "")]
+        assert pytest_steps, f"{leg} must still RUN pytest"
+        silenced = [s.get("name") for s in pytest_steps
+                    if s.get("continue-on-error")]
+        assert not silenced, (
+            f"{leg}'s pytest step(s) must not be continue-on-error — that "
+            "silences the signal the disclosure says is still produced: "
+            f"{silenced}")
 
 
 # ── #2938: surface audit (report-only) ───────────────────────────────────
@@ -3494,4 +3749,125 @@ def test_every_changed_set_diff_disables_rename_detection():
         "Add --no-renames if it is a changed-set selection diff, or teach "
         "changed_set_git_diff_commands the new spelling (#4378):\n  "
         + "\n  ".join(unparsed)
+    )
+
+
+# ── #4740 review 4: the orphan-assert steps' fail-closed pgrep probe ───────
+# Each of the three `Assert no redislite orphans` steps in python-ci.yml is
+# the newest fail-closed control on the orphan count, and NO other test can
+# see it: `orphan-bound.test.sh` reads only the gate script, and the gate
+# receives an already-computed `--count`. A mutation (`-le 1` → `-lt 1`, or a
+# revert to `COUNT=$(pgrep … | wc -l)`) would be undetectable. This pin reads
+# the workflow text and requires, per step, that pgrep's OWN status is
+# captured and the count is never read from a `pgrep | …` pipeline (whose
+# status is the last command's — `tr`, always 0 — so a failed probe would
+# read as a measured 0 and pass).
+
+
+def _orphan_assert_steps() -> list[dict]:
+    wf = _load_python_ci()
+    steps = [
+        s
+        for job in wf["jobs"].values()
+        for s in (job.get("steps") or [])
+        if str(s.get("name", "")).startswith("Assert no redislite orphans")
+    ]
+    return steps
+
+
+def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
+    """#4740 review 4: pgrep's own status must gate the orphan count."""
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, (
+        f"expected the three 'Assert no redislite orphans' steps, found "
+        f"{len(steps)} — this pin must not pass vacuously"
+    )
+    for s in steps:
+        # Drop whole-line comments: they QUOTE the rejected pipeline form
+        # (`COUNT=$(pgrep … | wc -l)`) and the `${PIPESTATUS[0]}` rationale, so
+        # scanning raw text would flag the documentation rather than the code.
+        body = "\n".join(
+            line
+            for line in s["run"].splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "PIPESTATUS" not in body, (
+            "a ${PIPESTATUS[0]} read after `COUNT=$(pgrep … | wc -l)` is the "
+            "`tr` status, never pgrep's, so the guard would be inert (#4740)"
+        )
+        assert re.search(r"\$\(pgrep\b[^)]*\|", body) is None, (
+            "COUNT must not be read from a `pgrep | …` pipeline: its status is "
+            "the last command's, so a failed probe reads as a measured 0 and "
+            "passes (the #4740 fail-open)"
+        )
+        assert 'PIDS=$(pgrep -f "redislite/bin/redis-server")' in body, (
+            "pgrep must run on a bare assignment so `$?` is its own status"
+        )
+        assert "prc=$?" in body, "pgrep's own status must be captured"
+        assert '[ "$prc" -le 1 ]' in body, (
+            "rc 0 (matches) and rc 1 (none) are real measurements; anything "
+            "else must fail closed (#4740)"
+        )
+        assert "exit 1" in body, "the failed-probe guard must exit non-zero"
+        assert 'COUNT=$(printf \'%s\' "$PIDS" | wc -w | tr -d \' \')' in body, (
+            "COUNT must be derived from the pgrep output `$PIDS`, not a "
+            "constant — a `COUNT=0` would hand the gate a measured-zero that "
+            "no later leak could ever exceed (#4740 review 10)"
+        )
+        assert '--count "$COUNT"' in body, (
+            "the orphan gate must consume the derived COUNT (#4740 review 10)"
+        )
+
+
+def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
+    """#4740 review 5: each empty-selection block must WRITE the no-pytest
+    report to the very path the orphan gate is handed.
+
+    Cases 11-13 of orphan-bound.test.sh pin the gate's READING of that report,
+    but nothing pinned the PRODUCER: deleting one `printf` left both the
+    harness and the pgrep pin green, so the cycle-1 P0 (the gate parses a
+    `missing` report and REDs a legitimately-empty selection) could silently
+    return. This reads the real workflow via `_load_python_ci()`.
+    """
+    report_path = "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+    producers = [
+        s
+        for job in _load_python_ci()["jobs"].values()
+        for s in (job.get("steps") or [])
+        if isinstance(s.get("run"), str) and '"skipped":"no-pytest"' in s["run"]
+    ]
+    assert len(producers) == 3, (
+        f"expected the three empty-selection blocks that write the "
+        f"'no-pytest' report, found {len(producers)} — one `printf` deleted "
+        f"leaves the gate parsing a missing report and REDs a healthy skip "
+        f"(the #4740 cycle-1 P0)"
+    )
+    for s in producers:
+        printf_lines = [
+            line
+            for line in s["run"].splitlines()
+            if '"skipped":"no-pytest"' in line
+        ]
+        assert len(printf_lines) == 1, (
+            f"step {s.get('name')!r} must write the no-pytest report exactly "
+            f"once, found {len(printf_lines)} lines carrying it"
+        )
+        line = printf_lines[0].strip()
+        assert line.startswith("printf '"), (
+            f"step {s.get('name')!r} must WRITE the report with printf, got "
+            f"{line!r}"
+        )
+        assert line.endswith(f'> "{report_path}"'), (
+            f"step {s.get('name')!r} must write the no-pytest report to "
+            f"{report_path} — the exact path the orphan gate is handed, not a "
+            f"different file (#4740)"
+        )
+    handed = [
+        s
+        for s in _orphan_assert_steps()
+        if f'--hygiene "{report_path}"' in s["run"]
+    ]
+    assert len(handed) == 3, (
+        f"all three orphan-assert steps must be handed {report_path}, the "
+        f"path the empty-selection blocks write; found {len(handed)}"
     )

@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import ci_timing  # noqa: E402, RUF100
@@ -242,3 +244,262 @@ def test_candidate_flakes_across_samples() -> None:
     assert [f["test"] for f in flakes] == ["tests/test_alpha.py::test_two"]
     assert flakes[0]["run_id"] == "4242"
     assert ci_timing.candidate_flakes([history[0]]) == []
+
+
+# --- eligible-run selection (ci-timing.yml `find` step) ---------------------
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
+CI_TIMING_WORKFLOW = WORKFLOW_DIR / "ci-timing.yml"
+
+# A python segment embedded in a shell body: `python3 - <<'EOF' … EOF` (heredoc;
+# optionally prefixed, e.g. inside `$( … )`) and `python3 -c '…'` (inline, may
+# span lines). Matched against the YAML-parsed run body — i.e. AFTER the block
+# scalar has stripped its indentation, exactly what the runner materialises.
+#
+# The inline form's closing quote is followed by whatever ends the command: `)`
+# (`$( … )`), `>>`/`|` (a redirect or a pipe), `}` — the closing brace of a bash
+# FUNCTION wrapping the call, which is how ai-review-gate.yml calls its diff
+# normalizer — or end-of-string. Omitting `}` (#5107) made the non-greedy body
+# backtrack past the real closing quote to a later one, swallowing the quote and
+# the brace into the "source" (`unterminated string literal`). The workflow ran
+# fine on every PR; only the extractor mis-read it.
+_HEREDOC_RE = re.compile(r"python3?[^\n]*<<-?'?(\w+)'?\n(.*?)\n\s*\1\s*$", re.S | re.M)
+_INLINE_C_RE = re.compile(r"python3 -c '(.*?)'(?=\s*(?:\)|>>|\||\}|$))", re.S)
+
+
+def _run_blocks(workflow_path: Path) -> list[tuple[str, str]]:
+    """(step name, run body) for every `run:` step in a workflow."""
+    wf = yaml.safe_load(workflow_path.read_text())
+    blocks: list[tuple[str, str]] = []
+    for job in wf.get("jobs", {}).values():
+        for step in job.get("steps", []):
+            if "run" in step:
+                blocks.append((step.get("name") or "(unnamed)", step["run"]))
+    return blocks
+
+
+def _embedded_python(script: str) -> list[tuple[str, str]]:
+    """(kind, python source) for every python segment embedded in a shell body."""
+    out = [("heredoc", m.group(2)) for m in _HEREDOC_RE.finditer(script)]
+    out += [("inline -c", m.group(1)) for m in _INLINE_C_RE.finditer(script)]
+    return out
+
+
+def _find_step_body() -> str:
+    wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
+    for step in wf["jobs"]["measure"]["steps"]:
+        if step.get("id") == "find":
+            return step["run"]
+    raise AssertionError("ci-timing.yml measure job no longer has a `find` step")
+
+
+def make_fake_gh_runs(bin_dir: Path, runs: list[dict], *, record: Path | None = None) -> None:
+    """PATH stub: `gh api <url>` → a workflow_runs list response, appending its
+    argv to `record` so tests can assert the exact query the step sends."""
+    script = bin_dir / "gh"
+    script.write_text(f"""#!/usr/bin/env python3
+import json, sys
+RUNS = {runs!r}
+if {record is not None!r}:
+    with open({str(record) if record else ""!r}, "a") as fh:
+        fh.write(" ".join(sys.argv[1:]) + "\\n")
+print(json.dumps({{"total_count": len(RUNS), "workflow_runs": RUNS}}))
+""")
+    script.chmod(0o755)
+
+
+@pytest.fixture
+def runs_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Stubbed `gh` returning cancelled/skipped then success/failure runs."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    make_fake_gh_runs(bin_dir, [
+        {"id": 101, "conclusion": "cancelled"},
+        {"id": 202, "conclusion": "skipped"},
+        {"id": 303, "conclusion": "success"},
+        {"id": 404, "conclusion": "failure"},
+    ], record=tmp_path / "gh-argv.txt")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    return bin_dir
+
+
+def test_pick_run_returns_first_eligible_completed_run(runs_env: Path, tmp_path: Path) -> None:
+    # cancelled/skipped are not comparable → first success/failure wins
+    assert ci_timing.pick_run("daniel-ospina/tortoise") == "303"
+    argv = (tmp_path / "gh-argv.txt").read_text()
+    assert "repos/daniel-ospina/tortoise/actions/workflows/python-ci.yml/runs" in argv
+    assert ("event=push&branch=main&status=completed"
+            "&exclude_pull_requests=true&per_page=10") in argv
+
+
+def test_pick_run_none_when_all_ineligible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    make_fake_gh_runs(bin_dir, [{"id": 1, "conclusion": "cancelled"}])
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    assert ci_timing.pick_run("daniel-ospina/tortoise") is None
+
+
+def test_pick_run_warns_instead_of_raising_on_api_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # behaviour parity with the pre-fix inline shell: an API failure warned and
+    # continued (this workflow is measurement-only, never a gate)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text("#!/bin/sh\necho boom >&2\nexit 2\n")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    assert ci_timing.pick_run("daniel-ospina/tortoise") is None
+    assert "::warning::gh api run-list failed" in capsys.readouterr().err
+
+
+def test_pick_run_cli_prints_only_the_id_and_writes_no_artifact(
+    runs_env: Path, tmp_path: Path
+) -> None:
+    tools = REPO_ROOT / "tools" / "ci_timing.py"
+    proc = subprocess.run(
+        [sys.executable, str(tools), "--pick-run", "--repo", "daniel-ospina/tortoise"],
+        capture_output=True, text=True, check=True, cwd=tmp_path,
+    )
+    assert proc.stdout == "303\n"
+    assert list(tmp_path.glob("ci-timing.*")) == []
+
+
+def test_pick_run_cli_empty_when_none_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    make_fake_gh_runs(bin_dir, [{"id": 1, "conclusion": "cancelled"}])
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "ci_timing.py"),
+         "--pick-run", "--repo", "daniel-ospina/tortoise"],
+        capture_output=True, text=True, check=True, cwd=tmp_path,
+    )
+    assert proc.stdout == ""
+
+
+# --- ci-timing.yml workflow regression (#3400 / CI-audit F8) ----------------
+
+def test_workflow_embedded_python_is_column_zero_after_yaml_dedent() -> None:
+    """Class guard for F8/#3400.
+
+    Every python segment embedded in every workflow must compile as the runner
+    sees it — i.e. after the YAML block scalar strips the block's indentation.
+    The pre-fix ci-timing.yml embedded a multi-line `python3 -c` whose python
+    lines kept 2 spaces after the dedent → `IndentationError: unexpected indent`
+    → exit 1 → the artifact steps were skipped on all three weekly runs.
+    """
+    failures: list[str] = []
+    for wf_path in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for step_name, script in _run_blocks(wf_path):
+            for kind, source in _embedded_python(script):
+                try:
+                    compile(source, f"{wf_path.name}:{step_name}:{kind}", "exec")
+                except SyntaxError as exc:
+                    failures.append(f"{wf_path.name} :: {step_name} [{kind}]: "
+                                    f"{type(exc).__name__}: {exc.msg}")
+    assert failures == [], (
+        "embedded python must reach column 0 after the YAML block scalar is dedented "
+        "(use `python3 - <<'EOF'` at the block's own indent, or move the logic into "
+        "tools/):\n" + "\n".join(failures)
+    )
+
+
+def test_inline_c_extraction_ends_at_the_shell_closing_quote() -> None:
+    """The extractor must stop at the quote that CLOSES the shell string (#5107).
+
+    #5003 wrapped a diff normalizer in a bash function —
+    `normalize_review_diff() { python3 -c '<body>' }` — so the closing quote is
+    followed by `}` rather than `)`/`>>`/`|`/end-of-string. With `}` missing from
+    the terminator allow-list the non-greedy body backtracked to a LATER quote and
+    the captured "source" swallowed the real closing quote and the brace, so
+    `compile()` failed with `unterminated string literal` and every PR carried a
+    false red on test (a)/(b)/test-carve-out — for a workflow the runner executed
+    correctly. Each of the three terminator shapes must yield exactly its own body.
+    """
+    script = "\n".join([
+        "normalize() {",
+        "python3 -c '",
+        "import sys",
+        'sys.stdout.write("ok")',
+        "'",
+        "}",
+        "python3 -c 'print(1)' | cat",
+        "out=$(python3 -c 'print(2)')",
+    ])
+    inline = [src for kind, src in _embedded_python(script) if kind == "inline -c"]
+    assert len(inline) == 3, inline
+    # the function-wrapped body stops at its quote — no `'`, no `}`, no `| cat`
+    assert inline[0].strip() == 'import sys\nsys.stdout.write("ok")', repr(inline[0])
+    assert inline[1].strip() == "print(1)", repr(inline[1])
+    assert inline[2].strip() == "print(2)", repr(inline[2])
+    for source in inline:
+        compile(source, "<inline -c>", "exec")  # what the runner materialises
+
+
+def test_ci_timing_workflow_embeds_no_inline_python() -> None:
+    """ci-timing.yml delegates run selection to tools/ci_timing.py::pick_run.
+
+    Inline python in this file is what F8 broke; the tool is unit-tested above, so
+    YAML indentation can no longer take the measurement loop down.
+    """
+    for step_name, script in _run_blocks(CI_TIMING_WORKFLOW):
+        assert _embedded_python(script) == [], f"{step_name} embeds inline python"
+    assert "python3 tools/ci_timing.py --pick-run" in _find_step_body()
+
+
+def test_find_step_writes_run_id_to_github_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execute the `find` step body exactly as the runner would (YAML parse →
+    dedent → `bash -e`) with a stubbed `gh`, and assert the expected run_id
+    reaches $GITHUB_OUTPUT — the step that used to die before writing anything."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "gh-argv.txt"
+    make_fake_gh_runs(bin_dir, [
+        {"id": 101, "conclusion": "cancelled"},
+        {"id": 202, "conclusion": "skipped"},
+        {"id": 303, "conclusion": "success"},
+        {"id": 404, "conclusion": "failure"},
+    ], record=record)
+    gh_output = tmp_path / "github_output"
+    gh_output.write_text("")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "daniel-ospina/tortoise")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(gh_output))
+
+    proc = subprocess.run(["bash", "-e", "-c", _find_step_body()],
+                          cwd=REPO_ROOT, capture_output=True, text=True)
+    assert proc.returncode == 0, f"find step failed:\n{proc.stdout}\n{proc.stderr}"
+    assert gh_output.read_text() == "run_id=303\n"
+    assert "sampled run: 303" in proc.stdout
+    # same query the pre-fix step used (behaviour preserved across the refactor)
+    argv = record.read_text()
+    assert "actions/workflows/python-ci.yml/runs" in argv
+    assert ("event=push&branch=main&status=completed"
+            "&exclude_pull_requests=true&per_page=10") in argv
+
+
+def test_find_step_warns_when_no_eligible_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    make_fake_gh_runs(bin_dir, [{"id": 1, "conclusion": "cancelled"}])
+    gh_output = tmp_path / "github_output"
+    gh_output.write_text("")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "daniel-ospina/tortoise")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(gh_output))
+
+    proc = subprocess.run(["bash", "-e", "-c", _find_step_body()],
+                          cwd=REPO_ROOT, capture_output=True, text=True)
+    assert proc.returncode == 0, f"find step failed:\n{proc.stdout}\n{proc.stderr}"
+    assert gh_output.read_text() == "run_id=\n"
+    assert "::warning::no completed push-to-main python-ci run found in the last 10" in proc.stdout

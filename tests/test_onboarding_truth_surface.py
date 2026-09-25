@@ -181,6 +181,37 @@ class TestCheckpointStepRequiresAgentCredential:
         assert r.status_code == 200, r.text
         assert steps == ["catalog-presented"]
 
+    def test_agent_credential_files_the_config_write_step(self, monkeypatch):
+        """#3451: ``connection-written`` is on the checkpoint allowlist and
+        reaches the step writer through the real route.
+
+        RED mutation: restore the pre-#3451 ``_CHECKPOINT_STEPS`` (without
+        ``connection-written``) → the POST hits the 422 ``unknown_step``
+        branch BEFORE the writer, so ``steps`` stays empty and this fails.
+        GREEN: the agent credential records exactly ``connection-written``
+        (the config write is an AGENT act — the server cannot observe the
+        user's disk)."""
+        r, steps = self._post_step(
+            monkeypatch, _AGENT, step="connection-written")
+        assert r.status_code == 200, r.text
+        assert steps == ["connection-written"]
+
+    def test_session_jwt_cannot_write_the_config_write_step(self, monkeypatch):
+        """The #3671 lane applies to the new step too: the browser may not
+        assert that a config was written (it cannot know), so the session
+        credential is refused and the writer is never reached.
+
+        RED mutation: add ``connection-written`` to
+        ``_DASHBOARD_WRITABLE_STEPS`` → 200 + the writer is called → both
+        assertions fail."""
+        r, steps = self._post_step(
+            monkeypatch, _SESSION, step="connection-written")
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == {
+            "message": "agent_credential_required",
+            "step": "connection-written"}
+        assert steps == []
+
     def test_non_step_flow_op_keeps_its_session_lane(self, monkeypatch):
         """The dashboard's human answer (fork) is NOT a step observation — it
         must stay session-writable (scope pin: only step writes are gated)."""
@@ -204,6 +235,95 @@ class TestCheckpointStepRequiresAgentCredential:
             app.dependency_overrides.clear()
         assert r.status_code == 200, r.text
         assert writes == ["self"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Part 1b — #3451: the DERIVED restart_pending, both directions
+# ═══════════════════════════════════════════════════════════════════
+
+class _FakeProj:
+    """Stand-in for the FalkorProjection handle (never queried directly)."""
+
+
+class _FakeSDK:
+    def __init__(self, proj):
+        self._proj = proj
+
+    def _get_proj(self):
+        return self._proj
+
+
+class TestRestartPendingProjection:
+    """#3451: the surface the resuming agent reads must render the
+    config-write trace as a DERIVED condition — never a stored field — and
+    must state BOTH directions truthfully.
+
+    RED mutation (the false-positive direction): derive ``restart_pending``
+    from the bare absence of ``harness-connected`` instead of from the
+    recorded ``connection-written`` step → ``test_no_config_written...`` sees
+    True for an abandoned install and fails.
+    """
+
+    def _projection(self, monkeypatch, steps, *, node_present=True,
+                    graph_down=False, namespace=True):
+        monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
+        monkeypatch.setattr(ha, "_graph_has_org_namespace",
+                            lambda oid: namespace)
+        if graph_down:
+            def _boom(oid):
+                raise RuntimeError("graph down")
+            monkeypatch.setattr(ha, "_open_org_graph_sdk", _boom)
+        else:
+            monkeypatch.setattr(ha, "_open_org_graph_sdk", lambda oid: None)
+            monkeypatch.setattr(ha, "_make_sdk",
+                                lambda namespace=None: _FakeSDK(_FakeProj()))
+            monkeypatch.setattr(
+                ha._os, "read_onboarding_node",
+                lambda proj, oid: ({"status": "active", "version": 1}
+                                   if node_present else None))
+            monkeypatch.setattr(ha._os, "completed_steps",
+                                lambda proj, oid: list(steps))
+        return ha._get_onboarding_projection("org-3451")
+
+    def test_config_written_but_unverified_is_restart_pending(self, monkeypatch):
+        state = self._projection(
+            monkeypatch, ["team-named", "connection-written"])
+        assert state["restart_pending"] is True
+
+    def test_no_config_written_never_claims_restart_pending(self, monkeypatch):
+        # the abandoned install — the direction that must never be reported
+        # as waiting for a restart
+        state = self._projection(monkeypatch, ["team-named"])
+        assert state["restart_pending"] is False
+
+    def test_absent_node_never_claims_restart_pending(self, monkeypatch):
+        state = self._projection(monkeypatch, [], node_present=False)
+        assert state["restart_pending"] is False
+
+    def test_no_namespace_never_claims_restart_pending(self, monkeypatch):
+        """#3451: the NO-NAMESPACE branch (the org has no graph at all) must
+        also serve False — an org with no state cannot have a config written.
+
+        This is the fourth of the projection's four return paths and was
+        otherwise unpinned: the node-absent and graph-down paths were covered,
+        so a mutation setting ``True`` here escaped every test.
+
+        RED mutation: set ``restart_pending`` True on the no-namespace return
+        path (or omit the key) → both assertions fail.
+        """
+        state = self._projection(monkeypatch, [], namespace=False)
+        assert "restart_pending" in state, state
+        assert state["restart_pending"] is False
+
+    def test_verified_connection_is_not_pending(self, monkeypatch):
+        state = self._projection(
+            monkeypatch,
+            ["team-named", "connection-written", "harness-connected"])
+        assert state["restart_pending"] is False
+
+    def test_graph_down_claims_neither_direction(self, monkeypatch):
+        state = self._projection(monkeypatch, [], graph_down=True)
+        assert state["restart_pending"] == "unavailable"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -275,7 +395,8 @@ class TestPatchRefusesFabricatedReceipt:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Part 2b — #3681: the receipt harness is SERVER-resolved
+# Part 2b — #3681: the receipt harness is CALLER-resolved (stored or claimed),
+# never server-observed — see #3700
 # ═══════════════════════════════════════════════════════════════════
 
 _CAPTURE_TEAM = {
@@ -298,14 +419,19 @@ _CONV = [
 ]
 
 
-class TestCaptureReceiptHarnessIsServerResolved:
+class TestCaptureReceiptHarnessResolution:
     """RED mutation: keep ``_capture_receipt_key(body.harness)`` → capture #2
     (a forged ``body.harness='cursor'`` replay of a claude session) writes
     ``session_capture_receipt_cursor`` → the 'no cursor receipt' assertion
     fails. Also: revert ``_observed_capture_harness`` to return ``claimed``
     for a session credential → the bare-receipt assertion fails.
     GREEN: the legitimate forms — a fresh agent capture names its own harness,
-    and a re-capture keeps the server's recorded harness."""
+    and a re-capture keeps the server's recorded harness.
+
+    #3700 — the harness is RESOLVED (stored-or-claimed), never OBSERVED: a
+    # re-capture keeps the Session's stored harness when it has one, and falls
+    # back to the current caller's declaration when it does not; either way the
+    # harness is a caller declaration, not something the server observed."""
 
     @pytest.fixture()
     def env(self, tmp_path, monkeypatch):
@@ -380,7 +506,8 @@ class TestCaptureReceiptHarnessIsServerResolved:
 
     def test_fresh_agent_capture_names_its_own_harness(self, env):
         """The legitimate form: a FRESH session's agent credential declares its
-        harness, and the receipt names it (the agent is the observation)."""
+        harness, and the receipt names it — a CALLER declaration, not a server
+        observation of the harness (#3700; the capture itself IS observed)."""
         tc, _holder, seen = env
         r = self._capture(tc, session_id="S-fresh", harness="cursor")
         assert r.status_code == 200, r.text

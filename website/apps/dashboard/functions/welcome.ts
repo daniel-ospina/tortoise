@@ -4,11 +4,15 @@
  * WHY THE SERVER DECIDES
  * ----------------------
  * `welcome.html` used to decide this in the browser, via a hard gate that called
- * `readValidSession()`. Under the BFF there is no JS-readable session, so that
- * function returned null on EVERY load and the gate redirected to /auth on every
- * successful login — the #3485 loop, reproduced by construction for every user.
+ * `readValidSession()`. That resolves the legacy parent-domain
+ * `sb-tortoise-auth-token` cookie — after first copying a valid legacy localStorage
+ * session into it — while a BFF login writes only the HttpOnly `__Host-session`. So
+ * the gate's answer came from the legacy credential rather than from the session
+ * sign-in had just established, and wherever that legacy read resolved nothing the
+ * visitor was sent to /auth: the #3485 loop, reproduced by construction. Removing the
+ * bridge and the gate together is what fixed it.
  *
- * The session cookie is HttpOnly. The server is the only thing that can
+ * The BFF session cookie is HttpOnly. The server is the only thing that can
  * legitimately answer "is this visitor signed in?" — so the answer is a status
  * code here, and the page no longer participates in the decision at all.
  *
@@ -45,7 +49,8 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     // 302, not a rendered page: /welcome is a post-AUTH landing, so an
     // anonymous visitor belongs at the sign-in screen. This is deterministic
     // server-side routing, so it cannot loop the way the client gate did — the
-    // client gate bounced SIGNED-IN users because it could not see the session.
+    // client gate bounced a browser that held no legacy session, because it could
+    // not see the BFF session.
     return redirect(
       `/auth?next=${encodeURIComponent(url.pathname + url.search)}&stale=1`,
     );
