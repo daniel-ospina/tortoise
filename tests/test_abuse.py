@@ -590,6 +590,13 @@ class _StaleNoneStore(MemoryAbuseStore):
         return None
 
 
+class _FlagClearFailingStore(MemoryAbuseStore):
+    """`flag_clear` always raises — the episode-end write fails."""
+
+    def flag_clear(self, org_id, rule, now=None):
+        raise RuntimeError("clear write failed")
+
+
 class _FakeResendResponse:
     def raise_for_status(self):
         pass
@@ -644,18 +651,35 @@ class TestFlagNotificationBudget:
         assert ("o", "key_create", "flag") in eng._last_notified
 
     def test_new_episode_after_clean_window_alerts_again(self, notified):
-        """The claim is per-EPISODE, not a wall-clock cooldown: once a clean
-        window ends the first episode, a new burst must alert again even if it
-        starts inside the first episode's original window."""
+        """The claim is per-EPISODE, not a wall-clock cooldown. A heavy event
+        early plus a small one inside the window flags LATE, so the flag's
+        claim outlives the window in which the heavy event ages out: a clean
+        evaluation then ends the episode and the claim must be RELEASED, or the
+        next (new) burst 1s later would be durably flagged but silent."""
         eng = AbuseEngine(MemoryAbuseStore())
-        eng.record_point_create("t1", 501, now=T0)          # episode 1 → alert
+        eng.record_point_create("t1", 500, now=T0)                    # no flag
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(seconds=3000)) == "flag"       # claim→3600s
         assert [c[0] for c in notified].count("abuse_flag") == 1
-        # window goes clean → episode ends → the claim is released
+        # +3601: the 500-weight event ages out → clean → episode ends
         assert eng.record_point_create(
             "t1", 1, now=T0 + timedelta(seconds=3601)) is None
+        # new burst 1s later is INSIDE the old claim's window, but a NEW episode
         assert eng.record_point_create(
             "t1", 501, now=T0 + timedelta(seconds=3602)) == "flag"
         assert [c[0] for c in notified].count("abuse_flag") == 2
+
+    def test_clean_window_does_not_release_when_episode_end_fails(self):
+        """A failed `flag_clear` must NOT re-arm the alert budget — a store
+        failure must reduce alert volume, never increase it (#3631)."""
+        store = _FlagClearFailingStore()
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)          # flag + claim
+        assert ("t1", "point_create", "flag") in eng._last_notified
+        # the window is clean, but the episode-end write fails → no release
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(seconds=3601)) is None
+        assert ("t1", "point_create", "flag") in eng._last_notified
 
     def test_no_notification_when_flag_not_persisted(self, notified):
         """(b): a store write failure emits ZERO abuse alerts — the pre-fix

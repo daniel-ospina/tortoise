@@ -526,7 +526,15 @@ class AbuseEngine:
         genuinely NEW episode alerts again. The claim is per-EPISODE, not a
         wall-clock cooldown (#3631) — without this release, a burst that
         recycles inside the previous episode's window would re-flag durably but
-        stay silent to ops."""
+        stay silent to ops.
+
+        An out-of-band un-suspend (the ``abuse_unsuspend`` RPC writes a
+        ``flag_clear`` with no in-process caller here) is not observed until the
+        next clean window, so a re-breach before then may be muted for up to
+        ``window_s``. That is the deliberate conservative side: releasing on a
+        bare ``None`` would re-open the stale-read storm this claim exists to
+        stop.
+        """
         with self._notify_lock:
             self._last_notified.pop((org_id, rule, stage), None)
 
@@ -580,16 +588,21 @@ class AbuseEngine:
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
             # later burst starts fresh (re-flag, never a stale-flag suspend).
+            ended = False
             try:
                 if self.store.latest_flag_at(org_id, rule) is not None:
                     self.store.flag_clear(org_id, rule, now=now)
+                ended = True
             except Exception:
                 logger.debug("abuse flag_clear failed for %s/%s", org_id, rule)
-            # The episode is over (or was already clean): re-arm the alert
-            # budget so a NEW episode alerts again (#3631 — per-episode, not a
-            # wall-clock cooldown).
-            self._release_notify(org_id, rule, EVENT_FLAG)
-            self._release_notify(org_id, rule, EVENT_SUSPEND)
+            if ended:
+                # Episode CONFIRMED over: re-arm the alert budget so a NEW
+                # episode alerts again (#3631 — per-episode, not a wall-clock
+                # cooldown). NOT released when the episode-end read/write
+                # FAILED — a store failure must reduce alert volume, never
+                # increase it, so the claim is left to expire on its own.
+                self._release_notify(org_id, rule, EVENT_FLAG)
+                self._release_notify(org_id, rule, EVENT_SUSPEND)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
