@@ -29,7 +29,7 @@ opposite of the intent, so the form is load-bearing.
 Sites 3 and 4 are the two the issue body missed. They are a *second-line*
 handler around the already-absorbing ``_record_write_op``: normal traffic
 signals as lane=write_op and reaches them only if the inner helper itself
-raises. The owner's six-site requirement counts the HANDLERS, and the
+raises. The owner's SEVEN-site requirement counts the HANDLERS, and the
 correctness proof is that no handler is a silent ``pass`` — so an uncovered
 one would be a silent drop exactly like the original defect.
 
@@ -435,10 +435,10 @@ def test_capture_ledger_drop_is_signalled(caplog, monkeypatch):
 def test_create_object_drop_is_signalled(hosted, monkeypatch, caplog):
     """``create_object`` wraps ``_record_write_op`` in its own guard — one of
     the two handlers the issue body missed, and one of the owner's declared
-    six. It is a SECOND-LINE guard: ``_record_write_op`` already absorbs and
+    seven. It is a SECOND-LINE guard: ``_record_write_op`` already absorbs and
     signals its own failures, so normal production traffic is reported as
     lane=write_op and reaches this handler only if the inner helper itself
-    raises (an import fault, a future refactor). The owner's six-site proof
+    raises (an import fault, a future refactor). The owner's seven-site proof
     counts the HANDLERS, so this one must not be a silent ``pass`` either.
 
     REDs on: reverting this guard to ``except Exception: pass`` (no

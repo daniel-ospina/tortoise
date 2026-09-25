@@ -15,10 +15,12 @@ work-owning boundary and written through ``metering.record_embedding_usage``.
 
 THE FLEET BAR FOR THIS FILE
 ---------------------------
-Every behavioural test drives the REAL writer/reader (registry lane) or the
-real seam (Supabase lane) — never a stub's return value in isolation — and each
-names the mutation that must make it RED. The two integration tests drive the
-real HTTP boundary (the pure-ASGI middleware and the ``/v1/team`` route).
+The integration tests for each boundary drive the REAL writer/reader (registry
+lane) or the real seam (Supabase lane); the unit tests below them replace
+``metering.record_embedding_usage`` with a recording stub, which is why each
+one names the mutation that must make it RED. The two HTTP-boundary tests
+(authored in ``TestMiddleware``) drive the real pure-ASGI middleware and the
+``/v1/team`` route.
 
 DECLARED RESIDUAL (not a claim)
 -------------------------------
@@ -348,13 +350,18 @@ class TestFlush:
         assert calls[0]["calls"] == 1, calls
 
     def test_second_flush_is_a_no_op(self, monkeypatch):
-        # Mutation: flush_tally() not marking the tally consumed → two rows
-        # (double-counted embedding work).
+        # The CONSUMED guard, pinned directly on a held tally: the same object
+        # offered to the writer twice records once. (``take_and_reset``'s
+        # single-shot semantics are pinned separately by
+        # test_take_and_reset_clears_and_is_single_shot — routing this through
+        # ``flush()`` would let the two mechanisms mask each other, which is
+        # exactly what the earlier version of this test did: deleting the
+        # consumed guard left it green.)
         calls = _capture_writer(monkeypatch)
-        em.arm(ORG)
-        em.note_encode(texts=1, chars=10, wall_ms=1.0)
-        assert em.flush(ORG) is not None
-        assert em.flush(ORG) is None
+        tally = em.EmbedTally(calls=1, texts=1, chars=10, wall_ms=1.0,
+                              org_id=ORG)
+        assert em.flush_tally(tally, ORG) is not None
+        assert em.flush_tally(tally, ORG) is None
         assert len(calls) == 1
 
     def test_empty_flush_records_nothing_and_calls_no_rpc(self, monkeypatch):
@@ -454,8 +461,12 @@ class TestEmbeddingsHook:
         assert (t.calls, t.skipped) == (0, 2)
 
     def test_unarmed_compute_embeddings_is_unchanged(self, monkeypatch):
-        # Mutation: the hook raising when unarmed → every un-instrumented
-        # caller (the eval doubles, the longmem harness) breaks.
+        # REGRESSION GUARD, not a mutation pin: the hook must leave the
+        # un-instrumented call byte-identical (the eval doubles and the longmem
+        # harness call this with no tally armed). Two independent total-guards
+        # protect it (``note_encode``'s None check and ``_note_embed_encode``'s
+        # except), so no SINGLE production mutation reds it — each guard is
+        # pinned on its own by test_unarmed_note_is_a_noop.
         import tortoise.embeddings as emb
         monkeypatch.setattr(emb.EmbeddingModel, "get", classmethod(
             lambda cls: _FakeModel()))
@@ -769,12 +780,15 @@ class TestMiddleware:
         assert em.current_tally() is None
 
     def test_get_does_not_arm(self, monkeypatch):
-        # Mutation: arming on GET → a read-only request can only ever write an
-        # empty/zero row (and pays the ContextVar cost).
+        # Mutation: arming on GET → the tally is armed, so the encode below
+        # becomes attributable and the writer is called → RED. (The earlier
+        # version noted NOTHING, so an empty tally made the flush a no-op
+        # either way and the test passed with the GET guard deleted.)
         calls = _capture_writer(monkeypatch)
         self._run({"type": "http", "method": "GET",
-                   "state": {"org_id": ORG}}, note=False)
+                   "state": {"org_id": ORG}}, note=True)
         assert calls == []
+        assert em.current_tally() is None
 
     def test_post_with_no_org_alerts(self, monkeypatch):
         # Mutation: silently dropping the work when no org is resolvable → the

@@ -37,12 +37,15 @@ counter (PR #5292).
 
 TOTAL, NEVER RAISES. ``note_encode``/``note_skip``/``bind_org`` are total: an
 allocation fault on the measurement path must never fail a write. ``flush``
-absorbs every failure and reports a **window-unresolvable** drop to the operator
-through ``metering.report_unmetered_increment`` — the same lane-visible signal
-the seven swallow sites use (this module is the ``embed`` lane). A failure of the
-increment RPC ITSELF is logged at WARNING and is the #3824 residual, shared with
-every other lane (see ``metering.record_embedding_usage``); the two are distinct
-and this is the only one that ever alerts.
+absorbs every failure and reports the drops it can DETECT — a
+**window-unresolvable** window and a non-empty tally with **no resolvable org**
+— to the operator through ``metering.report_unmetered_increment``, the same
+lane-visible signal the seven swallow sites use (this module is the ``embed``
+lane). A failure of the increment RPC ITSELF is logged at WARNING and is the
+#3824 residual, shared with every other lane (see
+``metering.record_embedding_usage``); a note landing after the tally was
+consumed is the capture-cancellation residual. Those two are the ones this
+module cannot alert on — a declared limitation, not a claim of silence.
 
 NOT ON THE WRITE PATH. There is deliberately NO flush from
 ``hosted_api._record_write_op``: that site is SYNCHRONOUS and runs ON the event
@@ -76,9 +79,10 @@ _ACTIVE: ContextVar[EmbedTally | None] = ContextVar(
     "tortoise_embed_tally", default=None
 )
 
-#: Guards ONLY the take-and-reset snapshot — never held across the ledger RPC.
-#: A blocking write under this lock would serialize concurrent encodes, which
-#: is exactly the hot path this module exists to keep free.
+#: Guards the tally's consumed transition and its counter snapshot (one critical
+#: section), and the take-and-reset. Never held across the ledger RPC — a
+#: blocking write under this lock would serialize concurrent encodes, which is
+#: exactly the hot path this module exists to keep free.
 _LOCK = threading.Lock()
 
 
@@ -101,8 +105,8 @@ class EmbedTally:
     revision: str | None = None
     identity_mixed: bool = False
     org_id: str | None = None
-    #: Set by :func:`take_and_reset`/``flush_tally`` — a second flush of the
-    #: same object is a no-op (two boundaries in one request record once).
+    #: Set by :func:`flush_tally` — a second flush of the same object is a
+    #: no-op (two boundaries in one request record once).
     consumed: bool = False
     #: True once a real encode has stamped an identity (distinguishes "never
     #: encoded" from "encoded under an identity that happens to be None").
@@ -190,8 +194,10 @@ def note_skip(n: int = 1) -> None:
 def take_and_reset() -> EmbedTally | None:
     """Atomically claim the active tally and clear it. Returns None if unarmed.
 
-    The ONLY operation under :data:`_LOCK`. The claimed tally is marked consumed
-    by :func:`flush_tally`, so a second flush of the same object is a no-op.
+    One of the operations under :data:`_LOCK` (the other is
+    :func:`flush_tally`'s consumed transition + snapshot). The claimed tally is
+    marked consumed by :func:`flush_tally`, so a second flush of the same object
+    is a no-op.
     """
     with _LOCK:
         tally = _ACTIVE.get()

@@ -1783,10 +1783,11 @@ def _embed_metered(fn):
     A DECORATOR rather than a ``with`` block at each call site on purpose: these
     runners are reached from more than one boundary (the REST route, the MCP
     tool, an internal call), and only the RUNNER knows the org with certainty —
-    the session-auth and internal-seed lanes never populate
-    ``scope["state"]["org_id"]``, so a middleware-only attribution would drop
-    their work into an unattributable tally and fire a spurious operator alert
-    on every tenant provisioning.
+    the internal-seed lanes never populate ``scope["state"]["org_id"]``, so a
+    middleware-only attribution would drop their work into an unattributable
+    tally and fire a spurious operator alert on every tenant provisioning.
+    (The SESSION lane does populate it — ``_session_user_org`` stamps it — but
+    the runners themselves are reached directly by MCP too.)
 
     The tally is FRESH and flushed on exit (``embed_metering.meted``): a detached
     unit can neither double-count a request-scoped tally nor leak one. An
