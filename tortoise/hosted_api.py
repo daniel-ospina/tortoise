@@ -5471,6 +5471,45 @@ class _OffloadRefused:
 #: Public discriminator returned by a REFUSED best-effort offload (#4456).
 OFFLOAD_REFUSED = _OffloadRefused()
 
+#: Rate limit for the ``BILLING_NOTIFY_REFUSED`` ERROR floor (#4456 plan §4).
+#: The shared telemetry pool is reachable by any tenant, so ONE saturation
+#: refuses a notify per billing webhook for EVERY tenant — the repo already
+#: ruled against per-drop alert amplification (``operator_alert._log_shed``),
+#: so the ERROR line is shed-logged too. One line per window is enough to see
+#: the outage; the suppressed count is deliberately not carried.
+_BILLING_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference
+#: point is undefined, so a fresh-boot clock would suppress every line).
+_LAST_BILLING_REFUSED_LOG: float | None = None
+_BILLING_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_billing_notify_refused(org_id: str | None,
+                                event_type: str | None) -> None:
+    """The rate-limited ERROR floor for a REFUSED billing notify (#4456 AC3).
+
+    Emitted BEFORE the incident escalation, so it survives the two reasons the
+    alert channel can be ABSENT (no ``DR_ISSUES_PAT``, or an unbuildable
+    object store — the documented residual): without it, a permanently-lost
+    billing notification reads only as the ``_cp_offload`` best-effort WARNING
+    plus ``alert_operator``'s "no alert channel" WARNING, indistinguishable
+    from routine telemetry noise. Never raises.
+    """
+    global _LAST_BILLING_REFUSED_LOG
+    with suppress(Exception):
+        now = time.monotonic()
+        with _BILLING_REFUSED_LOG_LOCK:
+            if (_LAST_BILLING_REFUSED_LOG is not None
+                    and now - _LAST_BILLING_REFUSED_LOG
+                    < _BILLING_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_BILLING_REFUSED_LOG = now
+        _logger.error(
+            "webhook: billing notify REFUSED by the control-plane offload "
+            "seam (org=%s event_type=%s) — the WebhookEvent marker is already "
+            "committed, so Stripe's retry sees is_first=False and this "
+            "notification is LOST", org_id, event_type)
+
 
 async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                       pool: str = "auth", timeout: float | None = None,
@@ -27730,6 +27769,11 @@ async def webhooks_stripe(request: Request):
                             alert_billing_notify_refused,
                         )
 
+                        # The ERROR line is emitted BEFORE the escalation and
+                        # the subject is platform-scoped ("") — see
+                        # ``_log_billing_notify_refused`` and
+                        # ``alert_billing_notify_refused`` (#4456).
+                        _log_billing_notify_refused(org_id, etype)
                         alert_billing_notify_refused(org_id, etype)
             except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
                 _logger.warning(

@@ -544,12 +544,176 @@ def test_saturated_backlog_fails_closed(monkeypatch):
         second = asyncio.ensure_future(
             monitoring.run_control_plane_call(gate.wait, op="hold-2"))
         await asyncio.sleep(0)  # let `second` submit into the one-slot queue
-        with pytest.raises(monitoring.ControlPlaneOffloadError):
+        # The third submission is REFUSED by the one-slot backlog — the
+        # callable never runs, so ``refused`` must be True. Asserting only the
+        # exception TYPE let a ``refused=False`` mutation (which would disable
+        # the #4456 escalation in production) pass the whole suite.
+        with pytest.raises(monitoring.ControlPlaneOffloadError) as ex:
             await monitoring.run_control_plane_call(lambda: None, op="full")
+        assert ex.value.refused is True, (
+            f"a backlog-full refusal reported refused={ex.value.refused!r} — "
+            "the callable never ran, so the #4456 delivery discriminator must "
+            "be True"
+        )
         gate.set()
         await asyncio.gather(first, second)
 
     asyncio.run(_run())
+
+
+def test_bound_miss_on_a_queued_submission_is_refused_by_default(monkeypatch):
+    """#4456: the DEFAULT bound semantics are FAIL-CLOSED (no fake, no seam double).
+
+    ``cancel_on_timeout`` defaults to ``True``. A still-QUEUED submission has
+    its ``concurrent.futures.Future.cancel()`` SUCCEED when the bound expires;
+    the worker later reaches ``set_running_or_notify_cancel()``, gets False,
+    and SKIPS the callable — so the call did not and will not run, and
+    ``refused`` is True.
+
+    This is the polarity pin: flipping the default to ``False`` (delivery-
+    preserving, delivery for the Stripe notify lane only) would leave every
+    auth/oauth/graph bound miss silently delivery-preserving — a semantics
+    change to the AUTH lane — and the seam doubles elsewhere accept and IGNORE
+    the kwarg, so they MASK the flip instead of detecting it. Here the pool is
+    the REAL ``_SingleSlotWorker`` and the assertion reads an outcome, not the
+    argument.
+    """
+    tiny = monitoring._SingleSlotWorker("test-cp-polarity", workers=1,
+                                        max_backlog=1)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": tiny)
+    blocker_started = threading.Event()
+    release = threading.Event()
+    ran = threading.Event()
+
+    def _hold():
+        blocker_started.set()
+        release.wait(10.0)
+
+    def _queued():
+        ran.set()
+
+    async def _run():
+        first = asyncio.ensure_future(
+            monitoring.run_control_plane_call(_hold, op="polarity-hold"))
+        await asyncio.get_running_loop().run_in_executor(
+            None, blocker_started.wait)
+        try:
+            # DEFAULT args on purpose: the only difference from the
+            # delivery-preserving lane is the parameter default.
+            await monitoring.run_control_plane_call(
+                _queued, op="polarity-queued", timeout=0.05)
+        except monitoring.ControlPlaneOffloadError as exc:
+            try:
+                assert exc.refused is True, (
+                    f"a bound miss on a QUEUED submission reported "
+                    f"refused={exc.refused!r} — with the fail-closed default "
+                    "the submission is CANCELLED and the worker SKIPS it, so "
+                    "it did not run and the discriminator must be True "
+                    "(#4456)"
+                )
+            finally:
+                release.set()
+        else:  # pragma: no cover - a delivered queued call is the mutation
+            release.set()
+            raise AssertionError(
+                "the default bound DELIVERED a queued submission — the "
+                "fail-closed default has been flipped to delivery-preserving "
+                "(#4456)"
+            )
+        await first
+
+    asyncio.run(_run())
+    assert not ran.is_set(), (
+        "the queued callable RAN under the default (fail-closed) bound — it "
+        "must be cancelled and SKIPPED by the worker (#4456)"
+    )
+
+
+def test_an_abandoned_callable_failure_is_retrieved_and_attributed(
+        monkeypatch, caplog):
+    """#4456: an abandoned failure must not be ONLY an asyncio warning.
+
+    On the delivery-preserving lane ``shield`` does NOT mark the inner future's
+    result retrieved: in CPython 3.12 ``_outer_done_callback`` runs on
+    outer-cancel and, because the inner is not yet DONE (exactly the bound-miss
+    case), REMOVES ``_inner_done_callback`` — whose only job was
+    ``inner.exception()``. So a callable that fails AFTER the await was
+    abandoned leaves ``Future._log_traceback`` set: the failure surfaces only
+    as an unattributed "Future exception was never retrieved" when the future
+    is collected. The seam must consume that outcome and report it against the
+    op that abandoned it.
+    """
+    tiny = monitoring._SingleSlotWorker("test-cp-abandoned", workers=1,
+                                        max_backlog=4)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": tiny)
+    blocker_started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _hold():
+        blocker_started.set()
+        release.wait(10.0)
+
+    def _boom():
+        try:
+            raise RuntimeError("abandoned billing notify boom")
+        finally:
+            finished.set()
+
+    tiny.submit(_hold)
+    assert blocker_started.wait(5.0), "the blocker never occupied the slot"
+
+    # Capture the EXACT asyncio future the seam wraps: the retrieval is only
+    # observable on that object (``_log_traceback`` is cleared by
+    # ``exception()``).
+    wrapped: list = []
+    real_wrap_future = asyncio.wrap_future
+
+    def _spy_wrap_future(fut, **kwargs):
+        inner = real_wrap_future(fut, **kwargs)
+        wrapped.append(inner)
+        return inner
+
+    monkeypatch.setattr(monitoring.asyncio, "wrap_future", _spy_wrap_future)
+
+    async def _run():
+        with pytest.raises(monitoring.ControlPlaneOffloadError) as ex:
+            await monitoring.run_control_plane_call(
+                _boom, op="billing_notify", timeout=0.05,
+                cancel_on_timeout=False)
+        assert ex.value.refused is False
+        release.set()
+        # Let the abandoned worker run ``_boom`` and let the loop apply the
+        # concurrent future's outcome to the wrapped one.
+        await asyncio.get_running_loop().run_in_executor(None, finished.wait, 5.0)
+        for _ in range(200):
+            if wrapped and wrapped[0].done():
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+
+    assert wrapped, "the seam never wrapped a future — this run proves nothing"
+    inner = wrapped[0]
+    assert inner.done(), (
+        "the abandoned callable never completed — this run does not exercise "
+        "a post-bound failure (#4456)"
+    )
+    assert getattr(inner, "_log_traceback", None) is False, (
+        "the abandoned future's exception was NEVER retrieved: with "
+        "``_log_traceback`` still set, this failure is reported only as an "
+        "unattributed asyncio 'Future exception was never retrieved' warning "
+        "(#4456)"
+    )
+    errors = [r.getMessage() for r in caplog.records
+              if r.name == "tortoise.monitoring" and r.levelno >= 40]
+    assert any("billing_notify" in m and "abandoned" in m
+               and "abandoned billing notify boom" in m for m in errors), (
+        f"the abandoned failure was not attributed to its op — ERROR lines "
+        f"seen: {errors!r} (#4456)"
+    )
 
 
 # ── the rerouted SITE (this fails without the fix) ──────────────────────────

@@ -192,11 +192,21 @@ def alert_billing_notify_refused(org_id: str | None,
     billing notification (#4456): the event is already claimed, so this real
     drop is unrecoverable and must not be silent. Detail is a fixed,
     message-free vocabulary (the incident body is durable) — ``op`` names the
-    seam site and ``event_type`` the Stripe event type; no free text.
+    seam site, ``event_type`` the Stripe event type, ``org_id`` the affected
+    org; no free text.
+
+    The incident SUBJECT is PLATFORM-SCOPED (``""``) by the #4456 plan: ONE
+    Resend account serves every team, so a per-org key would file N issues for
+    ONE outage (the same reason ``notify.py`` passes ``""`` for a failed
+    billing send). Dedup is ``(kind, subject)``; the affected org still
+    travels in the detail. The shared telemetry pool makes such a refusal
+    CROSS-TENANT — one saturation refuses a notify per billing webhook for
+    every tenant — so per-org keying would amplify the outage it reports.
     """
     with contextlib.suppress(Exception):  # the alert must never raise
-        alert_operator(BILLING_NOTIFY_REFUSED_KIND, org_id,
-                       {"op": "billing_notify", "event_type": event_type})
+        alert_operator(BILLING_NOTIFY_REFUSED_KIND, "",
+                       {"op": "billing_notify", "event_type": event_type,
+                        "org_id": org_id or "?"})
 
 
 def file_operator_incident(store, kind: str, org_id: str | None, detail: dict) -> bool:

@@ -727,6 +727,21 @@ def daemon_worker(name: str, *, workers: int = 1,
         return worker
 
 
+def _consume_future_exception(future) -> None:
+    """Retrieve a finished future's exception so an abandoned failure is not
+    reported only as an unattributed asyncio warning. NEVER raises.
+
+    Registered by ``_await_future`` on the wrap_future awaitable of the
+    non-cancellable lane. Calling ``exception()`` is what marks the exception
+    RETRIEVED (clears ``Future._log_traceback``); without it, a failure that
+    lands AFTER the await bound was abandoned surfaces ONLY as asyncio's
+    "Future exception was never retrieved" when the future is collected.
+    """
+    with contextlib.suppress(Exception):
+        if not future.cancelled():
+            future.exception()
+
+
 async def _await_future(future, *, timeout: float | None,
                         cancel_on_timeout: bool = True):
     """Await a concurrent Future, optionally bounded.
@@ -746,14 +761,20 @@ async def _await_future(future, *, timeout: float | None,
     ``wrap_future`` awaitable alive, so the bound abandons only the AWAIT and
     a QUEUED submission still runs. Callers for which fail-closed
     abandonment is correct keep the default ``True``.
+
+    On the non-cancellable lane the abandoned awaitable has NO retriever, and
+    ``shield`` does NOT supply one: in CPython 3.12 ``_outer_done_callback``
+    runs on outer-cancel and, because the inner is not yet done (exactly the
+    bound-miss case), REMOVES ``_inner_done_callback`` — whose only job was
+    ``inner.exception()``. The wrapped future's outcome is therefore consumed
+    HERE (#4456), and ``run_control_plane_call`` attributes a later failure at
+    the op level.
     """
     awaitable = asyncio.wrap_future(future)
     if timeout is None:
         return await awaitable
     if not cancel_on_timeout:
-        # shield() marks the inner future's result as retrieved when the
-        # outer is cancelled, so an abandoned success/raise is not re-reported
-        # as "exception was never retrieved".
+        awaitable.add_done_callback(_consume_future_exception)
         awaitable = asyncio.shield(awaitable)
     return await asyncio.wait_for(awaitable, timeout)
 
@@ -1007,6 +1028,27 @@ def reset_control_plane_records() -> None:
         _CP_CLIENT_RECORDS.clear()
 
 
+def _log_abandoned_outcome(op: str):
+    """Done-callback factory: attribute an ABANDONED callable's later failure.
+
+    A bound miss on the ``cancel_on_timeout=False`` lane abandons ONLY the
+    await — the worker still runs the callable — so a failure that lands after
+    the bound has nowhere to be reported. ``_await_future`` consumes it (so it
+    is not just an unattributed asyncio warning); this names the op (#4456).
+    Never raises: it runs on the completing thread's done-callback path.
+    """
+    def _cb(future) -> None:
+        with contextlib.suppress(Exception):
+            if future.cancelled():
+                return
+            exc = future.exception()
+            if exc is not None:
+                logger.error(
+                    "control-plane call %r abandoned at the wait bound then "
+                    "FAILED: %r", op, exc)
+    return _cb
+
+
 async def run_control_plane_call(fn, *, op: str,
                                  timeout: float | None = None,
                                  pool: str = "auth",
@@ -1057,6 +1099,11 @@ async def run_control_plane_call(fn, *, op: str,
             raise
         reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                   else f"exceeded its {bound}s bound")
+        if not future.done():
+            # The callable is still QUEUED or RUNNING: the bound abandoned the
+            # AWAIT, not the work. Attribute whatever it eventually does at the
+            # op level instead of leaving it to a bare asyncio warning (#4456).
+            future.add_done_callback(_log_abandoned_outcome(op))
         # ``refused`` is the DELIVERY discriminator (#4456): True when the
         # callable did not and will not run (backlog-full refusal, or a queued
         # submission cancelled by the bound); False when a bound miss left it

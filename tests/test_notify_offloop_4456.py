@@ -29,8 +29,10 @@ These tests are behavioural where it matters:
   a still-queued ``Future.cancel()`` succeeds and the worker then SKIPS the
   callable), so the notify is submitted ``cancel_on_timeout=False``;
 * a REFUSAL (saturated backlog — the callable never ran) is distinguishable
-  per call (``OFFLOAD_REFUSED``) and escalated through the existing
-  ``operator_alert.alert_operator`` path rather than swallowed;
+  per call (``OFFLOAD_REFUSED``) and escalated through ``alert_operator`` on a
+  incident whose SUBJECT is platform-scoped (one outage = one issue) rather
+  than swallowed, with the rate-limited ERROR floor AC3 promises when the
+  alert channel is absent;
 * a structural pin: the direct call site sits INSIDE the ``_cp_offload``
   callable, so a revert to the inline shape fails regardless of argument.
 
@@ -44,6 +46,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -458,16 +461,22 @@ def test_stripe_billing_notify_queued_submission_still_runs(monkeypatch):
     assert "notify" in order, order
 
 
-def test_stripe_billing_notify_refusal_escalates_to_operator_alert(monkeypatch):
+def test_stripe_billing_notify_refusal_escalates_to_operator_alert(
+        monkeypatch, caplog):
     """#4456: a REFUSED submission is a REAL drop — distinguishable per call
-    (``OFFLOAD_REFUSED``) and escalated through ``operator_alert``.
+    (``OFFLOAD_REFUSED``) and escalated through the existing
+    ``operator_alert`` path, with the ERROR floor AC3 requires.
 
-    The seam's best-effort contract swallows an offload failure as ``None``,
-    which a caller cannot tell apart from a successful call. A REFUSAL
-    (saturated backlog) means the callable NEVER RAN, and the claimed event's
-    notification is lost, so ``_cp_offload`` returns the public
-    ``OFFLOAD_REFUSED`` sentinel and the webhook reuses the existing
-    ``operator_alert.alert_operator`` path instead of swallowing it.
+    Three things are pinned here that the round-1 shape did not pin:
+
+    * the escalation reaches ``operator_alert.alert_operator`` (the real
+      driver), not a test-local double of the wrapper;
+    * the incident SUBJECT is PLATFORM-SCOPED (``""``) per the issue's
+      recorded plan — one Resend account serves every team, so a per-org key
+      would file N issues for one outage — while the org travels in the
+      detail (dedup is ``(kind, subject)``);
+    * the rate-limited ERROR line fires at the site (plan §4), which is the
+      promised floor when the alert channel is ABSENT.
     """
     import tortoise.operator_alert as oa
 
@@ -484,20 +493,145 @@ def test_stripe_billing_notify_refusal_escalates_to_operator_alert(monkeypatch):
     monkeypatch.setattr(ha, "run_control_plane_call", _refuse)
     seen: list[tuple] = []
     monkeypatch.setattr(
-        oa, "alert_billing_notify_refused",
-        lambda org_id, event_type=None: seen.append((org_id, event_type)))
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+    # The ERROR floor is rate-limited process-wide; a prior test must not
+    # silence this one.
+    monkeypatch.setattr(ha, "_LAST_BILLING_REFUSED_LOG", None)
 
-    resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
+    with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+        resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
 
     assert resp.status_code == 200, resp.body[:200]
     assert "notify" not in order, (
         "the notifier ran despite the seam refusing the submission — a real "
         "refusal must not execute the callable (#4456)"
     )
-    assert seen == [("org-4456", "checkout.session.completed")], (
-        f"a REFUSED billing notification was not escalated (alert got {seen}) "
-        "— the claimed event's notification is lost silently (#4456)"
+    assert seen == [(oa.BILLING_NOTIFY_REFUSED_KIND, "",
+                     {"op": "billing_notify",
+                      "event_type": "checkout.session.completed",
+                      "org_id": "org-4456"})], (
+        f"a REFUSED billing notification was not escalated with a "
+        f"PLATFORM subject (alert got {seen}) — the claimed event's "
+        "notification is lost silently, and a per-org key would file one "
+        "issue per tenant for one outage (#4456)"
     )
+    heard = [r.getMessage() for r in caplog.records
+             if r.name == "tortoise.hosted_api" and r.levelno >= logging.ERROR]
+    assert any("REFUSED" in m and "billing notify" in m for m in heard), (
+        "no ERROR line was emitted for the refusal — with no alert channel "
+        "(no DR_ISSUES_PAT, or an unbuildable object store) the permanent "
+        "loss would read only as routine best-effort WARNINGs (#4456 AC3). "
+        f"ERROR lines seen: {heard!r}"
+    )
+
+
+def test_stripe_billing_notify_refused_through_the_real_seam(monkeypatch,
+                                                             caplog):
+    """#4456: the REFUSAL discriminator, exercised through the REAL path.
+
+    The escalation depends entirely on ``monitoring.py`` computing
+    ``refused`` from the submission's own future, but the other refusal tests
+    FAKE the exception (or assert only the exception TYPE). Here a FRESH
+    ``_SingleSlotWorker(workers=1, max_backlog=1)`` is saturated with a
+    blocker plus one queued filler, so the real ``webhooks_stripe`` →
+    ``_cp_offload`` → ``run_control_plane_call`` submission is genuinely
+    refused by the pool. Mutating ``refused=False`` at the seam makes this
+    test the one that fails.
+    """
+    import tortoise.operator_alert as oa
+
+    order: list[str] = []
+    notify_ran = threading.Event()
+    _wire_stripe_webhook(monkeypatch, order)
+
+    def _notify(kind, org, details=None):
+        order.append("notify")
+        notify_ran.set()
+
+    monkeypatch.setattr(nt, "notify_billing_event", _notify)
+
+    fresh = monitoring._SingleSlotWorker("test-4456-real-refusal",
+                                         workers=1, max_backlog=1)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": fresh)
+
+    blocker_started = threading.Event()
+    release = threading.Event()
+
+    def _block():
+        blocker_started.set()
+        release.wait(10.0)
+
+    def _filler():
+        release.wait(10.0)
+
+    fresh.submit(_block)
+    assert blocker_started.wait(5.0), "the blocker never occupied the slot"
+    fresh.submit(_filler)  # fills the one-slot backlog
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        oa, "alert_operator",
+        lambda kind, org_id, detail=None: seen.append((kind, org_id, detail)))
+    monkeypatch.setattr(ha, "_LAST_BILLING_REFUSED_LOG", None)
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+            resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
+    finally:
+        release.set()
+
+    assert resp.status_code == 200, (
+        f"a genuinely refused notify 500'd the claimed webhook: "
+        f"{resp.status_code} {resp.body[:200]!r} (#4456)"
+    )
+    assert not notify_ran.is_set(), (
+        "the notifier RAN even though the pool refused the submission — the "
+        "pool was not saturated, so this run does not exercise the real "
+        "refusal path (#4456)"
+    )
+    assert seen == [(oa.BILLING_NOTIFY_REFUSED_KIND, "",
+                     {"op": "billing_notify",
+                      "event_type": "checkout.session.completed",
+                      "org_id": "org-4456"})], (
+        f"a refusal exercised through the real pool did not escalate (alert "
+        f"got {seen}) — the escalation would never fire in production "
+        "(#4456)"
+    )
+    heard = [r.getMessage() for r in caplog.records
+             if r.name == "tortoise.hosted_api" and r.levelno >= logging.ERROR]
+    assert any("REFUSED" in m for m in heard), heard
+
+
+def test_billing_notify_refused_error_floor_is_rate_limited(monkeypatch,
+                                                            caplog):
+    """#4456 plan §4: the ERROR floor is one line per window.
+
+    ONE telemetry-pool saturation refuses a notify per billing webhook for
+    EVERY tenant, so an unthrottled ERROR would make the alert mechanism
+    amplify the outage it reports — the same ruling as
+    ``operator_alert._log_shed``.
+    """
+    monkeypatch.setattr(ha, "_LAST_BILLING_REFUSED_LOG", None)
+    with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+        ha._log_billing_notify_refused("org-a", "checkout.session.completed")
+        ha._log_billing_notify_refused("org-b", "checkout.session.completed")
+    assert len(caplog.records) == 1, (
+        f"{len(caplog.records)} ERROR lines inside one window — a "
+        "platform-wide saturation would flood the log (#4456)"
+    )
+    assert "org-a" in caplog.records[0].getMessage()
+
+    # The interval elapsed -> the floor logs again (a suppressed outage must
+    # not silence the next one forever).
+    monkeypatch.setattr(
+        ha, "_LAST_BILLING_REFUSED_LOG",
+        time.monotonic() - ha._BILLING_REFUSED_LOG_INTERVAL_S - 1.0)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+        ha._log_billing_notify_refused("org-c", "checkout.session.completed")
+    assert len(caplog.records) == 1, "the interval elapsed -> logs again"
 
 
 # ── the shape pin: the direct call must sit INSIDE the offload boundary ────
