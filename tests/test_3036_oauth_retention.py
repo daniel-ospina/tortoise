@@ -137,6 +137,29 @@ def test_one_table_failure_does_not_starve_the_others():
         "oauth_codes-inwindow", "oauth_codes-live"}
 
 
+def test_a_delete_leg_fault_is_also_fail_closed():
+    """Fail-closed must hold on the WRITE leg too. Both other fault tests
+    inject on GET, so wrapping only the DELETE in `try/except: pass` — silently
+    stopping GC with no error — would pass the whole suite."""
+    cp = FakeControlPlane()
+    for table, retention_s in _TABLES:
+        _seed_three(cp, table, retention_s)
+    cp.fail_query(table="oauth_access_tokens", method="DELETE")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sweep_oauth_retention(cp, now=NOW)
+
+    assert "oauth_access_tokens" in str(excinfo.value)
+    assert cp.unfired_faults() == []
+    # Nothing was deleted for the failed table (its rows survive), and the
+    # healthy tables were still swept.
+    assert {row["id"] for row in cp.tables["oauth_access_tokens"]} == {
+        "oauth_access_tokens-past", "oauth_access_tokens-inwindow",
+        "oauth_access_tokens-live"}
+    assert {row["id"] for row in cp.tables["oauth_refresh_tokens"]} == {
+        "oauth_refresh_tokens-inwindow", "oauth_refresh_tokens-live"}
+
+
 def test_retention_windows_are_positive():
     for value in (OAUTH_ACCESS_RETENTION_S, OAUTH_REFRESH_RETENTION_S,
                   OAUTH_CODE_RETENTION_S):
@@ -162,14 +185,12 @@ def test_a_row_exactly_at_the_cutoff_is_kept():
 
 
 def test_default_window_applies_when_the_env_is_unset(monkeypatch):
-    """Pin the DEFAULT magnitude independently of the constant the other tests
-    seed from (they derive their rows from `retention_s`, so a wrong constant
-    is invisible). With the env UNSET: 23h past expiry is kept, 25h is reaped
-    — which brackets the shipped 24h default without naming it.
-
-    ALL THREE tables: the defaults are three separate constants, so pinning
-    only the access one let a drifted refresh/codes default (anything > 2h)
-    pass the whole suite.
+    """Pin the exact shipped 24h DEFAULT independently of the constant the
+    other tests seed from (they derive their rows from `retention_s`, so a
+    wrong constant is invisible). Rows are seeded at 86400±1s so ONLY the exact
+    default satisfies both, and on ALL THREE tables — the defaults are three
+    separate constants, so pinning only the access one let a drifted
+    refresh/codes default (anything > 2h) pass the whole suite.
     """
     for name in ("TORTOISE_OAUTH_ACCESS_RETENTION_S",
                  "TORTOISE_OAUTH_REFRESH_RETENTION_S",
@@ -178,10 +199,10 @@ def test_default_window_applies_when_the_env_is_unset(monkeypatch):
     cp = FakeControlPlane()
     for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
         cp.seed(table, [
-            {"id": f"{table}-h23",
-             "expires_at": _iso(NOW - timedelta(hours=23))},
-            {"id": f"{table}-h25",
-             "expires_at": _iso(NOW - timedelta(hours=25))},
+            {"id": f"{table}-inside",
+             "expires_at": _iso(NOW - timedelta(seconds=86400 - 1))},
+            {"id": f"{table}-past",
+             "expires_at": _iso(NOW - timedelta(seconds=86400 + 1))},
         ])
 
     observed = sweep_oauth_retention(cp, now=NOW)
@@ -189,7 +210,24 @@ def test_default_window_applies_when_the_env_is_unset(monkeypatch):
     assert observed == {"oauth_access_tokens": 1, "oauth_refresh_tokens": 1,
                         "oauth_codes": 1}
     for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
-        assert [r["id"] for r in cp.tables[table]] == [f"{table}-h23"], table
+        assert [r["id"] for r in cp.tables[table]] == [f"{table}-inside"], table
+
+
+def test_ceiling_boundary_and_magnitude_are_pinned(monkeypatch):
+    """`>` vs `>=` at the ceiling is otherwise unpinned (a 9-digit in-range
+    value would be clamped upward), and importing `_MAX_RETENTION_S` in the
+    other tests neutralizes its magnitude — so assert the LITERAL here."""
+    from tortoise.oauth import _MAX_RETENTION_S, _retention_seconds
+
+    assert _MAX_RETENTION_S == 315_360_000, "the 10-year ceiling is a contract"
+    env = "TORTOISE_OAUTH_ACCESS_RETENTION_S"
+    # In-range values (including a 9-digit one) pass through UNCHANGED.
+    for raw in ("200000000", "315359999", "315360000"):
+        monkeypatch.setenv(env, raw)
+        assert _retention_seconds(env, OAUTH_ACCESS_RETENTION_S) == int(raw)
+    # One second over clamps.
+    monkeypatch.setenv(env, "315360001")
+    assert _retention_seconds(env, OAUTH_ACCESS_RETENTION_S) == _MAX_RETENTION_S
 
 
 def test_misconfigured_overrides_are_reported(monkeypatch, caplog):
@@ -412,14 +450,24 @@ def test_caller_sweeps_when_supabase_is_enabled(monkeypatch):
     assert {row["id"] for row in cp.tables["oauth_codes"]} == {"oauth_codes-live"}
 
 
-def test_caller_swallows_a_sweep_failure(monkeypatch):
-    """Best-effort: a failed sweep logs and never kills the loop."""
+def test_caller_swallows_a_sweep_failure(monkeypatch, caplog):
+    """Best-effort: a failed sweep logs and never kills the loop.
+
+    The LOG is half the contract — without it a GC failure is invisible — so
+    assert it, not just the absence of a raise.
+    """
+    import logging
+
     from tortoise import supabase_control as sc
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
 
-    ha_mod._sweep_oauth_retention()  # must not raise
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+        ha_mod._sweep_oauth_retention()  # must not raise
+
+    assert any("oauth retention sweep failed" in r.getMessage()
+               for r in caplog.records), caplog.records
 
 
 def test_boot_sweeps_include_the_oauth_sweep(monkeypatch):
