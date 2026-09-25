@@ -22,6 +22,7 @@ If you add or rename an extractor/indexer, update the catalog reference.
 from __future__ import annotations  # noqa: I001
 
 import json
+import logging
 import os
 import re
 import sys
@@ -34,6 +35,8 @@ from .file_indexer import (
     derive_session_id,
     parse_frontmatter,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── YAML frontmatter parsing ──────────────────────────────────────
 # Canonical home: tortoise.file_indexer (_FM_RE + parse_frontmatter). The
@@ -140,30 +143,53 @@ def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
 _graph_db = None
 
 def _graph_entity_keywords(content: str) -> list[str]:
-    """Find Object and Subject names from the graph mentioned in content."""
+    """Find Object and Subject names from the graph mentioned in content.
+
+    Best-effort: a lookup failure degrades to "no graph terms" rather than
+    aborting keyword extraction — but it is NEVER silent (#3067). Every
+    failure is logged at WARNING with the host/port and exception; the URI
+    itself is not logged because it carries credentials.
+    """
     global _graph_db
     content_lower = content.lower()
     matches = []
+    host = 'localhost'
+    port: int | None = None
     try:
-        import os as _os
-        uri = _os.environ.get('TORTOISE_DB_URI', '')
+        uri = os.environ.get('TORTOISE_DB_URI', '')
         if not uri:
             return []
         if _graph_db is None:
             from falkordb import FalkorDB  # noqa: I001
             from urllib.parse import urlparse
+
+            from tortoise.config import parse_uri_userinfo
             parsed = urlparse(uri)
             host = parsed.hostname or 'localhost'
             port = parsed.port or 16379
-            _graph_db = FalkorDB(host=host, port=port)
+            # #3067: forward the DECODED userinfo through the single shared
+            # rule. Dropping it makes an auth-required server (the canonical
+            # `docker://:pw@host:6379/tortoise` config) answer
+            # AuthenticationError — which the handler below used to swallow
+            # as "the graph has no matching entities", silently dropping
+            # every graph term from the extracted keywords.
+            username, password = parse_uri_userinfo(uri)
+            _graph_db = FalkorDB(host=host, port=port,
+                                 username=username, password=password,
+                                 ssl=(parsed.scheme == 'rediss'))
         g = _graph_db.select_graph('tortoise')
         rows = g.query('MATCH (n) WHERE (n:Object OR n:Subject) AND n.name IS NOT NULL RETURN DISTINCT n.name').result_set
         for row in rows:
             name = str(row[0])
             if len(name) > 3 and name.lower() in content_lower:
                 matches.append(name)
-    except Exception:
-        pass
+    except Exception as e:
+        # #3067: observable, not silent — a misconfigured/unreachable graph
+        # must be distinguishable from "the graph has no matching entities".
+        logger.warning(
+            "graph entity keyword lookup failed at %s:%s — %s: %s; "
+            "graph entities omitted from keywords",
+            host, port, type(e).__name__, e)
     return matches
 
 

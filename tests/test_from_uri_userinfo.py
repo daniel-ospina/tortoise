@@ -29,6 +29,11 @@ These tests pin:
    aliasing remain out of reach.
 4. **Helper decode** — each of the six converted ``graph-scripts`` parsers is
    exercised for real (the guard cannot see a plumbing regression).
+5. **Consumer plumbing (#3067)** — ``session_indexer._graph_entity_keywords``
+   DROPPED the userinfo (it parsed only hostname/port), so an auth-required
+   server answered ``AuthenticationError`` and the broad handler swallowed it
+   as "no entities". The lookup now forwards the decoded credentials and a
+   failure is logged, never silent.
 """
 
 from __future__ import annotations
@@ -692,3 +697,79 @@ def test_graph_script_helpers_decode_credentials(module_name):
     assert cfg["password"] == "p@ss", f"{module_name} did not decode userinfo"
     assert cfg["host"] == "localhost"
     assert cfg["graph"] == TEST_GRAPH
+
+
+# ── 5. session-indexer graph lookup (#3067) ──────────────────────────────
+
+def _fake_falkordb(captured: dict, error: Exception | None = None):
+    """A FalkorDB stand-in: records ctor kwargs, serves ``select_graph().query()``."""
+    class _Result:
+        result_set = (("SiblingParser",), ("UnrelatedThing",))
+
+    class _Graph:
+        def query(self, cypher, *args, **kwargs):
+            if error is not None:
+                raise error
+            return _Result()
+
+    class _FalkorDB:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def select_graph(self, name):
+            captured["graph"] = name
+            return _Graph()
+
+    return _FalkorDB
+
+
+def test_session_indexer_forwards_decoded_credentials(monkeypatch):
+    """#3067: ``_graph_entity_keywords`` dropped the URI's userinfo entirely.
+
+    It parsed only hostname/port and built ``FalkorDB(host=..., port=...)``,
+    so an auth-required server (the canonical ``docker://:pw@host`` config)
+    answered ``AuthenticationError`` and the broad handler swallowed it as
+    "the graph has no matching entities".
+    """
+    import falkordb
+
+    from tortoise import session_indexer as si
+
+    captured: dict = {}
+    monkeypatch.setenv("TORTOISE_DB_URI", _uri("p@ss", user="admin"))
+    monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(falkordb, "FalkorDB", _fake_falkordb(captured))
+
+    keywords = si._graph_entity_keywords("SiblingParser is discussed here")
+
+    assert captured["host"] == "db.example.com"
+    assert captured["port"] == 6379
+    assert captured["username"] == "admin"
+    assert captured["password"] == "p@ss"  # decoded, not the %40 form
+    assert captured["ssl"] is False
+    # Entity matching still works end to end on the same call.
+    assert "SiblingParser" in keywords
+
+
+def test_session_indexer_lookup_failure_is_logged_not_silent(monkeypatch, caplog):
+    """#3067: a failed lookup must not masquerade as "the graph has no entities"."""
+    import falkordb
+    import redis
+
+    from tortoise import session_indexer as si
+
+    monkeypatch.setenv("TORTOISE_DB_URI", _uri("p@ss", user="admin"))
+    monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(
+        falkordb, "FalkorDB",
+        _fake_falkordb({}, error=redis.exceptions.AuthenticationError(
+            "Authentication required.")))
+
+    with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
+        assert si._graph_entity_keywords("anything") == []
+
+    assert "AuthenticationError" in caplog.text
+    assert "db.example.com" in caplog.text
+    # A credential must never reach the log line.
+    assert "p@ss" not in caplog.text
+    assert "p%40ss" not in caplog.text
