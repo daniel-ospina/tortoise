@@ -795,7 +795,7 @@ def test_narrow_env_reads_are_the_frozen_ledger():
     closed = sorted(key for key in _KNOWN_NARROW_READS if key not in seen)
     assert not closed, (
         "closed _KNOWN_NARROW_READS entr(ies) — the read is gone, delete the entry so the "
-        "ledger can only shrink (#4128): " + ", ".join(f"{r}::{n}" for r, n in closed)
+        "ledger keeps shrinking by default (#4128): " + ", ".join(f"{r}::{n}" for r, n in closed)
     )
 
 
