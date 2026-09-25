@@ -618,8 +618,11 @@ export function preferredSurface(family, current) {
 // skill) is the agent-side self-adjudication source (the chooser's
 // successor). chatgpt is key-less/OAuth (HARNESS_OAUTH); #2698 removed its
 // chooser surface (HARNESS_FAMILIES has no chatgpt entry), so it renders on NO
-// live branch — UNIVERSAL_COMMAND.chatgpt exists for total-loop/roundtrip
-// consumers only (the roundtrip test reads it; nothing in the UI does).
+// dashboard branch — UNIVERSAL_COMMAND.chatgpt exists for total-loop/roundtrip
+// consumers only (the roundtrip test reads it; nothing in the UI does). Its LIVE
+// carrier is the public setup docs page (#4836): website/docs.html#chatgpt
+// names the Developer-mode path and the onboarding instructions URL, so a
+// ChatGPT user is not left with only a test-consumed constant.
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the

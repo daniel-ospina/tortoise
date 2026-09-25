@@ -471,6 +471,56 @@ class TestDocsPageAndSkillConfig:
         assert "bearer_token_env_var" in desktop
         assert "does <em>not</em> read shell exports" in desktop
 
+    def test_4836_docs_page_is_the_live_chatgpt_carrier(self):
+        """#4836: ChatGPT has no dashboard surface (#2912's 4-family chooser keeps
+        it out; #2698 deleted the flat tab first), so the public docs page is its
+        live carrier — it is the surface that already CLAIMED to describe ChatGPT
+        connection. That claim was false ("the dashboard's ChatGPT tab") and must
+        not come back, and the row it points at must carry the served onboarding
+        instructions URL — otherwise that URL is reachable only from a
+        test-consumed constant, which is the reach gap this issue is."""
+        docs = self.DOCS.read_text(encoding="utf-8")
+        assert "ChatGPT tab" not in docs, (
+            "docs.html must not send a ChatGPT user to the retired dashboard tab")
+        assert "it has no row below" not in docs, (
+            "docs.html must not claim ChatGPT has no row below once the row lands")
+        section = self._mcp_section()
+        start = section.find('<h4 id="chatgpt">')
+        assert start != -1, "docs #mcp must carry a ChatGPT carrier row (#4836)"
+        # Bound the slice to the next heading so the URL cannot be satisfied by a
+        # row elsewhere in the section (the `_row` id is un-anchored because the
+        # docs indent their `<h4>` rows).
+        rest = section[start:]
+        for delim in ("<h3", "<h4"):
+            cut = rest.find(delim, 1)
+            if cut != -1:
+                rest = rest[:cut]
+        assert "chatgpt.com/plugins" in rest, (
+            "the ChatGPT row must name its Developer-mode entry point")
+        assert ("https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
+                in rest), (
+            "the ChatGPT row must carry the onboarding instructions URL — it is "
+            "the live carrier #4836 requires")
+
+    def test_4836_document_section2_names_the_chatgpt_carrier(self):
+        """#4836 acceptance: `SKILL.md` §2's 7th-harness note and
+        `HARNESS_FAMILIES` must agree — a ChatGPT user can choose nothing from the
+        dashboard chooser, and the note must name the surface that actually
+        carries the instructions instead of leaving that to a test constant."""
+        skill = self.SKILL.read_text(encoding="utf-8")
+        marker = "> **#1701 —"
+        assert marker in skill, "SKILL.md lost the §2 7th-harness note"
+        note = skill.split(marker, 1)[1].split(
+            "\n\n## 3. Install + connect", 1)[0]
+        assert "https://tortoise.premiselabs.co/docs#chatgpt" in note, (
+            "§2's note must name the live ChatGPT carrier (the public docs page)")
+        assert "chatgpt.com/plugins" in note, (
+            "§2's note must keep naming the ChatGPT Developer-mode path")
+        assert "ChatGPT tab" not in note, (
+            "§2's note must not name the retired dashboard ChatGPT tab")
+        assert "no ChatGPT surface in the dashboard chooser" in note, (
+            "§2's note must state there is no ChatGPT chooser surface")
+
     def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
         section = self._mcp_section()
         # Global invariant: EVERY hosted JSON block keeps the key in an env var

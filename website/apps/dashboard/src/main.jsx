@@ -1230,7 +1230,7 @@ function claimIntentInFlight() {
   // key reveal; for returning empty-graph users it re-opens at step 0
   // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
-  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)); setWizardCopyFailed(false); setWizardConnectError('') }, [])
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)); setWizardConnectError('') }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
 
   // Wizard connect step: reset persisted 'chatgpt' value (legacy default) to a valid tab
@@ -1256,10 +1256,6 @@ function claimIntentInFlight() {
   // could not safely list the later-declared harnessKey). The
   // tdzDepsTripwire analyzer still guards the whole file against that class.
   const [wizardCopied, setWizardCopied] = React.useState('')
-  // #1701 R2: a failed clipboard write must not strand the ChatGPT flow — the
-  // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
-  // appears ONLY after a failure (the user explicitly asserts the copy).
-  const [wizardCopyFailed, setWizardCopyFailed] = React.useState(false)
   // #2328/#2912: Codex has two surfaces — CLI (shell) and Desktop (GUI app,
   // NO terminal, does not inherit shell exports). Since #2912 the SURFACE is
   // the leaf `wizardHarness` value ('codex' vs 'codexDesktop') chosen by the
@@ -3088,28 +3084,6 @@ function claimIntentInFlight() {
     }
     api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
-  }
-
-  // #1701 R2: chatgpt's copy handler is AWAITED — Continue (the checkpoint)
-  // must never be reachable without a successful copy, so the clipboard write
-  // resolves BEFORE the sticky wizardCopied='harness' state lands (mirrors
-  // claude-web's gate: copying ≠ setup done). The PATCH beacon fires on
-  // resolution only; wizardCopy above stays fire-and-forget so the 6 keyed
-  // harnesses keep byte-identical behavior.
-  async function wizardCopyChatgpt() {
-    setWizardConnectError('')
-    const text = HARNESS_INSTALL.chatgpt()
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      setWizardCopyFailed(true)
-      setWizardConnectError('Copy failed — select the prompt below and press ⌘/Ctrl-C, then Continue below')
-      return
-    }
-    setWizardCopyFailed(false)
-    setWizardCopied('harness')
-    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ harness: 'chatgpt', section: 'config' }) }).catch(() => {})
   }
 
   const stopGithubPoll = () => {
