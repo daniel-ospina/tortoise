@@ -1227,16 +1227,32 @@ class TestRecordFunctions:
         monitoring.record_error()
         assert _counter_value(monitoring.ERROR_COUNT) == before + 2
 
-    def test_record_cost_by_team(self):
-        before_e = _counter_value(monitoring.TEAM_COST, {"team": "eldato"})
-        before_a = _counter_value(monitoring.TEAM_COST, {"team": "app-team"})
+    def test_record_cost_sets_the_allocation_idempotently(self):
+        """#4493: ``TEAM_COST`` is a Gauge and ``record_cost`` SETS.
 
-        monitoring.record_cost("eldato", 150)
-        monitoring.record_cost("eldato", 50)
-        monitoring.record_cost("app-team", 75)
+        The old contract was ``.inc`` on a Counter — cumulative, and with no
+        production caller the series could never move off 0. The per-team cost
+        figure is a recurring ALLOCATION recomputed on every refresh, so it can
+        go down at a period rollover: Prometheus' rule is "if the value can go
+        down, it is a gauge", and a set is the only shape that is idempotent
+        across refreshes (an increment would double-count on every tick).
 
-        assert _counter_value(monitoring.TEAM_COST, {"team": "eldato"}) == before_e + 200
-        assert _counter_value(monitoring.TEAM_COST, {"team": "app-team"}) == before_a + 75
+        Note ``team_cost_cents()`` reads the Gauge's BARE sample name — the
+        ``_counter_value`` helper filters ``_total`` and would read every Gauge
+        as 0, the exact dead-hook signature this metric was rescued from.
+        """
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("org-a", 150)
+            monitoring.record_cost("org-a", 50)   # replaces — never accumulates
+            monitoring.record_cost("org-b", 75)
+            monitoring.record_cost("org-c", -5)   # clamped — never a credit
+
+            assert monitoring.team_cost_cents() == {
+                "org-a": 50, "org-b": 75, "org-c": 0,
+            }
+        finally:
+            monitoring.clear_team_cost()
 
 
 class TestMetricsEndpoint:
@@ -1249,6 +1265,10 @@ class TestMetricsEndpoint:
         assert b"tortoise_requests_total" in body
         assert b"tortoise_errors_total" in body
         assert b"tortoise_team_cost_cents" in body
+        # #4493: the per-team cost series is a GAUGE, so the family name
+        # carries no ``_total`` suffix — assert the bare exposition name, not
+        # the counter-shaped prefix the old Counter happened to satisfy too.
+        assert b"tortoise_team_cost_cents{" in body or b"tortoise_team_cost_cents " in body
 
 
 class TestProbeWorkerNoLeak:

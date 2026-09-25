@@ -21,7 +21,7 @@ from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
@@ -464,7 +464,21 @@ def event_retention_interval() -> int:
 REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endpoint"])
 REQUEST_LATENCY = Histogram("tortoise_request_latency_seconds", "Request latency")
 ERROR_COUNT = Counter("tortoise_errors_total", "Total errors")
-TEAM_COST = Counter("tortoise_team_cost_cents", "Cost by team", ["team"])
+# #4493: the per-team cost hook. It was a ``Counter`` with NO production call
+# site — registered on /metrics and permanently 0, which reads as a measured
+# zero. It is now a **Gauge** carrying the org's ALLOCATED fixed/shared SaaS
+# cost for the current month: a recurring cost is recomputed (and can go down)
+# at every period rollover, and Prometheus' rule is "if the value can go down,
+# it is a gauge". The writer is ``record_cost``, whose only production caller
+# is ``tortoise.cost_allocation.refresh_and_publish``; the value is an
+# ALLOCATION (showback), never a measurement — see docs/ops/cost-allocation.md.
+# The label is the org id (``team`` is the pre-#3543 name; kept for the
+# metric-family continuity the issue names).
+TEAM_COST = Gauge(
+    "tortoise_team_cost_cents",
+    "Allocated fixed/shared SaaS cost per org, current month (showback allocation, NOT a measurement; #4493)",
+    ["team"],
+)
 # #3820: the analytics write path's terminal outcome, one label child per
 # member of `hosted_api._ANALYTICS_OUTCOMES`. The single writer is
 # `record_analytics_outcome` — the write path never touches the counter
@@ -504,8 +518,18 @@ def record_error() -> None:
 
 
 def record_cost(team: str, cents: int) -> None:
-    """Track LLM/tool cost for a team. cents is integer (avoids float drift)."""
-    TEAM_COST.labels(team=team).inc(cents)
+    """Set a team's ALLOCATED fixed/shared SaaS cost for the current month.
+
+    #4493: idempotent (``.set``, not ``.inc``) — the allocation is recomputed
+    every refresh, so an increment would double-count and could never express a
+    period rollover. ``cents`` is integer (avoids float drift); a negative value
+    is clamped to 0 rather than publishing a nonsensical credit.
+
+    The single production caller is
+    ``tortoise.cost_allocation.refresh_and_publish`` — this is an ALLOCATION
+    (a policy applied to a stated total), not a measured cost.
+    """
+    TEAM_COST.labels(team=team).set(max(0, int(cents)))
 
 
 def record_analytics_outcome(outcome: str) -> None:
@@ -518,6 +542,30 @@ def record_analytics_outcome(outcome: str) -> None:
     ANALYTICS_OUTCOME_COUNT.labels(outcome=outcome).inc()
 
 
+def _collect_by_label(metric, label: str, *, sample_suffix: str = "_total") -> dict[str, int]:
+    """In-process snapshot of one labelled metric family, keyed by *label*.
+
+    ONE extraction declaration for every reader: the two families differ ONLY
+    in the sample-name suffix (a ``Counter`` exports ``…_total``; a ``Gauge``
+    exports the bare family name), and that difference is exactly why the
+    counter-shaped helpers read a Gauge as 0 — the bug class #4493 fixes.
+
+    ``sample_suffix=None`` matches the bare family name (Gauge).
+    """
+    counts: dict[str, int] = {}
+    for family in metric.collect():
+        for sample in family.samples:
+            if sample_suffix is not None:
+                if not sample.name.endswith(sample_suffix):
+                    continue
+            elif sample.name.endswith("_total") or sample.name.endswith("_created"):
+                continue
+            value = sample.labels.get(label)
+            if value is not None:
+                counts[value] = int(sample.value)
+    return counts
+
+
 def analytics_outcome_counts() -> dict[str, int]:
     """In-process snapshot of ``ANALYTICS_OUTCOME_COUNT``, keyed by outcome.
 
@@ -526,15 +574,27 @@ def analytics_outcome_counts() -> dict[str, int]:
     no scrape (today nothing scrapes it in production — see #3820's audit:
     ``serve_health`` is not a ``fly.toml`` process).
     """
-    counts: dict[str, int] = {}
-    for family in ANALYTICS_OUTCOME_COUNT.collect():
-        for sample in family.samples:
-            if not sample.name.endswith("_total"):
-                continue
-            outcome = sample.labels.get("outcome")
-            if outcome is not None:
-                counts[outcome] = int(sample.value)
-    return counts
+    return _collect_by_label(ANALYTICS_OUTCOME_COUNT, "outcome")
+
+
+def team_cost_cents() -> dict[str, int]:
+    """In-process snapshot of ``TEAM_COST`` (allocated cents), keyed by org.
+
+    #4493: the readable form of the per-org allocation. It reads the GAUGE's
+    bare sample names (``sample_suffix=None``) — the counter-shaped helpers
+    (``_collect_by_label``'s default, ``_counter_value`` in the tests) filter
+    ``_total`` and would silently read every Gauge as 0, which is precisely
+    the dead-hook defect this metric was just rescued from.
+    """
+    return _collect_by_label(TEAM_COST, "team", sample_suffix=None)
+
+
+def clear_team_cost() -> None:
+    """Drop every ``TEAM_COST`` child. Called ONLY by the allocation writer
+    before a SUCCESSFUL re-publish, so an org that left the fleet cannot keep a
+    stale value forever. Never called on an unreadable refresh — clearing there
+    would make "unreadable" indistinguishable from "zero cost" (#4493)."""
+    TEAM_COST.clear()
 
 
 def _is_transient_connect_error(exc: BaseException) -> bool:

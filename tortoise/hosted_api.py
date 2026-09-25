@@ -696,7 +696,14 @@ def _iter_registered_orgs() -> list[dict]:
     """List registered orgs from the control plane (best-effort).
 
     Used by the event-retention sweep (#432 Task 7) — the boot pass and the
-    hourly interval in _lifespan (this is its only production caller).
+    hourly interval in _lifespan — AND, since #4493, by the fixed-cost
+    allocation refresh (``_refresh_cost_allocation``), which is a second
+    production caller on the same hourly interval. The two share the one
+    offload pool below.
+
+    ⚠️ ``[]`` is returned on ANY failure, so it is NOT proof of an empty
+    fleet; the allocation caller treats a falsy result as "enumeration
+    unavailable" and fails closed rather than reading it as "no orgs, no cost".
     Supabase mode (post-#669 flip): enumerates from Supabase orgs via the
     seam — the registry is DELETED and querying it would auto-recreate the
     empty graph. Registry mode: the Org nodes from the
@@ -984,6 +991,59 @@ def _sweep_oauth_retention() -> None:
                          total, counts)
     except Exception as exc:  # a GC sweep must never crash the loop
         _logger.warning("oauth retention sweep failed: %s", exc)
+
+
+def _measured_write_ops_basis(orgs: list[str]) -> dict[str, int] | None:
+    """Measured per-org write-ops for the PROPORTIONAL allocation lines (#4493).
+
+    FAIL-CLOSED by construction: the first unreadable org returns ``None``,
+    which makes every proportional line ``unavailable`` for this refresh. A
+    partial map would silently redistribute the unreadable org's share, and a
+    zero would assert a measurement that was never taken — the distinction
+    ``metering.measure_write_ops`` exists to preserve (unlike
+    ``get_current_usage``, which degrades an unreadable read to 0).
+    """
+    from tortoise.metering import measure_write_ops
+    basis: dict[str, int] = {}
+    for org_id in orgs:
+        try:
+            basis[org_id] = measure_write_ops(org_id)
+        except Exception as exc:  # noqa: BLE001, RUF100 — unreadable basis is a state, not a crash
+            _logger.warning(
+                "cost allocation basis unreadable for org %s (%s) — proportional "
+                "lines will report 'unavailable' rather than a silent zero",
+                org_id, exc)
+            return None
+    return basis
+
+
+async def _refresh_cost_allocation() -> None:
+    """#4493: apply the declared fixed/shared SaaS allocation, per org.
+
+    The SINGLE production write path for the per-team cost metric
+    (``tortoise_team_cost_cents``, which had no production caller at all before
+    this). It is module-level ON PURPOSE: the periodic seam that arms it,
+    ``_event_retention_loop``, is a CLOSURE inside ``_lifespan`` and cannot be
+    called from a test, so a test that asserts the PRODUCTION call site needs
+    this half to be directly invocable.
+
+    Best-effort by construction: ``_event_retention_loop`` has NO per-iteration
+    guard, so a raise here would kill event retention AND the deleted-org purge
+    for the process's lifetime. Every non-cancellation exception is swallowed
+    with a warning.
+    """
+    from tortoise.cost_allocation import refresh_and_publish
+
+    def _run() -> None:
+        orgs = [o["org_id"] for o in _iter_registered_orgs() if o.get("org_id")]
+        refresh_and_publish(orgs, weights_by_org=_measured_write_ops_basis(orgs))
+
+    try:
+        await run_on_daemon_worker(_run, name="tortoise-cost-allocation")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001, RUF100 — must never kill the retention loop
+        _logger.warning("cost allocation refresh failed: %s", exc)
 
 
 async def _run_boot_sweeps() -> None:
@@ -1452,6 +1512,10 @@ async def _lifespan(app):
                     # #3036: GC dead OAuth rows (sync DB work off the loop)
                     await run_on_daemon_worker(_sweep_oauth_retention,
                                                name="tortoise-boot-sweep")
+                    # #4493: allocated fixed/shared SaaS cost per org — the
+                    # production write path for tortoise_team_cost_cents.
+                    # Swallows internally (see _refresh_cost_allocation).
+                    await _refresh_cost_allocation()
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
