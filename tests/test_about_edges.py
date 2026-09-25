@@ -351,9 +351,42 @@ class TestCreateEventAboutEdges:
             params={"eid": ev["eventId"]},
         ).result_set
         assert r[0][0] == 0, "no edge can exist for an unresolvable handle"
-        assert any("resolves to no node" in rec.getMessage()
+        assert any("does not resolve to a" in rec.getMessage()
                    for rec in caplog.records), \
             "unresolved about* handle must be reported, not silently dropped"
+
+    def test_create_event_about_subject_not_stolen_by_event_id(self, sdk):
+        """#3586 review: `create_about_edge` resolves its target across ALL
+        labels by id/eventId, so a value that collides with ANOTHER node's
+        eventId used to win — the edge attached to the wrong-label node and the
+        intended Subject target was dropped.
+
+        Provenance-first made this worse for the name case: the value RESOLVED
+        (to the Event), so the result was accepted and the name/mint path never
+        ran — `aboutSubject="acme"` linked an Event and never created the
+        Subject `acme`. Pin the label-scoped resolution: aboutSubject must land
+        on the Subject named `acme`, never on the Event whose eventId is it.
+        """
+        # an Event whose eventId collides with the aboutSubject value
+        sdk.create_event("first event", "meeting", _server_id="acme")
+        ev = sdk.create_event("second event", "meeting", aboutSubject="acme")
+        proj = sdk._get_proj()
+        # the intended Subject exists and carries the edge
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutSubject]->"
+            "(s:Subject {name:'acme'}) RETURN count(s)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert r[0][0] == 1, \
+            "aboutSubject must land on the Subject named 'acme'"
+        # the wrong-label Event must NOT be the aboutSubject target
+        wrong = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutSubject]->(x:Event) "
+            "RETURN count(x)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert wrong[0][0] == 0, \
+            "aboutSubject must not land on an Event (wrong label)"
 
 
 # ── Existing edges unbroken (regression) ────────────────────────────────

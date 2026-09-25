@@ -361,13 +361,22 @@ class _EdgeHandlers:
             return True
         return False
 
-    def create_about_edge(self, source_id: str, target_id: str, edge_type: str) -> bool:
+    def create_about_edge(self, source_id: str, target_id: str, edge_type: str, *,
+                          target_label: str | None = None) -> bool:
         """Create a specific about* edge by source/target IDs. Validates edge type.
         
         Args:
             source_id: ID of source node (Point, Document, or Event)
             target_id: ID of target node
             edge_type: one of aboutSubject, aboutObject, aboutEvent, aboutPoint, aboutDocument
+            target_label: restrict the target to this node label (#3586).
+                ``None`` (default) keeps the historical label-agnostic id/eventId
+                resolution — callers that deliberately wire a structural edge
+                whose target label is not the one the rel implies (Point→Point
+                ``aboutSubject`` transfer tests) must keep working. The about*
+                name/handle seam passes ``STRUCTURAL_REL_LABELS[edge_type]`` so a
+                value that collides with ANOTHER label's id/eventId cannot steal
+                the rel from its intended target.
         
         Returns True if edge was created.
         """
@@ -376,9 +385,14 @@ class _EdgeHandlers:
             raise ValueError(f"Invalid about edge type: {edge_type}. Must be one of {valid}")
         
         # Resolve endpoints via index-backed labeled lookups (issue #327).
-        # Source predicate is id-only; target is id OR eventId (legacy OR-set).
+        # Source predicate is id-only; target is id OR eventId (legacy OR-set),
+        # optionally SCOPED to ``target_label`` (#3586) so the label-agnostic
+        # union cannot let a same-spelling node of a different label win and
+        # strand the intended target.
         sources = self._resolve_entity(source_id, by_id=True)
         targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
+        if target_label is not None:
+            targets = [t for t in targets if t["label"] == target_label]
         if not sources or not targets:
             return False
         created = False

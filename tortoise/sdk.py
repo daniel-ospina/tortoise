@@ -1438,11 +1438,22 @@ def _iso_date10(value: object) -> str:
 # identifier (`_mint_subject_stub`, projection/edges.py). The predicate is
 # therefore LENIENT about casing and digest length — ``prefix`` + a 16..64 hex
 # digest covers every id spelling the SDK mints or can plausibly mint — and it
-# is used ONLY for the negative case (may an UNRESOLVED value be treated as a
-# name?), never to decide that a value IS an id: that is provenance, decided by
-# resolution (`_wire_about_value`). Over-refusal is fail-closed (one warning,
-# no node); the reverse mints junk a caller cannot distinguish from data.
+# is used ONLY for the negative case at the about* seam (may an UNRESOLVED
+# value be treated as a name?), never to decide that a value IS an id: that is
+# provenance, decided by resolution (`_wire_about_value`). Over-refusal there
+# is fail-closed (one warning, no node); the reverse mints junk a caller cannot
+# distinguish from data.
+#
+# ``_is_canonical_entity_id`` is the STRICT, HARD-REJECTION predicate. The two
+# are NOT interchangeable, and widening this one is not free: its consumer
+# (`_check_refs`) fails the WHOLE bundle closed on a hit, so a digest it newly
+# rejects is a previously-valid ref that stops ingesting. Keep it pinned to the
+# shapes the minting surfaces actually emit — a bare ULID, or
+# ``label[:3]-<sha256[:26]>`` (`_entity_name_id`). A spelling no minter can
+# produce (``pr-<hex16>``) cannot shadow a real node, so rejecting it buys no
+# safety and breaks a live ingest.
 _ENTITY_ID_RE = re.compile(r"^[a-z]{2,8}-[0-9a-f]{16,64}$", re.IGNORECASE)
+_CANONICAL_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
 
 
 def _is_entity_id(s: str) -> bool:
@@ -1463,13 +1474,29 @@ def _is_entity_id(s: str) -> bool:
     return bool(_is_ulid(s) or _ENTITY_ID_RE.match(s))
 
 
+def _is_canonical_entity_id(s: str) -> bool:
+    """Return True if *s* is shaped like an id the minting surfaces EMIT — a
+    bare ULID or ``label[:3]-<sha256[:26]>`` (``_entity_name_id``) — and so
+    could address (and shadow) a real node.
+
+    The HARD-REJECTION predicate (``_check_refs`` fails the whole bundle closed
+    on a hit). Do NOT widen it to anticipate a future id format: that trades a
+    live, previously-accepted ingest for protection against a spelling no
+    minter produces and which therefore cannot shadow anything. The lenient
+    about*-seam predicate is ``_is_entity_id``."""
+    return bool(_is_ulid(s) or _CANONICAL_ENTITY_ID_RE.match(s))
+
+
 def _wire_about_value(proj, source_id: str, value, rel: str) -> bool:
     """Wire ONE ``about*`` prop of a freshly-written Event; True iff an edge
     was created.
 
     **Provenance first (#3586).** ``create_about_edge`` resolves the value
-    against the id/eventId index — the surfaces a HANDLE comes from — so a
-    value that RESOLVES is an id, whatever its spelling. Its result previously
+    against the id/eventId index WITHIN the label *rel* implies — the surfaces
+    a HANDLE comes from — so a value that resolves to a node of that label is
+    an id, whatever its spelling, and a value that resolves only to a
+    DIFFERENT label is refused here and falls through to the name path below
+    (it must not steal the rel from its intended target). Its result previously
     went unread and a shape test decided instead, which took the wrong branch in
     both directions:
 
@@ -1493,15 +1520,22 @@ def _wire_about_value(proj, source_id: str, value, rel: str) -> bool:
     the REQUIRED resolution branch here — extend the ``create_about_edge`` hop
     below, never this shape predicate.
     """
-    if proj.create_about_edge(source_id, value, rel):
+    from .projection.edges import STRUCTURAL_REL_LABELS
+    # The rel names its target label; scope the resolution to it so a value that
+    # collides with ANOTHER label's id/eventId cannot win (review of #3586 —
+    # `aboutSubject="acme"` landing on the Event whose eventId is "acme" and
+    # dropping the intended Subject).
+    target_label = STRUCTURAL_REL_LABELS.get(rel)
+    if proj.create_about_edge(source_id, value, rel, target_label=target_label):
         return True
     if not isinstance(value, str):
         return False
     if _is_entity_id(value):
         _logger.warning(
-            "create_entity: %s %r is handle-shaped but resolves to no node — "
-            "edge not created and no stub minted (an identifier must not "
-            "become a name, #3586)", rel, value)
+            "create_entity: %s %r is handle-shaped but does not resolve to a "
+            "%s node — edge not created and no stub minted (an identifier "
+            "must not become a name, #3586)", rel, value,
+            target_label or "node")
         return False
     proj._create_about_edges(source_id, value)
     return True
@@ -8261,11 +8295,13 @@ class TortoiseSDK:
         a bare ULID OR a prefixed entity id (e.g. ``sub-<hex26>``, #1553) —
         would make refs.get(x, x) silently address an existing node.
 
-        #3586: the shape predicate is deliberately lenient about the minted
-        spelling (see ``_ENTITY_ID_RE``), so this check stays in sync with an
-        UNKNOWN future id format by over-rejecting rather than under-rejecting
-        — a digest-shaped ref is a label that would silently shadow, and
-        rejecting it is fail-closed."""
+        #3586: rejection fails the WHOLE bundle closed, so this check uses the
+        STRICT canonical predicate (``_is_canonical_entity_id``): only a shape
+        a minting surface can actually emit is rejected. The lenient about*-
+        seam predicate (``_is_entity_id``) is deliberately broader, and sharing
+        it here hard-rejected previously-valid refs whose digest is not a
+        canonical id (``pr-<hex16>``) — an id no minter produces, and which
+        therefore cannot shadow anything."""
         seen: dict[str, str] = {}
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
@@ -8274,7 +8310,7 @@ class TortoiseSDK:
                 ref = item.get("ref")
                 if not ref:
                     continue
-                if _is_entity_id(str(ref)):
+                if _is_canonical_entity_id(str(ref)):
                     violations.append({
                         "section": section, "index": i,
                         "message": f"ingest: {section}[{i}] ref {ref!r} is "
