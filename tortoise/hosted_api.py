@@ -38,7 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.routing import get_route_path
+from starlette.routing import Mount, get_route_path
 
 import tortoise
 
@@ -2305,16 +2305,26 @@ def _egress_route_class(scope, entry_path: str) -> tuple[str, bool]:
     path = entry_path or ""
     if path in _EGRESS_DECLARED_PATHS:
         return path, False
-    # A dot-segment means the arrival path is a traversal shape the mount does
-    # not actually serve (`/mcp/../v1/version` is a 404), so it must not carry
-    # the mount's label.
+    # A dot-segment path is rejected for the mount rule deliberately. The mount's
+    # sub-app DOES receive it (measured: the MCP sub-app emits the 404 for
+    # ``/mcp/../v1/version``), so this is a policy: a traversal shape must not
+    # carry the mounted surface's label.
     if "." not in path:
         for prefix in _EGRESS_DECLARED_PREFIXES:
             if path == prefix or path.startswith(prefix + "/"):
                 return prefix, False
     route = scope.get("route")
     template = getattr(route, "path", None)
-    if isinstance(template, str) and template and _route_describes(route, path):
+    # A ``Mount`` is NEVER the serving template: its pattern is relative to the
+    # mount and its regex matches everything beneath it
+    # (``^/mcp/(?P<path>.*)$``), so it would happily describe
+    # ``/mcp/../v1/version`` and hand a traversal shape the mount's label — the
+    # mount rule above is the only route from a mount to a label, and it covers
+    # DECLARED prefixes only. (Measured: WHICH router stamps a ``Mount`` at all
+    # depends on the parent app — FastAPI's ``APIRouter.app`` does not, while
+    # Starlette's base ``Router`` does — so the label must not depend on it.)
+    if (isinstance(template, str) and template and not isinstance(route, Mount)
+            and _route_describes(route, path)):
         return template, False
     segments = [seg for seg in path.split("/") if seg][:2]
     if not segments:

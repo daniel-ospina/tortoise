@@ -299,15 +299,64 @@ class TestWriter:
         assert "tortoise_egress_bytes_total" in text
         assert ("org_a", "/v1/?bad", ORIGIN_ROUTE) in _bytes_by_child()
 
-    def test_org_overflow_sentinel_cannot_be_a_real_org_id(self):
+    def test_org_overflow_sentinel_cannot_be_produced_by_the_id_generators(self):
         """The org sentinel must not be reachable as a real org id.
 
-        The pattern is the one ``create_org`` validates against (hosted_api
-        ``_id_pattern``): a real org id starts alphanumeric, so an id can never
-        collide with the sentinel child.
+        Org ids are GENERATED, not chosen: the provisioning lanes use
+        ``uuid4().hex[:26]`` and the registry lane ``org_<name>``. This asserts
+        the sentinel is outside both shapes, so changing it to a colliding value
+        (``org_overflow``) would fail here.
         """
-        pattern = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
-        assert pattern.match(monitoring.EGRESS_OVERFLOW) is None
+        assert not re.fullmatch(r"[0-9a-f]{26}", monitoring.EGRESS_OVERFLOW)
+        assert not monitoring.EGRESS_OVERFLOW.startswith("org_")
+
+    def test_control_characters_are_stripped_from_labels(self):
+        """A percent-decoded path carries control characters into the exposition.
+
+        ``prometheus_client`` escapes only ``\\``, ``\n`` and ``"``, so CR, NUL
+        and ESC would ride into every series of the family — the ``*_bucket``
+        lines included. The class is the one ``mcp_auth._sanitize_for_log``
+        covers, which is why the C1 range and the Unicode line separators are
+        asserted here too: a NEL or U+2028 in a label adds PHYSICAL lines to a
+        ``splitlines()``-based reader (measured).
+        """
+        monitoring.record_egress("", "/a\r\x00b", 5, derived=True)
+        monitoring.record_egress("", "/c\x85d", 5, derived=True)
+        monitoring.record_egress("", "/e\u2028f", 5, derived=True)
+
+        children = _bytes_by_child()
+        for expected in ("/a??b", "/c?d", "/e?f"):
+            assert ("", expected, ORIGIN_DERIVED) in children, (
+                f"control characters survived into a label: {sorted(children)!r}")
+        text = generate_latest().decode()
+        for bad in ("\x00", "\r", "\x85", "\u2028", "\u2029"):
+            assert bad not in text
+
+    def test_admission_rechecks_inside_the_lock(self):
+        """The in-lock re-check keeps ONE logical label on ONE child.
+
+        The window is between the lock-free fast path and the lock: a label
+        admitted by another thread in that window must be returned as itself,
+        not folded to overflow — otherwise a label could end up with two
+        children. Driven deterministically with a registry that reports a known
+        label absent ONCE (a lying ``__contains__``), which is exactly the race
+        shape; without the re-check this returns overflow.
+        """
+        class _RacySet(set):
+            lies = 0
+
+            def __contains__(self, item):
+                if self.lies:
+                    self.lies -= 1
+                    return False
+                return super().__contains__(item)
+
+        seen = _RacySet()
+        seen.add("/known")
+        seen.lies = 1
+
+        assert monitoring._admit_egress_label(
+            "/known", seen, 0, overflow="__overflow__") == "/known"
 
     def test_unrouted_sentinel_is_not_a_reachable_label(self):
         """The derived overflow child must not be a label a client can request.
@@ -325,26 +374,14 @@ class TestWriter:
             "a request for the sentinel path must be an ordinary derived label")
         assert ("", monitoring.EGRESS_UNROUTED, ORIGIN_DERIVED) not in children
 
-    def test_control_characters_are_stripped_from_labels(self):
-        """A percent-decoded path carries CR/NUL into the exposition otherwise.
-
-        ``prometheus_client`` escapes only ``\\``, ``\n`` and ``"``, so a bare
-        CR or NUL would ride into every series of the family; a scraper that
-        splits on CRLF (or validates control bytes) would drop or garble them.
-        """
-        monitoring.record_egress("", "/a\r\x00b", 5, derived=True)
-
-        assert ("", "/a??b", ORIGIN_DERIVED) in _bytes_by_child()
-        text = generate_latest().decode()
-        assert "\x00" not in text
-        assert "\r" not in text
-
     def test_concurrent_admissions_stop_at_the_cap(self):
         """The cap must hold under CONCURRENCY, not just in one thread.
 
         The hot path is lock-free for an admitted label and takes the lock only
-        to admit; a missed re-check inside the lock would let a burst of
-        simultaneous first-sightings exceed the cap.
+        to admit, so a burst of simultaneous first-sightings is the shape that
+        would expose a cap check applied outside the lock. (The in-lock RE-check
+        is about series stability, not the cap — it is pinned separately by
+        ``test_admission_rechecks_inside_the_lock``.)
         """
         def _spray(base: int) -> None:
             for i in range(200):
@@ -579,15 +616,19 @@ class TestMiddleware:
             f"{sorted(_bytes_by_child())!r}")
 
     def test_dot_segment_path_does_not_borrow_the_mount_label(self):
-        """A traversal shape the mount does not serve is a 404, not the mount.
+        """A traversal shape must not carry the mounted surface's label.
 
-        The declared-prefix rule reads the ARRIVAL path, so without this guard
-        ``/mcp/../v1/version`` (never routed to the mount) would carry the
-        mount's label.
+        The bypass this pins (found in review): the mount's own sub-app receives
+        ``/mcp/../v1/version`` (the sub-app emits the 404), and a ``Mount``'s
+        ``path_regex`` is ``^/mcp/(?P<path>.*)$`` — it describes that path. So a
+        stamped ``Mount`` would hand the traversal shape the mount's label; the
+        scope here is exactly that shape, which the older test (a hand-built
+        ``{"route": None}``) could not detect.
         """
-        scope = {"type": "http", "route": None}
+        mount = Mount("/mcp", app=Starlette(routes=[]))
 
-        label, derived = ha._egress_route_class(scope, entry_path="/mcp/../v1/version")
+        label, derived = ha._egress_route_class(
+            {"type": "http", "route": mount}, entry_path="/mcp/../v1/version")
 
         assert label != "/mcp", "a traversal path borrowed the mounted label"
         assert derived is True

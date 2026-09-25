@@ -601,18 +601,27 @@ _EGRESS_DERIVED_PATHS: set[str] = set()
 _EGRESS_LOCK = threading.Lock()
 
 
-#: Control characters a percent-DECODED path can carry (``%00``, ``%0d``,
-#: ``%1b``, …). ``prometheus_client`` escapes only ``\\``, ``\n`` and ``"``, so a
-#: bare CR/NUL would ride into the exposition on every series of the family.
-_EGRESS_LABEL_TRANSLATE = str.maketrans({c: "?" for c in (*range(0x20), 0x7F)})
+#: Characters replaced in a request-derived label: C0, DEL and the C1 range
+#: (U+0085 NEL and U+009B CSI are line-break / escape introducers to
+#: Unicode-aware readers), plus U+2028/U+2029 — the SAME CLASS
+#: ``mcp_auth._sanitize_for_log`` covers. That one escapes for a LOG sink; this
+#: one replaces with ``?``, because a label is a series KEY and the value's
+#: readability matters less than it not splitting a line.
+_EGRESS_LABEL_TRANSLATE = str.maketrans({
+    **{c: "?" for c in (*range(0x20), 0x7F, *range(0x80, 0xA0))},
+    0x2028: "?",
+    0x2029: "?",
+})
 
 
 def _utf8_safe(label: str) -> str:
     """Make a request-derived label safe to EMIT.
 
     Control characters are replaced: the path is percent-decoded and
-    unauthenticated, and a scraper splitting on CRLF — or one validating control
-    bytes — would drop or garble the series (measured: ``*_bucket`` lines too).
+    unauthenticated, and a reader that splits on line breaks — or one
+    validating control bytes — would drop or garble the series (measured: a NEL
+    in a label adds physical lines to a ``splitlines()`` reader, and the
+    ``*_bucket`` lines carry the same label).
 
     A label that cannot be UTF-8 encoded is repaired. ``generate_latest()``
     encodes label values, so ONE lone surrogate would make the whole
