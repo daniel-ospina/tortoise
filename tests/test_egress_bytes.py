@@ -351,9 +351,19 @@ class TestMiddleware:
     def test_mounted_sub_app_is_counted_and_attributed_by_its_own_path(self):
         """The large-payload read paths include mounted surfaces (the MCP mount).
 
-        Plain Starlette routes do NOT stamp ``scope["route"]`` (measured), so
-        this is also the coverage proof for the normalised fallback (which is
-        admitted as a DERIVED label, in its own budget).
+        A mounted sub-app MUST be attributed by the path the client requested
+        (``/mcp/export``), never by the sub-app's own route (``/export``) —
+        otherwise every mounted surface collapses into its sub-route label and
+        two mounts sharing a sub-route share one child.
+
+        This is also the coverage proof for the normalised fallback (admitted as
+        a DERIVED label, in its own budget). It is deliberately run against the
+        REAL router rather than a hand-forged scope, because WHETHER the
+        sub-app's router rewrites ``scope["path"]`` in place is a Starlette
+        version detail (measured: it does not under 1.6.0 — the lock — and does
+        under 1.7.0, which CI's unpinned install resolves). Asserting here that
+        the client-facing path survives is what makes the test mean the same
+        thing in both; CI caught the raw-scope version of this as a red.
         """
         sub = Starlette(routes=[Route("/export", lambda request: JSONResponse({"data": "d" * 300}))])
         app = Starlette(routes=[Mount("/mcp", app=sub)])
@@ -364,7 +374,40 @@ class TestMiddleware:
 
         assert r.status_code == 200
         assert ("", "/mcp/export") in _bytes_by_org_path()
+        assert ("", "/export") not in _bytes_by_org_path()
         assert monitoring.egress_bytes_by_org()[""] == len(r.content)
+
+    def test_mounted_route_is_not_accepted_as_the_template(self):
+        """The 1.7.0 shape, forced: a scope carrying a sub-app route must not
+        hand the sub-route label to the writer.
+
+        Direct unit proof of the version-independent rule, so the fix does not
+        depend on which Starlette behavior the environment happens to have.
+        """
+        sub_route = Route("/export", lambda request: JSONResponse({}))
+        scope = {"type": "http", "path": "/export", "route": sub_route}
+
+        label, derived = ha._egress_route_class(scope, entry_path="/mcp/export")
+
+        assert (label, derived) == ("/mcp/export", True)
+
+    def test_template_is_kept_when_it_describes_the_entry_path(self):
+        """The normal case must NOT regress: a matched template still wins.
+
+        Path params resolve to the template (that is what bounds cardinality),
+        so ``/v1/points/{pid}`` describes ``/v1/points/abc`` and is kept as a
+        CODE-literal label (``derived=False``).
+        """
+        template = Route("/v1/points/{pid}", lambda request: JSONResponse({}))
+        scope = {"type": "http", "path": "/v1/points/abc", "route": template}
+
+        assert ha._egress_route_class(scope, entry_path="/v1/points/abc") == (
+            "/v1/points/{pid}", False)
+
+        # ...and a request the template does NOT describe falls back instead.
+        assert ha._egress_route_class(
+            scope, entry_path="/v1/points/abc/children") == (
+                "/v1/points", True)
 
     def test_response_the_bound_dropped_is_not_credited(self, monkeypatch):
         """#3834 interaction: on a breach the bound DROPS the late response.

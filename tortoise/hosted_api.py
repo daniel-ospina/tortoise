@@ -2221,29 +2221,63 @@ _EGRESS_MAX_LABEL_LEN = 64
 _EGRESS_MAX_SEGMENT_LEN = 24
 
 
-def _egress_route_class(scope) -> tuple[str, bool]:
+def _route_describes(route, path: str) -> bool:
+    """Whether ``route`` is the route that served ``path``.
+
+    The route's OWN pattern is the arbiter, so path params still resolve to the
+    template (``/v1/points/{pid}`` describes ``/v1/points/abc``). A route
+    reached through a ``Mount`` has a pattern relative to the mount, so it does
+    NOT describe the prefixed request path and is rejected — which is the point:
+    the sub-route must not stand in for the surface the caller actually hit.
+    """
+    regex = getattr(route, "path_regex", None)
+    if regex is None:
+        return getattr(route, "path", None) == path
+    try:
+        return regex.fullmatch(path) is not None
+    except (TypeError, AttributeError):  # pragma: no cover - defensive
+        return False
+
+
+def _egress_route_class(scope, entry_path: str | None = None
+                        ) -> tuple[str, bool]:
     """The route class a response is attributed to, and whether it was DERIVED.
 
     FastAPI stamps the MATCHED ROUTE TEMPLATE onto the scope
     (``scope["route"].path`` is ``/v1/points/{pid}``), which is the exact,
-    bounded label — two point ids never become two metric children. Plain
-    Starlette routes and the mounted MCP app do NOT stamp it (measured: a
-    ``Mount``-ed sub-app leaves ``scope["route"]`` unset), so those fall back
-    to a NORMALISED path: at most two segments, with pure-numeric and long
-    digit-bearing segments collapsed to ``{id}`` (``/nope/123`` ->
-    ``/nope/{id}``; ``/v1/...`` is untouched because ``v1`` is a literal, not
-    an id).
+    bounded label — two point ids never become two metric children. When no
+    template describes the request, the label falls back to a NORMALISED path:
+    at most two segments, with pure-numeric and long digit-bearing segments
+    collapsed to ``{id}`` (``/nope/123`` -> ``/nope/{id}``; ``/v1/...`` is
+    untouched because ``v1`` is a literal, not an id).
 
-    The ``derived`` flag is returned because that fallback is REQUEST-DERIVED:
+    ``entry_path`` is the path the request ARRIVED with, captured before the
+    router runs, and it is what the fallback names. The scope's ``path`` is NOT
+    a safe source at RESPONSE time: a mounted sub-app's router may rewrite it in
+    place, and WHETHER it does is a Starlette version detail, not a contract —
+    measured across the two environments this suite runs in, a request to
+    ``/mcp/export`` arrives as ``/mcp/export`` and, at response time, is either
+    still ``/mcp/export`` (starlette 1.6.0, the lock) or already the sub-app's
+    ``/export`` (1.7.0, what CI's unpinned ``pip install -e '.[test,extras]'``
+    resolves). Attributing by the mutated path would silently collapse every
+    mounted surface into its sub-route label — and two mounts sharing a
+    sub-route would share one child. The entry path is the same in both.
+
+    The template is therefore accepted only when the route reports itself as
+    matching that entry path (its own ``path_regex``, so path params still
+    resolve to the template); a sub-app route reached through a ``Mount`` does
+    not match the prefixed path and is rejected rather than trusted. The
+    ``derived`` flag is returned because that fallback is REQUEST-DERIVED:
     ``monitoring.record_egress`` admits it into a SEPARATE, tightly capped
     registry so unknown traffic can never consume the code-literal route
     budget and fold real routes into overflow (review round 1).
     """
+    path = str(scope.get("path") or "") if entry_path is None else entry_path
     route = scope.get("route")
     template = getattr(route, "path", None)
-    if isinstance(template, str) and template:
+    if isinstance(template, str) and template and _route_describes(route, path):
         return template, False
-    segments = [seg for seg in str(scope.get("path") or "").split("/") if seg][:2]
+    segments = [seg for seg in path.split("/") if seg][:2]
     if not segments:
         return "/", True
     bounded = []
@@ -2291,6 +2325,10 @@ class EgressBytesMiddleware:
             await self.app(scope, receive, send)
             return
         nbytes = 0
+        # Captured BEFORE routing: the router may rewrite ``scope["path"]``
+        # in place for a mounted sub-app, and whether it does is a Starlette
+        # version detail — the arrival path is the same in every version.
+        entry_path = str(scope.get("path") or "")
 
         async def _counting_send(message):
             nonlocal nbytes
@@ -2309,7 +2347,7 @@ class EgressBytesMiddleware:
                        and bool(state.get(_WAIT_BOUND_REFUSED_STATE)))
             if not dropped:
                 org_id = state.get("org_id") if isinstance(state, dict) else None
-                path_label, derived = _egress_route_class(scope)
+                path_label, derived = _egress_route_class(scope, entry_path)
                 try:
                     # Call-time attribute read (`_monitoring`), so a test or an
                     # operator can substitute the writer; measurement must never
