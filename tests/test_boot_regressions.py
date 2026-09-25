@@ -207,7 +207,14 @@ def _redact(uri: str) -> str:
         ),
         # A scheme containing a non-ASCII letter is not a scheme
         # (`str.isalpha()` would accept it, the shell's `[a-zA-Z]` does not).
+        # Include an `@`-bearing credential so the ASCII guard is the only thing
+        # that can make the canonical fail closed here — without it, `rédiss`
+        # parses as a valid scheme and the value is merely masked.
         ("r\u00e9diss://user:pw", "<uri-redacted-unrecognised-shape>"),
+        (
+            "r\u00e9diss://user:S3npw@host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
         # A bracketed IPv6 port that is a non-ASCII digit is not a port.
         ("rediss://[::1]:\u0660", "<uri-redacted-unrecognised-shape>"),
         # ...including a continuation line with NO scheme and no '@' — the
@@ -488,6 +495,7 @@ _MALFORMED_VALUE_CORPUS = [
     "user:S3ntinel@rediss://host:6379",
     # a scheme with a non-ASCII letter / a non-ASCII bracketed port
     "r\u00e9diss://user:S3ntinel",
+    "r\u00e9diss://user:S3ntinel@host:6379",
     "rediss://[::1]:\u0660",
 ]
 
