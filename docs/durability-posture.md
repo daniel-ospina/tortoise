@@ -108,18 +108,41 @@ The `:Meta` class is therefore enrolled **key-scoped**. A label-wide `:Meta`
 read would sweep the two derived `point_fts_v2`/`event_fts_v2` markers into the
 preserved set and restore them as if they were authoritative configuration.
 
+A class whose identity is **composite, or which owns edges**, cannot be a
+`_config_classes()` row (that registry carries nodes with a single identity
+property). It gets its own declared sidecar sections instead:
+
+<!-- config-registry:preserved-sections -->
+- `:OnboardingState` + `:OnboardingStep` + the `COMPLETED_STEP` edges —
+  preserved by the `onboarding_snapshot` / `onboarding_step_links` sections
+  (**#4641**). The onboarding writers (`tortoise/onboarding/state.py`) use raw
+  Cypher that rides no journal record, and `projection` never re-derives any
+  of it; the loss is not benign — `fork` is set-once and never re-asked,
+  `status` is server-owned and gate-written, `member_progress`/`compact` are
+  per-org progress. A node-only registry row would have restored the node and
+  silently dropped the step edges, so the class rides a section **pair**: the
+  node property maps, and `(org_id, step_id)` link pairs. The `onboards` edge
+  to the org-anchor `:Subject` is restored from the captured
+  `org_subject_id` (the `:Subject` is journaled, so replay re-creates it);
+  the edge carries no section of its own.
+<!-- config-registry:end -->
+
 <!-- config-registry:unenrolled -->
-- `:OnboardingState`, `:OnboardingStep`, and their `COMPLETED_STEP` edges —
-  destroyed silently by `rebuild_all` today; no vehicle in this change.
-  **#4641**
-- `:TeamMeta` — same disposition, same vehicle. **#4641**
+- `:TeamMeta` — written with a bare `CREATE` and **no identity property**
+  (`sdk.py`, `hosted_api.py`), so it fits neither the registry (which
+  requires one) nor the container/link sections (which key on `id`). Its
+  presence is the whole `#2789` first-org guard, so its loss is load-bearing,
+  not bookkeeping. Preserving an at-most-one-per-graph, label-wide class is
+  its own design step — declared deliberately **not preserved here**, with
+  the class as a known residual. **#5353**
 - `:GraphEventMeta` — an event watermark that **is** re-derivable, so it is
   re-derived post-replay rather than snapshotted; today it is reset, which
   collides the next `next_seq` with replayed sequence numbers. **#4653**
 <!-- config-registry:end -->
 
 **Operator audit** — read-only; every preserved class is enumerated by the
-registry, so this query cannot silently under-report after a class is added:
+registry **or** by a declared sidecar section above, so this query cannot
+silently under-report after a class is added:
 
 <!-- config-registry:audit-query -->
 ```cypher
@@ -129,6 +152,11 @@ MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
 UNION ALL
 MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset']
 RETURN 'Meta' AS cls, x.key AS ident
+UNION ALL
+MATCH (n:OnboardingState) RETURN 'OnboardingState' AS cls, n.org_id AS ident
+UNION ALL
+MATCH (:OnboardingState)-[:COMPLETED_STEP]->(s:OnboardingStep)
+RETURN 'OnboardingStep' AS cls, s.org_id + '/' + s.step_id AS ident
 ```
 <!-- config-registry:end -->
 
@@ -224,7 +252,19 @@ gate in `tests/test_durability_posture.py` fails the build if a
   nothing and refuses nothing: the byte-identical unconditional wipe (which
   #2814 does **not** change, by owner decision — the surface belongs to PR
   #2996) destroys it exactly as before. The live instance is the
-  `unenrolled` list above (#4641, #4653).
+  `unenrolled` list above (#5353, #4653).
+- **#4641 residual** — within an interrupted-rebuild window a **pending**
+  (non-retired) pre-wipe sidecar keeps BOTH the leftover `onboarding_snapshot`
+  node map **and** the leftover `onboarding_step_links` pair verbatim, so a
+  mutation made after the sidecar was written can be rolled back by the
+  retry: a repaired/deleted `decide-completed` edge (#3912) can be re-added,
+  and a colliding org's `status`, `member_progress`, `fork` or `compact` is
+  reverted to its pre-wipe value. The node map deliberately keeps the
+  leftover verbatim — the alternative (fresh-wins field merging) would let a
+  self-healed default overwrite recovered truth, the harm #4641 removes — so
+  this is the same trade already documented for a colliding config key in the
+  **#2814 residual** above. The remedy is the same: the operator deletes the
+  pending rescue file (never the retired, entry-less one).
 - **#2814 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar reverts a **colliding** config key to its
   pre-wipe value, so a config deliberately deleted after the wipe can be

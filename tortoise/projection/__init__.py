@@ -271,7 +271,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 2
+_PREWIPE_SNAPSHOT_VERSION = 3
 # #2814: v2 adds the `config_snapshot` section. Reading v1 is required
 # (backward compatibility): a rescue file written before this change carries
 # no config record, and the union treats that exactly as the loader does —
@@ -280,7 +280,14 @@ _PREWIPE_SNAPSHOT_VERSION = 2
 # `_write_prewipe_snapshot`, so without a bump a v1 build would accept this
 # file and silently ignore `config_snapshot` while its wipe landed. With the
 # bump that build REFUSES the rebuild instead (its `version != 1` check).
-_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2)
+#
+# #4641: v3 adds `onboarding_snapshot` / `onboarding_step_links`. Same
+# reasoning one increment on: a v2 build would accept a v3 file and ignore the
+# onboarding sections while its wipe landed, so the bump is what makes a
+# downgrade REFUSE rather than destroy. A v1/v2 rescue file stays READABLE —
+# it simply carries no onboarding record (the writing build did not capture
+# the class), which the union reads as empty exactly as the loader does.
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -291,6 +298,18 @@ _PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2)
 _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       "batch_point_links", "session_snapshot",
                       "session_point_links",
+                      # #4641: the onboarding state machine. `:OnboardingState`
+                      # node properties + `:OnboardingStep` / `COMPLETED_STEP`
+                      # edges are RAW writes in `tortoise/onboarding/state.py`
+                      # that ride NO journal record and are not re-derivable, so
+                      # the sidecar is their only durable record once the wipe
+                      # lands (the #2814/#3947 class). Enrolled as a SECTION
+                      # pair rather than a `_config_classes()` row because the
+                      # registry carries nodes with a single-property identity
+                      # and `:OnboardingStep` is composite `(org_id, step_id)`
+                      # with an edge — a node-only row would restore the node
+                      # and silently drop the step edges.
+                      "onboarding_snapshot", "onboarding_step_links",
                       # #2814: authoritative configuration. Enrolled here so it
                       # is validated before the wipe (:447) and so the
                       # retirement payload and `rebuild_all`'s write payload can
@@ -666,6 +685,87 @@ def _capture_config_snapshot(g) -> list[dict]:
     return entries
 
 
+def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Read the onboarding state machine into sidecar section entries (#4641).
+
+    Returns ``(nodes, links)``:
+
+    * ``nodes`` — one entry per `:OnboardingState`, the property map itself
+      (the ``batch_snapshot`` / ``session_snapshot`` shape), keyed by
+      ``org_id``.
+    * ``links`` — ``(org_id, step_id)`` pairs for every `COMPLETED_STEP` edge.
+
+    The labels / edge type come from the DOMAIN module (never re-typed — a
+    rename must not silently de-enrol the class). The step-id set is the
+    canonical ``ONBOARDING_STEPS``: a `:OnboardingStep` id outside it carries
+    no gate semantics (every gate in ``tortoise/onboarding/state.py``
+    resolves canonical ids) and the pre-wipe validator refuses it — so the
+    capture filters to the canonical set. Capturing a foreign id instead would
+    write a sidecar this build then REFUSES to load on the retry, making the
+    log dir unrebuildable over data no gate reads.
+
+    An orphan `:OnboardingStep` node (no `COMPLETED_STEP` edge) is not
+    captured: it is the ``_prune_orphan_decide_step`` cleanup's residue, it
+    carries no properties beyond its `{org_id, step_id}` key, and nothing
+    reads it — the edge set is the record.
+
+    Any failure propagates: the caller funnels it into the ``capture_failed``
+    gate, so a graph that cannot answer this read NEVER reaches the wipe —
+    the same #2943 discipline the config capture documents.
+    """
+    from tortoise.onboarding.state import (
+        COMPLETED_STEP_EDGE,
+        ONBOARDING_NODE_LABEL,
+        ONBOARDING_STEP_LABEL,
+        ONBOARDING_STEPS,
+    )
+
+    node_rows = g.query(
+        f"MATCH (n:{ONBOARDING_NODE_LABEL}) RETURN properties(n)"
+    ).result_set
+    nodes = []
+    for row in node_rows or []:
+        props = row[0]
+        # The capture's output MUST be loader-acceptable: a non-str `org_id`
+        # (or a non-storable property) would be written into the rescue file
+        # and then make it UNLOADABLE on the retry, so the sidecar — the only
+        # durable record of EVERY graph-only class it carries — would be
+        # refused and auto-recovery blocked until an operator deleted it.
+        # Failing closed here (the caller funnels the raise into the
+        # `capture_failed` gate) aborts BEFORE the wipe instead, with the bad
+        # node still in place to be repaired (#2943, #4641).
+        if not isinstance(props, dict) or not isinstance(props.get("org_id"),
+                                                          str):
+            raise RuntimeError(
+                f"an :{ONBOARDING_NODE_LABEL} node cannot survive a rebuild "
+                f"round-trip (org_id={props.get('org_id')!r} is not a "
+                f"string) — writing it would make the pre-wipe snapshot "
+                f"unloadable on the retry")
+        for key, value in props.items():
+            if not _is_snapshot_primitive(value):
+                raise RuntimeError(
+                    f"an :{ONBOARDING_NODE_LABEL} node (org_id="
+                    f"{props.get('org_id')!r}) carries property {key!r} = "
+                    f"{value!r}, which is not storable — writing it would "
+                    f"make the pre-wipe snapshot unloadable on the retry")
+        nodes.append(props)
+    link_rows = g.query(
+        f"MATCH (n:{ONBOARDING_NODE_LABEL})"
+        f"-[:{COMPLETED_STEP_EDGE}]->(s:{ONBOARDING_STEP_LABEL}) "
+        "RETURN n.org_id, s.step_id"
+    ).result_set
+    # Explicit, symmetric predicate: a non-str `org_id` or a step id outside
+    # the canonical set is dropped here (never written), which keeps capture
+    # output ⊆ what `_validate_onboarding_step_link` accepts. The step-id
+    # filter is deliberate rather than accidental: every gate in
+    # `tortoise/onboarding/state.py` resolves canonical ids, so a foreign id
+    # carries no semantics and must not make the rescue file unloadable.
+    links = [(r[0], r[1]) for r in link_rows
+             if isinstance(r[0], str) and isinstance(r[1], str)
+             and r[1] in ONBOARDING_STEPS]
+    return nodes, links
+
+
 def _validate_point_entry(entry) -> str | None:
     """Return a complaint about a ``synthetic_events`` entry, else None.
 
@@ -754,12 +854,59 @@ def _validate_link_entry(entry) -> str | None:
     return None
 
 
+def _validate_onboarding_entry(entry) -> str | None:
+    """Return a complaint about an ``onboarding_snapshot`` entry, else None.
+
+    The entry is the `:OnboardingState` property map itself (the
+    `batch_snapshot` / `session_snapshot` shape), keyed by ``org_id`` — the
+    identity every onboarding writer uses. Checking the props here is what
+    keeps a non-storable value (a planted sidecar's, or one the graph somehow
+    holds) from reaching the driver AFTER the wipe.
+    """
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    if not isinstance(entry.get("org_id"), str):
+        return f"org_id {entry.get('org_id')!r} is not a string"
+    for key, value in entry.items():
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
+def _validate_onboarding_step_link(entry) -> str | None:
+    """Return a complaint about an ``onboarding_step_links`` entry, else None.
+
+    Shape first (a 2-element pair of strings, like the other link sections),
+    then MEMBERSHIP: the ``step_id`` must be a canonical onboarding step. The
+    sidecar is caller-supplied and a `COMPLETED_STEP` edge is what
+    ``completed_steps()`` feeds into the fork-aware completion gate and into
+    ``find_false_decide_completion`` — so a planted out-of-vocabulary id would
+    forge a completion, not merely carry a stray property. The id set is
+    imported from the DOMAIN module (never re-typed here), exactly as the
+    labels are.
+    """
+    complaint = _validate_link_entry(entry)
+    if complaint is not None:
+        return complaint
+    # Function-local import: `tortoise.onboarding.state` is stdlib-only, but
+    # this module is imported early and the #2814 registry uses the same
+    # function-local discipline for domain constants (see `_config_classes`).
+    from tortoise.onboarding.state import ONBOARDING_STEPS
+    if entry[1] not in ONBOARDING_STEPS:
+        return (f"step_id {entry[1]!r} is not a canonical onboarding step "
+                f"({sorted(ONBOARDING_STEPS)})")
+    return None
+
+
 _SNAPSHOT_ENTRY_CHECK = {
     "synthetic_events": _validate_point_entry,
     "batch_snapshot": _validate_batch_entry,
     "batch_point_links": _validate_link_entry,
     "session_snapshot": _validate_session_entry,
     "session_point_links": _validate_link_entry,
+    "onboarding_snapshot": _validate_onboarding_entry,
+    "onboarding_step_links": _validate_onboarding_step_link,
     "config_snapshot": _validate_config_entry,
 }
 # Node properties a snapshot Point carries that the replay does not fully
@@ -1057,7 +1204,14 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     occurrence is merely kept. The pair order differs by section:
     ``batch_point_links`` is ``(point id, batch id)`` (captured
     ``RETURN p.id, p.batch_id``), while ``session_point_links`` is
-    ``(session id, point id)`` (captured ``RETURN s.id, p.id``).
+    ``(session id, point id)`` (captured ``RETURN s.id, p.id``) and
+    ``onboarding_step_links`` is ``(org id, step id)`` (captured
+    ``RETURN n.org_id, s.step_id``).
+
+    ``onboarding_snapshot`` (#4641) is the second PER-KEY node union: like
+    ``config_snapshot`` it keeps a colliding LEFTOVER entry verbatim rather
+    than field-merging it, because a self-healed default re-created for the
+    same ``org_id`` must not overwrite recovered truth (see the leg's comment).
     """
     leftover = leftover or {}
 
@@ -1130,6 +1284,48 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         + list(fresh.get("session_point_links") or []),
         _link_key, "session_point_links", merge=False)
         if _link_key(entry) is not None]
+    # #4641: the onboarding state machine. The NODE leg is a PER-ORG union
+    # with the LEFTOVER kept VERBATIM — deliberately NOT `_merge_entry`'s
+    # fresh-wins field merge, for the same reason `config_snapshot` avoids it:
+    # a self-healed default must not overwrite recovered truth. The concrete
+    # case is `_ensure_onboarding_node_after_provision`
+    # (`tortoise/supabase_control.py`) re-creating a DEFAULT
+    # `{status:'active', version:1, member_progress:'{}'}` node for an org
+    # between an interrupted wipe and the retry — fresh-wins would then
+    # overwrite the recovered `status='complete'`/`compact`/`member_progress`
+    # and silently re-onboard the org, which is the exact harm #4641 removes.
+    # A FRESH-ONLY org — onboarding started after the interrupted wipe — is
+    # APPENDED; dropping it would put it into the retry's own wipe with
+    # nothing to restore it from. `.get` on the fresh side mirrors the session
+    # sections (partial dicts are legal for the offline union tests).
+    def _org_key(entry):
+        oid = entry.get("org_id") if isinstance(entry, dict) else None
+        return oid if isinstance(oid, str) else None
+
+    onboarding_nodes: list[dict] = []
+    onboarding_seen: set = set()
+    for entry in (list(leftover.get("onboarding_snapshot") or [])
+                  + list(fresh.get("onboarding_snapshot") or [])):
+        oid = _org_key(entry)
+        if oid is None:
+            # Unkeyable. The CAPTURE raises on this (so a live graph can never
+            # produce one); only a planted/hand-edited sidecar can, and the
+            # pre-wipe validator refuses it before the wipe.
+            onboarding_nodes.append(entry)
+            continue
+        if oid in onboarding_seen:
+            # Leftover-first iteration: the LEFTOVER entry is kept verbatim.
+            continue
+        onboarding_seen.add(oid)
+        onboarding_nodes.append(entry)
+    # The LINK leg is `merge=False` like every other link section: an entry is
+    # a two-element pair, not a property map, and leftover-first keeps the
+    # recovered pair.
+    onboarding_links = [tuple(entry[:2]) for entry in _union(
+        list(leftover.get("onboarding_step_links") or [])
+        + list(fresh.get("onboarding_step_links") or []),
+        _link_key, "onboarding_step_links", merge=False)
+        if _link_key(entry) is not None]
     # #2814: authoritative configuration. This is a PER-KEY union on
     # `_config_key` — NOT `_merge_entry` and NOT a wholesale section discard:
     #
@@ -1166,6 +1362,8 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             "batch_point_links": links,
             "session_snapshot": session_containers,
             "session_point_links": session_links,
+            "onboarding_snapshot": onboarding_nodes,
+            "onboarding_step_links": onboarding_links,
             "config_snapshot": config_entries}
 
 
@@ -3657,6 +3855,30 @@ class FalkorProjection(
             capture_failed.append(
                 f"config snapshot/#2814 ({type(e).__name__}: {e})")
 
+        # ── Onboarding state snapshot (#4641) ───────────────────────
+        # `tortoise/onboarding/state.py` writes `:OnboardingState`,
+        # `:OnboardingStep` and the `COMPLETED_STEP` edges with RAW Cypher —
+        # no journal record, and `rg OnboardingState tortoise/projection` is
+        # zero hits, so a replay cannot re-create any of it. The writers'
+        # contracts make the loss visible rather than benign: `fork` is
+        # set-once and never re-asked, `status` is server-owned and
+        # gate-written. Captured as a SECTION pair (node maps + step links)
+        # rather than a `_config_classes()` row because the registry carries
+        # nodes with a single identity property while `:OnboardingStep` is
+        # composite `(org_id, step_id)` and the edge is not a node at all — a
+        # node-only row would restore the node and silently drop the edges.
+        #
+        # Best-effort read, funneled into the SAME `capture_failed` gate: a
+        # graph that cannot answer this read NEVER reaches the wipe (I3).
+        onboarding_snapshot: list[dict] = []
+        onboarding_step_links: list[tuple[str, str]] = []
+        try:
+            onboarding_snapshot, onboarding_step_links = (
+                _capture_onboarding_snapshot(self.g))
+        except Exception as e:
+            capture_failed.append(
+                f"onboarding snapshot/#4641 ({type(e).__name__}: {e})")
+
         # ── #2943: a FAILED capture must not fall through to the wipe ───
         # Both capture blocks above are best-effort by design (the graph may
         # be corrupt), but proceeding after a failed capture would wipe the
@@ -3763,6 +3985,7 @@ class FalkorProjection(
                 "rebuild: found a leftover pre-wipe snapshot at %s (%d "
                 "graph-only point event(s), %d batch(es), %d batch link(s), "
                 "%d session container(s), %d session link(s), "
+                "%d onboarding state(s), %d onboarding step link(s), "
                 "%d config entry(ies)) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
@@ -3772,6 +3995,8 @@ class FalkorProjection(
                 len(leftover.get("batch_point_links") or []),
                 len(leftover.get("session_snapshot") or []),
                 len(leftover.get("session_point_links") or []),
+                len(leftover.get("onboarding_snapshot") or []),
+                len(leftover.get("onboarding_step_links") or []),
                 len(leftover.get("config_snapshot") or []))
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
@@ -3779,6 +4004,8 @@ class FalkorProjection(
             "batch_point_links": batch_point_links,
             "session_snapshot": session_snapshot,
             "session_point_links": session_point_links,
+            "onboarding_snapshot": onboarding_snapshot,
+            "onboarding_step_links": onboarding_step_links,
             "config_snapshot": config_snapshot,
         })
         synthetic_events = merged["synthetic_events"]
@@ -3793,6 +4020,14 @@ class FalkorProjection(
         # `covered` set (journal ∪ synthetic snapshot) cannot account for.
         session_snapshot = merged["session_snapshot"]
         session_point_links = merged["session_point_links"]
+        # #4641: the onboarding sections need the same reassignment for the
+        # same reason — on the sidecar-recovery path the live capture is empty
+        # (the wipe already landed), so restoring from the pre-union locals
+        # would restore nothing. The write payload below is derived from
+        # `merged` too, so a crash between the sidecar write and the replay
+        # keeps the recovered onboarding state in the retry's rescue file.
+        onboarding_snapshot = merged["onboarding_snapshot"]
+        onboarding_step_links = merged["onboarding_step_links"]
         # #2814: same reason as the session sections — on the sidecar-recovery
         # path the live graph is already empty, so the leftover's config is the
         # only record of it. Assigned from `merged` (not from the capture
@@ -3925,7 +4160,10 @@ class FalkorProjection(
                     f"{len(batch_point_links)} batch link(s), "
                     f"{len(session_snapshot)} :Session container(s) and "
                     f"{len(session_point_links)} session link(s) with no "
-                    f"durable record (#2943, #3947) — and the "
+                    f"durable record (#2943, #3947), the "
+                    f"{len(onboarding_snapshot)} onboarding state(s) / "
+                    f"{len(onboarding_step_links)} step link(s) that ride no "
+                    f"journal record at all (#4641) — and the "
                     f"{len(config_snapshot)} captured authoritative config "
                     f"entr(y/ies) with them (#2814). Fix the cause — write "
                     f"permissions/space on the event-log directory, or a "
@@ -5150,6 +5388,150 @@ class FalkorProjection(
                 params={"sid": sid, "pid": pid},
             )
 
+        # ── #4641: restore the onboarding state machine ─────────────────
+        # Same class as the :Session / :Batch markers above, and the same
+        # reason: `tortoise/onboarding/state.py`'s `:OnboardingState`,
+        # `:OnboardingStep` and `COMPLETED_STEP` writes are RAW Cypher that
+        # ride no journal record and that `projection` never re-derives. Runs
+        # here — after pass 1b (the journaled `:Subject` nodes exist, so the
+        # `onboards` edge has an endpoint) and before pass 2 (which does not
+        # touch onboarding). Labels / edge types / ids come from the DOMAIN
+        # module, never re-typed.
+        #
+        # The node write is `SET n += $props` (not replace): an unrelated live
+        # property must not be dropped, and the captured properties are the
+        # pre-wipe truth for the fields they carry.
+        #
+        # A failure here runs AFTER the wipe, so — like the `:Session` and
+        # config restores — it must DEGRADE rather than raise (#2943: a
+        # post-wipe raise leaves the store empty). Every failure is counted,
+        # reported once below, and the post-restore check turns a resulting
+        # gap into an ERROR.
+        from tortoise.onboarding.state import (
+            COMPLETED_STEP_EDGE,
+            ONBOARDING_NODE_LABEL,
+            ONBOARDING_STEP_LABEL,
+            ONBOARDS_EDGE,
+        )
+
+        onboarding_restore_failures = 0
+        onboarding_restored_orgs: set[str] = set()
+        for props in onboarding_snapshot:
+            oid = props.get("org_id") if isinstance(props, dict) else None
+            if not isinstance(oid, str):
+                continue
+            clean = {k: v for k, v in props.items() if k != "org_id"}
+            try:
+                self.g.query(
+                    f"MERGE (n:{ONBOARDING_NODE_LABEL} {{org_id:$oid}}) "
+                    "SET n += $props",
+                    params={"oid": oid, "props": clean},
+                )
+            except Exception as e:
+                onboarding_restore_failures += 1
+                logger.warning(
+                    "rebuild: onboarding-state restore for org %s failed "
+                    "(%s: %s) — the pre-wipe state was NOT restored (#4641)",
+                    oid, type(e).__name__, e,
+                )
+                continue
+            onboarding_restored_orgs.add(oid)
+            # The `onboards` edge is a RAW write too and nothing in the journal
+            # carries it. It is DERIVED from the captured `org_subject_id`
+            # (which rode the node entry), so no separate section is needed.
+            # `MATCH` on BOTH endpoints — the anchor `:Subject` is journaled
+            # (`sdk.create_subject` emits SubjectAdded) so replay re-creates
+            # it; a MATCH means a genuinely absent Subject drops the edge
+            # rather than minting an endpoint-less one.
+            sid = props.get("org_subject_id")
+            if isinstance(sid, str):
+                try:
+                    self.g.query(
+                        f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id:$oid}}), "
+                        "(s:Subject {id:$sid}) "
+                        f"MERGE (n)-[:{ONBOARDS_EDGE}]->(s)",
+                        params={"oid": oid, "sid": sid},
+                    )
+                except Exception as e:
+                    onboarding_restore_failures += 1
+                    logger.warning(
+                        "rebuild: onboarding `onboards` edge restore for "
+                        "org %s (subject %s) failed (%s: %s) — the org "
+                        "anchor link was NOT restored (#4641)",
+                        oid, sid, type(e).__name__, e,
+                    )
+        for oid, step_id in onboarding_step_links:
+            if oid not in onboarding_restored_orgs:
+                # The node entry is absent or its restore failed: the edge's
+                # endpoint does not exist. Counted (the post-restore check
+                # reports the gap) rather than minting a property-less
+                # `:OnboardingState` via MERGE, which would be a NEW incoherent
+                # state the next rebuild would capture and persist.
+                onboarding_restore_failures += 1
+                continue
+            try:
+                self.g.query(
+                    f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id:$oid}}) "
+                    f"MERGE (s:{ONBOARDING_STEP_LABEL} "
+                    "{org_id:$oid, step_id:$step_id}) "
+                    f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s)",
+                    params={"oid": oid, "step_id": step_id},
+                )
+            except Exception as e:
+                onboarding_restore_failures += 1
+                logger.warning(
+                    "rebuild: onboarding step edge restore for org %s step "
+                    "%s failed (%s: %s) — the completed step was NOT "
+                    "restored (#4641)",
+                    oid, step_id, type(e).__name__, e,
+                )
+        # Post-restore verification: compare the REBUILT graph against the
+        # captured set through the same reader the capture used, so the
+        # comparison cannot drift from the capture's scope. Never raise (this
+        # runs after the wipe). A failed verification READ is treated as a
+        # mismatch — "could not confirm" must not read as "confirmed".
+        onboarding_expected_orgs = {
+            e.get("org_id") for e in onboarding_snapshot
+            if isinstance(e, dict) and isinstance(e.get("org_id"), str)}
+        onboarding_expected_links = {
+            (o, s) for o, s in onboarding_step_links}
+        onboarding_missing_orgs: set = set()
+        onboarding_missing_links: set = set()
+        onboarding_verified = True
+        try:
+            live_nodes, live_links = _capture_onboarding_snapshot(self.g)
+            live_orgs = {e.get("org_id") for e in live_nodes
+                         if isinstance(e, dict)}
+            live_link_pairs = {(o, s) for o, s in live_links}
+            onboarding_missing_orgs = onboarding_expected_orgs - live_orgs
+            onboarding_missing_links = (onboarding_expected_links
+                                        - live_link_pairs)
+        except Exception as e:
+            onboarding_verified = False
+            logger.error(
+                "rebuild: could not VERIFY the restored onboarding state "
+                "(%s: %s) — treating it as not restored (#4641)",
+                type(e).__name__, e,
+            )
+        if onboarding_restore_failures or not onboarding_verified or \
+                onboarding_missing_orgs or onboarding_missing_links:
+            logger.error(
+                "rebuild: onboarding-state post-restore verification FAILED "
+                "— %d restore failure(s); %d of %d expected org state(s) and "
+                "%d of %d expected step edge(s) are ABSENT from the rebuilt "
+                "graph. This is a TRUE POSITIVE, not a silent success: the "
+                "wipe is unconditional and only the journal is replayed, so "
+                "those onboarding states/edges are gone. Re-run onboarding "
+                "for the affected org(s) — see #4641.",
+                onboarding_restore_failures,
+                len(onboarding_missing_orgs) if onboarding_verified
+                else len(onboarding_expected_orgs),
+                len(onboarding_expected_orgs),
+                len(onboarding_missing_links) if onboarding_verified
+                else len(onboarding_expected_links),
+                len(onboarding_expected_links),
+            )
+
         # ── #2814: restore the authoritative configuration ──────────────
         # After pass-1a (so a `:PackInstall` is not clobbered by a later replay
         # write) and before pass 2, alongside the other sidecar-borne graph
@@ -5765,7 +6147,25 @@ class FalkorProjection(
                 if config_verified else 0,
                 "config_reset": (config_reset_marker is not None
                                  or config_reset_read_failed),
-                "config_reset_read_failed": config_reset_read_failed}
+                "config_reset_read_failed": config_reset_read_failed,
+                # #4641: additive, and the caller-visible half of the
+                # post-restore verification. The onboarding restore's only
+                # other signal is an ERROR line, and the pending sidecar is
+                # retired afterwards (deliberately — #4305: retaining the
+                # single graph-wide blob would re-merge pre-wipe truth for
+                # EVERY id and resurrect post-wipe deletes), so without these
+                # counts a programmatic caller (`consistency.recover_from_log`)
+                # would report a success-shaped result over a destroyed
+                # onboarding state. `onboarding_restored` is 0 when the
+                # verification READ failed ("could not confirm" must not read
+                # as "confirmed").
+                "onboarding_expected": len(onboarding_expected_orgs),
+                "onboarding_restored": (len(onboarding_expected_orgs)
+                                       - len(onboarding_missing_orgs))
+                if onboarding_verified else 0,
+                "onboarding_missing_links": (len(onboarding_missing_links)
+                                             if onboarding_verified else None),
+                "onboarding_restore_failures": onboarding_restore_failures}
 
     def query(self, cypher: str, **params):
         # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.

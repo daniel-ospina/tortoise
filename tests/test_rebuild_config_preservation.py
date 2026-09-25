@@ -1,5 +1,12 @@
 """#2814 — authoritative-configuration durability across `rebuild_all`.
 
+#4641 — the onboarding state machine (`:OnboardingState`,
+`:OnboardingStep`, `COMPLETED_STEP`) rides the SAME sidecar: it is the
+sibling class of the config registry (graph-resident, unjournaled,
+not re-derivable), but its composite `(org_id, step_id)` identity and its
+edge ownership put it in dedicated `onboarding_snapshot` /
+`onboarding_step_links` sections rather than a registry row.
+
 The wipe in `rebuild_all` (`tortoise/projection/__init__.py`) is an
 unconditional `MATCH (n) DETACH DELETE n`, and only the journal is replayed.
 `:PackInstall`, `:PackManifest` and the keyed `:Meta` markers
@@ -101,7 +108,7 @@ def _config_state(sdk) -> set:
 
 
 def _sidecar_payload(**overrides) -> dict:
-    """A valid v2 sidecar payload; `overrides` replaces whole sections."""
+    """A valid sidecar payload; `overrides` replaces whole sections."""
     from tortoise.projection import _PREWIPE_SNAPSHOT_VERSION
     payload = {
         "version": _PREWIPE_SNAPSHOT_VERSION,
@@ -111,6 +118,8 @@ def _sidecar_payload(**overrides) -> dict:
         "batch_point_links": [],
         "session_snapshot": [],
         "session_point_links": [],
+        "onboarding_snapshot": [],
+        "onboarding_step_links": [],
         "config_snapshot": [],
     }
     payload.update(overrides)
@@ -1142,18 +1151,40 @@ def test_config_registry_doc_consistency():
 
     # Unenrolled: the known losses with their filed vehicles.
     unenrolled = _doc_block("unenrolled")
-    assert "OnboardingState" in unenrolled and "#4641" in unenrolled
-    assert "TeamMeta" in unenrolled
+    # #4641: :OnboardingState is no longer an unenrolled loss — it moved to the
+    # declared sidecar-section half. It must not be named as unenrolled, and
+    # its preserved declaration must name every part of the class (node label,
+    # step label, edge type) from the DOMAIN constants — never re-typed here,
+    # so a rename in `tortoise/onboarding/state.py` reds this pin.
+    from tortoise.onboarding.state import (
+        COMPLETED_STEP_EDGE,
+        ONBOARDING_NODE_LABEL,
+        ONBOARDING_STEP_LABEL,
+    )
+    assert "OnboardingState" not in unenrolled, (
+        ":OnboardingState is preserved by a sidecar section since #4641 — it "
+        "must not still be declared an unenrolled loss")
+    preserved_sections = _doc_block("preserved-sections")
+    assert f"`:{ONBOARDING_NODE_LABEL}`" in preserved_sections
+    assert f"`:{ONBOARDING_STEP_LABEL}`" in preserved_sections
+    assert f"`{COMPLETED_STEP_EDGE}`" in preserved_sections
+    assert "#4641" in preserved_sections
+    assert "TeamMeta" in unenrolled and "#5353" in unenrolled
     assert "GraphEventMeta" in unenrolled and "#4653" in unenrolled
     for vehicle in ("OnboardingState", "TeamMeta", "GraphEventMeta"):
         assert vehicle not in label_wide
 
-    # The audit query names every declared class and key (one-directional).
+    # The audit query names every declared class and key (one-directional) —
+    # and, since #4641, the sidecar-section classes too, or the operator query
+    # would under-report them.
     audit = _doc_block("audit-query")
     for label in label_wide:
         assert f":{label}" in audit, f"audit query omits :{label}"
     for key in doc_meta_keys:
         assert key in audit, f"audit query omits Meta key {key}"
+    assert f":{ONBOARDING_NODE_LABEL}" in audit
+    assert f":{ONBOARDING_STEP_LABEL}" in audit
+    assert COMPLETED_STEP_EDGE in audit
 
 
 def test_v1_leftover_with_self_healed_config_still_reports_unknown(graph):
@@ -1264,3 +1295,270 @@ def test_staged_marker_that_fails_to_restore_stays_in_the_verification(graph,
     assert result["config_expected"] == 0
     assert result["config_restored"] == 0
     assert result["config_reset_read_failed"] is False
+
+
+# ── #4641: the onboarding state machine survives the wipe ───────────────────
+
+
+def _os():
+    """The onboarding domain module (writes/reads the class under test)."""
+    from tortoise.onboarding import state as os_state
+    return os_state
+
+
+def _write_onboarding_state(sdk, org_id, *, fork=None, compact=None,
+                            steps=(), subject_id=None):
+    """Write the class the way `tortoise/onboarding/state.py` does."""
+    os_state = _os()
+    g = _g(sdk)
+    os_state.ensure_onboarding_state_node(g, org_id)
+    if fork is not None:
+        os_state.write_fork(g, org_id, fork, compact=bool(compact))
+    if compact is not None:
+        os_state.write_compact(g, org_id, compact)
+    for step in steps:
+        os_state.write_completed_step(g, org_id, step)
+    if subject_id is not None:
+        os_state.write_onboards_edge(g, org_id, subject_id)
+
+
+def _read_onboarding(sdk, org_id):
+    os_state = _os()
+    g = _g(sdk)
+    return (os_state.read_onboarding_node(g, org_id),
+            sorted(os_state.completed_steps(g, org_id)))
+
+
+def _onboards_targets(sdk, org_id):
+    rows = _g(sdk).query(
+        "MATCH (n:OnboardingState {org_id:$oid})-[:onboards]->(s) "
+        "RETURN s.id", params={"oid": org_id}).result_set
+    return sorted(r[0] for r in rows)
+
+
+def test_rebuild_all_preserves_onboarding_state(graph):
+    """T1/I1 (#4641): node properties byte-identical, step-edge set exact.
+
+    The REAL path: write the class through its own writers, run the actual
+    `rebuild_all` wipe+replay, read it back. Two orgs x two steps so a
+    single-org/one-step test cannot pass on a key collapse, and the
+    `onboards` anchor edge is asserted too (the node's `org_subject_id`
+    restores the link; the `:Subject` itself is journaled).
+    """
+    events, sdk = graph
+    anchor = sdk.create_subject("Org Anchor 4641",
+                                subjectKind="organisation")
+    _write_onboarding_state(sdk, "org-a", fork="build",
+                            steps=("harness-connected", "first-points-filed"),
+                            subject_id=anchor["id"])
+    _write_onboarding_state(sdk, "org-b", fork="self", compact=True,
+                            steps=("harness-connected",))
+    before = {oid: _read_onboarding(sdk, oid) for oid in ("org-a", "org-b")}
+    # Sanity: the fixture state is the interesting one, not a default.
+    assert before["org-a"][0]["fork"] == "build"
+    assert before["org-a"][1] == ["first-points-filed", "harness-connected",
+                                  "team-named"]
+    assert before["org-b"][1] == ["harness-connected", "team-named"]
+    assert _onboards_targets(sdk, "org-a") == [anchor["id"]]
+
+    sdk._get_proj().rebuild_all(str(events))
+
+    after = {oid: _read_onboarding(sdk, oid) for oid in ("org-a", "org-b")}
+    assert after["org-a"][0] == before["org-a"][0], (
+        "the :OnboardingState property map must survive byte-identically")
+    assert after["org-b"][0] == before["org-b"][0]
+    assert after["org-a"][1] == before["org-a"][1], (
+        "the COMPLETED_STEP edge set must survive exactly")
+    assert after["org-b"][1] == before["org-b"][1]
+    assert _onboards_targets(sdk, "org-a") == [anchor["id"]], (
+        "the org-anchor `onboards` edge must survive")
+
+
+def test_rebuild_all_restores_onboarding_from_pending_sidecar(graph):
+    """The sidecar-RECOVERY path: the live graph is already empty.
+
+    A crash after the wipe leaves the sidecar as the only record; the retry
+    must restore from it. Exercises the `merged[...]` reassignment — restoring
+    from the fresh (empty) capture would restore nothing.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-r", "status": "complete",
+                              "version": 4, "fork": "build", "compact": True,
+                              "member_progress": '{"u1": ["seed"]}'}],
+        onboarding_step_links=[["org-r", "harness-connected"],
+                               ["org-r", "first-points-filed"]]))
+
+    sdk._get_proj().rebuild_all(str(events))
+
+    node, steps = _read_onboarding(sdk, "org-r")
+    assert node is not None, "the recovered onboarding node is missing"
+    assert node["status"] == "complete"
+    assert node["compact"] is True
+    assert node["version"] == 4
+    assert node["member_progress"] == '{"u1": ["seed"]}'
+    assert steps == ["first-points-filed", "harness-connected"]
+
+
+def test_pending_onboarding_sidecar_beats_a_self_healed_default(graph):
+    """Leftover-wins: a re-provisioned default must not overwrite truth.
+
+    `_ensure_onboarding_node_after_provision` can re-create a DEFAULT node for
+    an org between an interrupted wipe and the retry. A fresh-wins field merge
+    would then reset `status='complete'`/`compact` and silently re-onboard the
+    org — the exact #4641 harm. The node leg therefore keeps the leftover
+    VERBATIM (as the config leg does, and for the same reason).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-r", "status": "complete",
+                              "version": 9, "fork": "self", "compact": True,
+                              "member_progress": "{}"}],
+        onboarding_step_links=[["org-r", "harness-connected"]]))
+    # The self-healed default: active, fork build, not compact.
+    _write_onboarding_state(sdk, "org-r", fork="build")
+
+    sdk._get_proj().rebuild_all(str(events))
+
+    node, steps = _read_onboarding(sdk, "org-r")
+    assert node["status"] == "complete", (
+        "a self-healed default overwrote the recovered status")
+    assert node["fork"] == "self"
+    assert node["compact"] is True
+    assert node["version"] == 9
+    # The recovered link is kept AND the fresh-only `team-named` link the
+    # self-healed write created is appended (the same fresh-only rule as
+    # `config_snapshot`) — the node LEG is what must stay leftover-verbatim.
+    assert steps == ["harness-connected", "team-named"]
+
+
+def test_onboarding_capture_failure_aborts_before_wipe(graph):
+    """I3 (#4641): a failed capture refuses BEFORE the wipe (the #2943 rule)."""
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-keep", fork="build",
+                            steps=("harness-connected",))
+    before = _read_onboarding(sdk, "org-keep")
+
+    patcher, injected = _inject_query_failure(
+        sdk, lambda c: "MATCH (n:OnboardingState)" in c
+        and "properties(n)" in c)
+    with patcher, pytest.raises(RuntimeError) as exc:
+        sdk._get_proj().rebuild_all(str(events))
+
+    assert injected, "the capture failure was never injected"
+    assert "aborted BEFORE the graph wipe" in str(exc.value)
+    assert _read_onboarding(sdk, "org-keep") == before, "the graph was touched"
+    assert not os.path.exists(_sidecar_path(events))
+
+
+def test_onboarding_sidecar_malformed_entries_refused_before_wipe(tmp_path):
+    """A planted/erroneous sidecar is refused PRE-wipe, not mid-restore.
+
+    The step-id membership check is the load-bearing one: a `COMPLETED_STEP`
+    edge is what `completed_steps()` feeds into the completion gate, so a
+    foreign id would forge a completion rather than carry a stray property.
+    """
+    from tortoise.projection import _load_prewipe_snapshot
+
+    cases = {
+        "node-not-an-object": {"onboarding_snapshot": ["nope"]},
+        "node-missing-org-id": {"onboarding_snapshot": [{"status": "active"}]},
+        "link-not-a-pair": {"onboarding_step_links": ["org-x"]},
+        "link-foreign-step": {
+            "onboarding_step_links": [["org-x", "made-up-step"]]},
+    }
+    for name, overrides in cases.items():
+        path = tmp_path / f"{name}.json"
+        _plant(path, _sidecar_payload(**overrides))
+        with pytest.raises(RuntimeError) as exc:
+            _load_prewipe_snapshot(str(path))
+        assert "onboarding" in str(exc.value), (name, str(exc.value))
+    # The membership complaint names the vocabulary, not just the shape.
+    path = tmp_path / "membership.json"
+    _plant(path, _sidecar_payload(
+        onboarding_step_links=[["org-x", "made-up-step"]]))
+    with pytest.raises(RuntimeError) as exc:
+        _load_prewipe_snapshot(str(path))
+    assert "canonical onboarding step" in str(exc.value)
+
+
+def test_onboarding_union_leftover_wins_and_keeps_unpaired_entries():
+    """The union policy, by value: leftover verbatim, fresh-only appended.
+
+    Also pins that a node with no links and a link with no node each survive
+    the union independently — the restore leg is what decides the latter's
+    fate (it drops it rather than minting a property-less node).
+    """
+    from tortoise.projection import _SNAPSHOT_SECTIONS, _union_prewipe_snapshot
+
+    empty = {k: [] for k in _SNAPSHOT_SECTIONS}
+    merged = _union_prewipe_snapshot(
+        {"onboarding_snapshot": [{"org_id": "o", "status": "complete"}],
+         "onboarding_step_links": [["o", "harness-connected"]]},
+        {**empty,
+         "onboarding_snapshot": [{"org_id": "o", "status": "active"},
+                                 {"org_id": "fresh", "status": "active"}],
+         "onboarding_step_links": [["fresh", "harness-connected"]]})
+    nodes = {e["org_id"]: e for e in merged["onboarding_snapshot"]}
+    assert nodes["o"]["status"] == "complete", "leftover must win verbatim"
+    assert "fresh" in nodes, "a fresh-only org must be appended"
+    links = {tuple(entry) for entry in merged["onboarding_step_links"]}
+    assert ("o", "harness-connected") in links
+    assert ("fresh", "harness-connected") in links
+
+    unpaired = _union_prewipe_snapshot(
+        {"onboarding_snapshot": [{"org_id": "lonely", "status": "active"}],
+         "onboarding_step_links": []},
+        {**empty, "onboarding_step_links": [["ghost", "harness-connected"]]})
+    assert [e["org_id"] for e in unpaired["onboarding_snapshot"]] == ["lonely"]
+    assert [list(e) for e in unpaired["onboarding_step_links"]] == [
+        ["ghost", "harness-connected"]]
+
+
+def test_onboarding_capture_refuses_an_unloadable_node(graph):
+    """The capture must never emit an entry the loader would refuse.
+
+    A non-str `org_id` written into the rescue file would make the whole file
+    UNLOADABLE on the retry — bricking automatic recovery for every graph-only
+    class it carries, not just onboarding. Fail closed pre-wipe instead.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-ok", fork="build",
+                            steps=("harness-connected",))
+    _g(sdk).query("MERGE (n:OnboardingState {org_id: 123}) "
+                  "SET n.status = 'active'")
+
+    with pytest.raises(RuntimeError) as exc:
+        sdk._get_proj().rebuild_all(str(events))
+
+    assert "aborted BEFORE the graph wipe" in str(exc.value)
+    assert "org_id" in str(exc.value)
+    assert not os.path.exists(_sidecar_path(events)), (
+        "an unloadable rescue file must never be written")
+    assert _read_onboarding(sdk, "org-ok")[0] is not None, "the graph was touched"
+
+
+def test_rebuild_all_reports_onboarding_restore_counts(graph):
+    """The failure signal must be caller-visible, not log-only.
+
+    The pending sidecar is retired after the replay by design (#4305), so the
+    returned counts are the only programmatic record that a restore gap
+    happened — `consistency.recover_from_log` reports a success shape without
+    them.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-r", "status": "complete"}],
+        onboarding_step_links=[["org-r", "harness-connected"]]))
+
+    result = sdk._get_proj().rebuild_all(str(events))
+
+    assert result["onboarding_expected"] == 1
+    assert result["onboarding_restored"] == 1
+    assert result["onboarding_missing_links"] == 0
+    assert result["onboarding_restore_failures"] == 0
