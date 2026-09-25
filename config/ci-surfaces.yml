@@ -405,7 +405,7 @@ surfaces:
   # (#3100/#3221), and keeping both is the #2913 invisible-duplicate class.)
   - test_battery_judge.py
   - test_battery_parity.py
-  - test_battery_recall_wiring.py  # #3327 matched-recall pre-pass wiring (hermetic)
+  - test_battery_recall_wiring.py  # #3327 matched-recall pre-pass wiring (hermetic); battery-owned — it pins battery/recall/prepass.py + battery/report/assemble.py + battery/runner/run.py wiring
   # Dual-registered (api + battery) where the test pins a battery/ module:
   # battery/ is the source-mapped surface (SOURCE_PATTERNS), so without a battery
   # entry a source-only edit selected the battery surface and ran none of them —
