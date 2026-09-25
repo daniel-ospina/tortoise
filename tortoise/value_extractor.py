@@ -161,7 +161,6 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         "core:WorkItem": "A unit of work",
         "core:Problem": "A deviation between actual and desired state — "
                         "problem-family parent (2026-08-31)",
-        "core:document": "A document artifact",
         "core:tag": "A tag",
         "core:user": "A user",
         "core:skill": "A skill",
