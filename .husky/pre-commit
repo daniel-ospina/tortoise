@@ -49,19 +49,36 @@ check_version
 #
 # #5128: `tools/ci_selection.py` now carries the inline >=3.12 interpreter
 # guard, so bare `python3` (3.9 via Apple CLT on this host) would REFUSE
-# instead of running — and the `2>/dev/null` below would swallow that refusal
-# and silently skip the registration it exists to perform. Resolve the project
-# interpreter instead: the worktree's venv when it is there, else `uv run`
-# (which finds the pinned 3.12). Mirrors tools/install-reaper-schedule.sh's
-# $REPO/.venv/bin/python resolution, without its unchecked PATH fallback.
+# instead of running — and the `2>/dev/null` on the dry-run below would swallow
+# that refusal and silently skip the #1429 test-surface auto-registration. So
+# resolve and VALIDATE the interpreter ONCE, up front: the worktree's venv when
+# it is there, else `uv run` (which finds the pinned 3.12). Nothing is silent —
+# if neither path yields >=3.12 the registration FAILS LOUDLY instead of being
+# skipped (that silent skip is the exact bug this hook exists to prevent), and
+# stderr is suppressed only on the dry-run, where a non-match is a normal
+# "nothing to register". Mirrors tools/install-reaper-schedule.sh's
+# $REPO/.venv/bin/python resolution.
+PY_TOOL=""
+if [ -x .venv/bin/python ] && .venv/bin/python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
+  PY_TOOL="venv"
+elif command -v uv >/dev/null 2>&1 && uv run python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
+  PY_TOOL="uv"
+fi
 py_tool() {
-  if [ -x .venv/bin/python ]; then
+  if [ "$PY_TOOL" = "venv" ]; then
     .venv/bin/python "$@"
   else
     uv run python "$@"
   fi
 }
 if git diff --cached --name-only | grep -qE '^tests/.*\.py$'; then
+  if [ -z "$PY_TOOL" ]; then
+    echo "⛔ [hooks] no Python >=3.12 interpreter (.venv/bin/python or uv run python)." >&2
+    echo "   The #1429 test-surface auto-registration cannot run, and skipping it" >&2
+    echo "   silently is the drift trap this hook exists to close. Install uv (or" >&2
+    echo "   create .venv with >=3.12) and re-run the commit." >&2
+    exit 1
+  fi
   if py_tool tools/ci_selection.py --register --dry-run 2>/dev/null | grep -q "would register"; then
     py_tool tools/ci_selection.py --register
     git add config/ci-surfaces.yml
