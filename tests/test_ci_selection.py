@@ -698,11 +698,11 @@ def test_expensive_eval_integration_stays_slow():
                     ["tortoise/ranking.py"]):
         got = set(_sel(changed)["test_files"])
         assert f not in got, f"{f} leaked into the fast gate for {changed}"
-    # A durations row for a slow file is manifest drift: integrity() rejects it
-    # with "durations key ... is a slow file (must be fast-gate)".
-    assert f not in m["durations"], (
-        "a slow file must have no durations row — integrity() rejects that shape"
-    )
+    # Deliberately NOT asserting `f not in m["durations"]`: a slow-lane key
+    # carries its measured cost there on purpose, so a cost regression in a lane
+    # that exists *because* it is expensive stays visible
+    # (ci_selection.validate_durations). It cannot re-pack the file into the fast
+    # gate — split_fast_gate subtracts slow_files first (`files -= slow`).
 
 
 def test_slow_files_emitted_on_every_return_path():
