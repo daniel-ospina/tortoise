@@ -57,6 +57,7 @@ from . import monitoring
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 from .projection.entities import (  # #3998: the declared :Source surface
+    _SOURCE_IDENTITY_PROPS,
     _SOURCE_NODE_PROP_NAMES,
     _SOURCE_SERVER_MANAGED_PROPS,
     filter_source_props,
@@ -19020,18 +19021,18 @@ class TortoiseSDK:
                 params={"id": id_val},
             ).result_set[0][0]
             if _is_source:
-                _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
+                _managed = sorted(
+                    k for k in props
+                    if k in _SOURCE_SERVER_MANAGED_PROPS or k in _SOURCE_IDENTITY_PROPS
+                )
                 if _managed:
-                    # #3998: the state is SERVER-MANAGED — it is validated by
-                    # `validate_raw_state` and owned by the fixed clauses of
-                    # `_upsert_source`. The declaration must admit it (the state
-                    # has to be writable) but a caller-supplied map must not:
-                    # `rawState=None` CLEARS a recorded absence (`SET n += {k:
-                    # null}` removes the key) and `rawState='banana'` persists an
-                    # unvalidated value. Either one silently resurrects a raw the
-                    # record says is gone — the precise silent-loss failure
-                    # #3998 exists to prevent — and the clear is journalled, so it
-                    # survives a rebuild.
+                    # #3998: two subsets are refused through the generic surface.
+                    # The STATE is server-managed (see below). The IDENTITY keys
+                    # are refused because they are the node's MERGE key: measured,
+                    # `update_entity(src_url, url=<2 KB body>)` rewrote it, and
+                    # after a rebuild that produced duplicate `:Source` nodes and
+                    # an EMPTY provenance chain for the Point — a payload route
+                    # and a silent provenance loss in one call.
                     raise ValueError(
                         f"{_managed!r} is server-managed on a :Source and "
                         f"cannot be set through the generic entity surface "

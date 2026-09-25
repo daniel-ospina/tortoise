@@ -783,6 +783,96 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
     s.update_entity(RAW_URL, format="transcript")
 
 
+def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
+    """Review round 5, P1: the fold's `:Source` arm filtered undeclared keys but
+    still replayed the SERVER-MANAGED ones, so a journal line written by an
+    earlier head — the ``rawState=None`` CLEAR that round 3's open guard
+    journalled — resurrected a permanently deleted raw on every rebuild. A
+    ``SourceCreated`` record owns the state; no legitimate ``EntityMutated``
+    producer exists for it, so replay must drop it.
+
+    (1) FAILS if the fold drops only undeclared keys: the recorded clear is
+        applied and the state reads back as ``present``.
+    (2) REACHABLE: the record is emitted through the real journal producer with
+        the exact shape the unguarded route wrote, and the read is checked.
+    """
+    from tortoise.raw_state import RAW_DELETED
+
+    s, events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
+    assert _raw(s)["raw_state"] == RAW_DELETED
+    s._journal_entity_mutation("Source", RAW_URL, "revise", state={"rawState": None})
+
+    s._get_proj().rebuild_all(str(events))
+
+    assert _raw(s)["raw_state"] == RAW_DELETED, (
+        "a replayed EntityMutated resurrected the raw the record says is gone"
+    )
+    assert _raw(s)["available"] is False
+
+
+def test_the_identity_keys_are_refused_through_the_generic_route(sdk):
+    """Review round 5, P2: the allowlist admitted the IDENTITY keys, so
+    ``update_entity(src_url, url=<2 KB body>)`` rewrote the MERGE key — a payload
+    route AND a silent provenance loss at once (measured: after a rebuild the
+    Point's ``get_provenance_chain`` came back EMPTY, and duplicate ``:Source``
+    nodes existed). The identity keys are the node's merge key and must be as
+    unwritable as the state.
+
+    (1) FAILS if only the server-managed subset is refused: the ``url`` rewrite
+        lands and the chain for the Point empties out.
+    (2) REACHABLE: the body is passed as ``url`` through the real tenant surface.
+    """
+    s, events = sdk
+    body = "IDENTITY_PAYLOAD " + ("raw. " * 300)
+    # Source FIRST, so it carries the `id` the guard and the write both resolve
+    # on — an id-less stub (from `_memory`'s link) is not what this tests.
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    pid = _memory(s)
+    with pytest.raises(ValueError, match=r"server-managed|cannot be set"):
+        s.update_entity(RAW_URL, url=body)
+    assert _raw(s)["raw_state"] == "present", "the source stopped being readable"
+    assert _source_props(s)["url"] == RAW_URL
+    s._get_proj().rebuild_all(str(events))
+    assert len(s.get_provenance_chain(pid)) == 1, (
+        "the identity rewrite split the source and lost the Point's provenance"
+    )
+    assert body not in repr(_source_props(s))
+
+
+def test_a_multi_source_point_prefers_the_source_that_has_an_entity(sdk):
+    """Review round 5, P2 — a REGRESSION introduced by this change's own
+    ``OPTIONAL MATCH``. Making the ``references`` hop survivable is required (a
+    source with no entity must still be sayable), but a bare ``LIMIT 1`` then
+    returned whichever source matched FIRST — so a Point with two sources
+    (#3263 many-to-many) whose first source has no entity reported
+    ``entity=None`` and HID the entity-bearing source the pre-change required-hop
+    query returned.
+
+    (1) FAILS if the query keeps ``OPTIONAL MATCH`` + ``LIMIT 1`` with no
+        ordering: the entity-less source wins and ``entity`` comes back ``None``.
+    (2) REACHABLE: the fixture builds that exact shape — an entity-less source
+        linked first, then an entity-bearing one — so both rows exist to choose
+        between.
+    """
+    s, _events = sdk
+    pid = _memory(s)
+    second = "https://raw.example.com/conv/8"
+    s.create_source(second, "conversation", contentHash="h2")
+    obj = s.create_entity("Object", "an extracted object")["node"]["id"]
+    s.link_source_to_entity(second, obj, "Object")
+    s._get_proj().g.query(
+        "MATCH (p:Point {id:$p}), (s:Source {url:$u}) MERGE (p)-[:extractedFrom]->(s)",
+        params={"p": pid, "u": second},
+    )
+    chain = s.get_provenance_chain(pid)
+    assert len(chain) == 1, chain
+    assert chain[0]["entity"] is not None, (
+        "the entity-bearing source was hidden behind an entity-less one"
+    )
+    assert chain[0]["labels"], "labels must accompany the entity"
+
+
 def test_index_entry_shape_carries_no_payload_field():
     """The entry is a REFERENCE by construction — there is no field a raw's
     bytes could be written into.

@@ -232,9 +232,18 @@ def raw_entry(
     """The graph's **index entry** for a raw — a reference, never a copy.
 
     This is the load-bearing shape of D30: what the graph keeps about a raw is
-    *identity + version + availability*, and never the bytes. ``content_hash``
-    is a hash, so it is not a payload; there is no field here a raw's bytes
-    could be written into.
+    *identity + version + availability*, and never the bytes. There is no field
+    here a raw's bytes could be written into — **provided the caller passed a
+    real digest for ``content_hash``**. That field is a hash BY CONVENTION, not
+    by enforcement: ``contentHash`` is caller-supplied and is not
+    length-checked, so a caller who passes 2 KB of body as the ``contentHash``
+    stores it (measured, and returned here verbatim). This entry is a reference
+    **by construction** — the entry's own keys are fixed and none of them is a
+    payload field — but it cannot make a caller's *value* be a digest. Digest
+    enforcement is a separate policy decision (what algorithm? what length?)
+    that this change does NOT take; it is part of the stated value-level
+    residual alongside `title`. Named here rather than left as a claim the
+    previous revision made and the code did not support.
 
     Never raises, for the same reason the resolver does not: a read path calls
     this unconditionally, so a hostile or malformed ``props`` must degrade to
