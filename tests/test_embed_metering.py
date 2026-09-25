@@ -264,6 +264,20 @@ class TestMeted:
             t.join()
         assert len(calls) == 1, calls
 
+    def test_meted_flushes_even_when_the_body_raises(self, monkeypatch):
+        # Mutation: only flushing on the happy path → no write after the raise.
+        calls = _capture_writer(monkeypatch)
+        with pytest.raises(ValueError, match="boom"), em.meted(ORG):
+            em.note_encode(texts=1, chars=4, wall_ms=1.0)
+            raise ValueError("boom")
+        assert len(calls) == 1
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# flush() — empty / unbound / dropped
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestFlush:
     def test_the_consumed_transition_is_inside_the_critical_section(
             self, monkeypatch):
         """The mechanism, pinned deterministically.
@@ -298,20 +312,41 @@ class TestMeted:
         assert em.flush_tally(tally, ORG) is None      # writer returns None
         assert observed == [("enter", False), ("exit", True)], observed
 
-    def test_meted_flushes_even_when_the_body_raises(self, monkeypatch):
-        # Mutation: only flushing on the happy path → no write after the raise.
+    def test_the_counter_snapshot_is_taken_inside_the_critical_section(
+            self, monkeypatch):
+        """The OTHER half of the fix, and the one that was unprotected.
+
+        Moving only the `snap = {...}` dict out of the `with _LOCK:` block (the
+        transition left inside) kept all 50 tests green — the probe above
+        records `consumed`, never WHEN the counters were read. So the lost-
+        increment race the fix closed had a regression test for one half and
+        none for the other.
+
+        The probe mutates the tally the instant the critical section ends — a
+        concurrent boundary's note landing exactly at the release boundary.
+        Correct code has already snapshotted `calls=1`; a snapshot taken after
+        the release reports 101. Deterministic, not timing-based.
+        """
+        import threading
         calls = _capture_writer(monkeypatch)
-        with pytest.raises(ValueError, match="boom"), em.meted(ORG):
-            em.note_encode(texts=1, chars=4, wall_ms=1.0)
-            raise ValueError("boom")
-        assert len(calls) == 1
+        tally = em.EmbedTally(calls=1, texts=1, chars=1, wall_ms=1.0,
+                              org_id=ORG)
+        real = threading.Lock()
 
+        class _MutatingLock:
+            def __enter__(self):
+                real.acquire()
+                return self
 
-# ════════════════════════════════════════════════════════════════════════════
-# flush() — empty / unbound / dropped
-# ════════════════════════════════════════════════════════════════════════════
+            def __exit__(self, *exc):
+                real.release()
+                tally.calls += 100       # a note arriving at the release
+                return False
 
-class TestFlush:
+        monkeypatch.setattr(em, "_LOCK", _MutatingLock())
+        em.flush_tally(tally, ORG)
+        assert calls[0]["calls"] == 1, calls
+
     def test_second_flush_is_a_no_op(self, monkeypatch):
         # Mutation: flush_tally() not marking the tally consumed → two rows
         # (double-counted embedding work).
@@ -769,6 +804,38 @@ class TestMiddleware:
             _receive, _send))
         assert calls[0]["org_id"] == "explicit-org"
 
+    def test_a_real_session_auth_request_attributes_through_starlette(
+            self, monkeypatch):
+        """The session-lane fix depends on Starlette's `Request.state` being
+        backed by `scope["state"]`. A duck-typed request cannot prove that
+        link, and `TestMiddleware` builds the scope dict by hand — so until
+        this test, nothing drove the real object across the real middleware.
+
+        Mutation: the middleware reading the org from anywhere but scope state
+        → the session-authed write is dropped AND falsely alerted → RED.
+        """
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+        calls = _capture_writer(monkeypatch)
+        alerts = _capture_alert(monkeypatch)
+
+        async def _handler(request: Request):
+            request.state.org_id = ORG        # exactly what session auth does
+            em.note_encode(texts=7, chars=70, wall_ms=3.0)
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route("/x", _handler, methods=["POST"])])
+        app.add_middleware(em.EmbedMeteringMiddleware)
+        with TestClient(app) as client:
+            assert client.post("/x").status_code == 200
+        assert len(calls) == 1, calls
+        assert calls[0]["org_id"] == ORG
+        assert calls[0]["texts"] == 7
+        assert alerts == []
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # The swallow-site completeness fence (the seventh lane)
@@ -909,9 +976,10 @@ class TestSessionLaneAttribution:
 
 class TestRunnerWiring:
     def test_decorator_attributes_the_runner_org_sync(self, monkeypatch):
-        # Mutation: relying on the middleware only → the session-auth and
-        # internal seed lanes (which never set scope["state"]["org_id"]) drop
-        # their work into an unattributable tally and fire a spurious alert.
+        # Mutation: relying on the middleware only → the internal seed lanes
+        # (which never set scope["state"]["org_id"]; the session lane DOES
+        # stamp it, since the round-1 fix) drop their work into an
+        # unattributable tally and fire a spurious alert.
         import tortoise.hosted_api as ha
         calls = _capture_writer(monkeypatch)
         alerts = _capture_alert(monkeypatch)
