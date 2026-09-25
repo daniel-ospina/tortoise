@@ -20748,6 +20748,18 @@ class TortoiseSDK:
             create-only cadence would revert updated Sources to create-time
             state post-rebuild); replay re-MERGEs by url and the hash-diff-gated
             bump lands at the live converged value.
+          - ``raw_state=`` (#3998, D30) — the ABSENT-RAW state: one of
+            ``present`` / ``deleted`` / ``offline`` / ``access_revoked``.
+            Validated strictly (an unknown value raises ``ValueError``) and
+            PRESERVED by a later upsert that carries none, so a re-ingest
+            cannot resurrect a raw deleted between the two writes. Pass
+            ``raw_state="present"`` to record that a raw came BACK — that is
+            the only way to move a state off an absence, by design. The state
+            rides the ``SourceCreated`` journal, so it survives ``rebuild_all``.
+            ⚠️ This is the write half of the two-store model: the graph keeps
+            identity + version + availability and NEVER the bytes, so props
+            that would carry raw payload are refused (see ``_SOURCE_EXTRA_PROPS``
+            in ``projection/entities.py`` for the declared :Source surface).
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if not url or not url.strip():
@@ -20784,14 +20796,14 @@ class TortoiseSDK:
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
                 )
-        # #3998 (D30): the graph INDEXES the raw; it is NOT the raw store. A
-        # payload-bearing prop here would put raw bytes on the :Source node and
-        # break the two-store model outright — measured BEFORE this guard:
-        # ``create_source(url, "conversation", content=<2 KB body>)`` persisted
-        # the body verbatim on the node, so "0 raw payload bytes retained"
-        # (the issue's target 4) was simply false for the props route. The
-        # bytes belong in the raw store, reached through the source's identity;
-        # what the graph keeps is identity + version + availability.
+        # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
+        # is the CLOSED :Source property surface in `projection/entities.py`
+        # (`_SOURCE_EXTRA_PROPS`), which is the only form that can hold — a
+        # blocklist cannot enumerate the payload name space (measured: `text`,
+        # `snippet`, `transcript`, `chunks`, `blob`, … all persisted a 2 KB body
+        # on the open passthrough). This refusal exists so the COMMON mistake
+        # gets an actionable error instead of a silent drop; an unlisted
+        # spelling is still denied, one layer down.
         for _k in ("content", "body", "raw", "payload", "raw_content", "rawContent"):
             if _k in props:
                 raise ValueError(

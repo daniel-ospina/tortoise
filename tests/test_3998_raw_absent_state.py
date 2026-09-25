@@ -66,6 +66,23 @@ from tortoise.sdk import TortoiseSDK
 
 RAW_URL = "https://raw.example.com/conv/7"
 
+#: The DECLARED ``:Source`` node-property surface (#3998, ``_SOURCE_EXTRA_PROPS``
+#: + the fixed SET clauses). Written out HERE, explicitly, rather than derived
+#: from the code: deriving it would let a new payload-carrying key enter the
+#: allowlist and this test at the same instant, which is the failure the test
+#: exists to catch.
+ALLOWED_SOURCE_NODE_PROPS = frozenset({
+    # identity
+    "url", "id", "canonicalUrl", "urlAliases", "sourceKind", "externalId",
+    # version
+    "contentHash", "version", "ingestedAt", "updatedAt", "sourceDate",
+    # availability (#3998 — the third value on the record)
+    "rawState", "rawStateAt",
+    # declared metadata
+    "title", "format", "name", "team", "credibilityTier", "is_episodic",
+    "sourcePath", "_searchText", "provenance_spans",
+})
+
 
 # ── fixtures ──────────────────────────────────────────────────────────────
 
@@ -422,53 +439,69 @@ def test_graph_holds_an_index_entry_not_a_copy(sdk):
     """Criterion (3) and (4) together: the graph keeps identity + version +
     availability, and **0 raw payload bytes**, for a raw hosted elsewhere.
 
-    (1) FAILS if the props route accepts a payload prop (part (a), which is
-        what makes part (b) non-vacuous), or if any property value on the
-        :Source carries the body.
-    (2) REACHABLE: a 2 KB body is built and handed to the code — first through
-        the props route (refused), then only its sha256 through the sanctioned
-        route (the realistic hosted-elsewhere shape).
+    ⛔ This test was DECORATIVE in its first form and was WRONG in its second,
+    and both failures are the point of it.
 
-    ⛔ This test was DECORATIVE in its first form. It asserted the payload was
-    absent while never handing a payload to the code, so the assertion held
-    for EVERY implementation — the doctrine's "a test that cannot fail". It
-    was falsified by MEASUREMENT: the first form of ``create_source`` accepted
-    ``content=<2 KB body>`` through the props passthrough and persisted the
-    body verbatim on the :Source node, so target 4 was false while the suite
-    was green.
+    *Form 1* asserted the payload was absent while never handing a payload to
+    the code, so it held for every implementation. *Form 2* enumerated the six
+    spellings the SDK blocklist knew — i.e. it tested the implementation's own
+    list, so it passed for any spelling nobody had thought of. Measured on the
+    open passthrough: ``text``, ``snippet``, ``excerpt``, ``transcript``,
+    ``bodyText``, ``rawText``, ``raw_text``, ``data``, ``blob``, ``bytes``,
+    ``payloadText``, ``contentText``, ``content_text``, ``fullText``,
+    ``full_text`` and a list-valued ``chunks`` ALL persisted the 2 KB body
+    verbatim. A name blocklist cannot hold this.
+
+    (1) FAILS if the closed :Source property surface
+        (``_SOURCE_EXTRA_PROPS``) is removed — then every spelling in
+        ``PAYLOAD_SPELLINGS`` lands on the node; or if ``ALLOWED_SOURCE_NODE_PROPS``
+        stops being an accurate description of the declared surface.
+    (2) REACHABLE: a >2 KB body is handed to the code under EVERY spelling
+        below, through the real write path.
     """
     s, _events = sdk
     body = ("MEETING TRANSCRIPT — " + "the raw conversation body. " * 80).strip()
     assert len(body) > 2000
     digest = hashlib.sha256(body.encode()).hexdigest()
 
-    # (a) the payload route is REFUSED — this is what makes (b) a real test:
-    #     the same body IS offered to the code, and rejected.
+    # (a) the common spellings get a LOUD, actionable error.
     for key in ("content", "body", "raw", "payload", "raw_content", "rawContent"):
         with pytest.raises(ValueError):
             s.create_source(RAW_URL, "conversation", contentHash=digest, **{key: body})
 
-    # (b) the sanctioned route: identity + version + availability, no bytes.
+    # (b) EVERY OTHER spelling is denied one layer down, by the closed surface.
+    #     This is the half that does not depend on anyone having thought of the
+    #     name — which is the only form the guarantee can take.
+    for key in ("text", "snippet", "excerpt", "transcript", "bodyText",
+                "rawText", "raw_text", "data", "blob", "bytes", "payloadText",
+                "contentText", "content_text", "fullText", "full_text"):
+        s.create_source(RAW_URL, "conversation", contentHash=digest, **{key: body})
+    s.create_source(RAW_URL, "conversation", contentHash=digest, chunks=[body])
+
+    # (c) the sanctioned route: identity + version + availability, no bytes.
     s.create_source(RAW_URL, "conversation", contentHash=digest, raw_state=RAW_OFFLINE,
-                    title="Weekly sync")
+                    title="Weekly sync", format="transcript")
 
     props = _source_props(s)
     assert props["url"] == RAW_URL
     assert props["contentHash"] == digest
     assert props[RAW_STATE_PROP] == RAW_OFFLINE
+    assert props["format"] == "transcript", "a declared metadata prop must still persist"
+    assert set(props) <= ALLOWED_SOURCE_NODE_PROPS, (
+        "undeclared :Source properties reached the node: "
+        f"{sorted(set(props) - ALLOWED_SOURCE_NODE_PROPS)}"
+    )
     for key, value in props.items():
-        text = value if isinstance(value, str) else str(value)
-        assert body not in text, f"{key} carries the raw payload"
-        assert "the raw conversation body." not in text, f"{key} carries raw payload fragments"
-    assert not any(k.lower() in ("content", "body", "payload", "raw") for k in props), sorted(props)
+        assert body not in repr(value), f"{key} carries the raw payload"
+        assert "the raw conversation body." not in repr(value), f"{key} carries fragments"
 
 
 def test_the_raw_payload_guard_is_not_vacuous(sdk):
-    """Contrast that keeps the guard above load-bearing: assert the refusal is
-    the props route's own work (the message names the reason), and that the
-    refused call created nothing at all.
+    """Contrast that keeps the guard above load-bearing: the refusal is the
+    SDK route's own work (its message names the reason), and the refused call
+    created nothing at all.
 
-    (1) FAILS if the guard is removed: the ``pytest.raises`` never fires.
+    (1) FAILS if the SDK guard is removed: the ``pytest.raises`` never fires.
     (2) REACHABLE: ``content`` is one of the six refused spellings.
     """
     s, _events = sdk
@@ -477,6 +510,35 @@ def test_the_raw_payload_guard_is_not_vacuous(sdk):
     assert not s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) RETURN count(s)", params={"u": RAW_URL}
     ).result_set[0][0]
+
+
+def test_rebuild_does_not_re_materialise_a_payload_from_the_journal(sdk):
+    """Review round 2, P1: the guard must hold on the REPLAY path, not only at
+    write time. ``rebuild_all`` re-materialises ``SourceCreated`` through the
+    same ``_upsert_source``, so a journal written while the passthrough was
+    open would otherwise restore its payload on every rebuild — the documented
+    recovery path re-creating the exact bytes AC4 forbids.
+
+    (1) FAILS if the allowlist is enforced only in ``create_source``: the
+        replayed event carries the payload straight past a write-time guard.
+    (2) REACHABLE: the event below is emitted with the PRE-GUARD writer's exact
+        shape (``SourceCreated`` carrying raw ``content``/``text``), which is
+        what every deployment that ran the shipped writer holds in its journal.
+    """
+    s, events = sdk
+    body = "PRE-GUARD PAYLOAD " + ("raw transcript body. " * 120)
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s._emit_event("SourceCreated", id=RAW_URL, url=RAW_URL, sourceKind="conversation",
+                  contentHash="h1", content=body, text=body)
+
+    s._get_proj().rebuild_all(str(events))
+
+    props = _source_props(s)
+    assert "content" not in props and "text" not in props, sorted(props)
+    assert body not in repr(props), "the rebuild restored the raw payload"
+    assert set(props) <= ALLOWED_SOURCE_NODE_PROPS, (
+        f"undeclared props survived replay: {sorted(set(props) - ALLOWED_SOURCE_NODE_PROPS)}"
+    )
 
 
 def test_index_entry_shape_carries_no_payload_field():
