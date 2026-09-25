@@ -704,9 +704,12 @@ class TestImportValidationFailClosed:
         """A corrupted blob whose clear header was NOT rewritten is rejected by
         the sha256 integrity gate — pre-decrypt, pre-restore (#3545).
 
-        NOT behind ``@_import_deep``: this branch has no other endpoint-level
-        coverage (#1390's parity E2E exercises the happy path only) and the
-        rejection is pre-restore, so the case is cheap.
+        NOT behind ``@_import_deep``: the rejection is pre-restore, so the case
+        is cheap, and this is the only test pinning THIS branch's rejection
+        message together with the live-graph-untouched assertion — #1390's
+        parity E2E exercises the happy path only, and the un-skipped sibling
+        ``test_import_quarantine_stamps_ledger`` reaches the same sha256 path
+        for ledger stamping only.
         """
         tc, fake, db_path = sb_client
         _seed_team(fake)
