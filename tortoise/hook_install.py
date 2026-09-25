@@ -121,13 +121,19 @@ KIND_CAPTURE_FAILURE = "capture-failure"
 #: (a bare word ``tortoise`` would match a foreign hook that merely mentions
 #: it) — the pre-#3795 un-markered hooks contain several of these.
 #:
-#: ``tortoise-capture`` is the Pi seam's CODE-stable anchor (its shipped log
-#: prefix is ``[tortoise-capture]``).  Without it the only matches in the Pi
-#: seam are PROSE in comments, so a future doc-comment rewording would flip an
-#: unmarkered pre-contract seam from ``unversioned-artifact`` to
-#: ``foreign-artifact`` — the class whose repair instruction is wrong (#4680
-#: review).  The other identifiers stay executable/prose-stable for the shell
-#: hooks.
+#: ``TORTOISE_API_KEY`` is the Pi seam's CODE-stable anchor.  The Pi seam's
+#: prose matches (``tortoise session``, ``tortoise/claude-hooks``) are comment
+#: text, and the artifact's own name ``tortoise-capture`` is a display string
+#: (a log prefix) — a comment or log rewording would drop them, so a
+#: pre-contract copy would fall to ``foreign-artifact``, whose repair
+#: instruction is wrong.  ``TORTOISE_API_KEY`` is an IDENTIFIER the seam must
+#: keep to talk to the API, so it cannot be reworded away (#4680).
+#:
+#: ⚠️ This sniff is FAIL-OPEN toward "ours": a foreign file that mentions any
+#: of these is classified as a Tortoise artifact and the installer REPLACES it
+#: (after keeping a ``.bak`` copy — never a silent overwrite, never a delete).
+#: The opposite error is the loud one, so the asymmetry is the safer
+#: direction; do not read the tuple as a security boundary.
 _TORTOISE_SIGNATURES = (
     "tortoise context",
     "tortoise session",
@@ -137,7 +143,7 @@ _TORTOISE_SIGNATURES = (
     "import tortoise",
     "tortoise.__main__",
     "tortoise/claude-hooks",
-    "tortoise-capture",
+    "TORTOISE_API_KEY",
 )
 
 
@@ -305,8 +311,9 @@ def record_hook_src_dir_for_install(harness: str, *, root: Path,
     layout = get_layout_optional(harness)
     # A harness with no shell-hook layout has no `../..` fallback to rescue, so
     # no record is needed — and this is the SAME condition the record's reader
-    # applies (WRITE == READ).  Before #4544 this raised `ValueError` for
-    # `pi`, which made `tortoise install pi` crash outright.
+    # applies (WRITE == READ).  Before the no-fake-layout ruling a
+    # `get_layout`-based lookup raised `ValueError` for `pi`, which made
+    # `tortoise install pi` crash outright (the ruling is recorded on #4680).
     if layout is None:
         return False
     if not _hook_needs_src_dir_record(layout, Path(root)):
@@ -340,9 +347,10 @@ def read_hook_version(path: str | os.PathLike[str]) -> int | None:
     """Return the canonical marker value in ``path``, or ``None``.
 
     ``None`` means "no readable canonical marker" — the file is missing, a
-    directory, or carries no column-0 ``# tortoise-hook-version: N`` (shell) or
-    ``// tortoise-hook-version: N`` (TypeScript) line.  A pre-#3795 install (no
-    marker on ``session-start.sh``) is exactly this case, so ``None`` is a
+    directory, carries no column-0 ``# tortoise-hook-version: N`` (shell) or
+    ``// tortoise-hook-version: N`` (TypeScript) line, or names a generation
+    too large to convert to ``int`` (#3928).  A pre-#3795 install (no marker
+    on ``session-start.sh``) is exactly this case, so ``None`` is a
     first-class *stale* signal, never an error.  The ``is_file`` gate also
     keeps a FIFO/socket at the path from blocking on ``read_text``.
     """
@@ -354,7 +362,21 @@ def read_hook_version(path: str | os.PathLike[str]) -> int | None:
     except OSError:
         return None
     matches = _HOOK_VERSION_RE.findall(text)
-    return int(matches[0]) if matches else None
+    if not matches:
+        return None
+    try:
+        # #3928: `None` is a first-class STALE signal, so this reader must
+        # never raise.  CPython bounds int<->str conversion
+        # (`sys.get_int_max_str_digits()`, 4300 by default), and a marker with
+        # more digits than that makes `int()` raise `ValueError` — a
+        # user-editable artifact at ``~/.pi/agent/extensions/`` therefore
+        # reaches one of the new callers (#4680) unguarded.  An
+        # unrepresentable generation is not a generation: report it as
+        # unmarkered, which is the classification every caller already
+        # handles.
+        return int(matches[0])
+    except ValueError:
+        return None
 
 
 def count_canonical_markers(path: str | os.PathLike[str]) -> int:
@@ -589,7 +611,16 @@ def get_layout_optional(harness: str) -> HarnessLayout | None:
     Asking what such a harness's layout is must not be an ERROR, because the
     only question the layout answers here is "does the installed hook need a
     ``hook-src-dir`` record?" — and for a hook that is not a shell script
-    there is no ``../..`` fallback, so the answer is simply NO (#4544).
+    there is no ``../..`` fallback, so the answer is simply NO.
+
+    **The ruling is deliberate and it cuts both ways: a harness with no
+    shell-hook layout must NOT be handed a fake one.** A layout-shaped
+    stand-in would claim a ``hooks_dir`` and a registration file the seam does
+    not have, and every layout consumer (``default_root``, ``detect_install``,
+    ``upgrade_install``) would then act on paths that do not exist. Such a
+    seam is described by :class:`ArtifactContract` instead. Recorded (with the
+    ``OVERRIDES:`` marker) on #4680; the number that used to sit here, #4544,
+    is a backup issue that does not carry it.
     """
     return HARNESS_LAYOUTS.get(harness)
 
@@ -609,11 +640,17 @@ class ArtifactContract:
     ``HarnessLayout`` describes a hooks *directory* plus a registration *file*
     — neither of which a non-shell seam has, and the no-fake-layout ruling
     documented on :func:`get_layout_optional` says inventing one for it is
-    wrong.  What the VERSION CONTRACT needs from such a seam is only the
-    shipped artifact and the name it installs under, so that is all this
-    carries; the marker's comment prefix is the READER's business
-    (``read_hook_version`` accepts a shell ``#`` or a TS ``//`` column-0
-    marker), never restated per artifact.
+    wrong.  What the VERSION CONTRACT needs from such a seam is the shipped
+    artifact, the name it installs under, and the root it installs into, so
+    that is all this carries; the marker's comment prefix is the READER's
+    business (``read_hook_version`` accepts a shell ``#`` or a TS ``//``
+    column-0 marker), never restated per artifact.
+
+    ``root_relpath`` is here so the module that OWNS the contract also owns
+    where the seam lives: without it every consumer re-hardcodes the harness
+    (``session_verify`` and ``doctor`` each hardcoded ``pi_home``), so a second
+    artifact seam would be probed at Pi's path — the same silent-omission
+    class this registry exists to remove (#4680 review).
 
     This is deliberately NOT a ``HarnessLayout`` and must never grow into one:
     a layout-shaped stand-in would claim a ``hooks_dir`` and a registration
@@ -623,6 +660,8 @@ class ArtifactContract:
     harness: str
     source: Path
     install_name: str
+    #: Directory the artifact installs into, RELATIVE to ``$HOME``.
+    root_relpath: Path
 
 
 def _pi_artifact_contract() -> ArtifactContract:
@@ -632,7 +671,21 @@ def _pi_artifact_contract() -> ArtifactContract:
         harness="pi",
         source=Path(__file__).resolve().parent / "pi-hooks" / PI_EXTENSION_NAME,
         install_name=PI_EXTENSION_NAME,
+        root_relpath=Path(".pi") / "agent" / "extensions",
     )
+
+
+def artifact_root(harness: str, home: Path) -> Path | None:
+    """The ``$HOME``-scoped install root for a REGISTERED artifact seam.
+
+    ``None`` for a harness that declares no artifact contract, so a caller can
+    tell "no such seam" from "a seam at this path" — the same distinction
+    :func:`get_layout_optional` draws for the shell half.
+    """
+    contract = ARTIFACT_CONTRACTS.get(harness)
+    if contract is None:
+        return None
+    return Path(home) / contract.root_relpath
 
 
 #: Shipped non-shell seams, by harness.  The version contract is the
@@ -715,14 +768,18 @@ def contract_version_for(harness: str) -> int | None:
     is a shell hook (answered by ``contract_version`` over a ``HarnessLayout``)
     or a non-shell artifact (answered from :data:`ARTIFACT_CONTRACTS`), so
     ``pi`` is pinned by the SAME test table as its three shell siblings instead
-    of falling outside the machinery (#4680).  Its production consumers are
-    the two freshness surfaces that must not skip a non-layout seam —
-    ``tortoise hooks status`` and ``tortoise doctor`` step 7.
+    of falling outside the machinery (#4680).  Its production consumer is
+    ``tortoise doctor`` step 7, which grades both seam classes; ``tortoise
+    hooks status`` also reads its version through it, but only for layout
+    harnesses — the CLI still rejects ``pi`` before reaching this call, so Pi
+    is unreachable there (#5351).
 
     ``None`` means "no contract is registered for this harness" or "the
-    shipped tree is unmarkered/self-inconsistent".  The former is the normal
-    answer for a harness with no seam; the latter is a REPO defect pinned by
-    tests, never an install's problem.
+    shipped seam declares no readable generation".  The former is the normal
+    answer for a harness with no seam.  The latter is a REPO defect pinned by
+    tests, never an install's problem — and for a layout it also covers the
+    scripts DISAGREEING with each other (``contract_version`` returns ``None``
+    then), a check the single-file artifact half has no analogue for.
     """
     layout = HARNESS_LAYOUTS.get(harness)
     if layout is not None:
@@ -748,6 +805,35 @@ class Finding:
     def line(self) -> str:
         icon = "❌" if self.blocking else "⚠️"
         return f"{icon} {self.kind}: {self.detail}"
+
+
+#: Blocking finding kinds the automated repair CANNOT fix: the installer
+#: refuses rather than clobber an unreadable, unsafe or foreign path, so the
+#: only correct instruction is the manual one the finding already carries.
+#: One declaration, consulted by both surfaces that recommend a repair
+#: (``tortoise hooks status`` for shell seams, ``tortoise doctor`` for both
+#: classes): a list copied into each caller drifts, and a drifted copy tells
+#: the user to run a command that refuses (#4680 review).  Both seam classes
+#: share the two structural names; the rest are per-class.
+MANUAL_FIX_KINDS = frozenset({
+    "unreadable-settings",
+    "settings-unreadable-entry",
+    "not-a-regular-file",
+    "not-executable-symlink",
+    "not-readable",
+    "foreign-script",
+    "foreign-artifact",
+})
+
+
+def is_manual_fix(kind: str) -> bool:
+    """Whether a finding of ``kind`` needs a human fix before any repair run.
+
+    True for :data:`MANUAL_FIX_KINDS` and for every ``symlinked*`` kind:
+    ``upgrade_install`` refuses on ANY symlink in a target path, and the
+    finding kinds for those are not knowable in advance.
+    """
+    return kind in MANUAL_FIX_KINDS or kind.startswith("symlinked")
 
 
 # ── settings helpers ────────────────────────────────────────────────────
@@ -2097,8 +2183,10 @@ def detect_artifact_install(root: str | os.PathLike[str],
     Kind names are suffixed ``-artifact`` rather than ``-script`` ONLY for the
     seam-specific kinds (``unversioned``/``stale``/``ahead``/``modified``/
     ``symlinked``/``foreign``); the structural kinds ``not-a-regular-file`` and
-    ``not-readable`` are shared verbatim with ``detect_install`` on purpose, so
-    the CLI's manual-fix kind set keeps matching both seam classes.
+    ``not-readable`` are shared verbatim with ``detect_install`` because the
+    two detectors genuinely report the same structural defect there, and a
+    kind-keyed caller (the manual-fix predicate, :func:`is_manual_fix`) then
+    covers both classes with one entry.
 
     KNOWN LIMITATION (tracked by #3713, not this detector's fix): only the one
     artifact file is inspected, so an ACTIVE legacy ``tortoise-capture/``
@@ -2169,10 +2257,14 @@ def detect_artifact_install(root: str | os.PathLike[str],
             # The pre-contract population (#4680): a present, functioning
             # Tortoise seam that carries no marker, so nothing could tell it
             # was weeks old.  Ownership is sniffed exactly as the shell half
-            # does it (`_looks_like_our_script`) — a foreign file at the
-            # artifact path must be reported as foreign, never as a
-            # pre-contract copy of ours (which would send the user to a
-            # reinstall that would refuse to clobber it).
+            # does it (`_looks_like_our_script`).  Getting this wrong is
+            # ASYMMETRIC, and the sniff is fail-open toward "ours": a foreign
+            # file that merely mentions Tortoise would be classified as a
+            # pre-contract copy and REPLACED by the installer — preserving a
+            # `.bak` of the foreign bytes, never deleting them.  The opposite
+            # error (reporting our own unmarkered seam as foreign) is the
+            # loud one: its instruction tells the user to move a working
+            # Tortoise seam aside.
             findings.append(Finding(
                 "unversioned-artifact",
                 f"{installed} carries no {HOOK_VERSION_TOKEN} marker "

@@ -943,3 +943,44 @@ class TestDoctorPiSeamFreshness:
 
         assert "✅" in row, row
         assert "install current" in row, row
+
+    def test_doctor_recommends_the_installer_for_a_repairable_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A stale-but-repairable Pi seam names `tortoise install pi`, the
+        command that actually fixes it (the counterpart to the foreign case
+        below — without this the hint could be silent for everything)."""
+        home = tmp_path / "home"
+        self._seam(home, "// tortoise-hook-version: 0\n// body\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "run `tortoise install pi` to repair" in row, row
+        assert "needs a manual fix" not in row, row
+
+    def test_doctor_never_recommends_a_pi_repair_that_would_refuse(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """#4680 review: `tortoise install pi` REFUSES a foreign artifact (it
+        will not clobber a file it cannot claim), so doctor must print the
+        finding's manual instruction instead of the hint that says to run it
+        unconditionally.  The detail is allowed to name the command as the
+        step AFTER moving the file aside — that is the installer's own
+        prescribed path.
+
+        Mutation: drop the `is_manual_fix` gate (always append "run `tortoise
+        install <harness>` to repair") — this REDs on a foreign artifact.
+        """
+        home = tmp_path / "home"
+        self._seam(home, "// some other product extension\nexport default 1;\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "foreign-artifact" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi` to repair" not in row, (
+            "recommending a command that refuses is worse than no hint")

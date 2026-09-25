@@ -3181,6 +3181,7 @@ def _cmd_hooks(args) -> int:
         default_root,
         detect_install,
         get_layout,
+        is_manual_fix,
         upgrade_install,
     )
 
@@ -3287,32 +3288,25 @@ def _cmd_hooks(args) -> int:
             blocking = [f for f in findings if f.blocking]
             if blocking:
                 # Some blocking kinds are NOT repairable by `upgrade` (it
-                # refuses rather than clobber an unreadable/unsafe path), so
-                # the hint must name the manual fix for those instead of
-                # recommending a command that will refuse.
-                _manual = frozenset({
-                    "unreadable-settings",
-                    "settings-unreadable-entry",
-                    "not-a-regular-file",
-                    "not-executable-symlink",
-                    "not-readable",
-                    "foreign-script",
-                })
+                # refuses rather than clobber an unreadable/unsafe/foreign
+                # path), so the hint must name the manual fix for those
+                # instead of recommending a command that will refuse.  Which
+                # kinds those are is declared ONCE, in `hook_install`, because
+                # `doctor` recommends a repair for the same kinds (#4680
+                # review).
                 kinds = {f.kind for f in blocking}
                 # `upgrade` refuses on ANY symlink in a target path, and the
                 # finding kinds for those are not knowable in advance, so
-                # treat any symlink finding as manual too.
-                symlinked_kinds = {f.kind for f in findings
-                                   if f.kind.startswith("symlinked")}
-                if kinds & _manual or symlinked_kinds:
+                # `is_manual_fix` treats every symlink kind as manual — and it
+                # is asked over ALL findings, not just the blocking ones, so a
+                # non-blocking symlink note still blocks the recommendation.
+                manual = {f.kind for f in findings if is_manual_fix(f.kind)}
+                if manual:
                     # A manual kind makes `upgrade` refuse the WHOLE run, so
                     # recommending it (even alongside repairable findings)
                     # would point at a command that refuses.
                     print("\nSome findings need a manual fix before upgrade "
-                          "can run: "
-                          + ", ".join(sorted(
-                              (kinds & _manual) | symlinked_kinds))
-                          + ".")
+                          "can run: " + ", ".join(sorted(manual)) + ".")
                 elif kinds:
                     print("\nRun `tortoise hooks upgrade"
                           f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
@@ -6364,63 +6358,107 @@ def _cmd_doctor(args):
     # no-capture the row exists to catch.
     try:
         from tortoise.hook_install import (
+            ARTIFACT_CONTRACTS,
+            HARNESS_LAYOUTS,
+            artifact_root,
             contract_version_for,
             default_root,
             detect_artifact_install,
             detect_install,
             get_layout_optional,
             is_installed,
+            is_manual_fix,
         )
         # `pi` is a non-shell artifact seam: it has NO `HarnessLayout`, so it
         # cannot go through `default_root`/`detect_install`, and omitting it
         # here left step 6's green "Pi (extension found)" as the ONLY Pi
         # signal — a stale or unmarkered seam exited 0 with no freshness row
-        # at all, which is the silent state #4680 exists to remove.  Keyed on
-        # `get_layout_optional`, and the version comes from
-        # `contract_version_for`, so one loop covers both seam classes.
-        for _harness in ("claude", "codex", "cursor", "pi"):
-            _layout = get_layout_optional(_harness)
-            if _layout is not None:
-                # Claude is project-scoped (`root_env is None`) and ignores
-                # this argument; a `None` home (step 6 could not resolve it)
-                # is given the cwd so a codex layout still refuses as a
-                # populated `ValueError` rather than raising `TypeError` on
-                # `Path(None)`.
-                _root = default_root(
-                    _layout, home if home is not None else Path("."))
-                if not is_installed(_root, _harness):
-                    continue
-                findings = detect_install(_root, _harness)
-            else:
-                # No home to anchor an artifact install, so there is nothing
-                # to probe (step 6 already warned that home did not resolve).
-                if home is None:
-                    continue
-                _root = pi_home(home)
-                _artifact = _root / PI_EXTENSION_NAME
-                if not (_artifact.exists() or _artifact.is_symlink()):
-                    continue
-                findings = detect_artifact_install(_root, _harness)
+        # at all, which is the silent state #4680 exists to remove.
+        #
+        # MEMBERSHIP IS DERIVED FROM THE REGISTRIES, never a literal list: a
+        # third hand-written harness list would drift from `HARNESS_LAYOUTS` /
+        # `ARTIFACT_CONTRACTS`, and a seam registered there would be silently
+        # ungraded here — the same omission class this row exists to remove
+        # (#4680 review).
+        for _harness in (*HARNESS_LAYOUTS, *ARTIFACT_CONTRACTS):
+            # Per-harness boundary: one bad harness must not cost the OTHERS
+            # their freshness row.  `detect_install` can raise on a malformed
+            # `settings.json` (`_load_settings` catches only `ValueError`, so
+            # a `RecursionError` from `json.loads` escapes), and with a single
+            # loop-wide handler a raise on `claude` would hide the Pi row this
+            # step exists to print (#4680 review).
+            try:
+                _label = ("Capture hooks" if _harness == "claude"
+                          else f"Capture hooks ({_harness})")
+                _layout = get_layout_optional(_harness)
+                if _layout is not None:
+                    # Claude is project-scoped (`root_env is None`) and ignores
+                    # this argument; a `None` home (step 6 could not resolve
+                    # it) is given the cwd so a codex layout still refuses as a
+                    # populated `ValueError` rather than raising `TypeError` on
+                    # `Path(None)`.
+                    _root = default_root(
+                        _layout, home if home is not None else Path("."))
+                    if not is_installed(_root, _harness):
+                        continue
+                    findings = detect_install(_root, _harness)
+                else:
+                    # No home to anchor an artifact install, so there is
+                    # nothing to probe (step 6 already warned that home did not
+                    # resolve).
+                    if home is None:
+                        continue
+                    _root = artifact_root(_harness, home)
+                    if _root is None:
+                        # Registered in neither class — unreachable given the
+                        # loop source, but fail visibly rather than probe
+                        # another harness's path.
+                        results.append((
+                            _label, "⚠️",
+                            f"check unavailable: no layout or artifact "
+                            f"contract for {_harness!r}"))
+                        continue
+                    _artifact = _root / ARTIFACT_CONTRACTS[
+                        _harness].install_name
+                    if not (_artifact.exists() or _artifact.is_symlink()):
+                        continue
+                    findings = detect_artifact_install(_root, _harness)
+            except MemoryError:
+                raise  # resource exhaustion is not a refusal
+            except Exception as e:
+                results.append((
+                    _label, "⚠️", f"check unavailable: {str(e)[:60]}"))
+                continue
             blocking = [f for f in findings if f.blocking]
             version = contract_version_for(_harness)
-            label = ("Capture hooks" if _harness == "claude"
-                     else f"Capture hooks ({_harness})")
             if not blocking:
-                results.append((label, "✅",
+                results.append((_label, "✅",
                                 f"install current (contract v{version})"))
+                continue
+            first = blocking[0]
+            # Never recommend a command that REFUSES: `hooks upgrade` rejects
+            # every manual-fix kind, and `tortoise install <harness>` refuses
+            # the same kinds for an artifact seam (a foreign or unreadable
+            # artifact, a non-regular file, an out-of-HOME symlink) — so those
+            # get the finding's own manual instruction instead.  Repairability
+            # is declared once, in `hook_install.is_manual_fix` (#4680 review).
+            _manual = sorted({f.kind for f in blocking
+                              if is_manual_fix(f.kind)})
+            if _manual:
+                _hint = ("needs a manual fix before `tortoise hooks status "
+                         f"--harness {_harness}` can recommend a repair "
+                         f"({', '.join(_manual)})" if _layout is not None else
+                         "needs a manual fix before `tortoise install "
+                         f"{_harness}` can run ({', '.join(_manual)})")
             else:
-                first = blocking[0]
-                # The repair command differs by seam class: `hooks upgrade`
-                # does not cover a non-layout seam (#5351), so Pi's is the
-                # installer that owns its artifact.
-                _repair = (f"tortoise hooks status --harness {_harness}"
-                           if _layout is not None
-                           else f"tortoise install {_harness}")
-                results.append((
-                    label, "❌",
-                    f"{len(blocking)} stale issue(s) — run `{_repair}` for the "
-                    f"repair path ({first.kind}: {first.detail})",
-                ))
+                _hint = (f"run `tortoise hooks status --harness {_harness}` "
+                         "for the repair path" if _layout is not None else
+                         f"run `tortoise install {_harness}` to repair")
+            results.append((
+                _label, "❌",
+                f"{len(blocking)} stale issue(s) — {_hint} "
+                f"({first.kind}: {first.detail})",
+            ))
     except Exception as e:
         results.append(("Capture hooks", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))

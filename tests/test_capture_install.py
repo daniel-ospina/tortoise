@@ -3229,7 +3229,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # marker mis-classifies current installs as stale, or stale ones as current) and
 # makes the next bump a deliberate edit of this table.  A literal at each
 # install assertion does neither: it goes stale silently, which is exactly how
-# #4314 left two red assertions behind (#4545).
+# #4314 left two red assertions behind.
 # claude 5→6 is the #3615 consent gate merged over main's 5 (the hooks changed
 # behaviour again, so an already-installed copy must read as stale).
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
@@ -3367,8 +3367,10 @@ def test_pi_stale_installed_seam_is_reported_not_silent(home):
 def test_pi_foreign_artifact_is_reported_foreign_not_unversioned(home):
     """A file at the Pi extension path that is NOT a Tortoise seam must be
     classified foreign, not as a pre-contract copy of ours — the shell half
-    makes the same distinction (``foreign-script``), and mislabeling it would
-    send the user to a reinstall that refuses to clobber the file.
+    makes the same distinction (``foreign-script``).  Mislabeling it as ours
+    would make the installer REPLACE the foreign file (keeping a ``.bak`` of
+    the bytes) under an instruction that says "reinstall"; labeling it
+    foreign routes the user to the loud, correct instruction instead.
 
     Mutation: drop the ``_looks_like_our_script`` ownership sniff (treat every
     unmarkered file as ours) — this REDs with ``unversioned-artifact``.
@@ -3433,3 +3435,85 @@ def test_pi_absent_seam_is_a_blocking_missing_finding(tmp_path):
     findings = hook_install.detect_artifact_install(tmp_path, "pi")
     assert [f.kind for f in findings] == ["missing-artifact"]
     assert findings[0].blocking
+
+
+def test_artifact_registry_and_the_installer_agree_on_root_and_name():
+    """The registry is a SINGLE source of truth for the whole contract: which
+    harnesses exist, where each installs, and what file it installs under.
+
+    Mutation: add a contract whose key names a different harness than its own
+    `harness` field, register an artifact for a harness that also has a shell
+    layout, or let `root_relpath` disagree with `pi_home` — each assertion
+    below REDs, and each failure is a silent-omission bug (doctor and
+    `session verify` would probe a path no installer writes).
+    """
+    from tortoise import hook_install
+    assert "pi" in hook_install.ARTIFACT_CONTRACTS
+    for key, contract in hook_install.ARTIFACT_CONTRACTS.items():
+        assert contract.harness == key, (
+            f"ARTIFACT_CONTRACTS[{key!r}].harness is {contract.harness!r} — "
+            "a mismatch makes the registry unusable as a lookup table")
+        assert key not in hook_install.HARNESS_LAYOUTS, (
+            f"{key!r} has BOTH a shell layout and an artifact contract — a "
+            "caller must be able to tell the two seam classes apart")
+        assert contract.source.name == contract.install_name
+    assert hook_install.artifact_root("pi", Path("/tmp/home")) == (
+        Path("/tmp/home") / ".pi" / "agent" / "extensions")
+    assert hook_install.artifact_root("pi", Path("/tmp/home")) == (
+        capture_install.pi_home(Path("/tmp/home")))
+    assert hook_install.artifact_root("claude", Path("/tmp/home")) is None, (
+        "a layout-only harness must not answer with an artifact root")
+
+
+def test_read_hook_version_reports_an_unrepresentable_marker_as_unmarkered(
+        home):
+    """#3928: `read_hook_version`'s documented contract is that it returns
+    None, never raises.  A marker with more digits than CPython will convert
+    (`sys.get_int_max_str_digits()`, 4300 by default) makes `int()` raise
+    ValueError, and #4680 wires the reader to a USER-EDITABLE artifact at
+    ``~/.pi/agent/extensions/`` — so a corrupt seam must still classify as
+    unmarkered rather than unwind the detector.
+
+    Mutation: `return int(matches[0])` with no guard — install a marker of
+    5000 digits and this REDs with `ValueError`.
+    """
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+    root = capture_install.pi_home(home)
+    installed = root / capture_install.PI_EXTENSION_NAME
+    # The shipped BODY with only the marker line replaced, so the file is still
+    # recognisably ours (`_looks_like_our_script`) — otherwise the assertion
+    # below would be about a foreign file, not about the marker.
+    installed.write_text(
+        "\n".join(
+            "// tortoise-hook-version: " + "9" * 5000
+            if line.startswith("// tortoise-hook-version:") else line
+            for line in installed.read_text(encoding="utf-8").splitlines()
+        ) + "\n",
+        encoding="utf-8")
+
+    assert hook_install.read_hook_version(installed) is None
+    blocking = [f for f in hook_install.detect_artifact_install(root, "pi")
+                if f.blocking]
+    assert [f.kind for f in blocking] == ["unversioned-artifact"], blocking
+
+
+def test_manual_fix_predicate_covers_both_seam_classes():
+    """`is_manual_fix` is the ONE declaration of "the automated repair refuses
+    this kind", consulted by `hooks status` and by `doctor`.  It must know the
+    artifact kinds too: `tortoise install pi` refuses a foreign or unreadable
+    artifact / non-regular file / out-of-HOME symlink exactly as `hooks
+    upgrade` refuses their shell siblings.
+
+    Mutation: drop `foreign-artifact` (or a shared structural name) from
+    `MANUAL_FIX_KINDS` — the doctor/status test that checks the hint does not
+    name a refusing command REDs.
+    """
+    for kind in ("foreign-script", "foreign-artifact", "not-a-regular-file",
+                 "not-readable", "unreadable-settings", "symlinked-artifact",
+                 "symlinked-script", "symlinked-settings"):
+        assert hook_install.is_manual_fix(kind), kind
+    for kind in ("stale-script", "stale-artifact", "unversioned-script",
+                 "unversioned-artifact", "modified-script",
+                 "modified-artifact", "ahead-script", "ahead-artifact"):
+        assert not hook_install.is_manual_fix(kind), kind
