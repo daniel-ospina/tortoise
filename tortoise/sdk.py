@@ -4923,6 +4923,11 @@ class TortoiseSDK:
         # `about_entities` topic channel below SKIPS subject-kind names (it
         # must not emit an un-gated aboutSubject, and it must not mint an
         # id-less Object stub for one).
+        # F6: EXACT names, derived only from payload entities whose KIND is a
+        # subject kind — the same population the resolver checks against. A
+        # `.lower()` fold here would skip a legitimately-cased Object whose
+        # name only case-insensitively matches a subject name, while the
+        # `MATCH (o:Object {name:$n})` resolution below is case-SENSITIVE.
         subject_entity_names: set[str] = set()
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
@@ -4931,7 +4936,7 @@ class TortoiseSDK:
             _ekind = str(e.get("kind", "core:other"))
             _is_subject = is_subject_kind(_ekind)
             if _is_subject:
-                subject_entity_names.add(name.lower())
+                subject_entity_names.add(name)
             try:
                 if _is_subject:
                     self.create_entity(
@@ -5108,7 +5113,7 @@ class TortoiseSDK:
                             # arbitrary node; (b) a NULL/absent `id` yielded
                             # `[None]` and no edge at all.
                             _n = name.strip()
-                            if _n.lower() in subject_entity_names:
+                            if _n in subject_entity_names:
                                 # #1370: the binder owns the gated
                                 # aboutSubject edge; the topic channel must
                                 # not produce an un-gated one, nor an

@@ -11413,8 +11413,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # binder is the only confidence-gated aboutSubject producer, and the raw
     # `MERGE (:Object {name})` would otherwise re-mint the #4934 label leak.
     from tortoise.subject_binding import bind_point_subjects, is_subject_kind
+    # F6: EXACT names (no `.lower()` fold) so the skip and the case-SENSITIVE
+    # `MATCH (o:Object {name:$n})` resolution agree, derived from the entities
+    # whose KIND is a subject kind.
     subject_entity_names = {
-        er.entity.name.lower() for er in reconcile.entities
+        er.entity.name for er in reconcile.entities
         if is_subject_kind(er.entity.kind)
     }
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
@@ -11497,8 +11500,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
-            if str(name).lower() in subject_entity_names:
-                continue  # #1370: the gated binder owns aboutSubject
+            if str(name) in subject_entity_names:
+                # #1370 (F5): DELIBERATE drop, not a hand-off. This loop writes
+                # `aboutObject` ONLY — the binder reads a Point's `slots`, not
+                # an Event's `about_entities`, so nothing replaces this edge.
+                # The attribution is intentionally not emitted because the only
+                # permitted Event→Subject writer would have to be UN-GATED
+                # (bypassing the fail-closed contract the issue exists for).
+                # No edge, no Object stub, no id-less `MERGE`. Residual recorded
+                # in the scoping doc.
+                continue
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
             # edge for NEW entities. MERGE creates the :Object on demand
@@ -11580,6 +11591,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # matching create_point); supersede candidates (changed content) get a NEW
     # content-addressed id + supersede_point (CORRECTS + outdated + edge
     # transfer, PL2). Non-episodic (the quota discriminator). ──
+    # #1370 (G1): payload point id → the id `create_point` actually RESOLVED
+    # the write to (the payload id on a fresh create, the canonical's id on a
+    # content-hash dedup hit). The binder below is keyed on this, never on the
+    # payload id, so it can only bind a Point the write actually addressed.
+    point_resolved_ids: dict[str, str] = {}
     for pr in reconcile.points:
         pid = pr.point.id
         if pr.action == "merge":
@@ -11600,7 +11616,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11621,13 +11637,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            if isinstance(_rid, str) and _rid:
+                point_resolved_ids[pr.point.id] = _rid
             sdk.supersede_point(pr.existing_id, pid)
         else:
             point_props = {}
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11646,16 +11665,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            if isinstance(_rid, str) and _rid:
+                point_resolved_ids[pr.point.id] = _rid
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
             "MERGE (s)-[:CONTAINS]->(p)",
             params={"sid": session_id, "pid": pid},
         )
 
-    # ── 6. Entities — :Object nodes MERGE by name (#452); objectKind + the
-    # S5 gate-result flag (passes_frequency_gate written WITH flag, amendment
-    # §4.3 #12); aboutObject edges (the canonical predicate — aboutEntity does
-    # NOT exist, §4.2). ──
+    # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
+    # become :Subject (with subjectKind) so the Subject layer is reachable and
+    # the vocabulary does not leak into Object.objectKind; everything else stays
+    # an :Object MERGEd by name (#452) with objectKind + the S5 gate-result flag
+    # (passes_frequency_gate written WITH flag, amendment §4.3 #12). aboutObject
+    # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
+    # gated binder is the only aboutSubject producer. ──
     for er in reconcile.entities:
         if is_subject_kind(er.entity.kind):
             sdk.create_entity(
@@ -11724,7 +11749,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
         for name in pr.point.about_entities:
-            if str(name).lower() in subject_entity_names:
+            if str(name) in subject_entity_names:
                 continue  # #1370: the gated binder owns aboutSubject
             proj.g.query(
                 "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
@@ -11733,15 +11758,26 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             )
         # #1370: write-time, confidence-gated, fail-closed subject binding —
         # the SAME shared driver the local capture seam calls. Only for a
-        # newly-written/superseding point (a `merge` resolved to an existing
-        # canonical whose binding was set when it was created).
+        # point this commit actually WROTE, and only against the id the write
+        # actually RESOLVED to.
+        #
+        # Hosted/local parity rule (G1): the local seam binds the id
+        # `create_point` resolved to, gated on `created_here`; a content-hash
+        # dedup hit resolves to a DIFFERENT node than the payload id, so the
+        # payload id addresses nothing. Binding the payload id made
+        # `link_entity` match no endpoint, return 0, and the binder's F7 path
+        # read that as "already present" — a phantom link. So bind the id
+        # recorded in step 5, and if this point has no resolved id (no write
+        # happened here), do NOT bind (fail-closed).
         if pr.action in ("new", "supersede") and pr.point.slots:
-            try:
-                bind_point_subjects(proj, sdk, point_id=pid,
-                                    slots=pr.point.slots)
-            except Exception:  # noqa: BLE001, RUF100 — never sinks a commit
-                _logger.warning("subject binding failed for %s", pid,
-                                exc_info=True)
+            resolved_pid = point_resolved_ids.get(pr.point.id)
+            if resolved_pid:
+                try:
+                    bind_point_subjects(proj, sdk, point_id=resolved_pid,
+                                        slots=pr.point.slots)
+                except Exception:  # noqa: BLE001, RUF100 — never sinks a commit
+                    _logger.warning("subject binding failed for %s",
+                                    resolved_pid, exc_info=True)
 
     # ── 7. Operators — shared commit semantics via apply_payload_operators
     # (#1532 D3; extracted verbatim from this block so the commit and capture

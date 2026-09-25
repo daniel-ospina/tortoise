@@ -60,10 +60,10 @@ scope here). No peer issue is filed.
 |---|---|---|
 | D10 | Bind at **write time**, never query time; `subject` read ≤1 hop, **fail-closed** | binder runs in the write seam; no read-side change (read half already landed) |
 | — | **Fail-closed:** no subject > wrong subject; unsure ⇒ UNBOUND | tri-state gate; a below-band slot writes **no** edge |
-| D4 | Tri-state: bound ≥ τ_hi / suspected band [τ_lo, τ_hi) / unbound < τ_lo | `DEFAULT_TAU_HI=0.7`, `DEFAULT_TAU_LO=0.4` (D4 "start ~0.6–0.7"); env-overridable |
+| D4 | Tri-state: bound ≥ τ_hi / suspected band [τ_lo, τ_hi) / unbound < τ_lo | `DEFAULT_TAU_HI=0.7`, `DEFAULT_TAU_LO=0.4` (D4 "start ~0.6–0.7"); env-overridable, and **validated fail-closed**: finite with `0.0 < τ_hi ≤ 1.0` and `0.0 ≤ τ_lo ≤ τ_hi`; an out-of-range, inverted or ALL-ZERO (`0.0/0.0`) pair falls back to the shipped defaults |
 | D6 | Entity-type-agnostic journaled binding carrying confidence; subject first | bound → `link_entity` (the shared journaled about*-edge writer), extended with `confidence`; object rides the same machinery; event slot left to #1417's content-edge contract |
 | — | NIL journaled as "attempted-and-refused" — tracked, never a silent drop | refused/suspected/unbound → JSONL-only `SubjectBindingRefused` audit record |
-| D2 | Kinds from the **declared** vocabulary; unknown ⇒ NIL, never invented | `is_subject_kind()` derived from `extractor_v2.SUBJECTS` (the only declared subject vocabulary — `known_kinds("subjectKind")` resolves empty, manifest v3 has no subjectKinds list) |
+| D2 | Kinds from the **declared** vocabulary; unknown ⇒ NIL, never invented | `is_subject_kind()` derived from `extractor_v2.SUBJECTS` (the only declared subject vocabulary — `known_kinds("subjectKind")` resolves empty, manifest v3 has no subjectKinds list). Accepts an **exact declared key** or, for a `core:` key, its **bare form**, compared against the **RAW string with no whitespace normalization**; a foreign namespace (`acme:team`), a leading-colon form (`:team`), and a case/whitespace variant (`' team '`, `'core:team\n'`) are all non-subject |
 | D8 | Gate the live **fail-open** name-stub minting | the binder never mints: a slot that does not resolve to an existing node is refused (no id-less `MERGE … aboutObject` reachable from the binder) |
 
 **D6 carrier note (deliberate, documented):** the design comment names the payload
@@ -83,16 +83,29 @@ already.
 
 - **`tortoise/subject_binding.py` (new, private helpers only)** — the single source of
   policy, including the graph-read audit and the fixture quality-gate metrics:
-  - `is_subject_kind(kind)` — bare-name membership against `extractor_v2.SUBJECTS`
-    (namespace-tolerant; unknown/empty ⇒ `False`).
+  - `is_subject_kind(kind)` — EXACT membership in the declared `extractor_v2.SUBJECTS`
+    keys, or their bare form for `core:` keys, compared as the **raw string** (no
+    whitespace normalization); a foreign/arbitrary namespace, a leading-colon form,
+    a case/whitespace variant, and unknown/empty ⇒ `False` (never stripped to a
+    bare declared name).
   - `decide_binding(confidence, *, tau_hi, tau_lo)` → `"bound" | "suspected" | "unbound"`
     (pure; non-numeric/None/NaN ⇒ `"unbound"`; out-of-range clamps fail-closed).
+  - `resolve_thresholds` validates the resolved pair fail-closed (finite,
+    `0.0 < tau_hi <= 1.0`, `0.0 <= tau_lo <= tau_hi`) so no env override can make the
+    gate fail open.
+  - `_resolve_target` resolves by NAME and returns only an id the `{id:...}` edge
+    writer can address: an `eventId`-only/legacy stub is an **unresolved** target, not
+    a phantom link.
   - `bind_point_subjects(proj, sdk, *, point_id, slots, tau_hi, tau_lo)` → per-role
     outcome. Bound → `link_entity(..., confidence=c, sdk=sdk)`; refused → journal.
+    `link_entity` returns 0 both for an already-existing edge and for an absent
+    endpoint pair, so a 0 result is **re-probed**: only a genuinely present edge takes
+    the confidence-refresh path (and the journaled `EntityLinked`); an absent pair is
+    refused (`unresolved`) and emits no record.
     This is the **shared anti-drift primitive**: both write seams call *this* one
     gated implementation (pinned by the hosted/local parity test). There is
     deliberately no batch wrapper — each seam keeps its own create-gating
-    (`created_here` / `pr.action`) and per-point best-effort isolation.- **`tortoise/session_link.py`** — `link_entity` gains `confidence: float | None = None`;
+    (`created_here` / the resolved id) and per-point best-effort isolation.- **`tortoise/session_link.py`** — `link_entity` gains `confidence: float | None = None`;
   when present the live MERGE `SET r.confidence = $c` and the emitted `EntityLinked`
   carries it.
 - **`tortoise/projection/entities.py`** — `_fold_entity_linked_reason` reads the optional
@@ -102,8 +115,11 @@ already.
   `create_entity("subject", …, subjectKind=bare)`, else Object; (ii) the `about_entities`
   resolver becomes label-aware (Object **or** Subject) so no edge is silently dropped;
   (iii) the shared binder is called per point from the payload `slots`.
-- **`tortoise/hosted_api.py`** — `_execute_commit_writes` step 6/6b: the same kind routing
-  + the same shared binder call (anti-drift parity test).
+- **`tortoise/hosted_api.py`** — `_execute_commit_writes` step 5/6/6b: the same kind
+  routing + the same shared binder call (anti-drift parity test). The binder is keyed on
+  the id `create_point` **resolved** the write to (the canonical's id on a content-hash
+  dedup hit), never on the payload id; a point with no resolved id is not bound
+  (fail-closed) — mirrored from the local seam's `created_here` gate.
 - **`tortoise/audit.py`** — untouched: the graph-read check `audit_subject_binding(graph)`
   lives in `subject_binding.py` (returning
   `{points, bound, suspected, unbound, no_slot, unbound_fraction}`), so no shared-module
@@ -144,7 +160,7 @@ behaviour:**
 | # | Adversarial input | Required behaviour |
 |---|---|---|
 | T1 | slot `confidence` below τ_lo (including `0.0`, negative, `None`, `NaN`, a string, a bool) | **no edge**; refusal journaled; never coerced upward |
-| T2 | slot `kind` not in the declared subject vocabulary (invented / namespaced-unknown / pack kind) | treated as non-subject ⇒ **no subject edge**, never minted into `Subject`/`subjectKind` |
+| T2 | slot `kind` not in the declared subject vocabulary (invented / namespaced-unknown / pack kind / leading-colon / case variant) | treated as non-subject ⇒ **no subject edge**, never minted into `Subject`/`subjectKind`. Accepted forms are an exact declared key or its bare form for `core:` keys ONLY — an arbitrary namespace is never stripped to a bare name |
 | T3 | slot `name` that does not resolve to an existing node | **no edge and no stub minted** (the D8 id-less name-stub MERGE is unreachable from the binder) |
 | T4 | malformed slots payload (non-dict role value, missing/blank name, non-dict entry, wrong container type) | dropped/refused with a warning; **never raises** and never sinks the commit |
 | T5 | threshold moved across a slot's confidence | outcome flips bound↔refused — the threshold is **load-bearing**, asserted by a two-value test |
@@ -166,14 +182,24 @@ claim-survival + *speaker* attribution; `schema.py::_reject_unknown_keys` forbid
 fields). The gate therefore ships as:
 
 1. `tests/fixtures/subject_binding_gold.jsonl` — authored labels (deterministic; no model
-   call), including below-threshold and unknown-kind rows whose gold subject is `null`.
+   call), including below-threshold and unknown-kind rows whose gold subject is `null`, and
+   rows which can fail for reasons **other than τ**: a name resolving to a node that is NOT
+   the gold subject, an unresolvable name whose gold is non-null, and a kind-mismatched
+   target. Each row carries a `graph_nodes` mini-graph.
 2. `tools/subject_binding_audit.py --gold <fixture>` — computes
    `misattribution_rate = (bound edges whose resolved subject ≠ gold) / bound edges` and
    `unbound_rate = (gold-subject rows left unbound) / gold-subject rows`, and prints a
    `--calibrate` sweep of τ_hi ∈ {0.3 … 0.9}.
-3. A test asserting the shipped default thresholds produce a **documented** misattribution
-   rate ≤ the committed target on that fixture, with the measured number in the test
-   docstring.
+3. The metric is **load-bearing**: `quality_gate_metrics` seeds a throwaway graph from every
+   row's `graph_nodes` and runs the REAL resolution/decision path (`bind_point_subjects` →
+   `_resolve_target`) per row, reading the resolved subject back off the graph edge — so a
+   row's outcome depends on its resolution and the resolved node's stored kind, not on a
+   static flag. A test asserts the shipped default thresholds produce a **documented**
+   misattribution rate ≤ the committed target on that fixture, with the measured number
+   (`1/13 ≈ 0.077`) in the test docstring; another test pins that flipping a row's
+   `graph_nodes` changes the computed rate.
+3b. `bound_fraction` is a point-level rate (`DISTINCT bound Points / all Points`), so it can
+   never exceed 1.0; the raw edge count is reported separately as `bound`.
 4. **Honest limitation:** the fixture measures the **policy** (threshold + fail-closed +
    resolution), not LLM extraction quality. Real per-model τ calibration (D4) requires
    model calls against a ~100–500-fact gold set and is **not covered** here — the harness
@@ -224,7 +250,13 @@ Revisions applied to the chosen solution (the plan doc carries the locked v2 for
   the live capture path). Recorded as a residual.
 - **P1 — hosted loops + citation.** Fixed: the hosted point resolver is at `hosted_api.py:11703`
   (not "6b"); the hosted **event** resolver (`hosted_api.py:11489`) is a raw id-less name
-  `MERGE` that would re-mint the #4934 Object leak — both now skip subject-kind names.
+  `MERGE` that would re-mint the #4934 Object leak — both now skip subject-kind names. For the
+  hosted **event** path the skip is a DELIBERATE drop, not a hand-off: that loop writes
+  `aboutObject` only and the gated binder reads a Point's `slots`, so nothing replaces an
+  Event's subject-kind attribution. It is not replaced because the only permitted
+  Event→Subject writer would have to be UN-GATED — the P0 this design closed — so an Event's
+  subject-kind `about_entities` correctly produces no edge and no id-less stub. Pinned by a
+  test and recorded as a residual below.
 - **P1 — entity supersession for subject kinds.** `apply_supersessions` / `_fold_object_superseded`
   are `:Object`-only; routing makes a subject-kind successor a `:Subject`, so such records hit
   a (warn-grade) skip. Now an **explicit, accurately-worded** skip with a test — not a
@@ -269,6 +301,30 @@ Revisions applied to the chosen solution (the plan doc carries the locked v2 for
   name-keyed — the pre-existing local/hosted writer divergence is NOT introduced by this change
   and is recorded as a residual, not silently absorbed). Vocabulary `unify-contract-keep-drivers`
   taken via the drift test against `extractor_v2.SUBJECTS`.
+
+## Residuals (filed, not chased)
+
+- **Hosted Event → Subject attribution is dropped.** A subject-kind name in an Event's
+  `about_entities` yields no edge (and no Object stub) on the hosted commit lane: the legacy
+  loop writes `aboutObject`, the gated binder reads a Point's `slots`, and the only permitted
+  Event→Subject writer would be un-gated. The drop is explicit, commented, and test-pinned;
+  replacing it with a gated Eventslot binder is a follow-up.
+- **Hosted SDKs are journal-less** (`hosted_api._make_sdk` / `_data_sdk` set no
+  `event_log_path`), so binder refusals there are live-only and `live == rebuild` does not
+  apply — the same #3664 qualifier `session_link.py` carries.
+- **The `D8` legacy/opt-in name-stub minters** (`_create_about_edges` /
+  `backfill_about_entities`) remain live fail-open on the opt-in path (out of scope).
+- **`tools/longmem_eval/ingest_v2.py`** has the same routing defect and never reads `slots`.
+- **#4934's hosted 29-row backfill** — a data migration.
+- **Real LLM τ calibration (D4)** — the harness ships; the calibration run is a follow-up.
+- **The `already_present` path is re-probed (G1).** `link_entity` returns 0 for both an
+  already-existing edge and an absent endpoint pair, so the binder re-probes the edge. A
+  Point id that addresses nothing, and a Subject stub carrying only an `eventId`, are
+  both refused (`unresolved`) and emit no `EntityLinked` — no phantom record a replay
+  would resurrect. The hosted seam binds only the id `create_point` resolved the write to.
+- **The audit CLI's unbound denominator needs a readable journal.** An existing but
+  unreadable `--journal` path (a directory, a chmod-000 file) does not crash the report:
+  it prints the honest UNKNOWN rather than formatting a `None` metric.
 
 ## Complexity
 

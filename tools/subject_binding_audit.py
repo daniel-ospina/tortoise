@@ -41,12 +41,21 @@ def _graph_report(args) -> dict:
     from tortoise.sdk import TortoiseSDK
     from tortoise.subject_binding import audit_subject_binding
 
+    # F1: this tool only READS the graph. Construct the SDK through a supported
+    # path — no `sdk.test_guard = lambda: None` monkey-patch (a non-test
+    # assignment to a public SDK member from `tools/` flips the surface
+    # manifest's caller category and reds CI). The audit needs no guard bypass.
+    # F4: `--uri` must NOT pass a positional `db_path` — the SDK takes the
+    # embedded branch when `db_path is not None` and silently ignores
+    # `TORTOISE_DB_URI`, reporting on an empty local graph.
     if args.uri:
-        sdk = TortoiseSDK("subject-binding-audit", namespace=args.namespace or None)
+        if not os.environ.get("TORTOISE_DB_URI"):
+            raise SystemExit(
+                "--uri requires TORTOISE_DB_URI to be set in the environment")
+        sdk = TortoiseSDK(namespace=args.namespace or None)
     else:
         sdk = TortoiseSDK(args.db)
     try:
-        sdk.test_guard = lambda: None
         return audit_subject_binding(sdk._get_proj().g, journal_path=args.journal)
     finally:
         sdk.close()
@@ -107,11 +116,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"points={report['points_total']} "
                   f"subjects={report['subjects_total']} "
                   f"bound={report['bound']} "
+                  f"bound_points={report['bound_points']} "
                   f"with_confidence={report['edges_with_confidence']} "
                   f"bound_fraction={report['bound_fraction']:.3f}")
-            if report["journal"] is None:
-                print("  unbound denominator: UNKNOWN — no --journal given "
-                      "(slots are not persisted on the node)")
+            # F14: guard on the metric being None, not merely on the path being
+            # absent — a non-existent --journal path yielded a None metric and
+            # crashed the f-string with TypeError.
+            if report.get("unbound_fraction") is None:
+                print("  unbound denominator: UNKNOWN — "
+                      + ("no existing --journal given" if report["journal"] is None
+                         else "journal unreadable")
+                      + " (slots are not persisted on the node)")
             else:
                 print(f"  attempted={report['attempted']} "
                       f"unbound={report['unbound']} "

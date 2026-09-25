@@ -1072,10 +1072,12 @@ class _EntityHandlers:
         # only when present, mirroring the live writer's conditional SET — so
         # a later no-confidence EntityLinked for the same edge cannot clear a
         # confident one on replay (the live pre-probe short-circuits, and this
-        # fold must agree). Non-numeric/NaN values are ignored, not written.
-        conf = ev.get("confidence")
-        if isinstance(conf, bool) or not isinstance(conf, (int, float)):
-            conf = None
+        # fold must agree). The value is coerced fail-closed by the SHARED
+        # helper: non-numeric, bool, NaN/±inf, overflow (10**400) and
+        # out-of-[0,1] values all become None — no SET, no FalkorDB parameter
+        # rejection (a raise here would abort rebuild_all AFTER the wipe).
+        from tortoise.session_link import coerce_confidence
+        conf = coerce_confidence(ev.get("confidence"))
         if conf is None:
             r = self.g.query(
                 f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
