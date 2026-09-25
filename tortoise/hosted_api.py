@@ -692,6 +692,26 @@ mcp_http_app = create_http_app(
 )
 
 
+#: #4493: the explicit row bound for the Supabase org enumeration, set EQUAL to
+#: the project's PostgREST ``max_rows`` (``supabase/config.toml`` → ``[api]
+#: max_rows = 1000``). ``SupabaseControlPlane.query`` neither paginates nor
+#: reads ``Content-Range``, and PostgREST silently caps a row LIST at
+#: ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list with
+#: no error. For the cost-allocation caller that is dangerous: a partial list
+#: is read as the whole fleet and the orgs beyond the page would be PRUNED from
+#: the published metric. Requesting ``limit`` equal to the cap and treating "the
+#: result filled it" as INCOMPLETE → ``[]`` is the smallest safe containment.
+#: Fail closed (publishing nothing) rather than prune real orgs.
+#:
+#: TODO(#5381-adjacent): this detects truncation only because the requested
+#: bound equals the configured cap. A server whose ``max_rows`` is LOWER than
+#: this constant would return a short page with no signal — the general fix
+#: reads ``Content-Range`` or paginates in ``supabase_control`` (or uses an
+#: ``array_agg`` RPC, the #3665 pattern), which is out of this PR's scope and
+#: must not be done by rewiring the shared helper here.
+_ORG_ENUMERATION_MAX_ROWS = 1000
+
+
 def _iter_registered_orgs() -> list[dict]:
     """List registered orgs from the control plane (best-effort).
 
@@ -709,6 +729,12 @@ def _iter_registered_orgs() -> list[dict]:
     empty graph. Registry mode: the Org nodes from the
     registry_control_plane graph via _make_sdk(namespace="registry").
     Returns [] on any failure — the sweep is best-effort.
+
+    #4493: the Supabase branch requests an explicit ``limit`` and returns ``[]``
+    when the result FILLS it, because ``query`` cannot distinguish a complete
+    page from a server-truncated one (no ``Content-Range`` read, no
+    pagination). A partial list must never be mistaken for the fleet — the
+    allocation path would prune every org beyond the page.
     """
     try:
         from tortoise.supabase_control import (
@@ -719,7 +745,15 @@ def _iter_registered_orgs() -> list[dict]:
             rows = get_control_plane().query(
                 "organizations", select=["id", "name"],
                 filters=[("deleted_at", "is", None)],
+                limit=_ORG_ENUMERATION_MAX_ROWS,
             )
+            if len(rows) >= _ORG_ENUMERATION_MAX_ROWS:
+                _logger.warning(
+                    "org enumeration filled its explicit limit (%d rows) — "
+                    "treating it as INCOMPLETE and returning [] (fail-closed: a "
+                    "truncated page must never prune orgs from the cost metric)",
+                    _ORG_ENUMERATION_MAX_ROWS)
+                return []
             return [{"org_id": r["id"], "name": r.get("name")} for r in rows]
 
         # #2251 (was #2179 follow-up): the old bare TortoiseSDK() read the

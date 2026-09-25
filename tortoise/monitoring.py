@@ -590,11 +590,35 @@ def team_cost_cents() -> dict[str, int]:
 
 
 def clear_team_cost() -> None:
-    """Drop every ``TEAM_COST`` child. Called ONLY by the allocation writer
-    before a SUCCESSFUL re-publish, so an org that left the fleet cannot keep a
-    stale value forever. Never called on an unreadable refresh — clearing there
-    would make "unreadable" indistinguishable from "zero cost" (#4493)."""
+    """Drop every ``TEAM_COST`` child (the TEST SEAM and the documented pruner).
+
+    Production does NOT clear the family before a re-publish: ``/metrics`` is
+    served by another thread, so a clear-then-set would let a scrape observe an
+    empty or partial family on every refresh. The production writer records the
+    new children first and then calls :func:`prune_team_cost` to remove only the
+    ones that are gone. This function remains for tests (and as the blunt
+    "drop everything" escape hatch). Never called on an unreadable refresh —
+    clearing there would make "unreadable" indistinguishable from "zero cost"
+    (#4493)."""
     TEAM_COST.clear()
+
+
+def prune_team_cost(keep: set[str]) -> None:
+    """Remove every ``TEAM_COST`` child whose label is not in *keep*.
+
+    #4493: the production pruner. The allocation writer records the new/updated
+    children FIRST and prunes LAST, so a scrape on the ``/metrics`` thread can
+    never observe a gap (the clear-then-set race). An org deleted from the
+    fleet still cannot keep a stale value forever: its label is simply not in
+    *keep* on the next successful refresh.
+
+    Reads the family's current labels through the GAUGE's bare sample names
+    (:func:`team_cost_cents`), not the counter-shaped ``_total`` filter that
+    would read every child as absent.
+    """
+    for label in list(team_cost_cents()):
+        if label not in keep:
+            TEAM_COST.remove(label)
 
 
 def _is_transient_connect_error(exc: BaseException) -> bool:

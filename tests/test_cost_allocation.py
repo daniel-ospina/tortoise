@@ -33,6 +33,15 @@ def _clean_metric():
     ca._reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _pin_cost_env(monkeypatch):
+    """Hermetic: every test here depends on the allocation overrides, so the
+    AMBIENT shell must not be able to change an outcome. Each test that wants an
+    override sets it explicitly with ``monkeypatch.setenv``."""
+    for line in ca.declared_lines():
+        monkeypatch.delenv(line.env_var, raising=False)
+
+
 # ── Indicator 2 · the declared rule ────────────────────────────────────────
 
 
@@ -80,11 +89,54 @@ def test_env_override_supplies_a_real_invoice_figure(monkeypatch):
     assert ca.line_total_cents(fly) == 9999
 
 
-@pytest.mark.parametrize("raw", ["oops", "-5", "3.5", "  "])
-def test_malformed_env_override_falls_back_to_the_default(monkeypatch, raw):
+@pytest.mark.parametrize("raw", ["oops", "-5", "3.5", "  ", "100000001"])
+def test_malformed_env_override_fails_closed_instead_of_falling_back(monkeypatch, raw):
+    """A PRESENT-but-unusable override is an explicit `unavailable` STATE, never
+    a silent fallback to the declared default — which is 0 for four of the five
+    lines, i.e. indistinguishable from "unconfigured"."""
     fly = next(ln for ln in ca.declared_lines() if ln.name == "fly_base")
     monkeypatch.setenv(fly.env_var, raw)
-    assert ca.line_total_cents(fly) == fly.total_cents
+    snap = ca.evaluate_allocation(["org_a"], weights_by_org={"org_a": 1})
+    line = next(ln for ln in snap.lines if ln.line == "fly_base")
+    assert line.state == ca.STATE_UNAVAILABLE
+    assert line.shares == (), "no share may be published for an unusable override"
+    assert fly.env_var in line.detail, (
+        f"detail must name the variable, got {line.detail!r}")
+    if raw.strip():
+        assert repr(raw) in line.detail, (
+            f"detail must name the offending value, got {line.detail!r}")
+
+
+def test_absent_override_uses_the_declared_default_without_an_error_state():
+    """The fail-closed rule is about a PRESENT override; unset keeps the default
+    and is not an error."""
+    fly = next(ln for ln in ca.declared_lines() if ln.name == "fly_base")
+    snap = ca.evaluate_allocation(["org_a"], weights_by_org={"org_a": 1})
+    line = next(ln for ln in snap.lines if ln.line == "fly_base")
+    assert line.state == ca.STATE_MEASURED
+    assert line.total_cents == fly.total_cents
+
+
+def test_override_provenance_describes_the_override_not_the_declaration(monkeypatch):
+    """An operator-supplied invoice must NOT be published with the in-repo
+    declaration's source/as_of/is_estimate."""
+    fly = next(ln for ln in ca.declared_lines() if ln.name == "fly_base")
+    monkeypatch.setenv(fly.env_var, "9999")
+    snap = ca.evaluate_allocation(
+        ["org_a"], now=datetime(2026, 10, 3, tzinfo=UTC),
+        weights_by_org={"org_a": 1})
+    line = next(ln for ln in snap.lines if ln.line == "fly_base")
+    assert line.total_cents == 9999
+    assert line.source == f"env override {fly.env_var}"
+    assert line.as_of == "2026-10-03", "as_of must be the OBSERVATION date"
+    assert line.as_of != fly.as_of
+    assert line.is_estimate is False, "an operator's invoice is not an estimate"
+
+
+def test_every_override_variable_is_documented_in_env_example():
+    text = (REPO / ".env.example").read_text(encoding="utf-8")
+    missing = [ln.env_var for ln in ca.declared_lines() if ln.env_var not in text]
+    assert missing == [], f"undocumented TORTOISE_COST_* vars: {missing}"
 
 
 # ── Constraint (iii) · largest remainder ───────────────────────────────────
@@ -195,12 +247,112 @@ def test_measure_write_ops_raises_when_the_window_is_unreadable(monkeypatch):
         metering.measure_write_ops("org_a")
 
 
+class _FakeMeteringPeriod:
+    start_iso = "2026-09-01T00:00:00+00:00"
+    label = "2026-09"
+
+
+class _FakeQueryResult:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _FakeRegistry:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, *_a, **_k):
+        return _FakeQueryResult(self._rows)
+
+
+class _FakeRegistrySDK:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def _get_registry(self):
+        return _FakeRegistry(self._rows)
+
+
+def _wire_registry_read(monkeypatch, rows):
+    monkeypatch.setattr(metering, "_supabase_mode", lambda: False)
+    monkeypatch.setattr(
+        metering, "_current_period", lambda _org: _FakeMeteringPeriod())
+    monkeypatch.setattr(metering, "_reg_sdk", lambda: _FakeRegistrySDK(rows))
+
+
+def test_measure_write_ops_absent_row_is_a_measured_zero(monkeypatch):
+    """No row for the window is a genuine, MEASURED zero."""
+    _wire_registry_read(monkeypatch, [])
+    assert metering.measure_write_ops("org_a") == 0
+
+
+def test_measure_write_ops_returns_the_measured_count(monkeypatch):
+    _wire_registry_read(monkeypatch, [("42",)])
+    assert metering.measure_write_ops("org_a") == 42
+
+
+def test_measure_write_ops_read_failure_raises_and_never_returns_zero(monkeypatch):
+    """An unreadable READ must raise — a 0 here would silently redistribute the
+    org's share of a fixed cost (the distinction the module exists for)."""
+    _wire_registry_read(monkeypatch, [])
+
+    def _boom():
+        raise RuntimeError("registry unreachable")
+
+    monkeypatch.setattr(metering, "_reg_sdk", _boom)
+    with pytest.raises(RuntimeError):
+        metering.measure_write_ops("org_a")
+
+
+def test_measure_write_ops_negative_count_raises(monkeypatch):
+    """A negative count is corruption, not a measurement."""
+    _wire_registry_read(monkeypatch, [(-3,)])
+    with pytest.raises(ValueError):
+        metering.measure_write_ops("org_a")
+
+
+def test_measured_write_ops_basis_returns_none_when_any_org_is_unreadable(monkeypatch):
+    """The fail-closed branch of ``_measured_write_ops_basis``: one unreadable
+    org makes the WHOLE basis None, so every proportional line goes unavailable."""
+    def _boom(_org_id):
+        raise RuntimeError("window unreadable")
+
+    monkeypatch.setattr(metering, "measure_write_ops", _boom)
+    assert ha._measured_write_ops_basis(["org_a", "org_b"]) is None
+
+
+def test_refresh_with_an_unreadable_basis_leaves_the_metric_untouched(monkeypatch):
+    """Drives the REAL ``_measured_write_ops_basis`` so its except branch
+    executes: one org's read raises, so the proportional lines are
+    `unavailable`, no share is emitted, and the metric stays untouched."""
+    ph = next(ln for ln in ca.declared_lines() if ln.name == "posthog")
+    monkeypatch.setenv(ph.env_var, "100")
+    monkeypatch.setattr(
+        ha, "_iter_registered_orgs",
+        lambda: [{"org_id": "org_a"}, {"org_id": "org_b"}])
+
+    def _boom(_org_id):
+        raise RuntimeError("window unreadable")
+
+    monkeypatch.setattr(metering, "measure_write_ops", _boom)
+    asyncio.run(ha._refresh_cost_allocation())
+
+    snap = ca.current_snapshot()
+    assert snap is not None and snap.enumeration_available is True
+    line = next(ln for ln in snap.lines if ln.line == "posthog")
+    assert line.state == ca.STATE_UNAVAILABLE
+    assert line.shares == ()
+    assert ca.allocation_by_org() == {}, (
+        "a refresh whose basis is unreadable must publish nothing")
+
+
 # ── Constraint (iv)/(v) · the metric, its state, and bounded cardinality ───
 
 
 def test_publish_sets_the_gauge_and_the_metric_help_names_an_allocation():
     snap = ca.evaluate_allocation(
-        ["org_a"], now=datetime(2026, 9, 15, tzinfo=UTC))
+        ["org_a"], now=datetime(2026, 9, 15, tzinfo=UTC),
+        weights_by_org={"org_a": 1})
     ca.publish(snap)
     assert ca.allocation_by_org().get("org_a", 0) > 0
     text = generate_latest().decode()
@@ -208,23 +360,85 @@ def test_publish_sets_the_gauge_and_the_metric_help_names_an_allocation():
     assert "NOT a measurement" in text, "the help must name the allocation"
 
 
-def test_unavailable_refresh_leaves_the_last_known_good_untouched():
-    good = ca.evaluate_allocation(["org_a"])
+def test_last_known_good_is_kept_for_BOTH_unavailable_shapes(monkeypatch):
+    """(a) the enumeration failed and (b) the enumeration succeeded but a LINE
+    could not be read — the second used to fall through to a partial re-record
+    that silently DROPPED every published per-org total. Both must keep the
+    last-known-good metric untouched."""
+    ph = next(ln for ln in ca.declared_lines() if ln.name == "posthog")
+    monkeypatch.setenv(ph.env_var, "100")
+    good = ca.evaluate_allocation(
+        ["org_a", "org_b"], weights_by_org={"org_a": 3, "org_b": 1})
+    assert good.state == ca.STATE_MEASURED
     ca.publish(good)
     before = ca.allocation_by_org()
-    ca.publish(ca.evaluate_allocation([]))  # unreadable
+    assert before, "sanity: last-known-good must be non-empty"
+
+    # (a) the org ENUMERATION is unreadable
+    ca.publish(ca.evaluate_allocation([]))
     assert ca.allocation_by_org() == before
-    assert ca.current_snapshot().state == "unavailable"
+    assert ca.current_snapshot().state == ca.STATE_UNAVAILABLE
+
+    # (b) enumeration succeeded, the proportional BASIS could not be read
+    partial = ca.evaluate_allocation(["org_a", "org_b"], weights_by_org=None)
+    assert partial.state == ca.STATE_UNAVAILABLE
+    assert partial.enumeration_available is True
+    ca.publish(partial)
+    assert ca.allocation_by_org() == before, (
+        "a line-unavailable refresh must not re-record a PARTIAL set — the "
+        "published totals silently drop")
+
+
+def test_nonzero_residual_is_published_and_sums_to_the_declared_total(monkeypatch):
+    """The residual projection is a real published child: a zero-weight total
+    parks in ``__residual__`` and the published set still sums to the declared
+    total. Deleting the projection breaks this test."""
+    ph = next(ln for ln in ca.declared_lines() if ln.name == "posthog")
+    monkeypatch.setenv(ph.env_var, "100")
+    snap = ca.evaluate_allocation(["org_a"], weights_by_org={"org_a": 0})
+    ca.publish(snap)
+    published = ca.allocation_by_org()
+    assert published.get(ca.RESIDUAL_ORG) == 100
+    declared = sum(ln.total_cents for ln in snap.lines
+                   if ln.state != ca.STATE_UNAVAILABLE)
+    assert sum(published.values()) == declared
+
+
+def test_reconcile_reads_the_published_metric_and_can_fire(caplog):
+    """The reconciliation compares the PUBLISHED metric, not the snapshot's own
+    shares (summing those made the mismatch branch unreachable — both sides came
+    from the same sum-exact function). A divergent metric value must WARN."""
+    snap = ca.evaluate_allocation(["org_a"], weights_by_org={"org_a": 1})
+    ca.publish(snap)
+    monitoring.record_cost("unexpected_extra", 123)  # diverge the metric
+    with caplog.at_level("WARNING", logger="tortoise.cost_allocation"):
+        ca._reconcile_and_log(snap)
+    assert any("does NOT reconcile" in r.message for r in caplog.records), (
+        caplog.text)
+
+
+def test_reconcile_is_silent_when_the_published_metric_matches(caplog):
+    snap = ca.evaluate_allocation(["org_a"], weights_by_org={"org_a": 1})
+    ca.publish(snap)
+    with caplog.at_level("WARNING", logger="tortoise.cost_allocation"):
+        ca._reconcile_and_log(snap)
+    assert not any("does NOT reconcile" in r.message for r in caplog.records), (
+        caplog.text)
 
 
 def test_org_labels_are_bounded_with_a_fixed_overflow_child(monkeypatch):
     monkeypatch.setattr(ca, "MAX_ORG_LABELS", 2)
-    snap = ca.evaluate_allocation(["org_1", "org_2", "org_3", "org_4"])
+    orgs = ["org_1", "org_2", "org_3", "org_4"]
+    snap = ca.evaluate_allocation(orgs, weights_by_org={o: 1 for o in orgs})
     ca.publish(snap)
     labels = ca.allocation_by_org()
     assert ca.ORG_OVERFLOW in labels
     assert len([k for k in labels if k != ca.ORG_OVERFLOW]) == 2
-    declared = sum(ln.total_cents for ln in snap.lines)
+    # ``publish`` deliberately omits unavailable lines, so the declared total
+    # it is expected to sum to is over the NON-unavailable lines — matching
+    # ``_reconcile_and_log``.
+    declared = sum(ln.total_cents for ln in snap.lines
+                   if ln.state != ca.STATE_UNAVAILABLE)
     assert sum(labels.values()) == declared, "folding must not lose cents"
 
 
@@ -281,8 +495,24 @@ def test_event_retention_loop_awaits_the_cost_refresh():
          if isinstance(n, ast.While) and isinstance(n.test, ast.Constant)
          and n.test.value is True), None)
     assert while_loop is not None, "_event_retention_loop has no `while True:`"
-    names = {n.id for n in ast.walk(while_loop) if isinstance(n, ast.Name)}
-    assert "_refresh_cost_allocation" in names
+    # The refresh must be an AWAITED call that is a DIRECT statement of the
+    # `while True:` body. Asserting on the bare Name (the previous form) passed
+    # for an UN-AWAITED `_refresh_cost_allocation()` — the exact dead-hook
+    # regression #4493 exists to fix — and for a call inside a never-invoked
+    # nested async def. Both are excluded here: only `await f()` at the top
+    # level of the loop body is accepted.
+    awaited_direct: list[str] = []
+    for stmt in while_loop.body:
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Await)
+            and isinstance(stmt.value.value, ast.Call)
+            and isinstance(stmt.value.value.func, ast.Name)
+        ):
+            awaited_direct.append(stmt.value.value.func.id)
+    assert "_refresh_cost_allocation" in awaited_direct, (
+        "the cost refresh must be an `await _refresh_cost_allocation()` that is "
+        "a DIRECT statement of the `while True:` body")
 
 
 def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch):
@@ -291,6 +521,9 @@ def test_a_failing_refresh_cannot_kill_the_retention_loop(monkeypatch):
 
     monkeypatch.setattr(ca, "refresh_and_publish", _boom)
     monkeypatch.setattr(ha, "_iter_registered_orgs", lambda: [{"org_id": "o"}])
+    # No real metering/DB round trip: this test verifies ONLY the swallow path.
+    monkeypatch.setattr(
+        ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
     # The retention loop has no per-iteration guard: this must NOT raise.
     asyncio.run(ha._refresh_cost_allocation())
 
@@ -303,6 +536,45 @@ def test_an_unconfirmed_empty_enumeration_fails_closed(monkeypatch):
     snap = ca.current_snapshot()
     assert snap is not None and snap.state == "unavailable"
     assert ca.allocation_by_org() == {}
+
+
+def test_truncated_supabase_org_enumeration_fails_closed(monkeypatch):
+    """#4493: ``query`` cannot distinguish a complete page from a truncated one,
+    so an enumeration that FILLS the explicit limit is INCOMPLETE and returns
+    [] (a partial fleet must never prune orgs from the published metric)."""
+    from tortoise import supabase_control as sc
+
+    class _FakeCP:
+        def __init__(self, rows):
+            self._rows = rows
+            self.limit_seen = None
+
+        def query(self, _table, **_kw):
+            self.limit_seen = _kw.get("limit")
+            return self._rows
+
+    rows = [{"id": f"org_{i}", "name": None}
+            for i in range(ha._ORG_ENUMERATION_MAX_ROWS)]
+    cp = _FakeCP(rows)
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+
+    assert ha._iter_registered_orgs() == []
+    assert cp.limit_seen == ha._ORG_ENUMERATION_MAX_ROWS, (
+        "the enumeration must request an explicit limit — without one the "
+        "server's db-max-rows truncation is invisible")
+
+
+def test_short_supabase_org_enumeration_is_returned(monkeypatch):
+    from tortoise import supabase_control as sc
+
+    class _FakeCP:
+        def query(self, _table, **_kw):
+            return [{"id": "org_a", "name": "A"}]
+
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _FakeCP())
+    assert ha._iter_registered_orgs() == [{"org_id": "org_a", "name": "A"}]
 
 
 # ── Constraint (vii) + single writer · invariants that are ENFORCED ────────
@@ -318,12 +590,60 @@ def test_allocation_never_touches_the_measured_ledger():
         assert forbidden not in src, f"cost_allocation must not reference {forbidden}"
 
 
-def test_cost_allocation_is_the_only_writer_of_the_team_cost_metric():
-    hits = []
+#: Anything that reads/writes the ``TEAM_COST`` family in a way that can
+#: mutate it: the metric object itself plus the three mutator helpers. (Readers
+#: such as ``team_cost_cents`` are deliberately NOT here — ``_reconcile_and_log``
+#: and ``allocation_by_org`` must be able to read the metric.)
+_METRIC_NAMES = frozenset(
+    {"TEAM_COST", "record_cost", "clear_team_cost", "prune_team_cost"})
+#: Functions permitted to touch the metric outside ``monitoring.py``: the single
+#: production writer, plus the explicit test seam (which must be able to clear).
+_METRIC_WRITER_ALLOWLIST = {
+    ("cost_allocation.py", "publish"),
+    ("cost_allocation.py", "_reset_for_tests"),
+}
+
+
+def _metric_references(fn) -> set[str]:
+    """Names/attributes of the TEAM_COST family referenced inside *fn*.
+
+    AST-based, so a COMMENT or a DOCSTRING mention is not a hit — substring
+    matching prose is the same class of defect the guard exists to catch.
+    """
+    refs: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and node.id in _METRIC_NAMES:
+            refs.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in _METRIC_NAMES:
+            refs.add(node.attr)
+    return refs
+
+
+def test_publish_is_the_only_writer_of_the_team_cost_metric():
+    """Assert on the METRIC, not a function name: a second caller of
+    ``clear_team_cost``/``prune_team_cost`` — or a direct ``TEAM_COST`` write —
+    must be caught. Every reference to the family outside ``monitoring.py``
+    (its definitions) must sit inside ``publish`` (the one production writer),
+    with ``_reset_for_tests`` as the explicit test seam."""
+    offenders: dict[str, set[str]] = {}
     for path in (REPO / "tortoise").rglob("*.py"):
+        if path.name == "monitoring.py":
+            continue  # the definitions themselves
         src = path.read_text(encoding="utf-8")
-        if "record_cost(" in src and path.name != "monitoring.py":
-            hits.append(path.name)
-    assert hits == ["cost_allocation.py"], (
-        f"unexpected writers of record_cost: {hits} — a second writer would "
-        "break the reconciliation invariant")
+        # Cheap prefilter so the whole tree is not AST-parsed: a source file
+        # cannot reference the family in AST form without the literal token.
+        # The VERDICT is still AST-based (this only skips files that cannot
+        # possibly match).
+        if not any(name in src for name in _METRIC_NAMES):
+            continue
+        tree = ast.parse(src)
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            refs = _metric_references(fn)
+            if refs and (path.name, fn.name) not in _METRIC_WRITER_ALLOWLIST:
+                offenders.setdefault(path.name, set()).update(refs)
+    assert offenders == {}, (
+        "unexpected references to TEAM_COST/its mutators outside monitoring.py "
+        f"+ the writer allowlist: {offenders} — a second writer would break the "
+        "reconciliation invariant")

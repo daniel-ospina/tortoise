@@ -44,6 +44,14 @@ failure mode ``docs/runbook/b7-activation-scorecard.md`` §"Zero vs no-signal"
 exists to prevent. The state vocabulary is IMPORTED from
 :mod:`tortoise.activation_scorecard` (one home for the three strings).
 
+A MALFORMED ``TORTOISE_COST_*_CENTS`` override is unreadable input too. A
+present-but-unusable value (non-integer, negative, present-but-empty, or above
+:data:`MAX_LINE_CENTS`) is **not** silently replaced by the declared default —
+the line is reported :data:`STATE_UNAVAILABLE` with a detail naming the
+variable and the offending value. Falling back to the default would make a
+misconfiguration indistinguishable from "unconfigured", and for four of the
+five lines that default is 0.
+
 WINDOW
 ------
 The declared total is **monthly** (the vendor's window). The allocation window
@@ -83,13 +91,21 @@ BASIS_EVEN = "even"
 BASIS_PROPORTIONAL = "proportional"
 _BASES = (BASIS_EVEN, BASIS_PROPORTIONAL)
 
-#: Fixed children of the allocation metric. Never org-derived.
+#: Fixed child of the allocation metric: the explicit residual bucket. Never
+#: org-derived. (There is deliberately no ``__unreadable__`` sentinel: an
+#: unreadable input leaves the metric at LAST-KNOWN-GOOD rather than publishing
+#: a synthetic child — see :func:`publish`.)
 RESIDUAL_ORG = "__residual__"
-UNREADABLE_ORG = "__unreadable__"
 #: Org-label overflow child (bounded cardinality — a per-org label is a
 #: cardinality axis, so it is capped exactly like a request/tenant label is).
 ORG_OVERFLOW = "__other__"
 MAX_ORG_LABELS = 512
+
+#: Sanity ceiling for an operator override (cents/month). A figure above this is
+#: a misconfiguration (almost certainly a unit typo — dollars, or cents×100),
+#: not a real monthly line: publishing it would allocate a nonsense amount with
+#: no error. 100_000_000 cents = $1,000,000/month.
+MAX_LINE_CENTS = 100_000_000
 
 
 @dataclass(frozen=True)
@@ -200,29 +216,81 @@ def declared_lines() -> tuple[LineSpec, ...]:
     return ALLOCATION_LINES
 
 
-def line_total_cents(line: LineSpec) -> int:
-    """The effective monthly total for *line*: env override, else its default.
+@dataclass(frozen=True)
+class LineTotal:
+    """One line's effective total, its provenance, and its override error.
+
+    ``error`` is ``None`` when the effective total is usable. A PRESENT but
+    unusable override yields a detail naming the variable and offending value;
+    the line is then reported :data:`STATE_UNAVAILABLE` (see
+    :func:`_resolve_line_total`).
+    """
+
+    cents: int
+    source: str
+    as_of: str
+    is_estimate: bool
+    error: str | None
+
+
+def _resolve_line_total(line: LineSpec, *, observed_as_of: str) -> LineTotal:
+    """Resolve *line*'s total AND its provenance, fail-closed on a bad override.
 
     The env override exists so an operator can supply a real invoice figure
-    WITHOUT a code change. A malformed value (non-integer or negative) falls
-    back to the declared default with a warning — it never becomes a silent 0.
+    WITHOUT a code change. It is resolved as follows:
+
+    * **absent** — the declared default, with the declaration's own
+      ``source``/``as_of``/``is_estimate`` (it IS the declaration).
+    * **present and usable** — the operator's figure. Provenance is the
+      OVERRIDE, not the declaration: ``source`` names the env var, ``as_of`` is
+      the observation date (the refresh date — the declaration's date would be
+      a lie about where the number came from), and ``is_estimate`` is ``False``
+      (an operator-supplied invoice is a real figure, not an estimate).
+    * **present and unusable** (non-integer, negative, present-but-empty, or
+      above :data:`MAX_LINE_CENTS`) — an explicit error, never a silent
+      fallback to the declared default: ``error`` names the variable and value,
+      and :func:`evaluate_allocation` reports the line ``unavailable``.
     """
     raw = os.environ.get(line.env_var)
-    if raw is None or not str(raw).strip():
-        return line.total_cents
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        logger.warning(
-            "%s=%r is not an integer number of cents — using the declared "
-            "default %d for line %s", line.env_var, raw, line.total_cents, line.name)
-        return line.total_cents
-    if value < 0:
-        logger.warning(
-            "%s=%r is negative — using the declared default %d for line %s",
-            line.env_var, raw, line.total_cents, line.name)
-        return line.total_cents
-    return value
+    if raw is None:
+        return LineTotal(line.total_cents, line.source, line.as_of,
+                         line.is_estimate, None)
+    text = str(raw).strip()
+    if not text:
+        reason = "is present but empty"
+    else:
+        try:
+            value = int(text)
+        except (TypeError, ValueError):
+            reason = f"is not an integer number of cents ({raw!r})"
+        else:
+            if value < 0:
+                reason = f"is negative ({raw!r})"
+            elif value > MAX_LINE_CENTS:
+                reason = (f"exceeds the sanity ceiling of {MAX_LINE_CENTS} "
+                          f"cents/month ({raw!r})")
+            else:
+                return LineTotal(
+                    value, f"env override {line.env_var}", observed_as_of,
+                    False, None)
+    detail = f"{line.env_var} {reason}"
+    logger.error(
+        "%s — line %s reported %s (fail-closed; the declared default is NOT "
+        "used)", detail, line.name, STATE_UNAVAILABLE)
+    return LineTotal(line.total_cents, line.source, line.as_of,
+                     line.is_estimate, detail)
+
+
+def line_total_cents(line: LineSpec) -> int:
+    """The effective monthly total in cents for *line* (value-only accessor).
+
+    A malformed override is NOT accepted as a value here —
+    :func:`evaluate_allocation` resolves the same override through
+    :func:`_resolve_line_total` and reports the line ``unavailable`` (the
+    fail-closed path). This accessor exists for a caller that only wants the
+    number; use :func:`_resolve_line_total` when the state matters.
+    """
+    return _resolve_line_total(line, observed_as_of=line.as_of).cents
 
 
 @dataclass(frozen=True)
@@ -253,10 +321,14 @@ class LineAllocation:
 class AllocationSnapshot:
     """The readable, state-carrying allocation figure.
 
-    ``state`` is the whole-snapshot state: :data:`STATE_UNAVAILABLE` when the
-    org set itself could not be read (never a confident zero), otherwise the
-    worst state across the lines. ``window`` names the allocation window; the
-    unit is integer CENTS.
+    ``state`` is the whole-snapshot roll-up, NOT "the worst state across the
+    lines": :data:`STATE_UNAVAILABLE` if the enumeration could not be read OR
+    any single line could not be read; :data:`STATE_NOT_MEASURABLE` only when
+    EVERY line is not_measurable (all declared totals 0); otherwise
+    :data:`STATE_MEASURED`. Because the four zero-default lines report
+    ``not_measurable``, a default snapshot is ``measured`` while most lines are
+    unconfigured — the PER-LINE state carries that partiality. ``window`` names
+    the allocation window; the unit is integer CENTS.
     """
 
     generated_at: str
@@ -389,7 +461,12 @@ def evaluate_allocation(
     org's share.
     """
     start, end = monthly_allocation_window(now)
-    generated = (now or datetime.now(UTC)).isoformat()
+    moment = now or datetime.now(UTC)
+    generated = moment.isoformat()
+    # The date an env OVERRIDE was observed: an override's ``as_of`` must be
+    # the observation date, never the declaration's date (that would claim the
+    # operator's invoice was stated by the in-repo declaration).
+    observed_as_of = moment.date().isoformat()
     org_list = [o for o in (orgs or []) if o]
     if not org_list:
         return AllocationSnapshot(
@@ -399,23 +476,38 @@ def evaluate_allocation(
             lines=tuple(
                 LineAllocation(
                     line=ln.name, basis=ln.basis,
-                    total_cents=line_total_cents(ln), source=ln.source,
-                    as_of=ln.as_of, is_estimate=ln.is_estimate,
+                    total_cents=rt.cents, source=rt.source,
+                    as_of=rt.as_of, is_estimate=rt.is_estimate,
                     state=STATE_UNAVAILABLE, shares=(), residual_cents=0,
                     detail="org enumeration unavailable or empty (fail-closed)",
                 )
                 for ln in ALLOCATION_LINES
+                for rt in (_resolve_line_total(ln, observed_as_of=observed_as_of),)
             ),
         )
 
     lines: list[LineAllocation] = []
     for ln in ALLOCATION_LINES:
-        total = line_total_cents(ln)
+        rt = _resolve_line_total(ln, observed_as_of=observed_as_of)
+        total, source, as_of, is_estimate = (
+            rt.cents, rt.source, rt.as_of, rt.is_estimate)
+        if rt.error is not None:
+            # A present-but-unusable override is an unreadable input: fail
+            # closed as `unavailable`, NEVER the declared default (which is 0
+            # for four of the five lines, i.e. indistinguishable from
+            # "unconfigured").
+            lines.append(LineAllocation(
+                line=ln.name, basis=ln.basis, total_cents=total,
+                source=source, as_of=as_of, is_estimate=is_estimate,
+                state=STATE_UNAVAILABLE, shares=(), residual_cents=0,
+                detail=rt.error,
+            ))
+            continue
         if ln.basis == BASIS_PROPORTIONAL:
             if weights_by_org is None:
                 lines.append(LineAllocation(
                     line=ln.name, basis=ln.basis, total_cents=total,
-                    source=ln.source, as_of=ln.as_of, is_estimate=ln.is_estimate,
+                    source=source, as_of=as_of, is_estimate=is_estimate,
                     state=STATE_UNAVAILABLE, shares=(), residual_cents=0,
                     detail="measured basis unreadable (fail-closed)",
                 ))
@@ -424,7 +516,7 @@ def evaluate_allocation(
             if missing:
                 lines.append(LineAllocation(
                     line=ln.name, basis=ln.basis, total_cents=total,
-                    source=ln.source, as_of=ln.as_of, is_estimate=ln.is_estimate,
+                    source=source, as_of=as_of, is_estimate=is_estimate,
                     state=STATE_UNAVAILABLE, shares=(), residual_cents=0,
                     detail=f"basis missing for {len(missing)} org(s) (fail-closed)",
                 ))
@@ -447,8 +539,8 @@ def evaluate_allocation(
         else:
             state, detail = STATE_MEASURED, ""
         lines.append(LineAllocation(
-            line=ln.name, basis=ln.basis, total_cents=total, source=ln.source,
-            as_of=ln.as_of, is_estimate=ln.is_estimate, state=state,
+            line=ln.name, basis=ln.basis, total_cents=total, source=source,
+            as_of=as_of, is_estimate=is_estimate, state=state,
             shares=shares, residual_cents=residual, detail=detail,
         ))
 
@@ -494,17 +586,31 @@ def publish(snapshot: AllocationSnapshot) -> None:
     """Project *snapshot* onto the per-org cost metric (the SINGLE writer path).
 
     The metric carries the org's TOTAL allocated fixed/shared cost across all
-    lines, in cents. On :data:`STATE_UNAVAILABLE` the metric is **left
-    untouched** (last-known-good) rather than cleared or zeroed: clearing would
-    make "unreadable" and "no cost" indistinguishable, which is the failure
-    this module exists to avoid. Success prunes stale children first, so an org
-    deleted from the fleet cannot keep a value forever.
+    lines, in cents.
+
+    THE RULE: a snapshot whose whole-snapshot ``state`` is
+    :data:`STATE_UNAVAILABLE` — whether the ORG ENUMERATION failed
+    (``enumeration_available`` is False) or a single LINE could not be read
+    (the enumeration succeeded) — leaves the metric at **last-known-good**: it
+    is neither cleared nor partially re-recorded. A partial re-record would
+    silently DROP every org's published total (the unreadable line's share
+    simply vanishes, with no state on the metric to say so), which reads
+    exactly like "this org's cost fell" — the failure this module exists to
+    avoid. The warning distinguishes the two shapes via
+    ``enumeration_available``.
+
+    On success the new children are recorded FIRST and only the children no
+    longer present are pruned, so a concurrent ``/metrics`` scrape served by
+    another thread can never observe an empty or partial family (a
+    clear-then-set would expose exactly that gap on every refresh).
     """
     global _last_snapshot
-    if not snapshot.enumeration_available:
+    if snapshot.state == STATE_UNAVAILABLE:
         logger.warning(
-            "cost allocation refresh unavailable — metric left at last-known-good "
-            "(window %s→%s)", snapshot.window_start, snapshot.window_end)
+            "cost allocation refresh unavailable (enumeration_available=%s) — "
+            "metric left at last-known-good (window %s→%s)",
+            snapshot.enumeration_available,
+            snapshot.window_start, snapshot.window_end)
         with _lock:
             _last_snapshot = snapshot
         return
@@ -523,9 +629,12 @@ def publish(snapshot: AllocationSnapshot) -> None:
     for label, cents in totals.items():
         merged[bounded[label]] = merged.get(bounded[label], 0) + cents
 
-    monitoring.clear_team_cost()
+    # Record first, prune second: never clear the whole family up front. A
+    # reader on the /metrics thread must not be able to observe a gap between
+    # the clear and the re-record.
     for label, cents in sorted(merged.items()):
         monitoring.record_cost(label, cents)
+    monitoring.prune_team_cost(set(merged))
 
 
 def refresh_and_publish(
@@ -553,31 +662,42 @@ def refresh_and_publish(
 
 
 def _reconcile_and_log(snapshot: AllocationSnapshot) -> None:
-    """Log one line per refresh; WARN if the published set does not reconcile.
+    """Log one line per refresh; WARN if the PUBLISHED metric does not reconcile.
 
-    Reconciliation: for every MEASURED line, Σ(shares) + residual must equal
-    the declared total. A divergence means an allocation bug — it must be
-    audible, not swallowed (the whole point of "no dead hooks").
+    Reconciliation reads what was ACTUALLY published — :func:`allocation_by_org`,
+    the metric itself — against the declared totals. The previous form summed
+    the snapshot's OWN shares, so both sides came from the same sum-exact
+    function and the mismatch branch could never fire (a dead hook). The
+    published sum includes the explicit :data:`RESIDUAL_ORG` and
+    :data:`ORG_OVERFLOW` children: both are part of what a reader sees, so both
+    count. On an ``unavailable`` snapshot :func:`publish` left the metric at the
+    previous window, so there is nothing to reconcile against this
+    declaration — the check is skipped rather than reported as a false
+    mismatch. Never raises: a cost refresh must not be able to take down the
+    caller (it runs inside the hosted retention loop, which has no
+    per-iteration guard).
     """
-    published = sum(
-        s.cents for ln in snapshot.lines if ln.state != STATE_UNAVAILABLE
-        for s in ln.shares
-    ) + snapshot.unallocated_cents
-    declared = sum(
-        ln.total_cents for ln in snapshot.lines if ln.state != STATE_UNAVAILABLE
-    )
-    orgs = len({s.org_label for ln in snapshot.lines for s in ln.shares})
+    published_by_org = allocation_by_org()
+    published = sum(published_by_org.values())
+    declared = sum(ln.total_cents for ln in snapshot.lines)
+    residual = published_by_org.get(RESIDUAL_ORG, 0)
+    overflow = published_by_org.get(ORG_OVERFLOW, 0)
+    orgs = len([k for k in published_by_org
+                if k not in (RESIDUAL_ORG, ORG_OVERFLOW)])
     logger.info(
         "cost allocation refresh kind=allocation state=%s window=%s..%s "
-        "lines=%d orgs=%d published_cents=%d residual_cents=%d",
+        "lines=%d orgs=%d published_cents=%d residual_cents=%d overflow_cents=%d",
         snapshot.state, snapshot.window_start, snapshot.window_end,
-        len(snapshot.lines), orgs, published, snapshot.unallocated_cents,
+        len(snapshot.lines), orgs, published, residual, overflow,
     )
-    if snapshot.enumeration_available and published != declared:
+    if snapshot.state == STATE_UNAVAILABLE:
+        return
+    if published != declared:
         logger.warning(
             "cost allocation does NOT reconcile: published=%d declared=%d "
-            "(an allocation bug — the published set must sum to the declared "
-            "totals)", published, declared,
+            "delta=%d residual=%d overflow=%d (an allocation bug — the "
+            "published set must sum to the declared totals)",
+            published, declared, published - declared, residual, overflow,
         )
 
 

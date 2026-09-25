@@ -1264,11 +1264,27 @@ class TestMetricsEndpoint:
         body = generate_latest()
         assert b"tortoise_requests_total" in body
         assert b"tortoise_errors_total" in body
-        assert b"tortoise_team_cost_cents" in body
-        # #4493: the per-team cost series is a GAUGE, so the family name
-        # carries no ``_total`` suffix — assert the bare exposition name, not
-        # the counter-shaped prefix the old Counter happened to satisfy too.
-        assert b"tortoise_team_cost_cents{" in body or b"tortoise_team_cost_cents " in body
+
+    def test_generate_latest_exposes_the_team_cost_gauge_as_a_bare_sample(self):
+        """#4493: the per-team cost family is a GAUGE, so its sample name
+        carries no ``_total`` suffix.
+
+        The previous assertion — ``b"..._cents{" in body or b"..._cents " in
+        body`` — could NEVER fail: the ``# TYPE tortoise_team_cost_cents
+        gauge`` comment line satisfies the second disjunct, and the OLD
+        Counter's ``..._cents_total`` sample satisfied it too. Record a value
+        and assert the real bare-sample line, and that no counter-shaped
+        sample exists.
+        """
+        from prometheus_client import generate_latest
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("t", 7)
+            body = generate_latest()
+        finally:
+            monitoring.clear_team_cost()
+        assert b'tortoise_team_cost_cents{team="t"} 7' in body, body
+        assert b"tortoise_team_cost_cents_total" not in body
 
 
 class TestProbeWorkerNoLeak:

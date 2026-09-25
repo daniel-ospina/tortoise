@@ -51,9 +51,39 @@ Declared lines (2026-09-25):
 | `sentry` | `proportional` | 0 | not configured | yes |
 
 **A `0` default means "this line must be configured by an operator", not "the
-cost is zero".** Set `TORTOISE_COST_<LINE>_CENTS` to supply a real figure. The
-in-repo figures are rates and dated estimates, never a measured invoice — the
-B7 cost-structure audit established that vendor invoice amounts are not in-repo.
+cost is zero".** The override variables are exactly (integer **cents**, monthly
+window):
+
+| Line | Override variable |
+|---|---|
+| `fly_base` | `TORTOISE_COST_FLY_BASE_CENTS` |
+| `falkordb_base` | `TORTOISE_COST_FALKORDB_BASE_CENTS` |
+| `supabase_base` | `TORTOISE_COST_SUPABASE_BASE_CENTS` |
+| `posthog` | `TORTOISE_COST_POSTHOG_CENTS` |
+| `sentry` | `TORTOISE_COST_SENTRY_CENTS` |
+
+(The naming rule is `TORTOISE_COST_<LINE>_CENTS`; the table is the enumerated
+list, and a test pins every `LineSpec.env_var` to an occurrence in
+`.env.example`.) The in-repo figures are rates and dated estimates, never a
+measured invoice — the B7 cost-structure audit established that vendor invoice
+amounts are not in-repo.
+
+### Override provenance
+
+When an override supplies the value, the published provenance describes the
+**override**, not the code declaration:
+
+* `source` is the env var name (`env override TORTOISE_COST_…_CENTS`);
+* `as_of` is the **observation date** — the refresh date on which the override
+  was read — never the declaration's `as_of` (that date belongs to the in-repo
+  figure, and repeating it would claim the operator's number was stated by the
+  declaration);
+* `is_estimate` is `False`: an operator-supplied invoice is a real figure, not
+  an estimate.
+
+Without this rule an operator's invoice is published as
+`is_estimate=True, as_of=2026-09-10`, and the four zero-default lines report
+`source="not configured…", as_of="unset"` beside a NON-ZERO total.
 
 ### Arithmetic
 
@@ -85,8 +115,22 @@ An unreadable input is **never** reported as `0`:
 
 When the enumeration is unavailable the metric is left at **last-known-good**
 (it is not cleared — clearing would make "unreadable" and "no cost"
-indistinguishable). A single unreadable proportional line is reported
-`unavailable` while the readable lines still publish.
+indistinguishable). **The same holds when the enumeration succeeded but a line
+could not be read**: `publish` gates on the whole-snapshot `state`, so a
+line-`unavailable` refresh also leaves the metric at last-known-good. Re-recording
+only the still-readable lines would silently DROP every org's published total
+(the unreadable line's share vanishes, with no state on the metric to say so),
+which reads exactly like "this org's cost fell". The distinction between the two
+shapes is logged via `enumeration_available`.
+
+A **malformed override** is unreadable input too: a present-but-unusable
+`TORTOISE_COST_*_CENTS` value (non-integer, negative, empty/whitespace, or above
+the `MAX_LINE_CENTS` sanity ceiling) reports that line `unavailable` with a
+detail naming the variable and the offending value — it is **never** silently
+replaced by the declared default. Falling back would make a misconfiguration
+indistinguishable from "unconfigured", and for four of the five lines the
+default is `0`. An absent variable and a present-but-empty one are also
+reported distinctly.
 
 ## How to read it
 
@@ -94,8 +138,12 @@ Three read paths, no dashboard:
 
 1. **`fly logs`** — the refresh emits one `INFO` line per cycle
    (`tortoise.cost_allocation`): `cost allocation refresh kind=allocation
-   state=… window=… lines=… orgs=… published_cents=… residual_cents=…`. This is
-   the production-readable path today (nothing scrapes `/metrics` in production).
+   state=… window=… lines=… orgs=… published_cents=… residual_cents=…
+   overflow_cents=…`. This is the production-readable path today (nothing
+   scrapes `/metrics` in production). The `published_cents` figure is read back
+   from the METRIC itself (`allocation_by_org()`), not from the in-memory
+   shares, so the reconciliation warning compares what was actually published
+   against the declared totals and can fire.
 2. **PromQL** — `tortoise_team_cost_cents{team="<org>"}` once a scraper exists.
 3. **In-process** — `tortoise.cost_allocation.current_snapshot()` (full
    declaration + shares + state) or `monitoring.team_cost_cents()`.
@@ -126,6 +174,10 @@ declared total is 0 (unconfigured) or no org carries weight.
 * The org label is bounded (`MAX_ORG_LABELS`, default 512, with a fixed
   `__other__` overflow child), so org growth cannot blow up the metric's
   cardinality.
-* The single writer of `TEAM_COST` is
-  `tortoise.cost_allocation.refresh_and_publish`; `monitoring.record_cost` is
-  the only function that touches the metric.
+* The only PRODUCTION path that writes `TEAM_COST` is
+  `tortoise.cost_allocation.refresh_and_publish` → `publish`. In that path
+  `monitoring.record_cost` is the setter and `monitoring.prune_team_cost` the
+  pruner; both are called only from there, plus the test seams
+  (`_reset_for_tests` / `clear_team_cost`). A test asserts this on the METRIC
+  (every non-`monitoring.py` reference to `TEAM_COST` and its mutators must sit
+  inside `publish`), not on a function-name substring.
