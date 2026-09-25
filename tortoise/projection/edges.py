@@ -260,7 +260,7 @@ _BACKFILL_ANCHOR_SET = _anchor_on_create("e.file_hash")
 
 
 def resolve_source_versions(g, source_ref) -> dict[str, str]:
-    """LIVE-only: map each source ref to its :Source's non-empty ``contentHash``.
+    """LIVE-only: map each source ref to its :Source's non-blank ``contentHash``.
 
     #5256 — the create-path ``extractedFrom`` read-version anchor. This is the
     ONLY place a version is read from a Source; it runs on the LIVE write path
@@ -272,9 +272,12 @@ def resolve_source_versions(g, source_ref) -> dict[str, str]:
 
     Keys are ``resolve_source_key(g, ref)`` — the node's stored ``url``, the
     SAME key ``_link_source`` resolves a ref to — so a URL variant cannot
-    silently miss and leave the edge bare. Empty / missing / ``''`` hashes are
-    OMITTED: ``''`` compares equal to a Source's ``''`` and reads as a false
-    CURRENT, so absent is the honest value (ONTOLOGY §4.6).
+    silently miss and leave the edge bare. Empty / missing / ``''`` / blank
+    hashes are OMITTED: ``''`` compares equal to a Source's ``''`` and reads as
+    a false CURRENT, so absent is the honest value (ONTOLOGY §4.6). The same
+    rule is applied on the replay side by ``_valid_transit_pairs`` — this
+    function must agree with it or a blank hash is live-only (a live≠replay
+    divergence).
 
     ``source_ref`` is normalized exactly as ``_link_source`` does — a bare
     ``str`` is ONE ref, never iterated character-wise.
@@ -296,7 +299,14 @@ def resolve_source_versions(g, source_ref) -> dict[str, str]:
         if not rows:
             continue
         h = rows[0][0]
-        if isinstance(h, str) and h:
+        # #5256: blank is ABSENT, exactly as the replay-side
+        # `_valid_transit_pairs` treats it. A truthiness test would admit a
+        # whitespace-only `contentHash` ("   " is truthy): the LIVE writers
+        # would then stamp `r.sourceVersion="   "` (`_anchor_on_create` only
+        # nulls `''`) and carry `[['url','   ']]` on the node, while the
+        # REPLAY predicate drops the pair — a live≠replay divergence reachable
+        # from `create_source(url, kind, contentHash="   ")`.
+        if isinstance(h, str) and h.strip():
             out[key] = h
     return out
 

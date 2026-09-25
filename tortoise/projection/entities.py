@@ -341,16 +341,19 @@ def _valid_transit_pairs(value):
     of "a corrupt journal contributes no anchor". A body value that is a dict
     (or a list containing one) is also what would make Falkor raise mid-replay.
 
-    Why the non-empty member rule: an empty (or blank) hash is the PRODUCERS'
-    honest-absent signal — `resolve_source_versions` and
-    `_source_version_transit` both skip it — and `_anchor_on_create` nulls
-    ``''`` on the edge. A hand-written ``[[DOC, '']]`` therefore used to leave
-    the node carrier claiming a per-link pair for DOC while the authoritative
-    edge carried NULL (and a blank ``'   '`` stamped garbage on the edge,
-    since the CASE only matches ``''``): a gate-invisible disagreement between
-    the two writers, re-derived from the same journal line so `check_consistency`
-    saw no divergence. Requiring non-empty members here keeps honest-absent
-    honest and keeps the two writers in lockstep.
+    Why the non-empty member rule: an empty (or blank) hash is an ABSENT read
+    version, and ``resolve_source_versions`` now omits both (``h.strip()``),
+    while ``_anchor_on_create`` nulls ``''`` on the edge — so a blank member is
+    never a legitimate value. Enforcing it here keeps the two writers in
+    lockstep even on a hand-written or foreign journal line: without the rule,
+    ``[[DOC, '']]`` left the node carrier claiming a per-link pair for DOC
+    while the authoritative edge carried NULL (and a blank ``'   '`` stamped
+    garbage on the edge, since the CASE only matches ``''``) — a gate-invisible
+    disagreement between the two writers, re-derived from the same journal line
+    so `check_consistency` saw no divergence. (Note: the LIVE writers write the
+    carrier straight from ``_source_version_transit`` and do NOT run this
+    predicate; the agreement is a property of both sides applying the SAME
+    absent rule, which is why ``resolve_source_versions`` must strip-test too.)
     """
     if not isinstance(value, (list, tuple)) or not value:
         return None
@@ -826,7 +829,9 @@ class _EntityHandlers:
         }
         # #5256: the extractedFrom read-version transit. Written ONLY when the
         # payload carries a well-formed non-empty list of [source_url,
-        # contentHash] pairs — the SAME shape `_upsert_point_edges` validates.
+        # contentHash] pairs whose two members are non-blank strings — the SAME
+        # shape (and the same shared `_valid_transit_pairs` predicate)
+        # `_upsert_point_edges` validates.
         # An un-sourced Point, or one whose Source has no recorded hash, carries
         # NO property (never '' and never []: honest-absent, because '' compares
         # equal to a Source's '' and reads as a false CURRENT). `coalesce` is

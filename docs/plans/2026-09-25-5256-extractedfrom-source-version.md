@@ -101,7 +101,8 @@ LIVE  create_point(..., extractedFrom=refs)                      # FRESH-CREATE 
         └─ _emit_event("PointAdded", ..., point=self.get_point(pid))  # snapshot carries the prop
 
 LIVE  EventAPI.add_point(..., extractedFrom=…)
-        ├─ if self.projection is not None:  p["sourceVersionTransit"] = <the SAME builder>(…)
+        ├─ if getattr(self.projection, "g", None) is not None:
+        │     _sv = <the SAME builder>(…);  if _sv is not None: p["sourceVersionTransit"] = _sv
         └─ _emit("PointAdded", point=p) → log.append + projection.apply
               ├─ pass-1 _upsert_point_props  → explicit SET n.sourceVersionTransit=$sv
               └─ pass-2 _upsert_point_edges  → _link_source(..., source_versions=dict(p["sourceVersionTransit"]))
@@ -246,7 +247,7 @@ Every test names the input that makes it FAIL.
 |---|---|---|
 | Ontology | medium | the anchor is canonical; no wording change |
 | Architecture | high | replay determinism, the journal seam, two live producers |
-| Code | high | `edges.py` + `entities.py` + `sdk.py` + `api.py` + `consistency.py` + four reject surfaces |
+| Code | high | `edges.py` + `entities.py` + `sdk.py` + `api.py` + `consistency.py` + five reject surfaces |
 | Overall | **complex** | matches `complexity:complex` |
 
 ## 9. Residuals (documented, not chased)
@@ -309,4 +310,23 @@ review's reproduced hole); the plan §6-17 supersede-boundary test was added (it
 WITH `extractedFrom` and asserts NEITHER writer anchors; the `EventAPI` reject message no longer
 calls a provenance key an embedding field; and the ci-surfaces comments were corrected
 (`edges.py` selects `sdk`, not `ep`, so the `ep` registration was dropped as unjustified; the lane is
-embedded-without-URI / docker-server-with-URI via the #1647 redirect).
+DOCKER (the #1647 default) — a URI-less run FAILS at the session fixture, and the file is
+deliberately NOT carve_out-registered).
+
+**Cycle 6 — code review round 4 (re-review of `ffc5197f4..637bcf8ad`).** The round-3 predicate
+hardening exposed an asymmetry the predicate could not fix on its own: `resolve_source_versions`
+admitted a hash on truthiness (`h` is truthy for `'   '`), so a whitespace-only `contentHash` —
+reachable from `create_source(url, kind, contentHash='   ')`, no validation — was written LIVE
+(node carrier `[[DOC,'   ']]`, edge `r.sourceVersion='   '`, since `_anchor_on_create` nulls only
+`''`) and DROPPED at replay by `_valid_transit_pairs`: `derived != replay(journal)` for a
+public-API input, the exact parity class this change exists to close. **Folded:** the producer now
+strip-tests (`if isinstance(h, str) and h.strip()`), so both lanes treat blank as honest-absent;
+a LIVE-producer test (`test_whitespace_hash_gets_no_anchor_and_survives_rebuild`) asserts live ==
+replay AND `check_consistency` healthy, so the two halves are pinned together; the
+`_valid_transit_pairs` docstring no longer claims "`_source_version_transit` skips blank" (it is a
+pure mapper and skips nothing — only the now-strip-testing `resolve_source_versions` does); both
+call-site shape comments name the non-blank member rule; and the §3 `EventAPI` sketch, the §8
+"four reject surfaces" row and §10's lane sentence were corrected to match §2/§3/§4/§7 and the
+corrected ci-surfaces comment. Also: the whitespace-KEY half was checked and is NOT reachable — a
+blank `url` is refused by `create_source` (`url must be a non-empty string`), and a padded url
+resolves to its non-blank padded key, so `pair[0].strip()` cannot drop a legitimate pair.
