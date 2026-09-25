@@ -56,6 +56,7 @@ aboutObjects: tortoise
 | #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |
 | #2514 planted-operator (layer-2) corpus + grading scoping | `docs/scoping/2026-09-07-2514-operator-corpus.md` |
 | #4620 Pi capture seam executable verification — scope + plan (installed-artifact fired check; `session_verify` disclosure; manual-only residual for objective 1) | `docs/scoping/2026-09-22-4620-pi-capture-verification.md` · `docs/plans/2026-09-22-4620-pi-capture-verification.md` |
+| #2535 invited-user onboarding — what "joining an org" means; the membership model as it is, the member connect gap after the (shipped) skip, multi-org, and the recorded decisions (POLICY A · #2789 · #2534) | `docs/scoping/2026-09-25-2535-invited-user-onboarding-design.md` |
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
