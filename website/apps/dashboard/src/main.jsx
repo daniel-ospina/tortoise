@@ -1233,12 +1233,6 @@ function claimIntentInFlight() {
   const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
 
-  // Connect-step validity guard: keeps `wizardHarness` on a leaf the connect step
-  // can render. It cannot fire while the legacy wizard is off — `wizardHarness`
-  // starts at 'claude' and nothing persists or hydrates it. It guards the A0
-  // rollback path: with `LEGACY_WIZARD_ARCHIVED` back on, the archived tabs map
-  // the full `HARNESS_ORDER` (which still carries 'chatgpt') into
-  // `setWizardHarness`, and this resets that pick to 'pi'.
   React.useEffect(() => {
     // #2912: 'codexDesktop' is a first-class leaf now (the Codex chooser's
     // Desktop surface), so it is a valid value too.

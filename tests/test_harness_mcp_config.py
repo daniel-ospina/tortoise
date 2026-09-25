@@ -542,10 +542,10 @@ class TestDocsPageAndSkillConfig:
         section = self._mcp_section()
         start = section.find('<h4 id="chatgpt">')
         assert start != -1, "docs #mcp must carry a ChatGPT carrier row (#4836)"
-        # Bound the slice to the row's own end — the next heading OR the hosted
-        # card's callout, which follows the row and carries the slashed form —
-        # so the literals below cannot be satisfied elsewhere in the section
-        # (the id is un-anchored because the docs indent their `<h4>` rows).
+        # Bound the slice to the row's own end — the next heading OR the
+        # hosted card's callout, which follows the row — so the literals below
+        # cannot be satisfied elsewhere in the section (the id is un-anchored
+        # because the docs indent their `<h4>` rows).
         row = section[start:]
         for delim in ('<p class="callout">', "<h3", "<h4"):
             cut = row.find(delim, 1)
