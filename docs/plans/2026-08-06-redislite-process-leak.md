@@ -266,7 +266,7 @@ proj = FalkorProjection('/tmp/custom.db', allow_nonstandard_path=True)
 
 **Step 1:** Write verification command (grep). 
 **Step 2:** Run migration edits.
-**Step 3:** Run grep → 0 matches; run **two representative scripts (R2 P3 fix — now specified): `python graph-scripts/bp_approach_cycle1.py` (was relative-path fix, category a) + `python graph-scripts/fix_6704_operational_grounding.py` (was absolute-path, category b)** → both work against canonical path.
+**Step 3:** Run grep → 0 matches; run **two representative scripts (R2 P3 fix — now specified): `uv run python graph-scripts/bp_approach_cycle1.py` (was relative-path fix, category a) + `uv run python graph-scripts/fix_6704_operational_grounding.py` (was absolute-path, category b)** → both work against canonical path.
 **Step 4:** Commit
 
 ### Task 10: Migrate library code (pipeline_cli, backup, __main__, mcp_server, sdk, ingest, hosted_api, validation/, test_cross_ontology, smoke_test)
