@@ -1029,6 +1029,7 @@ surfaces:
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
+  - test_write_path_unreachable_seam_5148.py
   - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py

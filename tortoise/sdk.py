@@ -2957,9 +2957,12 @@ class TortoiseSDK:
             try:
                 from .embeddings import stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100
-                # #5148 review: the seam MODULE is unreachable (a damaged
-                # partial install — `numpy` is a core dependency). The graph
-                # mutation has ALREADY happened by the time we get here, so
+                # #5148 review: the seam is unimportable at this call site —
+                # see `EventAPI._point` for what that does and does not cover
+                # (not a missing-core-dep install; a failing import hook, and
+                # the principle that a write must not depend on an import).
+                # The graph mutation has ALREADY happened by the time we get
+                # here, so
                 # raising would hand the caller an ImportError for a write
                 # that SUCCEEDED, and would then skip `log.append` below —
                 # the exact contract that call site honours ("a log-write

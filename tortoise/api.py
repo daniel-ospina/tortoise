@@ -114,15 +114,19 @@ class EventAPI:
             try:
                 from .embeddings import encode_for_store, stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100
-                # #5148: the SEAM MODULE itself is unreachable — a damaged or
-                # partial install (`numpy` is a core dependency, so this is an
-                # environment fault, not a supported configuration). A write
-                # must still not fail on it, which is the rule this block
-                # already follows for an unavailable EMBEDDER. PRESENCE IS
-                # OWNERSHIP holds regardless, and NOTHING is lost by skipping
-                # the stamp: with no vector, `stamp_journal_embedding` only
-                # re-sets `embedding` to the `None` written below, and its
-                # attestation block requires a vector to fire.
+                # #5148: the seam MODULE is unimportable AT THIS MOMENT. Note
+                # what this does NOT claim: `tortoise.embeddings` is imported
+                # transitively at package-import time (sdk -> cross_lens), and
+                # `numpy` is a core dependency, so a plain missing-dependency
+                # install never reaches here. What it covers is an import hook
+                # or an import environment that fails at the call site — and
+                # the principle that a WRITE must not depend on an import
+                # succeeding, which is the rule this block already follows for
+                # an unavailable EMBEDDER. PRESENCE IS OWNERSHIP holds
+                # regardless, and NOTHING is lost by skipping the stamp: with
+                # no vector, `stamp_journal_embedding` only re-sets `embedding`
+                # to the `None` written below, and its attestation block
+                # requires a vector to fire.
                 stamp_journal_embedding = None
             if stamp_journal_embedding is not None:
                 try:
@@ -202,10 +206,10 @@ class EventAPI:
             try:
                 from .embeddings import stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100
-                # #5148 review: the same environment-fault lane as `_point` —
-                # an unreachable seam MODULE must not fail a write. Only the
-                # stamp's normalisation safety net is lost; the key is already
-                # present, so PRESENCE IS OWNERSHIP is intact.
+                # #5148 review: the same import-at-the-call-site lane as
+                # `_point` — an unimportable seam must not fail a WRITE. Only
+                # the stamp's normalisation safety net is lost; the key is
+                # already present, so PRESENCE IS OWNERSHIP is intact.
                 stamp_journal_embedding = None
             if stamp_journal_embedding is not None:
                 stamp_journal_embedding(p, creating=False)

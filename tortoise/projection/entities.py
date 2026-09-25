@@ -253,8 +253,19 @@ def _record_embedding_identity(p: dict, warned: set) -> None:
     Point and bury the signal in O(N) identical warnings. The mismatch is
     keyed by the identity pair, so every DISTINCT divergence still reports.
     """
-    from tortoise.embeddings import embedding_identity
-    cur_model, cur_rev = embedding_identity()
+    try:
+        from tortoise.embeddings import embedding_identity
+        cur_model, cur_rev = embedding_identity()
+    except Exception:  # noqa: BLE001, RUF100
+        # #5119/#5148 review: this is an ADVISORY warning path, and it runs
+        # inside the recovery replay (`_upsert_point_props` -> here, once per
+        # journalled vector). Letting it raise aborted EVERY replayed event, so
+        # `recover_from_log` counted zero applied and refused the DB with
+        # "replay produced an empty graph" — the #5119 failure shape,
+        # re-entered through the identity CHECK rather than the write. A
+        # replay must never fail on a warning: with no configured identity
+        # there is nothing to compare the record against, so say nothing.
+        return
     j_model = p.get("embedding_model")
     j_rev = p.get("embedding_revision")
     if j_model is None and j_rev is None:

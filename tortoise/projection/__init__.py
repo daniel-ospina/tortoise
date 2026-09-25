@@ -6284,7 +6284,18 @@ class FalkorProjection(
         """
         if self._vector_index_api is None:
             return None  # no Point vector index → brute-force, any width
-        from ..embeddings import EMBEDDING_DIM
+        try:
+            from ..embeddings import EMBEDDING_DIM
+        except Exception:  # noqa: BLE001, RUF100
+            # #5148 review: this is read on the REPLAY path (`_upsert_point_props`,
+            # outside any `try`), so an unimportable seam here would abort every
+            # replayed event and re-enter the #5119 failure shape. The width is
+            # an ENFORCEMENT guard, not data: degrading to the property's
+            # documented "any width" answer restores the journalled vector and
+            # keeps the graph, which is strictly better than refusing to rebuild
+            # it. (An index that cannot be described is also not one this store
+            # can use to reject a vector usefully.)
+            return None
         return EMBEDDING_DIM
 
     def backfill_document_search_text(self) -> int:
