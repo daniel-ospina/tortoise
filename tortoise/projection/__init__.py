@@ -6787,6 +6787,54 @@ class FalkorProjection(
                 _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
                 return 0
             prop = _ENTITY_ID_PROP[label]
+            if label == "Source":
+                # #3998: this arm replays a caller-supplied property map onto a
+                # `:Source` — so it is a WRITE PATH, and the declaration has to
+                # gate it exactly as `_upsert_source` and `_update_entity` are
+                # gated. Without this, replay re-materialises arbitrary
+                # undeclared keys (i.e. a raw payload recorded by an earlier
+                # head) on every rebuild, which is the one place the "index, not
+                # a copy" guarantee cannot be retired by fixing the live writer:
+                # the bytes are already in the journal on any deployment that
+                # ran one. Denied keys are DROPPED and WARNED, never silently.
+                from .entities import (
+                    _SOURCE_SERVER_MANAGED_PROPS,  # local: #2662 cycle
+                    filter_source_props,
+                )
+
+                state, _denied = filter_source_props(state)
+                # The SERVER-MANAGED keys are dropped too (#3998 review round 5).
+                # A `SourceCreated` record is the sole owner of the absent-raw
+                # state; there is no legitimate `EntityMutated` producer of it
+                # (the live route refuses it). Replaying one let a journal line
+                # written by an earlier head — e.g. the `rawState=None` CLEAR that
+                # round 3's open guard journalled — resurrect a permanently
+                # deleted raw on every rebuild. That is the silent loss this
+                # issue exists to prevent, on the one path whose comment already
+                # says a live-writer fix cannot retire the bytes.
+                _sm = sorted(k for k in state if k in _SOURCE_SERVER_MANAGED_PROPS)
+                if _sm:
+                    for k in _sm:
+                        state.pop(k)
+                    _denied = sorted(_denied + _sm)
+                if _denied:
+                    logger.warning(
+                        "rebuild: EntityMutated for :Source %r carried %d "
+                        "undeclared property name(s) %s — DROPPED, not replayed "
+                        "(#3998: the graph indexes the raw, it is not the raw "
+                        "store; event_id=%s)",
+                        rid, len(_denied), _denied, ev.get("event_id"))
+                if not state:
+                    # Nothing declared to apply. Still a MATCH, so the survivor
+                    # count reflects the record — but do not run an empty SET.
+                    r = self.g.query(
+                        f"MATCH (n:{label} {{{prop}:$id}}) RETURN count(n)",
+                        params={"id": rid},
+                    )
+                    matched = r.result_set[0][0] if r.result_set else 0
+                    if not matched:
+                        _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
+                    return matched or 0
             r = self.g.query(
                 f"MATCH (n:{label} {{{prop}:$id}}) SET n += $s RETURN count(n)",
                 params={"id": rid, "s": state},

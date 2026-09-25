@@ -414,6 +414,74 @@ class _EntityHandlers:
         # they were historically dropped by the fixed-field MERGE and
         # are now persisted as arbitrary props via _persist_extra_props.
     })
+    # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
+    # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
+    # open passthrough (mirroring `_POINT_LIST_PROPS`' undeclared-list denial).
+    #
+    # ⛔ A blocklist of payload KEY NAMES is not a fix and cannot be one:
+    # measured on the open passthrough, `text`, `snippet`, `excerpt`,
+    # `transcript`, `bodyText`, `rawText`, `raw_text`, `data`, `blob`, `bytes`,
+    # `payloadText`, `contentText`, `content_text`, `fullText`, `full_text` AND
+    # a list-valued `chunks` ALL persisted a 2 KB raw body verbatim on the node,
+    # so "0 raw payload bytes" was false for every name nobody had thought of
+    # yet. Declaring the surface is what makes the criterion a property of the
+    # WRITE PATH rather than of a list someone must keep extending.
+    #
+    # ⛔ Enforced HERE, not only in the SDK: `create_source` is not the only
+    # producer — `rebuild_all` replays `SourceCreated` through this same method,
+    # so a journal written while the passthrough was open would otherwise
+    # re-materialise its payload on every rebuild, the documented recovery path
+    # restoring the exact bytes the contract forbids.
+    # #3998 (D30): the full DECLARED node-property surface of a :Source — the
+    # single source of truth for "what may be on this node". Three things read
+    # it: the closed passthrough below (:data:`_SOURCE_EXTRA_PROPS` is its
+    # extra-props subset), the generic entity write in `sdk._update_entity`
+    # (which reaches `:Source` too and would otherwise bypass the declaration),
+    # and the provenance read, which filters the returned bag to it rather than
+    # handing back whatever a pre-#3998 writer left behind.
+    #
+    # ⚠️ WHAT THIS DOES AND DOES NOT ESTABLISH. It establishes that the node's
+    # property surface is DECLARED: a caller-supplied property map cannot carry
+    # an undeclared key onto a `:Source` — and so no un-named-in-advance spelling
+    # of a raw payload can reach the node — on the caller-prop write paths
+    # (`create_source`/`_upsert_source`, `_update_entity`) and on journal replay
+    # (the `EntityMutated` fold arm below). It does NOT bound the VALUES of the
+    # declared metadata fields: a caller who deliberately writes a 2 KB body
+    # into `title` still stores 2 KB under `title`. Bounding those is a value
+    # policy for short metadata (what IS the maximum title?), which is a product
+    # decision this change does not take — stated here rather than implied away.
+    #
+    # This is the set of properties that may APPEAR on the node, which is why it
+    # is what the READ filter and the fold consult. It is deliberately BROADER
+    # than `_SOURCE_EXTRA_PROPS` (what a CALLER may set through the passthrough):
+    # `reliability*` is minted by an in-tree producer, not by a caller, so it
+    # must survive the read filter and must still be refused on the write side.
+    # `test_the_declaration_covers_every_in_tree_source_writer` enforces that
+    # this stays a superset of what the in-tree writers actually produce — the
+    # check whose absence let `reliability*` be dropped from the read bag.
+    _SOURCE_NODE_PROPS: frozenset = frozenset({
+        # identity
+        "id", "url", "canonicalUrl", "urlAliases", "sourceKind", "externalId",
+        # version
+        "contentHash", "version", "ingestedAt", "updatedAt", "sourceDate",
+        # availability (#3998 — the third value on the source record)
+        "rawState", "rawStateAt",
+        # declared metadata
+        "title", "format", "name", "team", "credibilityTier", "is_episodic",
+        "sourcePath", "_searchText", "provenance_spans",
+        # the session-capture writer (`sdk._materialize_session_source`)
+        "sessionId", "capturedAt", "summary", "topics", "eventId",
+        # the reliability cache (`sdk.get_source_reliability`) — an in-tree
+        # producer, so these must survive the read filter. Omitting them made
+        # `get_provenance_chain` silently drop the cache it had just returned.
+        "reliability", "reliabilityComponents", "reliability_derived_at",
+    })
+    _SOURCE_EXTRA_PROPS: frozenset = frozenset({
+        "credibilityTier",   # create_source(tier=)
+        "sourceDate",        # create_source(sourceDate=) — the evidence-age clock
+        "is_episodic",       # create_source(is_episodic=) — the quota discriminator
+        "name", "team", "format", "provenance_spans",  # in-tree callers
+    })
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
         "title", "ingestedAt", "version", "externalId", "updatedAt",
@@ -422,6 +490,23 @@ class _EntityHandlers:
         # open-set passthrough (which would let a payload clobber the
         # canonical identity).
         "canonicalUrl", "urlAliases",
+        # #3998 (D30): the ABSENT-RAW state — the THIRD value on the source
+        # record (identity = url/canonicalUrl, version = contentHash,
+        # availability = rawState; STORAGE §9.4 ③ "a third value on that
+        # record, not a fourth kind of source").  Like the identity props
+        # above, these are owned by the fixed SET clauses and never by the
+        # open-set passthrough, and for the same reason plus one more: a
+        # payload must not be able to CLEAR a recorded absence, and an upsert
+        # that carries no state must PRESERVE the stored one (the contentHash
+        # anchor rule, applied to availability).
+        "rawState", "rawStateAt",
+        # `raw_state` (snake_case) is a DEFENSIVE ALIAS: `create_source` maps the
+        # sanctioned `raw_state=` keyword to the camelCase ev key, so no writer
+        # emits it today — but a future or out-of-tree producer building a
+        # SourceCreated payload by hand must not be able to persist the
+        # snake_case spelling verbatim, which would put the state in TWO places
+        # and make the read-side default ambiguous.
+        "raw_state",
         # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
         # the MERGE clause, never persisted verbatim snake_case) and
         # `_searchText` (set by the write path, coalesce-on-create /
@@ -530,7 +615,8 @@ class _EntityHandlers:
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
                               ev: dict, handled_keys: frozenset,
-                              list_props: frozenset | None = None) -> dict:
+                              list_props: frozenset | None = None,
+                              allow_keys: frozenset | None = None) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -548,6 +634,10 @@ class _EntityHandlers:
         # persisted only when its key is declared there; an undeclared list is
         # denied, never written raw. `None` keeps the pre-existing permissive
         # behaviour for the non-Point layers.
+        #3998 (D30): when `allow_keys` is supplied the passthrough becomes a
+        CLOSED set — a key not in it is denied, whatever its name. This is the
+        only form that can carry a "no raw payload" guarantee, because the
+        payload-bearing name space is unbounded. Used by the `:Source` layer.
 
         Returns the dict of props actually persisted (empty when none) so the
         caller can report unrecognised keys (#2795 drift warning).
@@ -556,6 +646,8 @@ class _EntityHandlers:
         extra = {}
         for k, v in ev.items():
             if k in skip or v is None or not _is_persistable_prop_value(v):
+                continue
+            if allow_keys is not None and k not in allow_keys:
                 continue
             # #2958 review: a TUPLE is persisted by the engine as an array
             # exactly like a list, so the list policy must cover both —
@@ -2386,6 +2478,15 @@ class _EntityHandlers:
             is completed — the JOINT-E2E sweep's stub-handling);
           - ``s.sourcePath = coalesce($sp, s.sourcePath)`` (§4.1 — the
             sanctioned source_path route maps to camelCase on the node);
+          - ``s.rawState``/``s.rawStateAt`` (#3998, D30): the ABSENT-RAW state
+            — the third value on the source record, after identity (url) and
+            version (contentHash). Written ON CREATE only when the caller
+            carries one, and PRESERVED ON MATCH whenever the incoming
+            ``$rawState`` is NULL — the contentHash anchor rule applied to
+            availability, so a re-ingest cannot resurrect a raw that was
+            deleted between the two writes. Deliberately INDEPENDENT of the
+            hash-diff gate above: a state change with an unchanged body must
+            still land;
           - ``s._searchText`` — coalesce ON CREATE, OVERWRITE on hash-diff
             MERGE (§4.1 cycle-4 merge semantics; E2E-5 retitle refresh);
           - ``s.__runId = $rid`` on the ON CREATE branch ONLY when
@@ -2432,6 +2533,12 @@ class _EntityHandlers:
             "              s.version = 1, "
             "              s.externalId = $ext, "
             "              s.sourcePath = coalesce($sp, s.sourcePath), "
+            # #3998: the absent-raw state.  Written only when the caller
+            # supplies one — a null leaves the property UNWRITTEN, so "nothing
+            # recorded" stays the read-side default (present) and no source
+            # gains a noise property it never needed.
+            "              s.rawState = $rawState, "
+            "              s.rawStateAt = $rawStateAt, "
             "              s._searchText = $st" + run_clause + " "
             # JOINT-E2E (epic #900 #1032): when the caller carries NO
             # contentHash ($hash IS NULL — the bundle ingest source-item
@@ -2459,6 +2566,16 @@ class _EntityHandlers:
             "           s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
             "               THEN coalesce(s.urlAliases, []) "
             "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
+            # #3998: availability is PRESERVED by an upsert that carries no
+            # state — the same rule the contentHash anchor follows above.  The
+            # gate is the incoming STATE, not the hash diff: re-fetching the
+            # same version must not resurrect a raw that was deleted between
+            # the two writes.  A caller that DOES carry a state moves it
+            # (``raw_state='present'`` is the "the raw came back" write).
+            "           s.rawState = CASE WHEN $rawState IS NULL THEN s.rawState "
+            "                        ELSE $rawState END, "
+            "           s.rawStateAt = CASE WHEN $rawState IS NULL THEN s.rawStateAt "
+            "                         ELSE coalesce($rawStateAt, $now) END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                        THEN $st ELSE s._searchText END",
@@ -2473,12 +2590,94 @@ class _EntityHandlers:
                 "ext": ev.get("externalId", ""),
                 "sp": ev.get("source_path"),
                 "st": search_text,
+                # #3998: None (not a default string) so the ON CREATE clause
+                # LEAVES THE PROPERTY UNWRITTEN and the ON MATCH clause
+                # PRESERVES — see both clauses above.
+                "rawState": ev.get("rawState"),
+                "rawStateAt": ev.get("rawStateAt"),
                 **({"rid": merge_run_id} if merge_run_id is not None else {}),
             },
         )
-        # #228: persist arbitrary caller-supplied props
-        self._persist_extra_props(
+        # #228: persist arbitrary caller-supplied props — CLOSED to the
+        # declared :Source surface since #3998 (see _SOURCE_EXTRA_PROPS). An
+        # undeclared key is DENIED rather than written, so no spelling of a raw
+        # payload can reach the node and no journal replay can restore one.
+        # The DENIAL is logged (#2795's drift warning, applied to this layer):
+        # silently dropping a prop a caller sent is how a declaration rots into
+        # a mystery, and the return value exists precisely to feed this.
+        _persisted = self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
-            ev, self._SOURCE_HANDLED,
+            ev, self._SOURCE_HANDLED, allow_keys=self._SOURCE_EXTRA_PROPS,
         )
+        _denied = {
+            k for k in ev
+            if k not in _persisted and k not in self._META_KEYS
+            and k not in self._SOURCE_HANDLED and k not in self._SOURCE_EXTRA_PROPS
+            and ev.get(k) is not None
+        }
+        if _denied:
+            logger.warning(
+                "#3998: denied %d undeclared :Source prop(s) on %s: %s — the "
+                "graph INDEXES the raw and is not the raw store (D30). Add the "
+                "key to _SOURCE_EXTRA_PROPS if it is genuine metadata.",
+                len(_denied), key, sorted(_denied),
+            )
         return r
+
+
+#: #3998 (D30): the declared `:Source` node-property surface, exposed at module
+#: level so the OTHER write path that reaches `:Source` — the generic
+#: `sdk._update_entity` tenant surface — and the provenance READ can enforce
+#: and filter against the SAME declaration. Two copies of this set would be two
+#: contracts, and the one that drifts is the one that stops being true.
+_SOURCE_NODE_PROP_NAMES: frozenset = _EntityHandlers._SOURCE_NODE_PROPS
+# The SERVER-MANAGED subset of the declaration: written only by `_upsert_source`'s
+# fixed clauses (and validated by `raw_state.validate_raw_state`), never by a
+# caller-supplied property map. `_update_entity` refuses these on a `:Source` —
+# its allowlist is the whole declaration (which MUST admit `rawState`, or the
+# state could not be written at all), so without this second set the documented
+# tenant route could CLEAR a recorded absence by passing `rawState=None`, or
+# persist an unvalidated `rawState='banana'` (#3998 review round 4).
+#
+# Put this IN FRONT of the declaration, never instead of it: the declaration is
+# the read filter's contract (what may appear), this is the write filter's
+# (what a caller may set).
+_SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
+    "rawState", "rawStateAt",
+})
+
+# The IDENTITY keys of a `:Source` — also refused to a caller-supplied map, and
+# also dropped on replay (#3998 review round 5). `create_source` treats these as
+# server-managed (it MERGEs on `url` and mints `canonicalUrl`/`urlAliases`), so a
+# caller map must not move them: measured, `update_entity(src_url, url=<2 KB
+# body>)` rewrote the MERGE key, and after a rebuild produced DUPLICATE `:Source`
+# nodes and an EMPTY provenance chain for the Point — i.e. the payload route and
+# a silent provenance loss at once. (`id` is already refused by
+# `_sanitize_props(reject_id=True)` at the SDK boundary.)
+_SOURCE_IDENTITY_PROPS: frozenset = frozenset({
+    "url", "canonicalUrl", "urlAliases",
+})
+
+
+def filter_source_props(props: dict) -> tuple[dict, list[str]]:
+    """Split a property map for a `:Source` into (declared, denied). #3998.
+
+    ONE filter for the READ paths and for a REPLAYED property map. The live write
+    paths enforce the same declaration through two deliberately DIFFERENT sets,
+    because a caller may set less than may appear on the node:
+
+      * `_upsert_source` (the caller passthrough) uses `_SOURCE_EXTRA_PROPS` —
+        the narrow set a caller is allowed to ADD via `create_source(...)`.
+      * `_update_entity` uses `_SOURCE_NODE_PROP_NAMES`, minus the server-managed
+        and identity subsets it refuses outright.
+      * the replay fold and the read paths (this function) use
+        `_SOURCE_NODE_PROP_NAMES` — a replayed map is already-persisted state, so
+        the question is what may APPEAR, not what a caller may set.
+
+    Stated plainly because an earlier revision of this docstring claimed a single
+    uniform enforcer, which the code does not do — and the two-set shape is the
+    design, not a slip.
+    """
+    denied = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
+    kept = {k: v for k, v in props.items() if k in _SOURCE_NODE_PROP_NAMES}
+    return kept, denied

@@ -3,6 +3,13 @@ surfaces:
   api:
   - test_1162_add_operator_local_svbp.py
   - test_3926_error_prop_guard.py  # #3926: the MCP error-prop success-path guard; same `api` surface as test_bridge_mcp.py / test_mcp_server_auth_modes.py (tortoise/mcp_server.py is a SHARED_MODULE — full matrix)
+  # #3998 (D30): the absent-raw state is a first-class VALUE on the source
+  # record, and the provenance read paths report it — labelled per cause,
+  # never raising, never holding the bytes. Registered under `api` because the
+  # change is carried by `tortoise/sdk.py`, a SHARED_MODULE (so it runs on the
+  # full matrix anyway); the registration is what pins it to a surface at all,
+  # without which a guard whose own file changes alone never runs.
+  - test_3998_raw_absent_state.py
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)

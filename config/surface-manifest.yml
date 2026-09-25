@@ -17,6 +17,20 @@ response_fields:
   field: why
   emitted_when: 'TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)'
   unchanged_when_off: 'yes — the response is byte-identical when the flag is off'
+# #3998 (D30): the ABSENT-RAW state, added in the SDK layer (`tortoise/sdk.py`)
+# — NOT inside a tool function, so the D2 carve-out holds (a tool-body edit is
+# what reds the gate as "a changed implementation"). Recorded here because
+# every response-field addition is, and because the entry is the only record
+# of what we now tell agents we return. NOT flag-gated: the keys are ABSENT
+# (not null) in the sourceless case, so those responses stay byte-identical.
+- response: sdk:provenance
+  field: raw
+  emitted_when: 'the point has an extractedFrom :Source — the index entry for the raw: source_id, content_hash, raw_state, raw_state_at, available, permanent, retryable, label, message'
+  unchanged_when_off: 'n/a — not flag-gated; the key is absent when the point has no source, so a sourceless response is byte-identical'
+- response: sdk:get_provenance_chain
+  field: raw
+  emitted_when: 'always, on every returned item — the same index entry (the chain is the Source link, which exists whether or not the raw does)'
+  unchanged_when_off: 'n/a — not flag-gated; the ENTITY half also changed: a source with no :references edge now returns one item with entity=None/labels=[] instead of silently returning [] (the key set stays stable, so no consumer KeyErrors)'
 counts:
   tools: 82
   sdk_public_methods: 150

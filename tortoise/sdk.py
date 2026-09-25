@@ -44,13 +44,26 @@ from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .raw_state import (  # #3998: the absent-raw state
+    RAW_ABSENT_STATES,
+    RAW_PRESENT,
+    raw_entry,
+    validate_raw_state,
+)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         resolve_pool_size)
 from . import monitoring
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
+from .projection.entities import (  # #3998: the declared :Source surface
+    _SOURCE_IDENTITY_PROPS,
+    _SOURCE_NODE_PROP_NAMES,
+    _SOURCE_SERVER_MANAGED_PROPS,
+    filter_source_props,
+)
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
+from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
@@ -10185,6 +10198,24 @@ class TortoiseSDK:
 
     # ── P1-4: Entity Linking ────────────────────────────────────
 
+    def _raw_entry_for_point(self, point_id: str) -> dict | None:
+        """#3998: the point's raw INDEX ENTRY, or None when it has no source.
+
+        The entry is identity + version + availability — a reference, never a
+        copy (``raw_state.raw_entry``). Returns None (not an exception) when
+        the point has no ``extractedFrom`` source, so a read path can call
+        this unconditionally.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
+            "RETURN properties(src) LIMIT 1",
+            params={"pid": point_id},
+        ).result_set
+        if not rows:
+            return None
+        return raw_entry(rows[0][0], source_id=(rows[0][0] or {}).get("url"))
+
     def provenance(self, point_id: str) -> dict:
         """Provenance chain — "Who decided this?" Point → Subject → delegation."""
         point = self.get_point(point_id)
@@ -10193,6 +10224,15 @@ class TortoiseSDK:
         author = point.get("authoredBy", "")
         chain = {"point": {"id": point_id, "content": (point.get("content") or "")[:200],
                            "authoredBy": author}}
+        # #3998 (D30): the raw is OPTIONAL. Attach the source's index entry —
+        # including the absent-raw state — so a memory whose raw was deleted,
+        # went offline, or had access revoked is still readable AND SAYABLE.
+        # Additive: emitted only when the point HAS an extractedFrom source,
+        # so a sourceless point's response is byte-identical. Set BEFORE the
+        # early returns below, so every exit path carries it.
+        _raw = self._raw_entry_for_point(point_id)
+        if _raw is not None:
+            chain["raw"] = _raw
         if not author:
             return chain
         proj = self._get_proj()
@@ -17916,7 +17956,25 @@ class TortoiseSDK:
         # more deterministic than the previous scan-order-arbitrary LIMIT 1.
         resolved = self._get_proj()._resolve_entity(
             id_val, by_id=True, by_eventId=True, by_url=True)
-        return resolved[0]["properties"] if resolved else {}
+        if not resolved:
+            return {}
+        _props = resolved[0]["properties"]
+        # #3998 (D30) review round 4: this is the PRIMARY entity read and it is
+        # exposed as the MCP tool `tortoise_get_entity`, so a payload-bearing
+        # `:Source` written before the surface was declared came straight back
+        # through it. `get_provenance_chain` was filtered and this was not — the
+        # same leak, one function away, which is why the filter now lives in one
+        # place (`projection.entities.filter_source_props`) instead of being
+        # re-stated per read path.
+        if resolved[0].get("label") == "Source":
+            _props, _denied = filter_source_props(_props)
+            if _denied:
+                _logger.warning(
+                    "get_entity: a :Source node for %r carries %d undeclared "
+                    "property name(s) %s — WITHHELD from the read (#3998: the "
+                    "graph indexes the raw, it is not the raw store). Run "
+                    "`rebuild_all` to scrub them.", id_val, len(_denied), _denied)
+        return _props
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
@@ -17974,6 +18032,57 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
+        # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
+        # per-label branch below writes caller props with a live `SET n += $p`.
+        # Without this the closed :Source surface declared in
+        # `projection/entities.py` would be bypassed by the documented tenant
+        # route (`tortoise_update_entity`), putting raw bytes on the node AND
+        # into the EntityMutated journal record — where a rebuild restores them.
+        # Measured before this guard: `create_source(...)` then
+        # `update_entity(url, text=<2 KB body>)` persisted the body as `s.text`
+        # and it SURVIVED `rebuild_all`.
+        if props:
+            # The predicate MUST be the one the write below uses
+            # (`{label: {_ENTITY_ID_PROP[label]: $id}}`), or the guard protects a
+            # node the write cannot reach: an earlier version resolved by
+            # `n.url = $id OR n.id = $id`, so a `:Source` STUB (minted by
+            # `_link_source`, which carries `url` and no `id`) was refused a
+            # declared update whose write would have been a no-op anyway — an
+            # error message naming a node the caller was never touching.
+            _src_id_prop = _ENTITY_ID_PROP.get("Source", "id")
+            _is_source = self._get_proj().g.query(
+                f"MATCH (n:Source {{{_src_id_prop}:$id}}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _is_source:
+                _managed = sorted(
+                    k for k in props
+                    if k in _SOURCE_SERVER_MANAGED_PROPS or k in _SOURCE_IDENTITY_PROPS
+                )
+                if _managed:
+                    # #3998: two subsets are refused through the generic surface.
+                    # The STATE is server-managed (see below). The IDENTITY keys
+                    # are refused because they are the node's MERGE key: measured,
+                    # `update_entity(src_url, url=<2 KB body>)` rewrote it, and
+                    # after a rebuild that produced duplicate `:Source` nodes and
+                    # an EMPTY provenance chain for the Point — a payload route
+                    # and a silent provenance loss in one call.
+                    raise ValueError(
+                        f"{_managed!r} is server-managed on a :Source and "
+                        f"cannot be set through the generic entity surface "
+                        f"(#3998/D30). Record an absence with "
+                        f"`create_source(..., raw_state=...)`, which validates "
+                        f"the value (accepted: {sorted(RAW_ABSENT_STATES)} or "
+                        f"{RAW_PRESENT!r})."
+                    )
+                _undeclared = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
+                if _undeclared:
+                    raise ValueError(
+                        f"{_undeclared!r} cannot be set on a :Source — the "
+                        f"graph INDEXES the raw, it is not the raw store "
+                        f"(D30/#3919, #3998). Declared :Source properties: "
+                        f"{sorted(_SOURCE_NODE_PROP_NAMES)}."
+                    )
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
         # its Point branch below writes caller props straight through
@@ -20702,6 +20811,7 @@ class TortoiseSDK:
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
                       source_path: str | None = None,
+                      raw_state: str | None = None,
                       is_episodic: bool | None = None,
                       _merge_run_id: str | None = None,
                       **props) -> dict:
@@ -20739,6 +20849,18 @@ class TortoiseSDK:
             create-only cadence would revert updated Sources to create-time
             state post-rebuild); replay re-MERGEs by url and the hash-diff-gated
             bump lands at the live converged value.
+          - ``raw_state=`` (#3998, D30) — the ABSENT-RAW state: one of
+            ``present`` / ``deleted`` / ``offline`` / ``access_revoked``.
+            Validated strictly (an unknown value raises ``ValueError``) and
+            PRESERVED by a later upsert that carries none, so a re-ingest
+            cannot resurrect a raw deleted between the two writes. Pass
+            ``raw_state="present"`` to record that a raw came BACK — that is
+            the only way to move a state off an absence, by design. The state
+            rides the ``SourceCreated`` journal, so it survives ``rebuild_all``.
+            ⚠️ This is the write half of the two-store model: the graph keeps
+            identity + version + availability and NEVER the bytes, so props
+            that would carry raw payload are refused (see ``_SOURCE_EXTRA_PROPS``
+            in ``projection/entities.py`` for the declared :Source surface).
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if not url or not url.strip():
@@ -20759,16 +20881,37 @@ class TortoiseSDK:
         # it (the sanitizer's docstring carve-out; §4.1). ``id`` overrides are
         # equally server-managed (node identity) — rejected here because
         # ``_create_entity``'s reject_id is bypassed for the sanctioned route.
-        for _k in ("sourcePath", "source_path", "id", "is_episodic"):
+        for _k in ("sourcePath", "source_path", "id", "is_episodic",
+                   "rawState", "rawStateAt", "raw_state"):
             if _k in props:
                 # #1501: name the actual sanctioned keyword per key (is_episodic
-                # became a sanctioned create_source keyword in this change).
+                # became a sanctioned create_source keyword in this change; #3998
+                # adds raw_state for the absent-raw state, server-managed for the
+                # same reason — a props payload must not be able to CLEAR a
+                # recorded absence, which is the whole point of the state).
                 sanctioned = ("source_path" if _k in ("sourcePath", "source_path")
+                              else "raw_state" if _k in ("rawState", "rawStateAt", "raw_state")
                               else _k)
                 raise ValueError(
                     f"{_k!r} is a server-managed field and cannot be set via "
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
+                )
+        # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
+        # is the CLOSED :Source property surface in `projection/entities.py`
+        # (`_SOURCE_EXTRA_PROPS`), which is the only form that can hold — a
+        # blocklist cannot enumerate the payload name space (measured: `text`,
+        # `snippet`, `transcript`, `chunks`, `blob`, … all persisted a 2 KB body
+        # on the open passthrough). This refusal exists so the COMMON mistake
+        # gets an actionable error instead of a silent drop; an unlisted
+        # spelling is still denied, one layer down.
+        for _k in ("content", "body", "raw", "payload", "raw_content", "rawContent"):
+            if _k in props:
+                raise ValueError(
+                    f"{_k!r} carries raw payload and cannot be stored on a "
+                    f":Source — the graph INDEXES the raw, it is not the raw "
+                    f"store (D30/#3919, #3998). Put the bytes in the raw store "
+                    f"and pass contentHash= instead."
                 )
         ev = {
             "url": url,
@@ -20783,6 +20926,15 @@ class TortoiseSDK:
             ev["is_episodic"] = is_episodic
         if source_path is not None:
             ev["source_path"] = str(source_path)
+        if raw_state is not None:
+            # #3998 (D30): the absent-raw state — the THIRD value on the source
+            # record, after identity (url) and version (contentHash). Validated
+            # HERE because the WRITE side is strict: silently dropping a
+            # recorded absence is the exact failure this issue closes.
+            # ``raw_state="present"`` is the "the raw came back" write.
+            ev["rawState"] = validate_raw_state(raw_state)
+            ev["rawStateAt"] = __import__('datetime').datetime.now(
+                __import__('datetime').timezone.utc).isoformat()
         if tier is not None:
             ev["credibilityTier"] = tier
         if sourceDate is not None:
@@ -21322,14 +21474,60 @@ class TortoiseSDK:
         return [dict(row[0]) for row in r.result_set]
 
     def get_provenance_chain(self, point_id: str) -> list:
-        """Return full provenance chain for a Point."""
+        """Return full provenance chain for a Point.
+
+        #3998 (D30): the raw is OPTIONAL — the chain must stay readable and
+        SAYABLE when the raw was deleted, is offline, or access was revoked.
+        Every item therefore carries ``raw``: the source's index entry
+        (identity + version + availability), never a copy of the raw and never
+        an exception. A source whose raw is gone still returns HERE — the node
+        and the ``extractedFrom`` edge are graph facts and do not depend on
+        the bytes.
+
+        ⛔ The ``references`` hop is ``OPTIONAL`` on purpose (#3998). It used to
+        be a REQUIRED edge, so a source with no referenced entity **dropped the
+        whole chain to ``[]``** — the read went SILENT about a provenance that
+        plainly existed. A source can have no entity (a raw indexed before
+        extraction, or one whose entities were withdrawn), and that is exactly
+        the state this issue says must stay sayable. ``LIMIT 1`` is kept so the
+        one-row-per-source shape is unchanged when the edge IS present.
+
+        The key set is STABLE: ``entity``/``labels`` are returned as
+        ``None``/``[]`` rather than omitted, so a caller iterating a non-empty
+        chain cannot ``KeyError`` on the case that previously produced ``[]``.
+        """
         proj = self._get_proj()
         r = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source)-[:references]->(entity) "
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
+            "OPTIONAL MATCH (src)-[:references]->(entity) "
+            # #3998 review round 5: `OPTIONAL` made the hop survivable, but a
+            # bare `LIMIT 1` then returned whichever source matched FIRST — so a
+            # Point with two sources (the #3263 many-to-many case) whose first
+            # source has no entity reported `entity=None` and HID the second,
+            # entity-bearing source the pre-change required-hop query returned.
+            # Prefer an entity-bearing row; fall back to the entity-less one, so
+            # the new survivable case is still reachable.
+            "WITH src, entity ORDER BY CASE WHEN entity IS NULL THEN 1 ELSE 0 END ASC "
             "RETURN properties(src) as source, properties(entity) as entity, labels(entity) as labels LIMIT 1",
             params={"pid": point_id},
         )
-        return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
+        return [
+            {
+                # #3998 (D30): the bag is filtered to the DECLARED :Source
+                # surface. A graph written before this change can still hold a
+                # payload-bearing Source (the passthrough was open), and this
+                # method edits `source` — so without the filter the read hands
+                # back the very bytes the write path now refuses, and the
+                # "never a copy of the raw" claim above would be false for
+                # every pre-existing node. The filter is the same declaration
+                # the write side enforces, so the two cannot drift.
+                "source": filter_source_props(row[0] or {})[0],
+                "raw": raw_entry(row[0], source_id=(row[0] or {}).get("url")),
+                "entity": dict(row[1]) if row[1] is not None else None,
+                "labels": list(row[2]) if row[2] is not None else [],
+            }
+            for row in r.result_set
+        ]
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
         """Create Source → Entity references edge (Ontology v3.1 §3.4).
