@@ -2371,7 +2371,16 @@ def tortoise_health() -> dict:
     tight fast-degrade bound. The allowance is resolved at CALL time
     (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
     set in the repo-root ``.env`` — loaded after this module imports
-    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
+    ``tortoise.monitoring`` — is honoured instead of frozen at import.
+
+    #3253 (health-truthful): the ``graph_size`` taxonomy count is bounded by
+    ``monitoring.GRAPH_SIZE_TIMEOUT`` on its own worker, so this tool's total
+    is ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT`` at
+    worst — never as long as a half-broken server stalls. When the count
+    cannot be measured, the report carries the per-call ``graph_size_error``
+    marker (``None`` when ``graph_size`` was really measured, so a 0 is a
+    genuinely empty graph; a string otherwise), instead of the previous
+    indistinguishable ok/0."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
