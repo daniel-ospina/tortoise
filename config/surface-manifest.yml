@@ -7,6 +7,16 @@ allowed_transforms:
 approval_status: pending-owner-approval
 approval_principal: null
 approval_pr: null
+# Response FIELDS are outside the frozen surface — the freeze is on tools and
+# endpoints — but each one is recorded here so this manifest stays the single
+# source of truth for what we tell agents we return. A field that is off by
+# default and leaves the response unchanged when off does not gate; an
+# unrecorded one has no approval behind it and the carve-out does not cover it.
+response_fields:
+- response: tortoise_analyze
+  field: why
+  emitted_when: 'TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)'
+  unchanged_when_off: 'yes — the response is byte-identical when the flag is off'
 counts:
   tools: 82
   sdk_public_methods: 150

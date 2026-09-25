@@ -1936,6 +1936,10 @@ jobs:
         run: python3 tools/surface-guard.py
       - name: The ordering lint (AC13)
         run: python3 tools/surface_manifest.py check
+      - name: The list is generated from the manifest and cannot drift from it
+        run: |
+          python3 tools/surface_manifest.py render
+          git diff --exit-code -- docs/product/mcp-sdk-surface.md
 
   # ── MERGE-PATH LATENCY: this aggregate keys on the SHORT legs only ────────
   # The required check's latency IS the merge path. This repo uses strict

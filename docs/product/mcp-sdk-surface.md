@@ -76,6 +76,62 @@ Daniel's review is what carries the approval.
 
 ---
 
+## What the gate compares — and what it does not
+
+The freeze this document serves is on **tools and endpoints**. The gate compares the live
+declaration against the approved list below. It fails on three kinds of name-level change:
+
+1. **A new tool** — an MCP tool that is not on the approved list.
+2. **A new endpoint** — a public SDK method that is not on the approved list.
+3. **An approved entry disappearing** — a tool or endpoint that is on the list and is no
+   longer offered.
+
+It also fails when the implementation behind an approved name is swapped for a different
+one, because that changes the endpoint while leaving the name intact.
+
+Those are the name-level checks. The gate **additionally** fails on several served-surface and
+evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed
+HTTP-vs-stdio serving, a registry count that no longer matches the baseline, an exemption that
+became reachable, and a missing or malformed baseline. They are listed in full in
+[`CONTRIBUTING.md`](CONTRIBUTING.md); read them there rather than inferring the gate's whole
+scope from this summary.
+
+**What is not a gate failure: an added field on an existing response.** A field that is off
+by default, and leaves the response unchanged when it is off, is neither a new tool nor a new
+endpoint, so it is not a name-level change and does not gate **as an addition**. The precedent
+is in the tree: the W4 why-layer key on the `tortoise_analyze` response is written only when
+`TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0` means off) — and every
+other field stays byte-identical when it is absent (`tortoise/mcp_server.py`,
+`tortoise/why.py`). That is a different `why` key from
+the one on `volunteer_context`, which is present by default.
+
+**One qualification, because the gate also fingerprints implementations.** The gate records a
+digest of each registered tool's own code object, so a field added *inside a tool's handler*
+changes that tool's fingerprint — and, since the fingerprint covers the function's source
+position, the fingerprint of every tool defined after it — and reds the gate, correctly,
+as a changed implementation rather than a new tool. Add response fields in the SDK or
+assembly layer, not inside a tool function, and the carve-out holds.
+
+**And it must still be recorded.** Every such addition goes in the table below, so this
+document stays the single source of truth. Two of `check`'s properties defend that record: an
+empty or missing `response_fields` block is a failure, and every entry must name a tool or
+endpoint that exists in this manifest — so the record can be neither deleted nor left
+unanchored. What no check *can* see is an off-by-default field that nobody recorded at all:
+nothing inspects response bodies at runtime, so that half is a reviewing obligation and this
+document says so rather than implying the machine guarantees it. The carve-out is about what
+the gate *fails* on — not about what goes *unrecorded*.
+
+### Recorded response fields
+
+| Response | Field | Emitted when | Unchanged when off |
+|---|---|---|---|
+| `tortoise_analyze` | `why` | TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off) | yes — the response is byte-identical when the flag is off |
+
+A field belongs in that table from the moment it is added — an off-by-default field that is
+not recorded here has no approval behind it, and the carve-out does not cover it.
+
+---
+
 ## The MCP tools
 
 ### memory — 27
