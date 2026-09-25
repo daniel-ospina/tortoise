@@ -324,6 +324,31 @@ def _warned_set(handler) -> set:
     return warned
 
 
+def _valid_transit_pairs(value):
+    """#5256: the ONE shape check for the `extractedFrom` read-version carrier.
+
+    Returns the value when it is a non-empty list/tuple of 2-element
+    ``[str, str]`` pairs, else ``None``. BOTH the node-prop clause
+    (`_upsert_point_props`) and the edge fold (`_upsert_point_edges`) call
+    THIS — an all-or-nothing predicate shared by both writers.
+
+    Why one predicate and all-or-nothing: the two writers must agree on a
+    corrupt payload. With a partial filter on the edge side, a
+    partially-malformed carrier (``[[DOC,'h9'], {"bad":1}]``) stamped
+    ``r.sourceVersion`` from the one valid pair while the node clause wrote NO
+    carrier — an edge anchor with no gate-compared record, the exact opposite
+    of "a corrupt journal contributes no anchor". A body value that is a dict
+    (or a list containing one) is also what would make Falkor raise mid-replay.
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    for pair in value:
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and isinstance(pair[0], str) and isinstance(pair[1], str)):
+            return None
+    return value
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -794,17 +819,17 @@ class _EntityHandlers:
         # equal to a Source's '' and reads as a false CURRENT). `coalesce` is
         # deliberately NOT used: the value is a recorded FACT of the reading,
         # not a derived value to preserve across re-emits.
-        # The shape guard is load-bearing for the REPLAY: this clause is the
-        # only writer of a value that came off a journal line, and a malformed
-        # one (a dict/set/bytes, or a list containing one) would reach
-        # `SET n.sourceVersionTransit=$sv` and raise a Falkor ResponseError —
-        # which, mid-`rebuild_all`, leaves the graph WIPED. A corrupt/foreign
-        # journal must contribute NO anchor, not abort the recovery path.
-        _sv_transit = p.get("sourceVersionTransit")
-        if isinstance(_sv_transit, (list, tuple)) and _sv_transit and all(
-                isinstance(pair, (list, tuple)) and len(pair) == 2
-                and isinstance(pair[0], str) and isinstance(pair[1], str)
-                for pair in _sv_transit):
+        # The shape guard is the SHARED `_valid_transit_pairs` predicate, the
+        # same one the edge fold uses — so a corrupt/foreign journal line
+        # contributes NO anchor on EITHER writer rather than one of them. This
+        # clause is the only writer of a value that came off a journal line, and
+        # a malformed one (a dict/set/bytes, or a list containing one) would
+        # otherwise reach `SET n.sourceVersionTransit=$sv` and raise a Falkor
+        # ResponseError — which, mid-`rebuild_all`, leaves the graph WIPED. A
+        # corrupt/foreign journal must contribute NO anchor, not abort the
+        # recovery path.
+        _sv_transit = _valid_transit_pairs(p.get("sourceVersionTransit"))
+        if _sv_transit is not None:
             set_clauses.append("n.sourceVersionTransit=$sv")
             params["sv"] = _sv_transit
         # A10 operator-scoped replay extension (cycle-22/23): the OperatorAdded
@@ -958,16 +983,13 @@ class _EntityHandlers:
         # `dict(...)` or stamping a non-str value.
         source_ref = p.get("extractedFrom")
         if source_ref:
-            source_versions = None
-            sv = p.get("sourceVersionTransit")
-            if isinstance(sv, (list, tuple)):
-                pairs = [
-                    (pair[0], pair[1]) for pair in sv
-                    if isinstance(pair, (list, tuple)) and len(pair) == 2
-                    and isinstance(pair[0], str) and isinstance(pair[1], str)
-                ]
-                if pairs:
-                    source_versions = dict(pairs)
+            # The SHARED `_valid_transit_pairs` predicate (all-or-nothing), so a
+            # partially-malformed carrier cannot stamp an edge while the node
+            # clause writes no record.
+            _svlist = _valid_transit_pairs(p.get("sourceVersionTransit"))
+            source_versions = (
+                {pair[0]: pair[1] for pair in _svlist}
+                if _svlist is not None else None)
             self._link_source(p["id"], source_ref,
                               source_versions=source_versions)
         # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
