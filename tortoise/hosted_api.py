@@ -4915,6 +4915,19 @@ class CreatePointRequest(BaseModel):
     # seed must not duplicate state on a re-click/retry. Default False keeps
     # the existing endpoint semantics unchanged.
     dedup: bool = False
+    # #4032: the hosted client (agent-infra `scripts/tortoise-memory.mjs`,
+    # `write-points` / `write-claim` --confidence / --authored-by) sent both
+    # of these and pydantic's default `extra='ignore'` DROPPED them here, so
+    # the route never forwarded them and the write reported `ok` while the
+    # value was never stored — a silent-false-green. They are declared (and
+    # the route forwards them) because the underlying primitive already
+    # persists them: `sdk.create_point(..., confidence=, authoredBy=)` writes
+    # both as Point props and `tortoise_client.write_claim` has relied on that
+    # since before this endpoint existed. Wire names are the client's
+    # (`authoredBy`, camelCase) — the same spelling the SDK prop and the MCP
+    # tool use. A value the store cannot hold is a 422, never a silent drop.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("kind")
     @classmethod
@@ -6000,11 +6013,21 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
         # `_get_proj()` is inside the worker because its FIRST call opens the
         # projection.
         def _write_point() -> dict:
+            # #4032: forward the caller's confidence/authoredBy as props —
+            # only when SUPPLIED (passing None would stamp a null property
+            # onto a point that never asked for one). `sdk.create_point`
+            # persists both verbatim (the SDK's props passthrough).
+            _author_props: dict = {}
+            if body.confidence is not None:
+                _author_props["confidence"] = body.confidence
+            if body.authoredBy is not None:
+                _author_props["authoredBy"] = body.authoredBy
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
                 tags=body.tags,
                 dedup=body.dedup,
+                **_author_props,
             )
             if body.about_object:
                 # #1643: ID-based edge (never the name-resolution path, which

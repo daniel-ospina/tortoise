@@ -1341,6 +1341,72 @@ class TestPointsCreate:
         assert r.status_code == 200, r.text
 
 
+class TestPointsCreateConfidenceAndAuthor:
+    """#4032: `confidence` / `authoredBy` were dropped at the REST boundary.
+
+    `CreatePointRequest` declared neither field, so pydantic's default
+    ``extra='ignore'`` discarded them and the route never forwarded them to
+    ``sdk.create_point`` — the write reported ``ok`` while BOTH fields were
+    lost. The wire names are not invented here: the hosted client
+    (agent-infra ``scripts/tortoise-memory.mjs``) sends exactly these on
+    ``write-points`` / ``write-claim``, and the in-repo Python client
+    (``tortoise_client.write_claim``) already persists them through
+    ``sdk.create_point``. Each test below pins one half of the contract: the
+    value is STORED, or the request is ANSWERED with a 4xx — never a success
+    that silently discards it.
+    """
+
+    def _read_point(self, client, point_id: str) -> dict:
+        r = client.get(f"/v1/points/{point_id}")
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_confidence_and_authoredBy_persist(self, client):
+        r = client.post(
+            "/v1/points",
+            json={
+                "content": "confidence round trip",
+                "kind": "hypothesis",
+                "confidence": 0.8,
+                "authoredBy": "research-skill",
+            },
+        )
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert props.get("confidence") == 0.8, props
+        assert props.get("authoredBy") == "research-skill", props
+
+    def test_confidence_zero_persists_not_dropped(self, client):
+        # 0.0 is FALSY — a truthiness guard at the boundary would drop it.
+        # The client's `is not None` guards are exactly what this pins.
+        r = client.post(
+            "/v1/points",
+            json={"content": "zero confidence", "kind": "hypothesis", "confidence": 0.0},
+        )
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert props.get("confidence") == 0.0, props
+
+    def test_out_of_range_confidence_is_rejected_not_dropped(self, client):
+        # A value the store cannot hold must be ANSWERED (422), not silently
+        # discarded while the write reports ok.
+        r = client.post(
+            "/v1/points",
+            json={"content": "bad confidence", "kind": "statement", "confidence": 5},
+        )
+        assert r.status_code == 422, r.text
+
+    def test_absent_extras_do_not_write_null_props(self, client):
+        # The fix must ADD props only when supplied — never stamp nulls onto
+        # a point that did not ask for them (a null confidence would look
+        # "recorded" to a reader).
+        r = client.post("/v1/points", json={"content": "no extras", "kind": "statement"})
+        assert r.status_code == 200, r.text
+        props = self._read_point(client, r.json()["id"])
+        assert "confidence" not in props, props
+        assert "authoredBy" not in props, props
+
+
 class TestPointsList:
     """GET /v1/points — list Points."""
 
