@@ -1786,3 +1786,35 @@ def test_cmd_cut_is_actually_wired_to_carry_the_recorded_fields(tmp_path, monkey
     assert written.get("response_fields") == sentinel, (
         "cmd_cut did not carry the recorded fields into the manifest it wrote"
     )
+
+
+def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkeypatch):
+    """The drift step must be satisfiable OFF the machine that committed the file.
+
+    The CI step is `python3 tools/surface_manifest.py render` followed by
+    `git diff --exit-code -- docs/product/mcp-sdk-surface.md`, and it runs where
+    `~/.tortoise/analytics_fallback.jsonl` does not exist. A render that reads that log
+    emits DIFFERENT bytes there, so the step could only ever pass on one laptop: measured
+    with the log absent, `_never` counted all 82 tools ("82 of 82" rather than "55 of 82")
+    and every row lost its `in use` / `never called` flag — a 166-line diff against the
+    committed document.
+
+    The render reads COMMITTED inputs only. `used_by` is the checked-in cell the document
+    already prints, so the flag is derived from it; the log keeps driving the artifact
+    through `build_doc`, which refreshes the MANIFEST and lands as a reviewed diff.
+    """
+    sm = _load_manifest_tool()
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+    try:
+        assert sm.cmd_render(argparse.Namespace()) == 0
+        assert out.read_text(encoding="utf-8") == RENDERED.read_text(encoding="utf-8"), (
+            "the render produced different bytes with no machine-local call log — the CI "
+            "drift step compares this output against the committed document, so it can "
+            "never pass on a runner"
+        )
+    finally:
+        out.unlink(missing_ok=True)

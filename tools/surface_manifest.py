@@ -1090,6 +1090,30 @@ def cmd_cut(args: argparse.Namespace) -> int:
     return 0
 
 
+def observed_usage(row: dict) -> str | None:
+    """The checked-in usage label for a row: `in use` / `never called`, or None.
+
+    Read from the row's OWN `used_by`, which is COMMITTED to
+    `config/surface-manifest.yml` — the same value the `Used by` column prints.
+
+    Deliberately NOT read from `~/.tortoise/analytics_fallback.jsonl`. That log is a
+    machine-local artifact, so a render that consults it emits DIFFERENT bytes on a
+    CI runner than on the machine that committed the file. Measured with the log
+    absent (an empty `HOME`): every row lost its flag and `_never` counted all 82
+    tools, so the committed document stopped matching its own generator and
+    `render` + `git diff --exit-code` — the drift step — could only ever pass on one
+    laptop. The log still drives the artifact, through `build_doc`, which refreshes
+    the MANIFEST; that lands as a reviewed, committed diff instead of as whichever
+    machine happens to run the render.
+    """
+    first = (row.get("used_by") or "").split(",")[0].strip()
+    if first == "agents":
+        return "in use"
+    if first == "never called":
+        return "never called"
+    return None
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     """manifest -> the list the owner reviews.
 
@@ -1126,24 +1150,6 @@ def cmd_render(args: argparse.Namespace) -> int:
     classes: dict[str, list[dict]] = {}
     for r in sdk:
         classes.setdefault(r.get("class") or "?", []).append(r)
-
-    called_tools: set[str] = set()
-    try:
-        import json as _json
-
-        log = Path.home() / ".tortoise" / "analytics_fallback.jsonl"
-        if log.exists():
-            for line in log.read_text(errors="ignore").splitlines():
-                if '"mcp_tool_call"' in line:
-                    try:
-                        rec = _json.loads(line)
-                    except Exception:
-                        continue
-                    name = (rec.get("properties") or {}).get("tool_name") or rec.get("tool") or ""
-                    if name:
-                        called_tools.add(name)
-    except Exception:
-        called_tools = set()
 
     out: list[str] = []
     add = out.append
@@ -1311,14 +1317,14 @@ def cmd_render(args: argparse.Namespace) -> int:
                 flags.append("DEPRECATED")
             if r.get("cluster"):
                 flags.append(f"group: `{r['cluster']}`" if r.get("canonical") else f"in group `{r['cluster']}`")
-            # `called_tools` holds the names the log SHOWS. The markers were inverted:
-            # the 64 tools with zero observed calls were labelled "in use" and the 35 that
-            # actually appear were labelled "never called" — contradicting both the legend
-            # and each row's own `used_by` cell.
-            if called_tools and r["name"] in called_tools:
-                flags.append("in use")
-            elif called_tools:
-                flags.append("never called")
+            # From the row's checked-in `used_by` — never from the machine-local call
+            # log, so the flag is identical on every checkout (see `observed_usage`).
+            # The markers were once inverted: the 64 tools with zero observed calls were
+            # labelled "in use" and the 35 that actually appear were labelled "never
+            # called" — contradicting both the legend and each row's own `used_by` cell.
+            usage_label = observed_usage(r)
+            if usage_label:
+                flags.append(usage_label)
             if r.get("proposed"):
                 flags.append(f"**proposed: move to `{r['recommended_family']}`**")
             reaches = r.get("sdk_method") or "handler-served"
@@ -1531,7 +1537,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("argument, both ways, with the weak parts named.")
     add("")
     add("**The case for pinning a small advertised set.** Two thirds of what we advertise has never been")
-    _never = [r for r in tools if not called_tools or r["name"] not in called_tools]
+    _never = [r for r in tools if observed_usage(r) == "never called"]
     add(f"called by anything, including us ({len(_never)} of {len(tools)}). Mainstream clients cap the tools they will show — a")
     add("reported 40 in Cursor — so a large part of our surface is not merely unused, it is invisible")
     add("anyway, and we pay context for it on every turn. Every comparable we studied pins a smaller set,")
