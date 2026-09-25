@@ -752,24 +752,72 @@ def test_session_indexer_forwards_decoded_credentials(monkeypatch):
 
 
 def test_session_indexer_lookup_failure_is_logged_not_silent(monkeypatch, caplog):
-    """#3067: a failed lookup must not masquerade as "the graph has no entities"."""
+    """#3067: a failed lookup must not masquerade as "the graph has no entities".
+
+    The injected error carries the credential-bearing URI and the decoded
+    password — the shape a client produces when it echoes the DSN it was
+    handed. An earlier version injected ``"Authentication required."``, a
+    message with no credential in it, so ``assert "p@ss" not in caplog.text``
+    could not fail even if the logger leaked; the redaction assertions below
+    are now capable of failing (verified by reverting ``_redact_exc`` in
+    ``session_indexer`` to log the raw exception).
+    """
     import falkordb
     import redis
 
     from tortoise import session_indexer as si
 
-    monkeypatch.setenv("TORTOISE_DB_URI", _uri("p@ss", user="admin"))
+    uri = _uri("p@ss", user="admin")
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
     monkeypatch.setattr(si, "_graph_db", None)
     monkeypatch.setattr(
         falkordb, "FalkorDB",
         _fake_falkordb({}, error=redis.exceptions.AuthenticationError(
-            "Authentication required.")))
+            f"Authentication required for {uri} (user=admin password=p@ss)")))
 
     with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
         assert si._graph_entity_keywords("anything") == []
 
     assert "AuthenticationError" in caplog.text
     assert "db.example.com" in caplog.text
-    # A credential must never reach the log line.
-    assert "p@ss" not in caplog.text
+    # A credential must never reach the log line — neither the percent-escaped
+    # form carried by the URI nor the decoded form the client may echo.
     assert "p%40ss" not in caplog.text
+    assert "p@ss" not in caplog.text
+
+
+def test_session_indexer_failure_log_names_real_endpoint_on_cache_hit(
+        monkeypatch, caplog):
+    """#3067 (P2): the endpoint in the diagnostic must survive the connection cache.
+
+    ``_graph_db`` is a process-wide cache, so a long-lived process normally
+    takes the cache-HIT branch. Host/port were assigned only inside
+    ``if _graph_db is None``, so the SECOND failure logged the placeholder
+    ``localhost:None`` — defeating the observability this diagnostic exists
+    to add.
+    """
+    import falkordb
+    import redis
+
+    from tortoise import session_indexer as si
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", _uri("p@ss", user="admin", host="cache.hit.example"))
+    monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(
+        falkordb, "FalkorDB",
+        _fake_falkordb({}, error=redis.exceptions.ConnectionError("boom")))
+
+    with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
+        assert si._graph_entity_keywords("anything") == []   # cache MISS
+        assert si._graph_db is not None                      # cache populated
+        miss_log = caplog.text
+        caplog.clear()
+        assert si._graph_entity_keywords("anything") == []   # cache HIT
+        hit_log = caplog.text
+
+    assert "cache.hit.example:6379" in miss_log
+    assert "cache.hit.example:6379" in hit_log, (
+        "cache-hit failure log named the placeholder endpoint instead of the "
+        f"real one: {hit_log!r}")
+    assert "localhost:None" not in hit_log

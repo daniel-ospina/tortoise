@@ -142,38 +142,62 @@ def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
 # Cached FalkorDB connection for graph entity lookups
 _graph_db = None
 
+def _redact_exc(e: BaseException,
+                secrets: tuple[str | None, ...]) -> str:
+    """``redact_error`` plus a scrub of the URI's known decoded credentials.
+
+    ``redact_error`` masks a ``://userinfo@`` span, but a client that echoes
+    the credentials it was handed may print the DECODED password (``p@ss``
+    from a ``p%40ss`` URI) outside that span — and both values are known to
+    the caller, so scrub them explicitly (#3067).
+    """
+    from tortoise.security import redact_error
+    msg = redact_error(e)
+    for secret in secrets:
+        if secret:
+            msg = msg.replace(secret, '***')
+    return msg
+
+
 def _graph_entity_keywords(content: str) -> list[str]:
     """Find Object and Subject names from the graph mentioned in content.
 
     Best-effort: a lookup failure degrades to "no graph terms" rather than
     aborting keyword extraction — but it is NEVER silent (#3067). Every
-    failure is logged at WARNING with the host/port and exception; the URI
-    itself is not logged because it carries credentials.
+    failure is logged at WARNING with the host/port and a redacted exception;
+    the URI itself is not logged because it carries credentials.
     """
     global _graph_db
     content_lower = content.lower()
     matches = []
+    # #3067 (P2): the endpoint and the decoded credentials are resolved BEFORE
+    # `_graph_db` is consulted. The connection is a process-wide cache, so the
+    # normal case in a long-lived process is a cache HIT — resolving them only
+    # inside `if _graph_db is None` made a cache-hit failure log the
+    # placeholder `localhost:None` (and left the redactor without the secrets).
     host = 'localhost'
     port: int | None = None
+    username: str | None = None
+    password: str | None = None
     try:
         uri = os.environ.get('TORTOISE_DB_URI', '')
         if not uri:
             return []
-        if _graph_db is None:
-            from falkordb import FalkorDB  # noqa: I001
-            from urllib.parse import urlparse
+        from urllib.parse import urlparse
 
-            from tortoise.config import parse_uri_userinfo
-            parsed = urlparse(uri)
-            host = parsed.hostname or 'localhost'
-            port = parsed.port or 16379
+        from tortoise.config import parse_uri_userinfo
+        parsed = urlparse(uri)
+        host = parsed.hostname or 'localhost'
+        port = parsed.port or 16379
+        username, password = parse_uri_userinfo(uri)
+        if _graph_db is None:
+            from falkordb import FalkorDB
             # #3067: forward the DECODED userinfo through the single shared
             # rule. Dropping it makes an auth-required server (the canonical
             # `docker://:pw@host:6379/tortoise` config) answer
             # AuthenticationError — which the handler below used to swallow
             # as "the graph has no matching entities", silently dropping
             # every graph term from the extracted keywords.
-            username, password = parse_uri_userinfo(uri)
             _graph_db = FalkorDB(host=host, port=port,
                                  username=username, password=password,
                                  ssl=(parsed.scheme == 'rediss'))
@@ -187,9 +211,9 @@ def _graph_entity_keywords(content: str) -> list[str]:
         # #3067: observable, not silent — a misconfigured/unreachable graph
         # must be distinguishable from "the graph has no matching entities".
         logger.warning(
-            "graph entity keyword lookup failed at %s:%s — %s: %s; "
+            "graph entity keyword lookup failed at %s:%s — %s; "
             "graph entities omitted from keywords",
-            host, port, type(e).__name__, e)
+            host, port, _redact_exc(e, (username, password)))
     return matches
 
 
