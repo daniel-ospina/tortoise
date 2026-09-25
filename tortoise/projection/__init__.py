@@ -6675,9 +6675,26 @@ class FalkorProjection(
                 # a copy" guarantee cannot be retired by fixing the live writer:
                 # the bytes are already in the journal on any deployment that
                 # ran one. Denied keys are DROPPED and WARNED, never silently.
-                from .entities import filter_source_props  # local: #2662 cycle
+                from .entities import (
+                    _SOURCE_SERVER_MANAGED_PROPS,  # local: #2662 cycle
+                    filter_source_props,
+                )
 
                 state, _denied = filter_source_props(state)
+                # The SERVER-MANAGED keys are dropped too (#3998 review round 5).
+                # A `SourceCreated` record is the sole owner of the absent-raw
+                # state; there is no legitimate `EntityMutated` producer of it
+                # (the live route refuses it). Replaying one let a journal line
+                # written by an earlier head — e.g. the `rawState=None` CLEAR that
+                # round 3's open guard journalled — resurrect a permanently
+                # deleted raw on every rebuild. That is the silent loss this
+                # issue exists to prevent, on the one path whose comment already
+                # says a live-writer fix cannot retire the bytes.
+                _sm = sorted(k for k in state if k in _SOURCE_SERVER_MANAGED_PROPS)
+                if _sm:
+                    for k in _sm:
+                        state.pop(k)
+                    _denied = sorted(_denied + _sm)
                 if _denied:
                     logger.warning(
                         "rebuild: EntityMutated for :Source %r carried %d "

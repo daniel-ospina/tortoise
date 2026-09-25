@@ -2646,14 +2646,37 @@ _SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
     "rawState", "rawStateAt",
 })
 
+# The IDENTITY keys of a `:Source` — also refused to a caller-supplied map, and
+# also dropped on replay (#3998 review round 5). `create_source` treats these as
+# server-managed (it MERGEs on `url` and mints `canonicalUrl`/`urlAliases`), so a
+# caller map must not move them: measured, `update_entity(src_url, url=<2 KB
+# body>)` rewrote the MERGE key, and after a rebuild produced DUPLICATE `:Source`
+# nodes and an EMPTY provenance chain for the Point — i.e. the payload route and
+# a silent provenance loss at once. (`id` is already refused by
+# `_sanitize_props(reject_id=True)` at the SDK boundary.)
+_SOURCE_IDENTITY_PROPS: frozenset = frozenset({
+    "url", "canonicalUrl", "urlAliases",
+})
+
 
 def filter_source_props(props: dict) -> tuple[dict, list[str]]:
     """Split a property map for a `:Source` into (declared, denied). #3998.
 
-    ONE filter, used by every consumer of the declaration — the caller-passthrough
-    write, the journal replay fold, and the read paths — so a route added later
-    cannot silently enforce a different rule (the exact drift that review
-    rounds 3 and 4 each found on a different path).
+    ONE filter for the READ paths and for a REPLAYED property map. The live write
+    paths enforce the same declaration through two deliberately DIFFERENT sets,
+    because a caller may set less than may appear on the node:
+
+      * `_upsert_source` (the caller passthrough) uses `_SOURCE_EXTRA_PROPS` —
+        the narrow set a caller is allowed to ADD via `create_source(...)`.
+      * `_update_entity` uses `_SOURCE_NODE_PROP_NAMES`, minus the server-managed
+        and identity subsets it refuses outright.
+      * the replay fold and the read paths (this function) use
+        `_SOURCE_NODE_PROP_NAMES` — a replayed map is already-persisted state, so
+        the question is what may APPEAR, not what a caller may set.
+
+    Stated plainly because an earlier revision of this docstring claimed a single
+    uniform enforcer, which the code does not do — and the two-set shape is the
+    design, not a slip.
     """
     denied = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
     kept = {k: v for k, v in props.items() if k in _SOURCE_NODE_PROP_NAMES}
