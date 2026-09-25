@@ -132,8 +132,12 @@ def test_guard(graph_name: str, yes: bool = False) -> None:
     always resolves to `<ns>_control_plane` (`registry_control_plane`),
     whatever the URI path says. Gating on the URI path would auto-approve a
     run whose path merely LOOKS test-prefixed while the write lands on the
-    shared registry graph. Because that resolved name is never test-prefixed,
-    a real write must always pass `--yes`.
+    shared registry graph. Because that resolved name is never test-prefixed
+    ON THE NO-`path=` CLI PATH THIS SCRIPT USES (the redirect that derives a
+    test-prefixed name needs an explicit `path=`), a real write must always
+    pass `--yes`. An in-test construction WITH an explicit `path=` does derive
+    a `test_`-prefixed, sweepable name (#3634) — so the no-prefix invariant is
+    scoped to the CLI path, not a property of the registry namespace.
     """
     if graph_name.startswith("tortoise_test_") or graph_name.startswith("test_"):
         print(f"✅ Test graph detected ({graph_name}) — proceeding")
@@ -176,9 +180,9 @@ def main() -> int:
     sdk = TortoiseSDK(namespace="registry")
     try:
         reg = sdk._get_registry()
-        target = getattr(reg, "name", "control_plane")
-        # path — `TortoiseSDK(namespace="registry")` derives the registry name
-        # from the NAMESPACE, not from the URI path.
+        target = reg.name
+        # The URI path never names this graph — `TortoiseSDK(namespace="registry")`
+        # derives the registry name from the NAMESPACE, not from the URI path.
         test_guard(target, args.yes)
         print(f"Registry graph (SDK-resolved): {target}")
         report = clear_stored_max_sessions(reg, dry_run=args.dry_run)
