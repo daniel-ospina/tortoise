@@ -90,9 +90,13 @@ SITE_LANES: dict[str, str] = {
     "subject_write_op": "tortoise/hosted_api.py",
     "mcp_write_op": "tortoise/mcp_server.py",
     "ask_ledger": "tortoise/ask_lane.py",
-    # #4488: the embed lane's own swallow site. ``flush_tally`` absorbs a failed
-    # embed increment (and a tally with no resolvable org) and reports it here,
-    # so the measurement is never dropped in SILENCE — same ruling, seventh lane.
+    # #4488: the embed lane's own swallow site. ``flush_tally`` reports a
+    # WINDOW-UNRESOLVABLE drop and a tally with no resolvable org here. Two
+    # drops do NOT reach this site and are NOT silent-by-this-lane: a failure
+    # of the increment RPC itself is absorbed at WARNING inside
+    # ``metering.record_embedding_usage`` (the shared #3824 residual), and a
+    # note landing after the tally was consumed is the declared
+    # capture-cancellation residual. Same ruling, seventh lane.
     "embed": "tortoise/embed_metering.py",
 }
 
