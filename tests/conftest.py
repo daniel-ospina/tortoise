@@ -728,10 +728,13 @@ def _server_graph_hygiene(_redislite_hygiene):
     from tests._embedded import (
         _JOURNAL_FILE,
         _leftover_sweep,
+        _live_graph_names,
+        _owned_survivors,
         _read_journal,
         _session_end_own_sweep,
         _stale_sweep,
         _sweep_proj,
+        _uri_default_graph_name,
     )
     from tortoise.embedded_reaper import _process_start_time, active_suite_markers
 
@@ -782,6 +785,7 @@ def _server_graph_hygiene(_redislite_hygiene):
     # Cycle-5 P2-3: capture the journal size BEFORE the sweep — the sweep
     # deletes the journal, so "journal size" is unreadable after.
     journal_size = len(_read_journal())
+    journal_names = set(_read_journal())
     try:
         own = _session_end_own_sweep(uri, _JOURNAL_FILE, skip_on_non_loopback=True)
     except Exception as exc:
@@ -835,6 +839,21 @@ def _server_graph_hygiene(_redislite_hygiene):
                     pass
         except Exception as exc:
             print(f"[server-graph-hygiene] GRAPH.LIST bound check skipped: {exc}")
+
+        # ── E2E-7 gate (#3634 Task 5). Lives under the `if not others` guard above
+        # (last-suite-standing only — do NOT widen that), and MUST sit outside the
+        # broad `except Exception`, or AssertionError is swallowed and the gate is
+        # vacuous. Short-circuit on `error` too: a sweep that RAISED sets
+        # own={"error": ...} with no `failed` key, so `not own.get("failed")` alone
+        # would run the gate over names a dead sweep left and red the suite
+        # (violating cycle-8 P2-3).
+        if not own.get("skipped") and not own.get("failed") and not own.get("error"):
+            survivors = _owned_survivors(journal_names, _live_graph_names(uri),
+                                         _uri_default_graph_name())
+            if survivors:
+                raise AssertionError(
+                    f"E2E-7: {len(survivors)} owned journalled graph(s) survived the "
+                    f"sweep: {sorted(survivors)}")
 
 
 # ── Epic #1647 Task 4 (P2): session-start backend-identity tripwire ────────

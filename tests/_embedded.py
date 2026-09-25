@@ -1281,6 +1281,21 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback=skip_on_non_loopback)
 
 
+def _live_graph_names(uri: str) -> set[str]:
+    """The live server's graph names. Mirrors the existing probe idiom
+    (conftest.py's `with _sweep_proj(uri) as probe: probe.db.list_graphs()`)."""
+    with _sweep_proj(uri) as probe:
+        return set(probe.db.list_graphs() or [])
+
+
+def _owned_survivors(journal_names, live_names, default_graph) -> set[str]:
+    """Owned ∧ journalled ∧ ¬default ∧ still live. Mirrors _sweep_drop's skips:
+    only a name the OWNERSHIP RECORD authorises is ever a leak."""
+    owned = {n for n in journal_names if owns_by_ownership_record(n)}
+    owned.discard(default_graph)
+    return owned & set(live_names)
+
+
 def _team_sweep_allowed(uri: str) -> bool:
     """#1686 (review P1-1): may the product-namespace stray pass run on `uri`?
 

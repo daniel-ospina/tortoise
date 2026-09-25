@@ -614,6 +614,7 @@ surfaces:
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
+  - test_server_hygiene_gate.py
   - test_source_dedup_registration.py
   - test_source_identity.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
