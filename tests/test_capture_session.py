@@ -3863,6 +3863,16 @@ def test_capture_writes_mitigates_artifact(sdk, monkeypatch):
     assert rows[0][0] == 0.4
     assert "raise the price" in rows[0][1], \
         f"reason must be the mitigating point's content, got {rows[0][1]!r}"
+    # #4937 INVARIANT GUARD (the regression pin for the refusal itself is
+    # tests/test_sdk.py::test_mitigates_is_not_an_operator_kind): the payload
+    # spelling is a BRIDGE-ATTACK record — it attaches to the IMPL operator
+    # above and must NOT create a peer operator kind. This holds on main too,
+    # so it guards the invariant rather than the #4937 diff.
+    peer = proj.g.query(
+        "MATCH (o:Point {is_operator:true}) WHERE o.op_type = 'MITIGATES' "
+        "RETURN count(o)").result_set
+    assert peer[0][0] == 0, \
+        "MITIGATES must not materialize as a generic operator kind (#4937)"
 
 
 def test_capture_mitigates_deep_miss_dropped_not_raised(sdk, monkeypatch):
