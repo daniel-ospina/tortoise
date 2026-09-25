@@ -263,6 +263,17 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/_redirects",
                    "website/apps/dashboard/public/404.html",
                    "website/apps/dashboard/src/",
+                   # #3048: the missing-asset contract now has a SERVER owner too —
+                   # `functions/assets/[[path]].ts` answers a `/assets/*` path that
+                   # resolves to no file with a non-HTML 404. A matching Function is
+                   # consulted BEFORE the static asset router, so this file is what
+                   # decides whether a deleted chunk reads as present; deleting or
+                   # gutting it would silently restore the defect while the
+                   # `public/` half of the guard stayed green. Without this entry a
+                   # functions-only PR selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the
+                   # #1349/#3332/#3616 silent-drop class.
+                   "website/apps/dashboard/functions/",
                    # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
                    # the Stripe ?session_id= return) are BUILT here, so a change to
                    # the server-side return path must run the guard too — otherwise

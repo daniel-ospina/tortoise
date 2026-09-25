@@ -37,6 +37,11 @@ SRC = PUBLIC.parent / "src"
 # a served pathname as unrouted.
 FUNCTIONS = PUBLIC.parent / "functions"
 
+# #3048: the missing-ASSET contract's server half. A matching Function is
+# consulted BEFORE the static asset router, so this file — not `404.html` — is
+# what decides the response for a `/assets/*` path that resolves to no file.
+ASSETS_FUNCTION = FUNCTIONS / "assets" / "[[path]].ts"
+
 # Pathnames that are app routes even though they are not the root — they are
 # not derived from main.jsx (Stripe builds /team from the server side), so
 # they are stated here as the closed set the routing must preserve.
@@ -596,4 +601,74 @@ def test_every_pathname_the_app_branches_on_is_routed() -> None:
     assert not missing, (
         f"the app branches on {missing!r} but neither public/_redirects nor a "
         "Function on this origin serves it — that pathname would 404 (#3523)"
+    )
+
+
+def _strip_comments(source: str) -> str:
+    """Remove `/* … */` and `// …` comments so a pin reads CODE, not prose.
+
+    A `//` inside a URL (`https://…`) must survive, so the line-comment pattern
+    uses a negative lookbehind for `:`. Without this the pin matched
+    `index.html` inside the Function's own doc block and failed on its own
+    rationale — a reminder that a substring assertion over a whole source file
+    is only meaningful once comments are excluded.
+    """
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"(?<!:)//[^\n]*", "", source)
+
+
+def test_missing_assets_are_a_non_html_404_not_the_shell() -> None:
+    """#3048: a missing `/assets/*` path must not read as a valid asset.
+
+    The measured defect (2026-09-11): a hashed chunk that was never deployed
+    answered `200 text/html` with the SPA shell, so a deleted or rotated chunk
+    looked PRESENT, deploy verification false-positived on asset existence, and
+    a client holding a stale shell died on `Unexpected token '<'` instead of
+    failing cleanly.
+
+    #4006 fixed the STATUS for every path (`404.html`), and
+    `test_top_level_404_html_exists` pins that. It did not fix the CONTENT TYPE
+    for this prefix: `404.html` is an HTML document, so a missing `.js` was
+    answered `404 text/html` — still an HTML document where JavaScript was
+    asked for. `functions/assets/[[path]].ts` is the file that closes it, and
+    this test pins the two properties that make it work, because BOTH are
+    silently regression-prone:
+
+    * the Function must PASS REAL ASSETS THROUGH. A matching Function is
+      consulted BEFORE the static asset router (verified on the real runtime,
+      `npx wrangler@4 pages dev dist`), so a Function that answered everything
+      with its own 404 would take the entire dashboard bundle down while an
+      assertion that only proved "missing assets 404" stayed green.
+    * the not-found body must be NON-HTML. A `text/html` body is exactly what
+      makes a missing `.js` read as a document again.
+
+    The live half of this contract (the deployed host, and the Pages project
+    setting that lives outside the repo) is asserted post-deploy in
+    `.github/workflows/deploy-pages.yml`'s `deploy-dashboard` job — a repo-file
+    guard cannot see an out-of-repo re-widening of the fallback.
+    """
+    assert ASSETS_FUNCTION.is_file(), (
+        "website/apps/dashboard/functions/assets/[[path]].ts is missing — a "
+        "missing /assets/* path falls back to the generic 404.html, whose "
+        "Content-Type is text/html, so a missing .js still reads as an HTML "
+        "document (#3048)"
+    )
+    body = ASSETS_FUNCTION.read_text()
+    # The pins below read CODE, not prose: the file's doc block quotes the bug
+    # report (which names `index.html`) and explains `text/plain` and
+    # `ASSETS.fetch`, so a raw substring scan would pass on comments alone.
+    code = _strip_comments(body)
+    assert "ASSETS.fetch" in code, (
+        "the /assets/* Function no longer resolves through `env.ASSETS.fetch` — "
+        "a matching Function is consulted BEFORE the static asset router, so "
+        "every real bundle request would 404 (#3048)"
+    )
+    assert "text/plain" in code, (
+        "the /assets/* Function no longer answers the not-found case with a "
+        "non-HTML content type — a text/html body is what makes a missing .js "
+        "read as a document (#3048)"
+    )
+    assert "index.html" not in code, (
+        "the /assets/* Function serves index.html — that is the SPA fallback "
+        "this issue exists to remove from the asset prefix (#3048)"
     )
