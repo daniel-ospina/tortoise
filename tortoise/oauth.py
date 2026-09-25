@@ -155,19 +155,23 @@ def _retention_seconds(env_name: str, default: int) -> int:
 #   claimed   → unclaimed           a VERIFIED-CLEAN failure re-armed it
 #                                   (#2863's re-arm, now durably recorded)
 #
-# `burned` is written where the claim's residue is terminal: a pre-mint signal,
-# or a reconcile past the grace that either revoked a live orphan family or (at
-# PROBE time — the probe and the settle are not one transaction) found none. An
-# outcome the process could not settle stays `claimed` so the reconciler can
-# resolve it — see `_reconcile_claimed_redemption`.
+# `burned` is written where the claim's residue is terminal: a pre-mint signal, or
+# a reconcile past the grace that ATTEMPTED to revoke a live orphan family
+# (`_rollback_minted` is best-effort — a failed revoke is captured, and the row
+# survives inert under a now-`burned` code until the retention sweep reaches its
+# TTL) or found none AT PROBE TIME (the probe and the settle are not one
+# transaction, so a family minted between them escapes). An outcome the process
+# could not settle stays `claimed` so the reconciler can resolve it — see
+# `_reconcile_claimed_redemption`.
 #
 # Schema invariant (migration 20260925000002) — DIRECTIONAL, deliberately not the
 # biconditional (a biconditional rejects the pre-#3027 writer, which sets
 # `used_at` alone, during the rolling deploy):
 #   used_at IS NULL  ⇒  redemption_state = 'unclaimed'
-# Every write in this module sets both columns in ONE statement, so the
-# biconditional holds for everything we write; the DB enforces the direction
-# that matters (no settled row without a claim timestamp).
+# The CLAIM and the RE-ARM set `used_at` and `redemption_state` in ONE statement;
+# a settle only transitions `redemption_state` on a row that is already `claimed`.
+# So the biconditional holds for everything we write, and the DB enforces the
+# direction that matters (no settled row without a claim timestamp).
 REDEMPTION_UNCLAIMED = "unclaimed"
 REDEMPTION_CLAIMED = "claimed"
 REDEMPTION_MINTED = "minted"

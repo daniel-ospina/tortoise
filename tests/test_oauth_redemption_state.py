@@ -349,6 +349,37 @@ def test_a_lost_minted_settle_capture_events_when_compensation_fails(
     assert len(calls) == 1, calls
 
 
+def test_a_failed_reconciler_revoke_is_captured_and_the_code_still_burns(
+        fault_client, monkeypatch):
+    """The reconciler's revoke is best-effort, and that must be VISIBLE.
+
+    `_rollback_minted` never raises, so a failed revoke would otherwise leave a
+    live row under a `burned` code (note `'orphan-revoked'`) with no signal at
+    all. The revoke passes `capture=True` for exactly this path; this pins the
+    observability and records the residual rather than pretending the revocation
+    cannot fail."""
+    from tortoise import sentry
+    calls: list[BaseException] = []
+    monkeypatch.setattr(sentry, "capture_exception",
+                        lambda exc, **kw: calls.append(exc))
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "orphan-revoke")
+    code_id = _code_row(cp, "orphan-revoke")["id"]
+    _seed_refresh_token(cp, "orphan-rt", code_id=code_id)
+    _force_claimed(cp, "orphan-revoke", age_s=120)
+    # A select-LESS PATCH is the rollback shape (the claim sends a select).
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
+                  match=lambda t, m, sel, f: m == "PATCH" and not sel, times=1)
+    r = _post_code(tc, cp, "orphan-revoke", verifier)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+    row = _code_row(cp, "orphan-revoke")
+    assert row["redemption_state"] == oauth.REDEMPTION_BURNED
+    assert row["redemption_note"] == "orphan-revoked"
+    # The escapee is live — inert (its plaintext was never delivered), TTL-reaped.
+    assert len(_live(cp, "oauth_refresh_tokens")) == 1
+    assert len(calls) == 1, calls
+
+
 def test_an_unreadable_code_state_is_retryable_and_writes_nothing(fault_client):
     """A failed CLASSIFICATION read is a retryable 503 — and it must be, because
     the claim PATCH was observed to match ZERO rows, so this request provably

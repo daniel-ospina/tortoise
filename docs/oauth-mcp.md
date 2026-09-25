@@ -160,7 +160,9 @@ request, a reconciler that took the claim over}* can settle a claim. (The
 in-process by the request that still owns its claim.) `burned` is
 written where the residue is terminal: a pre-mint signal (bad PKCE,
 client/redirect/resource mismatch, suspended org, or an expired code), or a
-reconcile past the grace that either revoked a live orphan family or found none
+reconcile past the grace that ATTEMPTED to revoke a live orphan family (the
+revoke is best-effort — a failure is captured and the row survives inert under a
+now-`burned` code until the TTL sweep) or found none
 **at probe time**.
 
 An outcome the process could not settle stays **`claimed`**, and another
@@ -176,7 +178,8 @@ it ages past the grace window (`TORTOISE_OAUTH_REDEMPTION_GRACE_S`, default 60s)
   then acts. If it loses that CAS the owner settled `minted` first, so the family
   is delivered and nothing is touched. If it wins and a LIVE family is linked to
   the code, the mint committed and was never delivered, so the family is
-  soft-revoked and the code burned; if it wins and no family is linked, the claim
+  soft-revoked (best-effort, and captured if the revoke fails) and the code is
+  burned; if it wins and no family is linked, the claim
   left no live credential **at probe time** (the probe and the settle are not one
   transaction, so a family minted between them escapes) and the code is **burned**
   (`unresolved`) — fail safe; the client re-runs authorization;

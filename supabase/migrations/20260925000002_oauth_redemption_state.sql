@@ -78,8 +78,10 @@
 -- shape `_observe_code` already tolerates (a row with `used_at` set and no state
 -- is classified `claimed`, the reconcilable state), and such a row is inert for
 -- the reconciler: its settle CAS matches nothing and returns `lost-race` without
--- revoking. Shipped code always writes both columns in ONE statement, so the
--- invariant holds for every write this codebase makes.
+-- revoking. The CLAIM and the RE-ARM write `used_at` and `redemption_state` in
+-- ONE statement; a settle only transitions `redemption_state` on an
+-- already-claimed row. So the biconditional holds for every write this codebase
+-- makes.
 -- ⛔ Do NOT "restore" the biconditional without an expand/contract rollout.
 -- `used_at` STAYS the claim timestamp, so every #2863/#3036 read and test keeps
 -- working unchanged.
@@ -135,7 +137,7 @@ UPDATE public.oauth_codes
 
 -- 3) The constraints. DROP-then-ADD keeps a re-apply idempotent (ADD COLUMN
 --    IF NOT EXISTS makes the columns, not the CHECKs). `chk_` is the repo's
---    CHECK-naming convention (see 0011/0016 and the tenancy migrations); the
+--    CHECK-naming convention (0003, 0007-0010 and 20260915000001), and the
 --    `ck_` DROPs remain so a database that already applied an earlier revision of
 --    THIS file is cleaned up rather than left with a second, stricter CHECK.
 ALTER TABLE public.oauth_codes

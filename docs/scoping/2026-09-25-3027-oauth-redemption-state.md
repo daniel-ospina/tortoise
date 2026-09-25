@@ -217,7 +217,9 @@ observation — nothing here is ever answered 503:
      **nothing is touched**.
    - CAS won, **a live family is linked** (`code_id = C`, `revoked_at IS NULL`, on either token
      table) → the mint committed and the response was lost (or the compensation failed). These rows
-     were never delivered, so they are **soft-revoked** and the code is `burned`
+     were never delivered, so they are **soft-revoked** (best-effort: a failed
+     revoke is captured and the row survives inert under the `burned` code until
+     the TTL sweep) and the code is `burned`
      (`note='orphan-revoked'`). This is the branch the issue's *"committed but compensation
      failed"* Target item names, and the one #2863's read-based confirmation could not reach.
    - CAS won, **no live family** → at probe time the claim left no live credential, so the residue is
@@ -258,12 +260,15 @@ which §0 forbids:
   a delivered one — the client did not receive the pair but the server cannot know. It is answered
   terminally (`invalid_grant`); the family it left is inert (nobody holds its plaintext) and is reaped
   by **#3036**'s retention sweep after its TTL.
-- **TOCTOU against the family probe.** The reconciler probes for a live family and *then* settles. If
-  the probe runs before the owner mints, the reconciler burns the claim with no family; the late owner
-  then mints, loses the settle CAS, and if its compensation *also* fails a live row survives under a
-  now-`burned` code — which the reconciler will never revisit. The escapee is inert (its plaintext was
-  never delivered) and is reaped by the retention sweep at TTL, but §3.4's no-family branch is not
-  universally true: it is true at probe time.
+- **TOCTOU against the family probe, and a best-effort revoke.** The reconciler probes for a live
+  family and *then* settles. If the probe runs before the owner mints, the reconciler burns the claim
+  with no family; the late owner then mints, loses the settle CAS, and if its compensation *also*
+  fails a live row survives under a now-`burned` code — which the reconciler will never revisit. The
+  same escape applies to the reconciler's own revoke: `_rollback_minted` is best-effort (it captures
+  on failure and never raises), so a failed revoke leaves the row live under a `burned` code with
+  `redemption_note='orphan-revoked'`. Both escapees are inert (their plaintext was never delivered)
+  and are reaped by the retention sweep at TTL, but §3.4's no-family branch is not universally true:
+  it is true at probe time, and the revoke is an attempt.
 - **The zero-row observation rests on the control-plane seam.** `_observe_code`'s retryable 503 is
   safe because the claim PATCH was *observed* to match zero rows — and a select-bearing PATCH asks
   for `return=representation`, whose genuine zero-match answer is a content-bearing `[]`.

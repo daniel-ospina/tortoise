@@ -75,11 +75,13 @@ SELECT tests.assert(
   '3027: both redemption CHECK constraints exist on oauth_codes');
 
 -- The biconditional form must NOT be present: it breaks the deployed writer.
+-- BOTH legacy names, so a rename that forgets one is caught.
 SELECT tests.assert(
   (SELECT count(*) FROM pg_constraint
-    WHERE conname = 'ck_oauth_codes_redemption_used_at'
+    WHERE conname IN ('ck_oauth_codes_redemption_used_at',
+                      'ck_oauth_codes_redemption_state')
       AND conrelid = 'public.oauth_codes'::regclass) = 0,
-  '3027: the biconditional ck_ constraint must not exist (it rejected the legacy writer)');
+  '3027: the legacy ck_ constraint names must not exist (the biconditional rejected the legacy writer)');
 
 -- ── 3. The default lands as 'unclaimed' with used_at NULL ──────────────────
 DO $$
