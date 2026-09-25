@@ -231,7 +231,11 @@ CURSOR_HOOKS_SUBDIR = "hooks"
 #: belongs to cannot drift apart.
 
 #: The extension name Pi auto-discovers under ``~/.pi/agent/extensions/``.
-PI_EXTENSION_NAME = "tortoise-capture.ts"
+#: DERIVED from the install-contract registry: the seam's NAME and its version
+#: contract are one fact, and the drift detector must inspect exactly the file
+#: the installer writes.  Two independent literals could disagree, which would
+#: leave the detector checking a path the installer never produced (#4680).
+PI_EXTENSION_NAME = hook_install.ARTIFACT_CONTRACTS["pi"].install_name
 
 #: The legacy agent-infra extension directory name (#3713).  Pi's loader does
 #: no basename dedupe, so ``tortoise-capture.ts`` and

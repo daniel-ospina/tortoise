@@ -3222,9 +3222,9 @@ def test_every_capture_artifact_ships_in_the_wheel():
             f"{patterns} — a wheel install would fail resolving it")
 
 
-# The shipped install-contract generations, one per harness that ships SHELL
-# hooks.  The marker is what makes a stale installed hook detectable, so it MUST
-# be bumped when what a hook writes changes, and bumping must be DELIBERATE.
+# The shipped install-contract generations, one per wizard-offered harness.
+# The marker is what makes a stale installed seam detectable, so it MUST be
+# bumped when what the seam writes changes, and bumping must be DELIBERATE.
 # Pinning the values here, ONCE, is what makes a revert RED (a silently reverted
 # marker mis-classifies current installs as stale, or stale ones as current) and
 # makes the next bump a deliberate edit of this table.  A literal at each
@@ -3232,7 +3232,12 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # #4314 left two red assertions behind (#4545).
 # claude 5→6 is the #3615 consent gate merged over main's 5 (the hooks changed
 # behaviour again, so an already-installed copy must read as stale).
-_EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2}
+# pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
+# TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
+# its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
+# #4680 the Pi seam carried no marker at all, which is why a Sep-17 installed
+# copy read as merely UNVERIFIABLE while capturing two-week-old logic.
+_EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2, "pi": 1}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3245,13 +3250,180 @@ def test_shipped_install_contract_generations(harness):
     fix never reaches it.  Those numbers are a reviewed decision, not a
     detail, so they are pinned once and explicitly.
 
-    `pi` is absent by construction: it ships a TypeScript extension rather than
-    shell hooks, declares no install contract, and has no `HarnessLayout`.
+    `pi` (#4680) reaches the same table through the ARTIFACT half of the
+    contract: it ships a TypeScript extension, has no `HarnessLayout` by the
+    #4544 ruling, and is pinned by ``contract_version_for`` — the ONE accessor
+    that answers for a shell-hook layout and a non-shell artifact alike.
     """
-    layout = hook_install.get_layout(harness)
-    assert hook_install.contract_version(layout) == (
-        _EXPECTED_INSTALL_CONTRACT[harness]), (
-        f"{harness} ships contract generation "
-        f"{hook_install.contract_version(layout)}, expected "
+    shipped = hook_install.contract_version_for(harness)
+    assert shipped == _EXPECTED_INSTALL_CONTRACT[harness], (
+        f"{harness} ships contract generation {shipped}, expected "
         f"{_EXPECTED_INSTALL_CONTRACT[harness]} — if that bump was deliberate, "
         f"update _EXPECTED_INSTALL_CONTRACT; if not, this is the revert")
+
+
+def _pi_seam_without_marker() -> str:
+    """The shipped Pi seam with its contract marker stripped.
+
+    Models the real pre-contract population (the Sep-17 seam #4680 was filed
+    about): a functioning Tortoise seam that declares no generation.  The
+    BODY is kept intact on purpose, because ownership is sniffed from it — a
+    synthetic body without a Tortoise signature would model a FOREIGN file,
+    not a pre-contract copy of ours.
+    """
+    return "\n".join(
+        line for line in _PI_SRC.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("// tortoise-hook-version:")) + "\n"
+
+
+def test_pi_seam_carries_exactly_one_canonical_marker():
+    """The Pi seam declares the SAME contract vocabulary as its three shell
+    siblings, so a stale installed copy is comparable rather than
+    unmeasurable (#4680).
+
+    Mutation: delete ``// tortoise-hook-version: 1`` from
+    ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
+    ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
+    test and the generation pin RED.
+    """
+    assert hook_install.read_hook_version(_PI_SRC) == 1
+    assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
+        "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
+        "site marker that would be mistaken for the contract)")
+
+
+def test_pi_contract_is_pinned_to_the_installer_artifact():
+    """The contract registry names the SAME file the installer writes, so the
+    drift detector can never inspect a path the installer does not produce.
+
+    Mutation: point ``ARTIFACT_CONTRACTS['pi'].install_name`` (or its source)
+    at a different basename than ``capture_install`` installs — the parity
+    assertions below RED.
+    """
+    contract = hook_install.ARTIFACT_CONTRACTS["pi"]
+    assert contract.install_name == capture_install.PI_EXTENSION_NAME
+    assert contract.source == _PI_SRC
+    assert contract.source.relative_to(_REPO_ROOT).as_posix() == (
+        CAPTURE_SEAM["pi"])
+
+
+def test_pi_installed_seam_is_read_as_current(home):
+    """The installer's own output is "current" to the artifact detector — the
+    same property ``detect_install`` has for the three shell seams, so
+    ``session verify --harness pi`` cannot report a fresh install as stale.
+
+    Mutation: make ``detect_artifact_install`` compare against a different
+    generation than the shipped marker — a fresh install reports drift.
+    """
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+    root = capture_install.pi_home(home)
+    assert hook_install.detect_artifact_install(root, "pi") == [], (
+        "the installer produced a Pi seam the drift detector calls drifted")
+
+
+def test_pi_stale_installed_seam_is_reported_not_silent(home):
+    """The failure this contract exists to catch (#4680): an installed Pi seam
+    from an older generation captures with the old logic and NO surface says
+    so.  Both shapes of stale must be BLOCKING findings — a marked-but-older
+    copy (``stale-artifact``) and the pre-contract copy that has no marker at
+    all (``unversioned-artifact``).
+
+    Mutation: make ``detect_artifact_install`` return ``[]`` for a Pi root
+    that is present (the pre-#4680 ``_static_findings`` behaviour) — this
+    REDs on both the stale and the unversioned leg.
+    """
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+    root = capture_install.pi_home(home)
+    installed = root / capture_install.PI_EXTENSION_NAME
+
+    # (a) a marked copy from an OLDER generation
+    installed.write_text(
+        "// tortoise-hook-version: 0\n" + "// body\n", encoding="utf-8")
+    findings = hook_install.detect_artifact_install(root, "pi")
+    blocking = [f for f in findings if f.blocking]
+    assert [f.kind for f in blocking] == ["stale-artifact"], findings
+    assert "current is" in blocking[0].detail
+
+    # (b) the pre-contract copy: a REAL seam with its marker stripped, so it
+    # is ours by body signature (`_looks_like_our_script`) but declares no
+    # generation — exactly the Sep-17 shape #4680 was filed about.
+    installed.write_text(_pi_seam_without_marker(), encoding="utf-8")
+    findings = hook_install.detect_artifact_install(root, "pi")
+    blocking = [f for f in findings if f.blocking]
+    assert [f.kind for f in blocking] == ["unversioned-artifact"], findings
+    assert "tortoise install pi" in blocking[0].detail, (
+        "a stale finding must name the sanctioned repair, or verify reports a "
+        "problem with no path out")
+
+
+def test_pi_foreign_artifact_is_reported_foreign_not_unversioned(home):
+    """A file at the Pi extension path that is NOT a Tortoise seam must be
+    classified foreign, not as a pre-contract copy of ours — the shell half
+    makes the same distinction (``foreign-script``), and mislabeling it would
+    send the user to a reinstall that refuses to clobber the file.
+
+    Mutation: drop the ``_looks_like_our_script`` ownership sniff (treat every
+    unmarkered file as ours) — this REDs with ``unversioned-artifact``.
+    """
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+    root = capture_install.pi_home(home)
+    (root / capture_install.PI_EXTENSION_NAME).write_text(
+        "// some other product extension\nexport default () => {};\n",
+        encoding="utf-8")
+    findings = hook_install.detect_artifact_install(root, "pi")
+    blocking = [f for f in findings if f.blocking]
+    assert [f.kind for f in blocking] == ["foreign-artifact"], findings
+
+
+def test_pi_symlinked_seam_is_judged_on_its_target(home):
+    """A symlink install (the shape the issue's notes describe for a dev
+    checkout) is reported on the RESOLVED bytes: a symlink to the shipped
+    seam is current, a symlink to an OLD copy is BLOCKING stale, and a broken
+    symlink is neither missing nor current.
+
+    Mutation: skip the version comparison for a symlink (return only the
+    non-blocking ``symlinked-artifact`` note) — a symlink to a stale checkout
+    reads as current and this REDs.
+    """
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+    root = capture_install.pi_home(home)
+    installed = root / capture_install.PI_EXTENSION_NAME
+    installed.unlink()
+
+    # (i) symlink to the SHIPPED seam — current, with only the non-blocking note
+    installed.symlink_to(_PI_SRC)
+    findings = hook_install.detect_artifact_install(root, "pi")
+    assert [f.kind for f in findings if f.blocking] == [], findings
+    assert [f.kind for f in findings] == ["symlinked-artifact"], findings
+
+    # (ii) symlink to an OLD copy — the target's generation is what counts
+    old = home / "old-seam.ts"
+    old.write_text(_pi_seam_without_marker(), encoding="utf-8")
+    installed.unlink()
+    installed.symlink_to(old)
+    blocking = [f for f in hook_install.detect_artifact_install(root, "pi")
+                if f.blocking]
+    assert [f.kind for f in blocking] == ["unversioned-artifact"], blocking
+
+    # (iii) a BROKEN symlink is its own finding, never `missing-artifact`
+    installed.unlink()
+    installed.symlink_to(home / "gone.ts")
+    findings = hook_install.detect_artifact_install(root, "pi")
+    assert [f.kind for f in findings] == ["symlinked-artifact"], findings
+    assert "broken symlink" in findings[0].detail
+
+
+def test_pi_absent_seam_is_a_blocking_missing_finding(tmp_path):
+    """A Pi root with no seam must still be reported — the detector may not
+    trade the old ``missing-extension`` signal away for the version check.
+
+    Mutation: return only version findings (drop the existence check) — a
+    missing seam reads as current and verify fires nothing.
+    """
+    findings = hook_install.detect_artifact_install(tmp_path, "pi")
+    assert [f.kind for f in findings] == ["missing-artifact"]
+    assert findings[0].blocking

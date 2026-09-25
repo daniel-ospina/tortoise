@@ -247,18 +247,19 @@ def _static_findings(harness: str, root: Path) -> list[dict[str, Any]]:
     """The install's on-disk drift, through the shared detector.
 
     Claude/Codex/Cursor delegate to ``hook_install.detect_install`` (the same
-    read-only detector ``tortoise hooks status`` uses).  Pi has no layout, so
-    its single artifact is checked directly.
+    read-only detector ``tortoise hooks status`` uses).  A harness whose seam
+    is a non-shell artifact (Pi) has no layout to hand that detector, so it
+    delegates to the ARTIFACT half — ``hook_install.detect_artifact_install``
+    — which is why a stale Pi seam is now reportable rather than only its
+    absence (#4680).  Keyed on the registry, never on a literal ``"pi"``, so a
+    future non-shell seam is covered without a second branch here.
     """
-    if harness == "pi":
-        dst = root / capture_install.PI_EXTENSION_NAME
-        if not dst.is_file():
-            return [{
-                "kind": "missing-extension",
-                "detail": f"{dst} is not installed",
-                "blocking": True,
-            }]
-        return []
+    if harness in hook_install.ARTIFACT_CONTRACTS:
+        return [
+            {"kind": f.kind, "detail": f.detail, "script": f.script,
+             "event": f.event, "blocking": f.blocking}
+            for f in hook_install.detect_artifact_install(root, harness)
+        ]
     return [
         {"kind": f.kind, "detail": f.detail, "script": f.script,
          "event": f.event, "blocking": f.blocking}

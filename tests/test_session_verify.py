@@ -1151,6 +1151,39 @@ def test_pi_is_honestly_unverifiable(hosted, setup):
             assert phrase not in text, (phrase, text[:90])
 
 
+def test_pi_stale_install_is_reported_not_unverifiable(hosted, setup):
+    """The #4680 defect, at the surface that hid it: a present-but-STALE Pi
+    seam used to report ``UNVERIFIABLE-IN-CI`` — indistinguishable from "fine"
+    — while capturing with older logic.  It must instead be a BLOCKING
+    install finding (``stale-artifact``/``unversioned-artifact``), the same
+    way the three shell seams already report ``stale-script``, and nothing may
+    be fired for it.
+
+    Mutation: restore the pre-#4680 ``_static_findings`` Pi branch (existence
+    only, no version comparison) — this REDs: a tampered seam reads
+    UNVERIFIABLE and no finding names the staleness.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    # The pre-contract shape: a REAL installed seam with its marker stripped —
+    # exactly the Sep-17 seam #4680 was filed about (present, ours, unmarkered).
+    seam = root / "tortoise-capture.ts"
+    seam.write_text(
+        "\n".join(line for line in seam.read_text(encoding="utf-8").splitlines()
+                  if not line.startswith("// tortoise-hook-version:")) + "\n",
+        encoding="utf-8")
+    graph, _url = hosted
+    report = _verify(hosted, home, "pi", root)
+    assert report["links"]["installed"]["status"] == "FAIL", report["links"]
+    detail = report["links"]["installed"]["detail"]
+    assert "not current" in detail
+    assert "unversioned-artifact" in detail
+    assert "tortoise install pi" in detail, (
+        "verify must name the sanctioned repair for the state it reports")
+    assert report["exit_code"] == EXIT_BROKEN
+    assert graph.posts == [], "nothing may be captured for a stale install"
+
+
 def test_pi_ruling_matcher_covers_the_possessive():
     """A comment block whose only Pi reference is the possessive ``Pi's`` must
     still count as naming the Pi ruling — otherwise a wrapped line carrying a

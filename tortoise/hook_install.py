@@ -22,20 +22,25 @@ half is an adapter rather than an assumption.
 
 Where the "current version" lives (single source of truth)
 ----------------------------------------------------------
-The version is **the marker inside the shipped script itself** — there is no
+The version is **the marker inside the shipped artifact itself** — there is no
 constant, no separate manifest, and nothing to keep in sync::
 
     # tortoise-hook-version: 3        <- column-0 header line, one per file
+    // tortoise-hook-version: 1       <- the same marker in a non-shell artifact
 
 ``read_hook_version()`` reads that line out of a file; the "expected" version
-for an install is read from the *repo* copy of the script, and the "installed"
+for an install is read from the *repo* copy of the artifact, and the "installed"
 version from the *user's* copy.  The comparison is therefore directly
 source-vs-installed, and the number a user greps is the same number this code
 acts on.  All scripts in a layout must declare the **same** generation
 (:func:`contract_version` returns ``None`` if they disagree) so the contract
 covering both halves — script bytes *and* the settings ``timeout`` — has one
 visible number.  The marker is bumped on every behavioural edit to a shipped
-hook, and on every change to the install contract those hooks participate in.
+artifact, and on every change to the install contract it participates in.
+
+The marker's comment prefix is the artifact's language, not a property of the
+contract: a shell hook writes ``#`` and the Pi seam (TypeScript, #4680) writes
+``//``.  Both are column-0 anchored, which is what makes the marker canonical.
 
 Deliberately *ignored*: indented markers inside a script body (the historical
 ``  # tortoise-hook-version: 2`` site markers).  Only a column-0 header line is
@@ -68,14 +73,19 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: The marker token.  A canonical marker is a column-0 ``#`` comment line of
-#: the form ``# tortoise-hook-version: <int>``.
+#: The marker token.  A canonical marker is a column-0 comment line of the
+#: form ``# tortoise-hook-version: <int>`` (shell) or
+#: ``// tortoise-hook-version: <int>`` (TypeScript — the Pi seam, #4680).
 HOOK_VERSION_TOKEN = "tortoise-hook-version"
 
 # Column-0 anchored on purpose: an indented marker (a comment inside a script
-# body) is a historical site marker, never the contract declaration.
+# body) is a historical site marker, never the contract declaration.  The two
+# comment prefixes are the artifact's LANGUAGE, not a per-harness setting: a
+# shell hook cannot open a line with ``//`` and a TypeScript module cannot open
+# one with ``#``, so accepting both here costs nothing and lets ONE reader
+# serve every shipped artifact (#4680).
 _HOOK_VERSION_RE = re.compile(
-    rf"^#\s*{re.escape(HOOK_VERSION_TOKEN)}:\s*(\d+)\s*$", re.MULTILINE
+    rf"^(?:#|//)\s*{re.escape(HOOK_VERSION_TOKEN)}:\s*(\d+)\s*$", re.MULTILINE
 )
 
 #: Where the shipped hook scripts live inside this package.
@@ -575,6 +585,57 @@ def get_layout_optional(harness: str) -> HarnessLayout | None:
     return HARNESS_LAYOUTS.get(harness)
 
 
+#: The extension name Pi auto-discovers under ``~/.pi/agent/extensions/``.  It
+#: lives HERE because the artifact and its version contract are one fact: the
+#: detector must inspect exactly the file the installer writes, and
+#: ``capture_install.PI_EXTENSION_NAME`` DERIVES from this declaration so the
+#: two can never name different files (#4680).
+PI_EXTENSION_NAME = "tortoise-capture.ts"
+
+
+@dataclass(frozen=True)
+class ArtifactContract:
+    """A shipped capture seam that is NOT a shell hook.
+
+    ``HarnessLayout`` describes a hooks *directory* plus a registration *file*
+    — neither of which a non-shell seam has, and #4544 rules that inventing a
+    fake layout for one is wrong.  What the VERSION CONTRACT needs from such a
+    seam is only the shipped artifact and the name it installs under, so that
+    is all this carries; the marker's comment prefix is the READER's business
+    (``read_hook_version`` accepts a shell ``#`` or a TS ``//`` column-0
+    marker), never restated per artifact.
+
+    This is deliberately NOT a ``HarnessLayout`` and must never grow into one:
+    a layout-shaped stand-in would claim a ``hooks_dir`` and a registration
+    file the seam does not have, which is the exact fake #4544 rejected.
+    """
+
+    harness: str
+    source: Path
+    install_name: str
+
+
+def _pi_artifact_contract() -> ArtifactContract:
+    """Pi's seam — the TypeScript extension installed at
+    ``~/.pi/agent/extensions/tortoise-capture.ts`` (#3575)."""
+    return ArtifactContract(
+        harness="pi",
+        source=Path(__file__).resolve().parent / "pi-hooks" / PI_EXTENSION_NAME,
+        install_name=PI_EXTENSION_NAME,
+    )
+
+
+#: Shipped non-shell seams, by harness.  The version contract is the
+#: harness-agnostic half of this module: a shell-hook seam answers through
+#: ``HARNESS_LAYOUTS``, a non-shell seam through this registry, and every
+#: consumer (``contract_version_for`` / ``detect_artifact_install``) is the
+#: same code either way — so ``pi`` is drift-checked without a fake layout
+#: (#4680, #4544).
+ARTIFACT_CONTRACTS: dict[str, ArtifactContract] = {
+    "pi": _pi_artifact_contract(),
+}
+
+
 def default_root(layout: HarnessLayout, home: Path) -> Path:
     """The install root to use when the caller passes no explicit directory.
 
@@ -630,6 +691,29 @@ def contract_version(layout: HarnessLayout) -> int | None:
         return None
     version = versions.pop()
     return version
+
+
+def contract_version_for(harness: str) -> int | None:
+    """The generation the SHIPPED capture seam for ``harness`` declares.
+
+    The harness-agnostic accessor: a caller never has to know whether the seam
+    is a shell hook (answered by ``contract_version`` over a ``HarnessLayout``)
+    or a non-shell artifact (answered from :data:`ARTIFACT_CONTRACTS`), so
+    ``pi`` is pinned by the SAME test table as its three shell siblings instead
+    of falling outside the machinery (#4680).
+
+    ``None`` means "no contract is registered for this harness" or "the
+    shipped tree is unmarkered/self-inconsistent".  The former is the normal
+    answer for a harness with no seam; the latter is a REPO defect pinned by
+    tests, never an install's problem.
+    """
+    layout = HARNESS_LAYOUTS.get(harness)
+    if layout is not None:
+        return contract_version(layout)
+    artifact = ARTIFACT_CONTRACTS.get(harness)
+    if artifact is None:
+        return None
+    return read_hook_version(artifact.source)
 
 
 @dataclass(frozen=True)
@@ -1976,6 +2060,129 @@ def detect_install(root: str | os.PathLike[str], harness: str = "claude",
         findings.append(Finding("unreadable-settings", error))
         return findings
     findings.extend(_settings_findings(layout, data or {}, root))
+    return findings
+
+
+def detect_artifact_install(root: str | os.PathLike[str],
+                            harness: str) -> list[Finding]:
+    """Report drift for a NON-shell capture seam — the artifact half.
+
+    The sibling of :func:`detect_install` for a harness in
+    :data:`ARTIFACT_CONTRACTS`: ONE shipped artifact, no ``hooks_dir`` and no
+    registration file, so the checks that need those (symlink-in-path,
+    settings, exec bit) do not apply.  The checks it DOES share are the same
+    ones: missing / not-a-regular-file / not-readable / foreign / unversioned /
+    stale / ahead / modified — the same classification ``detect_install``
+    applies (the kind names end ``-artifact`` rather than ``-script``, because
+    a caller may key on which seam class a finding belongs to), so ``session
+    verify`` reports a stale Pi seam exactly as it reports a stale Claude one
+    (#4680) instead of the old presence-only check that could not tell them
+    apart.
+
+    Read-only, like its shell sibling.  Returns ``[]`` for a harness with no
+    registered artifact (the normal answer for a harness this module does not
+    cover), and ``[]`` for a present artifact when the SHIPPED copy is
+    defective — a repo defect pinned by tests, never the install's problem.
+    """
+    contract = ARTIFACT_CONTRACTS.get(harness)
+    if contract is None:
+        return []
+    installed = Path(root) / contract.install_name
+    findings: list[Finding] = []
+    if installed.is_symlink() and not installed.exists():
+        # A BROKEN symlink: `.exists()` follows the link, so it would fall
+        # through to `missing-artifact` and imply the seam is absent when it
+        # is really a broken pointer.
+        return [Finding(
+            "symlinked-artifact",
+            f"{installed} is a broken symlink — remove or re-point it",
+            script=contract.install_name,
+        )]
+    if not installed.exists():
+        return [Finding(
+            "missing-artifact",
+            f"{installed} is not installed",
+            script=contract.install_name,
+        )]
+    if not installed.is_file():
+        # A directory / FIFO / socket at the artifact path is drift, and
+        # reading it (FIFO) could block — report without reading.
+        return [Finding(
+            "not-a-regular-file",
+            f"{installed} exists and is not a regular file",
+            script=contract.install_name,
+        )]
+    expected = read_hook_version(contract.source)
+    if expected is None:
+        # Repo defect (pinned by tests) — not this install's problem.
+        return findings
+    if installed.is_symlink():
+        # A symlink install tracks whatever it points at, so it may STILL be
+        # stale (a checkout from an older generation is stale) — unlike
+        # `upgrade_install`, which refuses symlinks, the detector reports on
+        # the RESOLVED bytes, so this is a note, never a reason to skip the
+        # version checks below.
+        findings.append(Finding(
+            "symlinked-artifact",
+            f"{installed} is a symlink — it tracks its target, so a stale "
+            "target is reported below; re-point or copy it to upgrade",
+            script=contract.install_name, blocking=False,
+        ))
+    if not os.access(installed, os.R_OK):
+        findings.append(Finding(
+            "not-readable",
+            f"{installed} is not readable — chmod it so the seam can load",
+            script=contract.install_name,
+        ))
+    found = read_hook_version(installed)
+    if found is None:
+        if not os.access(installed, os.R_OK):
+            pass  # already reported as `not-readable` above
+        elif _looks_like_our_script(installed):
+            # The pre-contract population (#4680): a present, functioning
+            # Tortoise seam that carries no marker, so nothing could tell it
+            # was weeks old.  Ownership is sniffed exactly as the shell half
+            # does it (`_looks_like_our_script`) — a foreign file at the
+            # artifact path must be reported as foreign, never as a
+            # pre-contract copy of ours (which would send the user to a
+            # reinstall that would refuse to clobber it).
+            findings.append(Finding(
+                "unversioned-artifact",
+                f"{installed} carries no {HOOK_VERSION_TOKEN} marker "
+                f"(expected {expected}) — it was installed before the version "
+                f"contract, so it captures with older logic; reinstall with "
+                f"`tortoise install {harness}`",
+                script=contract.install_name,
+            ))
+        else:
+            findings.append(Finding(
+                "foreign-artifact",
+                f"{installed} is not a Tortoise seam — move it aside, then "
+                f"re-run `tortoise install {harness}` to install ours",
+                script=contract.install_name,
+            ))
+    elif found < expected:
+        findings.append(Finding(
+            "stale-artifact",
+            f"{installed} is {HOOK_VERSION_TOKEN} {found}, "
+            f"current is {expected} — it captures with older logic; "
+            f"reinstall with `tortoise install {harness}`",
+            script=contract.install_name,
+        ))
+    elif found > expected:
+        findings.append(Finding(
+            "ahead-artifact",
+            f"{installed} is {HOOK_VERSION_TOKEN} {found}, newer than "
+            f"this CLI's {expected} — not replaced",
+            script=contract.install_name, blocking=False,
+        ))
+    elif installed.read_bytes() != contract.source.read_bytes():
+        findings.append(Finding(
+            "modified-artifact",
+            f"{installed} marker matches ({found}) but its bytes differ "
+            "from the shipped seam (local edit)",
+            script=contract.install_name,
+        ))
     return findings
 
 
