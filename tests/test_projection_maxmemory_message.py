@@ -138,9 +138,10 @@ def test_each_backend_cause_names_itself(cause, needle):
     message) would send an operator to destroy healthy data for a transient
     cause.
 
-    No `FLY_APP_NAME` dance: all three branches execute before the
-    `is_prod or not self._is_embedded` gate, so the env var cannot change the
-    outcome (P2-4).
+    No `FLY_APP_NAME` dance: all three causes branch before the
+    `is_prod or not self._is_embedded` gate, so which message is raised here
+    does not depend on the env var. (The FORK lane text is keyed on
+    `self._is_embedded` alone — see `_backend_failure_message`.)
     """
     proj = _projection(probe_error=RuntimeError(cause))
     with pytest.raises(RuntimeError) as err:
@@ -259,18 +260,38 @@ def test_fork_remedy_on_server_lane_does_not_prescribe_the_embedded_cure(monkeyp
     assert "python -m tortoise rebuild" not in msg, msg
 
 
-def test_fork_remedy_on_production_lane_names_the_server_action(monkeypatch):
-    """FLY_APP_NAME=production is the other non-embedded lane; same split."""
-    monkeypatch.setenv("FLY_APP_NAME", "tortoise-test")
+@pytest.mark.parametrize("is_prod,embedded,lane_label,has_cure", [
+    (False, False, "[server lane", False),
+    (False, True, "[embedded lane]", True),
+    (True, False, "[server lane", False),
+    (True, True, "[embedded lane]", True),
+])
+def test_fork_remedy_lane_follows_the_embedded_axis_only(
+    monkeypatch, is_prod, embedded, lane_label, has_cure
+):
+    """P2 — the lane remedy is selected on `self._is_embedded` ALONE.
+
+    The flag previously read `_is_embedded and not is_prod`, conflating two
+    independent axes. That handed a prod+embedded handle the server text
+    ("this is not an embedded unix-socket server") even though its socket
+    path WAS present and the slot cure was available. Pin all four
+    `is_prod` × `_is_embedded` products: only the embedded axis moves the
+    lane, and no variant may assert a socket property it cannot know.
+    """
+    if is_prod:
+        monkeypatch.setenv("FLY_APP_NAME", "tortoise-test")
+    else:
+        monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(
         probe_error=RuntimeError("GRAPH.COPY failed, could not fork"),
-        embedded=True,  # even an embedded handle is prod-gated here
+        embedded=embedded,
     )
     with pytest.raises(RuntimeError) as err:
         proj._auto_health_recover()
     msg = str(err.value)
-    assert "recover_fork_slot" not in msg, msg
-    assert "server" in msg.lower(), msg
+    assert lane_label in msg, msg
+    assert ("recover_fork_slot" in msg) is has_cure, msg
+    assert "this is not an embedded unix-socket server" not in msg, msg
     assert "python -m tortoise rebuild" not in msg, msg
 
 

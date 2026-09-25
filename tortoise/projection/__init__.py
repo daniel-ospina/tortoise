@@ -1247,8 +1247,10 @@ _BACKEND_FAILURE_MARKERS: tuple[tuple[str, str], ...] = (
 # `recover_fork_slot` where `socket_path_of(db)` is None, is wrong on both
 # counts. The body is therefore built from a shared cause-analysis prefix
 # plus a lane-specific action, selected by `_backend_failure_message`'s
-# `embedded` flag (the call site's own `_is_embedded and not is_prod`
-# reading), so a server-lane operator is never handed an embedded-only call.
+# `embedded` flag (the call site's own `self._is_embedded` reading — the axis
+# that actually decides whether `socket_path_of(db)` is non-None, NOT
+# `is_prod`, which gates auto-recovery and never the manual slot cure), so an
+# operator is never handed a cure their handle cannot execute.
 _FORK_REMEDY_CAUSE_ANALYSIS = (
     "DB health check failed on open: the server refused a module fork "
     "(FalkorDB replies `GRAPH.COPY failed, could not fork`). Redis allows "
@@ -1272,11 +1274,10 @@ _FORK_REMEDY_EMBEDDED = _FORK_REMEDY_CAUSE_ANALYSIS + (
 )
 _FORK_REMEDY_SERVER = _FORK_REMEDY_CAUSE_ANALYSIS + (
     "[server lane — remote/docker FalkorDB] The client-side slot cure is "
-    "embedded-only: this is not an embedded unix-socket server, so there is "
-    "no local daemon whose hung child could be reaped. On the SERVER's host, "
-    "reap the lingering `redis-module-fork` child or restart the FalkorDB "
-    "server; the refusal clears as soon as Redis reaps it. Do NOT rebuild. "
-    "See #3845 and #3634."
+    "embedded-only — it applies when the handle is a local unix socket. On "
+    "the SERVER's host, reap the lingering `redis-module-fork` child or "
+    "restart the FalkorDB server; the refusal clears as soon as Redis reaps "
+    "it. Do NOT rebuild. See #3845 and #3634."
 )
 _BACKEND_FAILURE_REMEDIES: dict[str, str] = {
     "loading": (
@@ -2910,11 +2911,14 @@ class FalkorProjection(
         server refusing a module fork. Returns ``None`` when no cause matches,
         so a genuine corruption failure still reaches the rebuild advice.
 
-        ``embedded`` selects the lane-specific FORK remedy (the slot cure is
-        embedded-only). Its default is ``False`` — the conservative lane: a
-        caller that has not stated its lane is never told to call an
-        embedded-only function. ``_auto_health_recover`` passes its own
-        ``self._is_embedded and not is_prod`` reading.
+        ``embedded`` selects the lane-specific FORK remedy and tracks ONE
+        axis: whether this handle is an embedded unix-socket server, i.e.
+        whether ``socket_path_of(db)`` is non-None and the slot cure is
+        available. It is deliberately NOT ``is_prod``-gated — production
+        disables auto-recovery, not the manual cure. Its default is ``False``
+        — the conservative lane: a caller that has not stated its lane is
+        never told to call an embedded-only function. ``_auto_health_recover``
+        passes its own ``self._is_embedded`` reading.
         """
         if exc is None:
             return None
@@ -2977,7 +2981,7 @@ class FalkorProjection(
             # instead of falling through to the rebuild advice.
             cause_message = self._backend_failure_message(
                 self._probe_error,
-                embedded=self._is_embedded and not is_prod,
+                embedded=self._is_embedded,
             )
             if cause_message is not None:
                 raise RuntimeError(cause_message)
