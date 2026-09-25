@@ -157,6 +157,11 @@ jobs:
     # Runs the tiered selector (tools/ci_selection.py): tier 1 smoke always;
     # matched surfaces on code PRs; full on push/shared/unknown.
     runs-on: ubuntu-latest
+    # This job now owns a network install (pip install pyyaml, #5128) and every
+    # downstream python-ci job has `needs: changes` -- without a bound, a stalled
+    # PyPI marks the whole matrix `skipped` for up to the 360-minute default.
+    # Mirrors manifest-integrity's bound for the same reason.
+    timeout-minutes: 5
     outputs:
       python: ${{ steps.select.outputs.python }}
       full: ${{ steps.select.outputs.full }}
