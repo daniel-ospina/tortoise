@@ -2966,8 +2966,18 @@ def _value_signature(content: str) -> str | None:
             hour_v = _num_word_value(words[0])
             if hour_v is None:
                 continue
-            minute_v = (_MINUTE_WORDS.get(" ".join(words[1:]), 0)
-                        if len(words) > 1 else 0)
+            minute_v = _MINUTE_WORDS.get(" ".join(words[1:])) if len(words) > 1 else 0
+            if minute_v is None:
+                # A spelled-out minute the table does not name ("six fifty pm")
+                # is still a minute.  Defaulting it to :00 made the whole clock
+                # normalise to the hour-only value, so "6:00pm" and "six fifty
+                # pm" carried the SAME signature and one deleted the other.
+                minute_v = _num_word_value(" ".join(words[1:])) \
+                    if len(words) > 1 else 0
+            if minute_v is None or not 0 <= minute_v <= 59:
+                # Unreadable minute: leave the clock un-normalised rather than
+                # claim it agrees with every other reading of that hour.
+                continue
             sigs.append(f"{amp}{hour_v % 12 or 12:02d}:{minute_v:02d}")
     # compound numbers: "27:12", "1:02:30", "27m12s" (clock forms already
     # captured above — a following am/pm excludes the compound pass)
@@ -3294,6 +3304,21 @@ def _is_edge_punct(ch: str) -> bool:
             or unicodedata.category(ch)[:1] in ("P", "S", "C", "M"))
 
 
+def _is_percent_like(ch: str) -> bool:
+    """A percent/permille/degree-family sign, in any script.
+
+    A whitelist of ASCII spellings let U+FF05 and U+FE6A be stripped as
+    decoration, so "50\uff05" folded into "50".  Unicode names the family, and
+    the name is what distinguishes it from the punctuation beside it.
+    """
+    try:
+        name = unicodedata.name(ch)
+    except ValueError:
+        return False
+    return ("PERCENT" in name or "PER MILLE" in name
+            or "PER TEN THOUSAND" in name or name == "DEGREE SIGN")
+
+
 def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
     """A symbol that changes what the numeral beside it counts.
 
@@ -3306,9 +3331,31 @@ def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
     same character must not survive at the END, or "5." and "5" stop being one
     value.
     """
-    if unicodedata.category(ch) in ("Sc", "Sm"):
+    if unicodedata.category(ch) in ("Sc", "Sm") or _is_percent_like(ch):
         return True
     return ch in (_NUMERIC_LEAD if leading else _NUMERIC_TRAIL)
+
+
+def _leading_symbol_run(t: str, start: int, end: int) -> int:
+    """Where the token starts once its leading symbols are accounted for.
+
+    A CHAIN of them is common and each one counts ("-\u00a350", "\u00a3-50",
+    "-.5").  Keeping only the symbol next to the first digit discarded the
+    sign, and a negative amount then folded into a positive one.  Zero when
+    the whole run belongs to the numeral, otherwise the index past it.
+    """
+    seen = 0
+    while seen < end and _is_edge_punct(t[seen]):
+        seen += 1
+    # Punctuation that cannot belong to a numeral (a bracket, a quote) is
+    # decoration, so it comes off before the numeric run is judged.
+    while start < seen and not _keeps_numeric_edge(t[start], True):
+        start += 1
+    if start == seen or not any(c.isdigit() for c in t[seen:end]):
+        return seen
+    if not all(_keeps_numeric_edge(c, True) for c in t[start:seen]):
+        return seen
+    return start
 
 
 def _is_numeric_sign_token(t: str) -> bool:
@@ -3321,7 +3368,7 @@ def _is_numeric_sign_token(t: str) -> bool:
     if not t:
         return False
     return all(c == "-" or unicodedata.category(c) in ("Sc", "Sm")
-               or c in _NUMERIC_TRAIL for c in t)
+               or _is_percent_like(c) or c in _NUMERIC_TRAIL for c in t)
 
 
 def _strip_edges(t: str) -> str:
@@ -3334,10 +3381,7 @@ def _strip_edges(t: str) -> str:
     if _is_numeric_sign_token(t):
         return t
     start, end = 0, len(t)
-    while start < end and _is_edge_punct(t[start]):
-        if _keeps_numeric_edge(t[start], True) and t[start + 1:start + 2].isdigit():
-            break
-        start += 1
+    start = _leading_symbol_run(t, start, end)
     while end > start and _is_edge_punct(t[end - 1]):
         if _keeps_numeric_edge(t[end - 1], False) and t[start:end - 1][-1:].isdigit():
             break
@@ -3500,6 +3544,16 @@ def _deaccent(t: str) -> str:
         "NFC", "".join(c for c in decomposed if unicodedata.category(c) != "Mn"))
 
 
+def _flat_words(s: str) -> str:
+    """The claim with every non-word character turned into a single space.
+
+    A multi-word table entry is written with plain spaces, so an interior
+    separator defeats a substring test: "as-long-as" and "next\u200bweek" are
+    not the entries they are.  Normalised this way, both are.
+    """
+    return re.sub(r"[^\w']+|_+", " ", _fold_unicode(_norm(s))).strip()
+
+
 def _lookup_keys(t: str) -> tuple[str, ...]:
     """Every form of a token a word list must be matched against.
 
@@ -3523,7 +3577,7 @@ def _condition_markers(content: str) -> frozenset[str]:
     found: set[str] = set()
     for t in _guard_tokens(content):
         found.update(k for k in _lookup_keys(t) if k in _CONDITION_MARKERS)
-    flat = _norm(content)
+    flat = _flat_words(content)
     found.update(p for p in _CONDITION_PHRASES if p in flat)
     return frozenset(found)
 
@@ -3544,7 +3598,7 @@ def _date_tokens(content: str) -> tuple[str, ...]:
     own order made the tuple permutation-invariant, which put the phrase form
     straight back where the set had been.
     """
-    flat = _norm(content)
+    flat = _flat_words(content)
     seq = _guard_token_seq(flat)
     found: list[tuple[int, str]] = []
     for i, t in enumerate(seq):
@@ -3577,7 +3631,8 @@ def _proper_nouns(content: str) -> frozenset[str]:
     ``_norm`` discards it.  The first token is excluded because it is
     capitalised by position rather than by being a name.
     """
-    raw = [_strip_edges(t) for t in _fold_unicode(content).split()]
+    raw = [_strip_edges(t)
+           for t in _fold_unicode(content).translate(_APOSTROPHES).split()]
     named: set[str] = set()
     for i, t in enumerate(raw):
         # The first token is excluded: it is capitalised by position rather
@@ -3631,9 +3686,17 @@ def _possessives(content: str) -> frozenset[str]:
     Read from the token stream, which keeps the separator, because
     ``_content_tokens`` strips it to make one word's two spellings agree and
     the possessive signal is exactly what that loses.
+
+    Both the whole token and its parts are searched, so a NON-composing
+    combining mark standing where the clitic separator belongs is not erased
+    before the shape rule can see it.
     """
-    return frozenset(_canon_token(_deaccent(t)) for t in _guard_tokens(content)
-                     if _POSSESSIVE_RE.search(_deaccent(t)))
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        for cand in (t, *_sub_tokens(t)):
+            if _POSSESSIVE_RE.search(cand):
+                out.add(_canon_token(_deaccent(cand)))
+    return frozenset(out)
 
 
 def _marker_scope(content: str) -> tuple[str, ...]:

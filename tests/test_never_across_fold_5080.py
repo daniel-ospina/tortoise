@@ -735,6 +735,107 @@ class TestDistinguishingDifference:
         assert not v2.fold_allowed("bob\u200b's report is ready",
                                    "the report is ready")
 
+    def test_a_spelled_out_minute_is_a_minute(self):
+        """An unrecognised minute word must not default to :00.
+
+        _MINUTE_WORDS names seven spellings; every other minute word defaulted
+        to zero, so "six fifty pm" and "six pm" normalised to the SAME value
+        and one claim deleted the other.
+        """
+        for b in ("we meet at six fifty pm", "we meet at six ten pm",
+                  "we meet at six twenty pm", "we meet at six forty five pm"):
+            a = "we meet at 6:00pm"
+            assert v2.distinguishing_difference(a, b) == "number", b
+            assert not v2.fold_allowed(a, b)
+        # A minute that cannot be read leaves the clock un-normalised rather
+        # than agreeing with every other reading of that hour.
+        assert v2.distinguishing_difference(
+            "we meet at six pm", "we meet at six blort pm") == "number"
+        # The listed minutes, and the notation fold, are unaffected.
+        assert v2.distinguishing_difference(
+            "we meet at 6:00pm", "we meet at six thirty pm") == "number"
+        assert v2.fold_allowed("the value is six pm", "the value is 6pm")
+        assert v2.fold_allowed("gym at 6pm", "gym at six pm")
+
+    def test_a_chain_of_leading_symbols_is_part_of_the_quantity(self):
+        """Each leading symbol counts, not just the one beside the digit.
+
+        Keeping only the innermost symbol discarded the sign, so a negative
+        amount folded into a positive one.
+        """
+        for a, b in (("we paid \u00a350", "we paid -\u00a350"),
+                     ("we paid -50", "we paid \u00a3-50"),
+                     ("we paid \u00a350", "we paid \u20ac-50"),
+                     ("the answer is .5", "the answer is -.5")):
+            assert v2.distinguishing_difference(a, b) == "number", (a, b)
+            assert not v2.fold_allowed(a, b)
+        # A bracket or a quote cannot belong to a numeral, so it still comes
+        # off: a parenthesised decimal is the same value.
+        for a, b in (("(.5)", ".5"), ("\"50\"", "50"),
+                     ("the answer is (5)", "the answer is 5")):
+            assert v2.distinguishing_difference(a, b) is None, (a, b)
+            assert v2.fold_allowed(a, b)
+
+    def test_a_percent_like_sign_is_read_by_its_unicodes_name(self):
+        """The percent family is a family, not a list of ASCII spellings.
+
+        A whitelist held "%" and "\u2030" and missed the fullwidth and small
+        forms, so "50\uff05" folded into "50".
+        """
+        for sign in ("%", "\uff05", "\ufe6a", "\u066a", "\u2030", "\u2031", "\u00b0"):
+            for a, b in ((f"we got 50{sign}", "we got 50"),
+                         (f"we paid {sign}50", "we paid 50")):
+                # U+066A reaches the boundary as a script difference rather
+                # than a number one; either way it is a difference.
+                assert v2.distinguishing_difference(a, b) is not None, (a, b)
+                assert not v2.fold_allowed(a, b)
+        assert v2.distinguishing_difference("we got 50%", "we got 50") == "number"
+
+    def test_a_multi_word_marker_survives_an_interior_separator(self):
+        """A phrase member is matched separator-insensitively.
+
+        The phrase table is written with plain spaces, so a substring test on
+        the raw normalised text missed "as-long-as" and "next\u200bweek" — the
+        member was present and the phrase was not found.
+        """
+        for spelling in ("as-long-as", "as_long_as", "as\u200blong as"):
+            a = "we keep backups"
+            b = f"we keep backups {spelling}"
+            assert v2.distinguishing_difference(a, b) == "condition", spelling
+            assert not v2.fold_allowed(a, b)
+        for spelling in ("next-week", "last\u200bmonth", "the-day-after-next",
+                         "the other-day"):
+            a = "we ship"
+            b = f"we ship {spelling}"
+            assert v2.distinguishing_difference(a, b) == "date", spelling
+            assert not v2.fold_allowed(a, b)
+        # The plain spellings still refuse...
+        assert v2.distinguishing_difference("we ship", "we ship next week") == "date"
+        assert v2.distinguishing_difference(
+            "we keep backups", "we keep backups as long as") == "condition"
+
+    def test_a_name_fused_by_any_apostrophe_is_still_a_name(self):
+        """The registered spelling must match the content skeleton's.
+
+        The skeleton is built from the apostrophe-TRANSLATED text, so it holds
+        "foralice"; read raw, the name rule registered "for\u2019alice" and the
+        intersection found nothing.
+        """
+        for apos in ("'", "\u2018", "\u2019", "\u2032", "\u2035", "\u00b4",
+                     "\u055a", "\u05f3", "\uff02", "\uff07"):
+            b = f"The deploy failed for{apos}Alice"
+            assert v2.distinguishing_difference("The deploy failed", b) \
+                == "substituted_content", apos
+            assert not v2.fold_allowed("The deploy failed", b)
+
+    def test_a_non_composing_mark_in_a_possessive_is_still_a_possessive(self):
+        """A mark that does NOT compose keeps the split, and stays in scope."""
+        for mark in ("\u0301", "\u0308", "\u0300"):
+            b = f"bob{mark}s report is ready"
+            assert v2.distinguishing_difference(
+                "the report is ready", b) == "substituted_content", mark
+            assert not v2.fold_allowed("the report is ready", b)
+
     def test_a_range_or_a_version_is_a_different_quantity(self):
         """The separators inside a numeric token are part of its value."""
         for a, b in (("we ship 3-4 crates", "we ship 4-3 crates"),
