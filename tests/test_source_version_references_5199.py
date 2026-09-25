@@ -21,7 +21,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK
 
 
 def _tmp(name: str) -> str:
@@ -92,7 +92,7 @@ def test_derivation_label_set_excludes_identity_targets():
     """
     from tortoise.projection.edges import _DERIVATION_REFERENCES_LABELS
 
-    assert _DERIVATION_REFERENCES_LABELS == frozenset({"Event", "Document"}), (
+    assert frozenset({"Event", "Document"}) == _DERIVATION_REFERENCES_LABELS, (
         "the derivation set must be exactly the labels whose in-repo writers build "
         f"the target FROM the source's content; got {_DERIVATION_REFERENCES_LABELS!r}"
     )
