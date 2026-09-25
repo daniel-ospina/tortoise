@@ -116,6 +116,15 @@ SHARED_MODULES = (
     "tortoise/projection/__init__.py",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
+    # #4069: suite-wide test helpers re-exported by `tests/conftest.py`. Both are
+    # imported at conftest MODULE level and hand their fixtures to every surface's
+    # tests, and neither is a `test_*.py` file, so the manifest never classifies
+    # them: without these entries a change to one selected `core` only, and a break
+    # it induced in an api/eval/onboarding/ep/battery test never ran on the PR that
+    # made it (#1349/#3332/#3910). The `tests.*` half of that rule is enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
+    "tests/_tmpdir_hygiene.py",
+    "tests/_embedded.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -134,6 +143,10 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/welcome.html",
                    "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
+                   # #2409: the public contact form's page. Registered here for the
+                   # same reason as the rest of this tuple — a PR touching only
+                   # this page must still select the guard that holds it.
+                   "website/contact.html",
                    "website/index.html",
                    "website/privacy.html",
                    # #3485: the shared cross-subdomain session bridge is a
@@ -155,6 +168,22 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #3673: the served skill documents and the installer belong to
+                   # this surface. The parity contract between
+                   # `tortoise/onboarding/SKILL.md` and its served mirror is
+                   # asserted by test_onboarding_variants.py, and the installer's
+                   # `SKILLS=(...)` is what the dashboard's shipped-set claim is
+                   # pinned against (test_installer_preserves_foreign_skill_
+                   # content.py, dual-registered onto this surface below).
+                   #
+                   # Before these entries a change to the SERVED copy alone matched
+                   # no pattern: `surfaces=[]` -> the parity gate ran only via the
+                   # tier-1 fallback (coverage by accident, not by design, and it
+                   # would vanish the moment the test left `tier1`). Worse, the
+                   # installer ran NO guard at all — its guard is on `core` and is
+                   # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
+                   "website/apps/dashboard/public/skills/",
+                   "website/apps/dashboard/public/install-tortoise-skills.sh",
                    # #3952: the blog-admin console SPA's build config and its
                    # committed build snapshot own the guard tests added in
                    # tests/test_admin_return_to.py (the build base, and
@@ -412,6 +441,16 @@ SOURCE_PATTERNS = {
             # CORE_ALSO: many core-registered tests (test_backup_sweep.py,
             # test_backup_multigraph_e2e.py, test_backup_watcher.py,
             # test_alert_store.py) also pin it.
+            # #4367: email_notify.py OWNS `_build_invite_link` (and the invite
+            # sender itself). `tests/test_email_integration_resend.py` —
+            # registered in `api` — is the guard that pins the invite-link
+            # contract and replays the recorded accept-page cassette, and
+            # `test_email_notify.py` (also `api`) pins the sender. Without this
+            # entry an email_notify.py-only change matched no pattern, fell
+            # through to `core`, and NEITHER guard ran on the PR that can break
+            # them — the regression was caught only post-merge, on push to
+            # main. Same silent-drop shape as the #2938/#3154 entries above.
+            "tortoise/email_notify.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
@@ -510,8 +549,20 @@ SOURCE_PATTERNS = {
 # `--manifest-only` alone selected only tier-1 smoke — the pin for the code being
 # changed would not have run. That is the #1349/#3332/#3616 silent-drop class, on
 # the file this PR modifies.
+#
+# #4069: the temp-dir sweep is test-infra whose guard tests
+# (tests/test_tmpdir_sweep.py, tests/test_tmpdir_hygiene.py) are
+# core-registered. `_selection_relevant()` consults CORE_ALSO, so
+# this entry has a DUAL role: it admits a `tools/` path past the
+# flat NON_PYTHON_PREFIXES filter AND, in the match loop below,
+# adds `core` and marks the path found — so a tool-only change
+# selects `core` instead of the unknown-path fail-closed full
+# matrix, and never drops to tier-1 smoke (the #1349/#3332/#3910
+# silent-drop class). No TOOL_CARVEOUTS entry is needed: that
+# tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
-             "tortoise/projection/edges.py")
+             "tortoise/projection/edges.py",
+             "tools/tmpdir_sweep.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -627,6 +678,19 @@ TOOL_CARVEOUTS = (
     # exact "proxy silent in the case it exists to cover" class this harness is
     # written to detect, so it must not apply to the harness itself.
     "tools/embedded_evidence.py",
+    # #2718/#4860: the eval-key isolation launcher owns
+    # tests/test_run_with_eval_keys.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows `tools/run-with-eval-keys.sh`, so a
+    # wrapper-only change (e.g. a fingerprint-format edit, or a change to the
+    # managed-key set) would come back as `changed=[]`, select() would take the
+    # docs-only return, and the wrapper's own guard suite would never run on
+    # the PR that changed the wrapper. No SOURCE_PATTERNS entry matches a `.sh`
+    # path, so it lands in the unknown-path branch -> FULL matrix (fail closed)
+    # — the safe default for the file that owns provider-key isolation.
+    # Pinned by
+    # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
+    "tools/run-with-eval-keys.sh",
 )
 
 

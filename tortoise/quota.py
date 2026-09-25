@@ -365,6 +365,49 @@ def resolve_org_limits(org_id: str) -> dict:
     }
 
 
+def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
+    """#4355: True iff `key_id` is a row that ``_count_resource(org_id,
+    'api_keys')`` counts RIGHT NOW — i.e. it currently occupies exactly one
+    ``max_api_keys`` slot.
+
+    This is NOT a fourth count. It is the api_keys cap predicate applied to
+    ONE id, and it exists for exactly one caller: the replacement-aware rotate
+    primitive, which may credit the slot it is about to release only when the
+    displaced row is one the cap actually charged. Without this proof a
+    revoked / expired / bootstrap row id would buy a free slot (the count
+    never held it) and rotate would become a cap hole.
+
+    The two lanes read through the SAME sources ``_count_resource`` uses —
+    Supabase: ``active_api_keys`` (the shared live-set reader) minus the
+    ``created_via='bootstrap'`` exclusion; registry: the same WHERE clause the
+    registry count carries — so the two can never disagree about what is LIVE
+    or about what is cap-exempt. ``tests/test_quota.py`` pins the parity
+    (the count equals the number of rows this predicate accepts).
+    """
+    if not org_id or not key_id:
+        return False
+    from tortoise.supabase_control import (  # noqa: I001
+        active_api_keys, get_control_plane, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        return any(
+            r.get("id") == key_id and r.get("created_via") != "bootstrap"
+            for r in active_api_keys(cp, org_id)
+        )
+    reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
+           else _make_sdk(namespace="registry"))
+    rows = reg._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $kid}) "
+        "WHERE k.revoked_at IS NULL "
+        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+        "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN k.id",
+        params={"tid": org_id, "kid": key_id,
+                "now": datetime.now(UTC).isoformat()},
+    ).result_set
+    return bool(rows)
+
+
 def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     """Count current usage for a resource. Raises QuotaCheckError on failure.
 
@@ -576,7 +619,8 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
-def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
+def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
+                      slot_credit: int = 0) -> None:
     """Reject a write when the org is at/over its resource limit.
 
     Args:
@@ -588,6 +632,13 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
+        slot_credit: #4355 — how many slots this write RELEASES as part of the
+            same operation, so the admission check is evaluated against the
+            post-release count. It exists for exactly ONE caller: the
+            replacement-aware rotate primitive, which passes 1 after proving
+            (``api_key_occupies_slot``) that the displaced row is counted once.
+            MUST be 0 everywhere else, and MUST never become reachable from a
+            client-supplied value — an unproven credit is a free slot.
 
     Raises:
         QuotaExceededError: org at/over limit (402-equivalent).
@@ -644,7 +695,7 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
             return
         raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     count = _count_resource(org_id, resource, sdk=sdk)
-    if count >= limit:
+    if count - slot_credit >= limit:
         raise QuotaExceededError(
             f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it."
         )

@@ -8,7 +8,7 @@ tortoise host; both hosts share the premise-labs Pages project).
 Two test groups:
 1. Static/live tests — no Supabase session needed:
    - page loads, shows loading state then the no-session error
-   - the live tortoise-onboarding skill mirror serves markdown
+   - the live tortoise-onboarding instructions mirror serves markdown
      (ONBOARDING_SKILL_URL contract — #1998 superseded the retired
      onboarding-prompt.md URL; see the module constant comment)
 2. Mocked-session tests — drive the success state (harness tabs, copy
@@ -36,13 +36,14 @@ import time
 import uuid
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
-# The canonical onboarding artifact is the tortoise-onboarding skill mirror
+# The canonical onboarding artifact is the tortoise-onboarding instructions mirror
 # (app.premiselabs.co/skills/tortoise-onboarding/SKILL.md) — W2 #1998 archived
 # the AGENT_ONBOARDING.md prompt pipeline (stage_variants.py -> website/
 # onboarding-prompt.md) under tortoise/onboarding/archive/ (M8: one live
@@ -57,6 +58,26 @@ ONBOARDING_SKILL_URL = os.environ.get(
     "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md",
 )
 
+# #4686: the MCP probe below targets LIVE PRODUCTION, and a transport failure
+# is not a 401-contract violation — but until this block it surfaced as one.
+# `APIRequestContext.post: Timeout 15000ms exceeded` reads exactly like "the
+# endpoint stopped rejecting unauthenticated callers", so the same red meant
+# both "prod is down" and "this change broke the contract". Two things made it
+# worse than a flaky test:
+#   * the job stops at the FIRST failing step, so while the probe is down a
+#     genuine failure in a later file of this job is INVISIBLE — the false red
+#     does not merely add a red, it hides the real ones;
+#   * there was no retry, although availability-watchdog already retries this
+#     exact class of probe (attempt 1 -> attempt 2 -> verdict).
+# The host's AVAILABILITY already has a discriminating monitor on main
+# (availability-watchdog -> incident issues). This probe's job is the 401
+# CONTRACT, so it asserts that contract only when the host actually answers;
+# an unreachable host is reported as UNAVAILABLE, never as a contract failure.
+MCP_PROBE_URL = os.environ.get("MCP_PROBE_URL", "https://api.premiselabs.co/mcp/")
+# Same politeness budget as availability-watchdog's PROBE_ATTEMPTS/retry.
+MCP_PROBE_ATTEMPTS = 3
+MCP_PROBE_RETRY_S = 10
+
 
 
 # ── Live/static tests (no auth) ─────────────────────────────────────
@@ -70,34 +91,82 @@ def test_welcome_page_no_session_redirects_to_auth(page: Page) -> None:
     expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=25_000)
 
 
-def test_onboarding_skill_serves_markdown(page: Page) -> None:
-    """The live tortoise-onboarding skill (#1998) must be fetchable as
-    markdown from the deployed dashboard mirror — the onboarding artifact URL
-    the CLI prints after `tortoise onboard` (#544, repointed by #1998)."""
+def test_onboarding_instructions_serves_markdown(page: Page) -> None:
+    """The live tortoise-onboarding INSTRUCTIONS document (#4365) must be
+    fetchable as markdown from the deployed dashboard mirror — the onboarding
+    artifact URL the CLI prints after `tortoise onboard` (#544, repointed by
+    #1998). Since #4365 it is instructions the agent READS, not an installed
+    skill: the installer ships the three reusable capabilities only. The
+    skill-shaped filename/URL is kept deliberately (it is the served path)."""
     resp = page.request.get(ONBOARDING_SKILL_URL, timeout=15_000)
-    assert resp.ok, f"skill URL returned {resp.status}"
+    assert resp.ok, f"instructions URL returned {resp.status}"
     assert "text/markdown" in (resp.headers.get("content-type") or "")
     body = resp.text()
-    assert body.startswith("---"), "unexpected skill body (frontmatter missing)"
-    assert "name: tortoise-onboarding" in body, "unexpected skill body (frontmatter name)"
+    assert body.startswith("---"), "unexpected instructions body (frontmatter missing)"
+    assert "name: tortoise-onboarding" in body, "unexpected instructions body (name)"
     assert "tortoise_health" in body and "harness-connected" in body, (
-        "skill missing canonical content markers"
+        "instructions missing canonical content markers"
     )
 
 
 def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
     """The MCP endpoint must 401 without a Bearer token (not 421/404) —
-    regression guard for the deploy pipeline fixes (#545/#609/#610)."""
-    resp = page.request.post(
-        "https://api.premiselabs.co/mcp/",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
-        data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
-        timeout=15_000,
+    regression guard for the deploy pipeline fixes (#545/#609/#610).
+
+    #4686: assert the contract ONLY against a host that answers. A transport
+    failure (timeout / DNS / connection refused) is an AVAILABILITY condition,
+    not a broken 401 contract, and reporting it as the latter reds every open
+    PR at once for a reason that has nothing to do with any of them. See the
+    MCP_PROBE_* block for the full rationale.
+    """
+    transport: Exception | None = None
+    for attempt in range(1, MCP_PROBE_ATTEMPTS + 1):
+        try:
+            resp = page.request.post(
+                MCP_PROBE_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+                data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                timeout=15_000,
+            )
+        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+            transport = exc
+            if attempt < MCP_PROBE_ATTEMPTS:
+                time.sleep(MCP_PROBE_RETRY_S * attempt)
+            continue
+        # A 5xx is NOT an answer. This is the repo's OWN recorded rule, not a
+        # convenience: availability-watchdog.yml states it verbatim -- "A 2xx or
+        # a 401 both mean 'the app answered'; a timeout, a 5xx or a connection
+        # error mean it did not" -- and availability-watchdog.sh encodes it as
+        # `000|5??) printf 'DOWN'`. A Fly/Cloudflare ORIGIN outage answers
+        # 502/521/503, so treating a 5xx as a contract verdict would reproduce
+        # exactly the false-401 red this change exists to remove: reported as
+        # "the endpoint stopped rejecting unauthenticated callers" while the
+        # real fault is availability, and fired on every open PR at once while
+        # the watchdog files the actual incident.
+        if resp.status >= 500:
+            transport = f"HTTP {resp.status} from the edge (no answer)"
+            if attempt < MCP_PROBE_ATTEMPTS:
+                time.sleep(MCP_PROBE_RETRY_S * attempt)
+            continue
+        # The host ANSWERED with a real status. The contract is the point, so
+        # assert it — this is the ONLY path that may red, and it names the
+        # status it actually got.
+        assert resp.status == 401, (
+            f"the MCP endpoint ANSWERED but returned {resp.status}, not 401 — "
+            f"the unauthenticated-rejection contract is broken "
+            f"(#545/#609/#610) at {MCP_PROBE_URL}"
+        )
+        return
+    pytest.skip(
+        f"{MCP_PROBE_URL} was UNREACHABLE after {MCP_PROBE_ATTEMPTS} attempts "
+        f"(last transport error: {transport!r}). This is an availability "
+        f"condition, NOT a 401-contract violation, so it is not reported as "
+        f"one (#4686). Host availability is monitored by "
+        f".github/workflows/availability-watchdog.yml"
     )
-    assert resp.status == 401, f"expected 401, got {resp.status}"
 
 
 # ── Mocked-session tests (welcome page v2 success state) ────────────

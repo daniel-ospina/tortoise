@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 # importable here.
 from tortoise.ids import content_hash as _content_hash
 from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+from tortoise.source_identity import normalize_source_url, resolve_source_key
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +197,145 @@ def _seq_events(events):
             yield idx, item
 
 
+#: Defensive bound on a journalled vector's length. The writer emits exactly
+#: `EMBEDDING_DIM`; a hand-edited/corrupt record must not make a rebuild
+#: materialise an unbounded list. Far larger than any real width.
+_MAX_JOURNALLED_VECTOR_LEN = 8192
+
+
+def _writable_journalled_vector(value) -> list[float] | None:
+    """#5004: normalise a journal-carried vector, or None if unusable.
+
+    A journal record is a FILE — it can be hand-edited, truncated, or written
+    by an older/newer code path. Mirrors the #19/#4305 recovery-path rule: an
+    unusable value must DEGRADE to "not restored", never raise after the wipe
+    and strand the rebuilt graph.
+
+    ``float`` alone is NOT sufficient, which an earlier version of this helper
+    got wrong (verified): ``float('nan')`` and ``float('inf')`` succeed, and
+    ``json`` round-trips ``NaN``/``Infinity`` by default, so a crafted line
+    reached ``vecf32()`` and raised AFTER the wipe on every retry. A huge JSON
+    integer raises ``OverflowError``, which is not a ``TypeError``; both are
+    handled here. Non-finite and non-numeric values are refused, and an
+    implausibly long list is refused before it is materialised.
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if len(value) > _MAX_JOURNALLED_VECTOR_LEN:
+        return None
+    out: list[float] = []
+    for x in value:
+        try:
+            f = float(x)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(f):
+            return None
+        out.append(f)
+    return out or None
+
+
+def _record_embedding_identity(p: dict, warned: set) -> None:
+    """#5004: record (do not silence) a journalled vector's identity mismatch.
+
+    The decision required by the design is that the journal carries the vector
+    AS WRITTEN — the past cannot be recomputed — so it is restored verbatim,
+    and the divergence from the configured embedder is RECORDED here. A model
+    change therefore becomes explicit: the operator re-embeds deliberately, or
+    not at all. It must never be resolved by silently re-encoding, which is
+    exactly how a changed embedder yielded a different graph from the same
+    journal. (The canonical durability authority is
+    `docs/durability-posture.md` — this docstring deliberately makes no
+    competing source-of-truth claim.)
+
+    ``warned`` is the caller's per-rebuild-pass de-dup set (the `#2958`
+    `_deny_drop_warned` pattern): a swap would otherwise emit one line per
+    Point and bury the signal in O(N) identical warnings. The mismatch is
+    keyed by the identity pair, so every DISTINCT divergence still reports.
+    """
+    try:
+        from tortoise.embeddings import embedding_identity
+        cur_model, cur_rev = embedding_identity()
+    except Exception:  # noqa: BLE001, RUF100
+        # #5119/#5148 review: this is an ADVISORY warning path, and it runs
+        # inside the recovery replay (`_upsert_point_props` -> here, once per
+        # journalled vector). Letting it raise aborted EVERY replayed event, so
+        # `recover_from_log` counted zero applied and refused the DB with
+        # "replay produced an empty graph" — the #5119 failure shape,
+        # re-entered through the identity CHECK rather than the write. A
+        # replay must never fail on a warning: with no configured identity
+        # there is nothing to compare the record against, so say nothing.
+        return
+    j_model = p.get("embedding_model")
+    j_rev = p.get("embedding_revision")
+    if j_model is None and j_rev is None:
+        # No identity on the record. That is EXPECTED for a re-emitted snapshot
+        # (`stamp_journal_embedding(creating=False)` deliberately omits it, since
+        # the vector may predate a model change) and for a hand-built/foreign
+        # record. Restore verbatim — the journal is still the truth — and stay
+        # silent: warning here would fire on every routine promote, which is the
+        # false-alarm class the design's "record which" is not asking for. The
+        # creating record, where one exists, owns the attestation and WILL warn
+        # on a genuine mismatch.
+        return
+    if j_model != cur_model or j_rev != cur_rev:
+        key = ("identity", j_model, j_rev)
+        if key not in warned:
+            warned.add(key)
+            logger.warning(
+                "replay: journaled embedding was computed by %s@%s but this "
+                "store's embedder is %s@%s — restoring the JOURNALED vector "
+                "verbatim (the past cannot be recomputed); re-embed "
+                "deliberately to change it (#5004)",
+                j_model, j_rev, cur_model, cur_rev)
+    j_text = p.get("embedding_text_hash")
+    content = p.get("content")
+    if not (isinstance(j_text, str) and isinstance(content, str)):
+        return
+    # #5004 round-3: `_content_hash` is `text.encode("utf-8")`, which RAISES
+    # `UnicodeEncodeError` on a lone surrogate. This runs INSIDE `rebuild_all`,
+    # after the wipe and before the graph write, so an unguarded call would
+    # destroy the graph and strand every retry on one foreign/hand-edited line
+    # — the same after-the-wipe class the NaN/Overflow guard closes for the
+    # vector. `_revise_point` already wraps the same call (#19); a hash that
+    # cannot be computed simply cannot be compared.
+    try:
+        cur_text_hash = _content_hash(content)
+    except Exception:  # noqa: BLE001, RUF100
+        return
+    if j_text != cur_text_hash:
+        key = ("text", j_text, cur_text_hash)
+        if key not in warned:
+            warned.add(key)
+            logger.warning(
+                "replay: a journaled embedding's text-hash does not match "
+                "its content (Point %s: %s != %s) — the vector was computed "
+                "from different text (#5004)",
+                p.get("id"), j_text, cur_text_hash)
+
+
+def _warned_set(handler) -> set:
+    """Per-handler de-dup set for the #5004 replay warnings (the `#2958`
+    `_deny_drop_warned` pattern). Reset by `rebuild_all` alongside it, so each
+    rebuild pass reports every distinct divergence once."""
+    warned = getattr(handler, "_embed_identity_warned", None)
+    if warned is None:
+        warned = handler._embed_identity_warned = set()
+    return warned
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
+
+    # #2958/#5004: the per-rebuild-pass warning de-dup sets. Declared HERE so
+    # mypy does not have to infer them from the runtime
+    # `getattr(...)`/chained-assignment sites below: leaving them undeclared
+    # built a PARTIAL type that never resolved and surfaced as a spurious
+    # `Cannot determine type of "_deny_drop_warned" [has-type]` at its OTHER
+    # assignment (`rebuild_all` in `projection/__init__.py`) — verified by
+    # bisecting the mypy failure to this file.
+    _deny_drop_warned: set
+    _embed_identity_warned: set
 
     # Event dict keys that are never stored as node properties (#228).
     _META_KEYS: frozenset = frozenset({
@@ -279,6 +417,11 @@ class _EntityHandlers:
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
         "title", "ingestedAt", "version", "externalId", "updatedAt",
+        # S0a/S0b (#5012): server-managed source-identity props.  They are
+        # written by `_upsert_source`'s fixed SET clauses, never by the
+        # open-set passthrough (which would let a payload clobber the
+        # canonical identity).
+        "canonicalUrl", "urlAliases",
         # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
         # the MERGE clause, never persisted verbatim snake_case) and
         # `_searchText` (set by the write path, coalesce-on-create /
@@ -296,6 +439,29 @@ class _EntityHandlers:
         "content", "is_operator", "op_type", "pointKind", "status",
         "authoredBy", "confidence", "createdAt", "created_at",
         "validFrom", "validTo", "updatedAt", "embedding",
+        # #5004: the embedding's IDENTITY travels with the vector in the journal
+        # payload (R1: STORE, do not regenerate). `_upsert_point_props` reads it
+        # to tell a faithful verbatim restore from a recorded model change, and
+        # it must NEVER become a node property: the design puts the identity in
+        # the PAYLOAD, and the live writer sets it only on the journal copy, so
+        # persisting it here would make replay diverge from live by three
+        # properties (caught by the #3312 round-trip guard before this entry).
+        "embedding_model", "embedding_revision", "embedding_text_hash",
+        # #5004 round-3: a DECLARED node property (own SET clause below), not
+        # journal-payload metadata. It marks a CALLER-supplied vector stored
+        # verbatim (`$embedding`, not `vecf32` — `create_point`'s recorded
+        # PR #3018 decision), so it must live on the NODE for a later re-emit
+        # (`promote_point` &c., which read the point back through `get_point`)
+        # to carry it; a payload-only flag was lost there and the replay then
+        # narrowed the vector to float32. In `_POINT_HANDLED` because its own
+        # clause owns it — the open-set passthrough must not also write it.
+        "embedding_verbatim",
+        # #5004 round-3: journal-payload metadata (
+        # `_write_capture_turns`): this capture did NOT encode a vector, it
+        # PRESERVED the node's existing one, so the record must not attest the
+        # ACTIVE model as its origin (`stamp_journal_embedding`). Never a node
+        # property — the node's vector identity is not a fact about the node.
+        "embedding_preserved",
         # A10 operator-scoped replay extension
         "direction", "label",
         # structural / edge-carried — never node props via passthrough
@@ -337,6 +503,10 @@ class _EntityHandlers:
     # reported by the undeclared-list warning below, NOT suppressed here.
     _POINT_DECLARED_PROPS: frozenset = frozenset({
         "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+        # E4 (#5007): the verbatim span POINTER — offsets into the Source's raw
+        # text, declared so the replay open-set passthrough does not log a
+        # FALSE undeclared-prop drift warning on every rebuild.
+        "span_start", "span_end",
         # #3689 review P2 (A): the four canonical annotator dims are legitimately
         # carried on a PointAdded snapshot by `create_point(annotator_*=…)` /
         # `_update_entity` — declaring them keeps the replay open-set
@@ -426,9 +596,11 @@ class _EntityHandlers:
         the embedded lane reddened). So the node kept its OLD vector and a
         rebuilt Point's ``embedding`` no longer derived from its ``content``.
         ``REMOVE``-first is the workaround this repo's own test helper
-        documents (``tests/test_precision_leak_4028.py``); the OTHER
-        vector-write sites carry the same overwrite shape and are NOT fixed by
-        this clause (tracked in #4520). On the server lane the final state is
+        documents (``tests/test_precision_leak_4028.py``); the sibling entity
+        seams in THIS file (``Subject``/``Object``/``Document``/plain
+        ``Event``) carried the same overwrite shape and are cleared the same
+        way by #4524, while the vector writers in OTHER files still carry it
+        (tracked in #4520). On the server lane the final state is
         unchanged, and because the clause is emitted ONLY when a new vector is
         being written, the preserve-on-None semantics above are untouched.
         See the query below.
@@ -451,11 +623,77 @@ class _EntityHandlers:
             # crash the Falkor path (parity with _apply_one's guard).
             prov = {}
 
-        # Compute embedding for non-operator Points (#7778)
+        # Compute OR RESTORE the embedding for non-operator Points (#7778).
+        # #5004: the journal is PRIMARY for this field. When the payload carries
+        # a vector — the journal recorded it with its model identity — restore
+        # it VERBATIM and do NOT re-encode. R1 (`docs/durability-posture.md`
+        # → *Derived properties that are STORED*; design source
+        # `docs/architecture/STORAGE-ARCHITECTURE.md` §3/§14.1
+        # O1, landed via #5016): the embedding STORES, it is not regenerated, because a re-embed
+        # is a RE-RUN, not a replay. Re-encoding here was the defect: a replay
+        # under a changed embedder silently produced a different graph from the
+        # same journal.
         embedding = None
+        embedding_clear = False
+        # PRESENCE IS OWNERSHIP (#5004 round-3). A producer that owns this field
+        # ALWAYS writes the key — the vector, or an explicit None when it
+        # genuinely has none (`stamp_journal_embedding` guarantees it). So the
+        # key being present means "the journal has spoken about this field; do
+        # NOT recompute". The absent case is a pre-#5004 strip-era record,
+        # where recomputation is the only behaviour available.
+        owns_embedding = "embedding" in p
+        journalled = _writable_journalled_vector(p.get("embedding"))
+        if not op and journalled is not None:
+            # Guard the width exactly as `encode_for_store` does for the
+            # recompute path: a vector of the wrong width is not a near-miss,
+            # it is a broken leg the HNSW index cannot hold (#4194/#4280).
+            dim = self.required_embedding_dim
+            if dim is not None and len(journalled) != dim:
+                # DELIBERATE refusal, not an oversight (#5004 review). Writing
+                # the journalled vector is impossible at this width, and
+                # RECOMPUTING it would store a vector whose model the journal
+                # never recorded — which is exactly how `derived =
+                # replay(journal)` goes false again. Refusing keeps the store a
+                # pure function of (journal, config); the operator re-embeds
+                # deliberately. Recorded once per (width, store-dim) pair.
+                warned = _warned_set(self)
+                key = ("width", len(journalled), dim)
+                if key not in warned:
+                    warned.add(key)
+                    logger.warning(
+                        "replay: a journaled embedding has width %d but this "
+                        "store holds %d — leaving it unset rather than writing "
+                        "a vector the index cannot hold, or recomputing one "
+                        "the journal never recorded (#5004)",
+                        len(journalled), dim)
+            else:
+                embedding = journalled
+                _record_embedding_identity(p, _warned_set(self))
+        elif not op and owns_embedding:
+            # The journal owns the field and carries NO usable vector — either
+            # an explicit None (the live write had no embedder) or a value the
+            # guard refused. Never recompute: re-encoding here is the round-3
+            # defect (on a re-capture made while the embedder was down, the
+            # live write PRESERVED-or-CLEARED the node's vector, and re-encoding
+            # would produce a vector the live graph does not have).
+            #
+            # #5004 round-6 — an explicit None is a CLEAR, not just a refusal
+            # to write. Live's turn write has an `ELSE NULL` arm for exactly
+            # this case (`_TURN_WRITE_CYPHER`: "a preserved vector for changed
+            # text would rank the turn by text no longer on the node"). An
+            # owned None that merely left `n.embedding` alone therefore
+            # RESURRECTED the vector an EARLIER record had set — on the
+            # highest-volume producer, under the same embedder. `pass` cannot
+            # express a clear; only an explicit arm can (see `$embedding_clear`
+            # in the SET clause).
+            if p.get("embedding") is None:
+                embedding_clear = True
+        # No journalled vector (a pre-#5004 strip-era log): there is nothing to
+        # restore, so recompute — the previous behaviour, kept deliberately so
+        # an old journal still replays and still yields vectors.
         # #331 (review r4): only embed real content — an empty string
         # produced a junk vector in the HNSW index.
-        if not op and p.get("content"):
+        elif not op and p.get("content"):
             try:
                 from tortoise.embeddings import encode_for_store
                 embedding = encode_for_store(
@@ -491,7 +729,18 @@ class _EntityHandlers:
             "n.pointKind=coalesce($pk, n.pointKind)",
             "n.status=coalesce($st, n.status, 'live')",
             "n.authoredBy=coalesce($ab, n.authoredBy)",
-            "n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END",
+            "n.embedding=CASE WHEN $embedding_clear THEN NULL "
+            "    WHEN $embedding IS NULL THEN n.embedding "
+            "    WHEN $embedding_verbatim THEN $embedding "
+            "    ELSE vecf32($embedding) END",
+            # #5004 round-3: a CALLER-owned vector's storage FORM, as its own
+            # clause (mirroring `is_episodic`). `CASE … ELSE n.embedding_verbatim`
+            # keeps the property ABSENT for a server-vectored point: writing an
+            # explicit `false` there would make live (absent) and replay
+            # (false) disagree. Set only when truthy, so it survives the later
+            # re-emits that read the point back through `get_point`.
+            "n.embedding_verbatim=CASE WHEN $evb THEN true "
+            "    ELSE n.embedding_verbatim END",
             "n.content_hash=coalesce($ch, n.content_hash)",
             "n.confidence=coalesce($cf, n.confidence)",
             "n.createdAt=coalesce($ca, n.createdAt, $now)",
@@ -506,6 +755,16 @@ class _EntityHandlers:
             "st": p.get("status"),
             "ab": p.get("authoredBy"),
             "embedding": embedding,
+            # #5004 round-3: a caller-supplied vector is restored RAW — the
+            # same form `create_point` stored it in (`$embedding`, not
+            # `vecf32`, per the recorded PR #3018 decision). Casting it here
+            # would narrow an explicitly caller-owned float64 list to float32
+            # and the rebuild would disagree with live by ~1e-8 on every
+            # component (`0.1` -> `0.10000000149011612`).
+            "embedding_verbatim": bool(p.get("embedding_verbatim")),
+            "evb": bool(p.get("embedding_verbatim")),
+            # #5004 round-6: an owned None CLEARS — see `embedding_clear` above.
+            "embedding_clear": embedding_clear,
             "ch": point_content_hash,
             "cf": p.get("confidence"),
             "ca": p.get("createdAt") or p.get("created_at"),
@@ -1309,6 +1568,22 @@ class _EntityHandlers:
         # producer without a deterministic id (api.add_subject, which unlike
         # add_object has no id= override) can re-id a canonical node — blast
         # radius is id-based wiring only (about* edges match by name).
+        # #4524: the embedded engine's ``vecf32`` overwrite hazard, same as
+        # the Point seam above (#4457): writing a vector onto a property that
+        # already holds one can be SILENTLY DISCARDED by falkordblite, leaving
+        # the stale vector in place with no error. This write sits inside the
+        # MERGE's ON CREATE/ON MATCH clauses, where the dialect will not accept
+        # an interleaved REMOVE — so clear the property in a SEPARATE query
+        # first (the shape tests/test_precision_leak_4028.py documents;
+        # atomicity is not required). Emitted ONLY when a new embedding is being
+        # written, so the ``ELSE s.embedding`` preserve branch is untouched and
+        # a fresh MERGE has nothing to remove. Key is ``name`` — the SAME key
+        # the MERGE uses (not ``id``), or this misses its own node.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (s:Subject {name:$name}) REMOVE s.embedding",
+                params={"name": name},
+            )
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
@@ -1369,6 +1644,15 @@ class _EntityHandlers:
         # same deterministic id for a given name across producers (this
         # function early-returns when the caller sends no id, so entities
         # without ids never fire the clause).
+        # #4524: as for Subject above — the embedded engine can silently
+        # discard a ``vecf32`` overwrite, and this embedding sits inside
+        # ON CREATE/ON MATCH, so PRE-REMOVE it in a separate query. Emitted
+        # only when a new vector is being written; key ``name``, the MERGE key.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (o:Object {name:$name}) REMOVE o.embedding",
+                params={"name": name},
+            )
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
@@ -1568,8 +1852,14 @@ class _EntityHandlers:
         # #167: sourcePath — coalesce-null sentinel (no "" default) so
         # partial updates preserve existing value
         sp = ev.get("source_path")
+        # #4524: the embedded engine's ``vecf32`` overwrite hazard (#4457).
+        # This one is a plain MERGE + SET list (no ON CREATE/ON MATCH), so the
+        # conditional REMOVE rides in the SAME atomic query exactly as
+        # _upsert_point_props does — emitted only when a new embedding is being
+        # written, so the ``ELSE d.embedding`` preserve branch is untouched.
+        embed_clear = "REMOVE d.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (d:Document {id:$id}) "
+            "MERGE (d:Document {id:$id}) " + embed_clear +
             "SET d.title=coalesce($title, d.title), "
             "    d.documentKind=coalesce($dk, d.documentKind), "
             "    d.format=coalesce($fmt, d.format), "
@@ -1704,6 +1994,17 @@ class _EntityHandlers:
     def _event_plain_merge(self, eid: str, props: dict, embedding,
                            inner: dict) -> None:
         """The legacy single-statement Event MERGE (+ edges + extra props)."""
+        # #4524: the ON MATCH embedding write below can be a SILENT no-op on
+        # the embedded engine — a ``vecf32`` overwrite of an existing vector is
+        # discarded (#4457). It sits inside ON CREATE/ON MATCH, so clear the
+        # property in a separate query first. Emitted ONLY when a new embedding
+        # is being written, leaving the ``ELSE e.embedding`` preserve branch
+        # untouched.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (e:Event {eventId: $eid}) REMOVE e.embedding",
+                params={"eid": eid},
+            )
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
             "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
@@ -1892,6 +2193,11 @@ class _EntityHandlers:
         url = source_url or inner.get("source", "")
         if not url:
             return
+        # S0b (#5012): connector events are 100% of this choke point — resolve
+        # the inbound spelling to the ONE node its canonical identity names, so
+        # the connector registration path cannot mint a second :Source either.
+        key = resolve_source_key(self.g, url)
+        canonical = normalize_source_url(key)
         # #388 conf-60 direction guard: NEVER let a fallback key displace a
         # real URL. chat_getPermalink returns None on ANY exception (rate
         # limits, transient outages), so a failed permalink poll emits the
@@ -1914,15 +2220,21 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.sourceKind = $sk, s.title = $url, "
+            "    s.canonicalUrl = $cu, s.urlAliases = [$raw_url], "
             "    s.contentHash = '', s.ingestedAt = $now "
-            "ON MATCH SET s.sourceKind = coalesce(s.sourceKind, $sk)",
-            params={"url": url, "sk": sk or "document", "now": _now_iso()},
+            "ON MATCH SET s.sourceKind = coalesce(s.sourceKind, $sk), "
+            "    s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+            "    s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "        THEN s.urlAliases "
+            "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END",
+            params={"url": key, "raw_url": url, "cu": canonical,
+                    "sk": sk or "document", "now": _now_iso()},
         )
         # (Source)-[:references]->(Event) — always, when the event exists.
         self.g.query(
             "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
             "MERGE (s)-[:references]->(e)",
-            params={"url": url, "eid": eid},
+            params={"url": key, "eid": eid},
         )
         # #388 conf-62/conf-60: a fallback-key materialization (`slack:{channel}` /
         # `linear:{team_key}` / bare `source`) can predate the real URL (a
@@ -1933,20 +2245,35 @@ class _EntityHandlers:
         # now-authoritative url, and delete the Source node outright if that
         # edge was its ONLY relationship (deg=1 → orphaned). Shared Sources
         # (still referencing other events / extractedFrom by Points) keep the
-        # node — only the superseded edge goes. EP-neutral: connector kinds
-        # are neutral on both sides of the swap. Direction-guarded by conf-60
+        # node — only the superseded edge goes. Direction-guarded by conf-60
         # above: this sweep runs only when the incoming url is a real URL (or
         # no real-URL Source references the event), so a fallback key can
-        # never supersede a real permalink Source.
+        # never supersede a real permalink Source. EP-neutral for an untiered
+        # pair; a deleted node's accumulated tier is inherited (never
+        # overwritten — the survivor's own value wins).
+        #
+        # The survivor is chosen by canonical identity, not by which node was
+        # materialized first, so a node that is ABOUT to be deleted (deg = 1)
+        # hands its accumulated tier/hash/title to the survivor rather than
+        # losing it. The copy is scoped to the deletion branch: a superseded
+        # node that survives (deg > 1, still shared) must not graft its
+        # metadata onto an unrelated live node.
         self.g.query(
             "MATCH (old:Source)-[r:references]->(e:Event {eventId: $eid}) "
             "WHERE old.url <> $url "
-            "WITH old, r, size([(old)-[x]-(y) | x]) AS deg "
+            "MATCH (s:Source {url: $url}) "
+            "WITH old, r, s, size([(old)-[x]-(y) | x]) AS deg "
             "DELETE r "
-            "WITH old, deg "
+            "WITH old, s, deg "
             "WHERE deg = 1 "
+            "SET s.credibilityTier = coalesce(s.credibilityTier, old.credibilityTier), "
+            "    s.title = coalesce(s.title, old.title), "
+            "    s.sourcePath = coalesce(s.sourcePath, old.sourcePath), "
+            "    s.ingestedAt = coalesce(s.ingestedAt, old.ingestedAt), "
+            "    s.contentHash = CASE WHEN coalesce(s.contentHash, '') = '' "
+            "        THEN coalesce(old.contentHash, '') ELSE s.contentHash END "
             "DELETE old",
-            params={"url": url, "eid": eid},
+            params={"url": key, "eid": eid},
         )
         # (Source)-[:references]->(Object {id}) — only on explicit
         # sourceObjectId (github entity path; event.object is never an Object
@@ -1956,7 +2283,7 @@ class _EntityHandlers:
             self.g.query(
                 "MATCH (s:Source {url: $url}), (o:Object {id: $oid}) "
                 "MERGE (s)-[:references]->(o)",
-                params={"url": url, "oid": obj_id},
+                params={"url": key, "oid": obj_id},
             )
 
     def _event_guarded_merge(self, inner: dict, candidate: str, props: dict,
@@ -2079,12 +2406,25 @@ class _EntityHandlers:
         url = ev.get("url", "")
         if not sid and not url:
             return None
-        key = url or sid
+        raw_key = url or sid
+        # ── S0a/S0b (#5012): canonical source identity ──
+        # S0a runs FIRST and is mechanical (no model, no graph).  S0b then
+        # resolves the inbound spelling to the ONE node its canonical identity
+        # names (adopting a pre-canonical node on the way).  The MERGE key
+        # STAYS ``url`` so every existing by-url read/mutation site keeps
+        # working; ``canonicalUrl``/``urlAliases`` are the new identity props.
+        # Identity is a canonicalised URL — NEVER an embedding (STORAGE §9.4).
+        # The resolver is shared with the stub/link writers (edges.py) so a
+        # URL variant cannot mint a second ``:Source`` on ANY write path.
+        key = resolve_source_key(self.g, raw_key)
+        canonical = normalize_source_url(raw_key)
         search_text = ev.get("_searchText") or ev.get("title")
         run_clause = ", s.__runId = $rid" if merge_run_id is not None else ""
         r = self.g.query(
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.id = coalesce($id, $url), "
+            "              s.canonicalUrl = $cu, "
+            "              s.urlAliases = [$raw_url], "
             "              s.sourceKind = $sk, "
             "              s.contentHash = coalesce($hash, ''), "
             "              s.title = $title, "
@@ -2115,11 +2455,17 @@ class _EntityHandlers:
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                     THEN $now ELSE s.updatedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
+            "           s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+            "           s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "               THEN coalesce(s.urlAliases, []) "
+            "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                        THEN $st ELSE s._searchText END",
             params={
                 "url": key, "id": sid or key,
+                "cu": canonical,
+                "raw_url": raw_key,
                 "sk": ev.get("sourceKind", "document"),
                 "hash": ev.get("contentHash"),
                 "title": ev.get("title", key),

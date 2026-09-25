@@ -42,6 +42,11 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 | `AGENT_ONBOARDING.md` Q3 | prompt e2e/manual | false-promise phrasing | drafted copy; grep clean; parity table |
 | Claude Code hooks + Pi extension | ops/e2e | exit-0 violation, receipt missing | hook smoke; Pi 2xx leg observed |
 
+> **#4620 (2026-09-22):** the Pi leg is executably verified for the seam's logic **and** the
+> installed artifact (`tortoise/pi-hooks/tortoise-capture.test.ts`, `tests/test_pi_capture_hooks.py`);
+> the real-`pi` leg is manual-only — procedure + actor in `tortoise/pi-hooks/README.md`. See the
+> amendment at the bottom.
+
 ### Journey Test Map
 
 ### Journey: First-timer opts into memory capture
@@ -252,7 +257,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 ### Task 15: T2 backfill — `tortoise sessions import --harness codex|claude-desktop|pi`
 
 **Intent:** Historical transcript backfill with 2xx-only receipts (scoped as backfill, NOT coupled to the wizard's capture acceptance).
-**Acceptance:** import CLI stages parsed session locally (data preservation), POSTs, writes receipt only on 2xx; 403/402/503 ⇒ fail, no receipt, honest error; Codex + Desktop parsers idempotent on re-import; Cursor spike verdict recorded (ships or honest `unsupported`).
+**Acceptance:** import CLI stages parsed session locally (data preservation), POSTs, writes receipt only on 2xx; 403 ⇒ fail, no receipt, honest error, and a RETRYABLE refusal (402/408/425/429/5xx, including 503) is additionally spooled for a later drain by `_spool_if_retryable` while still exiting 1 with no receipt (#4714); Codex + Desktop parsers idempotent on re-import; Cursor spike verdict recorded (ships or honest `unsupported`).
 **Files:**
 - Modify: `tortoise/__main__.py`
 - Create: `tortoise/session_import/parsers.py` (codex, claude_desktop, cursor-gated; **pi reuses the codex parser — pi session JSONL is a tree-structured JSONL like codex's; named reuse + idempotency test**, or add `pi.py`)
@@ -314,6 +319,10 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 2. **T2 (Task 15)** lands inside Slice 2 after T1+T3 (per user staging).
 3. **Cursor spike + Claude-Web filing-path spike** are research tasks inside their slices; verdicts recorded; web row disabled-with-reason until a server-visible signal is confirmed (Task 13 spike verdict) — never hidden.
 4. **Pi hosted-2xx leg** is an ops checklist item (live key + `tortoise-config.json`), not a CI pytest.
+   > **#4620 (2026-09-22):** the seam's logic and the installed artifact ARE CI-verified; what remains
+   > manual-only is a real `pi` process loading the installed extension. The procedure, actor, pass
+   > condition and blockers are canonical in `tortoise/pi-hooks/README.md` § Verification.
+   > See the amendment at the bottom.
 5. Every commit through **commit-workflow** (pre-flight, PR, code-review gate).
 
 ## Runtime Prerequisites
@@ -418,3 +427,23 @@ Docker FalkorDB test lane · `GITHUB_CLIENT_ID/SECRET` + token `repo` scope · `
 
 <!-- plan-review: cycles=5, status=clean, version=2.3.0 (cycles 3-5 folded into task bodies; cycles 1-2 have incorporation sections) -->
 <!-- final-verification: clean (2 P2s resolved post-gate) -->
+
+## #4620 amendment (2026-09-22) — the Pi seam's verification status, stated
+
+*Appended by `#4620`; the reviewed text above is unchanged (see the two pointers at the
+Integration-Surface row `Claude Code hooks + Pi extension` and sequencing item 4).*
+
+Objective 1's Pi leg has two halves with different verification statuses:
+
+- **Executably verified (hermetic, CI).** The seam's handler logic — `extractTurns`, truncation,
+  payload, credential precedence, the durable spool, and the real `session_start` / `session_shutdown`
+  handlers fired against a mock `pi` with an injected `fetch` — is covered by
+  `tortoise/pi-hooks/tortoise-capture.test.ts` (51 tests), and the artifact **as installed** is loaded
+  and fired by `tests/test_pi_capture_hooks.py` (CI-selected for a `tortoise/pi-hooks/` change). The
+  claim that "nothing loads the extension's seam in a test" is false.
+- **Manual-only.** That a real `pi` process loads the installed extension and calls
+  `turn_end` / `session_shutdown` against the live API. **Canonical: `tortoise/pi-hooks/README.md`
+  § Verification** — the procedure, its precondition, its actor, the pass condition and the
+  `#4661`/`#4675`/`#3713` blocker list live there, and are not restated here. Until `#4661` /
+  `#4675` clear, the live leg yields **no verdict**, so this objective must not be read as verified
+  for Pi.

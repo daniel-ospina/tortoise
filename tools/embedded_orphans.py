@@ -115,6 +115,7 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
         orphans: list[dict] = []
         protected = 0
         unclassified = 0
+        unattributed = 0
         for pid in pids:
             try:
                 sock_dir = _socket_dir_from_cmdline(pid)
@@ -133,6 +134,27 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
                 no_live_owner = (owners is not None and owners[0] == 0
                                  and not rec.get("path_based"))
                 dir_missing = bool(_socket_dir_missing(socket_path))
+                # #3767: a server with NO tortoise ownership instrument is NOT
+                # attributable to us — reap() requires the #1557/#1642 FIX 3
+                # confirmation window for it in every mode, so it is not a
+                # reapable orphan on this sweep. Bucketed SEPARATELY (not as
+                # 'protected') so the census never reports the invariant
+                # satisfied for a class the reaper will not fast-kill.
+                #
+                # ORDER MATTERS (#3767 review P1): the unattributed bucket is
+                # gated on the dir being PRESENT. A MISSING socket dir is
+                # attributable by the live pid's OWN argv — the arm
+                # `_has_ownership_claim` (b) admits it by — and
+                # `_owner_record_dir_present` necessarily reads False for it
+                # (its listdir raises OSError). Testing `unattributed` first
+                # would move the whole #1005 socketless leak class ("hundreds
+                # observed on the dev box") out of the dir-missing bucket and
+                # out of the exit code, i.e. the census could exit 0 while
+                # that leak grows — the exact fail-open this tool exists to
+                # prevent.
+                if rec.get("unattributed") and not dir_missing:
+                    unattributed += 1
+                    continue
                 # #3599 review cycle 2: an owner record is not the only way a
                 # server can be busy — mirror reap()'s CLIENT LIST gate, or
                 # the census reports a server that reap() would refuse (a
@@ -183,6 +205,15 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
         "orphan_details": orphans,
         "protected": protected,
         "unclassified": unclassified,
+        # #3767: live embedded servers with a PRESENT socket dir and no
+        # tortoise ownership instrument (`<socket_dir>/.tortoise-owners`).
+        # They are NOT fast-reapable — reap() requires the orphan-confirmation
+        # window for them — so they are neither orphans nor 'protected user
+        # data'; the census surfaces them explicitly. A server whose socket
+        # dir is MISSING keeps its `socket-dir-missing` orphan bucket above:
+        # it is attributed by the live pid's own argv, and counting it here
+        # would hide the #1005 socketless leak class from the exit code.
+        "unattributed": unattributed,
         "stale_socket_dirs": len(stale_dirs),
         "stale_socket_dir_sample": stale_dirs[:10],
         # #4068: --deep is a detect-only full scan; if its bounded deadline
@@ -237,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[embedded-orphans] live embedded servers: "
               f"{result['live_servers']} | orphans: {result['orphans']} "
               f"(budget {args.max_orphans}) | protected: "
-              f"{result['protected']} | unclassified: "
+              f"{result['protected']} | unattributed: "
+              f"{result.get('unattributed', 0)} | unclassified: "
               f"{result['unclassified']}"
               + (f" | stale socket dirs: {result['stale_socket_dirs']}"
                  if args.deep else ""))
