@@ -2527,7 +2527,7 @@ durations:
   test_product_rerank.py: 0.2
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.6
-  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 28 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
+  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 29 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
   test_rebuild_turn_points_3947.py: 4.4
   test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8

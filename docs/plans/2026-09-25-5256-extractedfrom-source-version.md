@@ -248,10 +248,14 @@ Every test names the input that makes it FAIL.
      pre-round-5 row said the reverse — `resolve_source_key` → raw ref was the fix — which is no
      longer true.);
   5b. the own-ref gate/filter (`_point_source_transit`) — removing the own-ref **filter** alone → the
-     own-refs P2 test; removing the gate *and* filter → the stray-carrier P2 test as well. Note the
+     own-refs P2 test; removing the gate *and* filter → the stray-carrier P2 test as well; and the
+     `or None` tail → the all-foreign-keys P2 test (`kept` alone would write
+     `sourceVersionTransit=[]`, which is not this change's absent value). Note the
      **gate alone is an EQUIVALENT mutant**: with no `extractedFrom` the own-ref filter's ref set is
      empty and drops every pair anyway, so only the filter-removing mutant is discriminating (the
-     stray-carrier behaviour is still mutation-covered, by that mutant);
+     stray-carrier behaviour is still mutation-covered, by that mutant). The stray-carrier drop is
+     also a deliberate **gate-visibility** change — it turns a green-but-unfaithful graph red (see
+     §10 Cycle-7), pinned by that test's own `check_consistency` assertion;
   6. **`_POINT_HANDLED` membership** (remove it) → test 16: the key then falls to `_uncarried`
      (`_UNCARRIED_LIST`) and is `skip`-ped from both sides, so the tampered mismatch becomes
      invisible — the gate's `ok` goes back to True and test 16 goes RED. (Separately: removing the
@@ -280,7 +284,7 @@ Every test names the input that makes it FAIL.
 | R3 | P2 | The ingest `extractedFrom` **connection** leg calls `_link_source` with **no** `source_versions`, so it produces **no anchor at all** (not an anchor that later dies). Its `extractedFrom` edge is also absent from the Point snapshot, so the edge itself dies at rebuild (pre-existing). Left bare. |
 | R4 | P2 | The `references` anchor (#5199) reads `s.contentHash` at link time and records its own stale-under-in-place-rebuild limitation; unchanged here. |
 | R5 | P2 | **Recast after code review — the edge resurrection is pre-existing, but the ANCHOR VALUE on it is new.** On a hard-delete→same-id-recreate, pass 2 re-creates the *old* incarnation's `extractedFrom` **edge**. That resurrection is pre-existing (the #4042 wipe clears node props, never edges) — but before this change the resurrected edge carried **no** `r.sourceVersion`; now it carries the dead incarnation's stale anchor while live has no edge at all. The **node-prop** half is closed here (the #4042 wipe + test 8b); the **edge half** is filed as a scoped follow-up (pass-2 edge-incarnation handling) and is deliberately NOT fixed in this PR. `test_recreated_point_does_not_inherit_the_node_transit` asserts the node only and says why; the follow-up must extend it to assert the edge is absent. |
-| R6 | P2 | **The Source NODE IDENTITY is not lane-stable when an unjournaled stub precedes the Source record.** `create_point(..., extractedFrom=CANON)` mints a stub at `CANON`; a later `create_source(VARIANT, …)` lands on it live (node url `CANON`), but replay pass-1 builds the Source from the VARIANT-spelled record, so the same ref re-resolves to `VARIANT` and the `extractedFrom` edge lands on a *different* `:Source` node per lane. **Pre-existing** (verified on the pre-round-5 parent: live edge `CANON`, replay edge `VARIANT`), independent of the anchor; reconciling it needs the stub write journaled (or the pass order changed) — out of scope. The **anchor is now stable across it** because the carrier is keyed by the raw ref (round-5 P1), and `test_variant_ref_after_an_unjournaled_stub_keeps_the_anchor` pins the scalar across the identity difference. |
+| R6 | P2 | **The Source NODE IDENTITY is not lane-stable when an unjournaled stub precedes the Source record.** `create_point(..., extractedFrom=CANON)` mints a stub at `CANON`; a later `create_source(VARIANT, …)` lands on it live (node url `CANON`), but replay pass-1 builds the Source from the VARIANT-spelled record, so the same ref re-resolves to `VARIANT` and the `extractedFrom` edge lands on a *different* `:Source` node per lane. **Pre-existing** (verified on the pre-round-5 parent: live edge `CANON`, replay edge `VARIANT`), independent of the anchor; reconciling it needs the stub write journaled (or the pass order changed) — out of scope. The **anchor is now stable across it** because the carrier is keyed by the raw ref (round-5 P1), and `test_variant_ref_after_an_unjournaled_stub_keeps_the_anchor` pins the scalar across the identity difference. **Filed** as a comment on **#5048** (the `derived = replay(journal)` root this is a symptom of) — not as a peer issue, per the file-a-symptom rule. |
 
 ## 10. Review cycle log
 
@@ -372,8 +376,15 @@ FIRST and therefore sidestepped the bug, asserting the defect's premise) to
 **no** `extractedFrom` planted a stray anchor with no edge (gate-invisible). Both writers now select
 the carrier through the shared `_point_source_transit`: written only when the Point OWNS an
 `extractedFrom`, and filtered to that Point's **own raw refs** (normalized as `_link_source` does);
-`test_carrier_without_an_extractedfrom_is_not_written` and
-`test_carrier_keeps_only_the_points_own_refs` pin the two halves. (3) **P3** — the Cycle-6 claim that
+`test_carrier_without_an_extractedfrom_is_not_written`,
+`test_carrier_keeps_only_the_points_own_refs` and
+`test_carrier_with_only_foreign_keys_is_not_written` pin the three halves (no edge ⇒ no carrier;
+foreign pairs dropped; an ALL-foreign carrier is `None`, never `[]`). ⚠️ The gate is a deliberate
+**gate-visibility** change: before it the stray carrier made the node equal its own journal payload, so
+`check_consistency` stayed GREEN; now the graph is unfaithful to that corrupt line and the gate REPORTS
+it (`divergent_points` names `sourceVersionTransit`) — the intended direction (surface the corrupt line,
+never silently mirror it), and the stray test now asserts that call instead of leaving it implicit. (3)
+**P3** — the Cycle-6 claim that
 BOTH call-site shape comments name the non-blank member rule was false; the rule was added to the
 `_upsert_point_edges` call-site comment, making the claim true. Mutation-verified: raw-ref key →
 resolved key reddens the new P1 test (and the rewritten variant test); the own-ref filter mutant
