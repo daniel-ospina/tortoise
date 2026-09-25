@@ -176,6 +176,20 @@ This is a **deliberate choice**, not a cost-free one. The harm classes: **a leak
 
 ---
 
+### Stage 0 findings — the named, bounded non-folded exemptions (#3585)
+
+R8 above requires that a shape genuinely exempt from the fail-the-run assertion be **named explicitly here**, with its degraded guarantee bounded in writing. Stage 0 (#3585, the fail-closed half of this lane) implemented the assertion and found exactly **three** such shapes. Each is recorded here because an exemption that lives only in code is indistinguishable from drift, and the next lane holding a vendor's page would tidy it away:
+
+| Shape | Why it is exempt | Degraded guarantee (the bound) | Recorded decision it rests on |
+|---|---|---|---|
+| `delete-miss` | "Already absent" **is** the delete's desired end state, so a delete matching 0 rows is legitimately idempotent (a retried delete, or an apply-based replay onto a graph that already holds the node). | Does **not** hide an unjournaled **creation**: the rebuild's entity census still sees that the journal registers nothing, and `check_consistency`'s entity parity leg reports the surviving node. | Plan `2026-09-22-unjournaled-mutation-class.md` §"Task 4" — **Policy** ("`op="delete"` matching 0 rows is legitimately idempotent … must not warn"); #4743's disposition. |
+| `point-superseded-no-new-id` | The graph fold treats a `PointSuperseded` with no `new_id` as a **documented no-op** (`_fold_point_superseded`), and the reference fold mirrors it — neither side changes state. | A CORRECTS edge the malformed record might have carried is absent on **both** sides: a bounded, symmetrical loss, not a live/replay divergence. The malformed record is still recorded and named. | Plan `2026-09-22-unjournaled-mutation-class.md` §"Task 4" warning policy (`_fold_point_superseded`'s no-op is the recorded behaviour); #4743's disposition. |
+| `supersede-target-deleted` | The `ObjectSuperseded` / `PointSuperseded` / `PointInvalidated` folds are **DEFERRED to a trailing sweep that runs after pass-1b**, so a target the journal hard-deleted (and that a `PointsMerged` merge hard-deleted) is legitimately absent by sweep time — `live` and `replay` both end with the node absent. | Granted only for a hard delete of the **SAME kind** (or the id-wide no-label fallback) that the fold **actually applied** — a same-kind re-creation anchor that suppressed the delete does not tag it. A foreign-kind delete sharing the id still refuses; a buried `status` still refuses; the entity-parity leg still compares a re-created node's status. | #4743's disposition (the deferred-sweep fold and its 0-row miss). |
+
+**Everything else fails the run.** A shape not listed in this table (or in `EXEMPT_SHAPES` in `tortoise/projection/nonfolded.py`) is fail-closed by default: a new fold-miss site that forgets to classify itself still fails, and the two classifiers — the graph replay engines and `check_consistency`'s reference fold — must yield the **same** disposition for the same journal, or `check_consistency` passes a journal `rebuild_all` refuses (the asymmetry #3585's re-review closed).
+
+---
+
 ## Migration path
 
 The full model is a large change. It is staged so that each step is independently shippable and the system is never worse than it is today.

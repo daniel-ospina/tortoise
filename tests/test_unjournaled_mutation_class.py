@@ -100,6 +100,7 @@ from tortoise.projection import (
     _ENTITY_MUTATION_STATE_OPS,
     classify_entity_mutation_op,
 )
+from tortoise.projection.nonfolded import NonFoldedEventsError
 from tortoise.sdk import TortoiseSDK
 
 _REC = "EntityMutated"
@@ -792,7 +793,8 @@ class TestOpVocabulary:
 class TestNonFoldedSet:
     """``rebuild == live`` alone is vacuous. These rows make the fold's
     silence observable: anything the journal claims and the fold cannot replay
-    must WARN, and a legitimately-idempotent miss must NOT."""
+    must FAIL the run (#3585 R8 — the fail-closed half this class's own
+    docstring assigned to #3585), and a legitimately-idempotent miss must NOT."""
 
     def _raw(self, events, **rec):
         rec.setdefault("event_id", "evt-" + rec.get("op", "?"))
@@ -801,37 +803,42 @@ class TestNonFoldedSet:
             fh.write(json.dumps(rec) + "\n")
 
     @pytest.mark.parametrize("op", sorted(_ENTITY_MUTATION_STATE_OPS))
-    def test_state_op_miss_warns(self, env, caplog, op):
-        """The journal claims a mutation whose entity never re-existed."""
+    def test_state_op_miss_fails_closed(self, env, caplog, op):
+        """The journal claims a mutation whose entity never re-existed.
+
+        #3585: a WARNING is no longer enough — the run must FAIL (R8), and the
+        raised error must name the journal position."""
         sdk, events = env
         self._raw(events, type=_REC, op=op, label="Object",
                   id="obj-never-existed", state={"name": "x"})
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("WARNING"), pytest.raises(NonFoldedEventsError) as ei:
             sdk._get_proj().rebuild_all(str(events))
         assert _MISS in " ".join(_fold_warnings(caplog)), \
             f"a fold that matched nothing for op={op} must warn"
-        assert "obj-never-existed" in " ".join(_fold_warnings(caplog)), \
-            "the message must carry the id that locates the journal line"
+        assert "obj-never-existed" in str(ei.value), \
+            "the error must carry the id that locates the journal line"
 
     @pytest.mark.parametrize("op", sorted(_ENTITY_MUTATION_PENDING_OPS))
-    def test_pending_op_warns_and_says_why(self, env, caplog, op):
+    def test_pending_op_fails_closed_and_says_why(self, env, caplog, op):
         sdk, events = env
         self._raw(events, type=_REC, op=op, label="Object", id="obj-1")
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("WARNING"), pytest.raises(NonFoldedEventsError) as ei:
             sdk._get_proj().rebuild_all(str(events))
         msgs = " ".join(_fold_warnings(caplog))
         assert _PENDING in msgs, (
             f"op={op} is RECORDED (#3299) but unimplemented — it must say so "
             "rather than be reported as 'unknown'")
+        assert "unimplemented-op" in str(ei.value)
 
-    def test_unknown_op_warns(self, env, caplog):
+    def test_unknown_op_fails_closed(self, env, caplog):
         sdk, events = env
         self._raw(events, type=_REC, op="teleported", label="Object",
                   id="obj-1", state={"name": "x"})
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("WARNING"), pytest.raises(NonFoldedEventsError) as ei:
             sdk._get_proj().rebuild_all(str(events))
         assert _UNKNOWN in " ".join(_fold_warnings(caplog)), \
             "an unrecognised op silently drops a mutation — must be loud"
+        assert "unknown-op" in str(ei.value)
 
     def test_delete_miss_does_not_warn(self, env, caplog):
         """The deliberate exemption: a delete matching 0 rows is legitimately

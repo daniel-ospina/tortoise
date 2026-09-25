@@ -48,6 +48,7 @@ import logging
 import pytest
 
 from tortoise.projection import fold
+from tortoise.projection.nonfolded import NonFoldedEventsError
 from tortoise.sdk import TortoiseSDK
 
 DIMS = (
@@ -297,7 +298,7 @@ def test_rebuild_warns_when_operator_annotated_matches_nothing(sup, caplog):
         "annotator_directness": 0.1,
     })
     _rewrite_journal(events, records)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING), pytest.raises(NonFoldedEventsError):
         _rebuild(sdk, events)
     assert any("OperatorAnnotated fold matched no Point" in m
                for m in caplog.messages), caplog.messages
