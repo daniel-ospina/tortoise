@@ -46,7 +46,7 @@ aboutObjects: tests/_embedded.py, tests/conftest.py, tortoise/sdk.py, tortoise/p
 - Competitor variance: Kubernetes/OpenShift reap by `ownerReferences` + a TTL controller, never by name shape.
 - Known pitfall: a name prefix is **not** proof of ownership, and prefix/pattern deletion is non-atomic in Redis-family stores. The journal is the correct shape; the defect is a prefix gate outvoting it.
 
-**Contradiction test (run first, per component):** D-4=A and #7795/#1884 hold that only the ownership record may authorise a delete. Tasks 1/2/5 move *toward* that; Task 3 uses the exact opt-in mechanism #1884 installed. **Three recorded departures**, each carrying an `OVERRIDES:` line **on issue #3634** (per AGENTS.md, the artifact a lane actually reads) and indexed in the epic changelog: (a) the E2E-7 gate's predicate (Task 5); (b) that gate's scoping against the log-and-continue policy (Task 5 Step 6); (c) the new opt-in env read, against `_KNOWN_NARROW_READS`'s "the ledger can only shrink" invariant (Task 3 Step 6). `noeviction` is untouched and `allkeys-*` is never adopted.
+**Contradiction test (run first, per component):** D-4=A and #7795/#1884 hold that only the ownership record may authorise a delete. Tasks 1/2/5 move *toward* that; Task 3 uses the exact opt-in mechanism #1884 installed. **Four recorded departures**, each carrying an `OVERRIDES:` line **on issue #3634** (per AGENTS.md, the artifact a lane actually reads) and indexed in the epic changelog: (a) the residue sweep itself — a journal-blind, name-shape-authorised delete (Task 3 Step 8, CI-7); (b) the new opt-in env read, against `_KNOWN_NARROW_READS`'s "the ledger can only shrink" invariant (Task 3 Step 8, CI-8); (c) the E2E-7 gate's predicate (Task 5 Step 7, CI-9); (d) that gate's scoping against the log-and-continue policy (Task 5 Step 7, CI-10). `noeviction` is untouched and `allkeys-*` is never adopted.
 
 ### Integration Surface Map
 
@@ -102,7 +102,7 @@ Layer vocabulary: **unit** = `_FakeDb`/`_FakeProj` or `object.__new__` (the `tes
 3. Legacy reclamation is opt-in by exact `"1"`; **off** ⇒ no default path deletes anything new, enforced by an **AST pin** (not prose); **on** ⇒ only the declared residue is reclaimed.
 4. No **owned** journalled name survives its sweep — `set(owned ∧ journalled ∧ ¬default) ∩ GRAPH.LIST == ∅`. **Reach: last-suite-standing only** (the gate sits under `if not others`), and the AST-pinned capture-before-sweep ordering is the guarantee — not an in-process assertion.
 5. A broken backend reports its **own** cause (`maxmemory` vs `LOADING` vs `fork`/errno-17), never `python -m tortoise rebuild`.
-6. All **three** recorded departures carry an `OVERRIDES:` line **on #3634** and a row in the epic changelog.
+6. All **four** recorded departures carry an `OVERRIDES:` line **on #3634** and a row in the epic changelog.
 
 ---
 
@@ -403,7 +403,7 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
 **Intent:** A `maxmemory` refusal, a `LOADING` reply, and a fork/errno-17 failure must each report **their own** cause. Routing all three into the maxmemory message would be the misattribution this task exists to remove.
 **Acceptance:** Each cause yields a message naming **that** cause; none yields the rebuild command; genuine corruption still reaches the rebuild advice.
 **Files:**
-- Modify: `tortoise/projection/__init__.py` (`_WRITE_REFUSAL_MARKERS` ~1197, `_write_refusal_message` ~2764)
+- Modify: `tortoise/projection/__init__.py` (add `_BACKEND_FAILURE_MARKERS` ~1222 and `_BACKEND_FAILURE_REMEDIES` ~1270, and add `_backend_failure_message` ~2875; `_WRITE_REFUSAL_MARKERS` ~1198 and `_write_refusal_message` ~2845 are **NOT** modified). Fork detection **delegates** to `fork_slot.is_fork_refusal` — the ONE canonical classifier, which owns the marker vocabulary (`could not fork`, `can't fork for module`, `cannot fork for module`) and walks the `__cause__`/`__context__` chain; the table must NOT restate fork markers, or the vocabulary re-forks and `could not fork` goes unrecognised again.
 - Test: `tests/test_projection_maxmemory_message.py`
 
 **Step 1: Write the failing test** — the file **already has the model**: `_projection(probe_error=...)` built with `object.__new__`, and it asserts on what `_auto_health_recover` **raises** via `pytest.raises`. Reuse it; do not invent a helper:
@@ -412,7 +412,12 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
 @pytest.mark.parametrize("cause,needle", [
     (_MAXMEMORY_ERROR, "maxmemory"),                              # the existing constant
     ("LOADING Redis is loading the dataset in memory", "loading"),
-    ("<module> fork failed - got errno 17", "fork"),
+    # The engine's REAL wordings, never an invented stem: `GRAPH.COPY failed,
+    # could not fork` is FalkorDB's reply (cmd_copy.c); errno 17 surfaces as
+    # redis's own `Can't fork for module: File exists` (module.c, EEXIST).
+    # Both route through `fork_slot.is_fork_refusal` — the shipped test pins both.
+    ("GRAPH.COPY failed, could not fork", "fork"),
+    ("Can't fork for module: File exists", "fork"),
 ])
 def test_each_backend_cause_names_itself(monkeypatch, cause, needle):
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
@@ -518,7 +523,7 @@ Add the matching rows to the epic changelog table (`docs/epics/2026-08-24-test-d
 
 ### Task 7: Verify and hand off evidence
 
-**Intent:** Prove the change is bounded and crosses no recorded decision beyond the **three** marked departures.
+**Intent:** Prove the change is bounded and crosses no recorded decision beyond the **four** marked departures.
 **Acceptance:** Gate-off lane green; the mechanism demonstrated on live fixtures; AC1–AC6 each have a named test or a recorded AST pin; no `allkeys-*` and no `wipe_server` literal widening in the diff.
 **Files:** `docs/plans/2026-09-24-3634-graph-leak-reaping.md` (add the `status: live` field at the top, per the sibling plans in `docs/plans/`), `docs/epics/2026-08-24-test-db-migration/plan.md` (the changelog rows from Task 3 Step 8 and Task 5 Step 7)
 
@@ -527,8 +532,8 @@ Add the matching rows to the epic changelog table (`docs/epics/2026-08-24-test-d
 **Step 3:** Confirm the guardrails held:
 
 ```bash
-git diff origin/main -- tests/_embedded.py | grep -n 'allkeys' || echo "no allkeys — OK"
-git diff origin/main -- tests/_embedded.py | grep -c 'startswith(("test_", "tortoise_test"))'   # expect 0 — the literal now has one home
+git diff "$(git merge-base origin/main HEAD)..HEAD" -- tests/_embedded.py | grep -n 'allkeys' || echo "no allkeys — OK"
+grep -c 'startswith(("test_", "tortoise_test"))' tests/_embedded.py   # must print 0 — the literal now has one home
 ```
 **Step 4:** Commit; run `commit-workflow`.
 
@@ -548,6 +553,6 @@ git diff origin/main -- tests/_embedded.py | grep -c 'startswith(("test_", "tort
 
 Unjournalled legacy `org_*` (104) and the graph named `t` — reachable only via the existing `_sweep_team_strays` opt-in (note: *journalled* `org_*`/`team_*` **are** owned and dropped by the default journal path; only the journal-blind residue needs the gate). LC5 (the `from_uri`/`host=` redirect gap). The atomicity residual #3214. The product storage architecture #4333.
 
-**LC4/LC7 — constructor-time / staging write-ahead journalling: filed as #5187.** A graph can be materialized before any ownership record exists — the restore staging graphs in `tortoise/hosted_backup.py:2356-2358` (journalled nowhere in that file) and `FalkorProjection.__init__`'s `_ensure_indexes()` at `tortoise/projection/__init__.py:2773` when a direct construction bypasses the `from_uri`/redirect append. A crash in the window leaves a graph invisible to every journalled sweep, including the new E2E-7 gate, which asserts on **owned ∧ journalled** survivors (so an unjournalled graph is outside its owned set by construction). Distinct from #3634: #3634 owns graphs that *had* a record and drifted out of the sweep. **Trigger:** an AST trip extending `tests/test_write_ahead_mint.py`'s `_MINT_SITES` guard to the constructor/staging materialization sites, so a new unowned mint reddens CI instead of rotting; dated re-check at the next #4333 touch or the next quarterly infra-stability pass.
+**LC4/LC7 — constructor-time / staging write-ahead journalling: tracked in #5048** (the original #5187 was consolidated into it and is now closed). A graph can be materialized before any ownership record exists — the restore staging graphs in `tortoise/hosted_backup.py:2356-2358` (journalled nowhere in that file) and `FalkorProjection.__init__`'s `_ensure_indexes()` at `tortoise/projection/__init__.py:2773` when a direct construction bypasses the `from_uri`/redirect append. A crash in the window leaves a graph invisible to every journalled sweep, including the new E2E-7 gate, which asserts on **owned ∧ journalled** survivors (so an unjournalled graph is outside its owned set by construction). Distinct from #3634: #3634 owns graphs that *had* a record and drifted out of the sweep. **Trigger:** an AST trip extending `tests/test_write_ahead_mint.py`'s `_MINT_SITES` guard to the constructor/staging materialization sites, so a new unowned mint reddens CI instead of rotting; dated re-check at the next #4333 touch or the next quarterly infra-stability pass.
 
 **Backfill-guard URI-path gate: filed as #5188.** `graph-scripts/backfill_invite_ghost_members.py:77-78` gates the destructive run on the URI-path graph name while the writes land on the SDK-resolved registry graph (`registry_control_plane`), so a test-prefixed `--uri` proceeds without `--yes` for a write to a shared non-test graph. Remedy: `test_guard(reg.name, args.yes)`, mirroring `graph-scripts/clear_max_sessions_4010.py:183`/`:186`. **Trigger:** the regression test in that issue (a test-prefixed URI path must not auto-approve a non-test resolved name).

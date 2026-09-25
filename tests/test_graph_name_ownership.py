@@ -99,11 +99,16 @@ def test_the_residue_predicate_is_deny_safe():
 
 
 def test_the_residue_census_cohort_is_exact():
-    """The declared cohort equals the golden census, and every name approves.
+    """The declared cohort equals the golden list, and every name approves.
 
-    A loop over the live tuple cannot detect its own shrinkage, so the set
-    equality below pins the CONTENT, and the per-name approve assertion pins
-    that each literal is actually reachable through `is_legacy_residue`.
+    `EXPECTED_RESIDUE_PREFIXES` is a hand-copy of the implementation tuple, so
+    the set equality below pins COPY-vs-CODE, not census-vs-code: it catches a
+    literal being dropped from or added to the declaration, and it does NOT by
+    itself prove every entry is real (that provenance comes from the archived
+    census on #3634). A loop over the live tuple cannot detect its own
+    shrinkage, so the equality is what pins the CONTENT here, and the per-name
+    approve assertion pins that each literal is actually reachable through
+    `is_legacy_residue`.
     """
     assert set(_LEGACY_RESIDUE_PREFIXES) == set(EXPECTED_RESIDUE_PREFIXES)
     for n in EXPECTED_RESIDUE_PREFIXES:
@@ -173,6 +178,13 @@ def test_a_sixth_copy_of_the_vocabulary_fails_here():
         src = (REPO / rel).read_text()
         for m in re.finditer(r"^\s*([A-Za-z_][A-Za-z_0-9]*PREFIXES)\s*[:=]", src, re.M):
             seen.add(m.group(1))
+    # POSITIVE CONTROL — mirror `tests/test_ci_selection.py`'s `assert workflows`.
+    # Without it a rename/move that stops the regex matching makes the scan find
+    # NOTHING, so `unregistered` is empty and this test passes for the wrong
+    # reason. Every constant the register declares must be found by the scan.
+    assert set(_DIVERGENCE_REGISTER) <= seen, (
+        f"scan missed declared constant(s): "
+        f"{sorted(set(_DIVERGENCE_REGISTER) - seen)} — it would pass vacuously")
     unregistered = {n for n in seen if n not in _DIVERGENCE_REGISTER}
     assert unregistered == set(), f"prefix constant(s) not in the register: {unregistered}"
 
