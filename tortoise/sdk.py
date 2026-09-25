@@ -14215,6 +14215,14 @@ class TortoiseSDK:
         fusion_weights: dict | None = None,
         fusion_k: int = 60,
         w4_enrich: bool = True,
+        # C6 (#2520, #2513): time-aware query expansion — the query-side
+        # date anchor. ``time_aware`` gates the C6 branch; ``query_date``
+        # is the question's date (YYYY-MM-DD, or a timestamp truncated to
+        # it). Default OFF (the #1745 fail-safe decision, matching
+        # ``entity_key_expansion``): the branch is never entered and the
+        # output is byte-identical.
+        query_date: str | None = None,
+        time_aware: bool = False,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -14325,6 +14333,22 @@ class TortoiseSDK:
         fusion_k (A3 #2070): the RRF damping constant override (the
             historical Cormack k=60). Default 60 = unchanged. Ask lane
             threads its TORTOISE_ASK_FUSION_K knob through this slot.
+        query_date / time_aware (C6 #2520, #2513): the query-side date
+            anchor. When ``time_aware`` is on, ``query_date`` is a valid
+            date, and ``tortoise.time_aware.detect_temporal_intent`` reads
+            the query as PREFER-LATEST ("now", "currently", "did I switch
+            X"), the DENSE-leg embedding is computed over
+            ``inject_query_date(query, query_date)`` = "<query> (as of
+            <date>)" — so the embedding can express "which version was
+            current on X", which the bare question cannot. The FTS and
+            structural legs keep the ORIGINAL query (date tokens would
+            dilute the sparse OR-union). A DATE-PINNED query ("where did I
+            live in 2024?") is deliberately NOT anchored and gets no fresh
+            bias (the invert-recency guard). Rank-time prefer-latest is a
+            caller concern (the eval applies it on its final pool — see
+            ``tools.longmem_eval.retrieve``): a stable reorder layered here
+            would be discarded by the eval's RRF re-sort. Default
+            ``time_aware=False`` → byte-identical, zero extra work.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -14373,6 +14397,17 @@ class TortoiseSDK:
         # Expand kind early for pack-aware structural query + kind filter
         expanded_kinds = self._expand_kind(kind) if kind else None
 
+        # C6 (#2520): resolve the freshness intent ONCE and derive the
+        # DENSE-leg query. The anchor touches the embedding only — the
+        # sparse/structural legs keep the original query. ``query=None``
+        # (full-scan) is safe: the detector is None-safe. Off path: no
+        # import, no scan, byte-identical.
+        _dense_query = query
+        if time_aware:
+            from .time_aware import dense_query_for
+            _dense_query = dense_query_for(query, time_aware=True,
+                                           query_date=query_date)
+
         # 2. Get query vector if needed (all core entity types now have embeddings #7845)
         # R3 (#1542) D4: no_embedder vs encode_failed are distinguished —
         # both leave query_vec None (the vector strategy is never submitted),
@@ -14392,7 +14427,7 @@ class TortoiseSDK:
                 _vec_reason = "no_embedder"
             else:
                 try:
-                    query_vec = model.encode([query])[0].tolist()
+                    query_vec = model.encode([_dense_query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
         if _vec_reason is not None and leg_trace is not None:
