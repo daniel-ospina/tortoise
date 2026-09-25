@@ -179,6 +179,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # tools/ci_selection.py carries the inline >=3.12 guard (#5128). Without
+      # this pin the whole selection job refuses on an older ambient python3,
+      # and every downstream python-ci job that needs: changes fails with it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Tiered selection
         id: select
         run: |
