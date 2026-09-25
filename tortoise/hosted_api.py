@@ -122,7 +122,7 @@ from tortoise.sdk import (
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
-    _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
+    _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
@@ -10257,7 +10257,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
-    _turn_texts = _capture_turn_texts(windowed)
+    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
+    # HERE — ONCE, off the event loop, on the capture pool — and the writer
+    # below REUSES this exact result instead of recomputing it. The scrub is
+    # ~3 s/MB of client-controlled text (measured: 0.97 s @220k, linear), and a
+    # legal-maximum 500x5,000 capture is 2.5 MB, so the four independent passes
+    # it replaced cost ~10 s of CPU for one capture. It must not run on the
+    # loop at all: `_capture_turn_texts` used to be an O(n) f-string loop, but
+    # it now scrubs, so calling it bare here would put seconds of CPU on the
+    # loop — the #3060/#3086 freeze class this file is built around (and which
+    # `test_capture_loop_responsiveness` cannot see: it counts on-loop QUERIES,
+    # and a scrub issues none).
+    _turn_texts, _redaction_counts = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_texts_with_redactions, windowed)
     _turn_embs = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
         proj.required_embedding_dim)
@@ -10272,7 +10284,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_redactions = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
         windowed, now=now, turn_embs=_turn_embs,
-        session_existed=session_existed)
+        session_existed=session_existed,
+        texts_and_counts=(_turn_texts, _redaction_counts))
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -10714,10 +10727,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # after the capture). Tracked on the Session node.
     try:
         from .session_link import link_session_entities
-        # #4194: the shared `_capture_turn_texts` is the ONE stored-text
-        # definition — the link trigger, the stored turn, and the embedded text
-        # cannot drift (#1532 D1/D2).
-        link_texts = _capture_turn_texts(windowed)
+        # #4194/#4911: the shared `_capture_turn_texts_with_redactions` is the
+        # ONE stored-text definition — the link trigger, the stored turn, and
+        # the embedded text cannot drift (#1532 D1/D2). The texts were already
+        # computed off the loop above; reusing them keeps the scrub to ONE pass
+        # per capture.
+        link_texts = _turn_texts
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"

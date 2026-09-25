@@ -122,11 +122,31 @@ still be caught, and the segmenter's space-rejoin makes that the common case), s
 followed by two long dot-separated words can absorb that prose. Visible in the marker, not a leak;
 narrowing it would cost the wrapped-JWT recall the rule exists for.
 
-**Residual, pre-existing and unchanged:** in the hosted lane `_materialize_session_source` still
-runs on the event loop; its own transcript derivation already did. Its scrub is now bounded to the
-same `_CAPTURE_TURN_CAP` window the persisted text uses — without that bound a client-controlled
-2 MB turn cost ~6.9 s of scanning on the loop (measured), which is why the cap is passed explicitly
-rather than left to the turn store.
+**Residual — CORRECTED by review (cycle 1):** this paragraph used to say `_materialize_session_source`
+"still runs on the event loop". It does not — this change moved it onto `_CAPTURE_EXECUTOR`, with the
+scrub cost as the stated reason. What review DID find is that two other consumers of the new scrub had
+been left on the loop: `_capture_turn_texts(windowed)` for the embedding batch and again for the
+entity-linking pass — the scrub has a measured, documented cost of ~3 s/MB, and a legal-maximum
+500x5,000 capture is 2.5 MB of client-controlled text, so that was seconds of CPU on the loop per
+capture, the #3060/#3086 freeze class. Both now run off the loop, once, and the writer and the linker
+reuse the result. **No capture-path scrub runs on the event loop.** The scrub itself is linear
+(measured 0.97 s @220k, 1.51 s @440k); its 2x-input cost ratio is ~2, and the binding test asserts
+that scaling rather than a wall-clock threshold.
+
+**Residual, FILED not fixed (outside the declared T1–T7 surface): the confirmation comparison is
+version-sensitive.** `session_confirm.expected_turns` builds the expected stored text with the
+CLIENT's redaction table and `confirm_capture` requires an exact match. Before this change the stored
+text was a version-independent function of the posted turns; now it depends on `_SECRET_SHAPES`, which
+lives independently on an installed client and a deployed server. A skew — an older client against an
+upgraded server, which is the direction a table extension moves — makes a turn with a shape the two
+disagree on compare unequal, so its `capture_spool` entry returns the retryable verdict, defers with
+backoff, and never terminalises (the #4675 symptom, re-entered through version skew rather than through
+the writer/reader mismatch #4923 fixed). Filed as its own issue with the reproduction rather than
+fixed here: the fix (accept a served body that differs from the expectation only where a
+`[REDACTED:<kind>]` span stands in for text the other side holds) loosens the exact-match guard, so it
+needs its own review rather than riding a bounded security cycle. Also filed alongside it: the #3086
+guard (`tests/test_capture_loop_responsiveness.py`) counts on-loop QUERIES and is structurally blind
+to a query-free CPU regression, which is exactly why the on-loop scrub above shipped green.
 
 ### Three persistence consumers, one control
 

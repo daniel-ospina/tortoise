@@ -518,7 +518,7 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
             speaker = "Speaker"
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        body = " ".join(content[:5000].split())
+        body = " ".join(content[:_CAPTURE_TURN_CAP].split())
         sents = [s.group(0).strip() for s in _SENT.finditer(body)]
         sents = [s for s in sents if len(s) >= 3]
         capped = sents[:MAX_EXTRACTIONS_PER_TURN]
@@ -714,7 +714,7 @@ def _capture_turn_texts_with_redactions(
         role = _normalize_turn_role(turn.get("role"))
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        texts.append(f"[{role}] {content[:5000]}")
+        texts.append(f"[{role}] {content[:_CAPTURE_TURN_CAP]}")
     return texts, counts
 
 
@@ -940,6 +940,7 @@ def _write_capture_turns(
     now: str,
     turn_embs: list[list[float] | None],
     session_existed: bool = True,
+    texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
 ) -> int:
     """Write a capture's episodic turn stream — ONE batched statement (#3086).
 
@@ -954,6 +955,15 @@ def _write_capture_turns(
     than the node holds (#4194); a length mismatch (unreachable from both
     callers) drops the whole batch's vectors with an error log rather than
     misaligning them.
+
+    ``texts_and_counts`` lets a caller that has ALREADY computed
+    ``_capture_turn_texts_with_redactions(windowed)`` hand the result in rather
+    than pay for a second scrub of the same client-controlled text. The hosted
+    lane passes it because its embeddings and its entity-linking pass both need
+    the same stored texts: the scrub is ~3 s/MB, so re-deriving it per consumer
+    cost seconds of CPU per legal-maximum capture (#4911 cycle 1). Defaults to
+    ``None`` — recompute — so the sync SDK lane and every test are unchanged,
+    and the count is always taken from the same window either way.
 
     The Session MUST already exist (both callers MERGE it immediately before)
     — the statement both node- and edge-writes, and a missing Session would
@@ -981,12 +991,15 @@ def _write_capture_turns(
     scrubbed upstream in ``_capture_turn_texts`` — see that function for why
     the redaction cannot live here — and the count is taken from the SAME
     window, so it covers the spans the session ``:Source`` sink and the
-    extractor scrub over the same stored window — when the Source is handed
-    # the raw conversation these are different OBJECTS holding the same first
-    # _CAPTURE_TURN_CAP characters of each turn, which is all either of them
-    # persists. Both callers surface it on their capture receipt.
+    extractor scrub over the same stored window. When the Source is handed the
+    raw conversation these are different OBJECTS holding the same first
+    ``_CAPTURE_TURN_CAP`` characters of each turn, which is all either of them
+    persists. Both callers surface it on their capture receipt.
     """
-    turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
+    if texts_and_counts is None:
+        turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
+    else:
+        turn_texts, redaction_counts = texts_and_counts
     redacted_total = sum(redaction_counts.values())
     if not turn_texts:
         return redacted_total

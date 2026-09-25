@@ -745,18 +745,54 @@ def test_a_caller_supplied_summary_is_scrubbed():
 def test_the_jwt_rule_scans_linearly_on_adversarial_input():
     """A failing ``eyJ`` start must not rescan the tail (the #5296 class).
 
-    ``eyJ`` followed by an unbroken run and no dot made the backtracking
-    engine rescan from every start (measured: 2x input, up to 9x time). The
-    possessive quantifiers fix it; the bound is generous (the linear scan is
-    ~0.5 s for 200k chars) so this fails only on a real regression.
+    TWO families, because the one this test used to assert did NOT bind the
+    guard (#4911 cycle 1 — review proved it stayed green with the lookbehind
+    reverted):
+
+      * ``("eyJ" + "A"*10) * n`` — every ``eyJ`` after the first is preceded by
+        ``A``, so ``(?<![A-Za-z0-9])`` rejected it before any body work ran.
+      * ``("_eyJ" + "A"*50 + "_") * n`` — ``_`` is a BASE64URL BODY character,
+        so a lookbehind that admits ``_`` turns the whole string into ONE body
+        run with a fresh candidate at every ``_``: each candidate possessively
+        consumes the entire tail, fails on the absent dot, and the engine
+        retries one character on. Quadratic — 55k chars measured 0.85 s, 110k
+        2.83 s, 220k 10.50 s. Excluding ``_``/``-`` from the lookbehind leaves
+        no surviving candidate inside a run, so the scan is a single pass.
+
+    Both a wall-clock bound AND a scaling assertion, because a generous
+    threshold alone cannot certify linearity (and did not: the reverted rule
+    passed the shipped 5.0 s bound at 520k).
     """
     import time
-    adversarial = ("eyJ" + "A" * 10) * 40_000   # ~520k chars, no dots
-    start = time.perf_counter()
-    _, counts = redact_secrets(adversarial)
-    elapsed = time.perf_counter() - start
-    assert counts == {}
-    assert elapsed < 5.0, f"superlinear scan: {elapsed:.2f}s for 520k chars"
+
+    def _scan(chars: int) -> tuple[float, dict]:
+        text = ("_eyJ" + "A" * 50 + "_") * (chars // 54)
+        started = time.perf_counter()
+        redacted, counts = redact_secrets(text)
+        assert redacted == text, "no dot ⇒ no JWT ⇒ the text is untouched"
+        return time.perf_counter() - started, counts
+
+    # The family the previous version used. Kept because it is the documented
+    # regression input, even though it alone cannot discriminate.
+    shipped = ("eyJ" + "A" * 10) * 40_000            # ~520k chars, no dots
+    started = time.perf_counter()
+    redacted, counts = redact_secrets(shipped)
+    elapsed = time.perf_counter() - started
+    assert counts == {} and redacted == shipped
+    assert elapsed < 8.0, f"superlinear scan: {elapsed:.2f}s for 520k chars"
+
+    # The binding family. Fixed ~1.0 s at 220k; the quadratic form measured
+    # 10.5 s there, so this bound discriminates both ways with margin.
+    one, counts_one = _scan(220_000)
+    assert counts_one == {}
+    assert one < 4.0, f"superlinear JWT scan: {one:.2f}s for 220k chars"
+
+    # Scaling: 2x input may not cost more than 3x time (linear ~2x, quadratic
+    # ~4x+). A generous absolute bound cannot certify this.
+    two, _ = _scan(440_000)
+    assert two < one * 3.0, (
+        f"JWT scan does not scale linearly: {one:.3f}s → {two:.3f}s for 2x "
+        "input — a lookbehind that admits a body character re-scans the run")
 
 
 def test_redaction_is_idempotent_under_the_capture_double_pass():

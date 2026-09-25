@@ -287,11 +287,24 @@ def redact_error(e: BaseException) -> str:
 #     EVERY one was prose (``risk-``, ``disk-``, ``task-``). The negative
 #     lookbehind on ``sk-`` is what makes it safe — the token must begin at a
 #     character that is not part of another token, so ``disk-…`` cannot match.
-#     **ONE deliberate exception**, and only because the value has no vendor
-#     prefix at all: the AWS *secret* access key is 40 chars of base64, so
-#     matching it bare would redact prose — it is anchored on the literal
-#     ``aws_secret_access_key`` name (quoted or bare) instead; the pair's ID half
-#     is covered by an anchored shape.
+#
+#     Two rule families are deliberately NOT pure vendor-shape matches, and
+#     the count matters because a maintainer extending the table by "shapes
+#     only" would not see them:
+#
+#       * **Keyword-anchored, value-shape-less.** The AWS *secret* access key
+#         is 40 chars of base64 with no vendor prefix, so matching it bare
+#         would redact prose — it is anchored on the literal
+#         ``aws_secret_access_key`` name (quoted or bare) instead. The same
+#         pattern covers the two ``bearer_token`` rules, anchored on the
+#         ``Authorization: Bearer`` header name / a bare ``bearer`` keyword.
+#         Each keeps its anchor text in the output, so the record stays
+#         diagnostic. These are the ONLY rules whose anchor is contextual;
+#         the AWS pair's ID half is covered by a vendor shape.
+#
+#     Everything else is anchored on a vendor-shaped prefix, and a
+#     structural/entropy guess (a gitleaks-style generic-api-key rule) is
+#     deliberately NOT shipped — see the note below ``google_api_key``.
 #   * **Terminators are ``(?![A-Za-z0-9])``, never ``\b``.** ``_`` is a word
 #     character, so ``\b`` both (a) fails to match a real token sitting against
 #     an underscore and (b) lets a greedy body BACKTRACK to an internal ``-``
@@ -315,6 +328,16 @@ def redact_error(e: BaseException) -> str:
 #     instead failed from every header would be O(headers × text) — measured
 #     40-96 ms on a single 5,000-char adversarial turn (#5296), which a
 #     whole-session transcript multiplies into minutes.
+#
+#     The SECOND way a rule goes superlinear is a lookbehind that admits a
+#     character the rule's OWN body class also matches. A body run then
+#     contains fresh candidate starts, each of which re-consumes the run from
+#     its own position — O(candidates × text). Measured on the ``jwt`` rule
+#     (#4911 cycle 1): a lookbehind of ``(?<![A-Za-z0-9])`` let ``_eyJ…``
+#     survive against a body class containing ``_``, and 55k chars cost
+#     0.85 s, 110k cost 2.83 s, 220k cost 10.50 s. Every lookbehind here
+#     therefore excludes its own body characters (``_`` and ``-`` for the
+#     base64url shapes), and a binding test asserts the scaling.
 #
 # Deliberately NOT included: a gitleaks ``generic-api-key``-style rule (context
 # match on ``api``/``token``/``secret``/``key`` plus an entropy gate). It would
@@ -380,9 +403,10 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
      re.compile(r"(?<![A-Za-z0-9])(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)"
                 r"[A-Z2-7]{16}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="aws_access_key_id")),
-    # The pair's OTHER half — and the only context-anchored rule in the table
-    # (see the module header): 40 base64 chars with no vendor prefix, so the
-    # literal parameter name is the anchor and the NAME is kept for diagnosis.
+    # The pair's OTHER half — a context-anchored rule, like the two
+    # ``bearer_token`` entries below (see the module header): 40 base64 chars
+    # with no vendor prefix, so the literal parameter name is the anchor and the
+    # NAME is kept for diagnosis.
     # ⛔ The optional closing quote between the name and the separator is
     # LOAD-BEARING: in JSON/YAML the quote sits exactly there
     # (``"aws_secret_access_key": "…"``), and without it that form — the form a
@@ -419,8 +443,9 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     #      around a URL).
     #
     # There is no vendor prefix to anchor on — the scheme is arbitrary — and this
-    # module's stated rule is anchored shapes only, with ONE exception whose
-    # anchor is a literal parameter NAME (see ``aws_secret_access_key``). A
+    # module's stated rule is anchored shapes only, with the keyword-anchored
+    # exception family whose anchors are literal parameter/header NAMES (see
+    # ``aws_secret_access_key`` and the ``bearer_token`` pair). A
     # structural guess is the class of rule whose false-positive rate made the
     # naive ``sk-``/``CONTAINS 'sk-'`` probe useless, so it is not shipped. The
     # gap is recorded on #4911 and filed as its own issue rather than papered
@@ -469,14 +494,22 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # and the sentence segmenter the session transcript runs through splits on
     # the dots — without it both turn one credential into three unmatched
     # fragments whose concatenation is still the key.
-    # ⛔ The quantifiers are POSSESSIVE ({10,}+), which is a linearity fix, not
-    # a style choice: a plain {10,} backtracks, so text with many `eyJ` starts
-    # and no dot made the engine rescan the whole tail from each start
-    # (measured quadratic: 2x input → up to 9x time). Possessive consumes each
-    # segment once and fails without backtracking, so the rule is O(text) like
-    # every other rule here — which is what the module header promises.
+    # ⛔ THE LOOKBEHIND, NOT THE QUANTIFIERS, IS WHAT MAKES THIS LINEAR — and it
+    # was wrong until review measured it (#4911 cycle 1). ``_`` and ``-`` are
+    # BODY characters of a base64url token, so ``(?<![A-Za-z0-9])`` admitted
+    # ``_eyJ…`` / ``-eyJ…``: the whole string became ONE body run with a fresh
+    # candidate at every ``_``, each possessively consuming the entire tail,
+    # failing on the absent dot, and retrying one character on — quadratic
+    # (0.85 s @55k → 2.83 s @110k → 10.50 s @220k, measured). Excluding the
+    # body's own characters from the lookbehind leaves no surviving candidate
+    # inside a run, so the scan is a single pass. The possessive quantifiers are
+    # KEPT as a second guard — they stop backtracking *within* a candidate that
+    # does start — but they never fixed the run-restart cost, and the test that
+    # was supposed to bind it (`("eyJ"+"A"*10)*n`) could not: every `eyJ` after
+    # the first is preceded by `A`, so the lookbehind rejected it before any
+    # body work happened.
     ("jwt",
-     re.compile(r"(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{10,}+"
+     re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}+"
                 r"\s*\.\s*[A-Za-z0-9_-]{10,}+"
                 r"\s*\.\s*[A-Za-z0-9_-]{10,}+"),
      _REDACTION_VALUE.format(kind="jwt")),
@@ -529,11 +562,15 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
     non-secret turn is returned byte-identical, and the text around a matched
     span is preserved.
 
-    Idempotent: a marker contains no character class any pattern matches (no
-    ``[``/``:``/``]`` in the token bodies), so re-running over already-redacted
-    text changes nothing and adds no counts. That matters because the capture
-    path redacts the stored text once for the embedding batch and once at the
-    write — the same bytes must come out both times (#4194).
+    Idempotent: no rule's ANCHOR can be satisfied inside a ``[REDACTED:<kind>]``
+    marker — no vendor prefix, no header/parameter keyword, no ``BEGIN …
+    PRIVATE KEY`` label appears in one — so re-running over already-redacted
+    text changes nothing and adds no counts. (The reason is the anchor, not the
+    body: the ``private_key`` body matches everything, including ``[``/``:``/
+    ``]``; it is the ``-----BEGIN … PRIVATE KEY-----`` anchor a marker cannot
+    provide.) That matters because the capture path redacts the
+    stored text once for the embedding batch and once at the write — the same
+    bytes must come out both times (#4194).
     """
     if not isinstance(text, str) or not text:
         return text, {}
