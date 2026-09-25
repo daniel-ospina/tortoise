@@ -199,6 +199,39 @@ _VALID_EDGE_PREDICATES = frozenset({
     'aboutSource', 'aboutAction',
 })
 
+# `references` targets whose node is BUILT FROM the source's content, and therefore
+# carry the version anchor `sourceVersion` (ONTOLOGY §3.4/§4.6 — owner-approved
+# 2026-09-25, #5199). The anchor is set at LINK TIME from the source's current
+# `contentHash`, which is why the public SDK signature does not change.
+#
+# `Object` is deliberately ABSENT. Every in-repo writer of a Source→Object
+# `references` link is identity/mention — a connector artifact whose Source `url`
+# IS the artifact — so a version there would be a non-answer, not a stale mark.
+# Referential-containment links (Source→Source) are written outside this method
+# and stay property-free. `references` is in NEITHER `STRUCTURAL_REL_LABELS` nor
+# `DERIVABLE_STRUCTURAL_RELS`, so this anchor adds nothing to the replay surface.
+#
+# The discriminator is the target LABEL, which is a proxy for "derived" — the only
+# signature-preserving signal available. Every in-repo `Event` link is built from
+# the source (connector choke point + meeting path); if the ontology later rules
+# that the connector Event is identity rather than derivation, only this set moves.
+_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
+
+# CQL suffix stamping the derivation anchor on a `references` MERGE. Shared by EVERY
+# writer of a derivation edge so the anchor cannot be written by one path and silently
+# omitted by another (#5199 review, finding 1).
+#
+# `ON CREATE` only: a re-link (connectors re-poll; `link_source_to_entity` is an
+# idempotent MERGE) must NOT advance the recorded version, or the staleness the anchor
+# exists to expose would silently read as current. And `''` — the auto-created-Source
+# placeholder — must NOT be stamped: `'' = ''` compares equal to the source's current
+# hash and would read as a FALSE current.
+_DERIVATION_ANCHOR_SET = (
+    "ON CREATE SET r.sourceVersion = "
+    "CASE WHEN s.contentHash IS NULL OR s.contentHash = '' "
+    "THEN NULL ELSE s.contentHash END"
+)
+
 
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
@@ -447,6 +480,14 @@ class _EdgeHandlers:
             entity_label: the entity label (Document|Event|Object) for the MATCH
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
+        Anchor (#5199, owner-approved 2026-09-25): a DERIVATION link
+        (``entity_label`` in ``_DERIVATION_REFERENCES_LABELS``) records the version
+        it was read from as ``sourceVersion`` — the source's current
+        ``contentHash``, read HERE so that no caller passes it and the public SDK
+        signature is unchanged. Identity/mention links (``Object``) stay
+        property-free. Written ``ON CREATE`` only: a re-link must NOT advance the
+        recorded version, or staleness would silently read as current.
+
         Raises:
             ValueError: if entity_label is not one of Document, Event, Object
                 (Action was dissolved in Ontology v3.0).
@@ -472,10 +513,36 @@ class _EdgeHandlers:
             params={"url": key, "raw_url": source_url, "cu": canonical,
                     "sk": source_kind, "now": _now_iso()},
         )
+        if entity_label in _DERIVATION_REFERENCES_LABELS:
+            self.g.query(
+                f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
+                f"MERGE (s)-[r:references]->(e) " + _DERIVATION_ANCHOR_SET,
+                params={"url": key, "eid": entity_id},
+            )
+        else:
+            self.g.query(
+                f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
+                f"MERGE (s)-[:references]->(e)",
+                params={"url": key, "eid": entity_id},
+            )
+
+    def link_source_to_event(self, source_key: str, event_id: str) -> None:
+        """MERGE ``(Source {url})-[:references]->(Event {eventId})`` — the
+        ``eventId``-keyed derivation writer, with the anchor stamped identically.
+
+        Separate from :meth:`link_source_to_entity` because legacy raw-Cypher Events
+        carry no ``id``, so that method's id-keyed MATCH would silently no-op on them
+        (the reason ``TortoiseSDK._backfill_link`` exists). One writer per key shape,
+        both stamping ``sourceVersion`` — so a derivation edge cannot be created
+        anchored on one path and unanchored on another (#5199 review, finding 1).
+
+        ``source_key`` is passed through AS the Source key — callers pass the same
+        value they used for the Source MERGE, so this adds no new resolution step.
+        """
         self.g.query(
-            f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
-            f"MERGE (s)-[:references]->(e)",
-            params={"url": key, "eid": entity_id},
+            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
+            "MERGE (s)-[r:references]->(e) " + _DERIVATION_ANCHOR_SET,
+            params={"url": source_key, "eid": event_id},
         )
 
     # ponytail: SDK compat alias (Phase 1b will rename caller)

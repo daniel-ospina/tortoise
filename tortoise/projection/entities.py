@@ -2230,12 +2230,9 @@ class _EntityHandlers:
             params={"url": key, "raw_url": url, "cu": canonical,
                     "sk": sk or "document", "now": _now_iso()},
         )
-        # (Source)-[:references]->(Event) — always, when the event exists.
-        self.g.query(
-            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
-            "MERGE (s)-[:references]->(e)",
-            params={"url": key, "eid": eid},
-        )
+        # (Source)-[:references]->(Event) — always, when the event exists, and
+        # anchored ON CREATE by the shared derivation writer (#5199).
+        self.link_source_to_event(key, eid)
         # #388 conf-62/conf-60: a fallback-key materialization (`slack:{channel}` /
         # `linear:{team_key}` / bare `source`) can predate the real URL (a
         # permalink becomes available later, or a later poll resolves the

@@ -553,7 +553,13 @@ The owner raised the gap the D10 pass left open: *"shouldn't we have some form o
 
 - **So the cost of closing it falls on the derivation links only** — one hash each, since a version is three timestamps + a hash and never a content copy (D30). ⚠️ **No total is derivable without a census**: the derivation-link count is its own quantity (the connector paths mint per-`Event` links for events that may yield no Point), so it is **not** bounded by the `extractedFrom` count. **Not measured** — the shared instance refused reads when this was written.
 
-**Open and tracked:** `#5199` (scope + decision; `#5038` is the model's home). Closing it would add a field to a declared relation — i.e. it edits `ONTOLOGY.md` §3.4 — so it is the **owner's call, not an implementation choice**.
+**DECIDED — option A (owner-approved 2026-09-25, `#5199`).** The anchor extends to the **derivation** `references` link only: an *optional* `sourceVersion`, set **at link time** from the source's current `contentHash` — so the **public SDK signature does not change** — and written **`ON CREATE` only**, because a re-link must not advance the recorded version or staleness would silently read as current. **Identity/mention** (`Object`) and **referential-containment** (`Source → Source`) links stay **property-free**, and a source with no content (`contentHash = ''`) anchors nothing. Currency stays a **read** (`r.sourceVersion` vs `s.contentHash`), never a stored status.
+
+⚠️ **The mechanism discriminates on the target's LABEL, which is a proxy for "derived"** — the only signal available without changing the SDK signature. It is applied at **every** writer of a derivation edge (the `id`-keyed entry point, and the `eventId`-keyed connector/capture/backfill writer), so a derivation edge cannot be anchored on one path and unanchored on another.
+
+⚠️ **No backfill, deliberately.** An edge written before this change carries no recorded version and is **not** retro-stamped: the version it was read from is **unknown**, and writing today's hash would fabricate a `current` read. Its honest state is **absent** — which is precisely why the anchor is a derived comparison and never a stored `status`.
+
+⚠️ **The model statement lives in `ONTOLOGY.md` §3.4 / §4.6** — this section records only what the anchor costs. The ontology wording is in owner review (`#5199`); until it lands, the code and this section are the operative record.
 
 #### ⭐ The policy — **B: mark stale now, supersede on re-inference** (owner)
 

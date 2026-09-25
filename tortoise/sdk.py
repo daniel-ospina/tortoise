@@ -5445,11 +5445,8 @@ class TortoiseSDK:
             params=params,
         )
         if event_id:
-            proj.g.query(
-                "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-                "MERGE (s)-[:references]->(e)",
-                params={"url": url, "eid": event_id},
-            )
+            # Anchored ON CREATE by the shared derivation writer (#5199).
+            proj.link_source_to_event(url, event_id)
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -20465,11 +20462,10 @@ class TortoiseSDK:
         silently no-op on them — the edge must bind the legacy node directly.
         """
         proj = self._get_proj()
-        proj.g.query(
-            "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
-            "MERGE (s)-[:references]->(e)",
-            params={"url": url, "eid": event_id},
-        )
+        # Anchored ON CREATE by the shared derivation writer (#5199) — the SAME
+        # writer the live path uses, so a crash-repaired edge is indistinguishable
+        # from one written on the happy path.
+        proj.link_source_to_event(url, event_id)
 
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
