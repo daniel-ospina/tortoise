@@ -155,13 +155,19 @@ def _retention_seconds(env_name: str, default: int) -> int:
 #   claimed   → unclaimed           a VERIFIED-CLEAN failure re-armed it
 #                                   (#2863's re-arm, now durably recorded)
 #
-# `burned` is written ONLY when no minted family can exist (a pre-mint terminal
-# signal) or one has been revoked. An outcome the process could not settle
-# stays `claimed` so the reconciler can resolve it — see
-# `_reconcile_claimed_redemption`.
+# `burned` is written where the claim's residue is terminal: a pre-mint signal,
+# or a reconcile past the grace that either revoked a live orphan family or (at
+# PROBE time — the probe and the settle are not one transaction) found none. An
+# outcome the process could not settle stays `claimed` so the reconciler can
+# resolve it — see `_reconcile_claimed_redemption`.
 #
-# Schema invariant (migration 20260925000002):
-#   (redemption_state = 'unclaimed') == (used_at IS NULL)
+# Schema invariant (migration 20260925000002) — DIRECTIONAL, deliberately not the
+# biconditional (a biconditional rejects the pre-#3027 writer, which sets
+# `used_at` alone, during the rolling deploy):
+#   used_at IS NULL  ⇒  redemption_state = 'unclaimed'
+# Every write in this module sets both columns in ONE statement, so the
+# biconditional holds for everything we write; the DB enforces the direction
+# that matters (no settled row without a claim timestamp).
 REDEMPTION_UNCLAIMED = "unclaimed"
 REDEMPTION_CLAIMED = "claimed"
 REDEMPTION_MINTED = "minted"
@@ -271,6 +277,9 @@ def _log_and_capture(exc: BaseException, *, where: str) -> None:
       lane 2 of `_issue_tokens`        → the single capture of the TRIGGERING exception
       lane 1 loser rollback (capture=True)  → the single capture for the loser path
                                                (nothing else captures there)
+      #3027 delivery-gate loss (capture=True) → the single capture for that path
+                                               (the mint succeeded, so nothing has
+                                               captured; the handler only logs)
       lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
       lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
       the two correction-#8 revokes    → each the single capture for its terminal path
@@ -1113,6 +1122,10 @@ def _settle_redemption(cp, code_row: dict | None, state: str,
     # A legacy/pre-state row carries no redemption_id; the id+state CAS still
     # fences it (PostgREST `eq` does not match NULL, so an unconditional filter
     # would make such a row un-settleable in production while the fake matched it).
+    # (`eq` with a NULL is NOT "match NULL": `_encode` renders it `eq.None`, i.e.
+    # the LITERAL string — a 400 on a `bigint` column and a literal compare on a
+    # `text` column. Either way it matches no real row, so the clause must be
+    # omitted, not passed as NULL.)
     if code_row.get("redemption_id") is not None:
         filters.append(("redemption_id", "eq", code_row["redemption_id"]))
     try:
@@ -1141,11 +1154,19 @@ def _observe_code(cp, code: str) -> dict:
 
     The zero-row observation is load-bearing for that safety, and it rests on the
     control-plane seam: a select-bearing PATCH is sent with
-    `Prefer: return=representation`, whose zero-match result is a content-bearing
-    `[]` (an empty body is also read as `[]`, but a transport failure RAISES
-    instead of returning empty — `supabase_control.query`). So a claim that
-    COMMITTED cannot arrive here as a zero-row result; only a genuine no-match
-    can.
+    `Prefer: return=representation`, whose genuine zero-match result is a
+    content-bearing `[]`, and a transport failure RAISES rather than returning
+    empty (`supabase_control.query`). So on the normal seam a COMMITTED claim does
+    not arrive here as zero rows.
+
+    Residual, stated rather than hidden: `query` ALSO reads a 2xx with an EMPTY
+    body as `[]`, so an intermediary that stripped a committed PATCH's body would
+    make this look like a zero-row claim. The consequence is bounded and is NOT a
+    double-issue — the retry re-runs the same claim CAS, which is what actually
+    decides — but the signal is then retryable for a code that is in fact
+    consumed, i.e. #2863's "untruthful retry" would be reinstated by the seam.
+    Pinned by `test_empty_body_patch_reads_as_zero_rows` in the fault suite; do
+    not widen the 503 basis further without re-reading it.
     """
     try:
         rows = cp.query("oauth_codes", select=[
@@ -1176,9 +1197,10 @@ def _observe_code(cp, code: str) -> dict:
 def _live_family_for_code(cp, code_row: dict) -> list[tuple[str, str]]:
     """Every LIVE token row linked to this code (#3027). Raises on read failure.
 
-    A code row with NO id is refused rather than probed: `code_id = NULL` matches
-    every unlinked token row, so the probe would report an unrelated family as
-    this code's.
+    A code row with NO id is refused rather than probed: there is no `code_id`
+    value to filter on, and passing NULL would render `code_id=eq.None` — a 400 on
+    the `bigint` column, and on a `text` column a compare against the literal
+    "None". Probing is therefore impossible, NOT "matches every unlinked row".
     """
     code_id = code_row.get("id")
     if code_id is None:
@@ -1247,13 +1269,16 @@ def _consume_code(cp, code: str) -> dict:
     `redemption_id` in the SAME statement, so the durable state can never be
     half-written relative to the CAS.
 
-    On zero rows the row is re-read READ-ONLY to classify WHY. Every non-
-    `unclaimed` verdict is TERMINAL (`invalid_grant`): a minted code is a replay,
-    and a CLAIMED code is consumed by an attempt that may still be running — a
-    different request must never re-arm it (two live families) and must never
-    report it retryable (the retry can terminate, which #2863 records as the
-    untruthful signal it removed). A `claimed` observation also triggers the lazy
-    reconcile, which settles the residue for good.
+    On zero rows the row is re-read READ-ONLY to classify WHY. Every verdict
+    EXCEPT `unobservable` is TERMINAL (`invalid_grant`): a minted code is a
+    replay, and a CLAIMED code is consumed by an attempt that may still be
+    running — a different request must never re-arm it (two live families) and
+    must never report it retryable (the retry can terminate, which #2863 records
+    as the untruthful signal it removed). A `claimed` observation also triggers
+    the lazy reconcile, which settles the residue for good. `unobservable` — the
+    classification READ failed — is a retryable 503 instead, because the claim
+    PATCH was OBSERVED to match zero rows (so this request wrote nothing, and the
+    retry re-runs that same CAS); see `_observe_code`.
     """
     for attempt in (1, 2):
         rows = cp.query("oauth_codes", select=[
@@ -1522,7 +1547,11 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
         if not _settle_redemption(cp, code_row, REDEMPTION_MINTED):
             minted = [("oauth_refresh_tokens", out["_refresh_id"]),
                       ("oauth_access_tokens", out["_access_id"])]
-            _rollback_minted(cp, minted, _now_iso(), capture=False)
+            # capture=True is this path's SINGLE capture (I4): nothing has captured
+            # yet — `_issue_tokens` succeeded — and the handler below only logs. A
+            # failed compensation here leaves a live, never-delivered row, which
+            # must not vanish silently.
+            _rollback_minted(cp, minted, _now_iso(), capture=True)
             raise OAuthMintAborted(_mint_observably_clean(cp, minted))
     except OAuthError as exc:
         # #3027: an intentional terminal signal AFTER the claim burns the code

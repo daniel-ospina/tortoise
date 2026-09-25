@@ -150,12 +150,35 @@ and pays no schema/consistency cost.
   durable record exists to represent, and burning it would hide the orphan from the only mechanism
   that can revoke it. It is resolved by the reconciler once it ages past the grace.
 
-**Invariant, enforced at the schema:** `(redemption_state = 'unclaimed') = (used_at IS NULL)`.
-`used_at` stays the claim timestamp (all #2863/#3036 code and tests keep working); the state can
-never drift from it. Corollaries the reconciler relies on: **a live family linked to a `claimed`
-code is never a delivered family** (delivery is what writes `minted`, and it is gated on winning the
-settle), and **a claim is never re-armed across requests** — an outcome-unknown claim that is not
-reconciled clean stays consumed.
+**Invariant, enforced at the schema — DIRECTIONAL:**
+`used_at IS NULL ⇒ redemption_state = 'unclaimed'` (written
+`used_at IS NOT NULL OR redemption_state = 'unclaimed'`, constraint
+`chk_oauth_codes_redemption_used_at`).
+
+**⛔ Deliberately NOT the biconditional, and this was a review finding.** The
+biconditional `(state='unclaimed') = (used_at IS NULL)` was the first form and it
+**breaks the deployed writer on its normal path**: the pre-#3027 `_consume_code`
+PATCHes `used_at` alone, leaving the `'unclaimed'` default → `23514` on every
+authorization-code exchange. And the rollout makes that window MANDATORY, not
+theoretical: `deploy-hosted`'s fail-closed migration-drift gate requires prod to
+hold this migration **before** the new image ships, so the old writer serves
+traffic against this schema (and any rollback re-breaks it permanently).
+`ADD CONSTRAINT ... NOT VALID` does not rescue it — Postgres still enforces a
+NOT VALID check on INSERT/UPDATE (verified in PGlite). So the enforced direction
+is the one the state machine depends on (**no settled row without a claim
+timestamp**, which is what makes `_settle_redemption`'s `state='claimed'` filter
+imply `used_at IS NOT NULL`), and the relaxed one is the shape `_observe_code`
+already tolerates — it classifies a `used_at`-set, state-less row as `claimed`, the
+reconcilable state; and such a row is inert for the reconciler, whose settle CAS
+matches nothing and returns `lost-race` without revoking.
+
+`used_at` stays the claim timestamp (all #2863/#3036 code and tests keep
+working). Every write this codebase makes sets both columns in ONE statement, so
+the biconditional holds for everything we write. Corollaries the reconciler
+relies on: **a live family linked to a `claimed` code is never a delivered
+family** (delivery is what writes `minted`, and it is gated on winning the
+settle), and **a claim is never re-armed across requests** — an outcome-unknown
+claim that is not reconciled clean stays consumed.
 
 ### 3.3 The provenance link — `code_id`, and it survives rotation
 
@@ -241,6 +264,14 @@ which §0 forbids:
   now-`burned` code — which the reconciler will never revisit. The escapee is inert (its plaintext was
   never delivered) and is reaped by the retention sweep at TTL, but §3.4's no-family branch is not
   universally true: it is true at probe time.
+- **The zero-row observation rests on the control-plane seam.** `_observe_code`'s retryable 503 is
+  safe because the claim PATCH was *observed* to match zero rows — and a select-bearing PATCH asks
+  for `return=representation`, whose genuine zero-match answer is a content-bearing `[]`.
+  `supabase_control.query` ALSO reads a 2xx with an **empty** body as `[]`, so an intermediary that
+  stripped a committed PATCH's body would look like a zero-row claim. The consequence is bounded and
+  is **not** a double-issue (the retry re-runs the same claim CAS, which is what decides), but the
+  signal is then retryable for a code that is in fact consumed — #2863's untruthful retry, reinstated
+  by the seam. Pinned by `test_empty_body_patch_reads_as_zero_rows`.
 
 The invariant the issue asks for holds regardless: a retry **never creates a second live family**.
 
@@ -255,7 +286,8 @@ Additive, mirroring the #3036 migration's shape and its honesty about lock footp
 
 - 4 columns on `oauth_codes` (`redemption_state text NOT NULL DEFAULT 'unclaimed'`; `redemption_id
   text`; `redemption_settled_at timestamptz`; `redemption_note text`), the CHECK on the state
-  vocabulary, and the state/`used_at` agreement CHECK.
+  vocabulary, and the DIRECTIONAL `used_at`-agreement CHECK (§3.2 — not the biconditional; the
+  biconditional rejected the deployed writer during the mandatory migration-before-image rollout).
 - 2 `bigint` FK columns + 2 indexes on the token tables. **No dangling-pointer repair is needed**:
   the columns are new and nullable, so no existing row can carry a dangling value.
 - **Backfill:** `used_at IS NOT NULL` → `burned` with `redemption_settled_at = used_at` and
@@ -314,7 +346,9 @@ the #3027 decision comment.
      directions** (a late `minted` cannot resurrect a reconciled claim; a reconciler cannot revoke a
      family whose owner settled `minted` first).
    - `supabase/tests/20260925000002_oauth_redemption_state.sql` — PGlite assertions: state
-     vocabulary CHECK, the `used_at` agreement CHECK, the backfill (a pre-existing `used_at` row
+     vocabulary CHECK, the DIRECTIONAL `used_at` agreement CHECK (**including that the legacy
+     `used_at`-only writer is ACCEPTED and that a settled row without a claim timestamp is
+     rejected, on INSERT *and* UPDATE**), the backfill (a pre-existing `used_at` row
      becomes `burned`), the `code_id` FK enforcement and `SET NULL` on code delete, and rotation
      inheritance is asserted at the app layer.
    - The pre-seed for the backfill is placed **before** the migration in `validate.mjs`, mirroring

@@ -28,8 +28,8 @@
 --      redemption_note  (the state machine + its diagnostics)
 --   2. a backfill: used_at IS NOT NULL → 'burned' (fail-safe terminal — a code
 --      consumed before this state existed is NEVER re-armed)
---   3. two CHECK constraints: the state vocabulary, and the invariant that the
---      new state can never drift from `used_at`
+--   3. two CHECK constraints: the state vocabulary, and the DIRECTIONAL
+--      invariant that pins a state to `used_at` (see the boxed note below)
 --   4. oauth_access_tokens.code_id / oauth_refresh_tokens.code_id — the
 --      provenance link back to the authorizing code, plus one index each for
 --      the reconciler's `code_id = C AND revoked_at IS NULL` probe
@@ -58,25 +58,53 @@
 -- an entire rotation chain, so CASCADE would delete through it. SET NULL drops
 -- only the provenance back-link. Do NOT "tidy" these back to CASCADE.
 --
--- INVARIANT (enforced, ck_oauth_codes_redemption_used_at):
---   (redemption_state = 'unclaimed') = (used_at IS NULL)
+-- INVARIANT (enforced, chk_oauth_codes_redemption_used_at) — ONE DIRECTIONAL:
+--   used_at IS NULL  ⇒  redemption_state = 'unclaimed'
+-- written as `used_at IS NOT NULL OR redemption_state = 'unclaimed'`.
+--
+-- ⛔ DELIBERATELY NOT THE BICONDITIONAL. `(state='unclaimed') = (used_at IS NULL)`
+-- was the first form, and it BREAKS THE DEPLOYED WRITER ON ITS NORMAL PATH: the
+-- pre-#3027 `_consume_code` PATCHes `used_at` alone, leaving the DEFAULT
+-- 'unclaimed', so `TRUE = FALSE` → 23514 on every authorization-code exchange.
+-- `deploy-hosted`'s fail-closed migration-drift gate REQUIRES prod to hold this
+-- migration before the new image ships, so the old writer is live against the new
+-- schema for the whole rollout (and for any later app rollback), and
+-- `ADD CONSTRAINT ... NOT VALID` does NOT help — PG still enforces a NOT VALID
+-- check on INSERT/UPDATE (verified in PGlite).
+-- The direction above is the one that MATTERS and the one the state machine can
+-- rely on: no settled (`claimed`/`minted`/`burned`) row can exist without a claim
+-- timestamp, so `_settle_redemption`'s `redemption_state='claimed'` CAS filter
+-- always implies `used_at IS NOT NULL`. The relaxed direction is exactly the
+-- shape `_observe_code` already tolerates (a row with `used_at` set and no state
+-- is classified `claimed`, the reconcilable state), and such a row is inert for
+-- the reconciler: its settle CAS matches nothing and returns `lost-race` without
+-- revoking. Shipped code always writes both columns in ONE statement, so the
+-- invariant holds for every write this codebase makes.
+-- ⛔ Do NOT "restore" the biconditional without an expand/contract rollout.
 -- `used_at` STAYS the claim timestamp, so every #2863/#3036 read and test keeps
--- working unchanged; the state simply cannot drift away from it.
+-- working unchanged.
 --
 -- NO DANGLING-POINTER REPAIR is needed (unlike #3036): the code_id columns are
 -- NEW and NULLable, so no pre-existing row can carry a dangling value.
 --
--- Lock footprint (a bare "additive" header under-counts it): each `ALTER TABLE
--- ... ADD COLUMN` takes ACCESS EXCLUSIVE; `ADD COLUMN ... DEFAULT` on PG11+ is a
--- metadata-only fast default (no rewrite) but still holds the lock. Each
--- `DROP CONSTRAINT IF EXISTS` takes ACCESS EXCLUSIVE on its table. The two CHECK
--- adds take ACCESS EXCLUSIVE on `oauth_codes` (they have no referenced table);
--- each validated `ADD FOREIGN KEY` takes SHARE ROW EXCLUSIVE on BOTH the
--- referencing and the referenced table plus a full validation scan. So both
--- `oauth_codes` CHECKs block READS and writes, while the FK adds block writes
--- only. The backfill UPDATE scans oauth_codes once. Each CREATE INDEX is
--- NON-concurrent and locks out writes (not reads) on its token table until the
--- build finishes.
+-- ── Lock footprint — HONEST, and worse than "additive" sounds ───────────────
+-- `supabase db push` executes THIS WHOLE FILE INSIDE ONE TRANSACTION, so every
+-- lock below is held until COMMIT — for every table it touches, not merely for
+-- the duration of one statement:
+--   * oauth_codes: `ALTER TABLE` (ADD COLUMN, DROP/ADD CONSTRAINT) takes ACCESS
+--     EXCLUSIVE, so SELECTs are blocked as well as writes, for the whole file.
+--     The CHECK adds additionally run a FULL VALIDATION SCAN of oauth_codes under
+--     that lock (a pre-existing violating row aborts the migration).
+--   * oauth_access_tokens / oauth_refresh_tokens: each `ADD COLUMN code_id` takes
+--     ACCESS EXCLUSIVE on that table and holds it to COMMIT, so the MCP boundary's
+--     per-request reads of these tables are blocked for the whole file — not
+--     merely "writes blocked" by the index build.
+--   * the FK adds take SHARE ROW EXCLUSIVE on the referencing AND the referenced
+--     table (writes blocked, reads allowed) plus a full scan of the token table.
+--   * `CREATE INDEX` (non-concurrent) takes SHARE: writes blocked, reads allowed.
+-- So this is a short but REAL write-and-read blackout on all three OAuth tables.
+-- Applying it in a quiet window is the operational requirement; there is no online
+-- form for the ADD COLUMN / ADD CONSTRAINT pair.
 -- ============================================================================
 
 -- 1) The state machine + its diagnostics (additive, nullable except the state).
@@ -89,12 +117,14 @@ ALTER TABLE public.oauth_codes
 ALTER TABLE public.oauth_codes
     ADD COLUMN IF NOT EXISTS redemption_note text;
 
--- 2) Backfill BEFORE the agreement CHECK: a historical row with used_at set
---    carries the new default 'unclaimed', which the biconditional CHECK below
---    would reject. Treat every already-consumed code as the fail-safe terminal
---    `burned`: they were redeemed before this state existed and we cannot prove
---    they minted, so they must never be re-armed. `redemption_settled_at`
---    records the only instant we know — the original consumption.
+-- 2) Backfill: a historical row with used_at set carries the new default
+--    'unclaimed', which the directional CHECK below PERMITS (see the box) — so
+--    this UPDATE is not what makes the constraint addable. It is load-bearing as
+--    DATA: those rows were redeemed before this state existed and we cannot prove
+--    they minted, so they must never be READ as a live claim. Treat every
+--    already-consumed code as the fail-safe terminal `burned`;
+--    `redemption_settled_at` records the only instant we know — the original
+--    consumption.
 --    Idempotent: after the first run the state is no longer 'unclaimed'.
 UPDATE public.oauth_codes
    SET redemption_state = 'burned',
@@ -104,18 +134,25 @@ UPDATE public.oauth_codes
    AND redemption_state = 'unclaimed';
 
 -- 3) The constraints. DROP-then-ADD keeps a re-apply idempotent (ADD COLUMN
---    IF NOT EXISTS makes the columns, not the CHECKs).
+--    IF NOT EXISTS makes the columns, not the CHECKs). `chk_` is the repo's
+--    CHECK-naming convention (see 0011/0016 and the tenancy migrations); the
+--    `ck_` DROPs remain so a database that already applied an earlier revision of
+--    THIS file is cleaned up rather than left with a second, stricter CHECK.
 ALTER TABLE public.oauth_codes
     DROP CONSTRAINT IF EXISTS ck_oauth_codes_redemption_state;
 ALTER TABLE public.oauth_codes
-    ADD CONSTRAINT ck_oauth_codes_redemption_state
+    DROP CONSTRAINT IF EXISTS chk_oauth_codes_redemption_state;
+ALTER TABLE public.oauth_codes
+    ADD CONSTRAINT chk_oauth_codes_redemption_state
     CHECK (redemption_state IN ('unclaimed', 'claimed', 'minted', 'burned'));
 
 ALTER TABLE public.oauth_codes
     DROP CONSTRAINT IF EXISTS ck_oauth_codes_redemption_used_at;
 ALTER TABLE public.oauth_codes
-    ADD CONSTRAINT ck_oauth_codes_redemption_used_at
-    CHECK ((redemption_state = 'unclaimed') = (used_at IS NULL));
+    DROP CONSTRAINT IF EXISTS chk_oauth_codes_redemption_used_at;
+ALTER TABLE public.oauth_codes
+    ADD CONSTRAINT chk_oauth_codes_redemption_used_at
+    CHECK (used_at IS NOT NULL OR redemption_state = 'unclaimed');
 
 -- 4) The provenance link. Column first, then a NAMED constraint (mirrors
 --    #3036's shape so a re-apply is idempotent).

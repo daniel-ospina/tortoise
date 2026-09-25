@@ -131,10 +131,25 @@ indistinguishable from a replay. Migration
 | `minted` | the pair was handed to the response | no — replay-safe terminal |
 | `burned` | terminal failure; never mints again | no |
 
-A schema CHECK pins the state to the legacy flag —
-`(redemption_state = 'unclaimed') = (used_at IS NULL)` — so the two can never
-disagree. The claim statement writes `used_at`, the state and a fresh
-`redemption_id` atomically, alongside the existing `used_at IS NULL` CAS.
+A schema CHECK pins the state to the legacy flag **in one direction** —
+`used_at IS NULL ⇒ redemption_state = 'unclaimed'`, i.e.
+`used_at IS NOT NULL OR redemption_state = 'unclaimed'`. It is deliberately NOT
+the biconditional: the pre-#3027 writer PATCHes `used_at` alone and leaves the
+`'unclaimed'` default, and because this migration must be applied **before** the
+new image ships (the fail-closed migration-drift gate), the old writer is live
+against this schema during the rollout — a biconditional rejects it and every
+authorization-code exchange then fails with `23514`. (A `NOT VALID` check does not
+help: Postgres still enforces it on new writes.) The enforced direction is the one
+the state machine relies on — a settled row always has a claim timestamp — and the
+relaxed one is the shape `_observe_code` already treats as `claimed`. The claim
+statement writes `used_at`, the state and a fresh `redemption_id` atomically,
+alongside the existing `used_at IS NULL` CAS, so every write this code makes
+satisfies the biconditional anyway.
+
+**Rollout ordering.** Apply this migration before the new app image (the drift
+gate enforces it), and apply it in a quiet window: the migration runs in one
+transaction and takes `ACCESS EXCLUSIVE` on `oauth_codes`, `oauth_access_tokens`
+and `oauth_refresh_tokens` until commit, so reads of the token tables block too.
 
 **Terminal and recovery rules.** `minted` is written just before the pair is
 returned — and **delivery is gated on winning that write**. Every **settle** is a
@@ -143,9 +158,10 @@ CAS on the claim identity (`redemption_state='claimed'` plus `id`, and
 request, a reconciler that took the claim over}* can settle a claim. (The
 `claimed → unclaimed` re-arm is a separate CAS on `code_hash`+`used_at`, made
 in-process by the request that still owns its claim.) `burned` is
-written where no minted family can exist (a pre-mint terminal signal — bad PKCE,
-client/redirect/resource mismatch, suspended org, or an expired code) or where a
-family has just been revoked.
+written where the residue is terminal: a pre-mint signal (bad PKCE,
+client/redirect/resource mismatch, suspended org, or an expired code), or a
+reconcile past the grace that either revoked a live orphan family or found none
+**at probe time**.
 
 An outcome the process could not settle stays **`claimed`**, and another
 redemption of that code is answered **terminally** (`invalid_grant`) — never

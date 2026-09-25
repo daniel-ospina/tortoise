@@ -87,8 +87,13 @@ def test_verified_clean_abort_rearms_the_durable_state(fault_client):
 
 def test_terminal_signal_after_the_claim_burns_the_code(fault_client):
     """A wrong PKCE verifier claims the code and then fails. The code must be
-    BURNED durably — leaving it 'claimed' would let the reconciler re-arm it and
-    hand a code-holder one extra verifier guess per grace window."""
+    BURNED durably rather than left 'claimed'.
+
+    The reason is not a re-arm (there is none — see
+    `test_reconciler_burns_a_stale_claim_with_no_family`): a row left `claimed`
+    has an UNRECORDED outcome, so it is answered terminally forever while its
+    residue can only be resolved lazily, and the burn records the real outcome —
+    the client's attempt is over, so nothing may ever mint from this code."""
     tc, cp = fault_client
     _seed_code(cp, "pkce")
     r = _post_code(tc, cp, "pkce", "v" * 60)
@@ -311,6 +316,37 @@ def test_a_lost_minted_settle_compensates_instead_of_delivering(fault_client, mo
     assert _live(cp, "oauth_refresh_tokens") == []       # compensated, not delivered
     assert _live(cp, "oauth_access_tokens") == []
     assert _code_row(cp, "race")["redemption_state"] == oauth.REDEMPTION_BURNED
+
+
+def test_a_lost_minted_settle_capture_events_when_compensation_fails(
+        fault_client, monkeypatch):
+    """The delivery-gate-loss path owns its ONE Sentry capture (I4).
+
+    Nothing has captured yet (`_issue_tokens` succeeded), and the handler only
+    logs — so when the compensation ALSO fails, a live never-delivered token row
+    must not vanish silently. `capture=False` here is the observability hole a
+    review caught; this pins the fix."""
+    from tortoise import sentry
+    calls: list[BaseException] = []
+    monkeypatch.setattr(sentry, "capture_exception",
+                        lambda exc, **kw: calls.append(exc))
+    tc, cp = fault_client
+    verifier = _seed_code(cp, "racecap")
+    real = oauth._settle_redemption
+
+    def losing_settle(c, row, state, *, note=None):
+        if state == oauth.REDEMPTION_MINTED:
+            real(c, row, oauth.REDEMPTION_BURNED, note="unresolved")
+            return False
+        return real(c, row, state, note=note)
+
+    monkeypatch.setattr(oauth, "_settle_redemption", losing_settle)
+    # Both compensation rows fail -> the rollback must capture exactly once.
+    cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)
+    cp.fail_query(table="oauth_access_tokens", method="PATCH", times=1)
+    r = _post_code(tc, cp, "racecap", verifier)
+    assert r.status_code == 400, r.text
+    assert len(calls) == 1, calls
 
 
 def test_an_unreadable_code_state_is_retryable_and_writes_nothing(fault_client):

@@ -4,8 +4,11 @@
 --
 -- The migration adds the durable outcome of a code claim:
 --   * oauth_codes.redemption_state / redemption_id / redemption_settled_at /
---     redemption_note, the state-vocabulary CHECK, and the CHECK that pins the
---     state to `used_at` ((state = 'unclaimed') = (used_at IS NULL));
+--     redemption_note, the state-vocabulary CHECK, and the DIRECTIONAL CHECK
+--     `used_at IS NULL ⇒ state = 'unclaimed'`
+--     (`used_at IS NOT NULL OR redemption_state = 'unclaimed'` — deliberately NOT
+--     the biconditional: the pre-#3027 writer sets `used_at` alone and the
+--     constraint must not break it during the rollout. See the migration box.)
 --   * oauth_access_tokens.code_id / oauth_refresh_tokens.code_id, the provenance
 --     link back to the authorizing code, with ON DELETE SET NULL + indexes.
 --
@@ -65,11 +68,18 @@ SELECT tests.assert(
 -- object elsewhere must not be able to satisfy the probe.
 SELECT tests.assert(
   (SELECT count(*) FROM pg_constraint
-    WHERE conname IN ('ck_oauth_codes_redemption_state',
-                      'ck_oauth_codes_redemption_used_at')
+    WHERE conname IN ('chk_oauth_codes_redemption_state',
+                      'chk_oauth_codes_redemption_used_at')
       AND conrelid = 'public.oauth_codes'::regclass
       AND contype = 'c') = 2,
   '3027: both redemption CHECK constraints exist on oauth_codes');
+
+-- The biconditional form must NOT be present: it breaks the deployed writer.
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_constraint
+    WHERE conname = 'ck_oauth_codes_redemption_used_at'
+      AND conrelid = 'public.oauth_codes'::regclass) = 0,
+  '3027: the biconditional ck_ constraint must not exist (it rejected the legacy writer)');
 
 -- ── 3. The default lands as 'unclaimed' with used_at NULL ──────────────────
 DO $$
@@ -100,35 +110,34 @@ BEGIN
     GET STACKED DIAGNOSTICS which = CONSTRAINT_NAME;
   END;
   PERFORM tests.assert(rejected, '3027: an unknown redemption_state must be rejected');
-  PERFORM tests.assert(which = 'ck_oauth_codes_redemption_state',
-    '3027: the rejection must come from ck_oauth_codes_redemption_state, got '
+  PERFORM tests.assert(which = 'chk_oauth_codes_redemption_state',
+    '3027: the rejection must come from chk_oauth_codes_redemption_state, got '
     || coalesce(which, '<none>'));
 END $$;
 
--- ── 5. The state can never disagree with `used_at` ─────────────────────────
--- 'unclaimed' with a claim timestamp: the re-arm that forgot to clear used_at.
+-- ── 5. The DIRECTIONAL state/`used_at` invariant ──────────────────────────
+-- ⇉ TOLERATED: 'unclaimed' WITH a claim timestamp. This is exactly the pre-#3027
+--   writer's shape (`_consume_code` PATCHes `used_at` alone). It must be
+--   ACCEPTED, because `deploy-hosted`'s fail-closed drift gate requires prod to
+--   hold this migration BEFORE the new image ships, so the old writer serves
+--   traffic against this schema. If this ever starts being rejected, the rollout
+--   is broken and every authorization-code exchange returns 23514.
 DO $$
-DECLARE rejected boolean := false; which text;
 BEGIN
-  BEGIN
-    INSERT INTO public.oauth_codes
-      (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
-       expires_at, used_at, redemption_state)
-    VALUES ('3027-h-bad-claimed', '3027-client', '3027-user', '3027-org',
-            'https://app.example/cb', 'challenge', now() + interval '10 min',
-            now(), 'unclaimed');
-  EXCEPTION WHEN check_violation THEN
-    rejected := true;
-    GET STACKED DIAGNOSTICS which = CONSTRAINT_NAME;
-  END;
-  PERFORM tests.assert(rejected,
-    '3027: unclaimed must not carry a used_at timestamp');
-  PERFORM tests.assert(which = 'ck_oauth_codes_redemption_used_at',
-    '3027: the disagreement must be caught by ck_oauth_codes_redemption_used_at, got '
-    || coalesce(which, '<none>'));
+  INSERT INTO public.oauth_codes
+    (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+     expires_at, used_at, redemption_state)
+  VALUES ('3027-h-legacy-claim', '3027-client', '3027-user', '3027-org',
+          'https://app.example/cb', 'challenge', now() + interval '10 min',
+          now(), 'unclaimed');
+  PERFORM tests.assert(true,
+    '3027: the legacy writer (used_at alone, state left unclaimed) must be ACCEPTED');
 END $$;
 
--- A terminal state with NO claim timestamp: the outcome write that skipped the claim.
+-- A terminal/claimed state with NO claim timestamp: the outcome write that
+-- skipped the claim. This is the direction the constraint EXISTS for — it is what
+-- makes `_settle_redemption`'s `redemption_state='claimed'` CAS filter imply a
+-- `used_at` value, and it must stay rejected.
 DO $$
 DECLARE rejected boolean := false; which text;
 BEGIN
@@ -145,9 +154,32 @@ BEGIN
   END;
   PERFORM tests.assert(rejected,
     '3027: a terminal state must require a claim timestamp');
-  PERFORM tests.assert(which = 'ck_oauth_codes_redemption_used_at',
-    '3027: the disagreement must be caught by ck_oauth_codes_redemption_used_at, got '
+  PERFORM tests.assert(which = 'chk_oauth_codes_redemption_used_at',
+    '3027: the disagreement must be caught by chk_oauth_codes_redemption_used_at, got '
     || coalesce(which, '<none>'));
+END $$;
+
+-- …and the same on UPDATE: settling is fine, un-settling a claimed row (clearing
+-- `used_at` while leaving the state) is not.
+DO $$
+DECLARE code_pk bigint; rejected boolean := false; which text;
+BEGIN
+  INSERT INTO public.oauth_codes
+    (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+     expires_at, used_at, redemption_state)
+  VALUES ('3027-h-update-drift', '3027-client', '3027-user', '3027-org',
+          'https://app.example/cb', 'challenge', now() + interval '10 min',
+          now(), 'claimed')
+  RETURNING id INTO code_pk;
+  BEGIN
+    UPDATE public.oauth_codes SET used_at = NULL WHERE id = code_pk;
+  EXCEPTION WHEN check_violation THEN
+    rejected := true;
+    GET STACKED DIAGNOSTICS which = CONSTRAINT_NAME;
+  END;
+  PERFORM tests.assert(rejected AND which = 'chk_oauth_codes_redemption_used_at',
+    '3027: clearing used_at on a claimed row must be rejected by chk_oauth_codes_redemption_used_at');
+  DELETE FROM public.oauth_codes WHERE id = code_pk;
 END $$;
 
 -- ── 6. Both code_id FKs exist and are ON DELETE SET NULL (not CASCADE) ─────

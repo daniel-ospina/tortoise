@@ -360,6 +360,32 @@ def test_real_seam_maps_status_and_unparseable_body(capture_server, status, payl
     assert oauth._restore_code(cp, "c", "T1") is False
 
 
+def test_empty_body_patch_reads_as_zero_rows(capture_server):
+    """PIN THE SEAM #3027's `_observe_code` safety argument rests on.
+
+    A genuine zero-match `PATCH` (with `Prefer: return=representation`) answers 200
+    with the JSON array `[]` — a CONTENT-BEARING body. `SupabaseControlPlane.query`
+    also maps a 2xx with an EMPTY body to `[]`, so an intermediary that stripped a
+    committed claim's body would look exactly like "my claim matched nothing". That
+    is the documented residual on `_observe_code` (the retry is still safe — it
+    re-runs the claim CAS — but the signal is retryable for a possibly-consumed
+    code). This test records the behaviour rather than asserting it is desirable:
+    if the seam ever learns to distinguish them, this test is the place to make the
+    503 basis strictly stronger.
+    """
+    cp = SupabaseControlPlane(url=f"http://127.0.0.1:{capture_server.server_port}",
+                              service_key="svc")
+    capture_server.respond = (200, b"[]")            # genuine zero-match, WITH content
+    assert cp.query("oauth_codes", select=["id"], method="PATCH",
+                    filters=[("code_hash", "eq", "h")],
+                    json_body={"used_at": "T"}) == []
+    assert b'"used_at"' in capture_server.seen[-1][3]      # the write WAS sent
+    capture_server.respond = (200, b"")              # empty 2xx body — the residual
+    assert cp.query("oauth_codes", select=["id"], method="PATCH",
+                    filters=[("code_hash", "eq", "h")],
+                    json_body={"used_at": "T"}) == []   # ← indistinct from the above
+
+
 # ── Task 3: `_issue_tokens` — 3-lane taxonomy, structural no-leak guarantee ──
 
 def _mint(cp, **over):
