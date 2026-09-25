@@ -963,6 +963,30 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     return summary, topics
 
 
+#: #3518: the ONE searchable-text field on a :Source — the field the Source
+#: FTS index is declared on (``projection/__init__.py``) and the one
+#: ``search_engine.run_fts_query(entity_type='source')`` resolves against.
+SOURCE_SEARCH_TEXT_FIELD = "_searchText"
+
+
+def _source_search_text(*, title: str | None = None,
+                        summary: str | None = None) -> str | None:
+    """#3518: the ONE rule for a Source's searchable text — the title when
+    present, else the summary (``None`` when neither carries text).
+
+    Both Source writers resolve their ``_searchText`` through here so the two
+    cannot drift into different vocabularies: the indexer
+    (``_index_source_merge`` → ``create_source(..., _searchText=...)``) passes
+    its frontmatter ``title``; the capture path
+    (``_materialize_session_source``) has no title and passes its derived
+    ``summary``. Before this, the indexer set the field but the capture path
+    never did, and no ``Source`` FTS index existed at all — a captured session
+    was unfindable through ``tortoise_fts_query(entity_type='source')``.
+    """
+    text = title or summary
+    return text or None
+
+
 def _session_extraction_estimate(conversation: list[dict], *,
                                  extractor: str | None = None) -> int:
     """Pre-write fail-closed estimate of NEW non-episodic nodes a capture
@@ -5424,6 +5448,14 @@ class TortoiseSDK:
         ``_session_event_write`` agentSession pattern and the backfill's
         references edge (test_backfill_sources.py).
 
+        #3518: it also populates ``_searchText`` — the field the Source FTS
+        index is declared on — via the shared ``_source_search_text`` rule
+        (title-else-summary; the capture path has no title). Without it the
+        captured session was created but NOT findable through
+        ``tortoise_fts_query(entity_type='source')``. The SET is a
+        ``coalesce``, so a re-capture of an empty transcript cannot erase the
+        text a previous capture (or the indexer path) established.
+
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -5437,6 +5469,14 @@ class TortoiseSDK:
             hashlib.sha256(transcript.encode("utf-8")).hexdigest()
             if transcript.strip() else ""
         )
+        # #3518: the Source FTS index is declared on `_searchText`, so the
+        # capture path MUST populate it or the captured session stays
+        # unfindable. The capture path has no title (the indexer path is the
+        # one that carries frontmatter), so the shared rule resolves to the
+        # derived summary. `coalesce` keeps an existing value when a
+        # re-capture of an empty transcript yields no text, mirroring the
+        # merge semantics `_upsert_source` applies on the indexer side.
+        search_text = _source_search_text(summary=summary)
         params = {
             "url": url,
             "sk": "agentSession",
@@ -5445,6 +5485,7 @@ class TortoiseSDK:
             "ch": content_hash,
             "sum": summary,
             "topics": topics,
+            "st": search_text,
             "now": now,
         }
         set_clauses = [
@@ -5454,6 +5495,7 @@ class TortoiseSDK:
             "s.contentHash=$ch",
             "s.summary=$sum",
             "s.topics=$topics",
+            f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             "s.ingestedAt=coalesce(s.ingestedAt, $now)",
         ]
         if event_id:
@@ -19787,7 +19829,8 @@ class TortoiseSDK:
             # other index writers (threads leg). bolt:// stats stay honest.
             self.create_source(
                 url, kind, sourceDate=source_date, source_path=abs_path,
-                contentHash=content_hash, title=title, _searchText=title,
+                contentHash=content_hash, title=title,
+                _searchText=_source_search_text(title=title),
                 format="markdown", _merge_run_id=rid)
             proj = self._get_proj()
             rows = proj.g.query(

@@ -2470,8 +2470,11 @@ class _EntityHandlers:
             is completed — the JOINT-E2E sweep's stub-handling);
           - ``s.sourcePath = coalesce($sp, s.sourcePath)`` (§4.1 — the
             sanctioned source_path route maps to camelCase on the node);
-          - ``s._searchText`` — coalesce ON CREATE, OVERWRITE on hash-diff
-            MERGE (§4.1 cycle-4 merge semantics; E2E-5 retitle refresh);
+          - ``s._searchText`` — coalesce ON CREATE, and on a hash-diff MERGE
+            overwrite only when the incoming text is present (``coalesce($st,
+            s._searchText)``, #3518: a text-less write must never NULL the
+            value a prior capture/index write established); E2E-5 retitle
+            refresh still overwrites.
           - ``s.__runId = $rid`` on the ON CREATE branch ONLY when
             ``merge_run_id`` is given — the creator's per-run token. The
             embedded FalkorDBLite reports ``Nodes created: 1`` for BOTH of two
@@ -2546,7 +2549,13 @@ class _EntityHandlers:
             "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                        THEN $st ELSE s._searchText END, "
+            # #3518: coalesce — a hash-diff write that carries NO searchable
+            # text ($st IS NULL, the commit path's session Source) must not
+            # ERASE the text a prior capture/index write established. A write
+            # that does carry text (the indexer's retitle) still overwrites,
+            # so the #900 T3 cycle-4 retitle-refresh semantics are unchanged.
+            "                        THEN coalesce($st, s._searchText) "
+            "                        ELSE s._searchText END, "
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
