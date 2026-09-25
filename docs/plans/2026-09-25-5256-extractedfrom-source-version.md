@@ -3,7 +3,7 @@
 **Issue:** #5256 (`complexity:complex`, Level: task, epic #5088) · **Repo:** `daniel-ospina/tortoise`
 **Branch:** `feat/5256-extractedfrom-anchor` · **Base:** `origin/docs/5199-version-scope @ 52e703f89` (STACKED on PR #5207)
 **Predecessor:** `docs/plans/2026-09-25-5038-source-version-anchor.md` (Task 1, branch `docs/5038-scoping`)
-**Review cycle:** 7 (see §10).
+**Review cycle:** 8 (see §10).
 
 ---
 
@@ -392,3 +392,18 @@ reddens the own-refs test, and removing the gate *and* filter additionally redde
 test (the gate alone is an **equivalent mutant** — the empty ref set makes the filter drop every
 pair — recorded as such in §7). The replayed **Source node identity** difference (R6) is pre-existing
 and left unfixed; only the anchor is now stable across it.
+
+**Cycle 8 — code review rounds 6 and 7 (re-review of `6577b1aa4`, then of `ca7733001`).** Round 5's
+re-review returned no P0/P1 and five P3s — all "make the artifact tell the truth" rather than behaviour
+defects. Folded in `ca7733001`: (1) the `or None` tail of `_point_source_transit` was the round-5 diff's
+only unkilled line (`return kept` left all 28 tests green) —
+`test_carrier_with_only_foreign_keys_is_not_written` now reddens on it, so the absent value is `None` and
+never `[]`; (2) the stray-carrier drop is a deliberate **gate-visibility** change (a green-but-unfaithful
+graph becomes a REPORTED divergence) and the stray test now asserts that call; (3) two over-claims
+corrected — `_point_source_transit`'s "cannot disagree" (true of the selected pair SET, not of per-pair
+VALUES) and two test docstrings still describing the pre-round-5 resolved-key contract. The round-6
+re-review then found two more P3s, folded here: the first variant test's scope note was itself **false** —
+mutation shows the resolved-key mutant reddens BOTH variant tests (the LIVE anchor lands, the REPLAY edge
+goes bare, because the round-5 own-ref filter drops a pair keyed by the live-time resolution), so the note
+no longer claims the sibling alone pins the loss; and this §10 ledger entry + the header cycle count were
+advanced, which round 6 had missed.

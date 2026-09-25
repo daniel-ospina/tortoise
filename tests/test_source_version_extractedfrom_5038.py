@@ -222,12 +222,15 @@ def test_url_variant_ref_keeps_the_anchor_across_rebuild(prov):
     resolution (``resolve_source_key``'s return) instead of the RAW ref — the
     carrier assertion below pins the key directly (``[[variant, 'h1']]``).
 
-    Scope note — what this fixture can and cannot pin: the Source is registered
-    FIRST here, so its identity is lane-stable and the variant resolves to ``DOC``
-    on BOTH lanes; the edge scalar therefore survives even under the resolved-key
-    mutation. The ANCHOR LOSS itself is pinned by the sibling test below, where an
-    unjournaled stub comes first and the two lanes resolve to different node urls.
-    This test pins the CARRIER KEY contract only.
+    Scope note — verified by MUTATION (``out[ref] = h`` → ``out[key] = h``): BOTH
+    this test and its sibling below go RED. Here the LIVE anchor still lands (the
+    live caller hands ``_link_source`` the registry, which looks the raw ref up),
+    but the REPLAY edge is BARE — the pair was keyed by the live-time resolution,
+    so the round-5 own-ref filter drops it for a Point whose own raw ref is the
+    variant. I.e. the anchor IS lost across ``rebuild_all`` in this fixture too.
+    The sibling pins the additional case where the two lanes resolve to DIFFERENT
+    node urls. So this test pins the CARRIER KEY contract AND the anchor survival
+    it entails — not the key alone.
     """
     sdk, events, _log = prov
     sdk.create_source(DOC, "document", contentHash="h1")
