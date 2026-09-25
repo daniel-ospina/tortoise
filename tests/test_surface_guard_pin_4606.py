@@ -1,18 +1,24 @@
 """#4606 — the surface gate must not be neuterable by the PR it measures.
 
-`surface-guard` runs the CHECKOUT'S OWN `tools/surface-guard.py` and
-`tools/surface_manifest.py`. Without a pin, a PR can expand the surface and stub
-either tool out **in the same commit**: the stub prints `OK`, exits 0, and the
-REQUIRED `python-ci-gate` goes green on a rewritten gate.
+`surface-guard` runs the CHECKOUT'S OWN `tools/surface-guard.py`. Without a pin, a
+PR can expand the surface and stub the gate out **in the same commit**: the stub
+prints `OK`, exits 0, and the REQUIRED `python-ci-gate` goes green on a rewritten
+gate.
 
-The workflow now pins both tools to the base ref before running them. These
-tests exercise the **actual step text extracted from the workflow** — never a
+The workflow pins `tools/surface-guard.py` — the gate, which is self-contained —
+to the base ref before running it. `tools/surface_manifest.py` is deliberately NOT
+pinned: the steps that use it would then run the BASE ref's copy, so a PR that
+FIXES that tool could never pass them (the deadlock measured on #5192), and those
+steps are an ordering lint and an artifact-consistency check, not the expansion
+gate.
+
+These tests exercise the **actual step text extracted from the workflow** — never a
 hand-copied duplicate — against the filesystem mutations a hostile PR could
 commit in that same push.
 
 Scope: `tests/test_surface_guard_pin_4606.py` guards the pin's own mechanism.
-The declared threat surface is *modifying the two tool paths* (and the `tools/`
-container that resolves them). Making `.github/workflows/python-ci.yml` itself
+The declared threat surface is *modifying the pinned tool path* (and the `tools/`
+container that resolves it). Making `.github/workflows/python-ci.yml` itself
 unmodifiable is a separate, still-open decision on #4606 and is deliberately
 NOT asserted here.
 """
@@ -76,8 +82,23 @@ def test_the_extracted_step_is_the_real_one() -> None:
     """Guard the extractor: an empty/renamed step would make every case vacuous."""
     body = _pin_body()
     assert "surface-guard.py" in body, body
-    assert "surface_manifest.py" in body, body
     assert "mv -f" in body, body
+
+
+def test_the_gate_is_pinned_and_the_generator_is_not() -> None:
+    """Pin the ENFORCEMENT, not the GENERATOR — pinning the generator deadlocks it.
+
+    The two steps that use `tools/surface_manifest.py` run the BASE ref's copy of
+    it, so a PR that fixes that tool can never make them pass; measured on #5192.
+    It cannot influence the gate either — `surface-guard.py` carries its own
+    `_read_manifest` and imports nothing from it. Asserted on the EXECUTED list,
+    not on the prose, so a comment naming the file cannot satisfy it.
+    """
+    body = _pin_body()
+    loops = [ln for ln in body.splitlines() if ln.strip().startswith("for f in")]
+    assert len(loops) == 1, body
+    assert "surface-guard.py" in loops[0], loops[0]
+    assert "surface_manifest.py" not in loops[0], loops[0]
 
 
 def test_the_pin_runs_before_both_guard_steps() -> None:
