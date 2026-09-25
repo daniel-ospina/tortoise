@@ -162,6 +162,36 @@ class TestWriter:
         assert ("org_a", "/v1/unknown-overflow") not in _bytes_by_org_path()
         assert _bytes_by_org_path()[("org_a", monitoring.EGRESS_OVERFLOW)] == 9
 
+    def test_derived_path_cardinality_folds_into_one_fixed_child(self):
+        """Request-derived labels have their OWN, much smaller budget."""
+        for i in range(monitoring.EGRESS_MAX_DERIVED_PATHS):
+            monitoring.record_egress("org_a", f"/scan-{i}", 1, derived=True)
+        monitoring.record_egress("org_a", "/scan-overflow", 9, derived=True)
+
+        assert ("org_a", "/scan-overflow") not in _bytes_by_org_path()
+        assert ("org_a", monitoring.EGRESS_UNROUTED) in _bytes_by_org_path()
+        paths = {path for _, path in _bytes_by_org_path()}
+        assert len(paths) == monitoring.EGRESS_MAX_DERIVED_PATHS + 1
+
+    def test_request_derived_labels_cannot_starve_route_templates(self):
+        """The round-1 review finding, pinned (bug + security reviewers, converged).
+
+        The live app already carries 121 route templates, so ONE shared path
+        budget of 128 left ~7 slots: an unauthenticated client could fill them
+        with distinct unknown paths and fold real routes — and the size
+        histogram — into ``__other__`` for the whole process. The two axes are
+        now separate budgets, and this asserts the separation from the side a
+        client can actually reach.
+        """
+        for i in range(monitoring.EGRESS_MAX_PATHS + 50):
+            monitoring.record_egress("org_a", f"/scan-{i}", 1, derived=True)
+
+        monitoring.record_egress("org_a", "/v1/retrieval/{rid}", 500)
+
+        assert _bytes_by_org_path()[
+            ("org_a", "/v1/retrieval/{rid}")] == 500, (
+            "request-derived volume displaced a code-literal route template")
+
     def test_admitted_labels_are_stable_once_past_the_cap(self):
         """The cap must not evict: an admitted org keeps its own child forever."""
         for i in range(monitoring.EGRESS_MAX_ORGS):
@@ -296,11 +326,34 @@ class TestMiddleware:
         over_long = [lab for lab in labels if len(lab) > ha._EGRESS_MAX_LABEL_LEN]
         assert not over_long, f"unbounded fallback label: {over_long!r}"
 
+    def test_unrouted_traffic_through_the_middleware_cannot_starve_templates(self):
+        """End-to-end version of the round-1 finding: real unauthenticated 404
+        requests fill the DERIVED budget, and a code-literal route template is
+        still admitted afterwards.
+
+        This is the assertion the direct-call cap test above cannot make: it
+        drives the traffic through the middleware's own fallback path.
+        """
+        async def _not_found(scope, receive, send):
+            await send({"type": "http.response.start", "status": 404,
+                        "headers": [(b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+
+        app = ha.EgressBytesMiddleware(_not_found)
+        client = TestClient(app)  # no context manager: raw ASGI app, no lifespan
+        for i in range(monitoring.EGRESS_MAX_PATHS + 20):
+            client.get(f"/scan{i}x/y")
+
+        monitoring.record_egress("org_real", "/v1/export/{rid}", 1234)
+
+        assert _bytes_by_org_path()[("org_real", "/v1/export/{rid}")] == 1234
+
     def test_mounted_sub_app_is_counted_and_attributed_by_its_own_path(self):
         """The large-payload read paths include mounted surfaces (the MCP mount).
 
         Plain Starlette routes do NOT stamp ``scope["route"]`` (measured), so
-        this is also the coverage proof for the normalised fallback.
+        this is also the coverage proof for the normalised fallback (which is
+        admitted as a DERIVED label, in its own budget).
         """
         sub = Starlette(routes=[Route("/export", lambda request: JSONResponse({"data": "d" * 300}))])
         app = Starlette(routes=[Mount("/mcp", app=sub)])

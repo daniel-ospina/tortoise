@@ -2221,8 +2221,8 @@ _EGRESS_MAX_LABEL_LEN = 64
 _EGRESS_MAX_SEGMENT_LEN = 24
 
 
-def _egress_route_class(scope) -> str:
-    """The bounded route class a response is attributed to (#4491).
+def _egress_route_class(scope) -> tuple[str, bool]:
+    """The route class a response is attributed to, and whether it was DERIVED.
 
     FastAPI stamps the MATCHED ROUTE TEMPLATE onto the scope
     (``scope["route"].path`` is ``/v1/points/{pid}``), which is the exact,
@@ -2232,20 +2232,25 @@ def _egress_route_class(scope) -> str:
     to a NORMALISED path: at most two segments, with pure-numeric and long
     digit-bearing segments collapsed to ``{id}`` (``/nope/123`` ->
     ``/nope/{id}``; ``/v1/...`` is untouched because ``v1`` is a literal, not
-    an id). A client walking unknown paths therefore cannot grow the label set.
+    an id).
+
+    The ``derived`` flag is returned because that fallback is REQUEST-DERIVED:
+    ``monitoring.record_egress`` admits it into a SEPARATE, tightly capped
+    registry so unknown traffic can never consume the code-literal route
+    budget and fold real routes into overflow (review round 1).
     """
     route = scope.get("route")
     template = getattr(route, "path", None)
     if isinstance(template, str) and template:
-        return template
+        return template, False
     segments = [seg for seg in str(scope.get("path") or "").split("/") if seg][:2]
     if not segments:
-        return "/"
+        return "/", True
     bounded = []
     for seg in segments:
         looks_like_id = seg.isdigit() or (len(seg) >= 8 and any(c.isdigit() for c in seg))
         bounded.append("{id}" if looks_like_id else seg[:_EGRESS_MAX_SEGMENT_LEN])
-    return ("/" + "/".join(bounded))[:_EGRESS_MAX_LABEL_LEN]
+    return ("/" + "/".join(bounded))[:_EGRESS_MAX_LABEL_LEN], True
 
 
 class EgressBytesMiddleware:
@@ -2304,12 +2309,13 @@ class EgressBytesMiddleware:
                        and bool(state.get(_WAIT_BOUND_REFUSED_STATE)))
             if not dropped:
                 org_id = state.get("org_id") if isinstance(state, dict) else None
+                path_label, derived = _egress_route_class(scope)
                 try:
                     # Call-time attribute read (`_monitoring`), so a test or an
                     # operator can substitute the writer; measurement must never
                     # be a NEW failure mode for the request it measures.
                     _monitoring.record_egress(
-                        org_id, _egress_route_class(scope), nbytes)
+                        org_id, path_label, nbytes, derived=derived)
                 except Exception:
                     _logger.debug("egress accounting failed", exc_info=True)
 

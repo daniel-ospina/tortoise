@@ -505,21 +505,44 @@ LOOP_LAG = Histogram(
 # touches a metric object directly (the #501/#3677 house shape). No endpoint,
 # no quota, no cap, no price — this measures; it does not price.
 #
-# BOUNDED CARDINALITY: BOTH labels are request-derived (an org id and a route),
-# so both are capped and everything past the cap folds into ONE shared child —
-# the ``_TELEMETRY_DROP_COUNTS`` doctrine in ``hosted_api``. Without the cap, a
-# client walking unknown paths (or a fleet of orgs) grows the Prometheus child
-# set without bound, which is a scrape-cost bug, not a measurement.
+# BOUNDED CARDINALITY: both labels are capped and everything past the cap folds
+# into ONE shared child — the ``_TELEMETRY_DROP_COUNTS`` doctrine in
+# ``hosted_api``. Without the cap, unknown traffic (or a fleet of orgs) grows
+# the Prometheus child set without bound, which is a scrape-cost bug, not a
+# measurement.
+#
+# ROUTE LABELS ARE TWO REGISTRIES, NOT ONE (review round 1, bug + security,
+# converged): a FastAPI route TEMPLATE is a code literal, but the fallback label
+# for an unmatched path (``/nope/{id}``, ``/mcp``) is REQUEST-DERIVED. Sharing
+# one 128-slot registry let an UNAUTHENTICATED client fill the budget with
+# distinct unknown paths (measured: the live app already carries 121 templates,
+# so ~7 slots remained) and fold real routes — and the size histogram — into
+# ``__other__`` for the whole process. The two are therefore admitted
+# separately: ``EGRESS_MAX_PATHS`` bounds the CODE-literal axis (traffic can
+# never add a template, so a generous cap cannot be reached by traffic), and
+# ``EGRESS_MAX_DERIVED_PATHS`` bounds the request-derived axis, whose overflow
+# is one fixed ``/__unrouted__`` child. An attacker can now add at most
+# ``EGRESS_MAX_DERIVED_PATHS + 1`` children and cannot displace a single route
+# template.
 EGRESS_MAX_ORGS = 512
-EGRESS_MAX_PATHS = 128
+#: The route-template axis — code literals, ~121 today (measured on the live
+#: app), so 512 is comfortable headroom for new routes rather than a tight fit.
+EGRESS_MAX_PATHS = 512
+#: The request-derived axis (unmatched paths, mounted sub-apps). Small on
+#: purpose: a handful of real fallbacks (`/mcp`, a webhook path) is all the
+#: granularity worth having for traffic that names its own label.
+EGRESS_MAX_DERIVED_PATHS = 8
 EGRESS_OVERFLOW = "__other__"
-# PAIR SPACE: the two caps multiply — the worst case is EGRESS_MAX_ORGS x
-# EGRESS_MAX_PATHS children, reached only if EVERY admitted org touches EVERY
-# admitted route. In practice children track (orgs x routes actually served)
-# per process. The caps are deliberately generous on the ORG axis because org
-# attribution is the measurement #4491 asks for, and the route axis is bounded
-# by the API surface (FastAPI route templates are code literals), not by
-# traffic — so a hostile client cannot reach the pair bound by walking paths.
+#: Where excess REQUEST-DERIVED path labels fold. Distinct from
+#: ``EGRESS_OVERFLOW`` because it answers a different question: "traffic on
+#: paths that match no route", not "the cap was hit".
+EGRESS_UNROUTED = "/__unrouted__"
+# PAIR SPACE: the caps multiply — the worst case is EGRESS_MAX_ORGS x
+# (EGRESS_MAX_PATHS + EGRESS_MAX_DERIVED_PATHS + 2) children. The ORG axis is
+# deliberately generous because org attribution IS the measurement #4491 asks
+# for, and it is not traffic-reachable: every unauthenticated request shares the
+# ``""`` child, and a new org label costs a real org id. The path axis is the
+# bounded one, per the two-registry split above.
 
 #: Response body bytes by (org, route class). The Counter answers "how many
 #: bytes did this org's traffic cost us"; the Histogram below answers "how big
@@ -545,15 +568,17 @@ EGRESS_RESPONSE_BYTES = Histogram(
 #: admitted org/path pair); the lock is taken only while ADMITTING a new label.
 _EGRESS_ORGS: set[str] = set()
 _EGRESS_PATHS: set[str] = set()
+_EGRESS_DERIVED_PATHS: set[str] = set()
 _EGRESS_LOCK = threading.Lock()
 
 
-def _admit_egress_label(label: str, seen: set[str], cap: int) -> str:
+def _admit_egress_label(label: str, seen: set[str], cap: int,
+                        overflow: str = EGRESS_OVERFLOW) -> str:
     """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
 
     Additive by construction: an already-admitted label never locks (and never
-    changes); a new label past the cap becomes ``EGRESS_OVERFLOW`` so the
-    metric stays bounded rather than raising or dropping the whole record.
+    changes); a new label past the cap becomes ``overflow`` so the metric stays
+    bounded rather than raising or dropping the whole record.
     """
     if label in seen:
         return label
@@ -561,19 +586,26 @@ def _admit_egress_label(label: str, seen: set[str], cap: int) -> str:
         if label in seen:
             return label
         if len(seen) >= cap:
-            seen.add(EGRESS_OVERFLOW)
-            return EGRESS_OVERFLOW
+            seen.add(overflow)
+            return overflow
         seen.add(label)
         return label
 
 
-def record_egress(org: str | None, path: str, nbytes: int) -> None:
+def record_egress(org: str | None, path: str, nbytes: int, *,
+                  derived: bool = False) -> None:
     """Record response body bytes written for ``org`` on route class ``path``.
 
     THE single writer for the egress dimension (#4491): the caller
     (``hosted_api.EgressBytesMiddleware``) supplies what it measured — org,
     route class, byte count — and never touches a metric object, so the unit
     and the attribution key stay in one place.
+
+    ``derived`` names WHICH route-label registry ``path`` belongs to: ``False``
+    (default) for a code-literal route template, ``True`` for a label the
+    caller derived from the request path because no route matched. They are
+    separate budgets so request-derived labels can never consume the template
+    budget — see the two-registry note above.
 
     ``org`` may be ``None``/empty: a request that never resolved an org (an
     unauthenticated 401, a health probe, an MCP call whose org lives in the
@@ -585,7 +617,12 @@ def record_egress(org: str | None, path: str, nbytes: int) -> None:
     """
     amount = max(0, int(nbytes))
     org_label = _admit_egress_label(org or "", _EGRESS_ORGS, EGRESS_MAX_ORGS)
-    path_label = _admit_egress_label(path or "", _EGRESS_PATHS, EGRESS_MAX_PATHS)
+    if derived:
+        path_label = _admit_egress_label(
+            path or "", _EGRESS_DERIVED_PATHS, EGRESS_MAX_DERIVED_PATHS,
+            overflow=EGRESS_UNROUTED)
+    else:
+        path_label = _admit_egress_label(path or "", _EGRESS_PATHS, EGRESS_MAX_PATHS)
     EGRESS_BYTES.labels(org=org_label, path=path_label).inc(amount)
     EGRESS_RESPONSE_BYTES.labels(path=path_label).observe(amount)
 
@@ -599,9 +636,10 @@ def egress_bytes_by_org() -> dict[str, int]:
     read, mirroring ``analytics_outcome_counts()``. Derived from ``collect()``
     rather than a second tally, so the snapshot cannot drift from the metric.
 
-    The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` is the
-    folded tail of the cardinality cap; both are INCLUDED, so the snapshot
-    always reconciles to the whole measurement.
+    The ``""`` key is the unattributed share, ``EGRESS_OVERFLOW`` the folded
+    tail of the org/path-template caps, and ``EGRESS_UNROUTED`` the folded tail
+    of the request-derived path cap; all are INCLUDED, so the snapshot always
+    reconciles to the whole measurement.
     """
     totals: dict[str, int] = {}
     for family in EGRESS_BYTES.collect():
@@ -626,6 +664,7 @@ def _reset_egress() -> None:
     with _EGRESS_LOCK:
         _EGRESS_ORGS.clear()
         _EGRESS_PATHS.clear()
+        _EGRESS_DERIVED_PATHS.clear()
     EGRESS_BYTES.clear()
     EGRESS_RESPONSE_BYTES.clear()
 
