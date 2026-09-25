@@ -656,6 +656,7 @@ surfaces:
   - test_rebuild_turn_points_3947.py
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
+  - test_rebuild_parity_fail_loud_3585.py  # #3585: Stage 0 — a non-folded journal event fails the rebuild (R8) and `check_consistency` asserts the refused set + non-Point entity parity (R9); the #3573 shape-A/B invariants. `tortoise/projection/__init__.py` + `tortoise/consistency.py` select `core`.
   - test_vecf32_overwrite_seams_4524.py  # #4524: the remaining embedded-engine vecf32 overwrite seams (Subject/Object/Document/Event) — one mutation-proven read-back guard per seam; runs in the carve-out lane (carve_out + embedded_only)
   # #5004: the journal must carry a Point's embedding (the design's largest
   # cost lever) and a replay must restore it VERBATIM rather than re-encode
@@ -2372,6 +2373,7 @@ durations:
   test_render.py: 0.0
   test_rebuild_recreate_content_parity.py: 2.0  # #4042: differential live-apply() parity for the same-file delete→recreate/re-emit content boundary
   test_rebuild_graph_only_derived_parity.py: 2.0  # #4305: differential live-apply() parity for graph-only (out-of-journal) Point derived — falsy re-emit + synthetic-tail clobber
+  test_rebuild_parity_fail_loud_3585.py: 20.0  # #3585: 14 rows, each opening/wiping a real FalkorDB graph (rebuild_all / rebuild / recover_from_log / check_consistency); locally measured on the docker lane.
   test_restore_container_recovery.py: 0.0
   test_sdk_adapter_cap.py: 0.0
   test_sentry.py: 0.0

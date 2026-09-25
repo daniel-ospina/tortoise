@@ -30,8 +30,50 @@ from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
+    SHAPE_DELETE_MISS,
+    SHAPE_OBJECT_SUPERSEDED_MISS,
+    SHAPE_POINT_BELIEF_MISS,
+    SHAPE_POINT_INVALIDATED_MISS,
+    SHAPE_POINT_SUPERSEDED_MISS,
+    SHAPE_STATE_OP_MISS,
+    SHAPE_UNIMPLEMENTED_OP,
+    SHAPE_UNKNOWN_EVENT_TYPE,
+    SHAPE_UNKNOWN_OP,
+    assert_no_non_folded,
+    collect_non_folded,
+    record_non_folded,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ── #3585: the fail-closed run boundary (R8/R9) ───────────────────────────
+#
+# The non-folded-event set is collected for the duration of a REPLAY RUN, and
+# the run fails when it is non-empty (minus the named exemptions). This wrapper
+# is the seam: it opens the collector around an engine's whole body and asserts
+# on a SUCCESSFUL return, so a fold-miss deep inside the two-pass rebuild needs
+# no signature change at every call site and cannot be forgotten at one.
+#
+# On an exception (e.g. #3947's RebuildDroppedEpisodicPoints) the collector is
+# reset by the context manager and the exception propagates unchanged — the
+# fail-closed assertion is about a run that COMPLETED, never a mask over a
+# different failure.
+def _fail_closed(engine: str):
+    """Wrap a replay engine so a non-folded event fails the run (R8)."""
+    def decorator(fn):
+        import functools
+
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            with collect_non_folded() as entries:
+                result = fn(self, *args, **kwargs)
+            assert_no_non_folded(entries, engine=engine)
+            return result
+
+        return wrapper
+    return decorator
 
 
 def _embedded_aof_enabled() -> bool:
@@ -1986,15 +2028,25 @@ def _warn_entity_mutation_fold_miss(op: str, rid, label, event_id) -> None:
     JSONL fallback all fold through it, so a call-site-only warning would leave
     the non-folded-set assertion vacuous on three of the four replay engines.
 
+    #3585 (R8): the warning is now ALSO recorded into the run's non-folded set,
+    which fails the run — a state-op miss is not exempt. The entry names the
+    journal position (``event_id``), the target, and the failure shape.
+
     Deliberately NOT used for ``op="delete"``: a delete matching 0 rows is
     legitimately idempotent (a retried delete; restore's fallback replaying onto
     a non-empty graph) and the existing pass-1b warning already covers the
-    rebuild_all case. Widening it would turn the lane's own evidence into a
-    false positive on valid journals.
+    rebuild_all case. That shape is a NAMED exemption (``delete-miss``) — it is
+    still recorded by the caller, it just does not fail the run.
 
     ``event_id`` is carried: it is the only handle that locates the diverging
     journal line.
     """
+    record_non_folded(
+        SHAPE_STATE_OP_MISS, event_id=event_id, event_type="EntityMutated",
+        label=label if isinstance(label, str) else None,
+        id=rid if isinstance(rid, str) else None, op=op,
+        detail="state op matched no entity on replay",
+    )
     logger.warning(
         "rebuild: EntityMutated %s fold matched no entity (event_id=%s id=%r "
         "label=%r) — the journal claims a mutation whose entity never "
@@ -2166,7 +2218,12 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         pass
     else:
         # P2-1 (#3299): a record type outside the recognized vocabulary must
-        # not vanish silently.
+        # not vanish silently. #3585 (R8): it is a non-folded event — record it
+        # so a run that skipped it fails closed.
+        record_non_folded(
+            SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
+            event_type=str(t), detail="in-memory fold: unrecognized type",
+        )
         logger.warning("unrecognized event type %r — skipped", t)
 
 
@@ -3257,6 +3314,16 @@ class FalkorProjection(
             # no branch HERE — e.g. PointSuperseded / PointInvalidated /
             # DirectEdgeRepoint, folded only by rebuild_all's deferred pass —
             # still warns: that is a genuine rebuild-parity gap, not noise.
+            # #3585 (R8): non-folded and NOT exempt — the run fails. Only a
+            # STRING type is a real record: a malformed line with no type is
+            # dropped identically by every engine (the writer never emits it),
+            # so recording it would be a false positive.
+            if isinstance(t, str):
+                record_non_folded(
+                    SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
+                    event_type=t,
+                    detail="graph fold: unrecognized type",
+                )
             logger.warning("unrecognized event type %r — skipped", t)
 
     def _episodic_point_ids(self) -> set[str]:
@@ -3416,6 +3483,7 @@ class FalkorProjection(
             "RDB backup, instead of trusting this rebuild."
         )
 
+    @_fail_closed("rebuild(log)")
     def rebuild(self, log) -> None:
         # #3947: read the journal FIRST (a torn/failed read must not wipe),
         # then PROVE the replay can recreate every episodic Point BEFORE the
@@ -3442,9 +3510,14 @@ class FalkorProjection(
             self.apply(ev)
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
 
+    @_fail_closed("rebuild_all")
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
 
+        #3585 (R8/R9): the whole fold runs inside the non-folded-event
+        collector; on a completed replay a non-empty refused set raises
+        :class:`NonFoldedEventsError` (a named-exemption set is recorded but
+        does not fail — see ``projection/nonfolded.py``).
         Two-pass: creates all Point nodes first (pass 1), then operator edges
         and all other event types second (pass 2), so cross-file operator→Point
         references always resolve regardless of filename sort order.
@@ -4067,6 +4140,13 @@ class FalkorProjection(
         journal_hash_write: set[str] = set()
         journal_embed_write: set[str] = set()
         journal_deleted: set[str] = set()
+        # #3585: EVERY id the journal hard-deletes (any kind). The deferred
+        # supersede/invalidate sweeps run AFTER pass-1b, so a fold whose target
+        # was deleted is legitimately a 0-row miss — not a non-folded event
+        # (live and replay both end with the node absent). `journal_deleted`
+        # above is Point-scoped (#4305's restore barrier); this one is the
+        # non-folded-exemption discriminator and must see every kind.
+        hard_deleted_any: set[str] = set()
         # (kind, id) pairs hard-deleted since their last creation — a
         # following creation of the SAME kind is a RE-creation (new
         # incarnation), not a bare upsert. #3860: keyed by (kind, id), so a
@@ -4461,6 +4541,8 @@ class FalkorProjection(
                 if (ev.get("op") == "delete" and isinstance(rid, str)
                         and _owns_point(ev.get("label"))):
                     journal_deleted.add(rid)
+                if ev.get("op") == "delete" and isinstance(rid, str):
+                    hard_deleted_any.add(rid)
                 anchor = None
                 if isinstance(rid, str):
                     label = ev.get("label")
@@ -4589,7 +4671,23 @@ class FalkorProjection(
                     # #3689: the defect was SILENT loss — an annotation that
                     # cannot be folded must be audible, mirroring the
                     # EntityMutated / PointSuperseded / PointInvalidated
-                    # fold-miss warnings.
+                    # fold-miss warnings. #3585 (R8): recorded and NOT
+                    # exempt — the run fails.
+                    #
+                    # #3585 review: only a record that COULD have targeted a
+                    # node is a non-folded event. A non-str/non-writable id or
+                    # a record carrying no annotator dim is dropped by the
+                    # WRITER too, so live and replay agree — recording those
+                    # would be a false positive (the existing warning stays).
+                    _ann_id = ev.get("id")
+                    if _writable_id(_ann_id) and _annotator_dims(ev, aliases=True):
+                        record_non_folded(
+                            SHAPE_POINT_BELIEF_MISS,
+                            event_id=ev.get("event_id"),
+                            event_type="OperatorAnnotated", seq=seq,
+                            id=_ann_id,
+                            detail="annotator record matched no Point",
+                        )
                     logger.warning(
                         "rebuild: OperatorAnnotated fold matched no Point "
                         "(event_id=%s id=%r) — operator not re-created by "
@@ -4622,6 +4720,20 @@ class FalkorProjection(
                 if _cc_anchor is not None and seq <= _cc_anchor:
                     continue
                 if self._fold_confidence_changed(ev) == 0:
+                    # #3585 (R8): recorded and NOT exempt — the run fails.
+                    # Only when the record actually carries a belief prop (a
+                    # bare ConfidenceChanged is a no-op on BOTH sides, so it is
+                    # not a live/replay divergence) and its id is writable.
+                    _cc_has_prop = any(
+                        k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))
+                    if _writable_id(_cc_rid) and _cc_has_prop:
+                        record_non_folded(
+                            SHAPE_POINT_BELIEF_MISS,
+                            event_id=ev.get("event_id"),
+                            event_type="ConfidenceChanged", seq=seq,
+                            id=_cc_rid,
+                            detail="belief write-back matched no Point",
+                        )
                     logger.warning(
                         "rebuild: ConfidenceChanged fold matched no Point "
                         "(event_id=%s id=%r) — point not re-created by any "
@@ -4652,7 +4764,7 @@ class FalkorProjection(
                 # run: the fold is an idempotent SET, so ordering vs its own
                 # registration is irrelevant and later re-creations are
                 # re-folded correctly.
-                supersede_folds.append(ev)
+                supersede_folds.append((seq, ev))
                 _sid, _sname = ev.get("id"), ev.get("name")
                 if isinstance(_sid, str):
                     _supersede_seq[("id", _sid)] = max(
@@ -4768,7 +4880,16 @@ class FalkorProjection(
                 pass
             else:
                 # P2-1 (#3299): a record type outside the recognized
-                # vocabulary must not be dropped silently.
+                # vocabulary must not be dropped silently. #3585 (R8):
+                # non-folded and NOT exempt — the run fails. A non-str
+                # (malformed) type is dropped identically by every engine and
+                # is NOT recorded.
+                if isinstance(t, str):
+                    record_non_folded(
+                        SHAPE_UNKNOWN_EVENT_TYPE, event_id=ev.get("event_id"),
+                        event_type=t, seq=seq,
+                        detail="rebuild_all: unrecognized type",
+                    )
                 logger.warning("unrecognized event type %r — skipped", t)
 
         # ── Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
@@ -4784,7 +4905,7 @@ class FalkorProjection(
         # superseded Object that is later re-created by a future event is
         # caught on the NEXT rebuild, but this rebuild's graph is honest
         # about what it could not fold.
-        for ev in supersede_folds:
+        for seq, ev in supersede_folds:
             # #2242: replay folds run under the DEFAULT cas=False (blind) —
             # byte-identical to pre-CAS. The live-path CAS must not leak
             # into replay: first-wins replay would regress incarnation-reuse
@@ -4793,6 +4914,20 @@ class FalkorProjection(
             # returns (matched, matched)).
             folded, _ = self._fold_object_superseded(ev)
             if folded == 0:
+                # #3585 (R8): a supersede whose target the journal HARD-DELETED
+                # is the named exemption (the fold is deferred past the delete);
+                # any other 0-row miss is refused and fails the run.
+                _sup_shape = (
+                    "supersede-target-deleted"
+                    if ev.get("id") in hard_deleted_any
+                    else SHAPE_OBJECT_SUPERSEDED_MISS)
+                record_non_folded(
+                    _sup_shape, event_id=ev.get("event_id"),
+                    event_type="ObjectSuperseded", seq=seq,
+                    id=ev.get("id") if isinstance(ev.get("id"), str) else None,
+                    candidates=(ev.get("supersedes_by"),),
+                    detail="supersede matched no Object",
+                )
                 logger.warning(
                     "rebuild: ObjectSuperseded fold matched no Object "
                     "(event_id=%s supersedes_by=%r) — object not "
@@ -4921,6 +5056,16 @@ class FalkorProjection(
                 matched = self._fold_point_invalidated(
                     ev, skip_updated_at=skip_ua)
                 if matched == 0:
+                    record_non_folded(
+                        "supersede-target-deleted"
+                        if ev.get("id") in hard_deleted_any
+                        else SHAPE_POINT_INVALIDATED_MISS,
+                        event_id=ev.get("event_id"),
+                        event_type="PointInvalidated", seq=fsq,
+                        id=ev.get("id") if isinstance(ev.get("id"), str) else None,
+                        candidates=(ev.get("corrected_by"),),
+                        detail="invalidate matched no Point",
+                    )
                     logger.warning(
                         "rebuild: PointInvalidated fold matched no Point "
                         "(event_id=%s id=%r corrected_by=%r) — invalidated "
@@ -4932,6 +5077,24 @@ class FalkorProjection(
             else:
                 matched = self._fold_point_superseded(ev)
                 if matched == 0:
+                    # #3585 (R8): a PointSuperseded with no new_id is the
+                    # NAMED exemption (the graph fold treats it as a no-op), as
+                    # is a target the journal hard-deleted before the sweep;
+                    # any other 0-row miss is refused and fails the run.
+                    if not ev.get("new_id"):
+                        _ps_shape = "point-superseded-no-new-id"
+                    elif ev.get("id") in hard_deleted_any:
+                        _ps_shape = "supersede-target-deleted"
+                    else:
+                        _ps_shape = SHAPE_POINT_SUPERSEDED_MISS
+                    record_non_folded(
+                        _ps_shape,
+                        event_id=ev.get("event_id"),
+                        event_type="PointSuperseded", seq=fsq,
+                        id=ev.get("id") if isinstance(ev.get("id"), str) else None,
+                        candidates=(ev.get("new_id"),),
+                        detail="supersede matched no Point",
+                    )
                     logger.warning(
                         "rebuild: PointSuperseded fold matched no Point "
                         "(event_id=%s old_id=%r new_id=%r) — superseded point "
@@ -6801,12 +6964,28 @@ class FalkorProjection(
             # (`retract`/`supersede`). LOUD: a silently dropped mutation is
             # exactly this class's defect. The two are distinguished so a
             # future extender is not told its sanctioned op is "unknown".
+            # #3585 (R8): both are non-folded and NOT exempt — the run fails,
+            # because the record's mutation is lost on replay.
             if op in _ENTITY_MUTATION_PENDING_OPS:
+                record_non_folded(
+                    SHAPE_UNIMPLEMENTED_OP, event_id=ev.get("event_id"),
+                    event_type="EntityMutated",
+                    label=label if isinstance(label, str) else None,
+                    id=rid if isinstance(rid, str) else None, op=op,
+                    detail="recorded op has no fold arm yet",
+                )
                 logger.warning(
                     "rebuild: EntityMutated op %r is recorded (#3299) but has no "
                     "fold arm yet (event_id=%s id=%r label=%r) — its mutation is "
                     "NOT replayed", op, ev.get("event_id"), rid, label)
             else:
+                record_non_folded(
+                    SHAPE_UNKNOWN_OP, event_id=ev.get("event_id"),
+                    event_type="EntityMutated",
+                    label=label if isinstance(label, str) else None,
+                    id=rid if isinstance(rid, str) else None, op=op,
+                    detail="op outside the recorded vocabulary",
+                )
                 logger.warning(
                     "rebuild: unknown EntityMutated op %r (event_id=%s id=%r "
                     "label=%r) — no fold applied; the record's mutation is LOST "
@@ -6821,8 +7000,20 @@ class FalkorProjection(
         # id-wide delete (``label=None``). The raw label never reaches the
         # Cypher label position — only the allowlisted branch does.
         label = ev.get("label")
-        return self._delete_entity_by_id(
+        deleted = self._delete_entity_by_id(
             rid, label if isinstance(label, str) else None)
+        if not deleted:
+            # #3585 (R8): RECORDED but EXEMPT (``delete-miss``) — "already
+            # absent" is the delete's end state. The entry still names the
+            # journal position, and `check_consistency`'s entity parity leg is
+            # what catches the unjournaled creation this shape can hide.
+            record_non_folded(
+                SHAPE_DELETE_MISS, event_id=ev.get("event_id"),
+                event_type="EntityMutated",
+                label=label if isinstance(label, str) else None, id=rid, op="delete",
+                detail="delete matched no entity (idempotent)",
+            )
+        return deleted
 
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""

@@ -22,6 +22,7 @@ import pytest  # noqa: E402
 
 from tortoise.ids import ulid  # noqa: E402
 from tortoise.log import EventLog  # noqa: E402
+from tortoise.projection.nonfolded import NonFoldedEventsError  # noqa: E402
 from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
 
 
@@ -449,7 +450,8 @@ class TestFoldMissWarning:
                             supersedes_by="successor-name")
             import logging
             with caplog.at_level(logging.WARNING,
-                                 logger="tortoise.projection"):
+                                 logger="tortoise.projection"), \
+                    pytest.raises(NonFoldedEventsError):
                 proj.rebuild_all(str(events))
             assert any("fold" in r.message.lower() and
                        "match" in r.message.lower() for r in caplog.records), (

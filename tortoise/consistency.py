@@ -51,6 +51,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from .projection import (
+    _ENTITY_MUTATION_STATE_OPS,
     _apply_one,
     _load_prewipe_snapshot,
     _promotion_point_with_operator,
@@ -60,6 +61,14 @@ from .projection import (
 from .projection.entities import (
     _EntityHandlers,
     _is_persistable_prop_value,
+)
+from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
+    SHAPE_POINT_INVALIDATED_MISS,
+    SHAPE_POINT_RETRACTED_MISS,
+    SHAPE_POINT_SUPERSEDED_MISS,
+    collect_non_folded,
+    record_non_folded,
+    refused_events,
 )
 
 logger = logging.getLogger(__name__)
@@ -735,9 +744,29 @@ def _fold_journal(events: list[dict]) -> dict:
             if (anchors.get(pid, {}).get("Point") or -1) >= seq:
                 continue
             if t == "PointSuperseded" and not ev.get("new_id"):
+                # #3585: the NAMED exemption — the graph fold treats a
+                # new_id-less supersede as a documented no-op, so the
+                # reference fold mirrors it. Recorded, not fatal.
+                record_non_folded(
+                    "point-superseded-no-new-id", event_id=ev.get("event_id"),
+                    event_type=t, seq=seq,
+                    detail="reference fold: supersede with no new_id is a no-op",
+                )
                 continue
             entry = by_id.get(pid)
             if not isinstance(entry, dict):
+                # #3585 (R8): the reference fold could not resolve the
+                # terminalizer to a point — the journal claims a state change
+                # this fold cannot produce. Recording it is what makes the
+                # #5011 content comparison non-vacuous.
+                record_non_folded(
+                    SHAPE_POINT_INVALIDATED_MISS if t == "PointInvalidated"
+                    else SHAPE_POINT_RETRACTED_MISS if t == "PointRetracted"
+                    else SHAPE_POINT_SUPERSEDED_MISS,
+                    event_id=ev.get("event_id"), event_type=t, seq=seq, id=pid,
+                    candidates=(ev.get("new_id"), ev.get("corrected_by")),
+                    detail="reference fold: terminalizer matched no point",
+                )
                 continue
             entry.update(_DECAY)
             if t == "PointRetracted":
@@ -756,6 +785,172 @@ def _fold_journal(events: list[dict]) -> dict:
     return by_id
 
 
+# ── #3585: entity parity — the invariant's non-Point leg ─────────────────
+#
+# `_fold_journal` above is POINT-only (it returns a `{id: point}` index), so
+# before #3585 the `rebuild == live` invariant was structurally blind to a
+# non-Point burial: shapes A and B of #3573 flip an OBJECT's `status`, and the
+# point-only check cannot see the Object at all. This leg closes that hole for
+# the fields a burial actually moves — entity PRESENCE and `status`.
+#
+# Deliberate bounds (reported, not hidden):
+#   * `Source` is excluded — its graph identity is ``url`` while the journal's
+#     delete/mutation records carry ``id`` (#4649's url-keyed no-op class), so
+#     a presence comparison there would be a false positive by construction.
+#   * Only `status` is compared, not `name` — `#3574`'s ``name[:200]``
+#     truncation is a known journal/graph asymmetry.
+#   * A name-only `ObjectSuperseded` (no id, >1 carrier) leaves the object's
+#     status AMBIGUOUS: the fold's own resolution is heuristic, so those
+#     objects are EXCLUDED from the comparison and the exclusion is reported.
+_ENTITY_PARITY: tuple[tuple[str, str], ...] = (
+    ("Object", "id"), ("Subject", "id"),
+    ("Document", "id"), ("Event", "eventId"),
+)
+_ENTITY_CREATION: dict[str, tuple[str, str, str | None]] = {
+    "ObjectRegistered": ("Object", "id", "live"),
+    "SubjectAdded": ("Subject", "id", "live"),
+    "DocumentCreated": ("Document", "id", "draft"),
+    "EventRecorded": ("Event", "eventId", None),
+}
+
+
+def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
+    """Reference fold for non-Point entities (#3585).
+
+    Returns ``(entities, deleted, ambiguous)``:
+      entities  — ``{(label, id): {"status": ...}}``
+      deleted   — ``{(label, id)}`` the journal hard-deletes
+      ambiguous — Object names a name-only supersede could not resolve
+    """
+    entities: dict = {}
+    deleted: set = set()
+    ambiguous: set = set()
+    for ev in events:
+        t = ev.get("type")
+        if t in _ENTITY_CREATION:
+            label, keyprop, default_status = _ENTITY_CREATION[t]
+            eid = ev.get(keyprop)
+            if not isinstance(eid, str) or not eid:
+                continue
+            rec = entities.setdefault((label, eid), {})
+            # A later creation RE-CREATES the incarnation: the id is live
+            # again, so an earlier journaled delete no longer owns it.
+            deleted.discard((label, eid))
+            status = ev.get("status") or ev.get("eventStatus") or default_status
+            if isinstance(status, str) and status and "status" not in rec:
+                rec["status"] = status
+            name = ev.get("name") or ev.get("title")
+            if isinstance(name, str) and name:
+                rec["name"] = name
+        elif t == "EntityMutated":
+            label, eid, op = ev.get("label"), ev.get("id"), ev.get("op")
+            if not isinstance(eid, str):
+                continue
+            if op == "delete":
+                if isinstance(label, str):
+                    deleted.add((label, eid))
+                    entities.pop((label, eid), None)
+                else:
+                    # Legacy id-wide delete: the record owns every kind with
+                    # this id (parity with `_delete_entity_by_id`).
+                    for k in [k for k in entities if k[1] == eid]:
+                        deleted.add(k)
+                        entities.pop(k, None)
+                continue
+            if isinstance(label, str) and op in _ENTITY_MUTATION_STATE_OPS:
+                rec = entities.get((label, eid))
+                state = ev.get("state")
+                if rec is not None and isinstance(state, dict):
+                    status = state.get("status")
+                    if isinstance(status, str) and status:
+                        rec["status"] = status
+                    newname = state.get("name")
+                    if isinstance(newname, str) and newname:
+                        rec["name"] = newname
+        elif t == "ObjectSuperseded":
+            oid, oname = ev.get("id"), ev.get("name")
+            target = None
+            if isinstance(oid, str) and ("Object", oid) in entities:
+                target = ("Object", oid)
+            elif isinstance(oname, str) and oname:
+                carriers = [
+                    k for k, r in entities.items()
+                    if k[0] == "Object" and r.get("name") == oname
+                    and r.get("status") != "superseded"]
+                if len(carriers) == 1:
+                    target = carriers[0]
+                else:
+                    ambiguous.add(oname)
+            if target is not None:
+                entities[target]["status"] = "superseded"
+    return entities, deleted, ambiguous
+
+
+def _graph_entities(projection) -> dict:
+    """``{(label, id): {"status": ...}}`` for the graph's non-Point entities."""
+    out: dict = {}
+    rows = projection.query(
+        "MATCH (n) WHERE n:Object OR n:Subject OR n:Document OR n:Event "
+        "RETURN labels(n), properties(n)"
+    ).result_set or []
+    id_prop = {label: prop for label, prop in _ENTITY_PARITY}
+    for row in rows:
+        if len(row) < 2:
+            continue
+        labels, props = row[0], row[1]
+        if not isinstance(props, dict) or not isinstance(labels, (list, tuple)):
+            continue
+        for label in labels:
+            prop = id_prop.get(label)
+            if not prop:
+                continue
+            eid = props.get(prop)
+            if isinstance(eid, str) and eid:
+                out[(label, eid)] = {"status": props.get("status")}
+    return out
+
+
+def _compare_entities(journal_entities, graph_entities, deleted,
+                      ambiguous) -> tuple[list, int]:
+    """Field-aware non-Point comparison. Returns (mismatches, count)."""
+    mismatches: list = []
+    for key, rec in journal_entities.items():
+        label, eid = key
+        if label == "Object" and rec.get("name") in ambiguous:
+            continue
+        g = graph_entities.get(key)
+        if g is None:
+            mismatches.append({
+                "id": eid, "label": label, "field": "presence",
+                "expected": "registered-in-journal",
+                "found": "absent-from-graph",
+            })
+            continue
+        # `status` is only a NODE PROPERTY for Object (Subject/Document/Event
+        # store `subjectKind`/`doc_status`/`eventStatus` respectively), so the
+        # status comparison is bounded to Object — the kind the #3573 shapes
+        # bury. Presence is compared for every kind.
+        if label != "Object":
+            continue
+        jv = rec.get("status")
+        if jv is None:
+            continue
+        gv = g.get("status")
+        if gv != jv:
+            mismatches.append({
+                "id": eid, "label": label, "field": "status",
+                "expected": jv, "found": gv,
+            })
+    for key in deleted:
+        if key in graph_entities:
+            mismatches.append({
+                "id": key[1], "label": key[0], "field": "presence",
+                "expected": "hard-deleted-in-journal",
+                "found": "present-in-graph",
+            })
+    return mismatches, len(mismatches)
+
+
 def check_consistency(log_path: str, projection, *,
                       record_state: bool = True) -> dict:
     """Fold the event log and compare the projection against `replay(journal)`.
@@ -770,10 +965,16 @@ def check_consistency(log_path: str, projection, *,
                                           baseline; a pure function of the graph)
       hash_match                        — graph == replay(journal), field-aware
       divergence                        — None | "content" | "lag" |
-                                          "unrecorded-mutation"
+                                          "unrecorded-mutation" | "non-folded"
       divergent_points                  — per-id field diagnosis (capped at
                                           `_MAX_DIVERGENT_POINTS`)
       divergent_point_count             — the true number of diverged ids
+      divergent_entities                — per-entity (label, id) diagnosis for
+                                          the non-Point leg (#3585)
+      divergent_entity_count            — non-Point divergences
+      non_folded_events                 — the R8 set, as strings (#3585)
+      non_folded_count / non_folded_refused_count
+                                        — size of the set / the failing subset
       watermark / journal_events / watermark_lag — the per-projection seq
       adopted                           — True on the FIRST healthy run against
                                           a pre-existing graph (never "diverged")
@@ -799,7 +1000,14 @@ def check_consistency(log_path: str, projection, *,
 
     log = EventLog(log_path)
     events = log.read_all()
-    journal_by_id = _fold_journal(events)
+    # #3585 (R9): the reference fold runs inside the non-folded collector. A
+    # non-object the fold could not resolve makes BOTH sides of the content
+    # comparison equally incomplete, so the comparison alone would pass
+    # vacuously — the collected set is what makes that a failure.
+    with collect_non_folded() as _nf_entries:
+        journal_by_id = _fold_journal(events)
+    non_folded = list(_nf_entries)
+    non_folded_refused = refused_events(non_folded)
 
     # The COUNT is read from the graph directly, NOT from `len(graph_by_id)`.
     # `graph_by_id` is keyed by `n.id`, so two nodes sharing an id (or a node
@@ -830,6 +1038,14 @@ def check_consistency(log_path: str, projection, *,
                                       projection)
     counts_ok = log_count == db_count
     hash_ok = not mismatches
+    # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
+    # Point-only, so an Object/Subject burial would be invisible; this compares
+    # the journal's entity reference against the graph's entity nodes.
+    journal_entities, entity_deleted, entity_ambiguous = _fold_journal_entities(events)
+    graph_entities = _graph_entities(projection)
+    entity_mismatches, entity_divergent_count = _compare_entities(
+        journal_entities, graph_entities, entity_deleted, entity_ambiguous)
+    entities_ok = not entity_mismatches
     # `db_hash` is a pure function of the GRAPH — the fields the verdict covers
     # PLUS the embedding, so a vector-only rewrite of an otherwise-identical
     # graph still moves the baseline (and so cannot hide under `hash_match`).
@@ -851,7 +1067,12 @@ def check_consistency(log_path: str, projection, *,
     unrecorded_mutation = graph_moved and not journal_moved
 
     divergence = None
-    if not counts_ok or not hash_ok or unrecorded_mutation:
+    if non_folded_refused:
+        # #3585 (R9): an event the reference fold could not resolve makes the
+        # content comparison vacuously incomplete on BOTH sides. This is the
+        # first-class failure R9 exists for — it outranks the content classes.
+        divergence = "non-folded"
+    elif not counts_ok or not hash_ok or unrecorded_mutation or not entities_ok:
         # Divergence, classified by WHICH side moved since the baseline. Each
         # cause names a different root cause:
         #   journal moved, graph did not → the projection is behind (a dropped
@@ -899,6 +1120,12 @@ def check_consistency(log_path: str, projection, *,
                                "advancing the journal (#4240 class): find the "
                                "unjournalled writer; re-baseline only after "
                                "the change is explained"),
+        "non-folded": ("the journal contains event(s) the reference fold "
+                       "could not resolve to exactly one node, so both "
+                       "projections are equally incomplete (R8/#3585): fix "
+                       "the journal (a missing creation event, an out-of-order "
+                       "append, an unjournaled producer) — re-baselining would "
+                       "bake in the loss"),
     }.get(divergence)
 
     return {
@@ -912,6 +1139,12 @@ def check_consistency(log_path: str, projection, *,
         "divergence": divergence,
         "divergent_points": mismatches,
         "divergent_point_count": divergent_count,
+        # ── #3585 non-Point leg + the non-folded set (R8/R9) ───────────
+        "divergent_entities": entity_mismatches,
+        "divergent_entity_count": entity_divergent_count,
+        "non_folded_events": [str(e) for e in non_folded],
+        "non_folded_count": len(non_folded),
+        "non_folded_refused_count": len(non_folded_refused),
         "watermark": watermark,
         "journal_events": len(events),
         "watermark_lag": watermark_lag,
@@ -1109,22 +1342,40 @@ def recover_from_log(events_dir: str, projection) -> dict:
     applied = 0
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
-    for seq, ev in enumerate(events):
-        if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
-            entity_link_events.append((seq, ev))
-            continue
-        try:
-            projection.apply(ev)
-            applied += 1
-        except Exception:
-            torn += 1
-    if entity_link_events:
-        try:
-            applied += projection.fold_deferred_entity_links(
-                entity_link_events, hard_delete_seqs)
-        except Exception:
-            torn += len(entity_link_events)
+    # #3585 (R8/R9): this apply-based engine folds inside the non-folded
+    # collector too. A refused event means the recovery REPLAYED an incomplete
+    # journal — reporting `recovered: True` there is the false PASS #3947's
+    # guard exists to prevent, so the run fails loudly (recovered=False, with
+    # the set named) and the caller refuses to open the DB.
+    with collect_non_folded() as _nf_entries:
+        for seq, ev in enumerate(events):
+            if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                entity_link_events.append((seq, ev))
+                continue
+            try:
+                projection.apply(ev)
+                applied += 1
+            except Exception:
+                torn += 1
+        if entity_link_events:
+            try:
+                applied += projection.fold_deferred_entity_links(
+                    entity_link_events, hard_delete_seqs)
+            except Exception:
+                torn += len(entity_link_events)
     after = _node_count()
+    refused = refused_events(_nf_entries)
+    if refused:
+        return {
+            "recovered": False, "log_points": len(events),
+            "db_points": after if after is not None else 0,
+            "reason": (
+                f"replay refused {len(refused)} journal event(s) it could not "
+                f"resolve to exactly one node (R8/#3585) — the rebuilt graph "
+                f"would be silently incomplete: "
+                + "; ".join(str(e) for e in refused[:5])),
+            "non_folded_events": [str(e) for e in _nf_entries],
+        }
     ok = applied > 0 and after is not None and after > 0
     return {"recovered": ok, "log_points": len(events),
             "db_points": after if after is not None else 0,
