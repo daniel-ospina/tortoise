@@ -514,3 +514,73 @@ class TestOneClassifierForTheNonFoldedSet:
         with pytest.raises(NonFoldedEventsError) as ei:
             sdk._get_proj().rebuild_all(str(events))
         assert "point-superseded-miss" in str(ei.value), str(ei.value)
+
+
+class TestReReviewRoundTwo:
+    def test_name_only_supersede_with_no_carrier_refuses_both_engines(
+            self, env):
+        """FAILS IF: the reference fold treats a carrier-less name-only
+        supersede as harmless ambiguity.
+
+        The graph fold matches 0 Objects and records `object-superseded-miss`
+        (refused), so `check_consistency` must not report `ok=True` on the same
+        journal.
+        REACHABLE: a journal whose only record supersedes a name that was never
+        registered (nothing to be ambiguous about)."""
+        sdk, events = env
+        _raw(events, type="ObjectSuperseded", name="NOPE",
+             supersedes_by="other", event_id="e-nope")
+        with pytest.raises(NonFoldedEventsError) as ei:
+            sdk._get_proj().rebuild_all(str(events))
+        assert "object-superseded-miss" in str(ei.value), str(ei.value)
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+        assert r["divergence"] == "non-folded", r["divergence"]
+
+    def test_pointsmerged_then_supersede_is_exempt_in_both_engines(
+            self, env, tmp_path):
+        """FAILS IF: the graph fold does not tag a `PointsMerged` hard delete.
+
+        `journal_hard_delete_seqs` (the reference fold's anchor source) counts a
+        merge as a hard delete, so a later supersede of a merged Point is the
+        NAMED exemption. If the engine's discriminator misses it, `rebuild_all`
+        refuses a journal `check_consistency` passes.
+        REACHABLE: `PointsMerged` for a Point no event created, then a
+        `PointSuperseded` with a new_id."""
+        sdk, events = env
+        _raw(events, type="PointsMerged", merge_ids=["p-merged"],
+             point={"keep_id": "p-keep"}, event_id="e-merge")
+        _raw(events, type="PointSuperseded", id="p-merged", new_id="p-new",
+             event_id="e-sup-merged")
+        sdk._get_proj().rebuild_all(str(events))  # must NOT raise
+        sdk.close()
+        proj = _fresh(tmp_path, "merged")
+        proj.rebuild_all(str(events))             # must NOT raise
+        try:
+            r = check_consistency(str(events / "events.jsonl"), proj)
+            assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        finally:
+            proj.close()
+
+    def test_ambiguous_status_does_not_hide_a_presence_burial(self, env):
+        """FAILS IF: the ambiguity bound also skips the PRESENCE leg.
+
+        Presence is decidable by name (the graph MERGEs Object/Subject by
+        name), so a buried node whose name appears in a name-only supersede
+        must still be reported — otherwise the bound hides exactly the loss
+        R9 exists to catch.
+        REACHABLE: two registrations of one name (making the name-only supersede
+        unresolvable) then the merged node removed from the graph."""
+        sdk, events = env
+        sdk.create_entity("object", name="AMB2", objectKind="k")
+        _raw(events, type="ObjectRegistered", id="obj-amb2-b", name="AMB2",
+             objectKind="k", status="live")
+        _raw(events, type="ObjectSuperseded", name="AMB2",
+             supersedes_by="other", event_id="e-amb2")
+        proj = sdk._get_proj()
+        proj.rebuild_all(str(events))
+        proj.g.query("MATCH (o:Object) DETACH DELETE o")
+        r = check_consistency(str(events / "events.jsonl"), proj)
+        assert r["entity_parity_ambiguous_count"] >= 1, r
+        assert any(d["field"] == "presence" and d["label"] == "Object"
+                   for d in r["divergent_entities"]), r["divergent_entities"]

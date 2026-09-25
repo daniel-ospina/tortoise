@@ -4230,6 +4230,12 @@ class FalkorProjection(
                 for mid in ev.get("merge_ids") or []:
                     if isinstance(mid, str):
                         pending_deleted.add(("Point", mid))
+                        # #3585 re-review: a merge HARD-DELETES the Point, and
+                        # `journal_hard_delete_seqs` (the reference fold's
+                        # anchor source) counts it — so the kind-scoped
+                        # exemption discriminator must see it too, or the two
+                        # classifiers disagree on a later PointSuperseded miss.
+                        hard_deleted_seq[("Point", mid)] = seq
                 continue
             if t in ("PointAdded", "OperatorAdded"):
                 # #331 (review r3): ev.get — missing 'point' key handled by

@@ -2373,7 +2373,7 @@ durations:
   test_render.py: 0.0
   test_rebuild_recreate_content_parity.py: 2.0  # #4042: differential live-apply() parity for the same-file delete→recreate/re-emit content boundary
   test_rebuild_graph_only_derived_parity.py: 2.0  # #4305: differential live-apply() parity for graph-only (out-of-journal) Point derived — falsy re-emit + synthetic-tail clobber
-  test_rebuild_parity_fail_loud_3585.py: 35.0  # #3585: 22 tests driving real FalkorDB graphs (rebuild_all / rebuild / recover_from_log / check_consistency); locally measured 29.8s on the docker lane.
+  test_rebuild_parity_fail_loud_3585.py: 35.0  # #3585: 25 tests driving real FalkorDB graphs (rebuild_all / rebuild / recover_from_log / check_consistency); locally measured 15.9-29.8s on the docker lane.
   test_restore_container_recovery.py: 0.0
   test_sdk_adapter_cap.py: 0.0
   test_sentry.py: 0.0

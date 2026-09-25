@@ -65,6 +65,7 @@ from .projection.entities import (
     _is_persistable_prop_value,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
+    SHAPE_OBJECT_SUPERSEDED_MISS,
     SHAPE_POINT_INVALIDATED_MISS,
     SHAPE_POINT_RETRACTED_MISS,
     SHAPE_POINT_SUPERSEDED_MISS,
@@ -827,8 +828,11 @@ def _fold_journal(events: list[dict]) -> dict:
 #     `absent-from-graph` on a correctly-replayed graph.
 #   * A name-only `ObjectSuperseded` (no id, >1 carrier) leaves the object's
 #     status AMBIGUOUS: the fold's own resolution is heuristic, so those
-#     objects are EXCLUDED from the comparison — and the exclusion is REPORTED
-#     to the caller (`entity_parity_ambiguous*`), never silently absorbed.
+#     objects' STATUS leg is excluded from the comparison — PRESENCE is still
+#     compared — and the exclusion is REPORTED to the caller
+#     (`entity_parity_ambiguous*`), never silently absorbed. A name-only
+#     supersede with NO carrier at all is NOT ambiguity: it records a refused
+#     `object-superseded-miss`, matching the graph fold.
 #   * The comparison runs in ONE direction, journal→graph (`entity_parity_bounds`
 #     states it): a node the GRAPH holds with no journal record is not a
 #     divergence here, because several in-tree paths write the projection
@@ -878,7 +882,7 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     entities: dict = {}
     deleted: set = set()
     ambiguous: set = set()
-    for ev in events:
+    for seq, ev in enumerate(events):
         t = ev.get("type")
         if t in _ENTITY_CREATION:
             label, default_status = _ENTITY_CREATION[t]
@@ -943,8 +947,23 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     and r.get("status") != "superseded"]
                 if len(carriers) == 1:
                     target = carriers[0]
-                else:
+                elif len(carriers) > 1:
+                    # Genuine ambiguity: the fold's STATUS resolution is
+                    # heuristic, so the status leg is excluded (and reported).
                     ambiguous.add(oname)
+                else:
+                    # #3585 re-review: NO carrier at all is not ambiguity — the
+                    # graph fold matches 0 Objects and records
+                    # `object-superseded-miss` (refused), so the reference fold
+                    # must refuse too, or `check_consistency` passes on a
+                    # journal `rebuild_all` refuses.
+                    record_non_folded(
+                        SHAPE_OBJECT_SUPERSEDED_MISS,
+                        event_id=ev.get("event_id"), event_type=t, seq=seq,
+                        candidates=(oname,),
+                        detail=("reference fold: name-only supersede matched "
+                                "no Object"),
+                    )
             if target is not None:
                 entities[target]["status"] = "superseded"
     return entities, deleted, ambiguous
@@ -991,17 +1010,22 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
 
     Returns ``(mismatches, count, excluded_ambiguous)``. The mismatch LIST is
     capped at ``_MAX_DIVERGENT_POINTS`` (the Point leg's contract) while
-    ``count`` is the true number; ``excluded_ambiguous`` names the Objects the
-    ambiguity bound skipped, so the verdict states what it did NOT compare.
+    ``count`` is the true number; ``excluded_ambiguous`` names the Objects whose
+    STATUS leg the ambiguity bound skipped, so the verdict states what it did
+    NOT compare. PRESENCE is still compared for those objects.
     """
     mismatches: list = []
     count = 0
     excluded_ambiguous: list = []
     for key, rec in journal_entities.items():
         label, eid = key
-        if label == "Object" and rec.get("name") in ambiguous:
+        # #3585 re-review: the ambiguity bound applies to the STATUS leg only.
+        # Presence is decidable by name (the graph MERGEs Object/Subject by
+        # name), so excluding it too could hide a genuine burial — and a
+        # name-only supersede with NO carrier no longer marks ambiguity at all.
+        ambiguous_status = label == "Object" and rec.get("name") in ambiguous
+        if ambiguous_status:
             excluded_ambiguous.append((label, eid, rec.get("name")))
-            continue
         g = graph_entities.get(key)
         if g is None and label in ("Object", "Subject"):
             # The graph MERGEs these labels by NAME, so a second registration
@@ -1021,7 +1045,7 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
         # store `subjectKind`/`doc_status`/`eventStatus` respectively), so the
         # status comparison is bounded to Object — the kind the #3573 shapes
         # bury. Presence is compared for every kind.
-        if label != "Object":
+        if label != "Object" or ambiguous_status:
             continue
         jv = rec.get("status")
         if jv is None:
@@ -1255,6 +1279,8 @@ def check_consistency(log_path: str, projection, *,
             "direction": "journal->graph",
             "status_compared": ["Object"],
             "name_keyed": ["Object", "Subject"],
+            "identity": {"Object": "name", "Subject": "name",
+                         "Document": "id", "Event": "eventId"},
         },
         "non_folded_events": [str(e) for e in non_folded],
         "non_folded_count": len(non_folded),
