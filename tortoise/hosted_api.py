@@ -4643,26 +4643,15 @@ async def get_current_org_session_ungated(request: Request) -> dict:
 
 
 def _key_limit_refusal(message: str = "Key limit reached — revoke an existing key") -> dict:
-    """The api_keys 402 for the doors that hold no count (#4614).
+    """Build the structured 402 `detail` for an api_keys refusal (#4614).
 
-    `quota_refusal_payload` is the ONE builder every quota 402 uses, so the
-    refusal SHAPE — and the `code` a caller branches on — is uniform across
-    doors. This helper is that builder with the argument set for the api_keys
-    doors that cannot resolve the gate's own numbers: the mint/rotate
-    `_KeyCapExceeded` race backstops and the two `/v1/session/key` recovery
-    lanes. It therefore emits `code`/`message`/`resource` and no
-    `used`/`limit`.
-
-    `/v1/team/keys`'s pre-check is deliberately NOT one of them: it goes
-    through `_check_org_limit`, which forwards the numbers
-    `enforce_org_limit` compared. So that one door can answer with or without
-    `used`/`limit` depending on which arm refused — the pre-check knows the
-    numbers, the race backstop does not — which is `quota_refusal_payload`'s
-    documented contract (emit only what the raise site actually knew, never a
-    fabricated count). Before #4614 every one of these doors answered with
-    bare prose, so the same exhausted quota had one machine-readable shape on
-    one door and none on another, and a caller branching on `detail.code`
-    could still not tell an api-keys refusal from any other 402.
+    Called at raise sites that supply no count — the mint/rotate
+    `_KeyCapExceeded` backstops and the two `/v1/session/key` recovery lanes —
+    so the payload is `code` + `message` + `resource`, with `used`/`limit`
+    omitted rather than fabricated (`quota_refusal_payload` emits only the
+    fields the raise site supplies). The `/v1/team/keys` pre-check passes the
+    numbers it compared via `_check_org_limit`, so that payload does carry
+    them.
     """
     from tortoise.quota import QuotaExceededError, quota_refusal_payload
     return quota_refusal_payload(
