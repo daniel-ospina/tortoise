@@ -1015,10 +1015,16 @@ def test_watcher_eligibility_degraded_is_reported():
 
 
 def test_watcher_cp_flicker_on_build_call_does_not_resolve():
-    """#3658 review: the scan and build loops call the graph provider
-    SEPARATELY, so a provider that answers the scan call and returns None on
-    the build call must NOT let the graph's incident be resolved by
-    universe-shrink off an unconfirmed surface (fabricated recovery)."""
+    """#3658 review: a graph provider that answers the scan call and returns None on
+    the build (confirmation) call must NOT let the graph's incident be resolved by
+    universe-shrink off an unconfirmed surface (fabricated recovery).
+
+    Merged (#3031 cycle-2 P1 + #3405 review P2): ``per_graph`` is built from the
+    ONE cached scan enumeration, so the graph STAYS on the surface; the build
+    loop's confirmation read gates the shrink DECISION, and its ``None`` clears
+    ``graph_surface_confirmed``. The safety property is main's; the mechanism is
+    the cache for the surface plus the confirmation read for the shrink.
+    """
     ch = _Channels()
     storage = MemoryStorage()
     _seed_archive(storage, "team_a", 0.5)
@@ -1032,12 +1038,77 @@ def test_watcher_cp_flicker_on_build_call_does_not_resolve():
 
     def _flicker(t):
         calls["n"] += 1
-        return ["g_x"] if calls["n"] == 1 else None  # scan ok, build unconfirmed
+        return ["g_x"] if calls["n"] == 1 else None  # scan ok, confirmation unconfirmed
 
     w._graphs_for = _flicker
     status = w.poll()
-    assert status["per_graph"] == {}
+    assert calls["n"] == 2, (
+        "one cached scan read supplies per_graph; a second confirmation read "
+        "gates the shrink decision (#3405 review P2)"
+    )
+    # The graph stays on the surface (cached list) → the shrink cannot resolve it.
+    assert "team_a:g_x" in status["per_graph"], status["per_graph"]
     assert any("STALE — team_a:g_x" in t for t in ch.issues.values())  # survives
+
+
+def test_watcher_second_read_disagreement_blocks_shrink_without_dropping_keys():
+    """#3405 review P2: a read that DISAGREES with the cached enumeration must
+    clear ``graph_surface_confirmed`` for the shrink decision while ``per_graph``
+    still comes from the CACHED list.
+
+    The regression this pins: caching the scan read removed main's second read,
+    so on a HEALTHY poll a single silently-TRUNCATED enumeration (the documented
+    PostgREST ``db-max-rows`` fail-open class) dropped a live graph's key out of
+    ``per_graph`` and the universe-shrink resolved its still-active incidents —
+    a fabricated false recovery, re-opened when the full read returned (a
+    ✅/🚨 flap). A complete re-read now blocks that resolve, and the CACHED list
+    keeps the keys so an inconsistent read cannot drop them either. A legitimate
+    vanish is only DEFERRED by one poll, never stranded.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    _seed_graph_archive(storage, "team_a", "g_x", 200)  # stale custom graph
+    _seed_graph_state(storage, "team_a", "g_x")
+    _seed_graph_archive(storage, "team_a", "g_y", 200)  # stale custom graph
+    _seed_graph_state(storage, "team_a", "g_y")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_x", "g_y"])
+    s1 = w.poll()
+    assert set(s1["per_graph"]) == {"team_a:g_x", "team_a:g_y"}
+    assert any("STALE — team_a:g_x" in t for t in ch.issues.values())
+    assert any("STALE — team_a:g_y" in t for t in ch.issues.values())
+    assert w._last_graph_keys == {"team_a:g_x", "team_a:g_y"}
+
+    # Poll 2: the SCAN (cached) read is silently TRUNCATED to {g_x}; the
+    # CONFIRMATION read is complete ({g_x, g_y}). g_y's archive is still there.
+    calls = {"n": 0}
+
+    def _disagree(t):
+        calls["n"] += 1
+        return ["g_x"] if calls["n"] % 2 == 1 else ["g_x", "g_y"]
+
+    w._graphs_for = _disagree
+    s2 = w.poll()
+    # (a) no keys dropped: per_graph stays on the CACHED list (so the truncated
+    # read's own key is present) and the inconsistent re-read injects no keys.
+    assert "team_a:g_x" in s2["per_graph"], s2["per_graph"]
+    assert "team_a:g_y" not in s2["per_graph"], s2["per_graph"]
+    # (b) no resolve: the disagreement cleared graph_surface_confirmed, so the
+    # universe-shrink did not run and the live graph's incident survives.
+    assert any("STALE — team_a:g_y" in t for t in ch.issues.values()), (
+        "a read DISAGREEMENT must not resolve a live graph's incident"
+    )
+    assert w._last_graph_keys == {"team_a:g_x", "team_a:g_y"}, (
+        "an unconfirmed shrink must not re-baseline the reference off the "
+        "truncated read (that would strand g_y un-resolvable forever)"
+    )
+
+    # Poll 3: both reads AGREE on the complete {g_x} and g_y is genuinely gone →
+    # resolved. The disagreement only deferred it by one poll.
+    w._graphs_for = lambda t: ["g_x"]
+    w.poll()
+    assert not any("team_a:g_y" in t for t in ch.issues.values())
 
 
 def test_watcher_universe_shrink_to_empty_resolves_org_incidents():
@@ -1457,3 +1528,226 @@ def test_watcher_transient_manifest_read_failure_no_fabricated_stale():
     # fresh (0.5 h < 90 min) — NOT stale, no incident
     assert status["per_team"]["team_a"] == "ok"
     assert not any("STALE" in t for t in list(ch.issues.values()))
+
+
+# ── #3031: a broken alerter must never fabricate WATCHER_DOWN ────────────────
+
+
+def test_alert_path_failure_still_writes_the_heartbeat():
+    """#3031: the alert store shares the R2 storage, so the degraded condition
+    R2_DOWN reports is exactly what makes `open_incident` raise. Uncontained,
+    that exception escaped the poll and skipped the heartbeat — and the DR driver
+    then filed WATCHER_DOWN against a watcher that was alive, masking the real
+    R2 fault.
+
+    The fixture seeds a STALE team, so the alert legs DO run: `open_incident` is
+    the first leg that fires (never resolving), and it raises here.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)   # stale → the alert legs fire
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    calls: list[tuple[str, str]] = []
+
+    def _boom(kind, team_id="", detail=None):
+        calls.append(("open", f"{kind}/{team_id}"))
+        raise RuntimeError("R2 read outage while filing the incident")
+
+    w._alerts.open_incident = _boom  # type: ignore[method-assign]
+    status = w.poll()
+
+    # The failure was actually reached (no vacuous pass: the leg ran and raised).
+    assert calls == [("open", "STALE/team_a")], calls
+    hb = json.loads(storage.download(HEARTBEAT_KEY))
+    assert hb["last_poll_at"], "the heartbeat must be written despite the alert failure"
+    assert status["per_team"]["team_a"] == "stale"
+    assert ch.issues == {}, "nothing could be filed — the store is down"
+
+
+def test_vanished_graph_resolution_failure_is_contained():
+    """#3031 (review): the universe-shrink resolutions used to run on the poll's
+    critical path OUTSIDE any containment — a raise there escaped before the
+    heartbeat and fabricated WATCHER_DOWN. Same gate, now contained, and the
+    `_last_graph_keys` update happens only AFTER a successful pass so the retry is
+    not lost."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 2)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w._last_graph_keys = {"team_a", "team_a:vanished"}
+
+    def _boom(kind, team_id=""):
+        raise RuntimeError("alert store down")
+
+    w._alerts.resolve_incident = _boom  # type: ignore[method-assign]
+    w.poll()
+
+    assert json.loads(storage.download(HEARTBEAT_KEY))["last_poll_at"]
+    # `resolve_incident` RAISES on a failed close (a `False` return only means
+    # "nothing open"), and the failed key is kept so the next poll's `prev - cur`
+    # diff re-includes it. Retiring it would document a retry that never happens.
+    assert "team_a:vanished" in w._last_graph_keys
+    attempts = {"n": 0}
+
+    def _count(kind, team_id=""):
+        attempts["n"] += 1
+        raise RuntimeError("alert store still down")
+
+    w._alerts.resolve_incident = _count  # type: ignore[method-assign]
+    w.poll()
+    assert attempts["n"] > 0, "the pending key must be retried on the next poll"
+
+
+def test_alert_failure_does_not_lose_the_poll_or_the_heartbeat():
+    """A failure while resolving/opening a leg must not stop the poll: the poll
+    returns its status and the heartbeat still lands (the remaining legs are
+    re-evaluated on the next poll — the lifecycle is dedup-backed and idempotent;
+    that trade is what guarantees the heartbeat)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    def _boom(kind, team_id="", detail=None):
+        raise RuntimeError("alert store down")
+
+    w._alerts.open_incident = _boom  # type: ignore[method-assign]
+    w.poll()
+    # No incident could be filed (the store is down) — but the poll completed and
+    # the heartbeat is fresh, so the failure is visible as itself, not as a
+    # fabricated WATCHER_DOWN.
+    assert ch.issues == {}
+    assert json.loads(storage.download(HEARTBEAT_KEY))["r2_ok"] is True
+
+
+# ── cycle-3 review: universe shrink across surfaces ─────────────────────────
+
+
+def test_universe_shrink_closes_the_absent_team_kinds_without_churn():
+    """A team whose seam entry and R2 prefix disappear closes its STALE incident on
+    the shrink poll, and a lingering `ops/teams/{team}/state.json` keeps
+    BACKUP_SET_MISSING open.
+
+    NOTE: this test does NOT defend the shrink leg's BACKUP_SET_MISSING exclusion —
+    the kind is not yet open when the leg runs, so re-adding it to the tuple still
+    passes (verified by mutation). The exclusion is pinned by
+    `test_no_teams_shrink_does_not_resolve_then_reopen_a_backup_set_missing_team`.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)          # stale → STALE
+    _seed_state(storage, "team_a")                 # → keeps BACKUP_SET_MISSING
+    w = _watcher(storage, ch)
+
+    w.poll()   # team present, stale
+    assert any("STALE" in t for t in ch.issues.values()), ch.issues
+
+    # The universe disappears from the seam AND from R2, but the state file stays.
+    w._orgs = lambda: []
+    for k in list(storage.list("backups/team_a/")):
+        storage.delete(k)
+
+    w.poll()
+    titles = sorted(ch.issues.values())
+    assert not any("STALE" in t for t in titles), titles
+    assert titles == ["[DR] BACKUP_SET_MISSING — team_a"], titles
+
+    # Second shrink poll: the same single issue, no resolve-then-reopen churn.
+    w.poll()
+    assert sorted(ch.issues.values()) == titles, ch.issues
+    assert len(ch.issues) == 1, ch.issues
+
+
+def test_no_teams_leg_uses_the_previous_surface_snapshot():
+    """The shrink leg resolves the PREVIOUS org surface — the caller snapshots
+    `_last_confirmed_per_team` before this poll re-baselines it; without the
+    snapshot the leg reads the current (empty) surface and is a no-op.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    assert any("STALE" in t for t in ch.issues.values()), ch.issues
+
+    w._orgs = lambda: []
+    for k in [k for k in storage.list("") if k.startswith("backups/team_a/")]:
+        storage.delete(k)
+    storage.delete("ops/teams/team_a/state.json")   # fully gone from every surface
+    w.poll()
+    assert not ch.issues, f"the previous surface's incidents must close: {ch.issues}"
+
+
+def test_no_teams_shrink_does_not_resolve_then_reopen_a_backup_set_missing_team():
+    """The exclusion's purpose, pinned directly and non-vacuously: a team the shrink
+    leg would resolve (it is in the PREVIOUS surface) whose BACKUP_SET_MISSING is
+    still open (an earlier close failed) must not be resolved and immediately
+    re-opened in the SAME poll — that is a ✅-then-🚨 Telegram flip with a fresh
+    issue on every poll.
+
+    Mutation-checked: re-adding BACKUP_SET_MISSING to the shrink tuple makes this
+    test fail (the ✅ push appears); without it, the open leg is a dedup no-op.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")              # state, never any archives
+    w = _watcher(storage, ch, orgs=())
+    # The incident is already open in the WATCHER's own store — e.g. its close
+    # failed on an earlier poll. (Seeding through `_store(ch)` would write to a
+    # different MemoryStorage and make this test vacuous — verified by mutation.)
+    assert w._alerts.open_incident("BACKUP_SET_MISSING", "team_a") is True
+    number = max(ch.issues)
+    w._last_confirmed_per_team = {"team_a"}   # and it was on the surface
+
+    for _ in range(3):                          # repeated polls = the flip surface
+        w.poll()
+
+    assert not [t for t in ch.telegram if "resolved" in t], ch.telegram
+    assert max(ch.issues) == number, "the incident must not be re-filed (flip)"
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues
+
+
+def test_a_failed_team_resolve_is_carried_pending_and_retried():
+    """Final-cycle review P1: `prev_per_team` is a ONE-SHOT snapshot, so a team
+    whose close failed on the shrink poll would never be revisited — the same
+    permanent-orphan defect the graph path fixed with its `pending` set. The
+    failure must be carried in `_pending_team_resolves` and retried once the
+    close cooldown allows it.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    clock = [FIXED]
+    w = _watcher(storage, ch, orgs=(), now_fn=lambda: clock[0])
+    assert w._alerts.open_incident("STALE", "team_a") is True
+    assert w._alerts.open_incident("NEVER_BACKED_UP", "team_a") is True
+    assert w._alerts.open_incident("METADATA_LOST", "team_a") is True
+    w._last_confirmed_per_team = {"team_a"}
+
+    attempts = {"n": 0}
+
+    def _flaky(kind, team_id=""):
+        attempts["n"] += 1
+        raise RuntimeError("github 403")
+
+    w._alerts.resolve_incident = _flaky  # type: ignore[method-assign]
+
+    w.poll()
+    first = attempts["n"]
+    assert first >= 3, "the shrink poll must attempt the team's kinds"
+    assert "team_a" in w._pending_team_resolves, "the failure must be carried"
+
+    # Next poll (still cooling down / still failing): retried, not forgotten.
+    clock[0] = clock[0] + timedelta(minutes=5)
+    w.poll()
+    assert attempts["n"] > first, "the pending team must be retried"
+    assert "team_a" in w._pending_team_resolves
+
+    # Recovery: the resolves succeed and the team leaves the pending set.
+    w._alerts.resolve_incident = lambda kind, team_id="": True  # type: ignore[method-assign]
+    w.poll()
+    assert "team_a" not in w._pending_team_resolves
