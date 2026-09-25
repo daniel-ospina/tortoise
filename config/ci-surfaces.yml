@@ -2132,3 +2132,13 @@ durations:
   test_session_reinjection.py: 0.0        # true CI junit sum 2.864 (20 tests)
   test_session_reinjection_rules.py: 0.0  # true CI junit sum 0.802 (38 tests)
   test_backups_v1_alias.py: 0.01
+  # #2961: newly-declared fast file — this PR's base sat ON the #3400 coverage
+  # floor (544/604 = 90.07% PASS), so the one file it adds to the fast pool
+  # dropped it to 544/605 = 89.9% FAIL: `test (b)`
+  # (test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic)
+  # and the `manifest-integrity` job (`tools/ci_selection.py --integrity`) both
+  # red on that single condition. Measured 23 tests / 13.12s local (10.0s of it
+  # is the deliberate lock-deadline sleep, so it is load-insensitive) rather than
+  # the flat 2.0s default; the PR's base has no junit for a file it introduces.
+  # Supersede from the first post-merge main run that includes it (#4817/#4729).
+  test_graph_delete_guard.py: 13.1
