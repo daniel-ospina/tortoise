@@ -1068,11 +1068,27 @@ class _EntityHandlers:
         # fold would faithfully replay an edge the ontology does not have.
         if (rel, src_label, tgt_label) not in self._ENTITY_LINKED_TRIPLES:
             return _malformed("not a permitted ONTOLOGY §3.2 triple")
-        r = self.g.query(
-            f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
-            f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
-            params={"sid": sid, "tid": tid},
-        )
+        # #1370: the binding confidence is OPTIONAL on the record. It is SET
+        # only when present, mirroring the live writer's conditional SET — so
+        # a later no-confidence EntityLinked for the same edge cannot clear a
+        # confident one on replay (the live pre-probe short-circuits, and this
+        # fold must agree). Non-numeric/NaN values are ignored, not written.
+        conf = ev.get("confidence")
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)):
+            conf = None
+        if conf is None:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
+                params={"sid": sid, "tid": tid},
+            )
+        else:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[e:{rel}]->(t) SET e.confidence=$conf "
+                "RETURN count(s)",
+                params={"sid": sid, "tid": tid, "conf": float(conf)},
+            )
         n = int(r.result_set[0][0]) if r.result_set else 0
         return (1, "ok") if n else (0, "absent")
 

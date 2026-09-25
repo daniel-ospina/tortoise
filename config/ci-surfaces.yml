@@ -170,6 +170,9 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  # #1370: dual-registered with `core` — the same test file covers the hosted
+  # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
+  - test_subject_binding_1370.py
   - test_verbatim_span.py  # #5007: the fourth layer's SPAN link is a POINTER into the Source's raw text, not a payload — schema all-or-nothing + node round-trip + the "no verbatim text on the node" trap (registered here with test_commit_schema.py: it guards the same contract, and `tortoise/sdk.py` selects this surface)
   - test_cross_subdomain_cookie_sync.py
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
@@ -548,6 +551,12 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
+  # #1370: write-time subject binding — the confidence-gated, fail-closed
+  # Point→aboutSubject producer + its audit/quality-gate tooling. Registered
+  # under `core` like its sibling binder guard (test_capture_entity_attachment_
+  # 3664.py) and the unpatterened engine modules it exercises (subject_binding,
+  # session_link, projection/entities, sdk). It also covers hosted_api.py.
+  - test_subject_binding_1370.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
   - test_client_cli_probe.py

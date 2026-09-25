@@ -4914,15 +4914,35 @@ class TortoiseSDK:
         # topical entities (the pinned Session-link contract: the Session's
         # aboutObject set is the resolved reference targets, nothing else).
         from .session_link import link_entity
+        from .subject_binding import bind_point_subjects, is_subject_kind
+        # #1370 / #4934: kind→label routing at the WRITE seam. The extractor's
+        # declared §5 Subject kinds must become `:Subject` nodes — otherwise
+        # the Subject layer is unreachable (no aboutSubject target exists) and
+        # the Subject vocabulary leaks into `Object.objectKind`. The binder is
+        # the ONLY confidence-gated aboutSubject producer, so the legacy
+        # `about_entities` topic channel below SKIPS subject-kind names (it
+        # must not emit an un-gated aboutSubject, and it must not mint an
+        # id-less Object stub for one).
+        subject_entity_names: set[str] = set()
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
+            _ekind = str(e.get("kind", "core:other"))
+            _is_subject = is_subject_kind(_ekind)
+            if _is_subject:
+                subject_entity_names.add(name.lower())
             try:
-                self.create_entity(
-                    "object", name,
-                    objectKind=str(e.get("kind", "core:other")),
-                    is_episodic=False)
+                if _is_subject:
+                    self.create_entity(
+                        "subject", name,
+                        subjectKind=_ekind,
+                        is_episodic=False)
+                else:
+                    self.create_entity(
+                        "object", name,
+                        objectKind=_ekind,
+                        is_episodic=False)
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
@@ -5088,6 +5108,13 @@ class TortoiseSDK:
                             # arbitrary node; (b) a NULL/absent `id` yielded
                             # `[None]` and no edge at all.
                             _n = name.strip()
+                            if _n.lower() in subject_entity_names:
+                                # #1370: the binder owns the gated
+                                # aboutSubject edge; the topic channel must
+                                # not produce an un-gated one, nor an
+                                # id-less Object stub for a subject-kind
+                                # name (the #4934 label leak).
+                                continue
                             _oid_rows = proj.g.query(
                                 "MATCH (o:Object {name:$n}) "
                                 "RETURN o.id",
@@ -5118,6 +5145,20 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid})
+                # #1370: write-time, confidence-gated, fail-closed subject
+                # binding. Only on a genuine create — a dedup hit resolved to
+                # a canonical whose binding was set when IT was created
+                # (first-writer; re-journaling would duplicate records).
+                if created_here and pt.get("slots"):
+                    try:
+                        bind_point_subjects(proj, self, point_id=pid,
+                                            slots=pt.get("slots"))
+                    except Exception as _sb_exc:  # noqa: BLE001, RUF100
+                        # Binding is best-effort — it must never sink the
+                        # commit (the point content is already durable).
+                        warnings.append(
+                            f"subject binding failed for {pid}: "
+                            f"{type(_sb_exc).__name__}: {_sb_exc}")
                 if not created_here:
                     # #2949 (review P2): a dedup hit wrote NONE of these props
                     # in this call (the session CONTAINS edge above is still

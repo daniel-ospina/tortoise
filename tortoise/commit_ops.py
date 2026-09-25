@@ -545,9 +545,24 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             params={"sb": supersedes_by},
         ).result_set
         if not sb_rows:
-            warn(f"entity supersession {ref!r} skipped — successor "
-                 f"{supersedes_by!r} is not an Object in the payload "
-                 f"entities or the graph (dangling successor)")
+            # #1370: routing a subject-kind entity to `:Subject` means an
+            # entity supersession record for it can no longer resolve to an
+            # Object. Report that case ACCURATELY (the generic "dangling
+            # successor" message would misdiagnose a correctly-typed node
+            # as a missing one) and skip — entity supersession is Object-only.
+            _subj = proj.g.query(
+                "MATCH (s:Subject {name:$sb}) RETURN count(s)",
+                params={"sb": supersedes_by},
+            ).result_set
+            if _subj and _subj[0][0]:
+                warn(f"entity supersession {ref!r} skipped — successor "
+                     f"{supersedes_by!r} is a :Subject (a declared §5 "
+                     f"subject kind, #1370); entity supersession is "
+                     f"Object-only")
+            else:
+                warn(f"entity supersession {ref!r} skipped — successor "
+                     f"{supersedes_by!r} is not an Object in the payload "
+                     f"entities or the graph (dangling successor)")
             continue
         # NB: >1 successor rows are NOT skipped here — the alias scan below
         # (post ref-side resolution) decides. Duplicate names are only

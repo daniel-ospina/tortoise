@@ -11407,6 +11407,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #1370 / #4934: the SAME kind→label routing + gated binder as the local
+    # capture seam (anti-drift — both call `subject_binding`). Subject-kind
+    # names are excluded from the legacy `about_entities` channel below: the
+    # binder is the only confidence-gated aboutSubject producer, and the raw
+    # `MERGE (:Object {name})` would otherwise re-mint the #4934 label leak.
+    from tortoise.subject_binding import bind_point_subjects, is_subject_kind
+    subject_entity_names = {
+        er.entity.name.lower() for er in reconcile.entities
+        if is_subject_kind(er.entity.kind)
+    }
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
     document_basename = _document_source_basename(payload)
@@ -11487,6 +11497,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
+            if str(name).lower() in subject_entity_names:
+                continue  # #1370: the gated binder owns aboutSubject
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
             # edge for NEW entities. MERGE creates the :Object on demand
@@ -11645,12 +11657,20 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # §4.3 #12); aboutObject edges (the canonical predicate — aboutEntity does
     # NOT exist, §4.2). ──
     for er in reconcile.entities:
-        sdk.create_entity(
-            "object", er.entity.name,
-            objectKind=er.entity.kind,
-            passes_frequency_gate=er.entity.passes_frequency_gate,
-            is_episodic=False,
-        )
+        if is_subject_kind(er.entity.kind):
+            sdk.create_entity(
+                "subject", er.entity.name,
+                subjectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
+        else:
+            sdk.create_entity(
+                "object", er.entity.name,
+                objectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED
@@ -11704,11 +11724,24 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
         for name in pr.point.about_entities:
+            if str(name).lower() in subject_entity_names:
+                continue  # #1370: the gated binder owns aboutSubject
             proj.g.query(
                 "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
                 "MERGE (p)-[:aboutObject]->(o)",
                 params={"pid": pid, "name": name},
             )
+        # #1370: write-time, confidence-gated, fail-closed subject binding —
+        # the SAME shared driver the local capture seam calls. Only for a
+        # newly-written/superseding point (a `merge` resolved to an existing
+        # canonical whose binding was set when it was created).
+        if pr.action in ("new", "supersede") and pr.point.slots:
+            try:
+                bind_point_subjects(proj, sdk, point_id=pid,
+                                    slots=pr.point.slots)
+            except Exception:  # noqa: BLE001, RUF100 — never sinks a commit
+                _logger.warning("subject binding failed for %s", pid,
+                                exc_info=True)
 
     # ── 7. Operators — shared commit semantics via apply_payload_operators
     # (#1532 D3; extracted verbatim from this block so the commit and capture
