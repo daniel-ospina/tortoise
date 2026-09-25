@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Page not found — Tortoise</title>
+    <meta name="robots" content="noindex" />
+    <meta name="theme-color" content="#060b14" />
+    <link rel="icon" href="data:," />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      :root {
+        --bg: #060b14;
+        --panel: #0d1524;
+        --border: #1e2c44;
+        --text: #cbd5e1;
+        --text-dim: #8b9bb4;
+        --accent: #22d3ee;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      main { width: 100%; max-width: 520px; }
+      .code {
+        margin: 0 0 0.5rem;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--accent);
+      }
+      h1 { margin: 0 0 0.75rem; font-size: 1.5rem; line-height: 1.3; font-weight: 600; }
+      p { margin: 0 0 1.25rem; color: var(--text-dim); }
+      code {
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        font-size: 0.9em;
+        color: var(--text);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.1em 0.45em;
+        overflow-wrap: anywhere;
+      }
+      a {
+        display: inline-block;
+        padding: 0.65rem 1.1rem;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 500;
+      }
+      a:hover { border-color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="code">404 &middot; NOT FOUND</p>
+      <h1>This address isn&rsquo;t part of the dashboard.</h1>
+      <p>
+        <code id="requested">this path</code> doesn&rsquo;t exist on
+        <code>app.premiselabs.co</code>. The dashboard, its welcome flow, and
+        billing returns all live at the root.
+      </p>
+      <a href="/">Go to the dashboard &rarr;</a>
+    </main>
+    <script>
+      // Name the address that was actually requested — the whole point of this
+      // page is that the path is not silently discarded.
+      document.getElementById("requested").textContent =
+        location.pathname + (location.search || "");
+    </script>
+  </body>
+</html>

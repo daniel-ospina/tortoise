@@ -34,7 +34,9 @@ jobs:
       python: ${{ steps.gate.outputs.python }}
       drift: ${{ steps.gate.outputs.drift }}
       driver_scripts: ${{ steps.gate.outputs.driver_scripts }}
+      ai_review_gate: ${{ steps.gate.outputs.ai_review_gate }}
       watchdog_scripts: ${{ steps.gate.outputs.watchdog_scripts }}
+      orphan_bound_scripts: ${{ steps.gate.outputs.orphan_bound_scripts }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,14 +46,28 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="origin/main"
-          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)
+          CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
           echo "$CHANGED"
           cat > /tmp/ci-gates.py <<'PY'
+          import subprocess
           import sys
 
           out = sys.argv[1]
           files = [ln.strip() for ln in sys.stdin if ln.strip()]
+
+          # The client wheel's shared-module set is DERIVED from the build
+          # script via client/shared_modules.sh (#3805). A literal
+          # enumeration here is what silently gated client-build OFF when
+          # tortoise/status_vocabulary.py was staged into the wheel. Fail
+          # closed: an underivable set must never silently skip the leg.
+          _probe = subprocess.run(["bash", "client/shared_modules.sh"],
+                                  capture_output=True, text=True)
+          SHARED = _probe.stdout.split()
+          if _probe.returncode != 0 or not SHARED:
+              print("::error::cannot derive the client wheel's shared modules "
+                    "from client/build_client.sh (client/shared_modules.sh)")
+              sys.exit(1)
 
           def startswith(p):
               return lambda f: f.startswith(p)
@@ -74,9 +90,41 @@ jobs:
                   startswith("supabase/migrations/"),
                   startswith(".github/scripts/check-migration-"),
               ),
-              # dashboard-js-tests (agent-infra node-ci in website/apps/dashboard)
+              # dashboard-js-tests (agent-infra node-ci in website/apps/dashboard).
+              # #3775: the suite BUILDS the bundle before testing it, and
+              # src/pricing.js imports product/pricing.json at build time — a
+              # pricing-only change can break that build. It used to ride in via
+              # the committed dist under website/apps/dashboard/; the artifact is
+              # untracked now, so name the input explicitly.
               "dashboard": any_file(
                   startswith("website/apps/dashboard/"),
+                  isfile("product/pricing.json"),
+                  # #3485: the dashboard's node suite loads the shared
+                  # website/assets/supabase-session.js bridge directly
+                  # (supabaseSessionBridge.test.js). Without this entry a PR
+                  # touching ONLY the bridge selects the `website` surface and
+                  # skips dashboard-js-tests, so the behavioural tests for the
+                  # very file under review would never run.
+                  isfile("website/assets/supabase-session.js"),
+                  # #3525: the dashboard's security-headers guard also pins the
+                  # MARKETING project's CSP, and it SCANS both projects'
+                  # `functions/` trees (cookie writers, `text/html` producers) —
+                  # the same policy text has to exist in a second `_headers` and
+                  # a second constant because a Pages project's `functions/`
+                  # cannot import across project roots, and
+                  # securityHeaders.test.js is what keeps the copies identical.
+                  # Scope by PREFIX, not by a list of filenames: the guard reads
+                  # the whole tree, so a file it scans but this predicate does
+                  # not name (a new marketing Function, or any file the guard
+                  # gains later) would skip dashboard-js-tests and let the guard
+                  # fail only where it never runs. A literal list is also
+                  # disarmed by a pure add: the new path matches nothing here
+                  # even though the guard scans it. The prefix is a superset of
+                  # the guard's input set by construction, which is the
+                  # fail-closed direction. `website/_headers` is a sibling of
+                  # `functions/`, so it is named explicitly.
+                  startswith("website/functions/"),
+                  isfile("website/_headers"),
               ),
               # uv-lock-check
               "uv_lock": any_file(
@@ -86,12 +134,15 @@ jobs:
               "entrypoints": any_file(
                   isfile("entrypoint.sh", ".ci-checks/check-entrypoint-guards.sh"),
               ),
-              # client-build (wheel staged from client/ + the 3 canonical
-              # shared modules build_client.sh copies into the wheel)
+              # client-build (wheel staged from client/ + the canonical
+              # shared modules build_client.sh copies into the wheel). The
+              # module set is DERIVED from the build script (SHARED, above)
+              # so a newly staged module cannot miss this gate again — the
+              # PR #4044 review regression, where status_vocabulary.py
+              # shipped in the wheel while this predicate named three.
               "client": any_file(
                   startswith("client/"),
-                  isfile("tortoise/mcp_client.py", "tortoise/config.py",
-                         "tortoise/exceptions.py"),
+                  isfile(*["tortoise/" + m for m in SHARED]),
               ),
               # packaging-smoke (wheel/sdist pack catalog + doc-consistency).
               # Pack SOURCE is the root packs/ tree (pyproject maps
@@ -119,7 +170,12 @@ jobs:
                   and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
-                         "tests/test_tenant_provision_cors.mjs"),
+                         "tests/test_tenant_provision_cors.mjs",
+                         # #4481: the blog SSR markdown renderer's harness. Its
+                         # subject (website/functions/blog/_lib.ts) already
+                         # matches the website/ prefix, but the harness itself
+                         # needs a path entry or a test-only PR would not run it.
+                         "tests/test_blog_markdown.mjs"),
                   # #3501: the BFF auth suites live here and had NO path entry,
                   # so a PR touching only them could not trigger the job that
                   # runs them — the job would be skipped, not failed.
@@ -210,31 +266,128 @@ jobs:
               "watchdog_scripts": any_file(
                   startswith(".github/scripts/availability-watchdog"),
                   startswith(".github/scripts/welcome-e2e-monitor"),
+                  # #3810: the record-only baseline recorder — its harness proves
+                  # the record cannot silently lose the cadence factor that
+                  # qualifies every availability figure.
+                  startswith(".github/scripts/availability-record"),
+                  # #4545: the post-deploy health gate's harness — extracted from
+                  # deploy-hosted.yml so the gate that decides whether a deploy
+                  # SUCCEEDED is testable. It pins the regression where the gate
+                  # asserted /health/ready once after polling the strictly
+                  # weaker db.ok, reddening healthy deploys.
+                  startswith(".github/scripts/deploy-health-gate"),
+                  # #3907: the SHARED auto-file substrate the re-pointed
+                  # monitors file through (e2e-live-reconcile, tenant-provision)
+                  # — its harness pins search-before-file (one issue per
+                  # finding), the recurrence counter, the machine-author +
+                  # exact-title guard against a forged look-alike title, and
+                  # fail-closed on a failed search.
+                  # TODO(#5019): availability-watchdog.sh — the monitor #3907
+                  # names as "the shape the fix is about" — and
+                  # availability-record.sh / welcome-e2e-monitor.sh /
+                  # registry-cron.sh still POST inline, so the substrate is not
+                  # yet what EVERY monitor files through.
+                  startswith(".github/scripts/auto-file-issue"),
+                  # #4759: the bypass reporter / expiry helper and the scheduled
+                  # check that ages every SKIP_* lane left set.
+                  startswith(".github/scripts/deploy-bypass"),
+                  isfile(".github/workflows/skip-bypass-expiry.yml"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
+                  isfile(".github/workflows/availability-record.yml"),
+                  isfile(".github/workflows/deploy-hosted.yml"),
+                  # #3907: the auto-file adopters — a change to the monitor that
+                  # calls the substrate re-runs its harness.
+                  isfile(".github/workflows/e2e-live-reconcile.yml"),
+                  isfile(".github/workflows/tenant-provision-monitor.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
               ),
+              # orphan_bound_scripts (#4740): the redislite orphan gate's harness
+              # — extracted from python-ci.yml so the bound it enforces (read
+              # from the conftest session-end sweep's own report, never a
+              # hand-picked constant) is testable. Gated on that gate's surface
+              # only.
+              "orphan_bound_scripts": any_file(
+                  startswith(".github/scripts/orphan-bound"),
+                  isfile(".github/workflows/python-ci.yml"),
+                  isfile(".github/workflows/ci.yml"),
+                  # #4740: tests/conftest.py defines the JSON contract the gate
+                  # parses (the session-end sweep's report) — a conftest-only
+                  # contract change must re-run the harness. The report field
+                  # set and its builder live in tortoise/embedded_reaper.py
+                  # (conftest imports them), so that module is a trigger too.
+                  isfile("tests/conftest.py"),
+                  isfile("tortoise/embedded_reaper.py"),
+              ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on
-              # the suite + the harness module/fixtures it imports + the
-              # render-critical src (a render PR runs the suite against its
-              # committed dist — render changes ship the dist rebuild in the
-              # same PR per convention, #2175 precedent) + any committed-dist
-              # change + workflow edits (a job-definition change re-runs its
-              # own suite). Known blind spot (accepted): a src render change
-              # that forgets its dist rebuild runs against the previous
-              # bundle — detecting that would require an in-CI npm build,
-              # which the scope doc S6 explicitly excludes (committed-dist
-              # convention; deploy-pages rebuilds from src at deploy).
+              # the suite + the harness module/fixtures it imports + every
+              # input the served dashboard bundle is BUILT from + workflow edits
+              # (a job-definition change re-runs its own suite).
+              #
+              # #3775: `dist/` was untracked, so it can no longer appear in a
+              # diff — this entry used to catch the committed rebuild, which was
+              # how a `public/`-only change (or a build-input change) became
+              # visible at all. The filter now names the build INPUTS directly,
+              # which is strictly more robust than the rebuild convention was:
+              # a change to any of them changes the bundle the job serves.
+              # (The pre-#3775 'known blind spot' — a src change that forgot its
+              # dist rebuild ran against the previous bundle — is GONE: the job
+              # builds before it boots.)
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
                   isfile("tests/e2e/test_graphs_management.py"),
+                  # #4221: `test_session_login_flow.py` is the SHARED HARNESS
+                  # for every migrated dashboard spec (the two CI specs, the
+                  # ship-test guard, and the onboarding suite wired in below),
+                  # so a change to it must re-run this job even though its own
+                  # three tests are not part of the list. It was previously
+                  # listed here while NOTHING ran it — which is the inversion
+                  # #4221 flags; the entry is now load-bearing rather than idle.
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
+                  # #4221: the onboarding wizard spec (36 collected cases) was
+                  # registered and green but never invoked. It is the one spec
+                  # of the four that #4221 named as never-run that still passes
+                  # end-to-end against the CURRENT app (see the issue's follow-up
+                  # for the other three), so it joins the job's pytest list and
+                  # needs this path entry — otherwise a PR touching ONLY it
+                  # skips the job (skipped, not failed). Same #3501 rationale as
+                  # the auth-suite entries under `website` above.
+                  isfile("tests/e2e/test_dashboard_onboarding.py"),
+                  # #3806: the ship-test guard's browser half (real clean-browser
+                  # walk against the built bundle) + the instrument it guards.
+                  isfile("tests/e2e/test_ship_test_onboarding.py",
+                         "tests/test_ship_test_onboarding.py",
+                         "tools/ship_test_onboarding.py"),
                   startswith("website/apps/dashboard/src/"),
-                  startswith("website/apps/dashboard/dist/"),
+                  # public/ is copied verbatim into dist/ by vite (default
+                  # publicDir) and was previously only visible via the
+                  # committed dist rebuild — a public-only change must still
+                  # run the suite that serves that copy.
+                  startswith("website/apps/dashboard/public/"),
+                  # the vite entry document + build config + deps
+                  isfile("website/apps/dashboard/index.html",
+                         "website/apps/dashboard/vite.config.js",
+                         "website/apps/dashboard/package.json",
+                         "website/apps/dashboard/package-lock.json"),
+                  # src/pricing.js imports product/pricing.json from the repo
+                  # root (4 levels up) at build time, so a pricing change
+                  # changes the served bundle — it too used to surface only
+                  # through the committed dist rebuild.
+                  isfile("product/pricing.json"),
+                  isfile(".github/workflows/ci.yml"),
+              ),
+              # ai-review-gate-tests (#2982): the signed-review merge gate's
+              # shell harness. Gated on the workflow, the harness, and ci.yml
+              # itself so a change to either side of the gate always exercises
+              # its evidence-acceptance logic. Security-relevant: a regression
+              # here silently accepts unsigned/stale evidence.
+              "ai_review_gate": any_file(
+                  isfile(".github/workflows/ai-review-gate.yml"),
+                  isfile(".github/scripts/ai-review-gate.test.sh"),
                   isfile(".github/workflows/ci.yml"),
               ),
           }
@@ -379,7 +532,13 @@ jobs:
       - name: Get changed markdown files
         id: changed
         run: |
-          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          # `--no-renames` is deliberate here, though this is a lint-target list
+          # rather than a changed-set SELECTION set (so the pin that enforces the
+          # flag workflow-wide still applies to it): a rename's deleted .md source
+          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
+          # path, and plain .md deletions already produce exactly such paths.
+          # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
+          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
         if: steps.changed.outputs.files != ''
@@ -392,19 +551,32 @@ jobs:
 
   dashboard-js-tests:
     needs: changes
-    if: needs.changes.outputs.dashboard == 'true'  # #2149: website/apps/dashboard/** only
-    # #1894/#387: the dashboard's pure-derivation + CSS-rule test suite (node
-    # --test, zero deps) now runs via the agent-infra reusable unit-test
-    # capability (node-ci.yml@v0.1.2) — the migration target of #387.
+    if: needs.changes.outputs.dashboard == 'true'  # #2149: dashboard surface (+ product/pricing.json, #3775)
+    # #1894/#387: the dashboard's derivation + CSS-rule test suite (node --test)
+    # runs via the agent-infra reusable unit-test capability
+    # (node-ci.yml@v0.1.3) — the migration target of #387.
+    #
+    # #3775: it is no longer a zero-dep suite. `dist/` was untracked (it is a
+    # build artifact), and two members of the glob read the SHIPPED bundle off
+    # disk — `distBundle.test.js` (the #2865/#3428/#2937 artifact backstop,
+    # which is the only scan that sees a writer living in a `public/`-copied
+    # script) and the dist-copy case in `graphsBackupColumnTripwire.test.js`.
+    # The suite therefore builds first (`npm ci && npm run build`) and asserts
+    # against the fresh vite output — byte-identical to what deploy-pages
+    # ships — instead of a committed bundle that can no longer exist. This is
+    # the reusable workflow's documented `test-command` escape hatch (it
+    # overrides `test-glob`). The old staleness premise ("src changed, dist
+    # not rebuilt") is structurally gone: there is no committed bundle to go
+    # stale.
     # script-validate/skill-lint skipped: tortoise's scripts/ symlink is
     # machine-local (broken on the runner) and there is no
     # scripts/check-skill-lint.mjs (un-bootstrapped) — the stack gates live
     # in python-ci.yml.
-    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.2
+    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.3
     with:
       node-version: '22'
       working-directory: website/apps/dashboard
-      test-glob: 'src/*.test.js'
+      test-command: 'npm ci && npm run build && node --test src/*.test.js'
       script-validate: false
       skill-lint: false
     secrets: inherit
@@ -462,6 +634,33 @@ jobs:
       - name: Backup driver state taxonomy (#2796)
         run: bash .github/scripts/registry-cron.test.sh
 
+  ai-review-gate-tests:
+    needs: changes
+    if: needs.changes.outputs.ai_review_gate == 'true'  # #2982: gate workflow/harness only
+    # #2982: the ai-review-gate's evidence-validation shell logic runs inline
+    # in the workflow (that workflow has no checkout step, so it cannot
+    # reference a repo script). This
+    # harness extracts that run block and drives it with fabricated signed
+    # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
+    # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
+    # PR-body source. It ALSO asserts the non-runtime invariants the required
+    # job depends on: no if:/needs:/continue-on-error:, trigger stays
+    # pull_request_target with no paths: filter, permissions keep
+    # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
+    # network, no secrets.
+    #
+    # ⚠️ This job is NOT a required status check: a red harness does not block a
+    # merge, so a regression here can land and then silently make the REQUIRED
+    # `ai-review-gate` check pass without evaluating evidence. Tracked in #3091
+    # (add this job to branch protection, or move the harness into an
+    # always-run required job). The `if:` above is a complete per-surface guard:
+    # it fires on any change to the gate workflow, this harness, or ci.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: AI review gate shell harness (#2982)
+        run: bash .github/scripts/ai-review-gate.test.sh
+
   availability-watchdog:
     needs: changes
     if: needs.changes.outputs.watchdog_scripts == 'true'  # #2850: monitor-script surfaces only
@@ -479,6 +678,82 @@ jobs:
         run: bash .github/scripts/availability-watchdog.test.sh
       - name: Welcome-e2e auto-file monitor (#2706/#2850)
         run: bash .github/scripts/welcome-e2e-monitor.test.sh
+      - name: Shared auto-file substrate (#3907)
+        # One issue per finding, with every occurrence recorded on it: files
+        # once, comments `Recurrence #N` after that, refuses to file on a failed
+        # search, and never adopts a forged/exact-mismatched look-alike title.
+        run: bash .github/scripts/auto-file-issue.test.sh
+
+  availability-record:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #3810: recorder surface only
+    # #3810: the RECORD-ONLY baseline instrument's harness. Self-contained:
+    # stubs gh, no network. It proves the record keeps the delivered/intended
+    # cadence factor beside EVERY availability figure (the revert test — drop
+    # it and this job goes red), that DEGRADED is never folded into DOWN, that
+    # restarts= is read from the ledger, and that a low figure never fails the
+    # run (record-only, not a gate). Mirrors availability-watchdog above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Availability record-only baseline (#3810)
+        run: bash .github/scripts/availability-record.test.sh
+
+  deploy-health-gate:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4545: deploy-gate surface only
+    # #4545: the post-deploy health gate's harness. Self-contained: stubs curl,
+    # no network. It pins the regression that reddened HEALTHY deploys — the
+    # gate polled db.ok (the FalkorDB data plane) and then asserted
+    # /health/ready ONCE, but readiness is an AND of the Supabase control plane
+    # and the data plane, so db.ok does NOT imply ready. Case 3 fails against
+    # the pre-fix single-shot assertion and passes only with the readiness
+    # poll. #4771 extended the same invariant to the DECISION: cases 2 and 11 pin
+    # that db.ok alone no longer fails the run (readiness 200 → pass with a
+    # warning) while db.ok false + readiness never 200 still fails, so the gate
+    # is not weakened. Mirrors availability-record above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy health gate poll (#4545)
+        run: bash .github/scripts/deploy-health-gate.test.sh
+
+  orphan-bound-gate:
+    needs: changes
+    if: needs.changes.outputs.orphan_bound_scripts == 'true'  # #4740: orphan-gate surface only
+    # #4740: the redislite orphan gate's harness. Self-contained: writes hygiene
+    # fixtures to a temp dir, no network, no CI runner. It pins that the gate's
+    # bound is READ from the conftest session-end sweep's report (two different
+    # `left` values both pass, so no fixed bound can satisfy both), that a
+    # disagreement between the workflow's count and the sweep's own measurement
+    # reds, that a violation of the sweep's accounting identity
+    # (`reaped + left < before`) reds, that `cleared: false` is keyed on the
+    # measured COUNT (a zero count passes with a warning, a non-zero count
+    # reds), that an 18+ digit number exits 2 as a usage error rather than
+    # reaching the pass line, and that a red verdict never falls through to a
+    # pass line.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Redislite orphan gate (#4740)
+        run: bash .github/scripts/orphan-bound.test.sh
+
+  deploy-bypass-report:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #4759: any monitor/deploy-gate surface (shared watchdog_scripts group)
+    # #4759: the bypass reporter / expiry helper's harness. Self-contained: no
+    # network, no gh — every input is an argument or an env binding, exactly as
+    # the workflow supplies them. It proves a bypass lands in
+    # $GITHUB_STEP_SUMMARY naming the gate, the lane that fired and BYPASSED
+    # (neuter the summary write and it goes red), that each job's end-of-job
+    # audit states every gate as bypassed or not, and that the expiry check ages
+    # a set lane, VIOLATES past the window, and treats a missing/invalid start
+    # date as a violation rather than silence. Mirrors deploy-health-gate above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy bypass report + expiry check (#4759)
+        run: bash .github/scripts/deploy-bypass.test.sh
 
   entrypoint-guards:
     needs: changes
@@ -509,7 +784,7 @@ jobs:
 
   client-build:
     needs: changes
-    if: needs.changes.outputs.client == 'true'  # #2149: client/ + the 3 shared modules in the wheel
+    if: needs.changes.outputs.client == 'true'  # #2149: client/ + the shared modules the build script stages into the wheel (derived — client/shared_modules.sh)
     # #526: the thin-client boundary must hold on EVERY PR — build the
     # tortoise-client wheel, run the acceptance gate in a clean venv (driver
     # imports, engine modules raise ImportError, no engine deps installed),
@@ -529,10 +804,17 @@ jobs:
         run: |
           # Whitelist (PR #1313 conf 88): ANY tortoise/ entry outside the
           # client module set is rejected — including package dirs (e.g.
-          # tortoise/projection/__init__.py) and new engine modules. Must
-          # stay in sync with verify_client.sh Gate 0.
+          # tortoise/projection/__init__.py) and new engine modules. The
+          # module set is DERIVED from the build script via
+          # client/shared_modules.sh (#3805) — the same source
+          # verify_client.sh Gate 0 reads, so the three cannot drift.
+          SHARED_RE="$(bash client/shared_modules.sh | grep -oE '^[A-Za-z0-9_]+' | paste -sd'|' -)"
+          if [ -z "$SHARED_RE" ]; then
+            echo "::error::cannot derive the client wheel's shared modules"
+            exit 1
+          fi
           BAD="$(unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/' | \
-            grep -vE '^tortoise/(__init__|mcp_client|config|exceptions)\.py$' | \
+            grep -vE "^tortoise/(__init__|${SHARED_RE})\\.py$" | \
             grep -vE '^tortoise_client/(__init__|__main__|cli)\.py$' || true)"
           if [ -n "$BAD" ]; then
             echo "::error::non-client entries leaked into the tortoise-client wheel:"
@@ -622,7 +904,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+          node-version: '22'   # .ts type stripping + syntax detection is DEFAULT-ON from 22.18; the parity driver passes --experimental-strip-types (>= 22.7), test_pi_capture_hooks' `node --test` does not (#373 harness, #4714 parity test)
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
       # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the
@@ -650,6 +932,19 @@ jobs:
       # this step reds welcome-e2e — it is load-bearing, not belt-and-braces.
       - name: Install wrangler on PATH (required by the #3501 auth suites)
         run: npm install -g wrangler@4.127.0
+      # #4054: the auth suites serve the dashboard's BUILT `dist/` root
+      # (tests/e2e/auth/conftest.py -> ensure_dashboard_dist()). Without a
+      # lockfile-pinned install here, that helper's `npm run build` has no local
+      # vite and fails; it used to run `npx vite build`, which silently did an
+      # AD-HOC install that omitted rollup's platform binary
+      # (`@rollup/rollup-linux-x64-gnu`, the npm optional-dependency gap) and
+      # errored the whole suite at fixture setup. `npm ci` is the same
+      # lockfile-pinned install dashboard-e2e and dashboard-js-tests use, and it
+      # is what provides the platform binary.
+      - name: Install dashboard dependencies (lockfile-pinned, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -731,6 +1026,8 @@ jobs:
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+      - name: Run blog SSR markdown renderer harness (#4481)
+        run: node --experimental-strip-types tests/test_blog_markdown.mjs
 
   legal-e2e:
     runs-on: ubuntu-latest
@@ -816,6 +1113,43 @@ jobs:
           cat /tmp/wrangler.log || true
           echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
+      # #4054: the auth surface (/auth, /signup, /welcome, /invite-accept) moved
+      # to the `tortoise-dashboard` Pages project, so this suite needs a LOCAL
+      # app origin too. Without it the app-surface tests followed the marketing
+      # origin's 301 to DEPLOYED PRODUCTION and asserted against whatever main
+      # had last shipped (they passed that way, which is the worst outcome).
+      - name: Install + build the dashboard bundle (app origin, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
+          npm run build
+      - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
+        run: |
+          cd website/apps/dashboard
+          # `--d1 SESSIONS`: the auth pages' session probe is `/api/session`,
+          # which resolves the HttpOnly `__Host-session` cookie against the D1
+          # `sessions` table. Without the binding a request carrying a cookie
+          # answers 503 ("store unreachable") instead of 401/200.
+          for attempt in 1 2; do
+            npx --yes wrangler@4.127.0 pages dev dist --port 8790 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
+              > /tmp/wrangler-app.log 2>&1 &
+            echo $! > /tmp/wrangler-app.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
+                echo "wrangler (app) ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8790' 2>/dev/null || true
+            sleep 3
+          done
+          echo "::error::wrangler (app) dev server failed to start (2 attempts)"
+          tail -50 /tmp/wrangler-app.log || true
+          exit 1
       - name: Run legal pages E2E suite (#657)
         # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
         # crawl fetches unauthenticated production URLs (github.com/LICENSE,
@@ -827,6 +1161,7 @@ jobs:
         # before (welcome-e2e collects it without RUN_LEGAL_E2E → self-skips).
         run: >
           RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
+          APP_BASE_URL=http://127.0.0.1:8790
           TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
           python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py
@@ -841,13 +1176,15 @@ jobs:
         # runner VM, so pkill can't touch other jobs)
         run: |
           kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
           pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill -f 'wrangler.*8790' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
 
   dashboard-e2e:
     needs: changes
-    if: needs.changes.outputs.dashboard_e2e == 'true'  # #2149: keys-table suite + harness + committed dist
+    if: needs.changes.outputs.dashboard_e2e == 'true'  # #2149: keys-table suite + harness + dashboard build inputs
     runs-on: ubuntu-latest
     # #2166/#2178: the mixed-fixture API Keys table suite — durable-only
     # render regression (bootstrap/session rows never render; truthful
@@ -857,10 +1194,14 @@ jobs:
     # e2e jobs serve website/ on :8788 only).
     #
     # TWO wrangler boots (the #1511/#2166 harness): website/ on :8788 (the
-    # auth origin the gate redirects to) + the dashboard's COMMITTED dist on
-    # :8790. NO npm build inside CI (committed-dist convention): the mixed
-    # fixture asserts against the exact bundle PRs ship, so a stale/missing
-    # dist commit red-fails the job = tripwire.
+    # auth origin the gate redirects to) + the dashboard bundle on :8790.
+    #
+    # #3775: the job now BUILDS that bundle (step below). Before #3775 `dist/`
+    # was tracked and CI had no build — the committed bundle was served and a
+    # stale/missing dist commit red-failed the job. With `dist/` untracked
+    # there is nothing to serve unless we build, and building is strictly
+    # better for this suite's purpose: the fixtures assert against the exact
+    # bundle THIS revision produces, instead of whatever was last committed.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -872,6 +1213,15 @@ jobs:
           node-version: '22'
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
+      # #3775: `dist/` is a build artifact (untracked). Build it before any
+      # preview boots — `npm ci` is lockfile-pinned, so this is the same
+      # vite output the deploy-dashboard job ships (byte-identical, verified
+      # by a clean-build diff on #3775).
+      - name: Build dashboard bundle (:8790 origin, #3775)
+        run: |
+          cd website/apps/dashboard
+          npm ci
+          npm run build
       # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
       # clock starts — a fresh runner's npx fetch was eating most of the 120s
       # boot budget (first CI run died here with an empty log). --version is
@@ -907,8 +1257,15 @@ jobs:
         run: |
           cd website/apps/dashboard
           for attempt in 1 2; do
+            # #3501/#4054: `--d1 SESSIONS` is load-bearing. The dashboard's
+            # session gate is `/api/session`, which resolves the HttpOnly
+            # `__Host-session` cookie against the D1 `sessions` table; without
+            # the binding a request carrying that cookie answers 503 ("store
+            # unreachable") instead of 200, so the suite's seeded-session
+            # fixtures can never render the shell. The harness seeds the row it
+            # reads (tests/e2e/test_session_login_flow.py).
             npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
-              --compatibility-date=2024-09-23 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
               > /tmp/wrangler-dash.log 2>&1 &
             echo $! > /tmp/wrangler-dash.pid
             for i in $(seq 1 240); do
@@ -926,10 +1283,28 @@ jobs:
           echo "::error::wrangler (dashboard) dev server failed to start"
           tail -50 /tmp/wrangler-dash.log || true
           exit 1
-      - name: Run keys-table mixed-fixture e2e (#2166/#2178)
+      # #4221: this step used to run three of the seven `RUN_DASHBOARD_E2E`
+      # specs, so the onboarding spec's 36 cases (plus 48 more across the three
+      # stale specs and the flow module named below) were registered, reported
+      # green, and never invoked. The onboarding spec joins the list here; the
+      # others are NOT wired because they are stale against the #3501 BFF
+      # session seam and the #4054 auth-origin move — wiring them would turn
+      # this job red on every run. Evidence and the follow-up are on #4221.
+      #   test_dashboard_identity.py    — 21/22 fail (seeds the retired
+      #                                   `sb-tortoise-auth-token`; mocks only
+      #                                   the legacy absolute api host)
+      #   test_dashboard_gate.py        — 15/19 fail (asserts the pre-#4054
+      #                                   prod-origin /auth redirect target)
+      #   test_dashboard_billing.py     — 4/4 fail (drives the moved /auth page
+      #                                   through the retired local :8788 origin)
+      #   test_session_login_flow.py    — 3/3 fail (same class); the module
+      #                                   itself is the shared harness, so it
+      #                                   stays in the change detector above
+      - name: Run dashboard e2e — keys-table (#2166/#2178), graphs, ship-test guard (#3806), onboarding (#4221)
         run: >
           RUN_DASHBOARD_E2E=1
           python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
+          tests/e2e/test_ship_test_onboarding.py tests/e2e/test_dashboard_onboarding.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
@@ -1086,7 +1461,7 @@ jobs:
     #                           top-level dir with __init__.py, sorted) — not
     #                           the engine. `mypy tortoise/` is what the
     #                           baseline was measured against.
-    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.2
+    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.3
     with:
       python-version: '3.12'
       test-command: ''

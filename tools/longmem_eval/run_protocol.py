@@ -26,6 +26,14 @@ the runner with flags that exist on the base, and the gate checks (integrity
 block, M7 report shape) are asserted by the operator from the produced report.
 The harness lanes add the mechanics; this lane adds the protocol.
 
+Every run step is launched **byte-code-free** (#3712): the measured-revision
+guard (`tools/longmem_eval/guard_measured_revision.py`) refuses any `.pyc`
+under the measured surface by default — a byte-cache is executable code and
+CPython runs it in preference to the `.py` beside it. `_run_cmd` / `_cell_cmd`
+pass `-B`, and `_run_env` sets `PYTHONDONTWRITEBYTECODE=1` for the runner and
+for anything it spawns, so the surface the guard inspects is free of bytecode
+by construction rather than by assumption.
+
 Usage::
 
     python -m tools.longmem_eval.run_protocol status
@@ -300,11 +308,21 @@ class ProtocolState:
 # ── Runner wiring (executes the underlying LongMemEval runner) ──────────────
 
 def _run_cmd(base: list[str]) -> list[str]:
-    return [sys.executable, "-m", "tools.longmem_eval.run", *base]
+    # -B (#3712): the measured run must be byte-code-free, or the guard refuses
+    # the byte-caches it would leave under the surface.
+    return [sys.executable, "-B", "-m", "tools.longmem_eval.run", *base]
 
 
 def _cell_cmd(base: list[str]) -> list[str]:
-    return [sys.executable, "-m", "tools.longmem_eval.full_context", *base]
+    # -B: same byte-code-free requirement as _run_cmd.
+    return [sys.executable, "-B", "-m", "tools.longmem_eval.full_context", *base]
+
+
+def _run_env() -> dict[str, str]:
+    """Environment for a run step (#3712): `-B` stops THIS interpreter writing
+    bytecode, `PYTHONDONTWRITEBYTECODE=1` stops the children it spawns from
+    doing so — the measured surface must hold no `.pyc` for the guard to attest."""
+    return {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
 
 
 def _default_checkpoint(kind: str) -> Path:
@@ -756,7 +774,10 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     # the base runner silently degrades to embedded FalkorDBLite, which would
     # masquerade as a V3 measurement. Fires on dry-run too so `plan`/`--dry-run`
     # tell the operator the step cannot run as configured. The smoke step
-    # (mock) is exempt: it is a wiring check, not a measurement.
+    # (mock) is exempt from THIS guard: it is a wiring check, not a
+    # measurement. That exemption is about the DB-URI guard ONLY — the
+    # DENSE-leg gate (#4718) is a separate gate, and the mock smoke declares
+    # its own `--skip-preflight` waiver in cmd_smoke for the same reason.
     if step.number in (3, 5, 7, 8, 9) and not os.environ.get("TORTOISE_DB_URI"):
         raise SystemExit(
             f"step {step.number} requires TORTOISE_DB_URI (real backend: "
@@ -805,7 +826,7 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         expected_direction=args.expected_direction if step.runner == "confirm" else None,
         resume_quality=resume_quality,
     )
-    rc = subprocess.run(cmd, env=os.environ.copy())
+    rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:
         state.fail_gate(step.number, f"run exited {rc.returncode}")
         raise SystemExit(f"run exited {rc.returncode} — fix (M4) and re-run")
@@ -816,18 +837,25 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
 def cmd_smoke(state: ProtocolState, args: argparse.Namespace) -> None:
     """Pre-pilot wiring smoke: 1 real-extractor question end-to-end. Uses the
     committed MINI fixture so it needs no dataset download; --mock for the
-    offline reader/judge (no keys)."""
+    offline reader/judge (no keys).
+
+    #4718: the mock form also passes ``--skip-preflight``. ``--mock`` selects
+    the reader/judge and is NOT a dense-leg waiver, and this command is
+    documented as a wiring check — not a measurement — so it declares the
+    waiver explicitly and stays runnable on a host with no embedder (which is
+    its whole point). The real (non-mock) form keeps the dense leg required.
+    """
     extra = ["--data", str(REPO_ROOT / "tests/fixtures/longmemeval_mini.json"),
              "--limit", "1", "--ingest-mode", "v2"]
     if args.mock:
-        extra.append("--mock")
+        extra += ["--mock", "--skip-preflight"]
     out = DEFAULT_RUN_DIR / "smoke.report.json"
     cmd = _run_cmd([*extra, "--output", str(out)])
     print(f"$ {' '.join(cmd)}")
     if args.dry_run:
         print("[dry-run] not executing")
         return
-    rc = subprocess.run(cmd, env=os.environ.copy())
+    rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:
         raise SystemExit(f"smoke failed (exit {rc.returncode})")
     print(f"\nsmoke report: {out}")
@@ -835,7 +863,16 @@ def cmd_smoke(state: ProtocolState, args: argparse.Namespace) -> None:
 
 def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
     """Option-5 full-context comparison cell (ceiling / headroom measurement)
-    on a question subset — feeds the reader the ENTIRE haystack, no retrieval."""
+    on a question subset — feeds the reader the ENTIRE haystack, no retrieval.
+
+    #4718 note: this cell does NOT take a dense-leg waiver, and must not. It
+    runs `tools/longmem_eval/full_context.py`, which has no dense-leg gate at
+    all (it never reaches `run.py`'s pre-flight) and which accepts NONE of the
+    dense-leg flags — it defines no `--skip-preflight`. Appending that flag made
+    the built command die at argparse with exit 2 (`error: unrecognized
+    arguments`). The waiver belongs to the `smoke` builder, whose target IS
+    `run.py`.
+    """
     extra = []
     if args.data:
         extra += ["--data", args.data]
@@ -854,7 +891,7 @@ def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
     if args.dry_run:
         print("[dry-run] not executing")
         return
-    rc = subprocess.run(cmd, env=os.environ.copy())
+    rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:
         raise SystemExit(f"full-context cell failed (exit {rc.returncode})")
     print(f"\nfull-context cell report: {out}")

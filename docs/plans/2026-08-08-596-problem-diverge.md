@@ -76,7 +76,7 @@ Every team backup depends on the registry to even be meaningful: without `Team` 
 ## Boundary & Stakeholders
 
 **Out of scope (explicitly or by omission):**
-- **Billing / tier-upgrade path** — Stripe checkout/webhook, `PATCH /v1/teams/{id}`, `backup_enabled` flip. The issue silently presumes this exists (it does not); without it, scope item 1 has a population of zero (A5).
+- **Billing / tier-upgrade path** — Stripe checkout/webhook, `PATCH /v1/organizations/{id}`, `backup_enabled` flip. The issue silently presumes this exists (it does not); without it, scope item 1 has a population of zero (A5).
 - **Reconcile scheduling** — the sibling uninvoked job (expired bootstrap keys, orphaned keys). Same "nothing runs it" class, different domain (A3).
 - **Tenant-facing backup health** — no public signal of `backup_latest_at`; `/backups` list is Pro-only and behind auth. Tenants cannot see their backup is healthy/stale.
 - **Automated restore drills** — periodic restore-verification against production (or staging) data; the strongest external recommendation, absent from the E2E.

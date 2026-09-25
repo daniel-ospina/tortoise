@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixtures_hash": "sha256:d17a99af2828eab6d1084f9d5edf8534497465d56f910ef6d6dafbf68c87bec6",
+  "fixtures_hash": "sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324",
   "judge_pin": "w2-write-path-mechanical-v2",
   "config": {
     "lanes": [
@@ -13,7 +13,7 @@
     "seed": 42,
     "extractor_posture": "llm"
   },
-  "justification": "INTENTIONAL corpus regeneration (#2514): fixtures 5->7 sessions (wp06_quarry_rollout + wp07_bluepeak_followup), fixtures_hash 52d4a742e -> d17a99af2, +4 planted operators (SUPPORTS/NEGATE/MITIGATES/SUPERSEDE). First llm-lane measurement on the new corpus: macro 0.5444 (49/90), sessions 7/7 emitting, leakage 1 (= wp03's per-session tolerance 1 \u2014 d_01, the known high-variance distractor: leaked in 2 of the last 4 sealed runs, 0 in the two clause runs), quote/provenance 1.0. FIRST REAL OPERATOR AUDIT: 0/4 planted operator edges edge_correct (content_ok 1) \u2014 the extractor does not emit correct supersede/negate/mitigate/support edges on the product lane; this is the measured baseline the layer-2 fix must move (corpus purpose achieved: the gap is now a number, not an assumption). Structural note: reified operator points carry no eventId and never enter the memory layer. Operator audit is an additive dimension, not a gated metric.",
+  "justification": "corpus_change STAGED (#2552): operator gold 4 -> 15 planted edges (wp01 2, wp02 1, wp03 3, wp04 3, wp05 2; wp06 1 + wp07 3 unchanged), fixtures_hash d17a99af2 -> 943a99ec6. The 15-edge denominator replaces the 4-edge one that swung 0-2/4 on identical code. ONLY GOLD changed \u2014 fixtures, planted units and anchors are untouched, so the gated metrics below remain measured on the SAME corpus content and are carried forward, not re-measured. The llm product lane was NOT re-run on the new operator gold (provider spend is an open owner decision on #2552); the operator_audit dimension is NOT a METRIC_VALUES member, so the carried metrics are not a substitute for a measurement.",
   "metrics": {
     "salient_unit_survival_macro": 0.5444444444444444,
     "salient_unit_survival_strict": 0.5444444444444444,
@@ -319,6 +319,20 @@
       ],
       "justification": "INTENTIONAL corpus regeneration (#2514): fixtures 5->7 sessions (wp06_quarry_rollout + wp07_bluepeak_followup), fixtures_hash 52d4a742e -> d17a99af2, +4 planted operators (SUPPORTS/NEGATE/MITIGATES/SUPERSEDE). First llm-lane measurement on the new corpus: macro 0.5444 (49/90), sessions 7/7 emitting, leakage 1 (= wp03's per-session tolerance 1 \u2014 d_01, the known high-variance distractor: leaked in 2 of the last 4 sealed runs, 0 in the two clause runs), quote/provenance 1.0. FIRST REAL OPERATOR AUDIT: 0/4 planted operator edges edge_correct (content_ok 1) \u2014 the extractor does not emit correct supersede/negate/mitigate/support edges on the product lane; this is the measured baseline the layer-2 fix must move (corpus purpose achieved: the gap is now a number, not an assumption). Structural note: reified operator points carry no eventId and never enter the memory layer. Operator audit is an additive dimension, not a gated metric.",
       "verdict": "regression"
+    },
+    {
+      "date": "2026-09-22",
+      "values": {
+        "salient_unit_survival_macro": 0.5444444444444444,
+        "salient_unit_survival_strict": 0.5444444444444444,
+        "distractor_leakage_per_run": 1,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [],
+      "justification": "corpus_change STAGED (#2552): operator gold 4 -> 15 planted edges (wp01 2, wp02 1, wp03 3, wp04 3, wp05 2; wp06 1 + wp07 3 unchanged), fixtures_hash d17a99af2 -> 943a99ec6. The 15-edge denominator replaces the 4-edge one that swung 0-2/4 on identical code. ONLY GOLD changed \u2014 fixtures, planted units and anchors are untouched, so the gated metrics below remain measured on the SAME corpus content and are carried forward, not re-measured. The llm product lane was NOT re-run on the new operator gold (provider spend is an open owner decision on #2552); the operator_audit dimension is NOT a METRIC_VALUES member, so the carried metrics are not a substitute for a measurement.",
+      "corpus_change": true
     }
   ]
 }

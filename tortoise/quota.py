@@ -1,8 +1,8 @@
-"""Per-team quota enforcement shared by REST and MCP (#329, #683, #686).
+"""Per-org quota enforcement shared by REST and MCP (#329, #683, #686).
 
 Design: limits are resolved ONCE by the authenticated caller
-(``hosted_api.get_current_team`` / MCP ``TeamResolutionMiddleware``) via
-``resolve_team_limits`` and passed to ``enforce_team_limit`` — never re-fetched
+(``hosted_api.get_current_org`` / MCP ``OrgResolutionMiddleware``) via
+``resolve_org_limits`` and passed to ``enforce_org_limit`` — never re-fetched
 per write.
 
 Fail-closed decision (#686)
@@ -11,49 +11,49 @@ Counting is **fail-closed**: any counting exception raises
 ``QuotaCheckError`` (server error), never a silent pass.
 
 Rationale:
-- **Money at stake.** Fail-open would let free-tier teams exceed paid limits
+- **Money at stake.** Fail-open would let free-tier orgs exceed paid limits
   undetected during a DB outage — direct revenue risk and abuse vector.
 - **Fail-closed is the secure default.** When you can't verify, don't grant.
 - **Customer harm from fail-closed is bounded.** A DB outage that breaks
   count queries typically also breaks the actual write (same store) — we're
   failing fast, not adding net-new unavailability.
 - **Alerting mitigates ops risk.** Every count failure is logged at ERROR
-  level with team_id and resource, so operators see the outage immediately
+  level with org_id and resource, so operators see the outage immediately
   and can decide whether to temporarily disable enforcement.
 
 Import topology: stdlib-only at module level; ``tortoise.sdk`` imported
 function-level inside the helpers to avoid any cycle (hosted_api → mcp_server
 → mcp_auth → sdk is the canonical direction; quota is a leaf consumer).
 
-No team context (stdio/operator) → ``enforce_team_limit(None, ...)`` returns
-cleanly (skip) — mirrors REST ``_check_team_limit``'s ``if not team_id: return``.
+No org context (stdio/operator) → ``enforce_org_limit(None, ...)`` returns
+cleanly (skip) — mirrors REST ``_check_org_limit``'s ``if not org_id: return``.
 Batch caps are unconditional in both modes.
 
 Downgrade-over-limit decision (#683)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When a team downgrades (e.g. Pro→Free) while over the NEW tier's limits
+When an org downgrades (e.g. Pro→Free) while over the NEW tier's limits
 (e.g. 2 memberships but Free allows only 1), the downgrade MUST be BLOCKED
-with a clear error message listing which limits the team exceeds.
+with a clear error message listing which limits the org exceeds.
 
 Rationale and decisions:
 - **Block downgrade (not graceful-degrade).** Allowing a downgrade that
   immediately locks out members or breaks graphs creates a trust-destroying
-  experience: the dashboard shows Free features, but the team has 2 members
+  experience: the dashboard shows Free features, but the org has 2 members
   and 2 graphs — inconsistent and confusing.
 - **No silent pass.** Trust requires that published limits are real limits.
-  If a team can be over-limit on a lower tier, the limits aren't real.
-- **No auto-delete.** Never delete data to fit a downgrade. The team must
+  If an org can be over-limit on a lower tier, the limits aren't real.
+- **No auto-delete.** Never delete data to fit a downgrade. The org must
   explicitly remove members/graphs before the downgrade can proceed.
 - **Stripe webhook downgrade path (future, #310).** When the
   ``customer.subscription.updated`` webhook processes a tier downgrade, the
   ``mirror_subscription`` handler should check limits via this module BEFORE
-  applying the new tier: if the team exceeds the new tier's limits, the
-  downgrade must be rejected (log + alert), keeping the team at its current
-  tier until the over-limit condition is resolved by the team owner.
+  applying the new tier: if the org exceeds the new tier's limits, the
+  downgrade must be rejected (log + alert), keeping the org at its current
+  tier until the over-limit condition is resolved by the org owner.
 
   Until #310 lands the Stripe integration, there is no user-facing tier-change
   REST endpoint — the decision is a documented policy, not a live code path.
-  The ``team_update`` SDK method (registry-level, no REST surface) allows
+  The ``org_update`` SDK method (registry-level, no REST surface) allows
   tier/limit writes for operational relief; it does NOT check downgrade
   preconditions (operator intent overrides).
 """
@@ -95,7 +95,7 @@ MAX_OPERATOR_TARGETS = 500
 MAX_SESSION_TURNS = 500
 MAX_EXTRACTIONS_PER_TURN = 200
 MAX_ANALYZE_LLM_PER_MIN = 60
-#: #1987 Task 6: per-team per-minute LLM-call budget for the ask lane
+#: #1987 Task 6: per-org per-minute LLM-call budget for the ask lane
 #: (mirrors ``MAX_ANALYZE_LLM_PER_MIN`` — the #329 pattern). Per-process
 #: (in-memory) scoping: a multi-worker uvicorn deployment scales the
 #: 60/min bound ×workers.
@@ -117,11 +117,49 @@ MAX_OPERATORS = 500
 
 # ── Default limits ──────────────────────────────────────────────────────────
 # max_points/max_api_keys have NO constant here — they resolve from
-# tortoise.pricing.tier_limits (product/pricing.json) so a legacy team without
+# tortoise.pricing.tier_limits (product/pricing.json) so a legacy org without
 # stored limits gets pricing-correct caps, never the stale 1000/20 consts that
-# contradicted pricing.json (#310 GAP-B, review fix 2). max_sessions has no
-# pricing.json field — flat 1000 across tiers (matches REST today).
-DEFAULT_MAX_SESSIONS = 1000
+# contradicted pricing.json (#310 GAP-B, review fix 2).
+#
+# max_sessions has NO constant here and NO pricing.json field either. The
+# flat 1000 was an INHERITED CODE FALLBACK, never a ratified product cap —
+# and the reason is checkable, not reconstructed: the plan that carried it
+# also designated its OWN canonical limits source, and that source has no
+# session field at all. `product/pricing.json` (canonical single source,
+# decision 1d: "product/pricing.json ... is canonical; pricing.md is
+# doc-generated from it") contains ZERO occurrences of "session" and no
+# sessions row in its tier table. What the plan recorded was KEEPING THE
+# EXISTING FALLBACK — as a fallback: 05-plan.md:570, "keep flat fallbacks
+# (1000/1000) in v1 OR fold into ops_allowance — decision: keep
+# points/sessions flat in v1; ops_allowance (write ops) is the billing
+# metric", restated at :598 ("points/sessions stay flat 1000/1000 in v1").
+# Keeping a fallback is not ratifying the value, and 05-plan.md:18's "human
+# gate #2 approved" reads in full "all 8 substeps, coherence CLEAN; human
+# gate #2 approved 2026-08-07; decomposed into #568-#578" — it approved the
+# plan's coherence to decompose, not a constant inside a tier table. The
+# default pre-dates the #329 security commit (f6ca5ebdb), whose scoping doc
+# only instructed preserving the existing resource in the shared helper
+# (docs/plans/scoping-329-problem.md:17 — a refactor-safety instruction, not
+# a cap ratification). It became a production ceiling because the limits
+# resolvers substituted the constant as their fallback wherever a stored
+# value was absent, and the lenient `if resource == "sessions"` branch in
+# enforce_org_limit supplied it to callers whose limits dict lacked the key
+# entirely (the MCP capture bridge).
+#
+# #4010 REMOVES that fallback (the 2026-09-19 correction on the issue
+# withdraws the earlier "recorded v1 decision / REOPEN" framing). Sessions
+# are UNLIMITED for every tier, and unlike every other limit a STORED
+# max_sessions value is deliberately NOT honoured as a cap (see
+# resolve_org_limits): a stored 1000 would otherwise keep the org capped
+# after the constant was deleted. This removes an unratified fallback that
+# should never have been enforcement; it is NOT a reopen of a v1 cap
+# decision, because nothing that RATIFIES a cap ever named it — no owner
+# ruling, no decision record, no `product/pricing.json` field. Approved docs
+# do carry 1000 forward as a default (`git grep -n max_sessions -- '*.md'`);
+# carrying a default forward is the inheritance this comment describes, not a
+# ratification. The owner confirms he never approved a 1k cap. Stale
+# 1000-as-cost-bound framing elsewhere: #4052. The P2-7 billing-metric
+# decision is untouched — write-ops remains the billing metric.
 
 # ── Documents cap: DERIVED-CONSTANT (T2-P2a, #1726 Slice 1) ────────────────
 # max_documents is DERIVED from max_points with a documented conversion
@@ -136,6 +174,9 @@ _DOCUMENTS_FROM_POINTS_FACTOR = 10
 _RESOURCE_LIMIT_KEYS = {
     "points": "max_points",
     "api_keys": "max_api_keys",
+    # #4010: the key is still carried so the resolved dict holds an EXPLICIT
+    # None for sessions ("present but unlimited") rather than a missing key
+    # (which is fail-closed). No constant ever supplies a value for it.
     "sessions": "max_sessions",
     "users": "max_users",
     "graphs": "max_graphs",
@@ -143,48 +184,48 @@ _RESOURCE_LIMIT_KEYS = {
 
 
 class QuotaExceededError(Exception):
-    """Team is at/over its resource limit — the write must be rejected (402)."""
+    """Org is at/over its resource limit — the write must be rejected (402)."""
 
 
 class QuotaCheckError(Exception):
     """Quota counting/config failed — fail closed (500/503), never pass."""
 
 
-def derived_tier(team_row: dict) -> str:
-    """Effective tier for a team row — the #1082 anon-ceiling derivation.
+def derived_tier(org_row: dict) -> str:
+    """Effective tier for an org row — the #1082 anon-ceiling derivation.
 
-    A zero-email (anonymous) team whose owner membership has NO linked
+    A zero-email (anonymous) org whose owner membership has NO linked
     user_id runs the reduced ``anon`` tier until it is claimed (#1082 PR1
     links the verified OAuth identity to the owner row; claim raises the
-    team to ``free``). The predicate is membership-based
-    (``is_anon_team``) — NEVER the ``teams.email IS NULL`` proxy, which
-    misclassifies reg- teams (email set at mint, owner user_id still NULL)
+    org to ``free``). The predicate is membership-based
+    (``is_anon_org``) — NEVER the ``teams.email IS NULL`` proxy, which
+    misclassifies reg- orgs (email set at mint, owner user_id still NULL)
     and legacy real-user rows.
 
     Registry mode: NO-OP (raw tier) — the anon ceiling is Supabase-mode
     only in v1 (selfhost is operator-controlled, not a farm surface).
 
-    NOTE: distinct from billing.effective_tier(team, now) (grace-period
+    NOTE: distinct from billing.effective_tier(org, now) (grace-period
     logic, billing.py:382) — do not merge.
 
     Args:
-        team_row: the teams row / Team dict (must carry ``tier`` and,
+        org_row: the orgs row / Org dict (must carry ``tier`` and,
             for Supabase mode, ``id``).
     Returns:
         The effective tier string.
     """
-    tier = team_row.get("tier") or "free"
-    team_id = team_row.get("id") or team_row.get("team_id")
-    if not team_id:
+    tier = org_row.get("tier") or "free"
+    org_id = org_row.get("id") or org_row.get("org_id")
+    if not org_id:
         return tier
     try:
         from tortoise.supabase_control import (  # noqa: I001
-            get_control_plane, is_anon_team, is_supabase_enabled,
+            get_control_plane, is_anon_org, is_supabase_enabled,
         )
         if not is_supabase_enabled():
             return tier  # registry mode: no-op
         cp = get_control_plane()
-        if tier == "free" and is_anon_team(cp, team_id):
+        if tier == "free" and is_anon_org(cp, org_id):
             return "anon"
         return tier
     except Exception:
@@ -194,28 +235,36 @@ def derived_tier(team_row: dict) -> str:
         return tier
 
 
-def resolve_team_limits(team_id: str) -> dict:
-    """Resolve a team's limits from the control plane.
+def resolve_org_limits(org_id: str) -> dict:
+    """Resolve an org's limits from the control plane.
 
-    Supabase mode (post-#669 flip): the teams row via the service-role
+    Supabase mode (post-#669 flip): the orgs row via the service-role
     seam — the registry is DELETED and querying it would auto-recreate the
     empty graph (post-flip verification finding, #669). Registry mode: the
-    Team node, as before.
+    Org node, as before.
 
-    Missing Team → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→team mapping). Missing attributes → defaults
-    (aligned with product/pricing.json free tier).
+    Missing Org → QuotaCheckError (fail-closed; the auth layer should
+    guarantee key→org mapping).
+
+    CONTRACT (the return shape every caller must honour, #310 GAP-B / #4010):
+    the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
+    that is PRESENT with value ``None`` means UNLIMITED (sessions is always
+    this, for every tier — #4010); a MISSING key is fail-closed in
+    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource.
+    A missing ATTRIBUTE on the row/column is resolved to a value here — it
+    never leaves the key absent. (The pre-#4010 rule of the same shape was
+    "missing attributes → defaults"; sessions has no default any more.)
     """
-    if not team_id:
-        raise QuotaCheckError("resolve_team_limits requires a team_id")
+    if not org_id:
+        raise QuotaCheckError("resolve_org_limits requires a org_id")
     from tortoise.supabase_control import (  # noqa: I001
         _QUOTA_SELECT,
-        _TEAM_ADDITIVE_0015_TIER,
-        _TEAM_ADDITIVE_2040_TIER,
-        _TEAM_ADDITIVE_BILLING_TIER,
-        _TEAM_ADDITIVE_DKL_TIER,
-        _TEAM_ADDITIVE_IMPORT_TIER,
-        _teams_row_fail_soft,
+        _ORG_ADDITIVE_0015_TIER,
+        _ORG_ADDITIVE_2040_TIER,
+        _ORG_ADDITIVE_BILLING_TIER,
+        _ORG_ADDITIVE_DKL_TIER,
+        _ORG_ADDITIVE_IMPORT_TIER,
+        _orgs_row_fail_soft,
         get_control_plane, is_supabase_enabled,
     )
     if is_supabase_enabled():
@@ -223,54 +272,57 @@ def resolve_team_limits(team_id: str) -> dict:
         # the max_points column (20260817000001) is ADDITIVE; a direct
         # select 400s on a schema one migration behind, which would turn a
         # degrade-to-tier-defaults into a hard failure. Same additive
-        # ladder as resolve_api_key / _session_user_team, newest migration
+        # ladder as resolve_api_key / _session_user_org, newest migration
         # dropped FIRST — incl. the #2040 marker tier so a schema missing
         # only the marker column degrades just the marker (quota keeps
         # reading max_points; a missing tier would 400 every rung down to
         # the terminal base-only read → hard failure on drift, the exact
         # #1832 class).
-        row = _teams_row_fail_soft(
-            get_control_plane(), team_id, select=_QUOTA_SELECT,
-            additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
-                            _TEAM_ADDITIVE_IMPORT_TIER,
-                            _TEAM_ADDITIVE_DKL_TIER,
-                            _TEAM_ADDITIVE_0015_TIER,
-                            _TEAM_ADDITIVE_BILLING_TIER],
+        row = _orgs_row_fail_soft(
+            get_control_plane(), org_id, select=_QUOTA_SELECT,
+            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                            _ORG_ADDITIVE_IMPORT_TIER,
+                            _ORG_ADDITIVE_DKL_TIER,
+                            _ORG_ADDITIVE_0015_TIER,
+                            _ORG_ADDITIVE_BILLING_TIER],
         )
         if row is None:
-            raise QuotaCheckError(f"Team {team_id!r} not found in control plane")
+            raise QuotaCheckError(f"Team {org_id!r} not found in control plane")
         # #1082 PR2: the anon ceiling is tier-DERIVED at resolution — an
-        # unclaimed zero-email team (owner user_id NULL) resolves to the
+        # unclaimed zero-email org (owner user_id NULL) resolves to the
         # reduced ``anon`` tier until claimed, then lifts to free. The row
-        # needs its ``id`` for the is_anon_team predicate (already have
-        # team_id).
-        row = {**row, "id": team_id, "tier": derived_tier({**row, "id": team_id})}
+        # needs its ``id`` for the is_anon_org predicate (already have
+        # org_id).
+        row = {**row, "id": org_id, "tier": derived_tier({**row, "id": org_id})}
         tier = row.get("tier") or "free"
         from tortoise.pricing import tier_limits
         lim = tier_limits(tier)
         # #1082 PR2: when the derived tier is anon, the STORED quota columns
         # (minted at free values by agent_signup/register) are overridden
         # read-time with the reduced anon caps — an unclaimed zero-email
-        # team must never bind at free limits (indicator 4).
+        # org must never bind at free limits (indicator 4).
         anon_override = tier == "anon"
         # Mirror the registry shape EXACTLY (review P2, PR #911): NULL
         # max_users/max_graphs = UNLIMITED (Team tier) — preserve None,
-        # never substitute pricing defaults (enforce_team_limit treats an
+        # never substitute pricing defaults (enforce_org_limit treats an
         # explicit None limit as unlimited; substituting finite caps would
         # hard-cap legacy/migrated rows). max_points override (GAP-B,
         # 20260817000001) takes precedence over graph_size_cap (the
-        # fallback), then pricing; max_api_keys/max_sessions fall back to
-        # pricing/defaults.
+        # fallback), then pricing; max_api_keys falls back to pricing.
+        # #4010: max_sessions is UNLIMITED for every tier — no pricing field,
+        # no constant, and (deliberately) no stored value honoured as a cap.
+        # The Supabase orgs row has no max_sessions column at all, so there is
+        # nothing to read even if we wanted to.
         mu = row.get("max_users")
         mg = row.get("max_graphs")
         # #1859 P3-2: max_points column (points-cap override, migration
         # 20260817000001) takes precedence; graph_size_cap is the legacy
-        # fallback (GAP-B); pricing last — mirrors import_team.
+        # fallback (GAP-B); pricing last — mirrors import_org.
         mp = row.get("max_points")
         if mp is None:
             mp = row.get("graph_size_cap")
         return {
-            "team_id": team_id, "tier": tier,
+            "org_id": org_id, "tier": tier,
             "max_users": (lim["max_users_per_team"] if anon_override
                            else (int(mu) if mu is not None else None)),
             "max_graphs": (lim["max_graphs_per_team"] if anon_override
@@ -278,34 +330,85 @@ def resolve_team_limits(team_id: str) -> dict:
             "max_points": (int(lim["max_graph_nodes"]) if anon_override
                             else (int(mp) if mp is not None else lim["max_graph_nodes"])),
             "max_api_keys": lim["max_api_keys"],
-            "max_sessions": DEFAULT_MAX_SESSIONS,
+            "max_sessions": None,
         }
     reg = _make_sdk(namespace="registry")
     rows = reg._get_registry().query(
         "MATCH (t:Team {id:$id}) "
         "RETURN t.tier, t.max_users, t.max_graphs, "
         "t.max_points, t.max_api_keys, t.max_sessions",
-        params={"id": team_id},
+        params={"id": org_id},
     ).result_set
     if not rows:
-        raise QuotaCheckError(f"Team {team_id!r} not found in registry")
-    tier, mu, mg, mp, mak, ms = rows[0]
+        raise QuotaCheckError(f"Team {org_id!r} not found in registry")
+    tier, mu, mg, mp, mak, _ms = rows[0]
     tier = tier or "free"
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
     return {
-        "team_id": team_id,
+        "org_id": org_id,
         "tier": tier,
         # max_users/max_graphs: None means unlimited (Team tier); preserve it.
         "max_users": int(mu) if mu is not None else None,
         "max_graphs": int(mg) if mg is not None else None,
         "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
         "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-        "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — the flat 1000 was
+        # an inherited code fallback, never a ratified cap (see the module
+        # comment above). `_ms` (the stored t.max_sessions) is read so the
+        # removal is VISIBLE at the exact site that could re-introduce the
+        # cap — and then NOT honoured, because a stored 1000 must never
+        # re-cap an org (the trap this issue names). Clearing the stored rows
+        # is the defence-in-depth half; ignoring them here is the half that
+        # actually decides.
+        "max_sessions": None,
     }
 
 
-def count_team_usage(team_id: str, resource: str, sdk=None) -> int:
+def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
+    """#4355: True iff `key_id` is a row that ``_count_resource(org_id,
+    'api_keys')`` counts RIGHT NOW — i.e. it currently occupies exactly one
+    ``max_api_keys`` slot.
+
+    This is NOT a fourth count. It is the api_keys cap predicate applied to
+    ONE id, and it exists for exactly one caller: the replacement-aware rotate
+    primitive, which may credit the slot it is about to release only when the
+    displaced row is one the cap actually charged. Without this proof a
+    revoked / expired / bootstrap row id would buy a free slot (the count
+    never held it) and rotate would become a cap hole.
+
+    The two lanes read through the SAME sources ``_count_resource`` uses —
+    Supabase: ``active_api_keys`` (the shared live-set reader) minus the
+    ``created_via='bootstrap'`` exclusion; registry: the same WHERE clause the
+    registry count carries — so the two can never disagree about what is LIVE
+    or about what is cap-exempt. ``tests/test_quota.py`` pins the parity
+    (the count equals the number of rows this predicate accepts).
+    """
+    if not org_id or not key_id:
+        return False
+    from tortoise.supabase_control import (  # noqa: I001
+        active_api_keys, get_control_plane, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        return any(
+            r.get("id") == key_id and r.get("created_via") != "bootstrap"
+            for r in active_api_keys(cp, org_id)
+        )
+    reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
+           else _make_sdk(namespace="registry"))
+    rows = reg._get_registry().query(
+        "MATCH (k:APIKey {org_id: $tid, id: $kid}) "
+        "WHERE k.revoked_at IS NULL "
+        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+        "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN k.id",
+        params={"tid": org_id, "kid": key_id,
+                "now": datetime.now(UTC).isoformat()},
+    ).result_set
+    return bool(rows)
+
+
+def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     """Count current usage for a resource. Raises QuotaCheckError on failure.
 
     Public so callers needing the raw count (e.g. extraction-aware estimates)
@@ -315,10 +418,10 @@ def count_team_usage(team_id: str, resource: str, sdk=None) -> int:
     documents (#1726: the :Document count with the transcript discriminator).
     ``points`` counts non-episodic Points + Object/Subject nodes (#1911).
     """
-    return _count_resource(team_id, resource, sdk=sdk)
+    return _count_resource(org_id, resource, sdk=sdk)
 
 
-def _count_resource(team_id: str, resource: str, sdk=None) -> int:
+def _count_resource(org_id: str, resource: str, sdk=None) -> int:
     """Count current usage for a resource. Raises QuotaCheckError on failure.
 
     Supported resources:
@@ -330,7 +433,10 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
       + /v1/subjects gates check this resource, and Object/Subject carry
       only their own labels, so they must be counted here or the cap is
       vacuous for those writes)
-    - api_keys: active (non-revoked) APIKey nodes in registry
+    - api_keys: LIVE (non-revoked, non-expired) API keys that COUNT against
+      max_api_keys. A bootstrap (24h session) credential is cap-EXEMPT
+      (R13/#4140) and excluded; a NULL/legacy ``created_via`` is a DURABLE
+      row and COUNTS (fail-closed). In registry (Cypher) and Supabase.
     - sessions: Session nodes in tenant graph (MATCH (s:Session) — NOT the
       all-nodes count; #947 P0)
     - users: active Membership nodes in registry
@@ -349,23 +455,33 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             # the count reads Supabase via the seam — post-flip the registry
             # is DELETED, so a registry count would fail-open (0 nodes) or
             # 500. Mirrors the registry predicates exactly:
-            #   api_keys: revoked_at IS NULL AND not expired (#2426/#2481 —
+            #   api_keys: revoked_at IS NULL AND not expired (#2426/#2481)
+            #             AND not created_via='bootstrap' (#4140/R13 —
             #             a REVOKED row is an audit tombstone (retained for
             #             audit + swept later, #685) that must NEVER consume
             #             the plan's max_api_keys budget; an expired-but-
-            #             unrevoked key must never wedge a team at its cap;
+            #             unrevoked key must never wedge an org at its cap;
             #             the auth layer already refuses both, so counting
             #             them would hold a slot for a dead credential.
             #             Pre-#2426 durable keys never carried expiry. The
             #             expiry filter (expires_at IS NULL OR > now) mirrors
-            #             the bootstrap cap queries' own predicate; live rows
-            #             of every created_via count exactly as before. #2481
-            #             audit: this predicate is the ONE count shared by
-            #             every max_api_keys mint gate (hosted_api._mint_key
-            #             for POST /v1/team/keys + per-graph key mints,
-            #             REST _check_team_limit, MCP enforce_team_limit).),
+            #             the bootstrap cap queries' own predicate.
+            #             #4140 (R13): a bootstrap (24h session) key is
+            #             cap-EXEMPT — this count was the ONE outlier that
+            #             omitted the exclusion every recovery-mint lane
+            #             already carries (hosted_api.session_key both lanes,
+            #             sdk.signup_token_recover, recover_team_key), so a
+            #             session credential silently burned a paid durable
+            #             slot. The exclusion is NULL-TOLERANT: a NULL/legacy
+            #             created_via is a DURABLE row and COUNTS
+            #             (fail-closed). #2481 audit: this predicate is the
+            #             ONE count shared by the standalone max_api_keys
+            #             mint gates (hosted_api._mint_key for POST
+            #             /v1/team/keys + per-graph key mints, REST
+            #             _check_org_limit / enforce_org_limit — MCP carries
+            #             no api_keys gate).),
             #   users:    status IS NULL OR status = 'active'
-            #   graphs:   the default graph derived from teams.graph_name
+            #   graphs:   the default graph derived from organizations.graph_name
             #             PLUS custom graph rows from the ``graphs`` table
             #             (20260901000001, C1 #2110) — custom ACTIVE graphs
             #             count toward max_graphs; deleted rows excluded.
@@ -377,58 +493,69 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             #             provisioning INSERT lands (review P2, recorded).
             # Selfhost (registry mode) keeps the registry count.
             from tortoise.supabase_control import (  # noqa: I001
-                _parse_ts, get_control_plane, graph_metadata,
+                active_api_keys, get_control_plane, graph_metadata,
                 is_supabase_enabled,
             )
             if is_supabase_enabled():
                 cp = get_control_plane()
                 if resource == "api_keys":
-                    rows = cp.query(
-                        "api_keys", select=["id", "expires_at"],
-                        filters=[("team_id", "eq", team_id),
-                                 ("revoked_at", "is", None)],
-                    )
-                    now = datetime.now(UTC)
-                    return len([r for r in rows
-                                if (exp := _parse_ts(r.get("expires_at")))
-                                is None or exp > now])
+                    # #4140 (R13): bootstrap (24h session) rows are
+                    # cap-EXEMPT — the SAME predicate the recovery-mint lane
+                    # applies (hosted_api._session_key_supabase). Liveness
+                    # (non-revoked + non-expired) comes from the shared
+                    # active_api_keys() reader, so this count and the
+                    # recovery lane can never disagree on what is LIVE.
+                    # The bootstrap exclusion is applied in PYTHON, never as
+                    # a PostgREST `created_via=neq.bootstrap` filter: SQL
+                    # `<>` drops NULL rows, and a legacy row with a NULL
+                    # created_via is DURABLE and must still count
+                    # (fail-closed — #4140 adversarial T4).
+                    return len([r for r in active_api_keys(cp, org_id)
+                                if r.get("created_via") != "bootstrap"])
                 if resource == "users":
                     rows = cp.query(
-                        "team_memberships", select=["status"],
-                        filters=[("team_id", "eq", team_id)],
+                        "org_memberships", select=["status"],
+                        filters=[("org_id", "eq", org_id)],
                     )
                     return len([r for r in rows
                                 if r.get("status") in (None, "active")])
-                # graphs: default graph exists whenever the team row does
-                return len(graph_metadata(cp, team_id))
+                # graphs: default graph exists whenever the org row does
+                return len(graph_metadata(cp, org_id))
             reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
                    else _make_sdk(namespace="registry"))
             if resource == "api_keys":
                 # #2426: expiry filter mirrors the supabase lane — expired
                 # durable keys never count against max_api_keys.
+                # #4140 (R13): bootstrap (24h session) rows are cap-EXEMPT
+                # — the SAME predicate the recovery-mint lane uses
+                # (hosted_api.session_key, registry lane). NULL created_via
+                # (legacy selfhost) COUNTS: Cypher `NULL <> 'bootstrap'` is
+                # NULL, so the explicit IS NULL arm is required (this is the
+                # over-exemption direction the cap must fail closed on).
                 rows = reg._get_registry().query(
-                    "MATCH (k:APIKey {team_id: $tid}) WHERE k.revoked_at IS NULL "
+                    "MATCH (k:APIKey {org_id: $tid}) WHERE k.revoked_at IS NULL "
+                    "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                     "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
-                    params={"tid": team_id, "now": datetime.now(UTC).isoformat()},
+                    params={"tid": org_id, "now": datetime.now(UTC).isoformat()},
                 ).result_set
             elif resource == "users":
                 rows = reg._get_registry().query(
-                    "MATCH (m:Membership {team_id: $tid}) "
+                    "MATCH (m:Membership {org_id: $tid}) "
                     "WHERE m.status IS NULL OR m.status = 'active' RETURN count(m)",
-                    params={"tid": team_id},
+                    params={"tid": org_id},
                 ).result_set
             else:  # graphs
                 rows = reg._get_registry().query(
-                    "MATCH (g:Graph {team_id: $tid}) "
+                    "MATCH (g:Graph {org_id: $tid}) "
                     "WHERE g.status IS NULL OR g.status <> 'deleted' "
                     "RETURN count(g)",
-                    params={"tid": team_id},
+                    params={"tid": org_id},
                 ).result_set
             return int(rows[0][0])
 
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
-            sdk = _make_sdk(namespace=team_id)
+            sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
             # #1726 Slice 1: the documents resource — :Document count with
             # the transcript discriminator (T2-P2a). NULL-kind docs COUNT
@@ -459,9 +586,9 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
         # UNCONDITIONALLY: they carry only their own labels (projection/
         # entities.py _upsert_object/_upsert_subject) and previously NEVER
         # appeared in this count — the /v1/objects + /v1/subjects gates
-        # (hosted_api._check_team_limit resource="points") and the MCP
+        # (hosted_api._check_org_limit resource="points") and the MCP
         # create_object/create_subject tools (_quota_gated "points") checked
-        # a count that could only ever see Points, so a free team could write
+        # a count that could only ever see Points, so a free org could write
         # unbounded objects/subjects without ever 402ing (bug-hunt 2026-08-28
         # server P2-1, #1911). max_points IS the pricing max_graph_nodes node
         # cap (tortoise.pricing tier_limits) — counting Object+Subject
@@ -469,7 +596,7 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
         # #1844 interplay (recorded intent): the GitHub indexer is an
         # UNGATED object writer (hosted_api.py:11097 — no points-quota
         # preflight, by design). Its minted Object nodes now count against
-        # the cap, so an indexing-heavy team can be pushed past max_points,
+        # the cap, so an indexing-heavy org can be pushed past max_points,
         # after which all points-gated writes 402 until upgrade — the
         # intended "0 uncapped object/subject growth" posture. A future
         # indexer preflight (follow-up) would gate the job itself.
@@ -487,29 +614,40 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
         redacted = redact_error(e)
         _logger.error(
             "quota count failed (fail-closed): team=%s resource=%s error=%s",
-            team_id, resource, redacted,
+            org_id, resource, redacted,
         )
         raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
-def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
-    """Reject a write when the team is at/over its resource limit.
+def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
+                      slot_credit: int = 0) -> None:
+    """Reject a write when the org is at/over its resource limit.
 
     Args:
-        limits: resolved team limits dict (from resolve_team_limits or the
-            authenticated caller). None → skip (stdio/operator, no team).
+        limits: resolved org limits dict (from resolve_org_limits or the
+            authenticated caller). None → skip (stdio/operator, no org).
+            A key that is PRESENT and None means UNLIMITED (skip); a MISSING
+            key is fail-closed (QuotaCheckError) for every resource — build
+            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010).
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
-        sdk: pre-built team SDK (REST callers already hold one) — optional.
+        sdk: pre-built org SDK (REST callers already hold one) — optional.
+        slot_credit: #4355 — how many slots this write RELEASES as part of the
+            same operation, so the admission check is evaluated against the
+            post-release count. It exists for exactly ONE caller: the
+            replacement-aware rotate primitive, which passes 1 after proving
+            (``api_key_occupies_slot``) that the displaced row is counted once.
+            MUST be 0 everywhere else, and MUST never become reachable from a
+            client-supplied value — an unproven credit is a free slot.
 
     Raises:
-        QuotaExceededError: team at/over limit (402-equivalent).
+        QuotaExceededError: org at/over limit (402-equivalent).
         QuotaCheckError: counting failed (fail-closed).
     """
     if limits is None:
-        return  # stdio/operator — no team context
-    team_id = limits.get("team_id")
-    if not team_id:
+        return  # stdio/operator — no org context
+    org_id = limits.get("org_id")
+    if not org_id:
         return
     # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
     # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
@@ -531,7 +669,7 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
                 f"team limits max_points invalid for documents resource "
                 f"({max_points!r})") from None
         limit = max_points * _DOCUMENTS_FROM_POINTS_FACTOR
-        count = _count_resource(team_id, "documents", sdk=sdk)
+        count = _count_resource(org_id, "documents", sdk=sdk)
         if count >= limit:
             raise QuotaExceededError(
                 f"Team documents limit reached ({limit}). Upgrade your plan "
@@ -547,14 +685,17 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
         # stored null) — skip enforcement (#683). Distinguish from a MISSING
         # key, which is fail-closed (#310 GAP-B): never silently fall back to
         # lenient caps.
+        # #4010: sessions is no longer the exception to that rule. The flat
+        # 1000 it fell back to was an inherited code fallback, never a
+        # ratified cap (see the module comment above), so it has no constant
+        # to fall back to and its resolved value is always the explicit None
+        # — the lenient `if resource == "sessions": limit =
+        # DEFAULT_MAX_SESSIONS` branch is deleted, not relocated.
         if limit_key in limits:
             return
-        if resource == "sessions":
-            limit = DEFAULT_MAX_SESSIONS
-        else:
-            raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
-    count = _count_resource(team_id, resource, sdk=sdk)
-    if count >= limit:
+        raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
+    count = _count_resource(org_id, resource, sdk=sdk)
+    if count - slot_credit >= limit:
         raise QuotaExceededError(
             f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it."
         )
@@ -562,20 +703,29 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
 
 # ── Ask lane: shared budget bucket + bounded runner (#1987 Tasks 6/7/8) ────
 #
-# The ONE shared per-team per-minute LLM budget for the ask lane, used by
+# ⛔ RETIRED-BUT-RETAINED (#3849): every PRODUCT caller of this cluster — the
+# hosted REST /v1/ask handler, the hosted MCP ask handler and the selfhost
+# /ask handler — was removed with the ask product surface, so no product path
+# reaches it today (the eval-only lane, tortoise/ask_lane.py, is unbudgeted).
+# Its one remaining caller is a test: tests/test_quota.py pins
+# `run_ask_bounded`'s exec-floor guarantee, so the #3849 §7 D5 purge has to
+# move or drop that test with it. The comments below that name the removed
+# handlers are kept as the record of what the bounds were.
+#
+# The ONE shared per-org per-minute LLM budget for the ask lane, used by
 # BOTH the hosted REST handler and the hosted MCP handler (no duplicated
 # prune/check/append logic — mcp_server.py imports ``tortoise.quota``). The
-# bucket is bounded: idle team keys are pruned under a TTL + LRU cap so
-# memory stays bounded under N-teams-ask-once / M-teams-idle, and a
-# reactivated team starts clean (P2-15).
+# bucket is bounded: idle org keys are pruned under a TTL + LRU cap so
+# memory stays bounded under N-orgs-ask-once / M-orgs-idle, and a
+# reactivated org starts clean (P2-15).
 
 import collections  # noqa: E402
 import contextlib  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
-_ASK_BUDGET_TTL_S = 300.0       # idle team bucket expiry
-_ASK_BUDGET_MAX_TEAMS = 1024    # LRU bound on the bucket dict
+_ASK_BUDGET_TTL_S = 300.0       # idle org bucket expiry
+_ASK_BUDGET_MAX_ORGS = 1024    # LRU bound on the bucket dict
 _ask_llm_budget: collections.OrderedDict[str, list[float]] = \
     collections.OrderedDict()
 _ask_budget_lock = threading.Lock()
@@ -583,45 +733,45 @@ _ask_budget_lock = threading.Lock()
 
 def _selfhost_transport_active() -> bool:
     """The transport-keyed selfhost exemption channel (tortoise/transport.py
-    — the SELFHOST_TEAM_ID VALUE is never the exemption key)."""
+    — the SELFHOST_ORG_ID VALUE is never the exemption key)."""
     from tortoise.transport import _selfhost_transport
     return _selfhost_transport.get()
 
 
-def ask_llm_budget_available(team_id: str | None) -> bool:
-    """True if this team still has ask LLM budget this minute.
+def ask_llm_budget_available(org_id: str | None) -> bool:
+    """True if this org still has ask LLM budget this minute.
 
-    Exemptions (always allowed): ``not team_id`` (stdio/None — mirroring
-    ``_analyze_llm_budget_available``'s ``if not team_id: return True``,
+    Exemptions (always allowed): ``not org_id`` (stdio/None — mirroring
+    ``_analyze_llm_budget_available``'s ``if not org_id: return True``,
     mcp_server.py) AND the selfhost-transport signal
     (``_selfhost_transport.get()`` — stdio + selfhost MCP modes are
-    unbudgeted). A hosted team with the RAW id "selfhost" is budget-charged
+    unbudgeted). A hosted org with the RAW id "selfhost" is budget-charged
     (the exemption is transport-keyed, never value-keyed).
 
     Prune → check → append (never pop between check and append — that
     orphans the appended timestamp and silently disables the budget).
     """
-    if not team_id or _selfhost_transport_active():
+    if not org_id or _selfhost_transport_active():
         return True
     now_ts = time.monotonic()
     with _ask_budget_lock:
-        bucket = _ask_llm_budget.get(team_id)
+        bucket = _ask_llm_budget.get(org_id)
         if bucket is None:
             bucket = []
-        # prune stale entries for THIS team (equal/sub-second timestamps
+        # prune stale entries for THIS org (equal/sub-second timestamps
         # safe — monotonic, no index errors)
         bucket[:] = [ts for ts in bucket if now_ts - ts < 60.0]
         if len(bucket) >= MAX_ASK_LLM_PER_MIN:
             return False
         bucket.append(now_ts)
-        _ask_llm_budget[team_id] = bucket
-        _ask_llm_budget.move_to_end(team_id)
-        # TTL + LRU bound: drop expired/least-recently-used team keys
+        _ask_llm_budget[org_id] = bucket
+        _ask_llm_budget.move_to_end(org_id)
+        # TTL + LRU bound: drop expired/least-recently-used org keys
         expired = [k for k, v in _ask_llm_budget.items()
                    if v and now_ts - v[-1] >= _ASK_BUDGET_TTL_S]
         for k in expired:
             del _ask_llm_budget[k]
-        while len(_ask_llm_budget) > _ASK_BUDGET_MAX_TEAMS:
+        while len(_ask_llm_budget) > _ASK_BUDGET_MAX_ORGS:
             _ask_llm_budget.popitem(last=False)
     return True
 
@@ -632,15 +782,15 @@ def _reset_ask_budget_for_tests() -> None:
         _ask_llm_budget.clear()
 
 
-def ask_budget_retry_after(team_id: str | None) -> float:
-    """Seconds until the team's ask budget window self-heals (Retry-After
+def ask_budget_retry_after(org_id: str | None) -> float:
+    """Seconds until the org's ask budget window self-heals (Retry-After
     for the 429 ``quota_exceeded`` response — ≈ the prune delay; 0 when no
     budget was consumed)."""
-    if not team_id:
+    if not org_id:
         return 0.0
     now_ts = time.monotonic()
     with _ask_budget_lock:
-        bucket = _ask_llm_budget.get(team_id) or []
+        bucket = _ask_llm_budget.get(org_id) or []
         if not bucket:
             return 0.0
         oldest = min(bucket)
@@ -648,22 +798,27 @@ def ask_budget_retry_after(team_id: str | None) -> float:
 
 
 class AskInFlightLimitError(Exception):
-    """Per-team in-flight cap hit (4 concurrent) — mapped to 429
-    ``in_flight_limit`` by the ask handlers."""
+    """Per-org in-flight cap hit (4 concurrent) — mapped to 429
+    ``in_flight_limit`` by the ask handlers (removed in #3849 — no handler
+    maps it any more, though the retained ``run_ask_bounded`` still raises
+    it; see the RETIRED note on this cluster)."""
 
 
 class AskBoundedTimeoutError(Exception):
     """The bounded ask section exceeded ``_ASK_TIMEOUT_S`` (semaphore queue
-    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers."""
+    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers
+    (removed in #3849 — no handler maps it any more, though the retained
+    ``run_ask_bounded`` still raises it and tests/test_quota.py pins that;
+    see the RETIRED note on this cluster)."""
 
 
-#: Ask-lane bounds (#1987 Task 7): global semaphore, per-team in-flight cap,
+#: Ask-lane bounds (#1987 Task 7): global semaphore, per-org in-flight cap,
 #: and the injectable module-level timeout (monkeypatched in tests — no real
 #: 60s sleeps).
 _ASK_TIMEOUT_S = 60
 _ASK_EXEC_FLOOR_S = 5.0     # a started ask is guaranteed >= this much execution time
 _ASK_GLOBAL_SEMAPHORE_SIZE = 8
-_ASK_TEAM_IN_FLIGHT_CAP = 4
+_ASK_ORG_IN_FLIGHT_CAP = 4
 
 #: Loop-safe semaphore/in-flight state: keyed by the RUNNING loop object via
 #: a weak-keyed dict (entries die with their loop — a recreated loop rebinds
@@ -705,13 +860,13 @@ def _call_sync(fn, args, kwargs):
     return fn(*args, **kwargs)
 
 
-def ask_in_flight_capacity(team_id: str | None) -> bool:
-    """True when the per-team in-flight ask cap still has room (or team_id
+def ask_in_flight_capacity(org_id: str | None) -> bool:
+    """True when the per-org in-flight ask cap still has room (or org_id
     is None). A cheap pre-check for the budget gates (#1987 P2): a request
     that ``run_ask_bounded`` will reject with 429 ``in_flight_limit`` must
     not burn a budget slot. Best-effort — a benign race can still charge a
     slot that later 429s, but the common full-cap case is skipped."""
-    if not team_id:
+    if not org_id:
         return True
     import asyncio
     try:
@@ -719,21 +874,24 @@ def ask_in_flight_capacity(team_id: str | None) -> bool:
     except RuntimeError:
         return True
     st = _ask_state_for_loop(loop)
-    return st["in_flight"][team_id] < _ASK_TEAM_IN_FLIGHT_CAP
+    return st["in_flight"][org_id] < _ASK_ORG_IN_FLIGHT_CAP
 
 
-async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
+async def run_ask_bounded(fn, org_id: str | None, *args, **kwargs):
     """Shared bounded ask runner (#1987 Task 7/8/9) — the ONE wrapper the
     hosted HTTP handler, the hosted MCP handler, and the selfhost REST
-    handler all await.
+    handler all awaited (all three removed in #3849, so no product caller
+    reaches it any more; its one remaining caller is ``tests/test_quota.py``,
+    which pins the exec-floor guarantee — see the RETIRED note on this
+    cluster).
 
     Bounds: global ``asyncio.Semaphore(8)`` + ``asyncio.wait_for(_ASK_TIMEOUT_S)``
     wrapping the FULL bounded section (semaphore acquire + the to_thread
     reader call) — total per-request latency is capped at ``_ASK_TIMEOUT_S``;
     a request queued behind 8 in-flight past the budget 504s (bounded, never
-    an unbounded queue wait). The per-team in-flight cap (4) lives INSIDE
+    an unbounded queue wait). The per-org in-flight cap (4) lives INSIDE
     this wrapper (shared by HTTP + MCP): the counter increments ON ENTRY
-    (BEFORE ``Semaphore.acquire`` — queued asks count toward the team's cap
+    (BEFORE ``Semaphore.acquire`` — queued asks count toward the org's cap
     while waiting) and is released on the ``to_thread`` future's COMPLETION
     (an ``add_done_callback`` — release on completion, NOT on ``wait_for``
     firing: a timed-out ask keeps its slot until the thread finishes, so a
@@ -742,7 +900,7 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
     The acquire-cancelled path (wait_for fires during the queue wait — no
     future exists) decrements the counter in the wrapper's finally.
 
-    Raises ``AskInFlightLimitError`` (per-team cap), ``AskBoundedTimeoutError``
+    Raises ``AskInFlightLimitError`` (per-org cap), ``AskBoundedTimeoutError``
     (504), or the underlying exception from ``fn``.
     """
     import asyncio
@@ -750,14 +908,15 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
     st = _ask_state_for_loop(loop)
     sem = st["sem"]
     inflight = st["in_flight"]
-    # ``_sdk_team_id`` is the bound SDK lane's metering team_id (hosted
-    # HTTP/MCP handlers pass the team; selfhost passes None) — stripped here
-    # so ``fn`` (sdk.ask) receives it WITHOUT colliding with this wrapper's
-    # own ``team_id`` (the in-flight-cap key).
+    # ``_sdk_org_id`` is the bound SDK lane's metering org_id (hosted
+    # HTTP/MCP handlers pass the org; selfhost passes None; that SDK entry
+    # point was removed in #3849) — stripped here
+    # so ``fn`` receives it WITHOUT colliding with this wrapper's
+    # own ``org_id`` (the in-flight-cap key).
     fn_kwargs = dict(kwargs)
-    sdk_team_id = fn_kwargs.pop("_sdk_team_id", team_id)
-    if sdk_team_id is not None:
-        fn_kwargs["team_id"] = sdk_team_id
+    sdk_org_id = fn_kwargs.pop("_sdk_org_id", org_id)
+    if sdk_org_id is not None:
+        fn_kwargs["org_id"] = sdk_org_id
     # contextvars do NOT propagate to run_in_executor worker threads (3.12,
     # empirically confirmed) — capture the selfhost-transport flag HERE (the
     # asyncio context) and thread it through so the executor-thread metering
@@ -765,12 +924,12 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
     from tortoise.transport import _selfhost_transport
     if _selfhost_transport.get():
         fn_kwargs["_selfhost_transport"] = True
-    if team_id:
-        if inflight[team_id] >= _ASK_TEAM_IN_FLIGHT_CAP:
+    if org_id:
+        if inflight[org_id] >= _ASK_ORG_IN_FLIGHT_CAP:
             raise AskInFlightLimitError(
-                f"team {team_id!r} in-flight ask cap reached "
-                f"({_ASK_TEAM_IN_FLIGHT_CAP})")
-        inflight[team_id] += 1
+                f"team {org_id!r} in-flight ask cap reached "
+                f"({_ASK_ORG_IN_FLIGHT_CAP})")
+        inflight[org_id] += 1
     future = None
     t_start = time.monotonic()
     # The SEMAPHORE-ACQUIRE window is bounded by the REMAINDER of the total
@@ -784,8 +943,8 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
         except (TimeoutError, asyncio.CancelledError) as e:
             # wait_for fired during the queue wait — no future exists; the
             # counter decrements here (never a leaked counter).
-            if team_id:
-                inflight[team_id] -= 1
+            if org_id:
+                inflight[org_id] -= 1
             if isinstance(e, asyncio.TimeoutError):
                 raise AskBoundedTimeoutError(
                     f"ask queued past {acquire_timeout}s (8 in flight)") from e
@@ -797,15 +956,15 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
             # (no future, no done-callback): release the slot + counter NOW.
             with contextlib.suppress(Exception):
                 sem.release()
-            if team_id:
-                inflight[team_id] -= 1
+            if org_id:
+                inflight[org_id] -= 1
             raise
 
         def _release(_fut) -> None:
             with contextlib.suppress(Exception):  # best-effort release — never blocks
                 sem.release()
-            if team_id:
-                inflight[team_id] -= 1
+            if org_id:
+                inflight[org_id] -= 1
 
         future.add_done_callback(_release)
         # The SECOND window uses the REMAINING budget (the acquire above may

@@ -34,24 +34,24 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 from tests._http_fixtures import patched_tortoise_sdk
-from tortoise.hosted_api import app, get_current_team, get_current_user
+from tortoise.hosted_api import app, get_current_org, get_current_user
 
-TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
+TEST_ORG_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
-    "team_id": TEST_TEAM_ID,
+    "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
     # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
     # data-plane gates otherwise (mirrors the #2241 migration pattern).
     "legacy_full_access": True,
     "tier": "free",
     "max_users": 1, "max_graphs": 1, "max_points": 10000,
-    "max_api_keys": 2, "max_sessions": 1000,
+    "max_api_keys": 2, "max_sessions": None,
 }
-TEST_TEAM_B = {"team_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
+TEST_TEAM_B = {"org_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
                # C5 #2114 (#2260): legacy tt_ class (see TEST_TEAM note).
                "legacy_full_access": True,
                "tier": "free", "max_users": 1, "max_graphs": 1,
-               "max_points": 10000, "max_api_keys": 2, "max_sessions": 1000}
+               "max_points": 10000, "max_api_keys": 2, "max_sessions": None}
 
 VALID_MANIFEST = """namespace: tenant-ops
 name: Tenant Operations
@@ -76,7 +76,7 @@ connectors:
 def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk).
         # Patching tortoise.sdk.TortoiseSDK == hosted_api.TortoiseSDK (same
         # class object) — the helper's hosted_api patch applies identically;
@@ -91,14 +91,14 @@ def client_b():
     """Second tenant (isolation probe)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test_b.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM_B)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
         # #2127: shared helper (see client).
         with patched_tortoise_sdk(db_path):
             yield TestClient(app)
 
 
-def _team_sdk(team_id: str = TEST_TEAM_ID):
-    return ha_mod._make_sdk(namespace=team_id)
+def _team_sdk(org_id: str = TEST_ORG_ID):
+    return ha_mod._make_sdk(namespace=org_id)
 
 
 # ── validate_manifest (unit) ────────────────────────────────────────────────
@@ -223,7 +223,7 @@ class TestUploadEndpoint:
         assert r.json()["detail"] == "manifest exceeds 64KB"
 
     def test_upload_401_unauthenticated(self):
-        from tortoise.hosted_api import get_current_team as _gt
+        from tortoise.hosted_api import get_current_org as _gt
         app.dependency_overrides.pop(_gt, None)
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patched_tortoise_sdk(os.path.join(tmpdir, "t.db")):
@@ -317,8 +317,8 @@ class TestUploadRateLimit:
             # is still a terminal outcome, so the progression holds there
             # too — only moving export's check AFTER authz breaks it (a
             # real doctrine regression worth catching).
-            assert tc.get("/v1/teams/nope/export").status_code == 403
-            assert tc.get("/v1/teams/nope/export").status_code == 429
+            assert tc.get("/v1/organizations/nope/export").status_code == 403
+            assert tc.get("/v1/organizations/nope/export").status_code == 429
             # export didn't consume the pack bucket → budget still left
             r = tc.post("/v1/packs/manifests",
                         json={"manifest_yaml": VALID_MANIFEST})
@@ -334,18 +334,18 @@ class TestUploadRateLimit:
         """Unauthenticated POSTs (dependency 401, before the body) must not
         burn the per-IP budget — a shared-IP spammer can't lock out the
         tenant (the limiter lives in the endpoint body, after the
-        get_current_team dependency)."""
+        get_current_org dependency)."""
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 1)
         ha_mod._SENSITIVE_BUCKETS.clear()
-        app.dependency_overrides.pop(get_current_team, None)
+        app.dependency_overrides.pop(get_current_org, None)
         try:
             for _ in range(3):
                 r = client.post("/v1/packs/manifests",
                                 json={"manifest_yaml": VALID_MANIFEST})
                 assert r.status_code == 401
             # bucket untouched → a legitimate upload still succeeds
-            app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
             r = client.post("/v1/packs/manifests",
                             json={"manifest_yaml": VALID_MANIFEST})
             assert r.status_code == 201, r.text
@@ -566,19 +566,19 @@ class TestIsolation:
             db_b = os.path.join(tmp_b, "b.db")
 
             def _route_patch(self, db_path_arg=None, *, namespace=None, **kwargs):
-                target = db_b if namespace == TEST_TEAM_B["team_id"] else db_a
+                target = db_b if namespace == TEST_TEAM_B["org_id"] else db_a
                 _orig(self, target, namespace=namespace)
 
             import tortoise.sdk as sdk_mod
             _orig = sdk_mod.TortoiseSDK.__init__
             sdk_mod.TortoiseSDK.__init__ = _route_patch
-            app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
             try:
                 c_a = TestClient(app)
                 r = c_a.post("/v1/packs/manifests",
                              json={"manifest_yaml": VALID_MANIFEST})
                 assert r.status_code == 201, r.text
-                app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM_B)
+                app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
                 c_b = TestClient(app)
                 r_b = c_b.get("/v1/packs")
                 ns = [p["namespace"] for p in r_b.json()["packs"]]
@@ -667,3 +667,45 @@ class TestDeploymentGateAndView:
         v3 = tenant_view(sdk)
         assert any(m["namespace"] == "tenant-ops" for m in v3["tenant"]), \
             "view must refresh after a :PackManifest write"
+
+
+# ── #2814: the REAL writers' output must survive a real rebuild ─────────────
+
+
+class TestRebuildDurability:
+    def test_tenant_manifest_survives_rebuild_all(self, client, tmp_path):
+        """Upload via the real endpoint → `rebuild_all` → the live graph keeps it.
+
+        The proof drives the REAL wipe+replay and asserts on the graph AFTER
+        it — a helper-only assertion would pass while the wipe destroyed the
+        manifest, which is the non-falsifying failure mode #2814 must avoid.
+        (Docker lane; `TORTOISE_TEST_MODE=1` redirects the graph to a
+        `test_*` name so the production bulk-wipe guard stays armed.)
+        """
+        from tortoise.pack_manifest_store import get_tenant_manifests
+
+        r = client.post("/v1/packs/manifests",
+                        json={"manifest_yaml": VALID_MANIFEST})
+        assert r.status_code == 201, r.text
+        sdk = _team_sdk()
+        before_manifests = get_tenant_manifests(sdk)
+        before_installs = sorted(
+            (row[0], row[1], row[2])
+            for row in sdk._get_proj().g.query(
+                "MATCH (p:PackInstall) RETURN p.namespace, p.source, "
+                "p.status ORDER BY p.namespace").result_set)
+        assert before_installs, "the upload activated nothing — vacuous test"
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk._get_proj().rebuild_all(str(events))
+
+        assert get_tenant_manifests(sdk) == before_manifests, (
+            "the real :PackManifest did not survive rebuild_all (#2814)")
+        after_installs = sorted(
+            (row[0], row[1], row[2])
+            for row in sdk._get_proj().g.query(
+                "MATCH (p:PackInstall) RETURN p.namespace, p.source, "
+                "p.status ORDER BY p.namespace").result_set)
+        assert after_installs == before_installs, (
+            "the real :PackInstall (source='custom') did not survive (#2814)")

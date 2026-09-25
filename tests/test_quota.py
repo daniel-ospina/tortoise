@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -9,9 +10,9 @@ import pytest
 from tortoise.quota import (
     QuotaCheckError,
     QuotaExceededError,
-    count_team_usage,
-    enforce_team_limit,
-    resolve_team_limits,
+    count_org_usage,
+    enforce_org_limit,
+    resolve_org_limits,
 )
 
 # graph-scripts/ is a hyphenated (namespace) dir — import the #947 backfill
@@ -40,7 +41,7 @@ def reg_sdk(monkeypatch, tmp_path):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
-    sdk.team_create(name="quota-team")
+    sdk.org_create(name="quota-team")
     yield sdk
     sdk.close()
 
@@ -48,22 +49,23 @@ def reg_sdk(monkeypatch, tmp_path):
 class TestResolveTeamLimits:
     def test_missing_team_fails_closed(self):
         with pytest.raises(QuotaCheckError):
-            resolve_team_limits("no-such-team")
+            resolve_org_limits("no-such-team")
 
     def test_provisioned_team_has_defaults(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
-        limits = resolve_team_limits(tid)
+        tid = _find_org_id(reg_sdk)
+        limits = resolve_org_limits(tid)
         # team_create writes max_api_keys from pricing.json free tier (=2),
-        # but NOT max_points / max_sessions — defaults apply (points from
-        # pricing max_graph_nodes=10000; sessions flat 1000 per #310).
+        # but NOT max_points — the pricing default applies (max_graph_nodes
+        # = 10000). max_sessions has no default at all: it is UNLIMITED per
+        # #4010 (present-but-None).
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
-        assert limits["max_sessions"] == 1000
+        assert limits["max_sessions"] is None
         assert limits["max_users"] == 1
         assert limits["max_graphs"] == 1
 
 
-def _find_team_id(sdk) -> str:
+def _find_org_id(sdk) -> str:
     """Find a team id in the registry graph (test helper)."""
     rows = sdk._get_registry().query(
         "MATCH (t:Team) RETURN t.id LIMIT 1"
@@ -75,7 +77,7 @@ def _find_team_id(sdk) -> str:
 class TestEnforceTeamLimit:
     def test_no_limits_skips(self):
         """stdio/operator: no team context → clean skip."""
-        enforce_team_limit(None, "points")  # must not raise
+        enforce_org_limit(None, "points")  # must not raise
 
     def test_at_limit_raises(self, tmp_path):
         from tortoise.sdk import TortoiseSDK  # noqa: I001
@@ -83,9 +85,9 @@ class TestEnforceTeamLimit:
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
-        limits = {"team_id": "team1", "max_points": 1}
+        limits = {"org_id": "team1", "max_points": 1}
         with pytest.raises(QuotaExceededError):
-            enforce_team_limit(limits, "points", sdk=sdk)
+            enforce_org_limit(limits, "points", sdk=sdk)
         sdk.close()
 
     def test_below_limit_passes(self, tmp_path):
@@ -94,8 +96,8 @@ class TestEnforceTeamLimit:
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
-        limits = {"team_id": "team1", "max_points": 10}
-        enforce_team_limit(limits, "points", sdk=sdk)  # must not raise
+        limits = {"org_id": "team1", "max_points": 10}
+        enforce_org_limit(limits, "points", sdk=sdk)  # must not raise
         sdk.close()
 
     def test_counting_error_fails_closed(self, tmp_path, monkeypatch, caplog):
@@ -108,12 +110,12 @@ class TestEnforceTeamLimit:
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
-        limits = {"team_id": "team1", "max_points": 1000}
+        limits = {"org_id": "team1", "max_points": 1000}
         def boom(*a, **kw):
             raise RuntimeError("db down")
         monkeypatch.setattr(sdk._get_proj().g._g, "query", boom)
         with pytest.raises(QuotaCheckError) as exc_info:
-            enforce_team_limit(limits, "points", sdk=sdk)
+            enforce_org_limit(limits, "points", sdk=sdk)
         sdk.close()
         # Verify ERROR log was emitted (#686 alerting)
         assert "quota count failed" in str(exc_info.value)
@@ -124,7 +126,7 @@ class TestEnforceTeamLimit:
 
     def test_unknown_resource_fails_closed(self):
         with pytest.raises(QuotaCheckError):
-            enforce_team_limit({"team_id": "t", "max_points": 10}, "widgets")
+            enforce_org_limit({"org_id": "t", "max_points": 10}, "widgets")
 
 
 # ── #683: users + graphs enforcement ──────────────────────────────────────
@@ -133,53 +135,53 @@ class TestEnforceUsersLimit:
     """User/membership quota enforcement."""
 
     def test_users_below_limit_passes(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
-        limits = resolve_team_limits(tid)
+        tid = _find_org_id(reg_sdk)
+        limits = resolve_org_limits(tid)
         # team_create does NOT create a membership; count = 0, max_users = 1
         # → below limit
-        enforce_team_limit(limits, "users")  # must not raise
+        enforce_org_limit(limits, "users")  # must not raise
 
     def test_users_at_limit_raises(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         # Create a membership to hit the limit
         reg_sdk.membership_create(tid, "user-1", "owner")
-        limits = resolve_team_limits(tid)
+        limits = resolve_org_limits(tid)
         # 1 membership, max_users=1 → at limit
         with pytest.raises(QuotaExceededError, match="users limit reached"):
-            enforce_team_limit(limits, "users")
+            enforce_org_limit(limits, "users")
 
     def test_users_unlimited_skips(self, reg_sdk):
         """None max_users = unlimited (Team tier) — never raises."""
-        tid = _find_team_id(reg_sdk)
-        limits = resolve_team_limits(tid)
+        tid = _find_org_id(reg_sdk)
+        limits = resolve_org_limits(tid)
         limits["max_users"] = None  # Team tier → unlimited
-        enforce_team_limit(limits, "users")  # must not raise
+        enforce_org_limit(limits, "users")  # must not raise
 
 
 class TestEnforceGraphsLimit:
     """Graph quota enforcement."""
 
     def test_graphs_below_limit_passes(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
-        limits = resolve_team_limits(tid)
+        tid = _find_org_id(reg_sdk)
+        limits = resolve_org_limits(tid)
         # team_create auto-creates 1 default graph; max_graphs=1
         # bump limit to 5 so we're below it
         limits["max_graphs"] = 5
-        enforce_team_limit(limits, "graphs")  # must not raise
+        enforce_org_limit(limits, "graphs")  # must not raise
 
     def test_graphs_at_limit_raises(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
-        limits = resolve_team_limits(tid)
+        tid = _find_org_id(reg_sdk)
+        limits = resolve_org_limits(tid)
         # 1 default graph from team_create, max_graphs=1 → at limit
         with pytest.raises(QuotaExceededError, match="graphs limit reached"):
-            enforce_team_limit(limits, "graphs")
+            enforce_org_limit(limits, "graphs")
 
     def test_graphs_unlimited_skips(self, reg_sdk):
         """None max_graphs = unlimited (pro/team tier) — never raises."""
-        tid = _find_team_id(reg_sdk)
-        limits = resolve_team_limits(tid)
+        tid = _find_org_id(reg_sdk)
+        limits = resolve_org_limits(tid)
         limits["max_graphs"] = None  # Pro/Team tier → unlimited
-        enforce_team_limit(limits, "graphs")  # must not raise
+        enforce_org_limit(limits, "graphs")  # must not raise
 
 
 # ── #683: None (unlimited) preservation in resolvers ──────────────────────
@@ -189,44 +191,44 @@ class TestNonePreservation:
 
     def test_resolve_team_limits_preserves_none_users(self, reg_sdk):
         """Team-tier team with max_users=None → resolve returns None, not 1."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         # Directly set max_users=None on the Team node (Team tier semantics)
         reg_sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_users = NULL",
             params={"id": tid},
         )
-        limits = resolve_team_limits(tid)
+        limits = resolve_org_limits(tid)
         assert limits["max_users"] is None, (
             f"Expected None (unlimited), got {limits['max_users']!r}")
 
     def test_resolve_team_limits_preserves_none_graphs(self, reg_sdk):
         """Team-tier team with max_graphs=None → resolve returns None."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         reg_sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_graphs = NULL",
             params={"id": tid},
         )
-        limits = resolve_team_limits(tid)
+        limits = resolve_org_limits(tid)
         assert limits["max_graphs"] is None, (
             f"Expected None (unlimited), got {limits['max_graphs']!r}")
 
     def test_team_limits_from_node_preserves_none_users(self):
-        """_team_limits_from_node: None max_users → None (not coiled to 1)."""
-        from tortoise.hosted_api import _team_limits_from_node
+        """_org_limits_from_node: None max_users → None (not coiled to 1)."""
+        from tortoise.hosted_api import _org_limits_from_node
         node = {"id": "t1", "tier": "team",
                 "max_users": None, "max_graphs": None}
-        limits = _team_limits_from_node(node)
+        limits = _org_limits_from_node(node)
         assert limits["max_users"] is None, (
             f"Expected None (unlimited Team tier), got {limits['max_users']!r}")
         assert limits["max_graphs"] is None, (
             f"Expected None (unlimited Team tier), got {limits['max_graphs']!r}")
 
     def test_team_limits_from_node_preserves_none_graphs(self):
-        """_team_limits_from_node: None max_graphs for pro tier = unlimited."""
-        from tortoise.hosted_api import _team_limits_from_node
+        """_org_limits_from_node: None max_graphs for pro tier = unlimited."""
+        from tortoise.hosted_api import _org_limits_from_node
         node = {"id": "t2", "tier": "pro",
                 "max_users": 2, "max_graphs": None}
-        limits = _team_limits_from_node(node)
+        limits = _org_limits_from_node(node)
         # max_graphs=None (pro tier) → unlimited
         assert limits["max_graphs"] is None, (
             f"Expected None (unlimited pro graphs), got {limits['max_graphs']!r}")
@@ -234,26 +236,30 @@ class TestNonePreservation:
         assert limits["max_users"] == 2
 
     def test_team_limits_from_node_explicit_zero(self):
-        """P1: explicit 0 is preserved, not conflated with missing."""
-        from tortoise.hosted_api import _team_limits_from_node
+        """P1: explicit 0 is preserved, not conflated with missing.
+
+        #4010: max_sessions is the exception — sessions have no cap, so a
+        stored 0 is NOT honoured (it would be a zero-session cap)."""
+        from tortoise.hosted_api import _org_limits_from_node
         node = {"id": "t3", "tier": "free",
                 "max_points": 0, "max_api_keys": 0, "max_sessions": 0}
-        limits = _team_limits_from_node(node)
+        limits = _org_limits_from_node(node)
         assert limits["max_points"] == 0, (
             f"Explicit 0 should be 0, got {limits['max_points']!r}")
         assert limits["max_api_keys"] == 0, (
             f"Explicit 0 should be 0, got {limits['max_api_keys']!r}")
-        assert limits["max_sessions"] == 0, (
-            f"Explicit 0 should be 0, got {limits['max_sessions']!r}")
+        assert limits["max_sessions"] is None, (
+            f"sessions are unlimited (#4010) — a stored 0 must not cap them, "
+            f"got {limits['max_sessions']!r}")
 
     def test_team_limits_from_node_free_tier_defaults(self):
         """Missing fields on free-tier node → pricing-aligned defaults."""
-        from tortoise.hosted_api import _team_limits_from_node
+        from tortoise.hosted_api import _org_limits_from_node
         node = {"id": "t4", "tier": "free"}
-        limits = _team_limits_from_node(node)
+        limits = _org_limits_from_node(node)
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
-        assert limits["max_sessions"] == 1000
+        assert limits["max_sessions"] is None  # unlimited (#4010)
 
 
 # ── #947 (epic #909 slice 2): sessions branch + is_episodic + constants ──
@@ -262,19 +268,21 @@ class TestSessionsQuota:
     """#947 P0: the sessions branch counts Session nodes, NOT all nodes.
 
     Pre-fix ``_count_resource("sessions")`` fell through to ``MATCH (n)`` —
-    ~25 nodes per captured session → false 402 after ~40 captures. The
-    fixture follows conftest.provision_test_user's convention (direct
-    max_sessions write on the Team node — no tier gives 40, DE2E-7).
+    ~25 nodes per captured session → false 402 after ~40 captures. #4010: the
+    stored ``t.max_sessions`` is no longer honoured as a cap (sessions are
+    unlimited for every tier), so the same fixture that used to gate the 41st
+    capture now stores it — the #947 count property is unchanged.
     """
 
-    def test_sessions_count_returns_session_nodes_and_41st_402(
+    def test_sessions_count_returns_session_nodes_and_41st_lands(
             self, reg_sdk, tmp_path):
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         # Inject max_sessions=40 on the Team node (provision_test_user
-        # convention — direct write, DE2E-7 quota fixture).
+        # convention — direct write, DE2E-7 quota fixture). #4010: a direct
+        # stored write is deliberately NOT honoured as a cap.
         reg_sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_sessions=40",
             params={"id": tid},
@@ -290,7 +298,7 @@ class TestSessionsQuota:
             # P0 regression: sessions count == 40, NOT the all-nodes count
             # (pre-fix this branch returned the all-nodes count → fails
             # pre-fix).
-            count = count_team_usage(tid, "sessions", sdk=tenant)
+            count = count_org_usage(tid, "sessions", sdk=tenant)
             assert count == 40, (
                 f"sessions count should be 40, got {count} — the P0 "
                 "(MATCH (n) all-nodes fallthrough) is not fixed")
@@ -300,12 +308,16 @@ class TestSessionsQuota:
             assert all_nodes > 40, (
                 f"expected >40 total nodes ({all_nodes}) — the fixture must "
                 "distinguish sessions from the pre-fix all-nodes count")
-            # Resolver picks the injected limit up
-            limits = resolve_team_limits(tid)
-            assert limits["max_sessions"] == 40
-            # 41st session → 402-equivalent (DE2E-7)
-            with pytest.raises(QuotaExceededError, match="sessions limit reached"):
-                enforce_team_limit(limits, "sessions", sdk=tenant)
+            # #4010: the stored 40 is NOT honoured — the resolver yields None.
+            limits = resolve_org_limits(tid)
+            assert limits["max_sessions"] is None, (
+                "a stored max_sessions=40 was honoured as a cap — the #4010 "
+                "trap is open")
+            enforce_org_limit(limits, "sessions", sdk=tenant)  # no raise
+            # 41st session is STORED, not refused (was a 402 before #4010).
+            tenant.capture_session(
+                [{"role": "user", "content": "okay"}], session_id="s40")
+            assert count_org_usage(tid, "sessions", sdk=tenant) == 41
         finally:
             tenant.close()
 
@@ -314,7 +326,7 @@ class TestSessionsQuota:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = TortoiseSDK(db, namespace=tid)
         try:
             tenant.capture_session(
@@ -323,7 +335,7 @@ class TestSessionsQuota:
             tenant.create_point("statement", "plain non-episodic point")
             for i in range(8):
                 tenant.create_point("statement", f"filler point {i}")
-            assert count_team_usage(tid, "sessions", sdk=tenant) == 1
+            assert count_org_usage(tid, "sessions", sdk=tenant) == 1
             # 11 = 1 plain + 8 fillers + 1 v2-extracted value point + 1
             # v2-minted Object entity (the deterministic _V2SessionMock
             # extracts one point and one entity from "ok"); extracted value
@@ -331,7 +343,7 @@ class TestSessionsQuota:
             # the quota by design — the capture estimate 3×Σ accounts for
             # both, #1350/#1486/#1911). Turn points stay episodic (not
             # counted).
-            assert count_team_usage(tid, "points", sdk=tenant) == 11
+            assert count_org_usage(tid, "points", sdk=tenant) == 11
         finally:
             tenant.close()
 
@@ -349,7 +361,7 @@ class TestDocumentsQuota:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         return tid, TortoiseSDK(db, namespace=tid)
 
     def _seed_doc(self, tenant, i: int, kind: str | None) -> None:
@@ -369,7 +381,7 @@ class TestDocumentsQuota:
         try:
             for i in range(3):
                 self._seed_doc(tenant, i, kind=None)
-            assert count_team_usage(tid, "documents", sdk=tenant) == 3
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3
         finally:
             tenant.close()
 
@@ -380,7 +392,7 @@ class TestDocumentsQuota:
         try:
             self._seed_doc(tenant, 0, kind="brief")
             self._seed_doc(tenant, 1, kind="transcript")
-            assert count_team_usage(tid, "documents", sdk=tenant) == 1
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
         finally:
             tenant.close()
 
@@ -399,14 +411,14 @@ class TestDocumentsQuota:
             tenant.create_point("statement", "claim two")
             for i in range(9):
                 self._seed_doc(tenant, i, kind="brief")
-            limits = resolve_team_limits(tid)
+            limits = resolve_org_limits(tid)
             assert limits["max_points"] == 1
             assert (1 * _DOCUMENTS_FROM_POINTS_FACTOR) == 10
-            enforce_team_limit(limits, "documents", sdk=tenant)  # no raise
+            enforce_org_limit(limits, "documents", sdk=tenant)  # no raise
             # 10th doc → 402-equivalent at the derived cap
             self._seed_doc(tenant, 9, kind="brief")
             with pytest.raises(QuotaExceededError, match="documents limit reached"):
-                enforce_team_limit(limits, "documents", sdk=tenant)
+                enforce_org_limit(limits, "documents", sdk=tenant)
         finally:
             tenant.close()
 
@@ -427,59 +439,59 @@ class TestObjectSubjectQuota:
         import os
         return TortoiseSDK(
             os.path.join(tmp_path, "quota.db"),
-            namespace=_find_team_id(reg_sdk))
+            namespace=_find_org_id(reg_sdk))
 
     def test_points_count_includes_objects_and_subjects(self, reg_sdk, tmp_path):
         """Indicator (1): the quota count includes Object+Subject nodes."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_point("statement", "a plain point")
             tenant.create_object("acme", objectKind="org")
             tenant.create_object("globex", objectKind="org")
             tenant.create_subject("alice", subjectKind="person")
-            assert count_team_usage(tid, "points", sdk=tenant) == 4
+            assert count_org_usage(tid, "points", sdk=tenant) == 4
         finally:
             tenant.close()
 
     def test_object_write_402_at_cap(self, reg_sdk, tmp_path):
         """Indicator (2): an object write 402s at the cap (pre-fix the
         points count could never see Object nodes → no 402)."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_object("o1", objectKind="org")
-            limits = {"team_id": tid, "max_points": 1}
+            limits = {"org_id": tid, "max_points": 1}
             with pytest.raises(QuotaExceededError, match="points limit reached"):
-                enforce_team_limit(limits, "points", sdk=tenant)
+                enforce_org_limit(limits, "points", sdk=tenant)
         finally:
             tenant.close()
 
     def test_subject_write_402_at_cap(self, reg_sdk, tmp_path):
         """Indicator (2): a subject write 402s at the cap."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_subject("s1", subjectKind="person")
-            limits = {"team_id": tid, "max_points": 1}
+            limits = {"org_id": tid, "max_points": 1}
             with pytest.raises(QuotaExceededError, match="points limit reached"):
-                enforce_team_limit(limits, "points", sdk=tenant)
+                enforce_org_limit(limits, "points", sdk=tenant)
         finally:
             tenant.close()
 
     def test_object_subject_mix_402_at_cap(self, reg_sdk, tmp_path):
         """Mixed object+subject nodes consume the cap together."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_object("o1", objectKind="org")
             tenant.create_subject("s1", subjectKind="person")
             # 2 nodes → at/over a cap of 2 → 402
             with pytest.raises(QuotaExceededError, match="points limit reached"):
-                enforce_team_limit({"team_id": tid, "max_points": 2},
+                enforce_org_limit({"org_id": tid, "max_points": 2},
                                    "points", sdk=tenant)
             # 2 nodes below a cap of 3 → passes
-            enforce_team_limit({"team_id": tid, "max_points": 3},
+            enforce_org_limit({"org_id": tid, "max_points": 3},
                                "points", sdk=tenant)
         finally:
             tenant.close()
@@ -489,18 +501,18 @@ class TestObjectSubjectQuota:
         """Regression: the Point predicate is untouched — a pure-point
         graph counts exactly as before (#1911 must not move the points cap
         for existing point-only usage)."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_point("statement", "one")
             tenant.create_point("statement", "two")
             tenant.create_point("statement", "three")
-            assert count_team_usage(tid, "points", sdk=tenant) == 3
+            assert count_org_usage(tid, "points", sdk=tenant) == 3
             # at/over cap → 402; below cap → passes (unchanged semantics)
             with pytest.raises(QuotaExceededError, match="points limit reached"):
-                enforce_team_limit({"team_id": tid, "max_points": 3},
+                enforce_org_limit({"org_id": tid, "max_points": 3},
                                    "points", sdk=tenant)
-            enforce_team_limit({"team_id": tid, "max_points": 4},
+            enforce_org_limit({"org_id": tid, "max_points": 4},
                                "points", sdk=tenant)
         finally:
             tenant.close()
@@ -511,14 +523,14 @@ class TestObjectSubjectQuota:
         a non-episodic Object entity ('the strategy') alongside the extracted
         value point — the Object now counts against the quota too (pre-fix
         the Points-only count saw the value point but never the entity)."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.capture_session(
                 [{"role": "user", "content": "okay"}], session_id="cap_s1")
             # 1 value point + 1 minted Object = 2 (the Session/turn Point/
             # Event/Source nodes stay episodic and are excluded)
-            assert count_team_usage(tid, "points", sdk=tenant) == 2
+            assert count_org_usage(tid, "points", sdk=tenant) == 2
         finally:
             tenant.close()
 
@@ -532,11 +544,11 @@ class TestIsEpisodicBackfill:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         return TortoiseSDK(
-            os.path.join(tmp_path, "quota.db"), namespace=_find_team_id(reg_sdk))
+            os.path.join(tmp_path, "quota.db"), namespace=_find_org_id(reg_sdk))
 
     def test_legacy_nodes_backfilled_are_episodic(self, reg_sdk, tmp_path):
         from backfill_is_episodic import run_backfill
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._make_tenant(reg_sdk, tmp_path)
         try:
             proj = tenant._get_proj()
@@ -572,10 +584,10 @@ class TestIsEpisodicBackfill:
                 "pointKind:'decision', is_operator:false, status:'live'})")
             # Pre-backfill: missing flag counts as NON-episodic (fail-closed,
             # R-18) → 3 legacy Points (p1, p2, k1) inflate the points quota.
-            assert count_team_usage(tid, "points", sdk=tenant) == 3
+            assert count_org_usage(tid, "points", sdk=tenant) == 3
             with pytest.raises(QuotaExceededError, match="points limit reached"):
-                enforce_team_limit(
-                    {"team_id": tid, "max_points": 3}, "points", sdk=tenant)
+                enforce_org_limit(
+                    {"org_id": tid, "max_points": 3}, "points", sdk=tenant)
             # Dry-run reports without writing (5 capture artifacts: s, e, src,
             # p1, p2 — NOT k1)
             report = run_backfill(proj, dry_run=True)
@@ -586,11 +598,11 @@ class TestIsEpisodicBackfill:
             # Idempotent — re-run is a no-op
             assert run_backfill(proj) == {"matched": 0, "updated": 0}
             # k1 is untouched — still counted → quota is NOT undercounted
-            assert count_team_usage(tid, "points", sdk=tenant) == 1
-            enforce_team_limit(
-                {"team_id": tid, "max_points": 3}, "points", sdk=tenant)
+            assert count_org_usage(tid, "points", sdk=tenant) == 1
+            enforce_org_limit(
+                {"org_id": tid, "max_points": 3}, "points", sdk=tenant)
             # Sessions branch still counts the (now-flagged) Session
-            assert count_team_usage(tid, "sessions", sdk=tenant) == 1
+            assert count_org_usage(tid, "sessions", sdk=tenant) == 1
         finally:
             tenant.close()
 
@@ -599,7 +611,7 @@ class TestIsEpisodicBackfill:
         on Session + turn Points going forward — unflagged new captures would
         re-introduce the false-402 this fix eliminates."""
         from backfill_is_episodic import run_backfill
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._make_tenant(reg_sdk, tmp_path)
         try:
             proj = tenant._get_proj()
@@ -615,9 +627,9 @@ class TestIsEpisodicBackfill:
             # the quota (#1350/#1486; the entity count is #1911 — capture-
             # minted entities are non-episodic and previously invisible to
             # the Points-only count).
-            assert count_team_usage(tid, "points", sdk=tenant) == 2
+            assert count_org_usage(tid, "points", sdk=tenant) == 2
             # Session counted by the sessions branch
-            assert count_team_usage(tid, "sessions", sdk=tenant) == 1
+            assert count_org_usage(tid, "sessions", sdk=tenant) == 1
         finally:
             tenant.close()
 
@@ -644,3 +656,194 @@ class TestBudgetConstants:
         # prevents wiring the wrong 50, plan §4.4).
         assert MAX_PAYLOAD_POINTS == MAX_VALUE_POINTS_PER_SESSION["ceiling"]  # noqa: SIM300
         assert MAX_PAYLOAD_POINTS == 50  # explicit value, not derived
+
+
+# ── The ask-lane bounded-execution cluster (#1987 P2, retained by #3849) ───
+# Moved here from tests/test_ask_api.py, which #3849 deleted with the REST
+# surface. `run_ask_bounded` and the exec-floor semantics it implements are
+# RETAINED in tortoise/quota.py (documented RETIRED-but-not-purged pending
+# #3849 §7 D5) — so the guarantee stays pinned rather than going untested
+# with the file that happened to host it. It needs no REST surface: it
+# drives `run_ask_bounded` directly.
+
+def test_ask_exec_floor_guarantees_execution(monkeypatch):
+    """#1987 P2: a queued ask released before the queue-wait cap gets a real
+    execution window (completes) rather than a near-zero remaining budget; a
+    request released past the cap 504s at acquire WITHOUT starting the call
+    (no wasted model call)."""
+    import asyncio
+
+    import tortoise.quota as quota_mod
+
+    monkeypatch.setattr(quota_mod, "_ASK_TIMEOUT_S", 3.0)
+    monkeypatch.setattr(quota_mod, "_ASK_EXEC_FLOOR_S", 1.0)
+
+    calls = {"n": 0}
+
+    def _fn():
+        calls["n"] += 1
+        return "ok"
+
+    async def _queue_and_release(release_at: float):
+        loop = asyncio.get_running_loop()
+        sem = quota_mod._ask_state_for_loop(loop)["sem"]
+        # hold all 8 global slots → the ask queues behind the semaphore
+        for _ in range(quota_mod._ASK_GLOBAL_SEMAPHORE_SIZE):
+            await sem.acquire()
+        task = asyncio.ensure_future(quota_mod.run_ask_bounded(_fn, None))
+        await asyncio.sleep(release_at)
+        for _ in range(quota_mod._ASK_GLOBAL_SEMAPHORE_SIZE):
+            sem.release()
+        return await task
+
+    # released at ~1.5s (< the 2.0s queue-wait cap) → acquires, remaining
+    # ~1.5s >= the 1.0s execution floor → completes (no bogus 504)
+    assert asyncio.run(_queue_and_release(1.5)) == "ok"
+    assert calls["n"] == 1
+
+    # control: released at ~2.5s (> the 2.0s cap) → 504 at acquire, the call
+    # never starts (no wasted model call)
+    calls["n"] = 0
+    with pytest.raises(quota_mod.AskBoundedTimeoutError):
+        asyncio.run(_queue_and_release(2.5))
+    assert calls["n"] == 0
+
+
+# ── #4355: the single-slot predicate must agree with the count, both lanes ──
+
+class TestApiKeySlotParity:
+    """`api_key_occupies_slot` is NOT a fourth count — it is the api_keys cap
+    predicate applied to ONE id, and the rotate primitive credits a slot on the
+    strength of it. The credit is only sound if the predicate accepts EXACTLY
+    the rows `_count_resource(org, 'api_keys')` charges for. These tests pin
+    that identity on both lanes over the whole state space that matters:
+    live-durable, live-bootstrap (cap-exempt), revoked, expired, and the
+    legacy NULL `created_via` (durable, must count — fail-closed).
+    """
+
+    def test_registry_lane_count_equals_accepted_ids(self, reg_sdk):
+        from tortoise.quota import _count_resource, api_key_occupies_slot
+
+        tid = _find_org_id(reg_sdk)
+        reg = reg_sdk._get_registry()
+        now = datetime.now(UTC)
+        states = {
+            "live-durable": {"revoked_at": None, "created_via": "dashboard",
+                             "expires_at": None},
+            "live-bootstrap": {"revoked_at": None, "created_via": "bootstrap",
+                               "expires_at": (now + timedelta(hours=24)).isoformat()},
+            "live-legacy-null": {"revoked_at": None, "created_via": None,
+                                 "expires_at": None},
+            "revoked": {"revoked_at": now.isoformat(), "created_via": "dashboard",
+                        "expires_at": None},
+            "expired": {"revoked_at": None, "created_via": "dashboard",
+                        "expires_at": (now - timedelta(days=1)).isoformat()},
+            "expired-bootstrap": {"revoked_at": None, "created_via": "bootstrap",
+                                  "expires_at": (now - timedelta(days=1)).isoformat()},
+        }
+        for name, s in states.items():
+            reg.query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$h, "
+                "key_prefix:$kp, created_by:'u1', created_at:$ca, "
+                "revoked_at:$ra, expires_at:$ea, created_via:$cv})",
+                params={"id": f"k-{name}", "tid": tid, "h": f"h-{name}",
+                        "kp": f"p-{name}", "ca": now.isoformat(),
+                        "ra": s["revoked_at"], "ea": s["expires_at"],
+                        "cv": s["created_via"]},
+            )
+
+        count = _count_resource(tid, "api_keys", sdk=reg_sdk)
+        accepted = [k for k in states if api_key_occupies_slot(tid, f"k-{k}",
+                                                              sdk=reg_sdk)]
+        assert count == len(accepted), (
+            f"count={count} but the slot predicate accepts {accepted}"
+        )
+        assert set(accepted) == {"live-durable", "live-legacy-null"}, (
+            "the predicate must charge live durable + live legacy-NULL rows "
+            f"and nothing else, got {accepted}"
+        )
+
+    def test_registry_lane_unknown_and_empty_ids_are_false(self, reg_sdk):
+        from tortoise.quota import api_key_occupies_slot
+
+        tid = _find_org_id(reg_sdk)
+        assert api_key_occupies_slot(tid, "no-such-key", sdk=reg_sdk) is False
+        assert api_key_occupies_slot("", "k", sdk=reg_sdk) is False
+        assert api_key_occupies_slot(tid, "", sdk=reg_sdk) is False
+
+    def test_supabase_lane_count_equals_accepted_ids(self, monkeypatch):
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise.quota import _count_resource, api_key_occupies_slot
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://slot-parity.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+
+        now = datetime.now(UTC)
+        tid = "team-slot-parity"
+        rows = [
+            {"id": "k-live-durable", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": None, "expires_at": None},
+            {"id": "k-live-bootstrap", "org_id": tid, "created_via": "bootstrap",
+             "revoked_at": None,
+             "expires_at": (now + timedelta(hours=24)).isoformat()},
+            {"id": "k-live-legacy-null", "org_id": tid, "created_via": None,
+             "revoked_at": None, "expires_at": None},
+            {"id": "k-revoked", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": now.isoformat(), "expires_at": None},
+            {"id": "k-expired", "org_id": tid, "created_via": "dashboard",
+             "revoked_at": None,
+             "expires_at": (now - timedelta(days=1)).isoformat()},
+        ]
+        fake.seed("api_keys", rows)
+
+        count = _count_resource(tid, "api_keys")
+        accepted = [r["id"] for r in rows if api_key_occupies_slot(tid, r["id"])]
+        assert count == len(accepted), (
+            f"count={count} but the slot predicate accepts {accepted}"
+        )
+        assert set(accepted) == {"k-live-durable", "k-live-legacy-null"}, accepted
+
+    def test_credit_widens_the_gate_by_exactly_one(self, reg_sdk):
+        """`enforce_org_limit(slot_credit=1)` moves the boundary by exactly
+        one slot — it is a credit, not an exemption: at 2/2 the plain gate
+        refuses, the credited gate admits, and a THIRD live key makes the
+        credited gate refuse again.”"""
+        from tortoise.quota import _count_resource
+
+        tid = _find_org_id(reg_sdk)
+        reg = reg_sdk._get_registry()
+        limits = {"org_id": tid, "max_api_keys": 2}  # free tier
+
+        def _seed(kid: str) -> None:
+            reg.query(
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$h, "
+                "key_prefix:$kp, created_by:'u1', created_at:$ca, "
+                "revoked_at:NULL, expires_at:NULL, created_via:'dashboard'})",
+                params={"id": kid, "tid": tid, "h": f"h-{kid}",
+                        "kp": f"p-{kid}", "ca": datetime.now(UTC).isoformat()},
+            )
+
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk)          # 0/2
+        _seed("slot-1")
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk)          # 1/2
+        assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 1
+        _seed("slot-2")
+        with pytest.raises(QuotaExceededError):                       # 2/2 → over
+            enforce_org_limit(limits, "api_keys", sdk=reg_sdk)
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk,
+                          slot_credit=1)                              # 2-1 → ok
+        assert _count_resource(tid, "api_keys", sdk=reg_sdk) == 2
+        _seed("slot-3")
+        with pytest.raises(QuotaExceededError):                       # 3-1 → over
+            enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=1)
+        # The credit is applied LITERALLY (`count - slot_credit >= limit`) — it
+        # is not clamped, so ONLY the caller's occupancy proof bounds it at 1.
+        # Over-crediting admits (the free-slot hazard); under-crediting
+        # over-tightens (fail-closed). Pinned here so the shape cannot drift
+        # silently; the guard itself is the single caller + test_rotate_key's
+        # revoked/expired/bootstrap refusals.
+        enforce_org_limit(limits, "api_keys", sdk=reg_sdk, slot_credit=4)

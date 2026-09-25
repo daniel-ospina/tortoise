@@ -34,6 +34,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
+# #4336: the dashboard's display-name map — the second hand-maintained copy of
+# the tier names (product.html renderPricing() carries the first).
+DASHBOARD_PRICING_JS = (REPO_ROOT / "website" / "apps" / "dashboard"
+                         / "src" / "pricing.js")
 
 # Internal quota tiers that are NOT public offerings — they must not leak
 # onto the pricing page (anon = unclaimed zero-email teams, raised to free
@@ -287,6 +291,42 @@ class TestMirrorNumericParity:
         assert js["tiers"]["team"]["max_users_per_team"] is None
 
 
+class TestDisplayLabelParity:
+    """#4336: the user-facing tier name lives in TWO hand-maintained maps —
+    product.html renderPricing()'s `labels` and the dashboard's
+    `TIER_LABELS` (pricing.js). Nothing else ties them together, so a rename
+    applied to one and not the other renders two names for one tier.
+    (The internal tier KEYS stay `pro` — only the display value changes.)"""
+
+    def _html_labels(self) -> dict:
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+        m = re.search(r"const labels = \{([^}]*)\}", fn)
+        assert m, "renderPricing() must define a `labels` display-name map"
+        return dict(re.findall(r"([A-Za-z_$][\w$]*)\s*:\s*'([^']*)'", m.group(1)))
+
+    def _dashboard_labels(self) -> dict:
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        m = re.search(r"export const TIER_LABELS = \{([^}]*)\}", js, re.S)
+        assert m, "pricing.js must export TIER_LABELS"
+        return dict(re.findall(r"([A-Za-z_$][\w$]*)\s*:\s*'([^']*)'", m.group(1)))
+
+    def test_labels_maps_agree_for_public_tiers(self):
+        html_labels = self._html_labels()
+        js_labels = self._dashboard_labels()
+        for tier in PUBLIC_TIERS:
+            assert html_labels.get(tier) == js_labels.get(tier), (
+                f"display-label drift for tier {tier}: product.html "
+                f"{html_labels.get(tier)!r} != pricing.js {js_labels.get(tier)!r}")
+
+    def test_pro_displays_as_builder_and_key_is_unchanged(self):
+        assert self._dashboard_labels()["pro"] == "Builder"
+        assert self._html_labels()["pro"] == "Builder"
+        # The tier KEY stays `pro` (parity, Stripe ids, pricing.json).
+        assert "pro" in _extract_pricing_object()["tiers"]
+        assert "pro" in json.loads(
+            PRICING_JSON.read_text(encoding="utf-8"))["tiers"]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. fmtPrice() math
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -348,6 +388,87 @@ class TestRenderElementInventory:
         # Every tier is mapped — a missing tier renders a blank card slot
         for name in ("free", "solo", "pro", "team"):
             assert f"'{name}'" in fn or f'"{name}"' in fn
+
+    def test_render_pricing_has_no_undefined_name_path(self):
+        """#4815: `names` and `labels` are separate hand-maintained lists, so a
+        tier in one but not the other used to print the literal string
+        "undefined" in customer copy — and an empty metered set dangled the
+        " — applies to " separator."""
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+
+        # Exactly one name resolver, and it carries the fallback...
+        assert "const displayName = (n) => labels[n] ||" in fn, (
+            "renderPricing() must resolve display names through one helper "
+            "with a fallback")
+        # ...so no render site indexes `labels` bare (no fallback → undefined).
+        resolver = "(n) => labels[n] ||"
+        assert "labels[" not in fn.replace(resolver, "", 1), (
+            "a bare `labels[...]` lookup renders `undefined` when the tier is "
+            "missing from the map — every use must go through displayName()")
+        # The sentence must not render its separator with nothing after it.
+        assert "overageTiers.length" in fn, (
+            "the overage line must be skipped (not left dangling) when no "
+            "tier is metered")
+
+    def test_dashboard_plan_grid_discloses_overage(self):
+        """#4815: `planOptions()` computed an `overage` flag and the plan
+        grids rendered nothing, so a metered tier was invisible on the card
+        the user upgrades from — the card Solo is bought on. The string must
+        come from pricing.json's own `display.overage_line`, never a second
+        hardcoded copy of the price.
+
+        The assertions are scoped to the LIVE surfaces: `main.jsx` carries a
+        SECOND `planOptions()` grid inside the archived
+        `LEGACY_WIZARD_ARCHIVED` block (dead code, never rendered), so a
+        whole-file substring would pass a disclosure that only ever rendered
+        there."""
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        main = (REPO_ROOT / "website" / "apps" / "dashboard" / "src"
+                / "main.jsx").read_text(encoding="utf-8")
+
+        assert "overageLine: t.overage" in js, (
+            "planOptions() must expose the disclosure only for a metered tier")
+        assert "pricing.display?.overage_line" in js, (
+            "the disclosure must be pricing.json's own display.overage_line")
+
+        # Excise the archived wizard block (same anchor/marker pair
+        # overview.test.js derives its A0 slice with) so the render assertions
+        # below can only be satisfied by code that actually runs.
+        archived_anchor = "LEGACY_WIZARD_ARCHIVED && welcomeOriented && ("
+        archived_start = main.index(archived_anchor)
+        archived_end = main.index("\n                )}\n", archived_start)
+        live = main[:archived_start] + main[archived_end:]
+
+        assert "{p.overageLine && (" in live, (
+            "the LIVE Billing plan grid must render the disclosure when the "
+            "flag is set — a line rendered only in the archived (dead) grid "
+            "is not a disclosure")
+
+        # The paid-new-org purchase dialog commits a metered subscription, so
+        # it must show the selected plan's overage line too.
+        dialog_start = live.index('id="create-org-title-purchase"')
+        dialog_end = live.index("Continue to checkout", dialog_start)
+        dialog = live[dialog_start:dialog_end]
+        assert "newOrgSelectedPlan?.overageLine && (" in dialog, (
+            "the paid-new-org purchase dialog must render the SELECTED "
+            "plan's overage line — it commits checkout for a metered "
+            "subscription")
+        # A bare `overageLine` substring is not enough: the same silent no-op
+        # this test exists to prevent is reachable by breaking the SELECTION,
+        # which leaves the render textually intact while `newOrgSelectedPlan`
+        # is undefined and nothing renders. Pin the predicate and the render
+        # variable so a predicate regression reds instead of passing.
+        assert ("team?.checkout_price_ids?.[p.tier] === createTeamPlan" in live), (
+            "the dialog's selected plan must be resolved by PRICE ID against "
+            "checkout_price_ids (the state holds a price id, not a tier key) "
+            "— matching on p.tier directly would resolve nothing and render "
+            "no disclosure")
+        assert "newOrgSelectedPlan.overageLine" in dialog, (
+            "the dialog must render the resolved plan's own overageLine")
+
+        assert "per additional 10k" not in main, (
+            "the overage price string belongs in pricing.json, not re-typed "
+            "in the dashboard")
 
     def test_set_billing_references_toggle_buttons(self):
         html = PRODUCT_HTML.read_text(encoding="utf-8")
@@ -424,7 +545,7 @@ def test_welcome_provisioning_pipeline_is_dead_since_1566():
     implementation, and the tempting "fix" of deleting that line would leave
     the provisioning symbols themselves unpinned.
     """
-    src = Path("website/welcome.html").read_text()
+    src = Path("website/apps/dashboard/public/welcome.html").read_text()
     # Comments in welcome.html name the removed markers to explain #3501, so
     # the absence checks must run against comment-stripped source.
     src_code = re.sub(r"<!--.*?-->", "", src, flags=re.S)

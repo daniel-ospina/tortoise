@@ -1,4 +1,4 @@
-"""HTTP tests for the #1230 graph import endpoint — POST /v1/teams/{team_id}/import.
+"""HTTP tests for the #1230 graph import endpoint — POST /v1/organizations/{org_id}/import.
 
 Integration-layer matrix (plan Integration Surface Map S4–S6):
 - Auth: no session 401; member/admin 403; unknown team 403 (no existence
@@ -37,11 +37,12 @@ import pytest
 # #1389 / #3505: these deep import-path tests (restore → temp graph → verify →
 # swap) are the #1389 skips. Their recorded reason — the app's keepalive anchor
 # and the handler booting two embedded daemons on the same single-writer path —
-# no longer holds for this module: `_EMBEDDED_CONSTRUCTION_LOCK` (below)
-# serializes every IN-PROCESS `FalkorProjection.__init__`, so the second daemon
-# of that pair is never started and every later opener reuses the first
-# starter's server. What remains outside the lock (the residual exposure listed
-# in the lock's own note below) is (a) a construction that raises inside
+# no longer holds: the session-wide construction serialization
+# (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by conftest's
+# `_serialize_embedded_construction`) closes the double-start race, so the
+# second daemon of that pair is never started and every later opener reuses the
+# first starter's server. What remains outside the lock (the residual exposure
+# listed in the lock's own note) is (a) a construction that raises inside
 # `_start_redis()` after its daemon spawned but before `_save_setting_registry()`,
 # and (b) redislite's `_cleanup()` last-client branch removing `<db>.settings`
 # from `__del__`/atexit. Neither is the keepalive-anchor-vs-handler collision
@@ -85,48 +86,6 @@ from tests.test_supabase_control import (  # noqa: E402
 # Tests opt out of the IP rate limiter; rate-limit tests re-enable it.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-# #3505: one embedded server per db_path — serialize construction.
-#
-# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
-# absent (or its pid is dead) — `redislite.client.RedisMixin.__init__` (the
-# `_is_redis_running()` / `_start_redis()` fork). Two constructions that
-# interleave BEFORE either has written `.settings` therefore BOTH take the
-# fresh-start branch, each spawning its own daemon in its own tempdir, and
-# the later `_save_setting_registry()` silently owns the registry. The
-# loser's writes are then invisible to every later opener.
-#
-# That is exactly this module's flake (#3505): on a failing run the seeder
-# held one daemon while the `tortoise-health-probe` thread (`hosted_api.py`
-# `_probe_db` -> `_make_sdk`) started its own on the same `import.db`;
-# `_counts` then re-opened through `.settings` and resolved to the probe's
-# EMPTY daemon — `assert [] == ['old-0']`, which reads like the import wiped
-# the graph. Serializing the construction makes the first starter the single
-# owner of the registry, so every later opener (health probe, boot sweep,
-# `_counts`, the import handler) reuses that one server.
-#
-# Scope of the guarantee (this is NOT a global single-writer guarantee): the
-# lock serializes only IN-PROCESS `FalkorProjection.__init__` calls. Two paths
-# stay outside it and can still add or remove a registry entry — (1) a
-# construction that raises inside `_start_redis()` (RedisLiteException /
-# RedisLiteServerStartError) after its daemon spawned but before
-# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
-# redislite's `_cleanup()` last-client branch, which removes `<db>.settings`
-# and shuts the daemon down from `__del__`/atexit on any thread. That residual
-# is why `_seed_live_graph` ALSO verifies visibility at seed time: if the
-# seeder's server is ever not the one a fresh opener resolves to, that check
-# raises the NAMED SeedVisibilityError instead of letting the condition
-# resurface as `assert [] == ['old-0']`.
-#
-# Blast radius of the critical section: it spans the WHOLE `__init__`,
-# including redislite's blocking `subprocess.call` server start and the
-# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
-# embedded start therefore stalls every other constructor in the module,
-# where it previously stalled only its own thread. That wait is bounded by
-# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
-# `redis-server` binary — accepted deliberately: the serialization is the
-# fix, and a hung start is a louder failure than a silent second daemon.
-_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
-
 
 @pytest.fixture(scope="module", autouse=True)
 def _embedded_local_file_lane():
@@ -143,29 +102,21 @@ def _embedded_local_file_lane():
     plan's Task 10 "13 migrate out" list: this is an embedded-file-contract
     file, not docker-migratable — it stays in RAW_EMBEDDED_ALLOWLIST.
 
-    #3505: also serializes embedded FalkorProjection construction for the
-    module (see _EMBEDDED_CONSTRUCTION_LOCK) — the app's probe/boot-sweep
-    threads construct on the same db_path as the test's seeder."""
+    #3505/#3546: the construction serialization this file needs (the app's
+    probe/boot-sweep threads construct on the same db_path as the test's
+    seeder) is now installed ONCE for the whole session by
+    `tests/conftest._serialize_embedded_construction` — not per module, which
+    was the #3546 defect (see `tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`).
+    """
     mp = pytest.MonkeyPatch()
     mp.delenv("TORTOISE_DB_URI", raising=False)
-
-    _orig_proj_init = FalkorProjection.__init__
-
-    def _serialized_proj_init(self, *args, **kwargs):
-        # `return` forwarded deliberately: `__init__` must return None, so it is
-        # inert today, but it keeps this wrapper correct if it is ever reused for
-        # a factory or `__new__` (where dropping the result would be a real bug).
-        with _EMBEDDED_CONSTRUCTION_LOCK:
-            return _orig_proj_init(self, *args, **kwargs)
-
-    mp.setattr(FalkorProjection, "__init__", _serialized_proj_init)
     yield
     mp.undo()
 
 
-TEAM_ID = "team-free-001"
+ORG_ID = "team-free-001"
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID literals 22P02 (HTTP 400) under
 # FakeControlPlane's fidelity check. user-1 → _U1 (mirrors the constant
 # in test_supabase_control, which _membership_row already seeds).
@@ -190,8 +141,8 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 @pytest.fixture
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB."""
-    fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "import.db")
@@ -221,7 +172,7 @@ def as_user():
 @pytest.fixture
 def capture_audit(monkeypatch):
     captured: list[dict] = []
-    _POSITIONAL = ("team_id", "actor_user_id", "operation",
+    _POSITIONAL = ("org_id", "actor_user_id", "operation",
                    "resource_type", "resource_id", "ip_address", "user_agent")
 
     def _capture(*args, **kwargs):
@@ -240,14 +191,14 @@ def capture_audit(monkeypatch):
 def _seed_team(fake, *, role: str = "owner", deleted_at: str | None = None,
                max_points: int | None = None) -> None:
     """Seed the Supabase control plane with a team (incl. graph_name so the
-    import's team_graph_name seam resolves) + owner membership."""
+    import's org_graph_name seam resolves) + owner membership."""
     team = dict(FREE_TEAM, graph_name=GRAPH_NAME)
     if max_points is not None:
         team["max_points"] = max_points
     if deleted_at:
         team["deleted_at"] = deleted_at
-    fake.seed("teams", [team])
-    fake.seed("team_memberships", [_membership_row(role=role)])
+    fake.seed("organizations", [team])
+    fake.seed("org_memberships", [_membership_row(role=role)])
     fake.seed("api_keys", [_key_row()])
 
 
@@ -406,7 +357,7 @@ def test_seed_visibility_guard_fails_loudly(monkeypatch, tmp_path):
 
 
 def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
-    """#3505 anti-regression: the CONSTRUCTION SERIALIZATION is pinned.
+    """#3505/#3546 anti-regression: the CONSTRUCTION SERIALIZATION is pinned.
 
     Why this test exists: the four live `_seed_live_graph` tests do not pin
     the lock. Running them against a copy with the serialization deleted is
@@ -416,7 +367,7 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     about. This test pins it DETERMINISTICALLY, with no dependence on
     redislite timing.
 
-    Mechanism: hold `_EMBEDDED_CONSTRUCTION_LOCK` from the test thread —
+    Mechanism: hold `EMBEDDED_CONSTRUCTION_LOCK` from the test thread —
     standing in for a construction that is inside the critical section — and
     assert a second construction from another thread cannot reach its BODY
     until the lock is released. The body's entry is observed by monkeypatching
@@ -434,11 +385,18 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     The join window is deliberately much larger than the probe latency (a
     microsecond-scale path) so the red arm is deterministic rather than a
     second timing lottery. Removing either half of the mechanism reds this
-    test: dropping the `with _EMBEDDED_CONSTRUCTION_LOCK` wrapper in
-    `_embedded_local_file_lane` lets the worker through; deleting the lock
-    object itself raises NameError on the holder thread.
+    test: dropping the `with EMBEDDED_CONSTRUCTION_LOCK` wrapper installed by
+    conftest's `_serialize_embedded_construction` lets the worker through;
+    deleting the lock object itself raises NameError on the holder thread.
+
+    #3546: this pins the CENTRAL lock — held against the wrapper that
+    conftest's `_serialize_embedded_construction` installs for the session, so
+    deleting that fixture reds here. A module-local lock copy (the defect the
+    issue names) could not gate a construction whose wrapper guards a
+    different lock object.
     """
     import tortoise
+    from tests._embedded import EMBEDDED_CONSTRUCTION_LOCK
 
     db_path = str(tmp_path / "serialized-construction.db")
     body_entered = threading.Event()
@@ -455,7 +413,7 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     monkeypatch.setattr(tortoise, "FalkorDB", _probe_falkordb)
 
     def _hold_lock() -> None:
-        with _EMBEDDED_CONSTRUCTION_LOCK:
+        with EMBEDDED_CONSTRUCTION_LOCK:
             holder_ready.set()
             release_holder.wait(30.0)
 
@@ -465,12 +423,12 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
 
     # The try/finally starts BEFORE the holder_ready assertion: if that wait
     # fails (or anything between here and the worker's own try raises), the
-    # holder would otherwise keep `_EMBEDDED_CONSTRUCTION_LOCK` for its full
-    # 30s event wait, and the module-scoped autouse fixture serializes EVERY
+    # holder would otherwise keep `EMBEDDED_CONSTRUCTION_LOCK` for its full
+    # 30s event wait, and the session-scoped autouse fixture serializes EVERY
     # in-process `FalkorProjection.__init__` on that same lock — one false RED
-    # would then stall every subsequent construction in this file.
+    # would then stall every subsequent construction in the session.
     try:
-        assert holder_ready.wait(5.0), "could not take _EMBEDDED_CONSTRUCTION_LOCK"
+        assert holder_ready.wait(5.0), "could not take EMBEDDED_CONSTRUCTION_LOCK"
 
         def _construct() -> None:
             try:
@@ -483,13 +441,13 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
         try:
             worker.join(1.0)
             assert not body_entered.is_set(), (
-                "#3505: FalkorProjection.__init__ reached its body while "
-                "_EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
+                "#3505/#3546: FalkorProjection.__init__ reached its body while "
+                "EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
                 "the construction serialization is missing or bypassed."
             )
             assert worker.is_alive(), (
-                "#3505: the constructor finished (or raised) while the lock was "
-                "held — the serialization did not gate it."
+                "#3505/#3546: the constructor finished (or raised) while the lock "
+                "was held — the serialization did not gate it."
             )
         finally:
             release_holder.set()
@@ -573,7 +531,7 @@ def _post_import(tc, artifact: bytes, key: bytes, *, headers: dict | None = None
             IMPORT_KEY_HEADER: _key_b64(key)}
     if headers:
         hdrs.update(headers)
-    return tc.post(f"/v1/teams/{TEAM_ID}/import", content=artifact, headers=hdrs)
+    return tc.post(f"/v1/organizations/{ORG_ID}/import", content=artifact, headers=hdrs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -584,7 +542,7 @@ def _post_import(tc, artifact: bytes, key: bytes, *, headers: dict | None = None
 class TestImportAuth:
     def test_import_requires_session_auth(self, sb_client):
         tc, _, _ = sb_client
-        r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+        r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
         assert r.status_code == 401
 
     def test_import_requires_owner(self, sb_client, as_user):
@@ -606,7 +564,7 @@ class TestImportAuth:
         """AuthZ-first: no existence oracle for unknown teams."""
         tc, _, _ = sb_client
         as_user()
-        r = tc.post("/v1/teams/nope/import", content=b"x",
+        r = tc.post("/v1/organizations/nope/import", content=b"x",
                     headers={IMPORT_KEY_HEADER: _key_b64(os.urandom(32))})
         assert r.status_code == 403
 
@@ -655,7 +613,7 @@ class TestImportCaps:
         artifact = _build_artifact(_build_payload(), key)
         chunks = [artifact[i:i + 64] for i in range(0, len(artifact), 64)]
         r = tc.post(
-            f"/v1/teams/{TEAM_ID}/import", content=iter(chunks),
+            f"/v1/organizations/{ORG_ID}/import", content=iter(chunks),
             headers={"Content-Type": "application/vnd.tortoise.export.v1",
                      IMPORT_KEY_HEADER: _key_b64(key)},
         )
@@ -681,9 +639,9 @@ class TestImportCaps:
             as_user()
             for _ in range(2):
                 # unknown team → 403 (authz-first), budget consumed either way
-                r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+                r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
                 assert r.status_code == 403
-            r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+            r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
             assert r.status_code == 429
             assert "Retry-After" in r.headers
         finally:
@@ -698,10 +656,10 @@ class TestImportCaps:
         try:
             tc, _, _ = sb_client
             as_user()
-            assert tc.get(f"/v1/teams/{TEAM_ID}/export").status_code == 403
-            assert tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x").status_code == 403
+            assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 403
+            assert tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x").status_code == 403
             # export didn't consume the import bucket → still budget left
-            r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+            r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
             assert r.status_code == 429
         finally:
             ha_mod._SENSITIVE_BUCKETS.clear()
@@ -827,7 +785,7 @@ class TestImportValidationFailClosed:
         key = os.urandom(32)
         artifact = _build_artifact(_build_payload(), key, tamper_blob=True)
         assert _post_import(tc, artifact, key).status_code == 422
-        rows = fake.tables["teams"]
+        rows = fake.tables["organizations"]
         assert rows and rows[0].get("last_import_quarantined_sha256")
 
 
@@ -865,7 +823,7 @@ class TestImportForeignKindsGuard:
         assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
         # ledger NOT stamped → re-import of the same artifact re-validates
         # (quarantine stamps a separate key; last_import_sha256 is untouched)
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
     def test_import_v1_1_empty_packs_foreign_kind_422(self, sb_client, as_user,
                                                       capture_audit):
@@ -972,7 +930,7 @@ class TestImportPackConfigShape422:
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
         # ledger NOT stamped; quarantine prop IS stamped
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert not row.get("last_import_sha256")
         assert row.get("last_import_quarantined_sha256")
 
@@ -995,7 +953,7 @@ class TestImportPackConfigShape422:
         assert "pack_config" in r.json()["detail"]
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == []
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
     def test_dual_fault_shape_fires_before_foreign_kind_guard(
             self, sb_client, as_user, capture_audit):
@@ -1021,7 +979,7 @@ class TestImportPackConfigShape422:
         assert "predates pack-config" not in r.json()["detail"]
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == []
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1067,7 +1025,7 @@ class TestImportPackConfigApplyFailures:
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         # swap LANDED (pack failure is post-swap) but ledger NOT stamped
         assert _counts(db_path)["ids"] == ["pt-0"]
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert not row.get("last_import_sha256")  # cleared / never stamped
         expected = hashlib.sha256(_canonical(payload)).hexdigest()
         assert row.get("last_import_quarantined_sha256") == expected
@@ -1091,7 +1049,7 @@ class TestImportPackConfigApplyFailures:
         assert r.status_code == 422, r.text
         assert "unknown starter pack" in r.json()["detail"]
         assert _counts(db_path)["ids"] == ["pt-0"]
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
         r2 = _post_import(tc, artifact, key)
         assert r2.status_code == 422, r2.text
         assert "unknown starter pack" in r2.json()["detail"]
@@ -1110,7 +1068,7 @@ class TestImportPackConfigApplyFailures:
         r = _post_import(tc, artifact, key)
         assert r.status_code == 422, r.text
         assert "nesting too deep" in r.json()["detail"]
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
     def test_rollback_prior_artifact_after_pack_failure(self, sb_client,
                                                         as_user):
@@ -1128,7 +1086,7 @@ class TestImportPackConfigApplyFailures:
         assert r_a.status_code == 200, r_a.text
         assert r_a.json()["imported"] is True
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: broken pack config (invalid manifest) — same key, new sha
         payload_b = self._payload("namespace: [broken", n_points=2)
         artifact_b = _build_artifact(payload_b, key)
@@ -1137,14 +1095,14 @@ class TestImportPackConfigApplyFailures:
         assert "invalid YAML" in r_b.json()["detail"]
         # ledger CLEARED (distinguishes clear-from-reorder-only: B's sha is
         # NOT what sits in last_import_sha256 — it must be falsy)
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert not row.get("last_import_sha256")  # cleared, not A and not B
         # re-import A → RE-SWAP (imported true), not already
         r_a2 = _post_import(tc, artifact_a, key)
         assert r_a2.status_code == 200, r_a2.text
         assert r_a2.json()["imported"] is True
         assert r_a2.json()["already"] is False
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
 
     def test_clear_path_stamp_failure_still_422(self, sb_client, as_user,
                                                 monkeypatch, caplog):
@@ -1156,10 +1114,10 @@ class TestImportPackConfigApplyFailures:
 
         real_stamp = ha_mod._stamp_import_prop
 
-        def _boom(source, team_id, prop, value):
+        def _boom(source, org_id, prop, value):
             if prop == "last_import_sha256" and value == "":
                 raise RuntimeError("simulated clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _boom)
         tc, fake, _ = sb_client
@@ -1204,12 +1162,12 @@ class TestImportPackConfigApplyFailures:
         r1 = _post_import(tc, artifact, key)
         assert r1.status_code == 422, r1.text
         assert "transient pack env failure" in r1.json()["detail"]
-        assert fake.tables["teams"][0].get("last_import_quarantined_sha256") == sha
+        assert fake.tables["organizations"][0].get("last_import_quarantined_sha256") == sha
         # 2: same sha, env fixed → 200 imported; quarantine cleared
         r2 = _post_import(tc, artifact, key)
         assert r2.status_code == 200, r2.text
         assert r2.json()["imported"] is True
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha
         assert not row.get("last_import_quarantined_sha256")
         # 3: same sha → already (quarantine consultation passes)
@@ -1233,10 +1191,10 @@ class TestImportPackConfigApplyFailures:
         the pack-failure marker STILL clears → already fires."""
         real_stamp = ha_mod._stamp_import_prop
 
-        def _clear_boom(source, team_id, prop, value):
+        def _clear_boom(source, org_id, prop, value):
             if prop == "last_import_quarantined_sha256" and value == "":
                 raise RuntimeError("simulated persistent clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
         # Transient apply failure on the FIRST import (fail-then-succeed).
@@ -1260,13 +1218,13 @@ class TestImportPackConfigApplyFailures:
         # 1: transient apply failure → 422, quarantine stamped (Q=sha)
         r1 = _post_import(tc, artifact, key)
         assert r1.status_code == 422, r1.text
-        assert fake.tables["teams"][0].get("last_import_quarantined_sha256") == sha
+        assert fake.tables["organizations"][0].get("last_import_quarantined_sha256") == sha
         # 2: same sha, env fixed → 200 imported; L=sha, Q-clear FAILS → Q stays sha;
         # the pack-failure marker still clears (independent best-effort writes)
         r2 = _post_import(tc, artifact, key)
         assert r2.status_code == 200, r2.text
         assert r2.json()["imported"] is True
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha
         assert row.get("last_import_quarantined_sha256") == sha  # Q clear failed
         assert not row.get("last_import_pack_failed_sha256")  # marker cleared
@@ -1293,7 +1251,7 @@ class TestImportPackConfigApplyFailures:
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
         r_a = _post_import(tc, artifact_a, key)
         assert r_a.status_code == 200, r_a.text
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: pre-restore rejection (foreign kind, no pack_config) — Q=B stamped,
         # graph untouched, NO pack-failure marker
         payload_b = _build_payload(n_points=1, n_edges=0)
@@ -1301,7 +1259,7 @@ class TestImportPackConfigApplyFailures:
         artifact_b = _build_artifact(payload_b, key)
         r_b = _post_import(tc, artifact_b, key)
         assert r_b.status_code == 422, r_b.text
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_quarantined_sha256") != sha_a
         assert not row.get("last_import_pack_failed_sha256")
         assert row.get("last_import_sha256") == sha_a  # A untouched
@@ -1322,10 +1280,10 @@ class TestImportPackConfigApplyFailures:
         live despite L==sha."""
         real_stamp = ha_mod._stamp_import_prop
 
-        def _clear_boom(source, team_id, prop, value):
+        def _clear_boom(source, org_id, prop, value):
             if prop == "last_import_sha256" and value == "":
                 raise RuntimeError("simulated ledger-clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
         real_apply = ha_mod._apply_import_pack_config
@@ -1353,21 +1311,21 @@ class TestImportPackConfigApplyFailures:
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
         r_a = _post_import(tc, artifact_a, key)
         assert r_a.status_code == 200, r_a.text
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: broken manifest → 422 post-swap; L-clear blips → L stays A (stale),
         # marker=B
         payload_b = self._payload("namespace: [broken", n_points=2)
         artifact_b = _build_artifact(payload_b, key)
         r_b = _post_import(tc, artifact_b, key)
         assert r_b.status_code == 422, r_b.text
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha_a  # stale (clear blipped)
         assert row.get("last_import_pack_failed_sha256") != sha_a
         # re-import A: swap lands, pack apply FAILS (2nd call) → 422; marker=A
         r_a2 = _post_import(tc, artifact_a, key)
         assert r_a2.status_code == 422, r_a2.text
         assert "pack env failure on A re-import" in r_a2.json()["detail"]
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_pack_failed_sha256") == sha_a  # marker=A
         # re-import A again → NOT already (marker==sha_a blocks the lie) → re-swap
         a_calls["n"] = 0  # reset so the third import applies cleanly
@@ -1386,10 +1344,10 @@ class TestImportPackConfigApplyFailures:
         for a non-empty quarantine of a DIFFERENT sha."""
         real_stamp = ha_mod._stamp_import_prop
 
-        def _clear_boom(source, team_id, prop, value):
+        def _clear_boom(source, org_id, prop, value):
             if prop == "last_import_sha256" and value == "":
                 raise RuntimeError("simulated ledger-clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
         tc, fake, _ = sb_client
@@ -1402,14 +1360,14 @@ class TestImportPackConfigApplyFailures:
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
         r_a = _post_import(tc, artifact_a, key)
         assert r_a.status_code == 200, r_a.text
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: broken manifest → 422 post-swap; ledger-clear FAILS → L stays A
         payload_b = self._payload("namespace: [broken", n_points=2)
         artifact_b = _build_artifact(payload_b, key)
         r_b = _post_import(tc, artifact_b, key)
         assert r_b.status_code == 422, r_b.text
         assert "invalid YAML" in r_b.json()["detail"]
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha_a  # STALE (clear failed)
         assert row.get("last_import_quarantined_sha256") != sha_a
         # re-import A → RE-SWAP (200 imported), NOT already (Q != A non-empty)
@@ -1431,11 +1389,11 @@ class TestImportPackConfigApplyFailures:
         sdk = TortoiseSDK(namespace="registry")
         try:
             g = sdk._get_registry()
-            g.query("CREATE (t:Team {id:$id})", params={"id": TEAM_ID})
-            _stamp_import_prop(g, TEAM_ID, "last_import_sha256", "")
+            g.query("CREATE (t:Team {id:$id})", params={"id": ORG_ID})
+            _stamp_import_prop(g, ORG_ID, "last_import_sha256", "")
             rows = g.query(
                 "MATCH (t:Team {id:$id}) RETURN t.last_import_sha256",
-                params={"id": TEAM_ID},
+                params={"id": ORG_ID},
             )
             assert rows.result_set[0][0] == ""
         finally:
@@ -1455,7 +1413,7 @@ class TestImportPackConfigApplyFailures:
         r = _post_import(tc, artifact, key)
         assert r.status_code == 200, r.text
         assert r.json()["imported"] is True
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha
         assert not row.get("last_import_quarantined_sha256")
         r2 = _post_import(tc, artifact, key)
@@ -1492,7 +1450,7 @@ class TestImportHappyPath:
         assert counts["edges"] == 2
         assert counts["ids"] == ["pt-0", "pt-1", "pt-2"]
         # audit event recorded (team_import, actor, sha256)
-        events = [e for e in capture_audit if e["operation"] == "team_import"]
+        events = [e for e in capture_audit if e["operation"] == "org_import"]
         assert len(events) == 1
         assert events[0]["actor_user_id"] == OWNER
         assert events[0]["detail"]["sha256"] == body["id"]
@@ -1506,7 +1464,7 @@ class TestImportHappyPath:
         payload = _build_payload(n_points=2, n_edges=1)
         artifact = _build_artifact(payload, key)
         r = tc.post(
-            f"/v1/teams/{TEAM_ID}/import",
+            f"/v1/organizations/{ORG_ID}/import",
             json={"artifact": base64.b64encode(artifact).decode(),
                   "key": _key_b64(key)},
         )
@@ -1598,7 +1556,7 @@ class TestImportIdempotencyAndSwapSafety:
         # no double-swap: the graph still has the imported nodes exactly once
         assert _counts(db_path)["nodes"] == 3
         assert _counts(db_path)["ids"] == ["pt-0", "pt-1", "pt-2"]
-        events = [e for e in capture_audit if e["operation"] == "team_import"]
+        events = [e for e in capture_audit if e["operation"] == "org_import"]
         assert len(events) == 2
         assert events[1]["detail"].get("already") is True
 
@@ -1612,7 +1570,7 @@ class TestImportIdempotencyAndSwapSafety:
         artifact = _build_artifact(payload, key)
         assert _post_import(tc, artifact, key).status_code == 200
         expected = hashlib.sha256(_canonical(payload)).hexdigest()
-        assert fake.tables["teams"][0].get("last_import_sha256") == expected
+        assert fake.tables["organizations"][0].get("last_import_sha256") == expected
 
     @_import_deep
     def test_import_swap_failure_503_quarantined_live_untouched(

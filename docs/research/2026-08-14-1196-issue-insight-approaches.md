@@ -52,7 +52,7 @@ new `TortoiseSDK.issue_insight()` method + thin `_safe()`-gated handler. Returns
    `no_prior_sessions`). `repo=` given + graph non-empty + zero observation points for repo →
    `repo_not_indexed: true` + actionable text (run `tortoise_onboarding_github_index`).
 
-Handler is the standard `return _safe(_get_team_sdk().issue_insight, title, body=..., ...)`
+Handler is the standard `return _safe(_get_org_sdk().issue_insight, title, body=..., ...)`
 wrapper (mirrors `tortoise_session_context`). Registry entry carries
 `rest_spec=RestSpec(GET, "/v1/issue-insight")` → `FastAPIRouterAdapter` derives the hosted
 endpoint for free (mirrors `/v1/context`); `hosted_api.py` route wrapper only resolves the team.
@@ -69,7 +69,7 @@ endpoint for free (mirrors `/v1/context`); `hosted_api.py` route wrapper only re
 **E2E:** Seed observation points (2 repos, incl. one matching the title's topic) + one
 high-EP decision point. Call `tortoise_issue_insight(title="...", repo="owner/a")` through the
 handler → assert `len(data_points) >= 1` and each point's content matches a seeded row (live,
-not copy). Empty-DB leg → `no_prior_knowledge`. Monkeypatched `_get_team_sdk` raising →
+not copy). Empty-DB leg → `no_prior_knowledge`. Monkeypatched `_get_org_sdk` raising →
 error dict, no crash. Repo-with-zero-points leg → `repo_not_indexed`.
 
 **Risks:**
@@ -189,7 +189,7 @@ honest fail-closed. Empty DB → `no_prior_knowledge`. Failure path → error di
   making the semantic cross-repo stage the *primary hook for the "aha"* and repo stats secondary
   framing, but the risk is real if the shaping drifts.
 - `handler_override` without `sdk_method` means no SDK-level unit test surface — logic is only
-  testable through the handler (embedded DB through the handler, or a `_get_team_sdk` stub);
+  testable through the handler (embedded DB through the handler, or a `_get_org_sdk` stub);
   REST mirror needs the optional helper module or it duplicates composition.
 - `repo_not_indexed` inference can false-positive while an in-flight `_INDEX_JOBS` job (1h TTL)
   is still populating — graph-inferred staleness is inherently a snapshot; acceptable for
