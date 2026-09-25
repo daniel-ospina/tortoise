@@ -30,7 +30,7 @@ response_fields:
 - response: sdk:get_provenance_chain
   field: raw
   emitted_when: 'always, on every returned item — the same index entry (the chain is the Source link, which exists whether or not the raw does)'
-  unchanged_when_off: 'n/a — not flag-gated; the entity/labels keys also become ABSENT rather than the whole chain being dropped when a source has no :references edge'
+  unchanged_when_off: 'n/a — not flag-gated; the ENTITY half also changed: a source with no :references edge now returns one item with entity=None/labels=[] instead of silently returning [] (the key set stays stable, so no consumer KeyErrors)'
 counts:
   tools: 82
   sdk_public_methods: 150

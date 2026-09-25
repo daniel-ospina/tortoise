@@ -431,7 +431,14 @@ class _EntityHandlers:
         # payload must not be able to CLEAR a recorded absence, and an upsert
         # that carries no state must PRESERVE the stored one (the contentHash
         # anchor rule, applied to availability).
-        "rawState", "rawStateAt", "raw_state",
+        "rawState", "rawStateAt",
+        # `raw_state` (snake_case) is a DEFENSIVE ALIAS: `create_source` maps the
+        # sanctioned `raw_state=` keyword to the camelCase ev key, so no writer
+        # emits it today — but a future or out-of-tree producer building a
+        # SourceCreated payload by hand must not be able to persist the
+        # snake_case spelling verbatim, which would put the state in TWO places
+        # and make the read-side default ambiguous.
+        "raw_state",
         # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
         # the MERGE clause, never persisted verbatim snake_case) and
         # `_searchText` (set by the write path, coalesce-on-create /
@@ -2396,6 +2403,15 @@ class _EntityHandlers:
             is completed — the JOINT-E2E sweep's stub-handling);
           - ``s.sourcePath = coalesce($sp, s.sourcePath)`` (§4.1 — the
             sanctioned source_path route maps to camelCase on the node);
+          - ``s.rawState``/``s.rawStateAt`` (#3998, D30): the ABSENT-RAW state
+            — the third value on the source record, after identity (url) and
+            version (contentHash). Written ON CREATE only when the caller
+            carries one, and PRESERVED ON MATCH whenever the incoming
+            ``$rawState`` is NULL — the contentHash anchor rule applied to
+            availability, so a re-ingest cannot resurrect a raw that was
+            deleted between the two writes. Deliberately INDEPENDENT of the
+            hash-diff gate above: a state change with an unchanged body must
+            still land;
           - ``s._searchText`` — coalesce ON CREATE, OVERWRITE on hash-diff
             MERGE (§4.1 cycle-4 merge semantics; E2E-5 retitle refresh);
           - ``s.__runId = $rid`` on the ON CREATE branch ONLY when

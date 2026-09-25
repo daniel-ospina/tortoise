@@ -20784,6 +20784,22 @@ class TortoiseSDK:
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
                 )
+        # #3998 (D30): the graph INDEXES the raw; it is NOT the raw store. A
+        # payload-bearing prop here would put raw bytes on the :Source node and
+        # break the two-store model outright — measured BEFORE this guard:
+        # ``create_source(url, "conversation", content=<2 KB body>)`` persisted
+        # the body verbatim on the node, so "0 raw payload bytes retained"
+        # (the issue's target 4) was simply false for the props route. The
+        # bytes belong in the raw store, reached through the source's identity;
+        # what the graph keeps is identity + version + availability.
+        for _k in ("content", "body", "raw", "payload", "raw_content", "rawContent"):
+            if _k in props:
+                raise ValueError(
+                    f"{_k!r} carries raw payload and cannot be stored on a "
+                    f":Source — the graph INDEXES the raw, it is not the raw "
+                    f"store (D30/#3919, #3998). Put the bytes in the raw store "
+                    f"and pass contentHash= instead."
+                )
         ev = {
             "url": url,
             "sourceKind": sourceKind,
@@ -21362,6 +21378,10 @@ class TortoiseSDK:
         extraction, or one whose entities were withdrawn), and that is exactly
         the state this issue says must stay sayable. ``LIMIT 1`` is kept so the
         one-row-per-source shape is unchanged when the edge IS present.
+
+        The key set is STABLE: ``entity``/``labels`` are returned as
+        ``None``/``[]`` rather than omitted, so a caller iterating a non-empty
+        chain cannot ``KeyError`` on the case that previously produced ``[]``.
         """
         proj = self._get_proj()
         r = proj.g.query(
@@ -21374,14 +21394,8 @@ class TortoiseSDK:
             {
                 "source": dict(row[0]),
                 "raw": raw_entry(row[0], source_id=(row[0] or {}).get("url")),
-                # The entity half is unchanged where it exists, and simply
-                # ABSENT (not null, not an error) where it does not — the
-                # provenance is the SOURCE link, which is always there.
-                **(
-                    {"entity": dict(row[1]), "labels": list(row[2])}
-                    if row[1] is not None
-                    else {}
-                ),
+                "entity": dict(row[1]) if row[1] is not None else None,
+                "labels": list(row[2]) if row[2] is not None else [],
             }
             for row in r.result_set
         ]
