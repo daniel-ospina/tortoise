@@ -124,6 +124,28 @@ def test_corruption_in_server_mode_still_advises_rebuild(monkeypatch):
     assert "python -m tortoise rebuild" in msg, msg
 
 
+@pytest.mark.parametrize("cause,needle", [
+    (_MAXMEMORY_ERROR, "maxmemory"),
+    ("LOADING Redis is loading the dataset in memory", "loading"),
+    ("<module> fork failed - got errno 17", "fork"),
+])
+def test_each_backend_cause_names_itself(monkeypatch, cause, needle):
+    """#3634 — each backend cause reports ITS OWN reason, not a neighbour's.
+
+    A maxmemory refusal, a still-hydrating `LOADING` reply and a fork/errno-17
+    failure are three different problems with three different remedies.
+    Falling through to the rebuild advice (or borrowing the maxmemory
+    message) would send an operator to destroy healthy data for a transient
+    cause.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(cause))
+    with pytest.raises(RuntimeError) as err:
+        proj._auto_health_recover()
+    assert needle in str(err.value).lower()
+    assert "python -m tortoise rebuild" not in str(err.value)
+
+
 def test_write_refusal_only_matches_the_server_wording():
     """The classifier is signature-scoped, not a blanket catch-all."""
     proj = _projection(probe_error=None)

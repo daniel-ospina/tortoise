@@ -1212,6 +1212,47 @@ _WRITE_REFUSAL_MARKERS = (
     "out of memory",            # generic engine wording
 )
 
+# #3634 — a probe can fail for reasons that are neither corruption nor a
+# maxmemory refusal, and each has its OWN remedy. Collapsing them (or letting
+# them fall through to the rebuild advice) misattributes the failure: a
+# still-hydrating server or a fork-starved container is NOT a broken graph.
+#
+# The markers are deliberately long phrases, NOT bare cause words: a bare
+# ``"loading"`` or ``"fork"`` would swallow unrelated text (a path, a
+# docstring, a query mentioning a fork) and route it to the wrong remedy.
+# Ordered: first match wins.
+#
+# (marker, cause_key)
+_BACKEND_FAILURE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("redis is loading the dataset", "loading"),  # LOADING reply — RDB/AOF hydrating
+    ("fork failed", "fork"),                      # BGSAVE/AOF-rewrite child refused
+    ("can't fork", "fork"),
+    ("cannot fork", "fork"),
+)
+
+# The per-cause body. Each NAMES its own cause and states what the cause
+# actually means, so the operator does not act on a neighbour's remedy.
+_BACKEND_FAILURE_REMEDIES: dict[str, str] = {
+    "loading": (
+        "DB health check failed on open: the server is still LOADING its "
+        "dataset (the Redis/FalkorDB reply is `LOADING Redis is loading "
+        "the dataset in memory`). The graph is neither corrupt nor full — "
+        "the server has not finished reading its snapshot. Wait for the "
+        "load to finish and retry; if it never completes, the dataset is "
+        "larger than the container's memory, so raise --maxmemory or "
+        "restore a smaller snapshot. Do NOT treat this as corruption. "
+        "See #3634."
+    ),
+    "fork": (
+        "DB health check failed on open: the server could not fork a "
+        "background child (the reply is `fork failed - got errno 17`). "
+        "The container has hit its process/address-space limit, so "
+        "snapshotting (BGSAVE) and append-only rewrites fail. The graph "
+        "is not corrupt — relieve the memory/process limit and retry. "
+        "See #3634."
+    ),
+}
+
 
 def _fmt_bytes(n: int) -> str:
     """Human byte size for an operator-facing message."""
@@ -2819,6 +2860,23 @@ class FalkorProjection(
             "the shared-lane form of this."
         )
 
+    def _backend_failure_message(self, exc: BaseException | None) -> str | None:
+        """Cause-specific error for a recognised NON-corruption failure.
+
+        The maxmemory refusal has its own classifier (``_write_refusal_message``)
+        and keeps its message verbatim; this covers the other causes that are
+        still NOT corruption — a server that has not finished LOADING and a
+        container that cannot fork. Returns ``None`` when no cause matches, so
+        a genuine corruption failure still reaches the rebuild advice.
+        """
+        if exc is None:
+            return None
+        text = str(exc).lower()
+        for marker, cause in _BACKEND_FAILURE_MARKERS:
+            if marker in text:
+                return _BACKEND_FAILURE_REMEDIES[cause]
+        return None
+
     def _find_local_jsonl_dir(self) -> str | None:
         """Adjacent JSONL event-log dir (same directory as the embedded DB).
 
@@ -2863,6 +2921,11 @@ class FalkorProjection(
             refusal = self._write_refusal_message(self._probe_error)
             if refusal is not None:
                 raise RuntimeError(refusal)
+            # #3634 — the other NON-corruption causes keep their own remedy
+            # instead of falling through to the rebuild advice.
+            cause_message = self._backend_failure_message(self._probe_error)
+            if cause_message is not None:
+                raise RuntimeError(cause_message)
             if is_prod or not self._is_embedded:
                 raise RuntimeError(
                     "DB health check failed on open (server/production mode). "
