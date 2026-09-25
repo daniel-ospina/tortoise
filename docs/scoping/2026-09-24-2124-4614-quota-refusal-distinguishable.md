@@ -103,9 +103,13 @@ In-repo canonical pattern (the actual precedent to follow):
 | D | Bound/degrade the capture instead of refusing | Changes product semantics; contradicts the owner's deferral of the cap/pricing decision | Rejected |
 
 **Why B wins on outcome, not on ease:** the prose survives *inside* the object,
-the dashboard's `api()`/`apiErrorText` already extract `.message`, and the number
-is preferred from `detail.limit` with the existing `/v1/team` fallback — so no
-deployed surface regresses while every caller gains `code`.
+the dashboard's `api()`/`apiErrorText` already extract `.message` — so no
+deployed surface regresses while every caller gains `code`. The structured
+`used`/`limit`/`estimate` fields have **no dashboard consumer yet**: the
+dashboard still regexes the number out of `message`
+(`keyAllowance.capLimitFrom`), and `detail.limit` is emitted for the callers that
+will read it (the #5208/#5051 follow-ups). Emitting the number is the point —
+reading it is a separate, deliberately deferred change.
 
 ### Adversarial threat surface
 
@@ -143,9 +147,11 @@ a caller branching on `code` to *skip* a write — is not reachable, because the
    `tests/test_hosted_api.py` (the live capture 402, the updated
    `TestKeyAllowance3874`, and the dict-detail flattening in
    `_record_capture_last_error`).
-6. `tortoise/mcp_server.py` — the MCP capture twin surfaces the refusal's
-   `message` from the structured detail to both sinks, instead of
-   stringifying the dict into a Python repr.
+6. `tortoise/quota.py` (the assembly layer) — `quota_refusal_payload` returns a
+   dict subclass whose `__str__` is the human message, so a consumer that only
+   has `str(detail)` (the MCP capture twin) prints the sentence, never a repr,
+   WITHOUT editing a registered tool's handler (`surface-guard` reds on any
+   change inside a tool function).
 7. `website/apps/dashboard/src/upsellGate.js` — `shouldNudgeUpgrade` no longer
    upsells a `cohort_cost_cap` (a spend cap an upgrade cannot lift);
    `normalizeError` exposes the refusal `code`.
@@ -164,8 +170,23 @@ a caller branching on `code` to *skip* a write — is not reachable, because the
 - **The capture clients' 402 classification is NOT narrowed.** A structured
   `code` now exists that *could* mark a quota refusal terminal, and acting on
   it would re-open the very data loss #4714 closed (a permanent classification
-  made the spool unlink its only copy of the transcript). #4925 holds the
+  made the spool unlink its only copy of the transcript). #5051 holds the
   terminal-refusal question.
+- **The clients that print the refusal still print the raw error body.** The
+  Python import path (`tortoise/__main__.py`) and the Pi leg
+  (`tortoise/pi-hooks/tortoise-capture.ts`) print/store the HTTP body verbatim;
+  that body is now the structured JSON, so the message is inside it but a reader
+  sees the envelope too. It is honest, not silent — flattening those two display
+  seams is part of the #5051 consolidation, not this change.
+- **The MCP result carries the coarse `ERR_QUOTA` code, not the fine one.**
+  `tortoise_session_capture` maps every 402 to `ERR_QUOTA`; republishing
+  `detail["code"]` there would edit a registered tool's handler and red
+  `surface-guard` (CONTRIBUTING: add response fields in the assembly layer, not
+  inside a tool function). The finer category is REST-only until #5051.
+- **The MCP capture twin stringifies the detail at the assembly layer.**
+  `quota_refusal_payload` returns a dict subclass whose `__str__` is the human
+  message, so the twin's `str(detail)` — unchanged — prints the sentence, not a
+  repr, and `surface-guard` stays green.
 - **The remaining non-`quota_exceeded` 402 doors** (`users`/member-limit, and
   the tier/entitlement gates such as "invites require the Builder tier" and
   "backups are a Builder feature") are a separate sweep, filed as **#5208**:

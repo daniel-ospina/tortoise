@@ -189,6 +189,25 @@ _RESOURCE_LIMIT_KEYS = {
 QUOTA_REFUSAL_CODE = "quota_exceeded"
 
 
+class RefusalPayload(dict):
+    """The structured 402 ``detail`` — a dict that STRINGIFIES to its message.
+
+    #4614: the payload must survive as a structured object (REST returns it as
+    the 402 ``detail`` and callers branch on ``code``), but the MCP capture twin
+    reads ``getattr(e, "detail", ...)`` and stringifies it. It cannot be fixed
+    there: the change would land inside a registered tool's handler and red
+    ``surface-guard`` (CONTRIBUTING: *"Add response fields in the SDK or
+    assembly layer, not inside a tool function"*). Answering the human message
+    from ``__str__`` fixes every ``str(detail)`` consumer at the assembly layer
+    instead, while ``json.dumps`` (and therefore FastAPI) still serializes it as
+    a JSON object.
+    """
+
+    def __str__(self) -> str:
+        message = self.get("message")
+        return message if isinstance(message, str) else super().__str__()
+
+
 class QuotaExceededError(Exception):
     """Org is at/over its resource limit — the write must be rejected (402).
 
@@ -247,10 +266,10 @@ def quota_refusal_payload(exc: QuotaExceededError) -> dict:
     off the exception (never assumed here) so a subclass's category survives a
     generic caller.
     """
-    payload: dict = {
+    payload: dict = RefusalPayload({
         "code": getattr(exc, "code", None) or QUOTA_REFUSAL_CODE,
         "message": str(exc),
-    }
+    })
     for key in ("resource", "used", "limit", "estimate"):
         value = getattr(exc, key, None)
         if value is not None:

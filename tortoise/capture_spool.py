@@ -329,7 +329,7 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     loss #4714 closed: any entry this drain would otherwise file later would be
     unlinked instead. The category is for REPORTING and for the surfaces that
     can act on it (`website/apps/dashboard`, the `capture-errors` breadcrumb);
-    the spool keeps deferring. #4925 holds the question of when a refusal is
+    the spool keeps deferring. #5051 holds the question of when a refusal is
     genuinely terminal; until it is answered, retry is the safe direction.
 
     Any 402 is retried, with the ENTRY's `backoff_delay` capping the cadence —

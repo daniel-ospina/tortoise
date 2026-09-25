@@ -979,3 +979,29 @@ class TestStructuredRefusal:
         """
         with pytest.raises(TypeError):
             QuotaExceededError("msg", "points", 1, 2)
+
+    def test_the_payload_stringifies_to_the_message(self):
+        """#4614: a consumer that only has `str(detail)` must see the sentence.
+
+        The MCP capture twin reads `getattr(e, "detail", ...)` and stringifies
+        it. Editing that handler would red `surface-guard` (CONTRIBUTING: add
+        response fields in the assembly layer, not inside a tool function), so
+        the payload answers `str()` here instead. JSON serialization must be
+        unchanged — `json.dumps` still emits an object.
+        """
+        import json
+
+        payload = quota_refusal_payload(QuotaExceededError(
+            "Team points limit reached (1). Upgrade your plan to increase it.",
+            resource="points", used=1, limit=1))
+        assert isinstance(payload, dict)
+        assert str(payload) == (
+            "Team points limit reached (1). Upgrade your plan to increase it.")
+        assert json.loads(json.dumps(payload)) == {
+            "code": QUOTA_REFUSAL_CODE,
+            "resource": "points",
+            "used": 1,
+            "limit": 1,
+            "message": "Team points limit reached (1). Upgrade your plan "
+                       "to increase it.",
+        }
