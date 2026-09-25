@@ -1198,6 +1198,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
+from tortoise.fork_slot import is_fork_refusal  # noqa: E402
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
@@ -1211,6 +1212,86 @@ _WRITE_REFUSAL_MARKERS = (
     "oom command not allowed",  # redis 7 wording
     "out of memory",            # generic engine wording
 )
+
+# #3634 — a probe can fail for reasons that are neither corruption nor a
+# maxmemory refusal, and each has its OWN remedy. Collapsing them (or letting
+# them fall through to the rebuild advice) misattributes the failure: a
+# still-hydrating server or a fork-refusing one is NOT a broken graph.
+#
+# The FORK family has exactly ONE classifier — ``fork_slot.is_fork_refusal``,
+# which owns the marker vocabulary (its single home) and walks the
+# ``__cause__``/``__context__`` chain — so this table carries only the LOADING
+# cause and ``_backend_failure_message`` delegates fork detection. Do NOT
+# restate fork markers here: a second, parallel list is how ``could not fork``
+# (FalkorDB's own reply, ``cmd_copy.c``) went unrecognised while the table
+# matched only the invented ``fork failed`` stem.
+#
+# The one marker is a deliberately long phrase, NOT a bare cause word: a bare
+# ``"loading"`` would swallow unrelated text (a path, a docstring) and route
+# it to the wrong remedy.
+#
+# (marker, cause_key)
+_BACKEND_FAILURE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("redis is loading the dataset", "loading"),  # LOADING reply — RDB/AOF hydrating
+)
+
+# The per-cause body. Each NAMES its own cause and states what the cause
+# actually means, so the operator does not act on a neighbour's remedy.
+#
+# The FORK remedy is the one cause whose body is not a single literal. Its
+# refusal has TWO mechanically distinct causes with a BYTE-IDENTICAL reply
+# (`GRAPH.COPY failed, could not fork` — see tools/embedded_evidence.py): a
+# background RDB/AOF child in the fork slot, and a hung un-reaped
+# `redis-module-fork` child from a PREVIOUS fork (#3845). And its slot cure
+# exists only on the EMBEDDED lane. Asserting one cause, or prescribing
+# `recover_fork_slot` where `socket_path_of(db)` is None, is wrong on both
+# counts. The body is therefore built from a shared cause-analysis prefix
+# plus a lane-specific action, selected by `_backend_failure_message`'s
+# `embedded` flag (the call site's own `self._is_embedded` reading — the axis
+# that actually decides whether `socket_path_of(db)` is non-None, NOT
+# `is_prod`, which gates auto-recovery and never the manual slot cure), so an
+# operator is never handed a cure their handle cannot execute.
+_FORK_REMEDY_CAUSE_ANALYSIS = (
+    "DB health check failed on open: the server refused a module fork "
+    "(FalkorDB replies `GRAPH.COPY failed, could not fork`). Redis allows "
+    "ONE module-fork child at a time, and that refusal has TWO mechanically "
+    "distinct causes with a byte-identical reply: an in-flight background "
+    "RDB save (or AOF rewrite) child occupies the slot, OR a hung, "
+    "un-reaped `redis-module-fork` child from a PREVIOUS fork still holds "
+    "it. errno 17 is EEXIST (the slot is occupied), NOT memory or process "
+    "pressure; the graph is not corrupt. Discriminate before acting: if no "
+    "hung `redis-module-fork` child is found, the slot is held by an "
+    "in-flight save — wait for it to finish and retry. A refusal carrying "
+    "EAGAIN (`Resource temporarily unavailable`) is a DIFFERENT mechanism — "
+    "a real resource limit — and is not cleared by reaping a child. "
+)
+_FORK_REMEDY_EMBEDDED = _FORK_REMEDY_CAUSE_ANALYSIS + (
+    "[embedded lane] Free a hung child with "
+    "`fork_slot.recover_fork_slot(db)` (it kills this daemon's own hung "
+    "child) or kill the lingering `redis-module-fork` child directly; the "
+    "refusal clears as soon as Redis reaps it. Do NOT rebuild. See #3845 "
+    "and #3634."
+)
+_FORK_REMEDY_SERVER = _FORK_REMEDY_CAUSE_ANALYSIS + (
+    "[server lane — remote/docker FalkorDB] The client-side slot cure is "
+    "embedded-only — it applies when the handle is a local unix socket. On "
+    "the SERVER's host, reap the lingering `redis-module-fork` child or "
+    "restart the FalkorDB server; the refusal clears as soon as Redis reaps "
+    "it. Do NOT rebuild. See #3845 and #3634."
+)
+_BACKEND_FAILURE_REMEDIES: dict[str, str] = {
+    "loading": (
+        "DB health check failed on open: the server is still LOADING its "
+        "dataset (the Redis/FalkorDB reply is `LOADING Redis is loading "
+        "the dataset in memory`). The graph is neither corrupt nor full — "
+        "the server has not finished reading its snapshot. Wait for the "
+        "load to finish and retry. (Secondary note: a load that never "
+        "completes can mean the dataset exceeds the container's memory, "
+        "for which a smaller snapshot is the durable fix — but the remedy "
+        "for THIS failure is simply to wait.) Do NOT treat this as "
+        "corruption. See #3634."
+    ),
+}
 
 
 def _fmt_bytes(n: int) -> str:
@@ -2819,6 +2900,39 @@ class FalkorProjection(
             "the shared-lane form of this."
         )
 
+    def _backend_failure_message(
+        self, exc: BaseException | None, *, embedded: bool = False
+    ) -> str | None:
+        """Cause-specific error for a recognised NON-corruption failure.
+
+        The maxmemory refusal has its own classifier (``_write_refusal_message``)
+        and keeps its message verbatim; this covers the other causes that are
+        still NOT corruption — a server that has not finished LOADING and a
+        server refusing a module fork. Returns ``None`` when no cause matches,
+        so a genuine corruption failure still reaches the rebuild advice.
+
+        ``embedded`` selects the lane-specific FORK remedy and tracks ONE
+        axis: whether this handle is an embedded unix-socket server, i.e.
+        whether ``socket_path_of(db)`` is non-None and the slot cure is
+        available. It is deliberately NOT ``is_prod``-gated — production
+        disables auto-recovery, not the manual cure. Its default is ``False``
+        — the conservative lane: a caller that has not stated its lane is
+        never told to call an embedded-only function. ``_auto_health_recover``
+        passes its own ``self._is_embedded`` reading.
+        """
+        if exc is None:
+            return None
+        # The fork family is classified by fork_slot's canonical predicate
+        # (P2-1): it walks the __cause__/__context__ chain and owns the marker
+        # vocabulary, so this call site and hosted_backup's can never drift.
+        if is_fork_refusal(exc):
+            return _FORK_REMEDY_EMBEDDED if embedded else _FORK_REMEDY_SERVER
+        text = str(exc).lower()
+        for marker, cause in _BACKEND_FAILURE_MARKERS:
+            if marker in text:
+                return _BACKEND_FAILURE_REMEDIES[cause]
+        return None
+
     def _find_local_jsonl_dir(self) -> str | None:
         """Adjacent JSONL event-log dir (same directory as the embedded DB).
 
@@ -2863,6 +2977,14 @@ class FalkorProjection(
             refusal = self._write_refusal_message(self._probe_error)
             if refusal is not None:
                 raise RuntimeError(refusal)
+            # #3634 — the other NON-corruption causes keep their own remedy
+            # instead of falling through to the rebuild advice.
+            cause_message = self._backend_failure_message(
+                self._probe_error,
+                embedded=self._is_embedded,
+            )
+            if cause_message is not None:
+                raise RuntimeError(cause_message)
             if is_prod or not self._is_embedded:
                 raise RuntimeError(
                     "DB health check failed on open (server/production mode). "

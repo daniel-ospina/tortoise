@@ -3530,7 +3530,7 @@ def _session_post(api_key: str, api_url: str):
             alone would confirm them. Uniformity is deliberate: a reviewer must
             not have to work out why one path confirms a 402 and the other does
             not. The deferral is recoverable either way (each is `retry`, so the
-            entry is kept and re-posted); #4925 holds the question of broadening
+            entry is kept and re-posted); #5051 holds the question of broadening
             both.
             """
             from tortoise.capture_spool import classify_failure
@@ -4386,7 +4386,7 @@ def _cmd_sessions_import(args) -> int:
         the spool, this decides what to RECEIPT. The cost of honouring it is a
         deferral, not a loss: a 402/503 whose commit landed is spooled (both are
         `retry`, so `_spool_if_retryable` keeps it) and filed by a later
-        attempt. #4925 records the tension — 503 and 504 are both 5xx and the
+        attempt. #5051 records the tension — 503 and 504 are both 5xx and the
         post-commit shape is identical; broadening needs that reopened.
 
         Writes the local receipt ONLY on :data:`FILED`. The turn rows are

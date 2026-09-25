@@ -967,6 +967,13 @@ export function pruneSpool(
  * oldest-first at the count/byte ceiling, with a recorded reason, so the two
  * legs describe the same policy (`capture_spool.py`).
  *
+ * ⚠️ #4614 gave the refusal a machine-readable CATEGORY
+ * (`detail.code === "quota_exceeded"`) so a caller no longer has to match the
+ * message text. This classifier still keys on the STATUS, deliberately: the
+ * category is for REPORTING and for surfaces that can act on it, and treating
+ * a `quota_exceeded` 402 as terminal here would re-open #4714's data loss. The
+ * two legs must keep answering this the same way (`capture_spool.py`).
+ *
  * PERMANENT (discard + record): every other 4xx — a malformed payload or an
  * out-of-range turn count never becomes valid by waiting.
  */
