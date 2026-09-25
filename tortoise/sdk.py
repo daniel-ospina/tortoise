@@ -5590,6 +5590,41 @@ class TortoiseSDK:
         elif "embedding" in props:
             props["embedding_verbatim"] = None
 
+        # #4208: a content edit must recompute the DERIVED vector in the SAME
+        # write, exactly as it already recomputes the derived `content_hash`
+        # (#1904). Before this, `update_point(content=B)` left the node holding
+        # content B with `vec(A)` — the dense leg then ranked it by text no
+        # longer on the node, and live != rebuild, because the replay's
+        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
+        # rule #19 set for the revise fold: recompute from the new content, or
+        # WIPE it when the embedder is unavailable (`None`) — never preserve a
+        # vector the new content did not produce (a vector for different text
+        # is worse than none). #4194/#4280: route through `encode_for_store`
+        # (the store-width-declaring seam) so the stored width matches the
+        # Point HNSW index this store created; the seam is still
+        # `compute_embedding` (module global), so installed doubles intercept.
+        #
+        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
+        # owns that write, the verbatim marker above already describes it, and
+        # the record/replay treatment of a caller vector on a revise is the
+        # separate declared gap #5046. Gated on the KEY, so this fires only
+        # when the caller supplied none.
+        _derived_embedding = False
+        _new_content = props.get("content")
+        if ("content" in props and "embedding" not in props
+                and _new_content is not None):
+            # `_new_content is not None` mirrors `_revise_point`'s own boundary
+            # — a `None` new_content is "no content edit" there, so it must not
+            # derive (or wipe) a vector either.
+            try:
+                from .embeddings import encode_for_store
+                props["embedding"] = (
+                    encode_for_store(_new_content, proj.required_embedding_dim)
+                    if _new_content else None)
+            except Exception:
+                props["embedding"] = None
+            _derived_embedding = True
+
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
             raise TypeError(
@@ -5689,7 +5724,17 @@ class TortoiseSDK:
         # #548: emit PointRevised event for rebuild parity
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
-        emit_props = {k: v for k, v in props.items() if k != "content_hash"}
+        # #4208: the vector this path just DERIVED from the content is stripped
+        # for the same reason — it is not owned by this record. The replay's
+        # `_revise_point` re-encodes from `new_content`, so a journalled copy
+        # would be dead weight, and #5004's presence-is-ownership rule would
+        # read the key as a producer claim the replay does not honour (the
+        # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        emit_props = {
+            k: v for k, v in props.items()
+            if k != "content_hash"
+            and not (_derived_embedding and k == "embedding")
+        }
         self._emit_event("PointRevised", id=id,
                          new_content=props.get("content"), **emit_props)
         return result
