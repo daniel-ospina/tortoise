@@ -1314,6 +1314,50 @@ class TestCanonicalObjectKindAlignment:
         assert retired.load_all() == 0
         assert "retired" in retired.errors
 
+    def test_a_pack_cannot_re_register_the_retired_kind(self, tmp_path):
+        """D10 must hold on the pack-manifest WRITE side too.
+
+        `_validate`'s collision check reads the SAME axis
+        (`CANONICAL_KINDS[kind_field]`) — so once `document` left
+        ``CANONICAL_OBJECT_KINDS`` a pack could declare ``objectKinds: [document]``
+        and validate clean. That is not inert: ``pack.object_kinds`` is unioned
+        into ``extractor_v2``'s writable kind forms and the classification index,
+        so the retirement became bypassable through the manifest path. The check
+        therefore also reads ``registered_source_types()`` — the axis D10 moved
+        the word TO. Declaring it THERE stays legal.
+
+        This pins the invariant for real. The module's ``__main__`` self-check
+        asserts the same thing, but nothing executes it (no test and no workflow
+        runs ``python -m tortoise.pack_registry``), and it rotted silently once
+        already when `document` left the canonical object set.
+        """
+        from tortoise.pack_registry import registered_source_types
+
+        assert "document" in registered_source_types()  # the axis D10 moved it to
+
+        sneaky_root = tmp_path / "sneaky_root"
+        sneaky_root.mkdir()
+        _write_pack(sneaky_root, "sneaky", {
+            "namespace": "sneaky", "name": "Sneaky",
+            "ontology": {"extends": "core", "objectKinds": ["document"]},
+        })
+        sneaky = PackRegistry(sneaky_root)
+        assert sneaky.load_all() == 0
+        assert any("canonical" in e for e in sneaky.errors.get("sneaky", [])), sneaky.errors
+
+        # Positive control: the same word on the SOURCE axis is legal, so the
+        # clause above rejects the collision and not the word itself.
+        legal_root = tmp_path / "legal_root"
+        legal_root.mkdir()
+        _write_pack(legal_root, "srcs", {
+            "namespace": "srcs", "name": "Sources",
+            "ontology": {"extends": "core", "objectKinds": ["widget"]},
+            "extraction": {"active": True, "sourceTypes": ["document"]},
+        })
+        legal = PackRegistry(legal_root)
+        assert legal.load_all() == 1, legal.errors
+        assert not legal.errors, legal.errors
+
     def test_legacy_extractor_vocab_is_a_documented_subset(self):
         """The legacy Phase-2 entity stage pins a NARROWER object-kind vocab
         (``extractor._OBJECT_KIND_VOCAB``): ``_intersect_object_kinds`` filters
