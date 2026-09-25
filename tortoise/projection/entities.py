@@ -1780,7 +1780,20 @@ class _EntityHandlers:
         name = ev.get("name")
         if not oid and not name:
             return (0, 0)
-        supersedes_by = str(ev.get("supersedes_by") or "")[:200]
+        # #5370: store the successor name VERBATIM — no 200-char cap. A cap
+        # here is LOSSY: a successor named >200 chars is stored on its
+        # Object in full (identity is the NAME — `_upsert_object` MERGEs on
+        # it — and `create_entity` has never capped), but the fold would
+        # record only its 200-char prefix — a value that names NO Object.
+        # The ask path's name-keyed successor probe
+        # (assembly._probe_visible_successors — MATCH (o:Object) WHERE
+        # o.name IN $names) then matches nothing and the renderer reports
+        # "no successor record found" for a successor that exists and is
+        # live. The old comment claimed this cap MIRRORED a writer cap in
+        # sdk.py `_connect_issue_objects`; that writer-side surface is a
+        # separate, session-indexing-only concern (still capped on main;
+        # #3574/#5314 removes it) and the fold must not truncate to it.
+        supersedes_by = str(ev.get("supersedes_by") or "")
         # #2164 final-review P4: prefer the journaled event's ORIGINAL ts —
         # rebuild pass-1b replays the raw journaled event (sdk._emit_event
         # stamps ts on the JSONL line) — without this a JSONL wipe+rebuild
