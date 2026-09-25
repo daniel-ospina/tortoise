@@ -466,11 +466,17 @@ def classify_query(
 
 #: R3 (#1542) D4 leg-trace entry shape (the R2 #1541 shared contract):
 #: {"leg", "ran", "degraded", "reason", "count"}. ``reason`` is never null
-#: when ``degraded`` is true (shape rule).
+#: when ``degraded`` is true (shape rule). #4999 adds one OPTIONAL key —
+#: ``mechanism`` — present only on an entry whose leg records WHICH path it
+#: took. Legs that do not pass one are byte-identical to the shared shape.
 def _trace_entry(leg: str, *, ran: bool, degraded: bool,
-                 reason: str | None, count: int) -> dict:
-    return {"leg": leg, "ran": ran, "degraded": degraded,
-            "reason": reason, "count": count}
+                 reason: str | None, count: int,
+                 mechanism: str | None = None) -> dict:
+    entry = {"leg": leg, "ran": ran, "degraded": degraded,
+             "reason": reason, "count": count}
+    if mechanism is not None:
+        entry[VECTOR_MECHANISM_KEY] = mechanism
+    return entry
 
 
 #: #4028 — leg-trace reason recorded when the vector leg RAN but the
@@ -479,6 +485,30 @@ def _trace_entry(leg: str, *, ran: bool, degraded: bool,
 #: of them was relevant", which the search surface must NOT mistake for a
 #: leg failure and answer from the TF-IDF fallback.
 BELOW_RELEVANCE_FLOOR = "below_relevance_floor"
+
+
+# ── #4999: the vector leg's MECHANISM (index vs scan) ───────────────────────
+# Both the HNSW-index path and the brute-force full scan recorded an
+# IDENTICAL leg-trace entry (``ran=True, degraded=False, reason="ok"``), so a
+# caller could not tell a 4.97 ms indexed query from a 16.96 ms full scan of
+# 7,859 Object vectors without reading this source. ``degraded`` deliberately
+# does NOT carry the signal: per #2952 it means "the vector leg contributed no
+# semantic results", and a brute-force scan DOES return semantic rows —
+# flipping it would make :func:`require_hybrid_read` refuse a valid semantic
+# read (see the #2952 tests). The path is reported additively instead.
+#:
+#: Trace-entry key carrying the mechanism (written by :func:`_trace_entry`,
+#: read by callers); the value is one of the three constants below, and the
+#: key is absent when no path was taken (e.g. ``breaker_open``).
+VECTOR_MECHANISM_KEY = "mechanism"
+#: Index-accelerated ``CALL db.idx.vector.queryNodes`` produced the rows.
+MECHANISM_INDEX = "index"
+#: Brute-force scan and NO index was attempted (embedded mode — the design).
+MECHANISM_SCAN = "scan"
+#: Brute-force scan AFTER an index attempt failed (docker mode): the silent
+#: fallback #4999 is about, now reportable on the trace rather than only in a
+#: log line.
+MECHANISM_SCAN_FALLBACK = "scan_fallback"
 
 
 # ── (C) #2952: declared degraded reads ──────────────────────────────────────
@@ -817,6 +847,16 @@ def run_vector_query(
     Falls back to brute-force vec.euclideanDistance if the index is
     unavailable (embedded mode, old FalkorDB, or index creation failed).
 
+    #4999: because both paths return rows, the leg-trace entry carries a
+    ``mechanism`` key naming the path taken — ``"index"`` | ``"scan"`` |
+    ``"scan_fallback"`` (:data:`MECHANISM_INDEX` / :data:`MECHANISM_SCAN` /
+    :data:`MECHANISM_SCAN_FALLBACK`, key :data:`VECTOR_MECHANISM_KEY`). A
+    caller can therefore tell an index-accelerated query from a full table
+    scan without reading this source, and can alert on ``scan_fallback``
+    (an index was expected and was not used). ``degraded`` is intentionally
+    left untouched: a scan still returns SEMANTIC rows, and #2952 defines
+    ``degraded`` as "contributed no semantic results".
+
     vector_index_api: 'procedure' | 'cypher' | None — the API that
     succeeded at index-creation time, recorded on the projection as
     FalkorProjection._vector_index_api (#1359). When 'cypher', the
@@ -841,11 +881,12 @@ def run_vector_query(
     consecutive slow/failed queries. (#249)
     """
     def _record(*, ran: bool, degraded: bool, reason: str | None,
-                count: int) -> None:
+                count: int, mechanism: str | None = None) -> None:
         if leg_trace is not None:
             leg_trace.append(_trace_entry("vector", ran=ran,
                                           degraded=degraded,
-                                          reason=reason, count=count))
+                                          reason=reason, count=count,
+                                          mechanism=mechanism))
 
     if not query_vec:
         return []
@@ -877,8 +918,15 @@ def run_vector_query(
     else:
         id_field = "id"
 
+    # #4999: did THIS call attempt an index query? Embedded mode never does
+    # (the scan is the design, not a fallback); docker mode always does, and a
+    # failure falls through to the scan below. That distinction is what makes
+    # ``scan`` and ``scan_fallback`` tellable apart.
+    index_attempted = False
+
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
+        index_attempted = True
         # #689: retracted Points must not leak into vector results.
         if label == "Point":
             vec_status_filter = ("" if excluded_statuses == ()
@@ -968,10 +1016,12 @@ def run_vector_query(
                     kept = [(pid, s) for pid, s in out if s >= min_similarity]
                     if not kept:
                         _record(ran=True, degraded=False,
-                                reason=BELOW_RELEVANCE_FLOOR, count=0)
+                                reason=BELOW_RELEVANCE_FLOOR, count=0,
+                                mechanism=MECHANISM_INDEX)
                         return []
                     out = kept
-                _record(ran=True, degraded=False, reason="ok", count=len(out))
+                _record(ran=True, degraded=False, reason="ok", count=len(out),
+                        mechanism=MECHANISM_INDEX)
                 return out
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
@@ -981,7 +1031,8 @@ def run_vector_query(
             # on this branch (an engine artefact, declared in the PR: the
             # measured defect is the embedded/brute-force lane).
             total = len(rows)
-            _record(ran=True, degraded=False, reason="ok", count=total)
+            _record(ran=True, degraded=False, reason="ok", count=total,
+                    mechanism=MECHANISM_INDEX)
             return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
         except Exception as e:
             msg = str(e).lower()
@@ -997,6 +1048,10 @@ def run_vector_query(
             # one logical query counts at most once. (#249 review P1-2)
 
     # Brute-force (embedded mode or index query failed)
+    # #4999: `scan_fallback` ONLY when an index attempt actually failed on
+    # this call — an embedded scan is the design and reports plain `scan`.
+    scan_mechanism = (MECHANISM_SCAN_FALLBACK if index_attempted
+                      else MECHANISM_SCAN)
     try:
         start = time.monotonic()
         # #244: vec.euclideanDistance rejects plain-list query params
@@ -1039,9 +1094,11 @@ def run_vector_query(
                        if s > 0 and (1.0 / s - 1.0) <= _floor_distance]
                 if not out:
                     _record(ran=True, degraded=False,
-                            reason=BELOW_RELEVANCE_FLOOR, count=0)
+                            reason=BELOW_RELEVANCE_FLOOR, count=0,
+                            mechanism=scan_mechanism)
                     return out
-            _record(ran=True, degraded=False, reason="ok", count=len(out))
+            _record(ran=True, degraded=False, reason="ok", count=len(out),
+                    mechanism=scan_mechanism)
             return out
         # R3 (#1542) D4: the explicit zero-row guard — an all-no-embedding
         # graph returns [] WITHOUT raising (the except catch below never
@@ -1057,22 +1114,25 @@ def run_vector_query(
             embedded = 0
         _record(ran=True, degraded=(embedded == 0),
                 reason=("no_embeddings" if embedded == 0 else "empty_results"),
-                count=0)
+                count=0, mechanism=scan_mechanism)
         return []
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Vector index not available — skipping vector strategy")
             _breaker_record("vector", True)
-            _record(ran=True, degraded=True, reason="index_missing", count=0)
+            _record(ran=True, degraded=True, reason="index_missing", count=0,
+                    mechanism=scan_mechanism)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
             _breaker_record("vector", True)
-            _record(ran=True, degraded=True, reason="no_embeddings", count=0)
+            _record(ran=True, degraded=True, reason="no_embeddings", count=0,
+                    mechanism=scan_mechanism)
         else:
             logger.warning("Vector query failed: %s", e)
             _breaker_record("vector", False)
-            _record(ran=True, degraded=True, reason="query_failed", count=0)
+            _record(ran=True, degraded=True, reason="query_failed", count=0,
+                    mechanism=scan_mechanism)
         return []
 
 
