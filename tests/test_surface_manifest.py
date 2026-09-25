@@ -1662,7 +1662,10 @@ def test_a_non_list_response_fields_block_crashes_neither_command(tmp_path, monk
         doc = _manifest()
         doc["response_fields"] = block
         monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, f"block-{type(block).__name__}.yml"))
-        monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+        # `_doc=doc` BINDS the value. A bare closure over `doc` would read the
+        # variable at CALL time, which is the next loop iteration's manifest —
+        # ruff's B023, and a real aliasing hazard rather than a style nit.
+        monkeypatch.setattr(sm, "build_doc", lambda *a, _doc=doc, **k: copy.deepcopy(_doc))
         monkeypatch.setattr(sm, "RENDERED_FILE", out)
         try:
             assert sm.cmd_render(argparse.Namespace()) == 0, f"render crashed on block={block!r}"
@@ -1698,7 +1701,7 @@ def test_check_reds_when_the_recorded_fields_block_is_empty_or_missing(tmp_path,
         else:
             doc["response_fields"] = block
         monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, f"empty-{block is None}.yml"))
-        monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+        monkeypatch.setattr(sm, "build_doc", lambda *a, _doc=doc, **k: copy.deepcopy(_doc))
         assert sm.cmd_check(argparse.Namespace()) == 1, f"check passed with response_fields={block!r}"
 
 
