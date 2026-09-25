@@ -956,6 +956,36 @@ def _sweep_events() -> None:
         _logger.warning("event retention sweep failed: %s", exc)
 
 
+def _sweep_oauth_retention() -> None:
+    """#3036: GC dead OAuth rows (hosted-only — D3).
+
+    Scheduled, not operator-run: armed by ``_run_boot_sweeps`` at boot and by
+    ``_event_retention_loop`` on the periodic interval (hourly by default), so
+    the oauth_* tables cannot accumulate redeemed codes / revoked tokens. The
+    windows are credential hygiene — a different axis from the user-content
+    deletion promise (``docs/retention-and-deletion.md``). OAuth lives on the
+    Supabase control plane only, so registry/embedded mode is a no-op.
+
+    Best-effort by construction (mirrors the other sweeps): a failure logs and
+    never kills the loop, and there is no retry beyond the next cycle.
+    """
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if not is_supabase_enabled():
+            return
+        from tortoise.oauth import sweep_oauth_retention
+        counts = sweep_oauth_retention(get_control_plane())
+        total = sum(counts.values())
+        if total:
+            _logger.info("oauth retention swept %s dead row(s): %s",
+                         total, counts)
+    except Exception as exc:  # a GC sweep must never crash the loop
+        _logger.warning("oauth retention sweep failed: %s", exc)
+
+
 async def _run_boot_sweeps() -> None:
     """#2953: the one-time boot sweeps, run as a BACKGROUND task.
 
@@ -982,7 +1012,8 @@ async def _run_boot_sweeps() -> None:
     """
     await asyncio.sleep(0)
     for label, fn in (("event retention", _sweep_events),
-                      ("deleted-team purge", _purge_deleted_orgs)):
+                      ("deleted-team purge", _purge_deleted_orgs),
+                      ("oauth retention", _sweep_oauth_retention)):
         try:
             await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
         except asyncio.CancelledError:
@@ -1417,6 +1448,9 @@ async def _lifespan(app):
                                                name="tortoise-boot-sweep")
                     # #302: hard-delete past grace (sync DB work off the loop)
                     await run_on_daemon_worker(_purge_deleted_orgs,
+                                               name="tortoise-boot-sweep")
+                    # #3036: GC dead OAuth rows (sync DB work off the loop)
+                    await run_on_daemon_worker(_sweep_oauth_retention,
                                                name="tortoise-boot-sweep")
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())

@@ -175,6 +175,7 @@ const suites = [
   '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
   '20260906000001_graphs_deleted_at.sql',  // #2304
   '20260919000001_metering_period_end_repair.sql',  // #4216
+  '20260925000001_oauth_referential_integrity.sql',  // #3036
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
@@ -311,6 +312,20 @@ try {
 }
 
 console.log('✅ ROLLBACK DRILL PASSED (apply → rollback → re-apply round trip)');
+
+// ── #3036: OAuth FK migration re-applies idempotently ──────────────────────
+// The suite above proves the constraints BEHAVE (dangling refs rejected, the
+// ON DELETE SET NULL action). Re-executing the migration text on a database
+// that already has both constraints proves the DROP-then-ADD pair plus the
+// dangling-pointer repair statements are idempotent — the deploy path runs
+// this file again on any environment where it was already applied.
+try {
+  await db.exec(readFileSync(`${MIG_DIR}/20260925000001_oauth_referential_integrity.sql`, 'utf8'));
+  console.log('✓ #3036: OAuth FK migration re-applies idempotently');
+} catch (e) {
+  console.error(`✗ #3036 migration re-apply FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
 
 console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
 

@@ -70,6 +70,19 @@ ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
 REFRESH_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_REFRESH_TTL",
                                           str(30 * 24 * 3600)))
 AUTH_CODE_TTL_S = int(os.environ.get("TORTOISE_OAUTH_CODE_TTL", "600"))
+# ── Retention / GC windows (issue #3036) ────────────────────────────────────
+# Credential hygiene, a DIFFERENT AXIS from the user-content deletion promise:
+# these rows are service-role-only hashed secrets (0016 RLS), never user
+# content — the same carve-out the canonical doc records for the operational
+# event store. Canonical promise doc: docs/retention-and-deletion.md.
+#
+# Each value is the grace kept AFTER the row's own expires_at, so a row that is
+# revoked but not yet expired lives out its natural TTL first. That is what
+# makes a #2863 soft-revoke an accounting residue rather than a leak. Expressed
+# in seconds and overridable per env.
+OAUTH_CODE_RETENTION_S = int(os.environ.get("TORTOISE_OAUTH_CODE_RETENTION_S", "86400"))
+OAUTH_ACCESS_RETENTION_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_RETENTION_S", "86400"))
+OAUTH_REFRESH_RETENTION_S = int(os.environ.get("TORTOISE_OAUTH_REFRESH_RETENTION_S", "86400"))
 # Distinct prefixes so the MCP auth middleware can route Bearer tokens without
 # a table scan (tt_ = tenant key, oat_ = OAuth access token). Refresh tokens
 # are never presented to /mcp — the prefix is a debugging aid.
@@ -1847,3 +1860,48 @@ def consent_page_html(*, client_name: str, scope: str | None,
         .replace("__SUPABASE_ANON_KEY__", _json_for_script(supabase_anon_key)) \
         .replace("__NONCE__", nonce)
     return html, nonce
+
+
+# ── Retention / GC (issue #3036) ────────────────────────────────────────────
+
+def sweep_oauth_retention(cp, *, now: datetime | None = None) -> dict[str, int]:
+    """Hard-delete dead OAuth rows past their retention grace (issue #3036).
+
+    GC for the three token tables 0016 introduced with no TTL sweep. A row is
+    dead once its own ``expires_at`` is in the past (a redeemed or unredeemed
+    code, an expired or revoked access/refresh token); it is then kept for a
+    short forensic grace (``OAUTH_*_RETENTION_S``) before this sweep removes
+    it. Those windows are credential hygiene — a different axis from the
+    user-content deletion promise (``docs/retention-and-deletion.md``).
+
+    Delete order: access rows first, then refresh rows, then codes — so there
+    is nothing live for the access→refresh FK to act on. The ``ON DELETE SET
+    NULL`` policy added by migration 20260925000001 is the safety net for an
+    out-of-band / manual delete, not this path.
+
+    Returns the number of rows deleted per table. FAIL-CLOSED: a query failure
+    raises; the caller (``hosted_api._sweep_oauth_retention``) logs and skips
+    the cycle so retention can never crash the loop. Idempotent: a re-run finds
+    nothing and deletes nothing.
+    """
+    now_dt = now or _now()
+
+    def _cutoff(seconds: int) -> str:
+        return (now_dt - timedelta(seconds=seconds)).isoformat()
+
+    deleted: dict[str, int] = {}
+    for table, seconds in (
+        ("oauth_access_tokens", OAUTH_ACCESS_RETENTION_S),
+        ("oauth_refresh_tokens", OAUTH_REFRESH_RETENTION_S),
+        ("oauth_codes", OAUTH_CODE_RETENTION_S),
+    ):
+        cutoff = _cutoff(seconds)
+        doomed = cp.query(table, select=["id"],
+                          filters=[("expires_at", "lt", cutoff)])
+        if not doomed:
+            deleted[table] = 0
+            continue
+        cp.query(table, method="DELETE",
+                 filters=[("expires_at", "lt", cutoff)])
+        deleted[table] = len(doomed)
+    return deleted
