@@ -143,6 +143,42 @@ def test_retention_windows_are_positive():
         assert isinstance(value, int) and value > 0
 
 
+def test_a_row_exactly_at_the_cutoff_is_kept():
+    """The predicate is STRICT ``<``: a row whose age exactly equals the window
+    is still inside the grace. No other test seeds a boundary row, so an
+    ``lt``→``lte`` mutation (which reaps one second early) passed the suite."""
+    cp = FakeControlPlane().seed("oauth_access_tokens", [
+        {"id": "at-cutoff",
+         "expires_at": _iso(NOW - timedelta(seconds=OAUTH_ACCESS_RETENTION_S))},
+        {"id": "just-inside",
+         "expires_at": _iso(NOW - timedelta(seconds=OAUTH_ACCESS_RETENTION_S - 1))},
+        {"id": "just-past",
+         "expires_at": _iso(NOW - timedelta(seconds=OAUTH_ACCESS_RETENTION_S + 1))},
+    ])
+
+    assert sweep_oauth_retention(cp, now=NOW)["oauth_access_tokens"] == 1
+    assert {r["id"] for r in cp.tables["oauth_access_tokens"]} == {
+        "at-cutoff", "just-inside"}
+
+
+def test_default_window_applies_when_the_env_is_unset(monkeypatch):
+    """Pin the DEFAULT magnitude independently of the constant the other tests
+    seed from (they derive their rows from `retention_s`, so a wrong constant
+    is invisible). With the env UNSET: 23h past expiry is kept, 25h is reaped
+    — which brackets the shipped 24h default without naming it."""
+    for name in ("TORTOISE_OAUTH_ACCESS_RETENTION_S",
+                 "TORTOISE_OAUTH_REFRESH_RETENTION_S",
+                 "TORTOISE_OAUTH_CODE_RETENTION_S"):
+        monkeypatch.delenv(name, raising=False)
+    cp = FakeControlPlane().seed("oauth_access_tokens", [
+        {"id": "h23", "expires_at": _iso(NOW - timedelta(hours=23))},
+        {"id": "h25", "expires_at": _iso(NOW - timedelta(hours=25))},
+    ])
+
+    assert sweep_oauth_retention(cp, now=NOW)["oauth_access_tokens"] == 1
+    assert [r["id"] for r in cp.tables["oauth_access_tokens"]] == ["h23"]
+
+
 def test_negative_retention_override_never_deletes_live_rows(monkeypatch):
     """A negative window would move the cutoff INTO THE FUTURE and delete live
     credentials. The resolver must fall back to the safe DEFAULT instead — and
@@ -266,6 +302,35 @@ def test_leading_zeros_do_not_inflate_the_width_check(raw, monkeypatch):
     monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", raw)
     assert _retention_seconds("TORTOISE_OAUTH_ACCESS_RETENTION_S",
                               OAUTH_ACCESS_RETENTION_S) == int(raw.lstrip("0"))
+
+
+class _RecordingFake(FakeControlPlane):
+    """Records (table, method) for every query so CALL ORDER is observable."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[tuple[str, str]] = []
+
+    def query(self, table, **kwargs):
+        self.calls.append((table, kwargs.get("method") or "GET"))
+        return super().query(table, **kwargs)
+
+
+def test_delete_order_is_access_then_refresh_then_codes():
+    """The documented delete order is load-bearing — it is why the FK's
+    ON DELETE SET NULL is a safety net rather than the routine path (an access
+    row is reaped before any refresh row it points at). FakeControlPlane models
+    no FK, so the order is otherwise unobservable, and a reordered plan passed
+    the whole suite."""
+    cp = _RecordingFake()
+    for table, retention_s in _TABLES:
+        _seed_three(cp, table, retention_s)
+
+    sweep_oauth_retention(cp, now=NOW)
+
+    deletes = [table for table, method in cp.calls if method == "DELETE"]
+    assert deletes == ["oauth_access_tokens", "oauth_refresh_tokens",
+                       "oauth_codes"]
 
 
 # ── the caller / scheduling wiring ──────────────────────────────────────────
