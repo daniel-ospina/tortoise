@@ -18,8 +18,9 @@ in place: O(1), no I/O, no lock on the hot path. A WORK-OWNING boundary arms /
 notes, then takes-and-resets the tally and writes it once through
 ``metering.record_embedding_usage``:
 
-* :class:`EmbedMeteringMiddleware` — every non-GET HTTP request (org resolved
-  from ``scope["state"]["org_id"]``, which the key-auth dependencies populate);
+* :class:`EmbedMeteringMiddleware` — every non-GET HTTP request, on every auth
+  lane that resolves an org (the key dependencies AND session auth write
+  ``scope["state"]["org_id"]`` during the request);
 * ``mcp_server._quota_gated`` — the MCP write lane;
 * :func:`meted` — work born in a DETACHED task (background index jobs, the dream
   worker, the onboarding/starter seed runners) installs a FRESH tally and flushes
@@ -204,19 +205,38 @@ def flush_tally(tally: EmbedTally | None, org_id: str | None = None) -> dict | N
     """Write one tally to the ledger. TOTAL — never raises.
 
     Returns the writer's summary dict, or None when there was nothing to write,
-    when the org is unresolvable, or when the write was dropped. Every drop is
-    reported to the operator on the ``embed`` lane (never silent).
+    when the org is unresolvable, or when the write was dropped.
+
+    A DROP IS ALERTED WHEN THIS MODULE CAN TELL IT APART — an unresolvable
+    metering window, or a non-empty tally with no org, both go to the operator on
+    the ``embed`` lane. Two drops are NOT alerted here, and that is a declared
+    limitation rather than a claim: a failure of the increment RPC ITSELF is
+    absorbed by ``metering.record_embedding_usage`` (WARNING — the shared #3824
+    residual), and a note that lands in a tally this call has already CONSUMED
+    (the capture-cancellation residual) is not attributed to any row.
     """
     if tally is None:
         return None
-    # The consumed transition is under the lock: two boundaries (a runner and the
-    # request middleware) can reach the same tally from different threads, and a
-    # check-then-set race would double-write it.
+    # The consumed transition AND the counter snapshot share ONE critical
+    # section. Two boundaries (a runner and the request middleware) can reach the
+    # same tally from different threads: a check-then-set race would double-write
+    # it, and a snapshot read after the release could miss an increment that
+    # landed in between.
     with _LOCK:
         if tally.consumed:
             return None
         tally.consumed = True
-    if tally.is_empty():
+        snap = {
+            "calls": tally.calls,
+            "texts": tally.texts,
+            "chars": tally.chars,
+            "wall_ms": tally.wall_ms,
+            "skipped": tally.skipped,
+            "model": tally.model,
+            "revision": tally.revision,
+            "identity_mixed": tally.identity_mixed,
+        }
+    if not (snap["calls"] or snap["skipped"]):
         return None
     org = org_id or tally.org_id
     if not org:
@@ -231,14 +251,14 @@ def flush_tally(tally: EmbedTally | None, org_id: str | None = None) -> dict | N
         from tortoise import metering
         return metering.record_embedding_usage(
             org,
-            calls=tally.calls,
-            texts=tally.texts,
-            chars=tally.chars,
-            wall_ms=tally.wall_ms,
-            skipped=tally.skipped,
-            model=tally.model,
-            revision=tally.revision,
-            identity_mixed=tally.identity_mixed,
+            calls=snap["calls"],
+            texts=snap["texts"],
+            chars=snap["chars"],
+            wall_ms=snap["wall_ms"],
+            skipped=snap["skipped"],
+            model=snap["model"],
+            revision=snap["revision"],
+            identity_mixed=snap["identity_mixed"],
         )
     except Exception as e:
         _report(org_id=org, error=e)
@@ -360,11 +380,11 @@ class EmbedMeteringMiddleware:
     WaitBound-owned task) but outside every route, so it sees the request that
     caused the work — not the pool thread that ran it.
 
-    The org is resolved at FLUSH time, after the handler has run: the key-auth
-    dependencies write ``scope["state"]["org_id"]`` during the request, and
-    ``scope`` is the same dict by then. Routes that publish their org another way
-    (session auth, the internal seed lanes) are covered by ``meted`` at the
-    runner instead — see the call sites.
+    The org is resolved at FLUSH time, after the handler has run: every auth
+    dependency that resolves an org (key auth AND session auth) writes
+    ``scope["state"]["org_id"]`` during the request, and ``scope`` is the same
+    dict by then. Routes whose org never reaches scope state (the internal seed
+    lanes) are covered by ``meted`` at the runner instead — see the call sites.
     """
 
     def __init__(self, app) -> None:
