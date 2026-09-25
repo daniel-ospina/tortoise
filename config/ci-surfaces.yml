@@ -2339,10 +2339,10 @@ durations:
   test_temporal_leg_2976.py: 0.4
   test_terminal_dedup_nullhash.py: 1.5
   test_terminal_status_vocabulary.py: 0.6
-  test_time_aware_2520.py: 0.0        # hermetic (pure rules)
-  test_time_aware_eval_2520.py: 0.0   # docker-lane leg
-  test_time_aware_run_2520.py: 0.0    # hermetic + docker legs
-  test_time_aware_sdk_2520.py: 0.0    # docker-lane leg
+  test_time_aware_2520.py: 0.0        # unmeasured — arrived via main #5297; no source leg measured it, 0.0 is main's minimum-weight pin
+  test_time_aware_eval_2520.py: 0.0   # unmeasured — arrived via main #5297; no source leg measured it
+  test_time_aware_run_2520.py: 0.0    # unmeasured — arrived via main #5297; no source leg measured it
+  test_time_aware_sdk_2520.py: 0.0    # unmeasured — arrived via main #5297; no source leg measured it
   test_tmpdir_hygiene_4096.py: 8.4
   test_turn_embedding_write_path_4194.py: 1.4
   test_website_docs_consistency.py: 3.2
