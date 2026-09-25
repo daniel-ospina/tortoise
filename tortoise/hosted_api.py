@@ -2241,10 +2241,12 @@ def _route_describes(route, path: str) -> bool:
     """Whether ``route`` is the route that served ``path``.
 
     The route's OWN pattern is the arbiter, so path params still resolve to the
-    template (``/v1/points/{pid}`` describes ``/v1/points/abc``). A route
-    reached through a ``Mount`` has a pattern relative to the mount, so it does
-    NOT describe the prefixed request path and is rejected — which is the point:
-    the sub-route must not stand in for the surface the caller actually hit.
+    template (``/v1/points/{pid}`` describes ``/v1/points/abc``). This predicate
+    answers ONLY whether the pattern covers the path: it cannot itself tell the
+    serving route from a mount's INNER route, and must not be asked to — an
+    inner ``Route("/{rest:path}")`` has regex ``^(?P<rest>.*)$`` and covers the
+    prefixed path too (measured). The mount cases are excluded by the CALLER,
+    never by a pattern match here.
 
     ``re.match``, NOT ``fullmatch``: the router matches with ``match`` against
     ``^…$`` (``starlette.routing.compile_path``), and Python's ``$`` also matches
@@ -2263,6 +2265,35 @@ def _route_describes(route, path: str) -> bool:
         return regex.match(path) is not None
     except Exception:  # noqa: BLE001, RUF100 - a label is never worth a 500
         return False
+
+
+def _routed_inside_a_mount(scope, entry_path: str) -> bool:
+    """Whether the matched route lives INSIDE a ``Mount`` the request descended.
+
+    A mount appends its prefix to ``root_path`` as it descends, and that happens
+    after ``entry_path`` was captured — so comparing the two answers the
+    question exactly. It has to be asked separately from the ``Mount`` check: a
+    mount's INNER route is a plain ``Route`` whose pattern is relative to the
+    mount, and a catch-all inner route (``Route("/{rest:path}")``, regex
+    ``^(?P<rest>.*)$``) describes the prefixed arrival path just as well as its
+    own, so it would stand in for the whole undeclared surface on the
+    code-literal axis (measured on starlette 1.7.0, where the sub-app's route is
+    stamped; 1.6.0 stamps nothing and fell to the derived axis — the label must
+    not depend on which version is installed).
+
+    ``entry_path`` is ``get_route_path(scope)`` at middleware entry, i.e. the
+    path minus the root_path of that moment, so the arrival's own root_path is
+    the slice of ``scope["path"]`` in front of it. A server ``--root-path``
+    prefixes EVERY request and so cancels out on both sides, leaving it
+    untouched — as it must, since a route's ``path_regex`` is matched against
+    the root_path-relative path and templates under a root_path are legitimate.
+    """
+    full_path = scope.get("path")
+    if isinstance(full_path, str) and full_path.endswith(entry_path):
+        entry_root_path = full_path[: len(full_path) - len(entry_path)]
+    else:  # cannot reconstruct it - assume the app did not change root_path
+        entry_root_path = scope.get("root_path") or ""
+    return (scope.get("root_path") or "") != entry_root_path
 
 
 def _egress_route_class(scope, entry_path: str) -> tuple[str, bool]:
@@ -2323,7 +2354,8 @@ def _egress_route_class(scope, entry_path: str) -> tuple[str, bool]:
     # DECLARED prefixes only. (Measured: WHICH router stamps a ``Mount`` at all
     # depends on the parent app — FastAPI's ``APIRouter.app`` does not, while
     # Starlette's base ``Router`` does — so the label must not depend on it.)
-    if (isinstance(template, str) and template and not isinstance(route, Mount)
+    if (isinstance(template, str) and template
+            and not isinstance(route, Mount) and not _routed_inside_a_mount(scope, path)
             and _route_describes(route, path)):
         return template, False
     segments = [seg for seg in path.split("/") if seg][:2]
@@ -2368,6 +2400,14 @@ class EgressBytesMiddleware:
       * a 500 synthesized by Starlette's ``ServerErrorMiddleware``, which sits
         OUTSIDE this wrapper (the innermost ``ExceptionMiddleware`` is inside it,
         so every handled response is counted);
+      * a request whose handler raised BEFORE the app sent anything: measured,
+        such a request propagates the exception and no response is produced, so
+        it is not counted AT ALL — recording it would add a 0-byte observation
+        to a route that never responded, indistinguishable in the histogram from
+        a route that answered with an empty body (ASGI ends every response with
+        a ``http.response.body`` message, so the first one is the signal that a
+        response exists — a stream that breaks halfway is still counted, which
+        makes the figure a lower bound on partial sends);
       * anything after a client disconnect whose ``send`` raised before the
         final message (the count is "bytes handed to ``send``", so the message
         that raised may still be credited — a bound, not an exact wire-byte
@@ -2387,10 +2427,14 @@ class EgressBytesMiddleware:
         # fixed for the request — a ``Mount`` mutates ``root_path`` as it
         # descends, so the same call at response time would no longer name it.
         entry_path = get_route_path(scope)
+        # Whether a response was ever produced (see the docstring): an app that
+        # raises before sending must not be recorded as a 0-byte response.
+        responded = False
 
         async def _counting_send(message):
-            nonlocal nbytes
+            nonlocal nbytes, responded
             if message["type"] == "http.response.body":
+                responded = True
                 nbytes += len(message.get("body") or b"")
             await send(message)
 
@@ -2403,7 +2447,7 @@ class EgressBytesMiddleware:
             # silent 200-less hang. Skip the record with a flag instead.
             dropped = (isinstance(state, dict)
                        and bool(state.get(_WAIT_BOUND_REFUSED_STATE)))
-            if not dropped:
+            if responded and not dropped:
                 org_id = state.get("org_id") if isinstance(state, dict) else None
                 try:
                     # Call-time attribute read (`_monitoring`), so a test or an

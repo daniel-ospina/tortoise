@@ -724,11 +724,18 @@ def egress_bytes_by_org() -> dict[str, int]:
     totals: dict[str, int] = {}
     for family in EGRESS_BYTES.collect():
         for sample in family.samples:
+            # Read ONLY the byte counter. The created series of the client the
+            # lock resolves is ``<name>_created``, so the second operand is not
+            # reachable there — it is kept so that a client naming it
+            # ``_created_total`` could not have its creation TIMESTAMP summed
+            # as byte counts.
             if (not sample.name.endswith("_total")
                     or sample.name.endswith("_created_total")):
                 continue
             org = sample.labels.get("org")
             if org is None:
+                # A family that lost the org label is skipped, never recorded as
+                # an org literally named ``None``.
                 continue
             totals[org] = totals.get(org, 0) + int(sample.value)
     return totals

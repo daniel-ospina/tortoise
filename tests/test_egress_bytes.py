@@ -35,6 +35,7 @@ import pathlib
 import re
 import threading
 import time
+import uuid
 
 import pytest
 from fastapi import FastAPI, Request, Response
@@ -299,16 +300,19 @@ class TestWriter:
         assert "tortoise_egress_bytes_total" in text
         assert ("org_a", "/v1/?bad", ORIGIN_ROUTE) in _bytes_by_child()
 
-    def test_org_overflow_sentinel_cannot_be_produced_by_the_id_generators(self):
-        """The org sentinel must not be reachable as a real org id.
+    def test_org_overflow_sentinel_is_outside_the_id_shapes(self):
+        """The org sentinel must be outside the shapes org ids are generated in.
 
         Org ids are GENERATED, not chosen: the provisioning lanes use
-        ``uuid4().hex[:26]`` and the registry lane ``org_<name>``. This asserts
-        the sentinel is outside both shapes, so changing it to a colliding value
-        (``org_overflow``) would fail here.
+        ``uuid4().hex[:26]`` and the registry lane ``org_<name>``. This pins the
+        SHAPE of those generators (via a sample of the uuid form) rather than
+        calling them — they live in the provisioning paths, not in a reusable
+        constructor — so a sentinel moved into either shape fails here.
         """
         assert not re.fullmatch(r"[0-9a-f]{26}", monitoring.EGRESS_OVERFLOW)
         assert not monitoring.EGRESS_OVERFLOW.startswith("org_")
+        # The generator the shape test above stands in for, exercised once.
+        assert re.fullmatch(r"[0-9a-f]{26}", uuid.uuid4().hex[:26])
 
     def test_control_characters_are_stripped_from_labels(self):
         """A percent-decoded path carries control characters into the exposition.
@@ -406,7 +410,7 @@ class TestWriter:
         """
         root = pathlib.Path(monitoring.__file__).resolve().parent
         offenders = []
-        for source in sorted(root.glob("*.py")):
+        for source in sorted(root.rglob("*.py")):
             if source.name == "monitoring.py":
                 continue
             text = source.read_text(encoding="utf-8")
@@ -551,6 +555,34 @@ class TestMiddleware:
         assert not [c for c in _bytes_by_child() if c[1] in ("/export", "/mcp/export")], (
             "the mounted request must be labelled by the declared prefix only")
         assert monitoring.egress_bytes_by_org()[""] == len(r.content)
+
+    def test_bare_mount_prefix_is_its_own_route_label(self):
+        """The bare connector URL (``/mcp``, no trailing slash) is a route label.
+
+        ``/mcp`` is the URL an MCP client is configured with, so it is not a
+        corner case — and it is the one arrival the PREFIX rule reaches through
+        its ``path == prefix`` arm (a path that merely starts with ``/mcp``
+        without the separator is a different route). Without that arm it would
+        fall to the tightly-capped derived axis, where a burst of bad connector
+        URLs could push the mount's own label into overflow. Driven through the
+        real router: Starlette answers ``/mcp`` with a redirect to ``/mcp/`` and
+        the request still ARRIVED at ``/mcp``.
+        """
+        sub = Starlette(routes=[Route("/export", lambda request: JSONResponse({}))])
+        app = Starlette(routes=[Mount("/mcp", app=sub)])
+        app.add_middleware(ha.EgressBytesMiddleware)
+
+        with TestClient(app) as client:
+            r = client.get("/mcp", follow_redirects=False)
+
+        assert r.status_code in (307, 308), r.status_code
+        assert ("", "/mcp", ORIGIN_ROUTE) in _bytes_by_child(), (
+            "the bare mount path must not fall to the derived axis")
+        assert ha._egress_route_class({"type": "http", "path": "/mcp"},
+                                      entry_path="/mcp") == ("/mcp", False)
+        # ... and a path that only shares the prefix is NOT the mount.
+        assert ha._egress_route_class({"type": "http", "path": "/mcpx"},
+                                      entry_path="/mcpx") == ("/mcpx", True)
 
     def test_declared_mount_prefix_survives_an_unrelated_junk_flood(self):
         """The round-2 review finding, pinned (bug + security, converged).
@@ -703,6 +735,88 @@ class TestMiddleware:
         label, derived = ha._egress_route_class(scope, entry_path="/plugins/export")
 
         assert (label, derived) == ("/plugins/export", True)
+
+    def test_mount_descent_predicate_is_version_independent(self):
+        """The mount-descent signal, pinned WITHOUT relying on a stamping router.
+
+        Whether a sub-app's route reaches the scope at all is a starlette
+        version detail (1.6.0 does not stamp it, 1.7.0 does — measured, and CI
+        runs the second), so on the lock's 1.6.0 the catch-all test above passes
+        VACUOUSLY. This drives the predicate directly, so the guard is exercised
+        in BOTH environments. ``entry_path`` is the arrival path minus the
+        entry-time root_path — the middleware's contract, and the reason a
+        mount's prefix shows up as a MISMATCH rather than as the baseline.
+        """
+        # Nothing descended: a plain route under no mount.
+        assert ha._routed_inside_a_mount(
+            {"path": "/v1/points/abc"}, "/v1/points/abc") is False
+        # The mount appended its prefix after entry_path was captured.
+        assert ha._routed_inside_a_mount(
+            {"path": "/mcp/export", "root_path": "/mcp"}, "/mcp/export") is True
+        # ... also when a server root_path was already in force at entry.
+        assert ha._routed_inside_a_mount(
+            {"path": "/x/mcp/export", "root_path": "/x/mcp"}, "/mcp/export") is True
+        # A server --root-path prefixes EVERY request and cancels out: templates
+        # under one must still be accepted (the regression this must not cause).
+        assert ha._routed_inside_a_mount(
+            {"path": "/x/v1/points/abc", "root_path": "/x"}, "/v1/points/abc") is False
+        assert ha._routed_inside_a_mount(
+            {"path": "/a/b", "root_path": None}, "/a/b") is False
+        # Unreconstructible scope (no usable path): assume unchanged, so an odd
+        # scope falls back to the request-derived label rather than a wrong one.
+        assert ha._routed_inside_a_mount({"root_path": ""}, "/anything") is False
+
+    def test_catch_all_inner_route_does_not_stand_in_for_the_mounted_surface(self):
+        """A mount's CATCH-ALL inner route is not the serving template either.
+
+        ``Route("/{rest:path}")`` has regex ``^(?P<rest>.*)$``, which describes
+        the mount-prefixed arrival path just as well as its own — so the mount
+        check alone is not enough, and on starlette 1.7.0 (what CI resolves) the
+        sub-app's route IS stamped onto the scope. Without the mount-descent
+        check this collapsed every path under an undeclared mount into ONE
+        code-literal child on the un-starvable axis (measured at 1.7.0: with the
+        guard, two derived children; without it, one ``route`` child of 14
+        bytes). On the lock's 1.6.0 nothing is stamped, so this test passes
+        vacuously there — the predicate itself is pinned separately by
+        ``test_mount_descent_predicate_is_version_independent``.
+        """
+        sub = Starlette(routes=[Route("/{rest:path}", lambda request: JSONResponse({"x": 1}))])
+        app = Starlette(routes=[Mount("/plugins", app=sub)])
+        app.add_middleware(ha.EgressBytesMiddleware)
+
+        with TestClient(app) as client:
+            assert client.get("/plugins/anything").status_code == 200
+            client.get("/plugins/deep/path")
+
+        children = _bytes_by_child()
+        assert not [c for c in children if c[1].startswith("/{")], (
+            f"a catch-all inner route became a route-axis label: {sorted(children)!r}")
+        assert not [c for c in children if c[2] == ORIGIN_ROUTE], (
+            f"an undeclared mount's traffic reached the code-literal axis: {sorted(children)!r}")
+        assert sum(children.values()) == 2 * len(b'{"x":1}'), (
+            "both responses must still be measured, on the derived axis")
+
+    def test_a_handler_that_raises_before_sending_is_not_recorded(self):
+        """No response was produced, so there is nothing to account for.
+
+        An ASGI response always ends with a ``http.response.body`` message, so
+        the first body message is what distinguishes "answered with an empty
+        body" (a real 0-byte response, which IS recorded) from "never answered"
+        — recording the latter would add a phantom 0-byte observation to a route
+        that did not respond at all (measured before the fix).
+        """
+        async def _boom(scope, receive, send):
+            scope.setdefault("state", {})["org_id"] = "org_boom"
+            raise RuntimeError("handler exploded before any response")
+
+        client = TestClient(ha.EgressBytesMiddleware(_boom))
+
+        with pytest.raises(RuntimeError, match="exploded"):
+            client.get("/v1/boom")
+
+        assert _bytes_by_child() == {}, "a request with no response was counted"
+        assert _histogram("/v1/boom", ORIGIN_DERIVED)[0] == 0, (
+            "a phantom 0-byte observation was added to the histogram")
 
     def test_template_is_kept_when_it_describes_the_entry_path(self):
         """The normal case must NOT regress: a matched template still wins.
