@@ -63,7 +63,7 @@ Declared bounds — what this file does NOT verify
 * **CI selection reach.** A PR that changes ONLY a `tools/*.py` path (not
   `tools/longmem_eval/`, not a `TOOL_CARVEOUTS`/`SOURCE_PATTERNS`-listed tool,
   and no test file) drops to tier-1 smoke and would not run this file. That is
-  the pre-existing #3261/#3616/#3910 silent-drop class, not introduced here; the
+  the pre-existing #3261/#3362/#4115 silent-drop class, not introduced here; the
   per-file carve-outs in `tools/ci_selection.TOOL_CARVEOUTS` are the existing
   remedy and a corpus-wide one is filed separately.
 * **`graph-scripts/profile_395_local_ep.py`** is UNGUARDABLE and excluded below:

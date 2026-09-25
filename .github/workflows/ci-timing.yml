@@ -38,6 +38,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # tools/ci_timing.py carries the inline >=3.12 guard (#5128).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Find latest completed push-to-main Python CI run
         id: find
