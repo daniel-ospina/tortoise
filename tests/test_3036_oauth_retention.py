@@ -120,10 +120,12 @@ def test_one_table_failure_does_not_starve_the_others():
 
     with pytest.raises(RuntimeError) as excinfo:
         sweep_oauth_retention(cp, now=NOW)
-    # The error must NAME the failing table and carry a reason — a bare
-    # `sorted(failures)` (table names only) is un-diagnosable in a log.
+    # The error must NAME the failing table AND carry the injected reason —
+    # asserting only `!=` a legacy string would pass for a message that keeps
+    # the shape but drops the reason (or reverts to `sorted(...)[0]`).
     assert "oauth_access_tokens" in str(excinfo.value)
-    assert str(excinfo.value) != "oauth retention sweep failed for ['oauth_access_tokens']"
+    assert "Supabase unreachable (simulated)" in str(excinfo.value)
+    assert cp.unfired_faults() == [], "the injected fault must have fired"
 
     # The two healthy tables were swept despite the access-table fault.
     assert {row["id"] for row in cp.tables["oauth_refresh_tokens"]} == {
@@ -151,10 +153,12 @@ def test_negative_retention_override_never_deletes_live_rows(monkeypatch):
         cp.seed(table, [
             {"id": f"{table}-live",
              "expires_at": _iso(NOW + timedelta(hours=1))},
-            # Expired 30 min ago — inside the 86400s default and outside every
-            # bad override, so only a true fallback keeps it.
+            # Expired 2h ago — inside the 86400s default but OUTSIDE every bad
+            # override below (`abs(-3600)` = 3600s, `0`, `+5`), so only a true
+            # fallback keeps it. (30 min would NOT discriminate: it is inside a
+            # bogus 3600s window, and an `abs()` mutant would pass.)
             {"id": f"{table}-grace",
-             "expires_at": _iso(NOW - timedelta(minutes=30))},
+             "expires_at": _iso(NOW - timedelta(hours=2))},
         ])
 
     observed = sweep_oauth_retention(cp, now=NOW)
@@ -182,19 +186,33 @@ def test_a_valid_positive_override_is_applied(monkeypatch):
         "access-inwindow"]
 
 
-@pytest.mark.parametrize("raw", [
-    "+5", "1_0", "\u0663", "0", "", " 5", "5 ", "1e9",
-    "99999999999999999999",  # ascii digits but astronomically large
-])
-def test_retention_override_rejects_anything_not_a_plain_positive_int(raw, monkeypatch):
+@pytest.mark.parametrize("raw", ["+5", "1_0", "\u0663", "0", "", " 5", "5 ", "1e9"])
+def test_malformed_or_nonpositive_override_falls_back_to_default(raw, monkeypatch):
     """Strict parse: `int()` alone accepts ``+5``, ``1_0`` and non-ASCII digits
     (``\u0663`` = 3), each of which silently yields a window far shorter than
-    intended; a huge value overflows the cutoff arithmetic."""
+    intended. A malformed or non-positive value falls back to the DEFAULT."""
     from tortoise.oauth import _retention_seconds
 
     monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", raw)
     assert _retention_seconds("TORTOISE_OAUTH_ACCESS_RETENTION_S",
                               OAUTH_ACCESS_RETENTION_S) == OAUTH_ACCESS_RETENTION_S
+
+
+@pytest.mark.parametrize("raw", [
+    str(315_360_000 + 1),       # one second over the ceiling
+    "999999999999",             # 12 digits, above the ceiling
+    "9" * 4301,                 # beyond CPython's int() digit limit
+])
+def test_out_of_range_override_clamps_to_the_ceiling(raw, monkeypatch):
+    """Directional: an operator asking for MORE than the ceiling gets the
+    ceiling, not the 1-day default — falling back would delete EARLIER than
+    requested. The 4301-digit case is the one bare `int()` cannot even parse
+    (CPython's 4300-digit limit), so the width guard must come first."""
+    from tortoise.oauth import _MAX_RETENTION_S, _retention_seconds
+
+    monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", raw)
+    assert _retention_seconds("TORTOISE_OAUTH_ACCESS_RETENTION_S",
+                              OAUTH_ACCESS_RETENTION_S) == _MAX_RETENTION_S
 
 
 # ── the caller / scheduling wiring ──────────────────────────────────────────

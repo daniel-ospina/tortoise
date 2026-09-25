@@ -56,9 +56,11 @@
 --
 -- Additive only: two NULL-able FK constraints + three `expires_at` indexes.
 -- No column added/dropped, no row inserted/updated except the dangling-pointer
--- repair above. Each CREATE INDEX is NON-concurrent, so it takes a write lock
--- on its token table for the duration of the build — noted because a plain
--- "additive" header under-counts a migration's lock footprint.
+-- repair above. Lock footprint, because a bare "additive" header under-counts
+-- it: each `DROP CONSTRAINT IF EXISTS` takes ACCESS EXCLUSIVE on its table, and
+-- each validated `ADD CONSTRAINT` takes SHARE ROW EXCLUSIVE plus a full
+-- validation scan of both tables; each CREATE INDEX is NON-concurrent and takes
+-- a write lock on its token table for the duration of the build.
 -- ============================================================================
 
 -- 1) Repair dangling pointers so the constraints can be added and validated.

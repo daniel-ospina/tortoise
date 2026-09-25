@@ -157,15 +157,22 @@ for (const f of files) {
         VALUES ('3036-preseed-refresh', '3036-preseed-hr', '3036-preseed-client',
                 '3036-preseed-user', '3036-preseed-org',
                 now() + interval '1 hour', '3036-preseed-missing-ancestor');
-        -- A VALID pair (+ a valid chain link) that the repair must NOT touch.
-        -- Without it the assertion only proves the DANGLING branch, and an
-        -- over-broad predicate (e.g. the AND NOT EXISTS guard dropped) would
-        -- silently NULL every live provenance link and still pass.
+        -- Valid links the repair must NOT touch: an access→refresh pair AND a
+        -- refresh→ancestor CHAIN link. Without them the assertion only proves
+        -- the DANGLING branch, and an over-broad predicate (the AND NOT EXISTS
+        -- guard dropped from EITHER repair) would silently NULL valid
+        -- provenance links and still pass. The chain link is what covers the
+        -- SECOND repair statement (rotated_from).
+        INSERT INTO public.oauth_refresh_tokens
+          (id, token_hash, client_id, user_id, org_id, expires_at, rotated_from)
+        VALUES ('3036-preseed-good-ancestor', '3036-preseed-hga2', '3036-preseed-client',
+                '3036-preseed-user', '3036-preseed-org',
+                now() + interval '1 hour', NULL);
         INSERT INTO public.oauth_refresh_tokens
           (id, token_hash, client_id, user_id, org_id, expires_at, rotated_from)
         VALUES ('3036-preseed-good-refresh', '3036-preseed-hgr', '3036-preseed-client',
                 '3036-preseed-user', '3036-preseed-org',
-                now() + interval '1 hour', NULL);
+                now() + interval '1 hour', '3036-preseed-good-ancestor');
         INSERT INTO public.oauth_access_tokens
           (id, token_hash, client_id, user_id, org_id, expires_at, refresh_token_id)
         VALUES ('3036-preseed-good-access', '3036-preseed-hga', '3036-preseed-client',
@@ -222,8 +229,12 @@ for (const f of files) {
        WHERE id = '3036-preseed-good-access') AS good_access_link,
     (SELECT count(*) FROM public.oauth_access_tokens
        WHERE id = '3036-preseed-good-access') AS good_access_rows,
+    (SELECT rotated_from FROM public.oauth_refresh_tokens
+       WHERE id = '3036-preseed-good-refresh') AS good_refresh_link,
     (SELECT count(*) FROM public.oauth_refresh_tokens
-       WHERE id = '3036-preseed-good-refresh') AS good_refresh_rows`);
+       WHERE id = '3036-preseed-good-refresh') AS good_refresh_rows,
+    (SELECT count(*) FROM public.oauth_refresh_tokens
+       WHERE id = '3036-preseed-good-ancestor') AS good_ancestor_rows`);
   const d = r.rows[0] || {};
   if (Number(d.access_rows) !== 1 || Number(d.refresh_rows) !== 1) {
     console.error(`✗ #3036: the repair must NULL the pointer, not delete the row (access_rows=${d.access_rows}, refresh_rows=${d.refresh_rows})`);
@@ -239,6 +250,14 @@ for (const f of files) {
   }
   if (d.good_access_link !== '3036-preseed-good-refresh') {
     console.error(`✗ #3036: the repair NULLed a VALID provenance link (got ${d.good_access_link}, want '3036-preseed-good-refresh') — its predicate is over-broad`);
+    process.exit(1);
+  }
+  if (Number(d.good_ancestor_rows) !== 1) {
+    console.error(`✗ #3036: the repair DELETED a valid chain ancestor (good_ancestor_rows=${d.good_ancestor_rows})`);
+    process.exit(1);
+  }
+  if (d.good_refresh_link !== '3036-preseed-good-ancestor') {
+    console.error(`✗ #3036: the repair NULLed a VALID rotation-chain link (got ${d.good_refresh_link}, want '3036-preseed-good-ancestor') — its predicate is over-broad`);
     process.exit(1);
   }
   await db.exec(`

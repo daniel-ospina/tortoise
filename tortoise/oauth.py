@@ -90,6 +90,7 @@ OAUTH_REFRESH_RETENTION_S = 86400
 # indistinguishable from "retention off" AND overflows the cutoff arithmetic
 # (``timedelta`` raises OverflowError), which would skip that table forever.
 _MAX_RETENTION_S = 10 * 365 * 86400
+_MAX_RETENTION_STR = str(_MAX_RETENTION_S)
 
 
 def _retention_seconds(env_name: str, default: int) -> int:
@@ -105,6 +106,12 @@ def _retention_seconds(env_name: str, default: int) -> int:
     ``int()`` also accepts a sign (``+5``), underscore separators (``1_0``)
     and non-ASCII digit forms (``٣`` = 3). None of those is a window a human
     meant, and the last two resolve to a far shorter window than intended.
+
+    Out-of-range handling is DIRECTIONAL on purpose: a non-positive or
+    malformed value falls back to ``default``, but a value ABOVE the ceiling
+    is CLAMPED to it. Falling back to the 1-day default for an operator who
+    asked for a longer window would delete EARLIER than requested — the wrong
+    direction for a retention knob.
     """
     raw = os.environ.get(env_name)
     if raw is None:
@@ -113,11 +120,22 @@ def _retention_seconds(env_name: str, default: int) -> int:
         logger.warning("oauth: %s=%r is not a positive integer — using %ss",
                        env_name, raw, default)
         return default
+    # Width check BEFORE int(): CPython refuses a string longer than
+    # ``sys.get_int_max_str_digits()`` (4300) with an uncaught ValueError, and
+    # anything wider than the ceiling is above it by construction anyway.
+    if len(raw) > len(_MAX_RETENTION_STR):
+        logger.warning("oauth: %s is wider than %d digits — clamping to %ds",
+                       env_name, len(_MAX_RETENTION_STR), _MAX_RETENTION_S)
+        return _MAX_RETENTION_S
     value = int(raw)
-    if value <= 0 or value > _MAX_RETENTION_S:
-        logger.warning("oauth: %s=%r outside 1..%d — using %ss",
-                       env_name, raw, _MAX_RETENTION_S, default)
+    if value <= 0:
+        logger.warning("oauth: %s=%r must be positive — using %ss",
+                       env_name, raw, default)
         return default
+    if value > _MAX_RETENTION_S:
+        logger.warning("oauth: %s=%r exceeds %ds — clamping",
+                       env_name, raw, _MAX_RETENTION_S)
+        return _MAX_RETENTION_S
     return value
 # Distinct prefixes so the MCP auth middleware can route Bearer tokens without
 # a table scan (tt_ = tenant key, oat_ = OAuth access token). Refresh tokens
