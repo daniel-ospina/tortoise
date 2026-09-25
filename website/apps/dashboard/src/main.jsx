@@ -1233,10 +1233,16 @@ function claimIntentInFlight() {
   const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
 
-  // Wizard connect step: reset persisted 'chatgpt' value (legacy default) to a valid tab
+  // Connect-step validity guard. `wizardHarness` starts at the literal 'claude'
+  // and is never persisted or hydrated (no storage/server read sets it), so the
+  // only values it can hold are the leaves the chooser writes — every one of them
+  // already in the list below. Nothing can reach this with a stale leaf today; it
+  // is kept as the guard for the day a persisted value is restored. (#4836: the
+  // comment used to claim a persisted 'chatgpt' was reset here, a value no code
+  // path can produce since #2698 deleted that tab.)
   React.useEffect(() => {
     // #2912: 'codexDesktop' is a first-class leaf now (the Codex chooser's
-    // Desktop surface), so it is a valid persisted value too.
+    // Desktop surface), so it is a valid value too.
     if (!['pi', 'cursor', 'claude', 'codex', 'codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardHarness)) {
       setWizardHarness('pi')
     }

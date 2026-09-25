@@ -242,8 +242,8 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
   // lacks MCP tools: both it and the live carrier (website/docs.html#chatgpt)
   // enrol the same Developer-mode OAuth connector. They differ only in the
   // instructions handed over — this block embeds the workflows prompt, the docs
-  // page hands over the onboarding document, whose §4 verifies with
-  // tortoise_health (#4836).
+  // page hands over the onboarding document, whose verify step calls
+  // `tortoise_health` (#4836).
   const cmd = UNIVERSAL_COMMAND.chatgpt()
   assert.match(cmd, /Developer mode/, 'command: Developer mode')
   assert.match(cmd, /chatgpt\.com\/plugins/, 'command: plugins surface')

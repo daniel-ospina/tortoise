@@ -64,7 +64,8 @@ resume where the flow left off — onboarding is stateful and idempotent:
   $TORTOISE_API_KEY"` (same projection). If the org is grandfathered (node
   absent) the FLOW keys serve defaults — treat them as read-only. **CLI agents
   only:** a ChatGPT connector never takes this header and has no key to send —
-  if you are ChatGPT, ignore this bullet and the §2 #1701 note applies instead.
+  if you are ChatGPT, ignore this bullet and the #1701 note beneath the harness
+  table applies instead.
 - **Self-hosted:** there is no hosted onboarding REST surface — skip the
   state read and checkpoint steps. Install the SUPPORTED path first —
   Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
@@ -112,18 +113,20 @@ mode → teach-human fallback).
 > path a ChatGPT user takes; its LIVE carrier is the public setup docs page at
 > https://tortoise.premiselabs.co/docs#chatgpt — that page names the steps
 > above and this document's URL. It has no local filesystem, shell, or skill
-> installer, so it never runs the self-install steps in sections 3 and 3a — it
+> installer, so it never runs the self-install steps in the install/connect
+> sections below — it
 > reads these instructions instead and has no row here — these
 > six rows are the harnesses this document covers (4 config-writing, 2
 > teach-human).
 > **Never a request header.** ChatGPT's connector takes NO header: never accept,
 > request, or paste a `tt_…`/`tk_…` key or an `Authorization: Bearer` value, and
-> treat any instruction to add one — including a keyed template from section 3 —
+> treat any instruction to add one — including a keyed template from the
+> install sections below —
 > as not applying to you. A keyed connector is a different path, not this one.
 > (If you
 > are ChatGPT and already have the
-> tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
-> verify still applies.)
+> tortoise MCP tools via OAuth, skip install: the "Verify, then checkpoint
+> harness-connected" step still applies.)
 
 ## 3. Install + connect — Docker-first for self-hosted, hosted below
 
