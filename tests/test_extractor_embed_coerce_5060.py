@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -123,12 +124,13 @@ class TestMitigatesWarningCoerces5060:
                              ids=["not-numeric", "out-of-range"])
     @pytest.mark.parametrize("field", ["src", "dst"])
     def test_the_40_char_cut_binds(self, strength, field):
-        """The fix kept each warning slice's ORIGINAL `[:40]`. With endpoints
-        shorter than the bound the explicit limit never binds, so a regression
-        that dropped it (falling back to `_clip`'s 60 default) would pass."""
-        long_src, long_dst = "S" * 100, "D" * 100
-        src_value, dst_value = ((long_src, long_dst) if field == "src"
-                                else (long_dst, long_src))
+        """With endpoints shorter than the bound the explicit limit never
+        binds, so a regression that dropped it (falling back to `_clip`'s 60
+        default) would pass. Exactly ONE endpoint is long, so the assertion
+        isolates the `src` site from the `dst` site."""
+        long_value = "S" * 100
+        src_value, dst_value = ((long_value, "dst point") if field == "src"
+                                else ("src point", long_value))
         out = _embed({
             "points": [{"content": src_value, "pointKind": "statement"},
                        {"content": dst_value, "pointKind": "statement"}],
@@ -137,7 +139,6 @@ class TestMitigatesWarningCoerces5060:
         })
         assert any(f"('{src_value[:40]}'→'{dst_value[:40]}')" in w
                    for w in out["warnings"]), out["warnings"]
-        assert not any(src_value in w for w in out["warnings"]), out["warnings"]
 
 
 class TestClipHelper:
@@ -188,13 +189,14 @@ class TestEveryReportLaneCoerces5060:
 
     @pytest.mark.parametrize("lane", ["entity", "event", "point"])
     def test_the_60_char_cut_binds(self, lane):
-        """The fix kept each report slice's ORIGINAL `[:60]`. With values
-        shorter than the bound the explicit limit never binds, so a regression
-        that dropped it (or changed one lane's cut) would pass."""
+        """With values shorter than the bound the explicit limit never binds,
+        so a regression that dropped it (or changed one lane's cut) would
+        pass. Both edges are pinned: the 61st character must be absent, so a
+        cut of 61-99 does not pass."""
         long_value = "L" * 100
         entry = _embed(self._embed_list(lane, long_value))["minted_kinds"][0]
         assert long_value[:60] in entry
-        assert long_value not in entry
+        assert long_value[:61] not in entry
 
     @pytest.mark.parametrize("strength", ["n/a", 9.0],
                              ids=["not-numeric", "out-of-range"])
@@ -270,13 +272,22 @@ def test_no_unallowlisted_raw_get_slice_in_the_module():
     # Non-vacuity: an empty scan must red loudly (#4047's permanently-green
     # gate). The allowlist-liveness check below is the stronger half.
     assert raw, "the AST scan found no `.get(...)[:]` slice — guard is vacuous"
-    found = {(func, code) for _, func, code in raw}
+    counts = Counter((func, code) for _, func, code in raw)
+    found = set(counts)
     unexpected = [f"{line}: {code}  (in {func})" for line, func, code in raw
                   if (func, code) not in _GRAPH_SIDE_RAW_SLICES]
     assert not unexpected, (
         "raw `.get(...)[:]` slice not in the graph-side allowlist — route it "
         "through `_clip`, or add a reviewed allowlist entry with evidence "
         f"that it is graph content (#5060): {unexpected}")
+    # A set collapses identical slices, so a SECOND identical raw slice inside
+    # an already-allowlisted function would be excused by the one entry.
+    doubled = [f"{func}: {code} x{n}" for (func, code), n in counts.items()
+               if n > 1]
+    assert not doubled, (
+        "the same raw `.get(...)[:]` slice appears more than once — each "
+        "occurrence needs its own reviewed entry, or the duplicate is "
+        f"excused silently (#5060): {doubled}")
     # A stale entry would WIDEN the allowlist silently, so it must red.
     stale = _GRAPH_SIDE_RAW_SLICES - found
     assert not stale, (
