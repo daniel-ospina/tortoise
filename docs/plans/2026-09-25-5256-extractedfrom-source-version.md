@@ -3,7 +3,7 @@
 **Issue:** #5256 (`complexity:complex`, Level: task, epic #5088) · **Repo:** `daniel-ospina/tortoise`
 **Branch:** `feat/5256-extractedfrom-anchor` · **Base:** `origin/docs/5199-version-scope @ 52e703f89` (STACKED on PR #5207)
 **Predecessor:** `docs/plans/2026-09-25-5038-source-version-anchor.md` (Task 1, branch `docs/5038-scoping`)
-**Review cycle:** 9 (see §10).
+**Review cycle:** 10 (see §10).
 
 ---
 
@@ -423,3 +423,18 @@ rule a `[["   ","h9"]]` carrier is written AND anchored — added `test_blank_ke
 `_link_source`'s resolved-first `versions.get(ref)` was killed by no test; added
 `test_link_source_accepts_a_registry_keyed_by_the_resolved_url`, which pins the defensive contract (with
 only the raw-ref lookup, a registry keyed by the resolved url leaves the edge bare).
+
+**Cycle 10 — code review round 9 (re-review of `4b5f590b7`).** Round 8's re-review returned
+`NO P0/P1/P2 — P3 residuals only`, naming three more unkilled guards — each on the
+hand-written/foreign-journal path, and each a real robustness gap rather than cosmetics. Folded:
+(1) `isinstance(pair[1], str)` in `_valid_transit_pairs` was killed by no test (`bad-numeric` is
+`[[1, 2]]` and fails on `pair[0]` first, so it never reaches the hash check): admitting an int let a
+hand-written `[[DOC, 2]]` write `r.sourceVersion = 2` — an INT, against ONTOLOGY §4.6's string scalar —
+with the gate still green. Added `bad-nonstr-hash`. (2) `resolve_source_versions`' `isinstance(h, str)`
+was killed by no test: `create_source` does not type-validate `contentHash`, so `contentHash=5` stores an
+int and `5.strip()` raised `AttributeError` out of a plain `create_point`. Added
+`test_non_string_content_hash_is_honest_absent_not_a_crash` (the anchor path is honest-absent, no crash).
+(3) `EventAPI.add_point`'s `if _sv is not None` was killed by no test — the null-key payload-purity rule
+had an SDK test but no EventAPI sibling, so dropping the conditional journaled
+`sourceVersionTransit: null`. Added `test_eventapi_payload_omits_the_key_when_there_is_no_anchor`. All
+three mutants go RED by their named test.
