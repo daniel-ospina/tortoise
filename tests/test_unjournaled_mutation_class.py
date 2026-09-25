@@ -232,7 +232,7 @@ def _assert_round_trip(sdk, events, caplog):
     """Live == replay over EVERY canonical entity, with a clean fold."""
     caplog.clear()
     live = _snapshot_all(sdk)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     replay = _snapshot_all(sdk)
     assert _fold_warnings(caplog) == [], (
         "fold reported a mutation it could not replay: "
@@ -425,7 +425,7 @@ class TestPropertyMutationRoundTrip:
         # supersede's OWN props (`supersededBy`/`supersededAt`) legitimately
         # exist on the replay side only. `status` is the two-sided value.
         caplog.clear()
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _fold_warnings(caplog) == [], _fold_warnings(caplog)
         assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
             "the deferred ObjectSuperseded sweep clobbered a LATER state op — "
@@ -449,7 +449,7 @@ class TestPropertyMutationRoundTrip:
         sdk.update_entity(oid, status="archived")
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
             "a supersede journalled LAST must win — the P1 fix must not simply "
             "re-apply every state fold")
@@ -470,7 +470,7 @@ class TestPropertyMutationRoundTrip:
         sdk.update_entity(oid, objectKind="k2")
         assert _props(sdk, "Object", oid, "status")["status"] == "archived"
 
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         got = _props(sdk, "Object", oid, "objectKind", "status")
         assert got == {"objectKind": "k2", "status": "archived"}, (
             "a post-supersede state op was lost — only the last one was "
@@ -502,7 +502,7 @@ class TestPropertyMutationRoundTrip:
 
         caplog.clear()
         with caplog.at_level("WARNING"):
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         misses = _fold_warnings(caplog)
         assert not misses, (
             "the replay was CORRECT (the inline fold applied it); a fold-miss "
@@ -516,7 +516,7 @@ class TestPropertyMutationRoundTrip:
         sdk2._emit_event("ObjectSuperseded", id=oid2, name="O",
                          supersedes_by="other", session_id="s", evidence="e")
         sdk2.update_entity(oid2, status="archived")
-        sdk2._get_proj().rebuild_all(str(events2))
+        sdk2._get_proj().rebuild_all(str(events2), confirm_destructive=True)
         assert _props(sdk2, "Object", oid2, "status")["status"] == "archived", (
             "control: without the delete the post-supersede op IS restored")
 
@@ -591,7 +591,7 @@ class TestPropertyMutationRoundTrip:
         assert recs[-1]["op"] == "restatus", recs[-1]["op"]
 
         # The payload of this test: the status SURVIVES a rebuild.
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         got = _props(sdk, "Object", oid, "status", "confidence")
         assert got == {"status": "archived", "confidence": 0.9}, (
             "#3312 must be closed for a name-BEARING write too: " f"{got}")
@@ -807,7 +807,7 @@ class TestNonFoldedSet:
         self._raw(events, type=_REC, op=op, label="Object",
                   id="obj-never-existed", state={"name": "x"})
         with caplog.at_level("WARNING"):
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _MISS in " ".join(_fold_warnings(caplog)), \
             f"a fold that matched nothing for op={op} must warn"
         assert "obj-never-existed" in " ".join(_fold_warnings(caplog)), \
@@ -818,7 +818,7 @@ class TestNonFoldedSet:
         sdk, events = env
         self._raw(events, type=_REC, op=op, label="Object", id="obj-1")
         with caplog.at_level("WARNING"):
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         msgs = " ".join(_fold_warnings(caplog))
         assert _PENDING in msgs, (
             f"op={op} is RECORDED (#3299) but unimplemented — it must say so "
@@ -829,7 +829,7 @@ class TestNonFoldedSet:
         self._raw(events, type=_REC, op="teleported", label="Object",
                   id="obj-1", state={"name": "x"})
         with caplog.at_level("WARNING"):
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _UNKNOWN in " ".join(_fold_warnings(caplog)), \
             "an unrecognised op silently drops a mutation — must be loud"
 
@@ -842,7 +842,7 @@ class TestNonFoldedSet:
         self._raw(events, type=_REC, op="delete", label="Object",
                   id="obj-never-existed")
         with caplog.at_level("WARNING"):
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _MISS not in " ".join(_fold_warnings(caplog))
 
     def test_miss_is_visible_through_apply_the_shared_fold_entry_point(
@@ -975,7 +975,7 @@ class TestLegacyJournalShapes:
         _append_raw(events, type="ObjectSuperseded", name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
 
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
             "the state fold overwrote a LATER name-keyed supersede")
 
@@ -989,7 +989,7 @@ class TestLegacyJournalShapes:
                     supersedes_by="other", session_id="s", evidence="e")
         sdk.update_entity(oid, status="archived")
 
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
             "the deferred supersede sweep clobbered a LATER state op")
 

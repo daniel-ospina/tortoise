@@ -381,7 +381,7 @@ def test_recapture_shorter_does_not_resurrect_turns_on_rebuild(tmp_path):
         assert set(stale) <= retracted, (
             f"the deletion is invisible to the event surface: {sorted(set(stale) - retracted)}")
 
-        proj.rebuild(EventLog(log_path))
+        proj.rebuild(EventLog(log_path), confirm_destructive=True)
 
         assert _turn_ids(proj) == [f"{SESSION_ID}_t0"], (
             "a rebuild must not resurrect the turns the re-capture deleted")
@@ -393,7 +393,7 @@ def test_recapture_shorter_does_not_resurrect_turns_on_rebuild(tmp_path):
         # capture re-writes under the same deterministic id.
         sdk.capture_session(CONV, session_id=SESSION_ID)  # 3 turns again
         assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)]
-        proj.rebuild(EventLog(log_path))
+        proj.rebuild(EventLog(log_path), confirm_destructive=True)
         assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)], (
             "the earlier hard-delete record must not suppress the re-grown "
             "turns — the fold is sequence-ordered")
