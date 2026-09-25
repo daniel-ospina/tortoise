@@ -2646,15 +2646,19 @@ class TortoiseSDK:
             # Epic #1647 (T7): the hyphenated test-* namespace family is
             # normalized in _get_proj (test-tiers → test_tiers_tortoise); the
             # control-plane path normalizes identically so it derives its name
-            # from the SAME `ns` string. The EMITTED test-derived name is
-            # `test_{ns}_{test_graph}_control_plane` (the `test_` prefix is
-            # applied just below), so it DOES start with `test_` and the
-            # server's prefix filter (`_SERVER_WIPE_PREFIXES`) DOES match it:
-            # `wipe_server` owns it by prefix. The journal append below is the
-            # ADDITIONAL ownership record, read by the journal sweep
-            # (`_SWEEP_OWNED_PREFIXES`). The shared names `{ns}_control_plane`
-            # and `control_plane` are NEVER prefixed — they belong to the
-            # namespace, and NEITHER sweeping set owns them.
+            # from the SAME `ns` string. For a test graph the emitted name is
+            # `{ns}_{test_graph}_control_plane`, prefixed with `test_` only when
+            # it does not already start with `test_`/`tortoise_test_` (below).
+            # So `test-hosted` emits
+            # `test_hosted_test_hosted_tortoise_control_plane`, never
+            # `test_test_hosted_...` — and that name therefore ALWAYS matches
+            # `_SERVER_WIPE_PREFIXES`: `wipe_server` owns it by prefix. The
+            # journal append below is the ADDITIONAL ownership record, read by
+            # the journal sweep (`_SWEEP_OWNED_PREFIXES`). The shared-name
+            # branch emits `{ns}_control_plane` / `control_plane`, never
+            # prefixed — for `registry` and the no-namespace path those match
+            # NEITHER set, but a `team_`/`org_` namespace DOES match
+            # `_SWEEP_OWNED_PREFIXES` (never `_SERVER_WIPE_PREFIXES`).
             if ns.startswith("test-"):
                 ns = ns.replace("-", "_")
             if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
