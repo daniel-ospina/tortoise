@@ -58,6 +58,7 @@ from .projection import (
     _load_prewipe_snapshot,
     _promotion_point_with_operator,
     journal_hard_delete_seqs,
+    journal_point_creation_ids,
     prewipe_snapshot_path,
 )
 from .projection.entities import (
@@ -706,6 +707,9 @@ def _fold_journal(events: list[dict]) -> dict:
     lane's file family (#3692 covers the promotions).
     """
     anchors = journal_hard_delete_seqs(events)
+    # #3585 re-review: the same journal-wide creation set `fold` passes — a
+    # belief/annotator refusal is mirrored only for an id NO record creates.
+    _created = journal_point_creation_ids(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
         t = ev.get("type")
@@ -804,7 +808,7 @@ def _fold_journal(events: list[dict]) -> dict:
                 if ev.get("expired_at"):
                     entry["expiredAt"] = ev["expired_at"]
             continue
-        _apply_one(by_id, ev)
+        _apply_one(by_id, ev, _created)
     return by_id
 
 

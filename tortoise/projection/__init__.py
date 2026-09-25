@@ -2094,7 +2094,35 @@ def _owns_point(label: object) -> bool:
     return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
 
 
-def _apply_one(points: dict[str, dict], ev: dict) -> None:
+_JOURNAL_POINT_CREATION_TYPES: tuple[str, ...] = ("PointAdded", "OperatorAdded")
+
+
+def journal_point_creation_ids(events: list[dict]) -> frozenset[str]:
+    """Ids of every Point ANY record in the journal creates.
+
+    `rebuild_all` hoists every creation into pass 1, so a belief/annotator
+    write is folded there even when it PRECEDES its own `PointAdded`. The
+    reference fold is chronological, so for the engine-order-dependent
+    `point-belief-miss` refusal to be mirrored without a false positive it must
+    ask the JOURNAL, not the pass-so-far index: an id created anywhere in the
+    journal is resolvable (no refusal), an id created nowhere is not (refusal).
+    """
+    out: set[str] = set()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") not in _JOURNAL_POINT_CREATION_TYPES:
+            continue
+        pt = ev.get("point")
+        pt = pt if isinstance(pt, dict) else {}
+        rid = pt.get("id")
+        if isinstance(rid, str) and rid:
+            out.add(rid)
+    return frozenset(out)
+
+
+def _apply_one(points: dict[str, dict], ev: dict,
+               journal_created_ids: frozenset[str] | None = None) -> None:
     ev = _norm(ev)
     t = ev.get("type")
     if not isinstance(t, str):
@@ -2166,15 +2194,23 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         p = points.get(rid) if _writable_id(rid) else None
         if p:
             p.update(_annotator_dims(ev, aliases=True))
-        # #3585 re-review: NO belief/annotator fold-miss is recorded here. The
-        # only graph engine that refuses one is `rebuild_all` — and it refuses
-        # for an id that is created LATER in the same journal too, because it
-        # hoists every creation into pass 1. `apply()` (and this chronological
-        # fold) instead discards the fold-miss return, and a forward-referenced
-        # write is FOLDED by rebuild_all, so mirroring its refusal here reds a
-        # journal `rebuild_all` reproduces exactly (a false positive on a
-        # healthy graph). The asymmetry is recorded as a bound: see
-        # `test_a_forward_referenced_belief_write_is_not_a_non_folded_event`.
+        elif (journal_created_ids is not None and _writable_id(rid)
+                and _annotator_dims(ev, aliases=True)
+                and rid not in journal_created_ids):
+            # #3585 re-review: ONLY an id that NO record in the journal creates
+            # is refused — the shape `rebuild_all` refuses whatever the order
+            # (it hoists creations, finds no Point, records
+            # `point-belief-miss`). A forward-referenced write IS folded there,
+            # so refusing it here would red a journal the graph reproduces
+            # exactly; asking the journal (not the pass-so-far index) is what
+            # separates the two. `journal_created_ids is None` (a bare
+            # `InMemoryProjection.apply`) has no journal to consult and records
+            # nothing.
+            record_non_folded(
+                SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
+                event_type="OperatorAnnotated", id=rid,
+                detail="reference fold: annotator write matched no Point",
+            )
     elif t == "PointRetracted":
         # #689: tombstone instead of hard delete — retracted content stays
         # recoverable via raw graph queries. Historical data loss prior to
@@ -2217,20 +2253,21 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             _nonpoint = (isinstance(_slabel, str)
                          and _slabel in _CANONICAL_ENTITY_LABELS
                          and _slabel != "Point")
-            # `_fold_entity_mutation` refuses (and `apply` therefore records) on
-            # FOUR clauses, verbatim: a non-str id, a label outside
-            # `_CANONICAL_ENTITY_LABELS`, a `state` that is not a dict, and a
-            # 0-row match. Mirroring only the last one left two fail-opens
-            # (re-review): `label=Widget` with a REAL Point id, and a
+            # `_fold_entity_mutation` records on THREE clauses, verbatim: a
+            # label outside `_CANONICAL_ENTITY_LABELS`, a `state` that is not a
+            # dict, and a 0-row match. Mirroring only the last one left two
+            # fail-opens (re-review): `label=Widget` with a REAL Point id, and a
             # `state`-less state op, both refused by the graph and passed here.
+            # A NON-STR id is deliberately NOT mirrored — the graph returns 0
+            # for it SILENTLY (#331 parity: a malformed id must not crash the
+            # fold), so recording here would refuse where the graph accepts.
             # The non-Point canonical labels are the entity fold's to resolve
             # (`_fold_journal_entities`) — this index cannot see them.
-            if (not _nonpoint) and (
-                    not _writable_id(_srid)
-                    or not isinstance(_slabel, str)
+            if (_writable_id(_srid) and not _nonpoint and (
+                    not isinstance(_slabel, str)
                     or _slabel not in _CANONICAL_ENTITY_LABELS
                     or not isinstance(ev.get("state"), dict)
-                    or _srid not in points):
+                    or _srid not in points)):
                 record_non_folded(
                     SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
                     event_type="EntityMutated",
@@ -2300,9 +2337,19 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
                 if not _belief_bool_value_ok(value):
                     continue
                 p[key] = value
-        # #3585 re-review: no `point-belief-miss` here — see the note in the
-        # OperatorAnnotated arm above (rebuild_all's refusal is order-dependent
-        # and a forward-referenced write folds; mirroring it would false-red).
+        elif (journal_created_ids is not None and _writable_id(rid)
+                and rid not in journal_created_ids
+                and any(k in ev for k in (*BELIEF_PROPS, *BELIEF_BOOL_PROPS))):
+            # #3585 re-review: as in the OperatorAnnotated arm — the refusal is
+            # mirrored ONLY for an id the journal never creates. A write whose
+            # Point exists but whose every carried value fails the value gate is
+            # `rebuild_all`-only (it folds 0 rows there); mirroring THAT would
+            # need the value gate re-run here, and it is a documented bound.
+            record_non_folded(
+                SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
+                event_type="ConfidenceChanged", id=rid,
+                detail="reference fold: belief write matched no Point",
+            )
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,
@@ -2323,8 +2370,9 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
 
 def fold(events: list[dict]) -> dict[str, dict]:
     points: dict[str, dict] = {}
+    created = journal_point_creation_ids(events)
     for ev in events:
-        _apply_one(points, ev)
+        _apply_one(points, ev, created)
     return points
 
 

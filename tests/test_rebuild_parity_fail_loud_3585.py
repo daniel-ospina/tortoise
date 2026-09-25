@@ -696,6 +696,40 @@ class TestReReviewRoundThree:
         assert any("state-op-miss" in e for e in r["non_folded_events"]), \
             r["non_folded_events"]
 
+    def test_a_never_created_belief_write_refuses_the_reference_fold(
+            self, env):
+        """P1 (re-review). FAILS IF: the reference fold stays silent for a
+        belief/annotator write whose Point NO record in the journal creates.
+        `rebuild_all` hoists every creation and still finds no Point, so it
+        records `point-belief-miss` and raises — the asymmetry #3585 exists to
+        eliminate. The distinction from the forward-reference guard is
+        JOURNAL-WIDE creation, not the pass-so-far index.
+        REACHABLE: a write for an id no `PointAdded`/`OperatorAdded` names."""
+        sdk, events = env
+        _raw(events, type="ConfidenceChanged", id="p-never-created",
+             confidence=0.9, event_id="e-r3-never")
+        with pytest.raises(NonFoldedEventsError):
+            sdk._get_proj().rebuild_all(str(events))
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["ok"] is False, r["divergence"]
+        assert r["divergence"] == "non-folded", r["divergence"]
+        assert any("point-belief-miss" in e
+                   for e in r["non_folded_events"]), r["non_folded_events"]
+
+    def test_a_nonstring_state_op_id_is_not_refused_by_the_reference_fold(
+            self, env):
+        """P2 (re-review) — the mirror's edge. FAILS IF: a state op with a
+        non-str id is refused here. `_fold_entity_mutation` returns 0 for it
+        SILENTLY (#331 parity: a malformed id must not crash the fold), so
+        `rebuild_all` accepts the journal and `check_consistency` must too.
+        REACHABLE: `id` as an int instead of a string."""
+        sdk, events = env
+        _raw(events, type="EntityMutated", op="restatus", label="Point",
+             id=12345, state={"status": "archived"}, event_id="e-r3-intid")
+        sdk._get_proj().rebuild_all(str(events))  # graph accepts it
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+
     def test_a_forward_referenced_belief_write_is_not_a_non_folded_event(
             self, env):
         """P2 (re-review) — the REGRESSION GUARD. FAILS IF: the reference fold
