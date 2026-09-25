@@ -625,11 +625,15 @@ surfaces:
   - test_source_version_references_5199.py
   # #5256 (extracted from #5038): the `extractedFrom` READ-VERSION anchor —
   # `sourceVersion` on the Point's provenance edge, carried in the node's own
-  # journaled snapshot. Hermetic (embedded DB per test: an explicit `db_path`
-  # wins over `TORTOISE_DB_URI`, and the JSONL journal + `rebuild_all` are
-  # exercised in-process). `tortoise/projection/edges.py` selects `ep`+
-  # `core`, `api.py` selects `api`+`core`; `sdk.py`, `projection/__init__.py`
-  # and `mcp_server.py` are SHARED_MODULEs (already the full matrix).
+  # journaled snapshot. Registered under `core` because every changed source
+  # file selects it (`tortoise/projection/edges.py` → `sdk`+`CORE_ALSO`,
+  # `entities.py`/`consistency.py` → `core`, `api.py` → `api`+`core`;
+  # `sdk.py`, `projection/__init__.py` and `mcp_server.py` are SHARED_MODULEs
+  # and already force the full matrix), so no `ep` entry is needed — the anchor
+  # path contains no `ep`-pattern file. Lane: the fixture passes an explicit
+  # `db_path`, so a URI-unset run is embedded; under a URI lane the #1647
+  # test-mode redirect sends it to the docker server (a per-path derived
+  # graph), which is why it needs no carve-out (nothing embedded-only).
   - test_source_version_extractedfrom_5038.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
@@ -1183,7 +1187,6 @@ surfaces:
   - test_pointinvalidated_rebuild.py
   - test_lifecycle_guards.py        # #2498: shared supersede/retract/invalidate terminal+operator guard (status x transition matrix)
   - test_provenance_extractedfrom_3263.py  # #3263: extractedFrom inferred from the write context + live==rebuild parity (docker-lane)
-  - test_source_version_extractedfrom_5038.py  # #5256: extractedFrom read-version anchor -- dual-registered with core (edges.py is the ep source pattern); per-link scalar on the edge + journaled node transit
   - test_weights_mitigation.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
@@ -2523,7 +2526,7 @@ durations:
   test_product_rerank.py: 0.2
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.6
-  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 21 tests, hermetic embedded DB per test; locally measured
+  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 26 tests; embedded when no URI, docker server under a URI lane; locally measured
   test_rebuild_turn_points_3947.py: 4.4
   test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8

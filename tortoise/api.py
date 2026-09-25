@@ -236,11 +236,13 @@ class EventAPI:
                           # Accepting it would let this non-SDK seam forge the
                           # provenance record, and the same reason the SDK and
                           # MCP boundaries reject it applies here.
-                          "sourceVersion", "sourceVersions"})
+                          "sourceVersion", "sourceVersions",
+                          "sourceVersionTransit"})
         if _forged:
             raise ValueError(
-                f"{_forged} are server-managed embedding journal fields and "
-                "cannot be set via add_point(fields=...)")
+                f"{_forged} are server-managed journal fields (embedding "
+                "identity / provenance) and cannot be set via "
+                "add_point(fields=...)")
         # #5256: resolve the extractedFrom read-version from the :Source on the
         # LIVE path and put it in the payload, so the Point's OWN journaled
         # snapshot carries it and the replay never re-reads the Source (whose
@@ -256,7 +258,7 @@ class EventAPI:
                 _sv = _source_version_transit(
                     resolve_source_versions(_g, p["extractedFrom"]))
                 if _sv is not None:
-                    p["sourceVersion"] = _sv
+                    p["sourceVersionTransit"] = _sv
         # P1 #49: mark events with projection_version=2 so the projection gate
         # (Task 1.6) knows to strip context from v2 events.
         self._emit("PointAdded", point=p, corrects=corrects, projection_version=2)

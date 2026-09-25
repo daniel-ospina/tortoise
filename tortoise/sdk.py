@@ -1326,7 +1326,9 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     # also a live/replay parity break. Rejected on BOTH spellings: the plural
     # spelling is the natural caller guess (mirrors `extractedFrom`'s own
     # accepts-list/str shape) and must not slip through as an unknown prop.
-    _source_version_keys = [k for k in ("sourceVersion", "sourceVersions")
+    _source_version_keys = [k for k in
+                            ("sourceVersion", "sourceVersions",
+                             "sourceVersionTransit")
                             if k in props]
     if _source_version_keys:
         raise ValueError(
@@ -3443,7 +3445,7 @@ class TortoiseSDK:
             _create_map["ep_dirty"] = "true"
             _create_map["ep_dirty_at"] = "$_epv"
         if _source_version_sv is not None:
-            _create_map["sourceVersion"] = "$sv"
+            _create_map["sourceVersionTransit"] = "$sv"
             _create_params["sv"] = _source_version_sv
         if _create_baseline is not None:
             _create_params.update(_baseline_create_params(_create_baseline))
@@ -8076,7 +8078,7 @@ class TortoiseSDK:
         # `_sanitize_props` ever sees props) and forge provenance. Rejected at
         # shape time, on BOTH spellings, and — like batch_id/is_episodic — for
         # EVERY section so the **item splats below can never bind it.
-        for _svk in ("sourceVersion", "sourceVersions"):
+        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
             if _svk in item:
                 violations.append({
                     "section": section, "index": index,
@@ -20818,6 +20820,20 @@ class TortoiseSDK:
                     f"{_k!r} is a server-managed field and cannot be set via "
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
+                )
+        # #5256: the `extractedFrom` read-version anchor and its node carrier
+        # are server-derived. `create_source` is the one writer that BYPASSES
+        # `_sanitize_props` (`_create_entity(..., _skip_sanitize=True)`), so it
+        # needs this reject itself — otherwise a caller-supplied `sourceVersion`
+        # would persist on the Source node (unjournalled-value mismatch: the
+        # value means nothing there, but it is a forged-looking provenance
+        # field the tenant never owned). Same key family as the Point reject.
+        for _svk in ("sourceVersion", "sourceVersions",
+                     "sourceVersionTransit"):
+            if _svk in props:
+                raise ValueError(
+                    f"{_svk!r} is a server-managed provenance field and cannot "
+                    f"be set via props."
                 )
         ev = {
             "url": url,

@@ -9,10 +9,13 @@ Design (settled in the scoping plan
 
 * The **edge** is authoritative — ``r.sourceVersion`` is the per-link scalar
   (mirrors #5199's derivation anchor).
-* The value is carried into the Point's **own journaled snapshot** as a
-  ``sourceVersion`` node property: a list of ``[resolved_source_key, hash]``
-  pairs. ``extractedFrom`` is a replay-derived projection (pass 2 wipes and
-  re-creates the edges), so the value must travel WITH the point or it is lost.
+* The value is carried into the Point's **own journaled snapshot** as a declared
+  ``sourceVersionTransit`` node property: a list of
+  ``[resolved_source_key, hash]`` pairs. ``extractedFrom`` is a replay-derived
+  projection (pass 2 wipes and re-creates the edges), so the value must travel
+  WITH the point or it is lost. It is named ``...Transit`` (not
+  ``sourceVersion``) so a Point read never shadows the canonical edge scalar
+  (ONTOLOGY §4.6) with a value of a different type.
 * ``_link_source`` **never** reads ``s.contentHash`` at replay time: the
   Source's in-place hash bump is unjournalled (#5024), so a re-read can record
   a version the Point was never read from — a FALSE current.
@@ -71,9 +74,9 @@ def _has_edge(proj, pid: str, url: str) -> bool:
 
 
 def _node_transit(proj, pid: str):
-    """The node's ``sourceVersion`` transit, or the sentinel ``"ABSENT"``."""
+    """The node's ``sourceVersionTransit`` carrier, or the sentinel ``"ABSENT"``."""
     rows = proj.g.query(
-        "MATCH (p:Point {id:$id}) RETURN p.sourceVersion",
+        "MATCH (p:Point {id:$id}) RETURN p.sourceVersionTransit",
         params={"id": pid}).result_set
     if not rows:
         return "NO_NODE"
@@ -105,7 +108,7 @@ def _rebuilt(sdk, events):
 def test_scalar_ref_records_the_version_on_the_edge_and_the_transit(prov):
     """Input: Source(url=DOC, contentHash='h1'); Point with a SCALAR ref.
 
-    FAILS IF the edge carries no ``sourceVersion``, OR the node transit is
+    FAILS IF the edge carries no ``sourceVersion``, OR the node carrier is
     missing/not ``[[resolved_url,'h1']]``. The scalar form is the ACCEPTANCE
     case and the one a list-only resolver would iterate character-wise.
     """
@@ -276,7 +279,7 @@ def test_journal_payload_omits_the_key_when_there_is_no_anchor(prov):
     """
     sdk, _events, log = prov
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
-    assert "sourceVersion" not in _journal_point(log, p["id"])
+    assert "sourceVersionTransit" not in _journal_point(log, p["id"])
 
 
 def test_transit_is_a_pair_list_for_a_hash_bearing_source(prov):
@@ -335,10 +338,10 @@ def test_recreated_point_does_not_inherit_the_node_transit(prov):
     """Input: a sourced Point hard-deleted, then re-created with the SAME id
     and NO ``extractedFrom``, then rebuilt.
 
-    FAILS IF the #4042 recreate wipe does not clear ``n.sourceVersion``: the
-    pre-delete incarnation's transit would survive the node MERGE (its clause
-    only fires when the new payload carries one) and the rebuilt node would hold
-    a property the live node does not (the #330/#5004 parity break).
+    FAILS IF the #4042 recreate wipe does not clear ``n.sourceVersionTransit``:
+    the pre-delete incarnation's carrier would survive the node MERGE (its
+    clause only fires when the new payload carries one) and the rebuilt node
+    would hold a property the live node does not (the #330/#5004 parity break).
 
     SCOPE: asserts the NODE only. The old incarnation's ``extractedFrom`` EDGE
     is separately resurrected by pass 2 today — a PRE-EXISTING gap in
@@ -361,7 +364,7 @@ def test_recreated_point_does_not_inherit_the_node_transit(prov):
 
     proj = _rebuilt(sdk, events)
     assert _node_transit(proj, pid) == "ABSENT", \
-        "the dead incarnation's sourceVersion survived the recreate wipe"
+        "the dead incarnation's sourceVersionTransit survived the recreate wipe"
 
 
 # ── fail-closed rejects on every tenant write surface ──────────────────────
@@ -370,10 +373,9 @@ def test_recreated_point_does_not_inherit_the_node_transit(prov):
 def test_sdk_create_point_rejects_a_forged_source_version(prov):
     """FAILS IF a tenant can forge the provenance record via ``create_point``."""
     sdk, _events, _log = prov
-    with pytest.raises(ValueError, match="server-managed"):
-        sdk.create_point("statement", "forged", sourceVersion="h9")
-    with pytest.raises(ValueError, match="server-managed"):
-        sdk.create_point("statement", "forged", sourceVersions="h9")
+    for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.create_point("statement", "forged", **{key: "h9"})
 
 
 def test_sdk_update_point_rejects_a_forged_source_version(prov):
@@ -383,7 +385,7 @@ def test_sdk_update_point_rejects_a_forged_source_version(prov):
     """
     sdk, _events, _log = prov
     p = sdk.create_point("statement", "claim")
-    for key in ("sourceVersion", "sourceVersions"):
+    for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
         with pytest.raises(ValueError, match="server-managed"):
             sdk.update_point(p["id"], **{key: "h9"})
 
@@ -396,7 +398,7 @@ def test_sdk_create_document_rejects_a_forged_source_version(prov):
     ``extractedFrom`` link runs before it. Both spellings; nothing written.
     """
     sdk, _events, _log = prov
-    for key in ("sourceVersion", "sourceVersions"):
+    for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
         with pytest.raises(ValueError, match="server-managed"):
             sdk.create_document("T", "report", **{key: "h9"})
     assert _proj(sdk).g.query(
@@ -417,7 +419,7 @@ def test_ingest_bundle_rejects_a_forged_source_version(prov):
     commit a Source.
     """
     sdk, _events, _log = prov
-    for key in ("sourceVersion", "sourceVersions"):
+    for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
         with pytest.raises(ValueError, match="on bundle items"):
             sdk.ingest({
                 "sources": [{"url": "https://s.example/x",
@@ -439,8 +441,8 @@ def test_mcp_boundary_rejects_a_forged_source_version():
     FAILS IF the MCP boundary is weaker than the SDK backstop.
     """
     from tortoise.mcp_server import _reject_server_managed_props
-    assert _reject_server_managed_props({"sourceVersion": "h9"}) is not None
-    assert _reject_server_managed_props({"sourceVersions": "h9"}) is not None
+    for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+        assert _reject_server_managed_props({key: "h9"}) is not None
     assert _reject_server_managed_props({"content": "ok"}) is None
 
 
@@ -480,7 +482,7 @@ def test_eventapi_add_point_rejects_a_forged_source_version(prov):
     sdk, _events, log_path = prov
     api = EventAPI(EventLog(log_path), initiated_by="extractor",
                    projection=_proj(sdk))
-    for key in ("sourceVersion", "sourceVersions"):
+    for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
         with pytest.raises(ValueError, match="sourceVersion"):
             api.add_point("forged", {}, **{key: "h9"})
 
@@ -503,18 +505,96 @@ def test_eventapi_add_point_without_a_graph_does_not_crash(prov):
         assert api.add_point("loose claim", {}, extractedFrom=DOC)
 
 
+def test_create_source_rejects_a_forged_source_version(prov):
+    """``create_source`` BYPASSES ``_sanitize_props`` (``_skip_sanitize=True``)
+    and relies on its own reject list.
+
+    FAILS IF the version keys are absent from that list — a caller-supplied
+    value would persist on the Source node (the security review's reproduced
+    hole). All three spellings.
+    """
+    sdk, _events, _log = prov
+    for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+        with pytest.raises(ValueError, match="server-managed provenance"):
+            sdk.create_source(DOC, "document", **{key: "h9"})
+    assert _proj(sdk).g.query(
+        "MATCH (s:Source) RETURN count(s)").result_set[0][0] == 0
+
+
+# ── the supersede boundary (R1: the transfer carries nothing) ──────────────
+
+
+def test_supersede_transfer_carries_no_anchor(prov):
+    """Plan §6-17: the version transfer must stay VERSION-FREE (R1, the half
+    deferred to #5038).
+
+    FAILS IF a future change copies edge properties on transfer
+    (``SET r2 += properties(r)``) or hands ``source_versions`` to the transfer
+    link — the successor would then claim a read it never made.
+    """
+    sdk, events, _log = prov
+    sdk.create_source(DOC, "document", contentHash="h1")
+    old = sdk.create_point("statement", "predecessor", extractedFrom=DOC)
+    new = sdk.create_point("statement", "successor")
+    sdk.supersede_point(old["id"], new["id"])
+
+    proj = _proj(sdk)
+    assert _edge_version(proj, new["id"], DOC) is None, \
+        "the transferred edge must carry no version"
+    assert _node_transit(proj, new["id"]) == "ABSENT"
+    assert _edge_version(proj, old["id"], DOC) == "NO_EDGE"
+    assert _node_transit(proj, old["id"]) == [[DOC, "h1"]]
+
+    proj = _rebuilt(sdk, events)
+    assert _edge_version(proj, new["id"], DOC) is None
+    assert _node_transit(proj, new["id"]) == "ABSENT"
+
+
+# ── malformed-journal resilience ───────────────────────────────────────────
+
+
+def test_malformed_carrier_payload_does_not_abort_the_rebuild(prov):
+    """A corrupt/foreign journal line must contribute NO anchor, not abort
+    ``rebuild_all`` midway.
+
+    FAILS IF ``_upsert_point_props`` writes the payload value unvalidated: a
+    non-persistable value (a dict, or a list containing one) raises a Falkor
+    ``ResponseError`` mid-rebuild and leaves the graph WIPED — the recovery path
+    aborting on the very corruption it exists to repair.
+    """
+    sdk, events, log_path = prov
+    sdk.create_point("statement", "the good point")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        for bad in ({"not": "persistable"}, [["a", "h"], {"x": 1}], "loose"):
+            fh.write(json.dumps({
+                "type": "PointAdded",
+                "point": {"id": f"bad-{abs(hash(str(bad))) % 9999}",
+                          "content": "bad", "kind": "statement",
+                          "status": "live", "sourceVersionTransit": bad},
+            }) + "\n")
+
+    sdk._get_proj().rebuild_all(str(events))  # must NOT raise
+    proj = _proj(sdk)
+    bad_ids = [r[0] for r in proj.g.query(
+        "MATCH (p:Point) WHERE p.id STARTS WITH 'bad-' RETURN p.id"
+    ).result_set]
+    assert bad_ids, "guard: the malformed points must exist to be checked"
+    for pid in bad_ids:
+        assert _node_transit(proj, pid) == "ABSENT", pid
+
+
 # ── the gate sees it and stays green on a faithful graph ───────────────────
 
 
 def test_consistency_gate_compares_the_transit(prov):
-    """The #5011 content gate must COMPARE ``sourceVersion``, not merely
+    """The #5011 content gate must COMPARE ``sourceVersionTransit``, not merely
     tolerate it.
 
-    FAILS IF the anchor was added to an exclusion list (the positive half), OR
+    FAILS IF the carrier was added to an exclusion list (the positive half), OR
     — the discriminating half — if a tampered graph still reads healthy. That
-    second case is exactly what happens when ``sourceVersion`` is dropped from
-    ``_POINT_HANDLED``: it falls into ``_uncarried`` and is ``skip``-ped from
-    BOTH sides, so a raw-Cypher forgery goes unseen. Hence the explicit
+    second case is exactly what happens when ``sourceVersionTransit`` is dropped
+    from ``_POINT_HANDLED``: it falls into ``_uncarried`` and is ``skip``-ped
+    from BOTH sides, so a raw-Cypher forgery goes unseen. Hence the explicit
     ``uncarried_journal_fields`` assertion.
     """
     from tortoise.consistency import check_consistency
@@ -526,15 +606,16 @@ def test_consistency_gate_compares_the_transit(prov):
     result = check_consistency(str(log_path), _proj(sdk))
     assert result["ok"], result
     assert result["divergence"] is None, result
-    assert "sourceVersion" not in result.get("excluded_fields", {}), \
-        "the anchor must NOT be excluded from the content comparison"
-    assert "sourceVersion" not in result.get("uncarried_journal_fields", []), \
-        "the anchor must be CARRIED by the replay, not skipped as uncarried"
+    assert "sourceVersionTransit" not in result.get("excluded_fields", {}), \
+        "the carrier must NOT be excluded from the content comparison"
+    assert "sourceVersionTransit" not in result.get(
+        "uncarried_journal_fields", []), \
+        "the carrier must be CARRIED by the replay, not skipped as uncarried"
 
-    # Discriminating half: forge the anchor in place and require the gate to
+    # Discriminating half: forge the carrier in place and require the gate to
     # name the field. (An unjournalled graph edit ⇒ unrecorded-mutation.)
     _proj(sdk).g.query(
-        "MATCH (n:Point {id:$id}) SET n.sourceVersion=[['forged','h9']]",
+        "MATCH (n:Point {id:$id}) SET n.sourceVersionTransit=[['forged','h9']]",
         params={"id": p["id"]})
     tampered = check_consistency(str(log_path), _proj(sdk))
     assert tampered["ok"] is False, tampered
@@ -543,7 +624,8 @@ def test_consistency_gate_compares_the_transit(prov):
         for dp in tampered.get("divergent_points") or []
         for field in (dp.get("fields") or [])
     }
-    assert "sourceVersion" in named, tampered
-    assert "sourceVersion" not in tampered.get("excluded_fields", {}), tampered
-    assert "sourceVersion" not in tampered.get("uncarried_journal_fields", []), \
+    assert "sourceVersionTransit" in named, tampered
+    assert "sourceVersionTransit" not in tampered.get("excluded_fields", {}), \
         tampered
+    assert "sourceVersionTransit" not in tampered.get(
+        "uncarried_journal_fields", []), tampered

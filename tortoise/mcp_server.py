@@ -1202,12 +1202,12 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_verbatim", "embedding_preserved",
-    # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (read
-    # from the :Source on the live path and carried in the Point's journaled
-    # snapshot). A tenant setting it would forge provenance and break
-    # live/replay parity. Rejected on BOTH spellings, at this boundary AND in
-    # `sdk._sanitize_props` (the fail-closed backstop).
-    "sourceVersion", "sourceVersions"})
+    # #5256: the `extractedFrom` READ-VERSION anchor and its Point node carrier
+    # are server-derived (read from the :Source on the live path and carried in
+    # the Point's journaled snapshot). A tenant setting either would forge
+    # provenance and break live/replay parity. Rejected on ALL spellings, at
+    # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    "sourceVersion", "sourceVersions", "sourceVersionTransit"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
