@@ -571,6 +571,102 @@ class TestDistinguishingDifference:
         assert v2.distinguishing_difference("we ship the build",
                                             "we ship the build\u0301") is None
 
+    def test_a_name_fused_to_the_word_before_it_is_still_a_name(self):
+        """Fusion does not require a space on the LEFT of the separator.
+
+        "for@Alice" is ONE whitespace token beginning lower case, so a
+        whole-token capital test saw no name at all; the parts have to be
+        tested, and the FUSED spelling registered too, because that is what the
+        content skeleton holds and the one-sided test intersects against.
+        """
+        for sep in ("@", "#", "~", "/", "&", "\u00bf", "\u201c", "\u2026", "\u2014",
+                    "|", ";", "_"):
+            for stem in ("for", "to", "by"):
+                a, b = "The deploy failed", f"The deploy failed {stem}{sep}Alice"
+                assert v2.distinguishing_difference(a, b) == "substituted_content", \
+                    (stem, sep)
+                assert not v2.fold_allowed(a, b)
+        # The spaced form is the same difference, and the sentence-initial
+        # capital is still excluded from the name rule.
+        assert v2.distinguishing_difference(
+            "The deploy failed", "The deploy failed for Alice") \
+            == "substituted_content"
+        assert v2.fold_allowed("Workout at the gym at six pm", "gym at 6pm")
+
+    def test_an_apostrophe_can_be_the_left_separator(self):
+        """An apostrophe is a separator here, not only a clitic marker.
+
+        Splitting on apostrophes is what finds the negator in "do'not"; a
+        clitic is still caught by the whole-token shape rule, so nothing is
+        lost by also reading the parts.
+        """
+        for sep in ("'", "\u2018", "\u2019", "\u2032", "\u2035", "\u00b4", "\u055a",
+                    "\u05f3", "\uff02", "\uff07"):
+            for base, b in (("we ship the build", f"we do{sep}not ship the build"),
+                            ("the build is green", f"the build is{sep}not green")):
+                assert v2.distinguishing_difference(base, b) == "negation", (sep, b)
+                assert not v2.fold_allowed(base, b)
+        # A real clitic is unaffected.
+        for clitic in ("don't", "mustn't", "isn't", "won't"):
+            b = f"we {clitic} ship the build"
+            assert v2.distinguishing_difference(
+                "we ship the build", b) == "negation", clitic
+
+    def test_a_sign_written_apart_from_its_numeral_is_part_of_it(self):
+        """The sign is a token of its own when it is written with a space.
+
+        Removed as decoration, the numeral read as a bare value and the amounts
+        folded: "we paid \u00a3 50" became "we paid 50".
+        """
+        for sym in ("\u00a3", "\u20ac", "$", "%", "\u2030", "\u2212", "+", "-"):
+            a, b = f"we paid {sym} 50", "we paid 50"
+            assert v2.distinguishing_difference(a, b) == "number", (a, b)
+            assert not v2.fold_allowed(a, b)
+        # A suffix reads as one only where a suffix means something (a percent
+        # or a currency after the numeral).
+        for sym in ("%", "\u2030", "\u00a3", "\u20ac", "$"):
+            a, b = f"we got 50 {sym}", "we got 50"
+            assert v2.distinguishing_difference(a, b) == "number", (a, b)
+            assert not v2.fold_allowed(a, b)
+        # A sentence-final full stop is still punctuation, not a sign.
+        assert v2.distinguishing_difference("the answer is 5 .",
+                                            "the answer is 5") is None
+
+    def test_a_number_word_with_a_unit_folds_with_its_digits(self):
+        """Two spellings of ONE quantity must not read as a value change.
+
+        The unit branch matched digits only, so "2 hours" carried a signature
+        and "two hours" carried none — identical claims reported a number
+        difference and superseded one another.
+        """
+        for a, b in (("we wait 2 hours", "we wait two hours"),
+                     ("we wait 6 hours", "we wait six hours"),
+                     ("we wait 30 minutes", "we wait thirty minutes"),
+                     ("we run 10km", "we run ten km"),
+                     ("we run 5k", "we run five k")):
+            assert v2.distinguishing_difference(a, b) is None, (a, b)
+            assert v2.fold_allowed(a, b)
+        # ... and a real quantity difference is still one.
+        for a, b in (("we wait 2 hours", "we wait 3 hours"),
+                     ("we run 5k", "we run 6k"),
+                     ("we run 10km", "we run 20km")):
+            assert v2.distinguishing_difference(a, b) == "number", (a, b)
+            assert not v2.fold_allowed(a, b)
+
+    def test_a_combining_mark_that_composes_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent.
+
+        A combining mark between the parts of a fused negator COMPOSES into the
+        letter before it under NFC, so "do\u0301not" is the single word
+        "d\u00f3not" and there is no part left to read as a marker.  Recovering
+        one needs de-accenting plus a lexicon; the shape is otherwise the same
+        word-list limitation as #5139.
+        """
+        assert v2.fold_allowed("we ship the build", "we do\u0301not ship the build")
+        # A mark at a token EDGE composes or strips, and is not a difference.
+        assert v2.distinguishing_difference("we ship the build",
+                                            "we ship the build\u0301") is None
+
     def test_a_range_or_a_version_is_a_different_quantity(self):
         """The separators inside a numeric token are part of its value."""
         for a, b in (("we ship 3-4 crates", "we ship 4-3 crates"),

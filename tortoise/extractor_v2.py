@@ -2975,11 +2975,21 @@ def _value_signature(content: str) -> str | None:
             r"\b\d{1,4}(?::\d{2})+(?:\.\d+)?\b(?!\s*(?:a\.?m\.?|"
             r"p\.?m\.?))|\b\d+m\d+s\b", c):
         sigs.append(re.sub(r"\s+", "", m.group(0)))
-    # quantity+unit: "5k", "10km", "2 hours"
+    # quantity+unit: "5k", "10km", "2 hours", "two hours".  The word form is
+    # matched too, and normalised to digits, or "2 hours"/"two hours" reported
+    # a value difference between two spellings of one quantity and identical
+    # claims superseded one another.
     for m in re.finditer(
-            r"\b\d+(?:\.\d+)?\s*(?:k|km|mi|m|kg|lb|min|mins|h|hr|hrs|"
+            rf"\b(\d+(?:\.\d+)?|(?:{_NUM_WORD_ALT})(?:\s*(?:{_NUM_WORD_ALT}))?)"
+            r"\s*(k|km|mi|m|kg|lb|min|mins|h|hr|hrs|"
             r"s|sec|secs|minutes|hours)\b", c):
-        sigs.append(re.sub(r"\s+", "", m.group(0)))
+        quant, unit = m.group(1), m.group(2)
+        if quant[:1].isdigit():
+            sigs.append(re.sub(r"\s+", "", quant) + unit)
+        else:
+            v = _num_word_value(quant)
+            if v is not None:
+                sigs.append(f"{v}{unit}")
     if not sigs:
         return None
     return "|".join(sorted(set(sigs)))
@@ -3214,6 +3224,37 @@ def _fold_unicode(s: str) -> str:
     return "".join(" " if unicodedata.category(c) == "Cf" else c for c in text)
 
 
+def _rejoin_numeric_signs(seq: list[str]) -> list[str]:
+    """A sign or currency written apart from its numeral is part of it.
+
+    "£ 50" and "50 %" are the same values as "£50" and "50%"; left apart, the
+    symbol was a one-sided content token, the numeral read as a bare value, and
+    "we paid £ 50" folded into "we paid 50".  Only a lone symbol token is
+    merged, and only against a token that is genuinely numeric, so an "and - but"
+    is left alone.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(seq):
+        t = seq[i]
+        nxt = seq[i + 1] if i + 1 < len(seq) else ""
+        sign_only = len(t) == 1 and _keeps_numeric_edge(t, True)
+        numeric_next = (any(c.isdigit() for c in nxt)
+                        or _num_word_value(nxt) is not None)
+        if sign_only and numeric_next:
+            out.append(t + nxt)
+            i += 2
+            continue
+        if (out and len(t) == 1 and _keeps_numeric_edge(t, False)
+                and out[-1][-1:].isdigit()):
+            out[-1] = out[-1] + t
+            i += 1
+            continue
+        out.append(t)
+        i += 1
+    return out
+
+
 def _guard_token_seq(content: str) -> list[str]:
     """Lowercased whitespace tokens with edge punctuation stripped, IN ORDER.
 
@@ -3222,7 +3263,8 @@ def _guard_token_seq(content: str) -> list[str]:
     the positions the comparison is about.
     """
     text = _fold_unicode(_norm(content)).translate(_APOSTROPHES)
-    return [t for t in (_strip_edges(_s) for _s in text.split()) if t]
+    seq = [t for t in (_strip_edges(_s) for _s in text.split()) if t]
+    return _rejoin_numeric_signs(seq)
 
 
 def _is_edge_punct(ch: str) -> bool:
@@ -3260,6 +3302,19 @@ def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
     return ch in (_NUMERIC_LEAD if leading else _NUMERIC_TRAIL)
 
 
+def _is_numeric_sign_token(t: str) -> bool:
+    """A token that is only a currency or sign, waiting for its numeral.
+
+    Written apart ("we paid £ 50"), the sign is its own whitespace token and
+    the edge strip removed it as decoration — the numeral then read as a bare
+    value and the difference folded.
+    """
+    if not t:
+        return False
+    return all(c == "-" or unicodedata.category(c) in ("Sc", "Sm")
+               or c in _NUMERIC_TRAIL for c in t)
+
+
 def _strip_edges(t: str) -> str:
     """Edge punctuation and symbols stripped, in any script.
 
@@ -3267,6 +3322,8 @@ def _strip_edges(t: str) -> str:
     (".5", "$50") and a trailing suffix that changes what it counts ("50%").
     Leading only for the first, so "5." and "5" stay one value.
     """
+    if _is_numeric_sign_token(t):
+        return t
     start, end = 0, len(t)
     while start < end and _is_edge_punct(t[start]):
         if _keeps_numeric_edge(t[start], True) and t[start + 1:start + 2].isdigit():
@@ -3298,6 +3355,12 @@ def _canonicalise_clocks(content: str) -> str:
         return "clock" + (sig.replace(":", "") if sig else m.group(0))
 
     return _CLOCK_RE.sub(sub, _norm(content))
+
+
+_UNIT_WORDS = frozenset({
+    "k", "km", "mi", "m", "kg", "lb", "min", "mins", "h", "hr", "hrs",
+    "s", "sec", "secs", "minutes", "hours",
+})
 
 
 def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
@@ -3346,6 +3409,13 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
                     value, i = str(two), i + 1
             if value is None:
                 value = str(v) if v is not None else None
+        if value is not None and i + 1 < len(seq) and seq[i + 1] in _UNIT_WORDS \
+                and any(c.isdigit() for c in value):
+            # A unit word written apart belongs to the value: "ten km" and
+            # "10km" are one quantity, and "2 hours"/"two hours" must agree
+            # whichever way the unit is written.
+            value = value + seq[i + 1]
+            i += 1
         if value is not None:
             out.append((anchor, value))
             i += 1
@@ -3368,7 +3438,16 @@ def _sub_tokens(t: str) -> tuple[str, ...]:
     """
     if t.isalnum():
         return ()
-    return tuple(_apostrophe_free(p) for p in re.split(r"[^\w']+|_+", t) if p)
+    out: list[str] = []
+    for part in re.split(r"[^\w']+|_+", t):
+        if not part:
+            continue
+        out.append(_apostrophe_free(part))
+        # An apostrophe used as a SEPARATOR is not a clitic: "do'not" is one
+        # token whose parts are "do" and "not".  Reading it whole gave
+        # "donot", which is no marker, and the negated claim folded.
+        out.extend(p for p in re.split(r"'+", part) if p)
+    return tuple(out)
 
 
 def _negation_markers(content: str) -> frozenset[str]:
@@ -3448,9 +3527,22 @@ def _proper_nouns(content: str) -> frozenset[str]:
     capitalised by position rather than by being a name.
     """
     raw = [_strip_edges(t) for t in _fold_unicode(content).split()]
-    return frozenset(_apostrophe_free(_norm(t))
-                     for i, t in enumerate(raw)
-                     if i and t and t[:1].isupper())
+    named: set[str] = set()
+    for i, t in enumerate(raw):
+        # The first token is excluded: it is capitalised by position rather
+        # than by being a name.
+        if i == 0 or not t:
+            continue
+        # A name fused to the word before it ("for@Alice") is ONE whitespace
+        # token beginning lower case, so a whole-token capital test never saw
+        # it.  BOTH spellings are registered: the part matches the split form,
+        # and the fused spelling matches what the content skeleton holds, which
+        # is what the one-sided test intersects against.
+        parts = [t] if t.isalnum() else [p for p in re.split(r"[^\w]|_+", t) if p]
+        if any(p[:1].isupper() for p in parts):
+            named.update(_apostrophe_free(_norm(p)) for p in parts)
+            named.add(_apostrophe_free(_norm(t)))
+    return frozenset(named)
 
 
 def _content_tokens(content: str) -> set[str]:
