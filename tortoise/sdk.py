@@ -5300,9 +5300,9 @@ class TortoiseSDK:
             warnings.append(
                 f"{len(event_failures)} extracted event(s) failed to write")
 
-        # ── operators (IMPL/NAND + MITIGATES — shared commit semantics,
-        #    #1532 D3: same artifact + deep-miss drop as the commit path via
-        #    apply_payload_operators) ──
+        # ── operators (IMPL/NAND kinds; a payload's MITIGATES entry is a
+        #    bridge-attack record routed to mitigate_operator — #4937; shared
+        #    commit semantics, #1532 D3 — apply_payload_operators) ──
         ops = payload.get("operators", []) or []
         if ops:
             from tortoise.commit_ops import (
@@ -7980,9 +7980,9 @@ class TortoiseSDK:
 
     # Operator vocabularies accepted by connection specs (create_operator's
     # op_type whitelist — kept in sync with create_operator's validation).
-    # #4937: MITIGATES is deliberately NOT here — it is not an operator kind;
-    # a mitigation attaches to the operator bridge it damps
-    # (sdk.mitigate_operator / mitigate_operator), never to a connection spec.
+    # #4937: MITIGATES is deliberately NOT here — it is not an operator KIND,
+    # so it is never a `conn["operator"]` value. A connection spec expresses a
+    # mitigation in its `mitigation` dict (see `_connection_route`).
     _INGEST_OPERATOR_TYPES = frozenset(
         ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
     )
@@ -21688,8 +21688,8 @@ def _summary_to_payload(summary: dict, session_id: str,
                        stream: dict | None = None) -> dict:
     """Map the summary to the derived-commit payload. When a constructed
     stream (Step 2 output) is provided, its wired structure (argument points
-    with about_entities + IMPL/NAND/MITIGATES operators + decision events) is
-    used directly; otherwise the loose mapping is applied."""
+    with about_entities + IMPL/NAND operators, a MITIGATES payload entry
+    routed to mitigate_operator (#4937) + decision events) is used directly; otherwise the loose mapping is applied."""
     if stream and (stream.get("points") or stream.get("events")):
         return _stream_to_payload(summary, session_id, stream)
     """Map the summary stream to the derived-commit payload (#1013 shape):

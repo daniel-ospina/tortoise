@@ -47,15 +47,22 @@ doc_status: live
 >   WIRE name of a bridge-attack record and is routed to the mitigation path
 >   (`commit_ops.apply_payload_operators` → `mitigate_operator`), never to
 >   `create_operator`.
-> - Existing data: **no `MITIGATES`-as-operator-kind Point exists anywhere**
->   (measured 2026-09-24 across the 9 reachable fleet FalkorDB stores /
->   5,131 graphs — 0 hits; the live mechanism is the `mitigated_by` edges the
->   same sweep found). So no migration is performed, and no data is dropped:
->   the refusal is loud at the write boundary, and the legacy PAYLOAD spelling
->   keeps working.
-> - **OVERRIDES:** MITIGATES-as-an-operator-kind (the flat operator menu) — a
->   mitigation damps an operator bridge rather than being a peer operator, so it
->   is removed from the generic menu and attached to the bridge it attacks.
+> - Existing data: the retired entry was the built-in operator **label**
+>   exemption (`label not in ("IMPL", "NAND", "MITIGATES")`); the `op_type`
+>   allowlist already excluded `MITIGATES`, so `create_operator` with
+>   `op_type="MITIGATES"` never created a node. Point-in-time measurement
+>   (2026-09-24, the 9 reachable fleet FalkorDB stores / 5,131 graphs):
+>   `MATCH (o:Point {is_operator:true}) WHERE o.op_type='MITIGATES'` → **0
+>   hits** (the live mechanism is the `mitigated_by` edges the same sweep
+>   found). The label-exemption removal is **warning-only** (warn-not-block):
+>   an operator carrying `label='MITIGATES'` stays legal and readable, and the
+>   change only stops a NEW one from being silently exempted. So **no migration
+>   runs and no data is dropped** — the refusal is loud at the write boundary,
+>   and the legacy PAYLOAD spelling keeps working.
+> - **OVERRIDES:** the "be liberal in what you accept" default at the write
+>   boundary — a second spelling of mitigation would make "why is this weaker?"
+>   answerable two ways with the strength present in only one; the menu keeps a
+>   single spelling and the mitigation attaches to the bridge it damps.
 >
 > **Changelog v3.16 (2026-09-24 — issues #2726 + #2727, meeting source kinds +
 > object-kind alignment; original branch change dated 2026-09-09, renumbered from
