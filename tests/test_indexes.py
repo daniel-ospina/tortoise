@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -571,3 +572,185 @@ def test_docker_lane_index_shape():
             # drop it explicitly
             proj.db.select_graph(proj.graph_name).delete()
         proj.close()
+
+
+# ── #4465: the schema-completeness guard on the bootstrap sweep ───────────
+#
+# `_ensure_indexes` is idempotent but pays ~26 graph round-trips of DDL that
+# is already satisfied on every construction after the first. Measured on the
+# hosted capture path: one 2-turn capture constructs ~12 projections (7 of
+# them on the event-loop thread), and 180+ of the capture's ~217 on-loop
+# queries were that repeated, already-satisfied DDL. The guard answers the
+# same question in ONE round trip by reading the engine's own index
+# catalogue. These tests pin each property the guard's correctness rests on:
+# it is TRUE only when the schema really is complete, it is FALSE for every
+# shape that still needs the sweep, and it is keyed on the GRAPH (not on
+# process memory, which goes stale the moment a graph is re-created).
+
+#: Statements a fully-indexed graph makes redundant — their presence in a
+#: repeat `_ensure_indexes()` call means the sweep ran again. The vector-index
+#: API probe is deliberately NOT here: resolving whether the engine registers
+#: `db.idx.vector.createNodeIndex` or only the Cypher-native form is 1–2
+#: round trips that `CALL db.indexes()` cannot answer, and it is not repeated
+#: *schema* work.
+_REDUNDANT_ON_INDEXED_GRAPH = (
+    "CREATE INDEX FOR",
+    "DROP INDEX ON",
+)
+
+
+def _is_repeated_schema_work(cypher: str) -> bool:
+    return (cypher.startswith(_REDUNDANT_ON_INDEXED_GRAPH)
+            or "fulltext.createNodeIndex" in cypher
+            or "fulltext.drop" in cypher
+            or cypher.startswith("MERGE (m:Meta")
+            or cypher.startswith("MATCH (m:Meta")
+            or cypher.startswith("MATCH (n:Point) WHERE n.search_keys"))
+
+
+@pytest.fixture
+def graph_factory():
+    """Build ISOLATED graphs on whichever backend this lane uses.
+
+    The guard is behavioural — it reads the graph's own index catalogue — so
+    the tests must own the graph they assert on: the shared session graph is
+    already bootstrapped by earlier tests, which would make "the sweep did
+    not rerun" vacuous. A ``test_``-prefixed ``graph_name`` is honored
+    verbatim on embedded AND under the #1647 test redirect, so one recipe
+    serves both lanes.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="tt_4465_")
+    db_path = f"{tmpdir}/t.db"
+    made: list = []
+
+    def _make():
+        proj = FalkorProjection(
+            db_path,
+            graph_name=f"test_4465_guard_{uuid.uuid4().hex[:8]}",
+            allow_nonstandard_path=True,
+        )
+        made.append(proj)
+        return proj
+
+    try:
+        yield _make
+    finally:
+        for proj in made:
+            with contextlib.suppress(Exception):
+                proj.db.select_graph(proj.graph_name).delete()
+            proj.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_schema_probe_is_true_only_on_a_complete_schema(graph_factory):
+    """A bootstrapped graph reads current; a graph missing ONE required
+    index does not — and the next sweep restores it."""
+    proj = graph_factory()
+    assert proj._schema_is_current() is True, (
+        "a freshly bootstrapped graph must read as current")
+
+    proj.g.query("DROP INDEX ON :Point(lastDreamedAt)")
+    assert proj._schema_is_current() is False, (
+        "a graph missing a required RANGE index must NOT read as current — "
+        "the guard would skip the very DDL that recreates it (#4465)")
+
+    proj._ensure_indexes()
+    assert proj._schema_is_current() is True
+
+
+def test_schema_probe_rejects_the_boolean_is_operator_index(graph_factory):
+    """#3154: a graph carrying the poisoned boolean index is NOT current.
+
+    The guard's `is_operator` arm is what keeps the #3154 purge reachable on
+    a graph that is otherwise fully indexed — without it the fast path would
+    adopt the corrupt index forever (#3154 is a silent-wrong-answer defect,
+    not a slow one).
+    """
+    proj = graph_factory()
+    proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
+    assert proj._schema_is_current() is False, (
+        "a boolean is_operator index must fail the probe (#3154)")
+
+    proj._ensure_indexes()
+    assert proj._schema_is_current() is True
+    rows = proj.g.query("CALL db.indexes()").result_set
+    assert not any("is_operator" in str(row[1]) for row in rows), (
+        f"the sweep must purge the boolean index (#3154): {rows}")
+
+
+def test_schema_probe_is_per_graph_not_per_process(graph_factory):
+    """The guard is read from the GRAPH, so one graph's drift cannot make
+    another read current.
+
+    Mutation check (must stay true): replacing the probe with a process-wide
+    "already bootstrapped" set keyed on anything coarser than the graph
+    (the endpoint, the org, a module global) makes the last assertion fail —
+    graph B's dropped index would be invisible to graph A.
+    """
+    a = graph_factory()
+    b = graph_factory()
+    assert a._schema_is_current() is True
+    assert b._schema_is_current() is True
+
+    b.g.query("DROP INDEX ON :Point(lastDreamedAt)")
+    assert b._schema_is_current() is False
+    assert a._schema_is_current() is True, (
+        "graph A must NOT inherit graph B's drift — a guard keyed on "
+        "anything but the graph is a cross-tenant correctness bug (#4465)")
+
+
+def test_schema_probe_notices_a_recreated_graph(graph_factory):
+    """A graph dropped and re-created in-process is NOT current.
+
+    This is the case a process-wide flag gets wrong: the NAME is unchanged,
+    so the flag still reads "indexed" while the new graph carries no indexes
+    — and `required_embedding_dim` would then advertise a vector index that
+    does not exist. Re-reading the catalogue cannot go stale.
+
+    Recreating the graph is exactly what an org-graph delete, a
+    ``GRAPH.COPY`` restore or an embedded recovery leaves behind.
+    """
+    proj = graph_factory()
+    assert proj._schema_is_current() is True
+    proj.db.select_graph(proj.graph_name).delete()
+    assert proj._schema_is_current() is False, (
+        "the re-created graph has no indexes — a process-wide cache would "
+        "still report the OLD graph as bootstrapped (#4465)")
+
+
+def test_repeat_sweep_runs_no_already_satisfied_ddl(graph_factory):
+    """#4465: re-running `_ensure_indexes` on an indexed graph is ONE probe.
+
+    This is the defect in isolation: the sweep is idempotent, so a second
+    call is a no-op semantically — but it used to be 26 graph round-trips of
+    it, on the event loop, ~7 times per hosted capture.
+
+    Mutation check (must stay true): removing the `_schema_is_current()`
+    guard from `_ensure_indexes` puts the full ~26-statement sweep back in
+    `seen` and fails here.
+    """
+    proj = graph_factory()
+    seen: list[str] = []
+    graph_cls = type(proj.g)
+    orig_query = graph_cls.query
+
+    def _record(self, cypher, *args, **kwargs):
+        seen.append(" ".join(cypher.split()))
+        return orig_query(self, cypher, *args, **kwargs)
+
+    graph_cls.query = _record
+    try:
+        proj._ensure_indexes()
+    finally:
+        graph_cls.query = orig_query
+
+    repeated = [c for c in seen if _is_repeated_schema_work(c)]
+    assert repeated == [], (
+        "a second `_ensure_indexes()` on an already-indexed graph re-ran "
+        f"{len(repeated)} schema statement(s): {repeated[:6]} — the "
+        "bootstrap is repeated per construction again (#4465)")
+    assert seen.count("CALL db.indexes()") == 1, (
+        f"the guard must cost exactly one catalogue probe, got {seen}")
+    # One probe + at most the two vector-API attempts (procedure, then the
+    # Cypher-native fallback) — anything more is schema work coming back.
+    assert len(seen) <= 3, f"the repeat sweep is no longer a probe: {seen}"

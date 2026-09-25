@@ -5991,6 +5991,110 @@ class FalkorProjection(
                     f"{r['label']!r}/{r['key']!r} (contract: constant tuple only)")
         return out
 
+    #: #4465 — the RANGE index set ``_ensure_indexes`` guarantees, as
+    #: ``(label, property, kind)``. Every entry is created unconditionally on
+    #: every backend, so a graph missing any of them is NOT bootstrapped.
+    _REQUIRED_RANGE_INDEXES = (
+        ("Point", "id", "RANGE"),
+        ("Point", "pointKind", "RANGE"),
+        ("Point", "content_hash", "RANGE"),
+        ("Point", "lastDreamedAt", "RANGE"),
+        ("Document", "id", "RANGE"),
+        ("Document", "documentKind", "RANGE"),
+        ("Subject", "id", "RANGE"),
+        ("Subject", "name", "RANGE"),
+        ("Object", "id", "RANGE"),
+        ("Object", "name", "RANGE"),
+        ("Event", "eventId", "RANGE"),
+        ("Source", "id", "RANGE"),
+        ("Source", "url", "RANGE"),
+        ("Source", "canonicalUrl", "RANGE"),
+        ("Session", "actor_user_id", "RANGE"),
+        ("Session", "id", "RANGE"),
+    )
+
+    #: #4465 — the FULLTEXT index set, required only on engines that support
+    #: it (``_ver is None or _ver[0] >= 4`` — the same gate the DDL sweep
+    #: uses). The FIELD SET is the migration contract: a legacy one-field
+    #: index (``Point.content`` only / ``Event.subject`` only) is missing here
+    #: on purpose, so such a graph takes the full path and its drop→recreate
+    #: migration still runs.
+    _REQUIRED_FULLTEXT_INDEXES = (
+        ("Point", "content", "FULLTEXT"),
+        ("Point", "search_keys", "FULLTEXT"),
+        ("Event", "subject", "FULLTEXT"),
+        ("Event", "name", "FULLTEXT"),
+        ("Subject", "name", "FULLTEXT"),
+        ("Object", "name", "FULLTEXT"),
+        ("Document", "_searchText", "FULLTEXT"),
+    )
+
+    def _schema_is_current(self) -> bool:
+        """#4465 — ONE round trip answering "is this graph already indexed?".
+
+        ``_ensure_indexes`` is idempotent, but it pays ~26 graph round-trips
+        of DDL that is already satisfied on every construction after the
+        first — and one hosted capture constructs ~12 projections (7 of them
+        on the event-loop thread). Measured before this guard, for a schema
+        that had not changed: 182 of the capture's 219 on-loop queries on the
+        docker lane (180 of 217 embedded) were that repeated DDL (`#4465`).
+        This reads the engine's own index catalogue in ONE round trip and
+        lets the sweep run only when it has work to do.
+
+        ⛔ The answer is read from the GRAPH, never from process memory. A
+        process-wide "already bootstrapped" flag keyed on the graph name looks
+        cheaper, and is a correctness bug: a graph dropped and re-created
+        in-process (org-graph deletion, `GRAPH.COPY`, embedded recovery, the
+        GC drill) would be remembered as indexed while carrying no indexes at
+        all — and `required_embedding_dim` would then claim a vector index that
+        does not exist. Re-reading the catalogue cannot go stale, and a
+        multi-tenant key collision is impossible because the read is
+        per-graph by construction.
+
+        **Fail-safe, not fail-open.** Any error — an engine without
+        `db.indexes()`, a row whose per-property KINDS are not reported —
+        returns ``False``, which runs the full sweep: the exact pre-#4465
+        behaviour. A probe that cannot PROVE the schema is current must never
+        be able to skip the work.
+
+        The FTS contract is checked by FIELD SET, not by the
+        ``point_fts_v2``/``event_fts_v2`` Meta markers those migrations set.
+        Only a one-field index can still need the migration, and that shape
+        fails the field requirement below; a two-field index with a missing
+        marker is precisely the shape the marker exists to keep OUT of the
+        drop→recreate branch, so skipping it is the intended outcome.
+        """
+        try:
+            rows = self.g.query("CALL db.indexes()").result_set
+        except Exception:  # a probe that cannot run is not a pass
+            return False
+        if not rows:
+            return False
+        present: set[tuple[str, str, str]] = set()
+        for row in rows:
+            # ``CALL db.indexes()`` rows are [label, properties,
+            # {prop: [kind, ...]}, ...] on every engine this store opens. A
+            # row without the kinds map cannot answer the RANGE/FULLTEXT
+            # question, so it fails the probe rather than guessing.
+            if not row or len(row) < 3 or not isinstance(row[2], dict):
+                return False
+            label, props, kinds = str(row[0]), row[1] or (), row[2]
+            # #3154: a boolean is_operator index is never VALID — its presence
+            # (single or composite, so either column can carry it) means the
+            # purge below still has work to do.
+            if any("is_operator" in str(p) for p in props):
+                return False
+            for prop, prop_kinds in kinds.items():
+                if "is_operator" in str(prop):
+                    return False
+                for kind in prop_kinds or ():
+                    present.add((label, str(prop), str(kind).upper()))
+        required = set(self._REQUIRED_RANGE_INDEXES)
+        _ver = getattr(self, "_falkordb_version", None)
+        if _ver is None or _ver[0] >= 4:
+            required |= set(self._REQUIRED_FULLTEXT_INDEXES)
+        return required <= present
+
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
 
@@ -6019,7 +6123,26 @@ class FalkorProjection(
         staleness ordering. See the purge block below and
         ``hosted_backup._audit_copied_boolean_indexes`` for the copy-path
         verification.
+
+        #4465: the sweep is GUARDED by ``_schema_is_current()`` — one
+        round trip that answers the same question this DDL answers ("is the
+        schema already there?"). A fully-indexed graph skips straight to the
+        vector-API handle below; a graph with any missing index, any
+        forbidden ``is_operator`` index, or an unreadable index catalogue
+        takes the full sweep exactly as before. The bootstrap is never
+        skipped, only the repeat of work already done.
         """
+        if self._schema_is_current():
+            # #4465 fast path. Everything the sweep would do is already true
+            # of this graph; only the vector-index API handle has to be
+            # re-derived, because it is a property of the ENGINE's index API
+            # (procedure vs Cypher-native) that ``CALL db.indexes()`` does not
+            # report. The existing index is never reconciled here (same as the
+            # sweep) and a MISSING one is still created — so a server graph
+            # that lost only its vector index still gets it back.
+            self._ensure_vector_index_api()
+            return
+
         # ── Range indexes (always safe, pre-4.x compatible) ──
         # NOTE: no index on `is_operator` is created here on ANY backend —
         # see the boolean-index policy in the docstring and the #3154 purge
@@ -6327,62 +6450,79 @@ class FalkorProjection(
                             "Failed to create fulltext index on %s.%s: %s", label, fields, e)
 
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
-            # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
-            # HNSW requires RediSearch module, not bundled with redislite.
-            # #1359: the engine's index API varies by version — try the
-            # RediSearch-style procedure first, fall back to the Cypher-native
-            # form on engines that don't register it (verified: falkordblite
-            # 0.10.0's bundled module exposes `CREATE VECTOR INDEX ... OPTIONS`
-            # but NOT `db.idx.vector.createNodeIndex`). Record which API
-            # succeeded on self._vector_index_api for the query path.
-            if not getattr(self, '_is_embedded', False):
-                # #4194/#4280: the width is the ONE constant the STORE declares
-                # (`FalkorProjection.required_embedding_dim`), so a FRESH index
-                # creation and the write path cannot disagree — a bare literal
-                # here plus a rotated `EMBEDDING_DIM` would bless vectors the
-                # index cannot hold (the mismatched-vector trap).
-                # ⛔ This single-sources CREATION only: an EXISTING index is
-                # never reconciled (both 'already' branches below assume it is
-                # correct). A dimension change is still the documented
-                # drop-and-recreate operation, not a constant edit.
-                from ..embeddings import EMBEDDING_DIM
-                try:
-                    self.g.query(
-                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
-                        f"{EMBEDDING_DIM}, 'HNSW')"
-                    )
-                    self._vector_index_api = 'procedure'
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "already" in msg:
-                        # Index already exists (prior startup). Assume the
-                        # procedure API — it either created it or the engine
-                        # is procedure-capable (docker/server image v4.16.7).
-                        self._vector_index_api = 'procedure'
-                    else:
-                        # Unknown procedure / not registered / invalid args →
-                        # Cypher-native form (the modern falkordb client's own
-                        # create_node_vector_index emits exactly this).
-                        try:
-                            self.g.query(
-                                "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
-                                "similarityFunction: 'cosine'}"
-                            )
-                            self._vector_index_api = 'cypher'
-                        except Exception as e2:
-                            msg2 = str(e2).lower()
-                            if "already" in msg2:
-                                self._vector_index_api = 'cypher'
-                            else:
-                                import logging
-                                logging.getLogger(__name__).warning(
-                                    "Failed to create vector index on Point.embedding: %s", e2)
+            self._ensure_vector_index_api()
         else:
             import logging
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
+
+    def _ensure_vector_index_api(self) -> None:
+        """Resolve ``_vector_index_api`` — the engine's vector-index API.
+
+        #4465: extracted from ``_ensure_indexes`` unchanged so the schema fast
+        path can re-derive the handle without re-running the DDL sweep. The
+        handle is NOT recoverable from ``CALL db.indexes()``: the catalogue
+        says an index EXISTS, not whether the engine registers the
+        ``db.idx.vector.createNodeIndex`` procedure or only the Cypher-native
+        ``CREATE VECTOR INDEX ... OPTIONS`` form. The attempts below answer
+        exactly that in one round trip on a graph whose index already exists
+        (the procedure raises "already"), and CREATE the index on a graph that
+        lacks it — both paths are the #1359/#4194/#4280 semantics verbatim.
+
+        Embedded mode (redislite) uses brute-force vec.euclideanDistance
+        instead — HNSW requires the RediSearch module, which redislite does not
+        bundle — and engines below 4.x skip the whole block, so both leave the
+        handle ``None`` (``required_embedding_dim`` documents the three
+        ``None`` lanes).
+        """
+        _ver = getattr(self, "_falkordb_version", None)
+        if _ver is not None and _ver[0] < 4:
+            return
+        if getattr(self, '_is_embedded', False):
+            return
+        # #4194/#4280: the width is the ONE constant the STORE declares
+        # (`FalkorProjection.required_embedding_dim`), so a FRESH index
+        # creation and the write path cannot disagree — a bare literal
+        # here plus a rotated `EMBEDDING_DIM` would bless vectors the
+        # index cannot hold (the mismatched-vector trap).
+        # ⛔ This single-sources CREATION only: an EXISTING index is
+        # never reconciled (both 'already' branches below assume it is
+        # correct). A dimension change is still the documented
+        # drop-and-recreate operation, not a constant edit.
+        from ..embeddings import EMBEDDING_DIM
+        try:
+            self.g.query(
+                "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                f"{EMBEDDING_DIM}, 'HNSW')"
+            )
+            self._vector_index_api = 'procedure'
+        except Exception as e:
+            msg = str(e).lower()
+            if "already" in msg:
+                # Index already exists (prior startup). Assume the
+                # procedure API — it either created it or the engine
+                # is procedure-capable (docker/server image v4.16.7).
+                self._vector_index_api = 'procedure'
+            else:
+                # Unknown procedure / not registered / invalid args →
+                # Cypher-native form (the modern falkordb client's own
+                # create_node_vector_index emits exactly this).
+                try:
+                    self.g.query(
+                        "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+                        f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                        "similarityFunction: 'cosine'}"
+                    )
+                    self._vector_index_api = 'cypher'
+                except Exception as e2:
+                    msg2 = str(e2).lower()
+                    if "already" in msg2:
+                        self._vector_index_api = 'cypher'
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create vector index on Point.embedding: %s", e2)
 
     @property
     def required_embedding_dim(self) -> int | None:
