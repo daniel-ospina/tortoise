@@ -37,7 +37,7 @@ follows after you run or paste it — nothing is installed into a skills dir.
   the 6 harnesses this document covers — 4 config-writing harnesses that run
   the skill installer, plus 2 teach-human leaves) or runs it in a terminal.
   (A 7th harness — ChatGPT — connects key-less via OAuth and never runs this
-  command; see the §2 note.)
+  command; see the #1701 note beneath the harness table.)
 - The Setup guide card / Overview says the organization is waiting on
   "Connect your agent".
 - You are a fresh agent pointed at a Tortoise organization and need to know
