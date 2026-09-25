@@ -44,6 +44,7 @@ from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
+from .raw_state import raw_entry, validate_raw_state  # #3998: the absent-raw state
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         resolve_pool_size)
@@ -10165,6 +10166,24 @@ class TortoiseSDK:
 
     # ── P1-4: Entity Linking ────────────────────────────────────
 
+    def _raw_entry_for_point(self, point_id: str) -> dict | None:
+        """#3998: the point's raw INDEX ENTRY, or None when it has no source.
+
+        The entry is identity + version + availability — a reference, never a
+        copy (``raw_state.raw_entry``). Returns None (not an exception) when
+        the point has no ``extractedFrom`` source, so a read path can call
+        this unconditionally.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
+            "RETURN properties(src) LIMIT 1",
+            params={"pid": point_id},
+        ).result_set
+        if not rows:
+            return None
+        return raw_entry(rows[0][0], source_id=(rows[0][0] or {}).get("url"))
+
     def provenance(self, point_id: str) -> dict:
         """Provenance chain — "Who decided this?" Point → Subject → delegation."""
         point = self.get_point(point_id)
@@ -10173,6 +10192,15 @@ class TortoiseSDK:
         author = point.get("authoredBy", "")
         chain = {"point": {"id": point_id, "content": (point.get("content") or "")[:200],
                            "authoredBy": author}}
+        # #3998 (D30): the raw is OPTIONAL. Attach the source's index entry —
+        # including the absent-raw state — so a memory whose raw was deleted,
+        # went offline, or had access revoked is still readable AND SAYABLE.
+        # Additive: emitted only when the point HAS an extractedFrom source,
+        # so a sourceless point's response is byte-identical. Set BEFORE the
+        # early returns below, so every exit path carries it.
+        _raw = self._raw_entry_for_point(point_id)
+        if _raw is not None:
+            chain["raw"] = _raw
         if not author:
             return chain
         proj = self._get_proj()
@@ -20682,6 +20710,7 @@ class TortoiseSDK:
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
                       source_path: str | None = None,
+                      raw_state: str | None = None,
                       is_episodic: bool | None = None,
                       _merge_run_id: str | None = None,
                       **props) -> dict:
@@ -20739,11 +20768,16 @@ class TortoiseSDK:
         # it (the sanitizer's docstring carve-out; §4.1). ``id`` overrides are
         # equally server-managed (node identity) — rejected here because
         # ``_create_entity``'s reject_id is bypassed for the sanctioned route.
-        for _k in ("sourcePath", "source_path", "id", "is_episodic"):
+        for _k in ("sourcePath", "source_path", "id", "is_episodic",
+                   "rawState", "rawStateAt", "raw_state"):
             if _k in props:
                 # #1501: name the actual sanctioned keyword per key (is_episodic
-                # became a sanctioned create_source keyword in this change).
+                # became a sanctioned create_source keyword in this change; #3998
+                # adds raw_state for the absent-raw state, server-managed for the
+                # same reason — a props payload must not be able to CLEAR a
+                # recorded absence, which is the whole point of the state).
                 sanctioned = ("source_path" if _k in ("sourcePath", "source_path")
+                              else "raw_state" if _k in ("rawState", "rawStateAt", "raw_state")
                               else _k)
                 raise ValueError(
                     f"{_k!r} is a server-managed field and cannot be set via "
@@ -20763,6 +20797,15 @@ class TortoiseSDK:
             ev["is_episodic"] = is_episodic
         if source_path is not None:
             ev["source_path"] = str(source_path)
+        if raw_state is not None:
+            # #3998 (D30): the absent-raw state — the THIRD value on the source
+            # record, after identity (url) and version (contentHash). Validated
+            # HERE because the WRITE side is strict: silently dropping a
+            # recorded absence is the exact failure this issue closes.
+            # ``raw_state="present"`` is the "the raw came back" write.
+            ev["rawState"] = validate_raw_state(raw_state)
+            ev["rawStateAt"] = __import__('datetime').datetime.now(
+                __import__('datetime').timezone.utc).isoformat()
         if tier is not None:
             ev["credibilityTier"] = tier
         if sourceDate is not None:
@@ -21302,14 +21345,46 @@ class TortoiseSDK:
         return [dict(row[0]) for row in r.result_set]
 
     def get_provenance_chain(self, point_id: str) -> list:
-        """Return full provenance chain for a Point."""
+        """Return full provenance chain for a Point.
+
+        #3998 (D30): the raw is OPTIONAL — the chain must stay readable and
+        SAYABLE when the raw was deleted, is offline, or access was revoked.
+        Every item therefore carries ``raw``: the source's index entry
+        (identity + version + availability), never a copy of the raw and never
+        an exception. A source whose raw is gone still returns HERE — the node
+        and the ``extractedFrom`` edge are graph facts and do not depend on
+        the bytes.
+
+        ⛔ The ``references`` hop is ``OPTIONAL`` on purpose (#3998). It used to
+        be a REQUIRED edge, so a source with no referenced entity **dropped the
+        whole chain to ``[]``** — the read went SILENT about a provenance that
+        plainly existed. A source can have no entity (a raw indexed before
+        extraction, or one whose entities were withdrawn), and that is exactly
+        the state this issue says must stay sayable. ``LIMIT 1`` is kept so the
+        one-row-per-source shape is unchanged when the edge IS present.
+        """
         proj = self._get_proj()
         r = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source)-[:references]->(entity) "
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
+            "OPTIONAL MATCH (src)-[:references]->(entity) "
             "RETURN properties(src) as source, properties(entity) as entity, labels(entity) as labels LIMIT 1",
             params={"pid": point_id},
         )
-        return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
+        return [
+            {
+                "source": dict(row[0]),
+                "raw": raw_entry(row[0], source_id=(row[0] or {}).get("url")),
+                # The entity half is unchanged where it exists, and simply
+                # ABSENT (not null, not an error) where it does not — the
+                # provenance is the SOURCE link, which is always there.
+                **(
+                    {"entity": dict(row[1]), "labels": list(row[2])}
+                    if row[1] is not None
+                    else {}
+                ),
+            }
+            for row in r.result_set
+        ]
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
         """Create Source → Entity references edge (Ontology v3.1 §3.4).

@@ -422,6 +422,16 @@ class _EntityHandlers:
         # open-set passthrough (which would let a payload clobber the
         # canonical identity).
         "canonicalUrl", "urlAliases",
+        # #3998 (D30): the ABSENT-RAW state — the THIRD value on the source
+        # record (identity = url/canonicalUrl, version = contentHash,
+        # availability = rawState; STORAGE §9.4 ③ "a third value on that
+        # record, not a fourth kind of source").  Like the identity props
+        # above, these are owned by the fixed SET clauses and never by the
+        # open-set passthrough, and for the same reason plus one more: a
+        # payload must not be able to CLEAR a recorded absence, and an upsert
+        # that carries no state must PRESERVE the stored one (the contentHash
+        # anchor rule, applied to availability).
+        "rawState", "rawStateAt", "raw_state",
         # epic #900 T3 (§4.1): the ev keys `source_path` (→ s.sourcePath via
         # the MERGE clause, never persisted verbatim snake_case) and
         # `_searchText` (set by the write path, coalesce-on-create /
@@ -2432,6 +2442,12 @@ class _EntityHandlers:
             "              s.version = 1, "
             "              s.externalId = $ext, "
             "              s.sourcePath = coalesce($sp, s.sourcePath), "
+            # #3998: the absent-raw state.  Written only when the caller
+            # supplies one — a null leaves the property UNWRITTEN, so "nothing
+            # recorded" stays the read-side default (present) and no source
+            # gains a noise property it never needed.
+            "              s.rawState = $rawState, "
+            "              s.rawStateAt = $rawStateAt, "
             "              s._searchText = $st" + run_clause + " "
             # JOINT-E2E (epic #900 #1032): when the caller carries NO
             # contentHash ($hash IS NULL — the bundle ingest source-item
@@ -2459,6 +2475,16 @@ class _EntityHandlers:
             "           s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
             "               THEN coalesce(s.urlAliases, []) "
             "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
+            # #3998: availability is PRESERVED by an upsert that carries no
+            # state — the same rule the contentHash anchor follows above.  The
+            # gate is the incoming STATE, not the hash diff: re-fetching the
+            # same version must not resurrect a raw that was deleted between
+            # the two writes.  A caller that DOES carry a state moves it
+            # (``raw_state='present'`` is the "the raw came back" write).
+            "           s.rawState = CASE WHEN $rawState IS NULL THEN s.rawState "
+            "                        ELSE $rawState END, "
+            "           s.rawStateAt = CASE WHEN $rawState IS NULL THEN s.rawStateAt "
+            "                         ELSE coalesce($rawStateAt, $now) END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                        THEN $st ELSE s._searchText END",
@@ -2473,6 +2499,11 @@ class _EntityHandlers:
                 "ext": ev.get("externalId", ""),
                 "sp": ev.get("source_path"),
                 "st": search_text,
+                # #3998: None (not a default string) so the ON CREATE clause
+                # LEAVES THE PROPERTY UNWRITTEN and the ON MATCH clause
+                # PRESERVES — see both clauses above.
+                "rawState": ev.get("rawState"),
+                "rawStateAt": ev.get("rawStateAt"),
                 **({"rid": merge_run_id} if merge_run_id is not None else {}),
             },
         )
