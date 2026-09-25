@@ -2053,15 +2053,49 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     # shell logic, which is the thing that has to be right on the runner.)
     if shutil.which("bash"):
         job_names = list(jobs["python-ci-gate"].get("needs") or [])
-        # The legs whose job-level `if:` is a selector output — the ones that
-        # may legitimately skip — and the output that selects each.
-        DECLINABLE = {"test": "python", "test-slow": "slow_run",
-                      "test-carve-out": "carve_out_run",
-                      "test-concurrency-falkor": "python",
-                      "packs-compile": "python", "test-track-b": "python"}
+
+        # Derive each leg's selector from the WORKFLOW itself, not from a literal
+        # list here: a leg whose job-level `if:` reads a selector output may
+        # legitimately skip when that output is false; a leg with no diff gate
+        # (its `if:` names no selector output) must therefore ALWAYS be SUCCESS.
+        # Deriving it makes the rows and the jobs' own `if:`s unable to drift.
+        def _selector_of(leg: str) -> str:
+            outs = re.findall(r"needs\.changes\.outputs\.(\w+)",
+                              str(jobs[leg].get("if") or ""))
+            return outs[0] if outs else "-"
+
+        SELECTOR = {leg: _selector_of(leg) for leg in job_names}
+        DECLINABLE = {leg: sel for leg, sel in SELECTOR.items() if sel != "-"}
+        ALWAYS = [leg for leg, sel in SELECTOR.items() if sel == "-"]
         # Default is "selected": an unexpected `skipped` is then a LOST shard,
         # which is the polarity #5219 is about.
         SELECTED = {out: "true" for out in DECLINABLE.values()}
+
+        # Every leg in `needs:` must have exactly ONE row, and that row's
+        # selector must be the output the job's own `if:` reads. Without this a
+        # shard added to `needs:` with no row — or with the wrong selector —
+        # would be certified green while `skipped` (the `lost-shard` shape).
+        rows: dict[str, str] = {}
+        for line in script.splitlines():
+            m = re.match(
+                r"^([\w-]+)\|\$\{\{\s*needs\.[\w-]+\.result\s*\}\}\|(.*)$",
+                line.strip())
+            if m:
+                rows[m.group(1)] = m.group(2).strip()
+        assert set(rows) == set(job_names), (
+            "every leg in `python-ci-gate.needs` must have exactly one row in "
+            "the aggregate's per-leg check; "
+            f"rows={sorted(rows)} vs needs={sorted(job_names)}")
+        for leg, selector in SELECTOR.items():
+            if selector == "-":
+                assert rows[leg] == "-", (
+                    f"`{leg}` has no diff gate, so its row must use `-` (must "
+                    f"always be SUCCESS); got {rows[leg]!r}")
+            else:
+                found = re.search(r"outputs\.(\w+)", rows[leg])
+                assert found and found.group(1) == selector, (
+                    f"`{leg}`'s row must gate on `{selector}` — the output its "
+                    f"own `if:` reads; got {rows[leg]!r}")
 
         def _render(results: dict, selected: dict) -> str:
             rendered = script.replace(
@@ -2083,7 +2117,8 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             return rendered
 
         def _verdict(results: dict, selected: dict | None = None) -> int:
-            sel = dict(SELECTED if selected is None else selected)
+            sel = dict(SELECTED)
+            sel.update(selected or {})
             return subprocess.run(["bash", "-c", _render(results, sel)],
                                   capture_output=True).returncode
 
@@ -2100,29 +2135,46 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                     f"a `{red}` for `{leg}` must FAIL python-ci-gate — a leg "
                     "the required check does not observe is a leg it cannot "
                     "block (#5219)")
-        # A docs-only diff selects nothing, so every declinable leg skips and
-        # the required check stays green (the gate must not block docs PRs).
-        declined_all = dict(green)
-        for leg in DECLINABLE:
-            declined_all[leg] = "skipped"
-        assert _verdict(declined_all,
-                        {out: "false" for out in DECLINABLE.values()}) == 0, (
-            "an all-declined (docs-only) diff must stay green")
-        # ... but a leg the selector DID select reporting `skipped` is a lost
-        # shard, and must red the required check (#5219).
-        for leg in DECLINABLE:
+        # An always-run leg has NO selector that can decline it, so a `skipped`
+        # one is a lost shard. This is the half of "`skipped` is not a pass"
+        # that covers the legs the gate cannot see skip: a silently skipped
+        # `changes`/`manifest-integrity`/`surface-guard` must red the check.
+        assert ALWAYS, "the aggregate must have always-run legs to assert on"
+        for leg in ALWAYS:
+            lost = dict(green)
+            lost[leg] = "skipped"
+            assert _verdict(lost) == 1, (
+                f"`{leg}` has no diff gate, so a `skipped` {leg} is a lost "
+                "shard and must red the required check")
+        # A leg the selector DID select reporting `skipped` is a lost shard...
+        for leg, selector in DECLINABLE.items():
             lost = dict(green)
             lost[leg] = "skipped"
             assert _verdict(lost) == 1, (
                 f"`{leg}` skipped although the selector SELECTED it is a lost "
                 "shard — the required check must not certify it (#5219)")
+            # ... while one the selector DECLINED may skip: a diff that does not
+            # touch the leg must not be blocked by the gate's own shape.
+            declined = dict(green)
+            declined[leg] = "skipped"
+            assert _verdict(declined, {selector: "false"}) == 0, (
+                f"`{leg}` skipped because `{selector}` declined it must not "
+                "red the required check")
+        # A docs-only diff selects nothing at all.
+        declined_all = dict(green)
+        for leg in DECLINABLE:
+            declined_all[leg] = "skipped"
+        assert _verdict(declined_all,
+                        {sel: "false" for sel in DECLINABLE.values()}) == 0, (
+            "an all-declined (docs-only) diff must stay green")
         # And the shape #5219 was actually about: a leg dropped from `needs:`
-        # must fail closed instead of vanishing.
-        dropped = dict(green)
-        dropped.pop("test")
-        assert _verdict(dropped) == 1, (
-            "a leg REMOVED from `needs:` must fail closed, not disappear — "
-            "that is the exact #5219 shape")
+        # must fail closed instead of vanishing — for EVERY leg, not just one.
+        for leg in job_names:
+            dropped = dict(green)
+            dropped.pop(leg)
+            assert _verdict(dropped) == 1, (
+                f"`{leg}` REMOVED from `needs:` must fail closed, not "
+                "disappear — that is the exact #5219 shape")
 
 
 def test_required_gate_covers_the_long_legs():
