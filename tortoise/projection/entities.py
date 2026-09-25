@@ -330,8 +330,9 @@ def _valid_transit_pairs(value):
     Returns the value when it is a non-empty list/tuple of 2-element
     ``[str, str]`` pairs whose members are BOTH non-empty/non-blank, else
     ``None``. BOTH the node-prop clause (`_upsert_point_props`) and the edge
-    fold (`_upsert_point_edges`) call THIS — an all-or-nothing predicate shared
-    by both writers.
+    fold (`_upsert_point_edges`) call THIS through the shared
+    `_point_source_transit` selector (which adds the own-ref gate/filter) — an
+    all-or-nothing predicate shared by both writers.
 
     Why one predicate and all-or-nothing: the two writers must agree on a
     corrupt payload. With a partial filter on the edge side, a
@@ -363,6 +364,44 @@ def _valid_transit_pairs(value):
                 and isinstance(pair[1], str) and pair[1].strip()):
             return None
     return value
+
+
+def _point_source_refs(extracted_from) -> list:
+    """The Point's OWN ``extractedFrom`` refs, normalized exactly as
+    ``_link_source`` fans them out: a bare ``str`` is ONE ref (never iterated
+    character-wise), any other value is a sequence, and falsy members are
+    skipped. ``[]`` when the Point has no ``extractedFrom`` at all."""
+    if not extracted_from:
+        return []
+    refs = ([extracted_from] if isinstance(extracted_from, str)
+            else list(extracted_from))
+    return [r for r in refs if r]
+
+
+def _point_source_transit(p: dict):
+    """#5256: the carrier to WRITE for a journal payload — the shape-validated
+    ``sourceVersionTransit`` pairs, gated on the Point OWNING an
+    ``extractedFrom`` and filtered to that Point's own raw refs.
+
+    ``None`` when there is nothing to record. The gate matters because the
+    carrier is a transit for an edge that will be written: without it a
+    hand-written/foreign journal line plants a stray carrier with no
+    ``extractedFrom`` edge at all (and ``check_consistency`` stays green — the
+    node equals its own journal payload). The filter matters because the pairs
+    are keyed by the RAW ref (see ``resolve_source_versions``), so a pair whose
+    key is not one of the Point's own refs is not one the edge fold can
+    consume — writing it would record an anchor for an edge this Point never
+    has. BOTH writers (``_upsert_point_props`` and ``_upsert_point_edges``) use
+    THIS selector, so the node carrier and the edge fold cannot disagree.
+    """
+    pairs = _valid_transit_pairs(p.get("sourceVersionTransit"))
+    if pairs is None:
+        return None
+    refs = _point_source_refs(p.get("extractedFrom"))
+    if not refs:
+        return None
+    kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]
+    return kept or None
 
 
 class _EntityHandlers:
@@ -828,17 +867,23 @@ class _EntityHandlers:
             "now": _now_iso(),
         }
         # #5256: the extractedFrom read-version transit. Written ONLY when the
-        # payload carries a well-formed non-empty list of [source_url,
-        # contentHash] pairs whose two members are non-blank strings — the SAME
-        # shape (and the same shared `_valid_transit_pairs` predicate)
-        # `_upsert_point_edges` validates.
+        # Point OWNS an `extractedFrom` AND the payload carries a well-formed
+        # non-empty list of [raw_ref, contentHash] pairs whose two members are
+        # non-blank strings, kept to that Point's own refs — the SAME shape
+        # check + own-ref filter (the SHARED `_point_source_transit` selector)
+        # `_upsert_point_edges` uses.
         # An un-sourced Point, or one whose Source has no recorded hash, carries
         # NO property (never '' and never []: honest-absent, because '' compares
-        # equal to a Source's '' and reads as a false CURRENT). `coalesce` is
+        # equal to a Source's '' and reads as a false CURRENT). A payload that
+        # carries a shape-valid carrier but NO `extractedFrom` ALSO carries
+        # nothing: the carrier is a transit for an edge, and without the edge it
+        # is a stray record (the node would otherwise equal its own journal
+        # payload and `check_consistency` would stay green). `coalesce` is
         # deliberately NOT used: the value is a recorded FACT of the reading,
         # not a derived value to preserve across re-emits.
-        # The shape guard is the SHARED `_valid_transit_pairs` predicate, the
-        # same one the edge fold uses — so a corrupt/foreign journal line
+        # The shape guard is the SHARED `_valid_transit_pairs` predicate (via
+        # `_point_source_transit`), the same one the edge fold uses — so a
+        # corrupt/foreign journal line
         # contributes NO anchor on EITHER writer rather than one of them. This
         # clause is the only writer of a value that came off a journal line, and
         # a malformed one (a dict/set/bytes, or a list containing one) would
@@ -846,7 +891,7 @@ class _EntityHandlers:
         # ResponseError — which, mid-`rebuild_all`, leaves the graph WIPED. A
         # corrupt/foreign journal must contribute NO anchor, not abort the
         # recovery path.
-        _sv_transit = _valid_transit_pairs(p.get("sourceVersionTransit"))
+        _sv_transit = _point_source_transit(p)
         if _sv_transit is not None:
             set_clauses.append("n.sourceVersionTransit=$sv")
             params["sv"] = _sv_transit
@@ -995,16 +1040,21 @@ class _EntityHandlers:
         # out to N edges (ontology §3.3 amended to many→many).
         # #5256: the read-version anchor travels in the SAME payload as the
         # ref, on the node's own `sourceVersionTransit` carrier list. We hand it
-        # to the writer as a {resolved_key: hash} map — this fold NEVER reads
+        # to the writer as a {raw_ref: hash} map (the journal-stable key — see
+        # `resolve_source_versions`) — this fold NEVER reads
         # `s.contentHash` (the Source may have advanced since live time). A
         # malformed/falsy payload contributes NO anchor rather than crashing
         # `dict(...)` or stamping a non-str value.
         source_ref = p.get("extractedFrom")
         if source_ref:
-            # The SHARED `_valid_transit_pairs` predicate (all-or-nothing), so a
+            # The SHARED `_point_source_transit` selector: the all-or-nothing
+            # `_valid_transit_pairs` shape check — a non-empty list of
+            # 2-element `[str, str]` pairs whose members are BOTH non-blank —
+            # PLUS the Point's own-ref filter, so a
             # partially-malformed carrier cannot stamp an edge while the node
-            # clause writes no record.
-            _svlist = _valid_transit_pairs(p.get("sourceVersionTransit"))
+            # clause writes no record, and a pair for a source this Point does
+            # not reference is dropped by BOTH writers alike.
+            _svlist = _point_source_transit(p)
             source_versions = (
                 {pair[0]: pair[1] for pair in _svlist}
                 if _svlist is not None else None)

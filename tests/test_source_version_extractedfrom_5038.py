@@ -11,7 +11,9 @@ Design (settled in the scoping plan
   (mirrors #5199's derivation anchor).
 * The value is carried into the Point's **own journaled snapshot** as a declared
   ``sourceVersionTransit`` node property: a list of
-  ``[resolved_source_key, hash]`` pairs. ``extractedFrom`` is a replay-derived
+  ``[raw_ref, hash]`` pairs, keyed by the Point's own ``extractedFrom``
+  spelling (the journal-stable key — NOT ``resolve_source_key``'s live-time
+  resolution). ``extractedFrom`` is a replay-derived
   projection (pass 2 wipes and re-creates the edges), so the value must travel
   WITH the point or it is lost. It is named ``...Transit`` (not
   ``sourceVersion``) so a Point read never shadows the canonical edge scalar
@@ -71,6 +73,21 @@ def _edge_version(proj, pid: str, url: str):
 
 def _has_edge(proj, pid: str, url: str) -> bool:
     return _edge_version(proj, pid, url) != "NO_EDGE"
+
+
+def _edge_anchor(proj, pid: str):
+    """``r.sourceVersion`` on the Point's ``extractedFrom`` edge, whichever
+    Source node identity the lane resolved it to — ``"NO_EDGE"`` when absent.
+
+    Lane-agnostic on purpose: the Source node's stored ``url`` is itself not
+    lane-stable when an unjournaled stub resolves differently at replay, so
+    only this read pins the anchor SCALAR itself.
+    """
+    rows = proj.g.query(
+        "MATCH (p:Point {id:$id})-[r:extractedFrom]->(:Source) "
+        "RETURN r.sourceVersion",
+        params={"id": pid}).result_set
+    return rows[0][0] if rows else "NO_EDGE"
 
 
 def _node_transit(proj, pid: str):
@@ -193,14 +210,19 @@ def test_list_refs_survive_rebuild_with_their_versions(prov):
             _edge_version(proj, p["id"], DOC2)) == live
 
 
-def test_url_variant_ref_uses_the_resolved_key(prov):
-    """Input: a Source stored canonically, linked via a URL VARIANT.
+def test_url_variant_ref_keeps_the_anchor_across_rebuild(prov):
+    """Input: a Source stored canonically, linked via a URL VARIANT after the
+    Source record exists.
 
-    FAILS IF ``resolve_source_versions`` keys by the RAW ref (or by
-    ``normalize_source_url``) instead of ``resolve_source_key``'s return — the
-    variant key would not match the node's stored ``url``, the lookup would
-    miss, and the edge would land bare with no error (the key contract the
-    resolver docstring calls load-bearing).
+    FAILS IF the carrier is keyed by ``resolve_source_versions``' live-time
+    resolution (``resolve_source_key``'s return) instead of the RAW ref — the
+    replay would then look the anchor up under a key the journal never carried,
+    and a lane whose Source identity differs (the sibling test below) loses the
+    anchor on the edge.
+
+    Pins the stable contract: the edge scalar is present on BOTH lanes, and the
+    node carrier is keyed by the Point's own raw ``extractedFrom`` spelling (the
+    one key both lanes share), NOT the resolved node url.
     """
     sdk, events, _log = prov
     sdk.create_source(DOC, "document", contentHash="h1")
@@ -208,12 +230,58 @@ def test_url_variant_ref_uses_the_resolved_key(prov):
     p = sdk.create_point("statement", "variant claim", extractedFrom=variant)
 
     proj = _proj(sdk)
+    # A REGISTERED canonical Source resolves the variant to DOC on BOTH lanes,
+    # so the edge itself lands on DOC here — this test isolates the CARRIER key.
     assert _edge_version(proj, p["id"], DOC) == "h1"
-    assert _node_transit(proj, p["id"]) == [[DOC, "h1"]], \
-        "the transit must key on the resolved node url, not the raw variant"
+    live_carrier = _node_transit(proj, p["id"])
     proj = _rebuilt(sdk, events)
     assert _edge_version(proj, p["id"], DOC) == "h1"
-    assert _node_transit(proj, p["id"]) == [[DOC, "h1"]]
+    assert _node_transit(proj, p["id"]) == live_carrier
+    assert live_carrier == [[variant, "h1"]], \
+        "the transit must key on the raw ref, not the resolved node url"
+
+
+def test_variant_ref_after_an_unjournaled_stub_keeps_the_anchor(prov):
+    """CONFIRMED P1 (round 5): a Point created BEFORE the Source is registered
+    mints an UNJOURNALED Source stub at the canonical spelling; the Source is
+    then registered under a VARIANT spelling, so at replay pass-1 builds the
+    Source node at the VARIANT url while live's node sits at the canonical one.
+
+    The Point's ``extractedFrom.sourceVersion`` must be byte-identical live and
+    after ``rebuild_all`` despite that node-identity difference, and
+    ``check_consistency`` must stay healthy.
+
+    FAILS IF the carrier (and therefore the replay lookup) is keyed by
+    ``resolve_source_versions``' live-time resolution: live anchors the edge
+    'h1', but at replay `_mint_source_stub` re-resolves the raw ref to a
+    DIFFERENT key, `versions.get(ref)` misses, the raw-ref fallback is absent
+    because the carrier was keyed by the resolution, and the replayed edge lands
+    BARE — a silent live≠replay anchor loss the gate cannot see.
+    """
+    sdk, events, log_path = prov
+    # 1. a Point before any Source: this MINTS the unjournaled canonical stub.
+    sdk.create_point("statement", "first", extractedFrom=DOC)
+    # 2. the Source lands on the VARIANT spelling (ON MATCH of that stub live,
+    #    but a fresh record at replay pass-1, where the stub is absent).
+    variant = "HTTPS://Doc.Example/a/?utm_source=x"
+    sdk.create_source(variant, "document", contentHash="h1")
+    # 3. a second Point linked through the variant ref.
+    p = sdk.create_point("statement", "second", extractedFrom=variant)
+
+    proj = _proj(sdk)
+    live = _edge_anchor(proj, p["id"])
+    assert live == "h1", f"guard: the live anchor must exist: {live!r}"
+    live_carrier = _node_transit(proj, p["id"])
+
+    proj = _rebuilt(sdk, events)
+    assert _edge_anchor(proj, p["id"]) == live, \
+        "the anchor was LOST across rebuild_all (live≠replay)"
+    assert _node_transit(proj, p["id"]) == live_carrier
+    assert live_carrier == [[variant, "h1"]], live_carrier
+
+    from tortoise.consistency import check_consistency
+    result = check_consistency(str(log_path), proj)
+    assert result["ok"], result
 
 
 def test_dedup_recommit_does_not_raise_or_diverge(prov):
@@ -640,6 +708,61 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
             assert _has_edge(proj, pid, DOC), f"{pid}: guard — the edge must exist"
             assert _edge_version(proj, pid, DOC) is None, \
                 f"{pid}: a partially-malformed carrier must not stamp the edge"
+
+
+def test_carrier_without_an_extractedfrom_is_not_written(prov):
+    """P2 (round 5): a shape-VALID carrier on a Point with NO
+    ``extractedFrom`` is dropped — no edge, no carrier.
+
+    FAILS IF ``_upsert_point_props`` writes the carrier on the payload's shape
+    alone: a hand-written/foreign journal line then plants a stray
+    ``sourceVersionTransit`` with no edge at all, and ``check_consistency``
+    stays green (the node equals its own journal payload).
+    """
+    sdk, events, log_path = prov
+    sdk.create_point("statement", "plain")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "PointAdded",
+            "point": {"id": "stray-carrier", "content": "x",
+                      "kind": "statement", "status": "live",
+                      "sourceVersionTransit": [[DOC, "h9"]]},
+        }) + "\n")
+
+    sdk._get_proj().rebuild_all(str(events))
+    proj = _proj(sdk)
+    assert _node_transit(proj, "stray-carrier") == "ABSENT", \
+        "a carrier with no extractedFrom edge must not be written"
+    assert not _has_edge(proj, "stray-carrier", DOC)
+
+
+def test_carrier_keeps_only_the_points_own_refs(prov):
+    """P2 (round 5), filter half: a carrier pair whose key is NOT one of the
+    Point's own ``extractedFrom`` refs is dropped by BOTH writers.
+
+    FAILS IF the own-ref filter is removed: the foreign pair would be written
+    to the node carrier — an anchor for an edge this Point never has (the edge
+    fold reads the same payload, so the two writers must agree it is absent).
+    """
+    sdk, events, log_path = prov
+    sdk.create_source(DOC, "document", contentHash="h1")
+    sdk.create_source(DOC2, "document", contentHash="h2")
+    sdk.create_point("statement", "plain")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "PointAdded",
+            "point": {"id": "mixed-carrier", "content": "x",
+                      "kind": "statement", "status": "live",
+                      "extractedFrom": DOC,
+                      "sourceVersionTransit": [[DOC, "h1"], [DOC2, "h2"]]},
+        }) + "\n")
+
+    sdk._get_proj().rebuild_all(str(events))
+    proj = _proj(sdk)
+    assert _node_transit(proj, "mixed-carrier") == [[DOC, "h1"]], \
+        "a pair for a non-referenced source must be filtered out"
+    assert _edge_version(proj, "mixed-carrier", DOC) == "h1"
+    assert not _has_edge(proj, "mixed-carrier", DOC2)
 
 
 # ── the gate sees it and stays green on a faithful graph ───────────────────

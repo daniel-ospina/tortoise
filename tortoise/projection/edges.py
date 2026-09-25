@@ -270,9 +270,17 @@ def resolve_source_versions(g, source_ref) -> dict[str, str]:
     so a Source read at replay time can have advanced since the Point was read —
     a FALSE current.
 
-    Keys are ``resolve_source_key(g, ref)`` — the node's stored ``url``, the
-    SAME key ``_link_source`` resolves a ref to — so a URL variant cannot
-    silently miss and leave the edge bare. Empty / missing / ``''`` / blank
+    Keys are the **raw ``extractedFrom`` ref** — the journal-stable spelling —
+    NOT ``resolve_source_key(g, ref)``'s live-time resolution. ``_link_source``
+    at replay looks the raw ref up directly, and a value keyed by a
+    *resolution* is unstable: the Source node's stored ``url`` can differ
+    between live and replay (an unjournaled stub minted by an earlier Point is
+    absent when pass-1 builds the Source, so the same ref resolves to a
+    different key), and the lookup then misses and leaves the edge bare with no
+    error. The raw ref is the one spelling both lanes share — it is the Point's
+    own payload key. ``resolve_source_key`` is still called for every ref, but
+    ONLY to FIND the Source node whose ``contentHash`` to read; it is never
+    this dict's key. Empty / missing / ``''`` / blank
     hashes are OMITTED: ``''`` compares equal to a Source's ``''`` and reads as
     a false CURRENT, so absent is the honest value (ONTOLOGY §4.6). The same
     rule is applied on the replay side by ``_valid_transit_pairs`` — this
@@ -307,14 +315,18 @@ def resolve_source_versions(g, source_ref) -> dict[str, str]:
         # REPLAY predicate drops the pair — a live≠replay divergence reachable
         # from `create_source(url, kind, contentHash="   ")`.
         if isinstance(h, str) and h.strip():
-            out[key] = h
+            # Keyed by the RAW ref, not `key`: see the docstring — the
+            # resolution is a live-time fact, the raw ref is journal-stable.
+            out[ref] = h
     return out
 
 
 def _source_version_transit(versions: dict[str, str] | None):
     """The Point-node transit for the ``extractedFrom`` read version (#5256).
 
-    A list of ``[source_url, contentHash]`` pairs — the EDGE carries the
+    A list of ``[raw_ref, contentHash]`` pairs, keyed by the Point's own
+    ``extractedFrom`` spelling (journal-stable — see ``resolve_source_versions``)
+    — the EDGE carries the
     per-link scalar ``r.sourceVersion``; this list is the prop-as-transit that
     puts the value into the Point's own journaled snapshot (``get_point`` →
     ``ev["point"]``) so pass-2 can re-stamp the edge without reading the
@@ -550,16 +562,18 @@ class _EdgeHandlers:
         (issue #1486). Non-session Sources (documents, connectors) are
         untouched.
 
-        ``source_versions`` (#5256) maps a source ref (keyed by
-        ``resolve_source_key``'s return) to the ``contentHash`` the Point was
-        read from. It is **handed** to this writer by the caller — the LIVE
-        create path resolves it from the Source; the REPLAY passes the value
-        from the Point's own journaled snapshot. This method therefore NEVER
+        ``source_versions`` (#5256) maps a source ref — keyed by the Point's
+        own RAW ``extractedFrom`` spelling, the journal-stable key — to the
+        ``contentHash`` the Point was read from. It is **handed** to this writer
+        by the caller — the LIVE create path resolves it from the Source; the
+        REPLAY passes the value from the Point's own journaled snapshot
+        (``sourceVersionTransit``, whose pairs are raw-ref keyed by the same
+        contract). This method therefore NEVER
         reads ``s.contentHash`` itself: pass-2 resurrection calls the same
         writer, and the Source's hash may have advanced since live time
         (``_upsert_source``'s in-place bump is unjournalled, #5024), so reading
-        it here would record a FALSE current. Absent/empty ⇒ no property at all
-        (``ON CREATE SET r.sourceVersion = NULL`` is a no-op), never ``''``.
+        it here would record a FALSE current. Absent / empty ⇒ no property at
+        all (``ON CREATE SET r.sourceVersion = NULL`` is a no-op), never ``''``.
         """
         refs = [source_ref] if isinstance(source_ref, str) else list(source_ref)
         versions = source_versions or {}
@@ -571,10 +585,14 @@ class _EdgeHandlers:
             # clause) so live wiring and rebuild replay mint byte-identical stubs
             # (one create path).
             ref = _mint_source_stub(self.g, raw_ref, source_kind)
-            # The value is looked up by the CANONICAL key `_mint_source_stub`
-            # just resolved (a URL variant resolves to the node's stored url);
-            # the raw-spelling fallback covers a caller that keyed by the raw
-            # ref. `$v` is ALWAYS bound so the bare callers
+            # The carrier is keyed by the RAW ref (the Point's journal-stable
+            # `extractedFrom` spelling), so the raw lookup is the one that must
+            # hit on BOTH lanes; the resolved-key lookup covers a caller that
+            # keyed by `_mint_source_stub`'s return instead. (`ref` is that
+            # return, and it is NOT stable across a rebuild — see
+            # `resolve_source_versions`; a URL variant resolves to the node's
+            # stored url, which can differ between live and replay.) `$v` is
+            # ALWAYS bound so the bare callers
             # (create_document, the ingest connection leg, direct test calls)
             # never miss a parameter.
             v = versions.get(ref)
