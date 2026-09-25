@@ -1,4 +1,4 @@
-"""#3981 — the metering-window raise is a SIGNAL; the six absorbing call sites each report an unmetered increment.
+"""#3981 — the metering-window raise is a SIGNAL; the seven absorbing call sites each report an unmetered increment.
 
 THE COVERAGE PROOF IS COMPLETENESS — SIX SITES, NOT FOUR
 --------------------------------------------------------
@@ -8,7 +8,7 @@ the user write". It does not: **every** production caller wraps the ``record_*``
 call in a broad ``except`` and absorbs the raise, so the request is served and
 the increment is dropped — the pre-#3825 behaviour with a louder module log.
 #3981's fix (owner ruling: proceed-and-alert) leaves the pre-spend admission gate
-untouched; the six absorbing call sites below each emit a lane-naming ERROR record
+untouched; the seven absorbing call sites below each emit a lane-naming ERROR record
 and report an unmetered increment:
 
   1. ``hosted_api._record_write_op``        → lane=write_op
@@ -73,8 +73,8 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_metering_period_window import _anchor, reg_org  # noqa: F401
 
-#: The six swallow sites → the lane token each must report. The inventory is
-#: asserted against source in ``test_the_six_swallow_sites_are_the_six_lanes``.
+#: The seven swallow sites → the lane token each must report. The inventory is
+#: asserted against source in ``test_the_seven_swallow_sites_are_the_seven_lanes``.
 SITE_LANES: dict[str, str] = {
     "write_op": "tortoise/hosted_api.py",
     "capture_ledger": "tortoise/hosted_api.py",
@@ -82,6 +82,10 @@ SITE_LANES: dict[str, str] = {
     "subject_write_op": "tortoise/hosted_api.py",
     "mcp_write_op": "tortoise/mcp_server.py",
     "ask_ledger": "tortoise/ask_lane.py",
+    # #4488: the embed lane's own swallow site. ``flush_tally`` absorbs a failed
+    # embed increment (and a tally with no resolvable org) and reports it here,
+    # so the measurement is never dropped in SILENCE — same ruling, seventh lane.
+    "embed": "tortoise/embed_metering.py",
 }
 
 _SUPABASE_URL = "https://n3981.test.supabase.co"
@@ -557,19 +561,25 @@ def test_ask_ledger_drop_is_signalled(caplog, monkeypatch, tmp_path):
 # ── The completeness fence ─────────────────────────────────────────────────
 
 
-def test_the_six_swallow_sites_are_the_six_lanes():
+def test_the_seven_swallow_sites_are_the_seven_lanes():
     """The correctness proof for #3981 IS coverage completeness, so pin the
     inventory against the SOURCE — not against this module's own dict (a bare
-    ``len(SITE_LANES) == 6`` is tautological: it counts a literal three lines
+    ``len(SITE_LANES) == 7`` is tautological: it counts a literal three lines
     above it and cannot fail). The scan covers every lane token passed through
     the two lane-carrying helpers — ``_alert_unmetered("<lane>", ...)`` and
     ``report_unmetered_increment(lane="<lane>", ...)``; the (file, lane) pairs
-    actually emitted must equal the declared six. A seventh site routed through
+    actually emitted must equal the declared seven. A site routed through
     either helper, a renamed token, or a deleted alert turns this RED.
 
-    (A seventh silent swallow reusing an EXISTING lane token is not detectable
-    by this fence; it is caught by review, and the six lanes above are the
-    declared surface.)
+    (#4488 added the seventh lane, ``embed``, when embedding-encode
+    measurement became its own swallow site. The census matches only the
+    ``lane=`` KEYWORD form, which is why ``embed_metering._report`` calls it
+    that way: a positional call would make the new lane invisible here —
+    the opposite of the intent.)
+
+    (A silent swallow reusing an EXISTING lane token is not detectable by this
+    fence; it is caught by review, and the seven lanes above are the declared
+    surface.)
     """
     root = Path(__file__).resolve().parents[1]
     emitted: set[tuple[str, str]] = set()
