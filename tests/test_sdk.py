@@ -162,6 +162,41 @@ class TestCreateOperator:
         with pytest.raises(ValueError, match="op_type must be"):
             sdk.create_operator("FOOBAR", "x", ["y"])
 
+    def test_mitigates_is_not_an_operator_kind(self, sdk):
+        """#4937 (F1 ruling on #2552): MITIGATES left the generic operator
+        menu. The refusal must NAME mitigate_operator — a bare 'invalid
+        op_type' leaves the caller with no route to the mechanism."""
+        a, b = _make_point(sdk), _make_point(sdk)
+        with pytest.raises(ValueError) as exc:
+            sdk.create_operator("MITIGATES", a["id"], [b["id"]])
+        msg = str(exc.value)
+        assert "MITIGATES is not an operator kind" in msg
+        assert "mitigate_operator" in msg
+        # No operator node was written (the raise precedes any mutation).
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Point) WHERE o.is_operator = true RETURN count(o)"
+        ).result_set[0][0] == 0
+
+    def test_mitigates_label_is_not_a_builtin_menu_entry(self, sdk):
+        """#4937: the generic operator menu is IMPL/NAND (+ pack-declared
+        relations). Spelling MITIGATES as a label no longer silently rides
+        the built-in fallback — it is warned as undeclared (warn-not-block)."""
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="MITIGATES")
+        assert op["op_type"] == "IMPL"
+        assert any(w.get("code") == "undeclared_relation"
+                   for w in op.get("warnings", [])), op.get("warnings")
+
+    def test_ingest_mitigates_operator_is_refused_with_the_path(self, sdk):
+        """#4937: the ingest operator menu is IMPL/NAND (+ part/whole); a
+        MITIGATES connection is refused with the correct path named."""
+        violations: list[dict] = []
+        sdk._check_connection(0, {"operator": "MITIGATES", "from": "a",
+                                  "to": "b"}, violations)
+        msg = " ".join(v["message"] for v in violations)
+        assert "MITIGATES is not an operator kind" in msg, msg
+        assert "mitigate_operator" in msg, msg
+
     def test_invalid_direction_raises(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
         with pytest.raises(ValueError, match="direction must be"):
