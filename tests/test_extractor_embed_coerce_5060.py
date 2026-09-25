@@ -119,6 +119,26 @@ class TestMitigatesWarningCoerces5060:
                    and "('12345'→'dst point')" in w
                    for w in out["warnings"])
 
+    @pytest.mark.parametrize("strength", ["n/a", 9.0],
+                             ids=["not-numeric", "out-of-range"])
+    @pytest.mark.parametrize("field", ["src", "dst"])
+    def test_the_40_char_cut_binds(self, strength, field):
+        """The fix kept each warning slice's ORIGINAL `[:40]`. With endpoints
+        shorter than the bound the explicit limit never binds, so a regression
+        that dropped it (falling back to `_clip`'s 60 default) would pass."""
+        long_src, long_dst = "S" * 100, "D" * 100
+        src_value, dst_value = ((long_src, long_dst) if field == "src"
+                                else (long_dst, long_src))
+        out = _embed({
+            "points": [{"content": src_value, "pointKind": "statement"},
+                       {"content": dst_value, "pointKind": "statement"}],
+            "operators": [{"src": src_value, "dst": dst_value,
+                           "op_type": "MITIGATES", "strength": strength}],
+        })
+        assert any(f"('{src_value[:40]}'→'{dst_value[:40]}')" in w
+                   for w in out["warnings"]), out["warnings"]
+        assert not any(src_value in w for w in out["warnings"]), out["warnings"]
+
 
 class TestClipHelper:
     """The one coercion the report sites now share."""
@@ -139,7 +159,7 @@ class TestEveryReportLaneCoerces5060:
     widens the VALUE axis (an LLM emits more than `null`/`0`). It is a
     hand-maintained lane list and cannot see a NEW lane — the structural
     guard against a new raw slice site is
-    `test_no_raw_get_slice_on_a_model_supplied_field` below.
+    `test_no_unallowlisted_raw_get_slice_in_the_module` below.
     """
 
     @staticmethod
@@ -165,6 +185,16 @@ class TestEveryReportLaneCoerces5060:
             f"{lane} lane emitted no report entry for {value!r} — the coerced "
             "text never reached the report")
         assert str(value)[:60] in out["minted_kinds"][0]
+
+    @pytest.mark.parametrize("lane", ["entity", "event", "point"])
+    def test_the_60_char_cut_binds(self, lane):
+        """The fix kept each report slice's ORIGINAL `[:60]`. With values
+        shorter than the bound the explicit limit never binds, so a regression
+        that dropped it (or changed one lane's cut) would pass."""
+        long_value = "L" * 100
+        entry = _embed(self._embed_list(lane, long_value))["minted_kinds"][0]
+        assert long_value[:60] in entry
+        assert long_value not in entry
 
     @pytest.mark.parametrize("strength", ["n/a", 9.0],
                              ids=["not-numeric", "out-of-range"])
@@ -227,7 +257,7 @@ def _raw_get_slice_sites(tree: ast.Module) -> list[tuple[int, str, str]]:
     return sorted(hits)
 
 
-def test_no_raw_get_slice_on_a_model_supplied_field():
+def test_no_unallowlisted_raw_get_slice_in_the_module():
     """An unallowlisted raw `X.get(...)[:]` slice in the module reds here.
 
     Declared scan BOUNDARY — it matches ONE shape: a `Subscript` whose
