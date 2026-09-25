@@ -1487,11 +1487,16 @@ def _purge_graph_storage(storage, org_id: str, graph_id: str,
     graph_name (= the namespace) even after the sweep re-attributed the
     entry to graph_id "" (the classify step maps ACTIVE rows only, so a
     deleted graph's flats lose their gid on the first sweep after delete —
-    #2462 P1). Matching graph_name == namespace recovers those entries;
-    matching the bare NAME is deliberately NOT done (name reuse would
-    misattribute a new graph's flats)."""
+    #2462 P1). Matching graph_name == namespace recovers those entries —
+    but ONLY when that namespace provably belongs to THIS graph (it derives
+    from the gid under the new layout); matching the bare NAME is
+    deliberately NOT done (name reuse would misattribute a new graph's
+    flats), and a namespace that does not derive from the gid may host a
+    LIVE graph, so its flats are preserved + reported (see
+    ``ambiguous_flats``)."""
     out: dict[str, Any] = {"pool_keys": 0, "state_keys": 0,
-                           "flat_keys": 0, "errors": []}
+                           "flat_keys": 0, "ambiguous_flats": [],
+                           "errors": []}
     for prefix in (f"backups/{org_id}/{graph_id}/",
                    f"ops/teams/{org_id}/graphs/{graph_id}/"):
         try:
@@ -1513,16 +1518,48 @@ def _purge_graph_storage(storage, org_id: str, graph_id: str,
     except Exception as e:
         logger.warning("purge %s %s: legacy index unreadable: %s",
                        org_id, graph_id, e)
-    flat_bids = [
-        str(bid) for bid, ent in (index or {}).items()
-        if isinstance(ent, dict) and (
-            str(ent.get("graph_id") or "") == graph_id
-            # #2462: entries re-attributed to "" by the sweep (the classify
-            # step sees ACTIVE rows only) still carry the manifest's
-            # graph_name — the tombstone's gid-keyed namespace.
-            or (namespace
-                and str(ent.get("graph_name") or "") == namespace))
-    ]
+    # MUST NEVER HAPPEN: a purge for graph X must never delete an archive
+    # that is not provably X's. The `graph_name == namespace` fallback is
+    # sound ONLY when the namespace provably derives from THIS graph's id
+    # (the new gid-keyed layout). Under the ownership guard (residual) the
+    # namespace does NOT derive from the gid — which is exactly why the
+    # guard refuses to drop it: a LIVE graph may occupy it (name-based reuse
+    # / drift; the default graph's own name included). Deleting a flat
+    # matched only by that name would erase the live occupant's archive, so
+    # ownership is AMBIGUOUS: preserve and report it, never delete. Mirrors
+    # the namespace guard.
+    gid_namespaces = {f"org_{org_id}_{graph_id}",
+                      f"team_{org_id}_{graph_id}"}
+    ns_trusted = bool(namespace) and namespace in gid_namespaces
+    flat_bids: list[str] = []
+    ambiguous_flats: list[str] = []
+    for bid, ent in (index or {}).items():
+        if not isinstance(ent, dict):
+            continue
+        # An absent/empty gid proves nothing — never match on it (a
+        # tombstone row without an id must not inherit the whole
+        # unresolved population).
+        if graph_id and str(ent.get("graph_id") or "") == graph_id:
+            # The index attributes this archive to THIS gid (gids are never
+            # reused) — provably the purged graph's, whatever its namespace.
+            flat_bids.append(str(bid))
+        elif namespace and str(ent.get("graph_name") or "") == namespace:
+            if ns_trusted:
+                # #2462: entries re-attributed to "" by the sweep (the
+                # classify step sees ACTIVE rows only) still carry the
+                # manifest's graph_name — the tombstone's gid-keyed
+                # namespace.
+                flat_bids.append(str(bid))
+            else:
+                ambiguous_flats.append(str(bid))
+    out["ambiguous_flats"] = ambiguous_flats
+    if ambiguous_flats:
+        logger.warning(
+            "purge %s %s: %d legacy flat archive(s) match namespace %r but "
+            "ownership is ambiguous (the namespace does not derive from "
+            "this graph id) — PRESERVED for operator review: %s",
+            org_id, graph_id, len(ambiguous_flats), namespace,
+            ", ".join(ambiguous_flats[:5]))
     if flat_bids:
         for bid in flat_bids:
             try:
