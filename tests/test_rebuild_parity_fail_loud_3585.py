@@ -665,16 +665,59 @@ class TestReReviewRoundThree:
         assert any("state-op-miss" in e for e in r["non_folded_events"]), \
             r["non_folded_events"]
 
-    def test_a_belief_write_miss_refuses_the_reference_fold(self, env):
-        """P1. FAILS IF: the reference fold drops a ConfidenceChanged /
-        OperatorAnnotated write-back for a Point it does not hold — the graph
-        fold records `point-belief-miss` (refused).
-        REACHABLE: a belief write for an id no event created, carrying a prop
-        (the graph fold only refuses a write it would actually have made)."""
+    def test_a_noncanonical_state_op_label_refuses_the_reference_fold(
+            self, env):
+        """P1 (re-review). FAILS IF: the reference fold only checks whether the
+        id is in its index. `_fold_entity_mutation` refuses a label outside
+        `_CANONICAL_ENTITY_LABELS` UNCONDITIONALLY, so a real Point id does not
+        make a `Widget` state op foldable.
+        REACHABLE: a hand-written state op naming a non-canonical label for an
+        id that IS a live Point."""
         sdk, events = env
-        _raw(events, type="ConfidenceChanged", id="p-never-created",
-             confidence=0.9, event_id="e-r3-belief")
+        p1 = sdk.create_point(content="x", kind="statement")["id"]
+        _raw(events, type="EntityMutated", op="restatus", label="Widget",
+             id=p1, state={"status": "archived"}, event_id="e-r3-widget")
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
         assert r["ok"] is False, r["divergence"]
-        assert any("point-belief-miss" in e
-                   for e in r["non_folded_events"]), r["non_folded_events"]
+        assert any("state-op-miss" in e for e in r["non_folded_events"]), \
+            r["non_folded_events"]
+
+    def test_a_state_less_state_op_refuses_the_reference_fold(self, env):
+        """P1 (re-review). FAILS IF: a state op with no applied map is treated
+        as a no-op. `_fold_entity_mutation` refuses it (there is nothing to
+        `SET`), so the reference fold must too.
+        REACHABLE: `op=restatus` with no `state` key, on a REAL Point."""
+        sdk, events = env
+        p1 = sdk.create_point(content="x", kind="statement")["id"]
+        _raw(events, type="EntityMutated", op="restatus", label="Point",
+             id=p1, event_id="e-r3-nostate")
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["ok"] is False, r["divergence"]
+        assert any("state-op-miss" in e for e in r["non_folded_events"]), \
+            r["non_folded_events"]
+
+    def test_a_forward_referenced_belief_write_is_not_a_non_folded_event(
+            self, env):
+        """P2 (re-review) — the REGRESSION GUARD. FAILS IF: the reference fold
+        refuses a belief write whose Point is created LATER in the journal.
+        `rebuild_all` hoists every creation into pass 1 and therefore FOLDS
+        this write, so refusing it here reds a journal the graph reproduces
+        exactly. The engine-order-dependent refusal (`point-belief-miss` exists
+        only in `rebuild_all`) is a recorded bound, not something the
+        chronological reference fold may mirror.
+        REACHABLE: the write precedes its own creation (an append the SDK does
+        not emit, but a partial/merged journal can)."""
+        sdk, events = env
+        _raw(events, type="ConfidenceChanged", id="p-later", confidence=0.9,
+             event_id="e-r3-fwd")
+        _raw(events, type="PointAdded", event_id="e-r3-fwd-add",
+             point={"id": "p-later", "content": "x", "kind": "statement",
+                    "status": "live",
+                    "createdAt": "2026-01-01T00:00:00Z"})
+        sdk._get_proj().rebuild_all(str(events))  # folds it: no refusal
+        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        # The CONTENT leg may still differ (the reference fold is chronological
+        # and does not apply a write that precedes its Point — a pre-existing,
+        # separate limit); what must NOT happen is a fail-LOUD verdict on it.
+        assert r["divergence"] != "non-folded", r["divergence"]

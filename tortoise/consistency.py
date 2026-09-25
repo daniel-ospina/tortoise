@@ -936,8 +936,15 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     # #3585 re-review: the graph fold records `state-op-miss`
                     # (refused) when a state op resolves to no entity or
                     # carries no applied map, so the reference fold must agree.
-                    # Only the non-Point canonical labels are handled here —
-                    # `_apply_one` owns the Point/unknown-label case.
+                    # Only the four labels this fold models are handled here —
+                    # `_apply_one` owns the Point and non-Point-label cases.
+                    # BOUND (re-review): `Source` is canonical to the graph
+                    # fold but has no entry in `_ENTITY_CREATION` (no
+                    # `SourceCreated` shape), so a Source state-op miss is not
+                    # refused here while `rebuild_all` refuses it. Adding the
+                    # label would need a `Source` row in the entity-parity
+                    # comparison, which the parity leg does not model — the
+                    # gap is recorded, not half-closed.
                     if label in _ENTITY_CREATION_LABELS:
                         record_non_folded(
                             SHAPE_STATE_OP_MISS, event_id=ev.get("event_id"),
