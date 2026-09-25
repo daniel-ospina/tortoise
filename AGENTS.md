@@ -372,9 +372,13 @@ boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive tit
 truncated at its completeness cap**. This is **not** clean. Fix the surface and re-run; never
 treat it as a pass.
 
-PR lists are enumerated to completeness (`--pr-limit`, default 1000; `--closed-pr-limit`, default
-5000). A list longer than its cap is reported **TRUNCATED** and the run is `exit 2` — a partial
-list is never CLEAN.
+**OPEN** PR lists are enumerated to completeness (`--pr-limit`, default 1000); a list longer than its
+cap is reported **TRUNCATED** and the run is `exit 2` — a partial list is never CLEAN. The
+**closed-PR** surface is a single bounded **advisory** request (`--closed-pr-limit`, default 100, which
+is now the per-page SAMPLE size rather than a completeness cap): its own `Link` header supplies the
+total, so a partial sample is reported `⚠ PARTIAL` but is **not** `exit 2` — that surface can never
+block a dispatch, so its partiality cannot authorize what a full enumeration would have refused
+(#5251). Every other surface keeps the fail-closed posture.
 
 **Enforcement lives in the agent skills, outside this repo.** The dispatch-path gate is wired
 into `~/.pi/agent/skills/`: `epic-executor` (Step 3 pre-dispatch, fail-closed), `issue-workflow`
