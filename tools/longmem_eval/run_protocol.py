@@ -774,7 +774,10 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     # the base runner silently degrades to embedded FalkorDBLite, which would
     # masquerade as a V3 measurement. Fires on dry-run too so `plan`/`--dry-run`
     # tell the operator the step cannot run as configured. The smoke step
-    # (mock) is exempt: it is a wiring check, not a measurement.
+    # (mock) is exempt from THIS guard: it is a wiring check, not a
+    # measurement. That exemption is about the DB-URI guard ONLY — the
+    # DENSE-leg gate (#4718) is a separate gate, and the mock smoke declares
+    # its own `--skip-preflight` waiver in cmd_smoke for the same reason.
     if step.number in (3, 5, 7, 8, 9) and not os.environ.get("TORTOISE_DB_URI"):
         raise SystemExit(
             f"step {step.number} requires TORTOISE_DB_URI (real backend: "
@@ -834,11 +837,18 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
 def cmd_smoke(state: ProtocolState, args: argparse.Namespace) -> None:
     """Pre-pilot wiring smoke: 1 real-extractor question end-to-end. Uses the
     committed MINI fixture so it needs no dataset download; --mock for the
-    offline reader/judge (no keys)."""
+    offline reader/judge (no keys).
+
+    #4718: the mock form also passes ``--skip-preflight``. ``--mock`` selects
+    the reader/judge and is NOT a dense-leg waiver, and this command is
+    documented as a wiring check — not a measurement — so it declares the
+    waiver explicitly and stays runnable on a host with no embedder (which is
+    its whole point). The real (non-mock) form keeps the dense leg required.
+    """
     extra = ["--data", str(REPO_ROOT / "tests/fixtures/longmemeval_mini.json"),
              "--limit", "1", "--ingest-mode", "v2"]
     if args.mock:
-        extra.append("--mock")
+        extra += ["--mock", "--skip-preflight"]
     out = DEFAULT_RUN_DIR / "smoke.report.json"
     cmd = _run_cmd([*extra, "--output", str(out)])
     print(f"$ {' '.join(cmd)}")
@@ -853,7 +863,16 @@ def cmd_smoke(state: ProtocolState, args: argparse.Namespace) -> None:
 
 def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
     """Option-5 full-context comparison cell (ceiling / headroom measurement)
-    on a question subset — feeds the reader the ENTIRE haystack, no retrieval."""
+    on a question subset — feeds the reader the ENTIRE haystack, no retrieval.
+
+    #4718 note: this cell does NOT take a dense-leg waiver, and must not. It
+    runs `tools/longmem_eval/full_context.py`, which has no dense-leg gate at
+    all (it never reaches `run.py`'s pre-flight) and which accepts NONE of the
+    dense-leg flags — it defines no `--skip-preflight`. Appending that flag made
+    the built command die at argparse with exit 2 (`error: unrecognized
+    arguments`). The waiver belongs to the `smoke` builder, whose target IS
+    `run.py`.
+    """
     extra = []
     if args.data:
         extra += ["--data", args.data]

@@ -239,6 +239,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # where the URI literal sits on the following line.
     "test_backup.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
+    # #5222/#5188 + #5222's hygiene gate: both files are HERMETIC (the SDK / the
+    # reaper is faked, no server is contacted), and both force the embedded or a
+    # test-pinned lane on purpose — the delenv/setenv IS the input, so the site
+    # must not be read as riding the ambient URI.
+    #   * backfill guard: `delenv` twice, so the run cannot inherit a developer's
+    #     ambient URI and accidentally target a real graph (the guard under test
+    #     resolves the namespace, not the URI path — #5188).
+    #   * server hygiene: `setenv` points the teardown probe at the test matrix
+    #     so the reaper's own path is exercised; fixture-param monkeypatch, so
+    #     pytest auto-undoes it at teardown (no lane leak).
+    "test_backfill_ghost_members_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                     # the URI literal sits on the FOLLOWING line at
+                                     # :251 (`setenv(` then the string), so the site's
+                                     # own line matches only the trailing branch — the
+                                     # same multi-line shape and the same remedy as
+                                     # `test_backup.py` above.
+                                     r'monkeypatch\.setenv\(\s*$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
