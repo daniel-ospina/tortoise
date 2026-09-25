@@ -150,9 +150,10 @@ jobs:
           script: |
             const inboundUrl = process.env.INBOUND_URL;
             const inboundSecret = process.env.INBOUND_SECRET_GITHUB;
-            // Pick the step output — whichever comment-and-close step ran
-            // Note: only one of the two comment steps will have run
-            const core = require('@actions/core');
+            // `actions/github-script` already injects `core` (@actions/core)
+            // into the script scope — redeclaring it here is a SyntaxError
+            // ("Identifier 'core' has already been declared") that aborted
+            // the whole step before the intake POST. Do not re-add (#5220).
 
             // Re-read the event to figure out what we're relaying
             const event = context.payload;
