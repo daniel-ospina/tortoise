@@ -1323,7 +1323,8 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     # able to set it. Accepting it would let a caller forge provenance — claim
     # a Point was read from a different version than the one recorded — and,
     # because the value persists live while the replay re-derives it, it is
-    # also a live/replay parity break. Rejected on BOTH spellings: the plural
+    # also a live/replay parity break. Rejected on EVERY spelling
+    # (`sourceVersion`, `sourceVersions`, `sourceVersionTransit`): the plural
     # spelling is the natural caller guess (mirrors `extractedFrom`'s own
     # accepts-list/str shape) and must not slip through as an unknown prop.
     _source_version_keys = [k for k in
@@ -8076,7 +8077,7 @@ class TortoiseSDK:
         # the Point's journaled snapshot). A bundle item carrying it would
         # splat-bind `create_point` below (the key binds the kwarg before
         # `_sanitize_props` ever sees props) and forge provenance. Rejected at
-        # shape time, on BOTH spellings, and — like batch_id/is_episodic — for
+        # shape time, on every spelling, and — like batch_id/is_episodic — for
         # EVERY section so the **item splats below can never bind it.
         for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
             if _svk in item:

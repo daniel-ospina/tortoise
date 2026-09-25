@@ -630,10 +630,11 @@ surfaces:
   # `entities.py`/`consistency.py` → `core`, `api.py` → `api`+`core`;
   # `sdk.py`, `projection/__init__.py` and `mcp_server.py` are SHARED_MODULEs
   # and already force the full matrix), so no `ep` entry is needed — the anchor
-  # path contains no `ep`-pattern file. Lane: the fixture passes an explicit
-  # `db_path`, so a URI-unset run is embedded; under a URI lane the #1647
-  # test-mode redirect sends it to the docker server (a per-path derived
-  # graph), which is why it needs no carve-out (nothing embedded-only).
+  # path contains no `ep`-pattern file. Lane: DOCKER (the #1647 default) — a
+  # URI-less run FAILS at the session fixture unless `TORTOISE_TEST_CARVE_OUT=1`,
+  # and this file is deliberately NOT carve_out-registered (it is not
+  # embedded-only). Under a URI lane the #1647 test-mode redirect sends it to
+  # the docker server as a per-path derived graph.
   - test_source_version_extractedfrom_5038.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
@@ -2526,7 +2527,7 @@ durations:
   test_product_rerank.py: 0.2
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.6
-  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 24 tests; embedded when no URI, docker server under a URI lane; locally measured
+  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 24 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
   test_rebuild_turn_points_3947.py: 4.4
   test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8

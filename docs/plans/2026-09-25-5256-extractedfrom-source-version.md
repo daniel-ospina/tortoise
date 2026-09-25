@@ -40,7 +40,7 @@ an operand" (a value the model may not fabricate).
 | **X3** | a key in the `_emit_event` payload dict is not replayable; the consumer reads `ev["point"]` | the value is a **declared node property**, so `get_point` carries it into `ev["point"]` |
 | **X4** | supersede successors emit no `PointAdded` | **moot** (no transfer version) |
 | **X5** | the *current* operand depends on #5024 (unjournalled in-place source bump) | the recorded value is the journaled read version, **never** re-read at replay (§3) |
-| **X6** | `batch_id = derive_batch_id(bundle)` runs **before** writes, so a server-observed version is outside the hashed bundle **iff** a fail-closed caller-supplied reject exists | the reject is added at the bundle Phase-1 validator **and** `_sanitize_props` (and the two other boundaries) |
+| **X6** | `batch_id = derive_batch_id(bundle)` runs **before** writes, so a server-observed version is outside the hashed bundle **iff** a fail-closed caller-supplied reject exists | the reject is added at the bundle Phase-1 validator **and** `_sanitize_props` (and every other boundary — five in all) |
 | **X7** | `structural_seen` dedupe drops a differing version | **moot** |
 
 Additional binding rules from #5256: honest-absent (never `''`); `_link_source` must be **handed**
@@ -116,22 +116,23 @@ record a version the Point was never read from — a **false current**.
 **The dedup path is untouched:** `create_point(dedup=True)` returns early; the resolver runs only on
 the fresh-create path, after the early return, so an idempotent re-commit cannot trip the new reject.
 
-**Reject surfaces (all four):** `_sanitize_props` (SDK backstop — also guards `create_document` via
+**Reject surfaces (all five):** `_sanitize_props` (SDK backstop — also guards `create_document` via
 `_create_entity`, `update_point`, `_update_entity`), `_check_item_shape` (bundle Phase 1),
-`_SERVER_MANAGED_PROPS` (MCP), and `EventAPI.add_point`'s `_forged` set (the one producer that
-bypasses `_sanitize_props`, #5004 round-7 precedent).
+`_SERVER_MANAGED_PROPS` (MCP), `EventAPI.add_point`'s `_forged` set, and `create_source`'s own loop
+— both `EventAPI.add_point` and `create_source` bypass `_sanitize_props` (the latter via
+`_skip_sanitize=True`) and so need their own reject (#5004 round-7 precedent).
 
 ## 4. Task breakdown
 
 | # | file | change |
 |---|---|---|
 | 1 | `tortoise/projection/edges.py` | `resolve_source_versions(g, refs)` — the **LIVE-only** resolver (keyed by `resolve_source_key`, skips empty/`''`/absent). It MUST normalize `refs` exactly as `_link_source` does — `refs = [refs] if isinstance(refs, str) else list(refs)` — else a scalar ref iterates **characters** and mints per-character Sources (`create_point` keeps the common single-source ref a scalar). `_source_version_transit(versions)` — the ONE pair-list builder (None when empty). `_link_source(..., source_versions: dict[str,str] \| None = None)`: the MERGE binds `r` and appends `_anchor_on_create("$v")` (reuses the #5199 helper — one source of truth for the `''`/NULL guard); `$v` is **always bound** (None when absent, for the bare callers: `create_document`, the ingest connection leg, `_link_extracted_from`, direct test calls). **Never** reads `s.contentHash`. |
-| 2 | `tortoise/projection/entities.py` | `_POINT_HANDLED \| {"sourceVersion"}`; an explicit conditional `SET n.sourceVersionTransit=$sv` clause in `_upsert_point_props` (only when the payload carries a non-empty list of pairs); `_upsert_point_edges` uses `p.get("sourceVersionTransit")` and, **only when it is a non-empty list of 2-element sequences**, hands `dict(...)` to `_link_source` (a falsy/None value must never reach `dict()`). |
+| 2 | `tortoise/projection/entities.py` | `_POINT_HANDLED \| {"sourceVersionTransit"}`; an explicit conditional `SET n.sourceVersionTransit=$sv` clause in `_upsert_point_props`; `_upsert_point_edges` folds the payload to `dict(...)` and hands it to `_link_source` (a falsy/None value must never reach `dict()`). BOTH writers validate through the ONE shared all-or-nothing `_valid_transit_pairs` predicate — non-empty list of 2-element `[str, str]` pairs whose members are both non-empty/non-blank — so a corrupt carrier contributes NO anchor on either side (and a hand-written `[[DOC,'']]` cannot leave the node claiming a pair while `_anchor_on_create` nulls the edge). |
 | 2b | `tortoise/projection/__init__.py` | add `n.sourceVersionTransit = NULL` to the #4042 pass-1a **recreate wipe** (`embedding` / `content_hash` / `embedding_verbatim`). Without it, a delete→same-id-recreate whose new snapshot omits `extractedFrom` retains the dead incarnation's transit in the rebuilt graph while live has none — a `derived = replay(journal)` break of exactly the `embedding_verbatim` class (#5004 round-4 precedent). |
-| 3 | `tortoise/sdk.py` | `_sanitize_props` rejects `sourceVersion`/`sourceVersions`; `_check_item_shape` rejects them on bundle items (Phase 1, free); `create_point` resolves the LIVE versions on the **fresh-create** path and puts the transit in the `CREATE` map (no second write — #2952). |
-| 4 | `tortoise/api.py` | `EventAPI.add_point`: reject `sourceVersion`/`sourceVersions` in the existing `_forged` set; when `getattr(self.projection, "g", None) is not None`, resolve and set `p["sourceVersionTransit"]` via the shared builder — **only when the builder returns non-None** (an un-sourced Point's payload must not carry `sourceVersionTransit: null`). The `getattr` guard covers **both** `projection=None` and an `InMemoryProjection` (no `.g`). |
+| 3 | `tortoise/sdk.py` | `_sanitize_props` rejects `sourceVersion`/`sourceVersions`/`sourceVersionTransit`; `_check_item_shape` rejects them on bundle items (Phase 1, free); `create_source` carries its own reject (it bypasses `_sanitize_props` via `_skip_sanitize=True`); `create_point` resolves the LIVE versions on the **fresh-create** path and puts the transit in the `CREATE` map (no second write — #2952). |
+| 4 | `tortoise/api.py` | `EventAPI.add_point`: reject `sourceVersion`/`sourceVersions`/`sourceVersionTransit` in the existing `_forged` set; when `getattr(self.projection, "g", None) is not None`, resolve and set `p["sourceVersionTransit"]` via the shared builder — **only when the builder returns non-None** (an un-sourced Point's payload must not carry `sourceVersionTransit: null`). The `getattr` guard covers **both** `projection=None` and an `InMemoryProjection` (no `.g`). |
 | 5 | `tortoise/consistency.py` | a declaration comment only: `sourceVersionTransit` is a **declared, compared** node property (`_POINT_HANDLED`), deliberately **not** `_EXCLUSION_REASONS`-excluded — excluding it would be a blind spot. |
-| 6 | `tortoise/mcp_server.py` | _SERVER_MANAGED_PROPS \| {"sourceVersion", "sourceVersions", "sourceVersionTransit"}` (#5004 convention). No surface change. *(Component addition: #5256's list omits `api.py`/`mcp_server.py`; both are required by indicator 3.)* |
+| 6 | `tortoise/mcp_server.py` | `_SERVER_MANAGED_PROPS \| {"sourceVersion", "sourceVersions", "sourceVersionTransit"}` (#5004 convention). No surface change. *(Component addition: #5256's list omits `api.py`/`mcp_server.py`; both are required by indicator 3.)* |
 | 7 | `config/ci-surfaces.yml` | register `tests/test_source_version_extractedfrom_5038.py`. |
 | 8 | `tests/test_source_version_extractedfrom_5038.py` | the new suite (§6). |
 
@@ -188,23 +189,27 @@ Precedent: `tests/test_provenance_extractedfrom_3263.py` (DB lane, embedded-safe
     asserts the NODE only and says why: the old incarnation's **`extractedFrom` edge** is already
     resurrected by pass 2 today (pre-existing, independent of this anchor) — see residual R5; the
     node wipe closes the part this change would otherwise introduce.
-9. **reject: `create_point(**props)`** — both keys raise; nothing written.
-10. **reject: `ingest` bundle** — a point item carrying the key raises at Phase-1; zero mutation.
+9. **reject: `create_point(**props)`** — all three names raise; nothing written.
+10. **reject: `ingest` bundle** — a point item carrying any of the three names raises at Phase-1; zero mutation.
 11. **reject: `create_document`** — the Document surface refuses.
 12. **reject: `update_point`** — the props path refuses.
 13. **reject: `EventAPI.add_point`** — the extractor seam refuses.
 14. **reject: MCP boundary** — `_reject_server_managed_props({...})` returns an error.
+14b. **reject: `create_source`** — the `_skip_sanitize=True` writer carries its own reject.
+14c. **malformed carrier** — a hand-written `PointAdded` payload with a non-list, a dict, a
+    short pair, a numeric pair, or an empty/blank hash contributes **NEITHER** the node carrier nor
+    the edge version, and does not abort `rebuild_all`.
 15. **no scalar stray / transit⇔edge** — for a **hash-bearing** fixture created through
     `create_point`/`EventAPI.add_point`, the node transit is a list of `[ref, hash]` pairs and, at
     creation, exists **iff** the Point has an `extractedFrom` edge; no Point carries a scalar
     `sourceVersionTransit`. (Scoped twice: the honest-absent case in test 2 legitimately has an edge and
     **no** transit; and the ingest **connection** leg, R3, is out of scope.)
-16. **gate comparison** — seed the graph through the **replay writer** (`rebuild_all`/`apply`, as
-    `test_consistency_divergence_5011.py`'s `_seed` does — NOT `create_point`, whose CREATE-map
-    write bypasses the clause), assert the faithful fixture is healthy (`check_consistency(...)["ok"]
+16. **gate comparison** — seed the graph through the **replay writer** (`rebuild_all` after the
+    `create_point` that journals the carrier — NOT the `create_point` CREATE-map write alone, which
+    bypasses the clause), assert the faithful fixture is healthy (`check_consistency(...)["ok"]
     is True`), **then** tamper the graph's `n.sourceVersionTransit` and assert it is reported as a
-    divergence. The positive half is what pins the clause; the mapped mutation is removing
-    `sourceVersionTransit` from `_POINT_HANDLED` (see §7 item 6; the node carrier is `sourceVersionTransit`).
+    divergence. The positive half is what pins the `_upsert_point_props` clause; the mapped mutation
+    for the gate is removing `sourceVersionTransit` from `_POINT_HANDLED` (see §7 item 6).
 17. **supersede boundary (4 steps)** — predecessor created against a Source(`h1`) → live
     `supersede_point` ⇒ the successor's **transferred** edge has `r.sourceVersion IS NULL` and the
     predecessor's edge is gone (its node transit unchanged) → `rebuild_all` ⇒ re-assert.
@@ -222,13 +227,16 @@ Every test names the input that makes it FAIL.
   1. `resolve_source_versions`' `''`/absent skip → test 2 (**this**, not the CASE, is the
      discriminating guard; the `_anchor_on_create` CASE is defence-in-depth in series);
   2. the "never `s.contentHash`" rule (make `_link_source` read the source) → test 3;
-  3. each reject site → tests 9/10/11/12/13/14;
+  3. each reject site → tests 9/10/11/12/13/14/14b (all five surfaces);
   4. the replay transit consumption (`_upsert_point_edges`) → test 1 (rebuild parity);
   5. the resolver key (`resolve_source_key` → raw ref) → test 5;
   6. **`_POINT_HANDLED` membership** (remove it) → test 16: the key then falls to `_uncarried`
      (`_UNCARRIED_LIST`) and is `skip`-ped from both sides, so the tampered mismatch becomes
      invisible — the gate's `ok` goes back to True and test 16 goes RED. (Separately: removing the
-     `_upsert_point_props` clause → test 1 / test 16's positive half.)
+     `_upsert_point_props` clause → test 1 (rebuild parity) **and** test 16's positive half, whose
+     graph is seeded through `rebuild_all`.)
+  6b. the shared `_valid_transit_pairs` non-empty rule (drop it) → test 14c's
+     `bad-empty-hash`/`bad-blank-hash` halves.
   7. `EventAPI.add_point`'s graph guard → test 7;
   8. the #4042 recreate wipe (`n.sourceVersionTransit = NULL`) → test 8b.
 
@@ -275,7 +283,7 @@ its Source-only adopt-on-touch write clarified; the (C)-rejection's false half (
 re-emit") deleted.
 
 **Cycle 3 — 2 verifiers.** Folded: the #4042 pass-1a **recreate wipe** must clear `n.sourceVersionTransit`
-(new task row 2b + test 8b); test 16 must seed through the replay writer and assert the faithful
+(new task row 2b + test 8b); test 16 seeds the graph through the replay writer and asserts the faithful
 fixture healthy **first**; mutation-verify #6 re-targeted to the `_POINT_HANDLED` membership (the
 non-discriminating replay-clause mutation demoted); test 15 scoped so it no longer contradicts
 test 2's honest-absent edge; the §3 data-flow `sv` type pinned (dict for `_link_source`, pair-list

@@ -328,9 +328,10 @@ def _valid_transit_pairs(value):
     """#5256: the ONE shape check for the `extractedFrom` read-version carrier.
 
     Returns the value when it is a non-empty list/tuple of 2-element
-    ``[str, str]`` pairs, else ``None``. BOTH the node-prop clause
-    (`_upsert_point_props`) and the edge fold (`_upsert_point_edges`) call
-    THIS — an all-or-nothing predicate shared by both writers.
+    ``[str, str]`` pairs whose members are BOTH non-empty/non-blank, else
+    ``None``. BOTH the node-prop clause (`_upsert_point_props`) and the edge
+    fold (`_upsert_point_edges`) call THIS — an all-or-nothing predicate shared
+    by both writers.
 
     Why one predicate and all-or-nothing: the two writers must agree on a
     corrupt payload. With a partial filter on the edge side, a
@@ -339,12 +340,24 @@ def _valid_transit_pairs(value):
     carrier — an edge anchor with no gate-compared record, the exact opposite
     of "a corrupt journal contributes no anchor". A body value that is a dict
     (or a list containing one) is also what would make Falkor raise mid-replay.
+
+    Why the non-empty member rule: an empty (or blank) hash is the PRODUCERS'
+    honest-absent signal — `resolve_source_versions` and
+    `_source_version_transit` both skip it — and `_anchor_on_create` nulls
+    ``''`` on the edge. A hand-written ``[[DOC, '']]`` therefore used to leave
+    the node carrier claiming a per-link pair for DOC while the authoritative
+    edge carried NULL (and a blank ``'   '`` stamped garbage on the edge,
+    since the CASE only matches ``''``): a gate-invisible disagreement between
+    the two writers, re-derived from the same journal line so `check_consistency`
+    saw no divergence. Requiring non-empty members here keeps honest-absent
+    honest and keeps the two writers in lockstep.
     """
     if not isinstance(value, (list, tuple)) or not value:
         return None
     for pair in value:
         if not (isinstance(pair, (list, tuple)) and len(pair) == 2
-                and isinstance(pair[0], str) and isinstance(pair[1], str)):
+                and isinstance(pair[0], str) and pair[0].strip()
+                and isinstance(pair[1], str) and pair[1].strip()):
             return None
     return value
 

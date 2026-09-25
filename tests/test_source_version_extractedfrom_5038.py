@@ -381,7 +381,7 @@ def test_sdk_create_point_rejects_a_forged_source_version(prov):
 def test_sdk_update_point_rejects_a_forged_source_version(prov):
     """``update_point`` shares the ``_sanitize_props`` backstop.
 
-    FAILS IF the reject lives only on the create path. Both spellings.
+    FAILS IF the reject lives only on the create path. All three names.
     """
     sdk, _events, _log = prov
     p = sdk.create_point("statement", "claim")
@@ -395,7 +395,7 @@ def test_sdk_create_document_rejects_a_forged_source_version(prov):
 
     FAILS IF the Document route (``create_document`` → ``_create_entity`` →
     ``_sanitize_props``) is refactored to skip the sanitizer, or the
-    ``extractedFrom`` link runs before it. Both spellings; nothing written.
+    ``extractedFrom`` link runs before it. All three names; nothing written.
     """
     sdk, _events, _log = prov
     for key in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
@@ -406,7 +406,7 @@ def test_sdk_create_document_rejects_a_forged_source_version(prov):
 
 
 def test_ingest_bundle_rejects_a_forged_source_version(prov):
-    """The Phase-1 shape check must reject it, for both spellings, with NO
+    """The Phase-1 shape check must reject it, for all three names, with NO
     section committed.
 
     FAILS IF a bundle item can splat-bind the kwarg / carry the prop, OR the
@@ -436,7 +436,7 @@ def test_ingest_bundle_rejects_a_forged_source_version(prov):
 
 
 def test_mcp_boundary_rejects_a_forged_source_version():
-    """The tenant MCP choke point rejects both spellings.
+    """The tenant MCP choke point rejects all three names.
 
     FAILS IF the MCP boundary is weaker than the SDK backstop.
     """
@@ -474,8 +474,8 @@ def test_eventapi_add_point_anchors_the_version(prov):
 
 def test_eventapi_add_point_rejects_a_forged_source_version(prov):
     """``EventAPI`` does not pass through ``_sanitize_props`` — the reject is
-    local to it. Both spellings (the plural is in the set but on a DIFFERENT
-    key, so dropping one would leave the other green).
+    local to it. All three names (the plural is in the set but on a DIFFERENT
+    key, so dropping one would leave the others green).
 
     FAILS IF this non-SDK journal producer lets a caller forge the anchor.
     """
@@ -566,6 +566,13 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
     per-pair filter on the edge side, the one valid pair would stamp
     ``r.sourceVersion`` while the node clause wrote no carrier — an edge anchor
     with no gate-compared record. It must produce NEITHER.
+
+    The ``bad-empty-hash``/``bad-blank-hash`` cases pin the non-empty member
+    rule: an empty/blank hash is the producers' HONEST-ABSENT signal, so a
+    hand-written ``[[DOC, '']]`` must not leave the node carrier claiming a
+    pair for DOC while ``_anchor_on_create`` nulls the edge — and a blank
+    ``'   '`` must not stamp garbage on the authoritative edge (the CASE only
+    matches ``''``). Both writers must agree it is absent.
     """
     sdk, events, log_path = prov
     sdk.create_point("statement", "the good point")
@@ -573,6 +580,12 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
         ("bad-dict", {"sourceVersionTransit": {"not": "persistable"}}),
         ("bad-list", {"sourceVersionTransit": [["a", "h"], {"x": 1}]}),
         ("bad-scalar", {"sourceVersionTransit": "loose"}),
+        ("bad-short-pair", {"sourceVersionTransit": [["only-one-element"]]}),
+        ("bad-numeric", {"sourceVersionTransit": [[1, 2]]}),
+        ("bad-empty-hash", {"extractedFrom": DOC,
+                            "sourceVersionTransit": [[DOC, ""]]}),
+        ("bad-blank-hash", {"extractedFrom": DOC,
+                            "sourceVersionTransit": [[DOC, "   "]]}),
         ("bad-edge", {"extractedFrom": DOC,
                       "sourceVersionTransit": [[DOC, "h9"], {"x": 1}]}),
     ]
@@ -607,12 +620,18 @@ def test_consistency_gate_compares_the_transit(prov):
     from ``_POINT_HANDLED``: it falls into ``_uncarried`` and is ``skip``-ped
     from BOTH sides, so a raw-Cypher forgery goes unseen. Hence the explicit
     ``uncarried_journal_fields`` assertion.
+
+    The graph is seeded through the **replay writer** (``rebuild_all``), NOT the
+    ``create_point`` CREATE-map write, so the positive half also pins the
+    ``_upsert_point_props`` carrier clause: remove that clause and the faithful
+    rebuild carries nothing, the positive ``ok`` assertion fails.
     """
     from tortoise.consistency import check_consistency
 
-    sdk, _events, log_path = prov
+    sdk, events, log_path = prov
     sdk.create_source(DOC, "document", contentHash="h1")
     p = sdk.create_point("statement", "claim", extractedFrom=DOC)
+    sdk._get_proj().rebuild_all(str(events))
 
     result = check_consistency(str(log_path), _proj(sdk))
     assert result["ok"], result
