@@ -616,13 +616,19 @@ export function preferredSurface(family, current) {
 // stay the single 7-harness vocabulary; the harness table in the SERVED
 // onboarding instructions (#4365: an instruction document, not an installed
 // skill) is the agent-side self-adjudication source (the chooser's
-// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH); #2698 removed its
-// chooser surface (HARNESS_FAMILIES has no chatgpt entry), so it renders on NO
-// dashboard branch — UNIVERSAL_COMMAND.chatgpt exists for total-loop/roundtrip
-// consumers only (the roundtrip test reads it; nothing in the UI does). Its LIVE
+// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH); #2698 deleted its flat
+// dashboard tab and #2912's 4-family HARNESS_FAMILIES excluded it from the
+// chooser, so it renders on NO dashboard branch — UNIVERSAL_COMMAND.chatgpt,
+// HARNESS_INTRO.chatgpt and HARNESS_CONTINUE_LABEL.chatgpt exist for
+// total-loop/roundtrip consumers only (the roundtrip test reads them; nothing
+// in the UI does). Its LIVE
 // carrier is the public setup docs page (#4836): website/docs.html#chatgpt
-// names the Developer-mode path and the onboarding instructions URL, so a
-// ChatGPT user is not left with only a test-consumed constant.
+// names the Developer-mode path, the canonical connector URL and the onboarding
+// instructions URL, so a ChatGPT user is not left with only a test-consumed
+// constant. NOTE the entry below and that page describe DIFFERENT paths: the
+// block is the in-chat prompt path, where ChatGPT has no MCP tools and so
+// verifies in chat; the OAuth connector path the docs page teaches DOES expose
+// the tortoise_* tools, so tortoise_health is its verify.
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the
@@ -754,7 +760,7 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
   'claude-web': () =>
     `Tortoise — universal setup command (Claude Web — OAuth, no API key)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${CANONICAL_MCP_URL}\n3. Leave Request headers empty — no API key is needed. On the first connection\n   Claude opens Tortoise's sign-in page: sign in, click Authorize, then pick the\n   Organization you're onboarding.\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've connected it — Continue" in the dashboard connect\n   step (the click only advances — the agent's first successful write is what\n   confirms it).\n   No local skills here — your agent follows the onboarding instructions at\n   ${ONBOARDING_INSTRUCTIONS_URL}.`,
   chatgpt: () =>
-    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools, then click "I've\nconnected it — Continue →" in the dashboard connect step (the click only\nadvances — the agent's first successful write is what confirms it).\nNo local skills here — your agent's onboarding instructions are the document at\n${ONBOARDING_INSTRUCTIONS_URL}.`,
+    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools. There is NO dashboard step\nto click for ChatGPT — #2698 deleted its tab and #2912's chooser has no chatgpt\nfamily, so the agent's first successful write is what confirms the connection.\nNo local skills here — your agent's onboarding instructions are the document at\n${ONBOARDING_INSTRUCTIONS_URL}.`,
 }
 
 export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER

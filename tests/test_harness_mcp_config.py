@@ -483,11 +483,18 @@ class TestDocsPageAndSkillConfig:
 
     @classmethod
     def _dashboard_constant(cls, name: str) -> str:
-        """The dashboard's exported string constant `name`."""
-        m = re.search(rf"^export const {name} =\s*\n?\s*'([^']+)'",
-                      cls._read_harnesses(), re.M)
-        assert m, f"{name} must be an exported string constant in harnesses.js"
-        return m.group(1)
+        """The dashboard's exported string constant `name`.
+
+        Exactly ONE match: a second definition would make the assertion below
+        read whichever came first and silently drop the other from every guard
+        that uses it.
+        """
+        found = re.findall(rf"^export const {name} =\s*\n?\s*'([^']+)'",
+                           cls._read_harnesses(), re.M)
+        assert len(found) == 1, (
+            f"{name} must be defined exactly once in harnesses.js, found "
+            f"{len(found)}: {found}")
+        return found[0]
 
     @classmethod
     def _harness_families(cls) -> str:
@@ -556,7 +563,7 @@ class TestDocsPageAndSkillConfig:
             "paste the document",   # 5 — the hand-off fallback if it can't fetch
             "tortoise_health",      # 6 — the journey's outcome: a verified link
             "first memory",         # 6 — ...and a first filed memory
-            "on your ChatGPT plan",  # 6 — which tools appear is plan-dependent
+            "plan-dependent",       # 6 — which tools appear is plan-dependent
         ):
             assert step in steps, (
                 f"the ChatGPT row must keep step {step!r} — a /docs#chatgpt "
@@ -566,15 +573,18 @@ class TestDocsPageAndSkillConfig:
             "journey, update this count and the per-step literals together")
         # The URL the row teaches must be the CONNECTOR form. harnesses.js pins
         # CANONICAL_MCP_URL for every connector surface (the two Claude leaves +
-        # ChatGPT) so the value matches the OAuth resource indicator byte-for-
-        # byte (#2864/#2849); the keyed rows keep the slashed MCP_URL.
+        # ChatGPT): it is the canonical endpoint, the value its PRM advertises and
+        # the form the shipped connector copy uses (#2864/#2849). The server
+        # TOLERATES the slash — oauth.py parse_resource rstrips it, and accepts
+        # the bare origin too — so this is a canonicality guard, not a hard
+        # failure the user would hit; the keyed rows keep the slashed MCP_URL.
         assert f"<code>{canonical}</code>" in steps, (
             f"the ChatGPT row must teach the canonical connector URL {canonical}")
         assert f"<code>{canonical}/</code>" not in steps, (
             "the ChatGPT row must not teach the slashed form (CANONICAL_MCP_URL)")
         assert "no trailing slash" in steps, (
-            "the row must SAY the URL is slash-free — the OAuth resource "
-            "indicator is exact, so a user who adds `/` gets a mismatch (#2864)")
+            "the row must state the URL exactly — the connector form is the "
+            "canonical endpoint, not the slashed config-file form")
         # The carrier LINKS the SERVED instructions document (the reach claim is
         # that a user can open it), and it is the same constant the dashboard
         # serves — a second hard-coded copy on a static page is only safe while
@@ -582,6 +592,12 @@ class TestDocsPageAndSkillConfig:
         assert f'href="{instructions_url}"' in steps, (
             "the ChatGPT row must LINK the onboarding instructions URL — it is "
             "the live carrier #4836 requires, not a bare mention")
+        # Handing a cloud agent the whole document must not become a key leak:
+        # the document's teach-human recipes carry `Bearer <TORTOISE_API_KEY>`,
+        # so the row has to say the key-less path is the only one.
+        assert "never paste a <code>tt_" in row, (
+            "the ChatGPT row must warn that no key/Authorization header belongs "
+            "in ChatGPT — the OAuth path is the only one")
 
     def test_4836_document_section2_and_the_chooser_agree_on_chatgpt(self):
         """#4836 acceptance: `SKILL.md` §2's 7th-harness note and
@@ -608,11 +624,11 @@ class TestDocsPageAndSkillConfig:
         assert carrier in note, (
             "§2's note must name the live ChatGPT carrier (the public docs page)")
         # Reachability: the note SENDS a user to that URL, so pin that the path
-        # still resolves to the docs page and the fragment exists on it. Either
-        # half being renamed would leave the note pointing at nothing (#4836).
-        base, _, fragment = carrier.partition("/docs#")
-        assert (base, fragment) == ("https://tortoise.premiselabs.co", "chatgpt")
-        assert '<h4 id="chatgpt">' in self.DOCS.read_text(encoding="utf-8"), (
+        # still resolves to the docs page and that the fragment it names exists
+        # there. Either half being renamed leaves the note pointing at nothing
+        # (#4836) — this is the check the URL literal alone cannot make.
+        docs = self.DOCS.read_text(encoding="utf-8")
+        assert f'id="{carrier.rpartition("#")[2]}"' in docs, (
             "the note's carrier fragment must exist on the docs page")
         redirects = (REPO_ROOT / "website" / "_redirects").read_text(encoding="utf-8")
         assert re.search(r"^/docs\.html\s+/docs(\s+\d+)?\s*$", redirects, re.M), (

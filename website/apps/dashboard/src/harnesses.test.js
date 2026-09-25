@@ -237,8 +237,10 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
   assert.equal(prompt, HARNESS_INSTALL['claude-web'](), 'claude-web and chatgpt share the identical workflows body')
   assert.match(prompt, /Follow these workflows/, 'prompt: workflows marker')
   // the self-contained UNIVERSAL_COMMAND block embeds the connector steps +
-  // prompt + a USER-FACING in-chat verify (no server signal — chatgpt has no
-  // tortoise_health call)
+  // prompt + a USER-FACING in-chat verify. This block is the IN-CHAT PROMPT
+  // path, which carries no MCP tools, so it must never name tortoise_health;
+  // the OAuth connector path (the live carrier, website/docs.html#chatgpt)
+  // DOES expose the tortoise_* tools and verifies with tortoise_health (#4836).
   const cmd = UNIVERSAL_COMMAND.chatgpt()
   assert.match(cmd, /Developer mode/, 'command: Developer mode')
   assert.match(cmd, /chatgpt\.com\/plugins/, 'command: plugins surface')

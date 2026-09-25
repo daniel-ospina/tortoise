@@ -105,7 +105,8 @@ mode → teach-human fallback).
 > Settings → Security and login → Developer mode, then chatgpt.com/plugins →
 > new app → MCP server URL → OAuth → Scan Tools → then give it THIS document as
 > its onboarding instructions).
-> There is no ChatGPT surface in the dashboard chooser (#2698), so this is the
+> There is no ChatGPT surface in the dashboard chooser (#2698 deleted its tab;
+> #2912's four-family chooser excludes it), so this is the
 > path a ChatGPT user takes; its LIVE carrier is the public setup docs page at
 > https://tortoise.premiselabs.co/docs#chatgpt — that page names the steps
 > above and this document's URL. It has no local filesystem, shell, or skill
@@ -211,8 +212,8 @@ dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 > never happened (§1's `restart_pending` row). It does NOT claim the harness is
 > connected: `harness-connected` remains §4's job, and only after
 > `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
-> (Claude Desktop / Claude Web) have no config write and no REST surface — they
-> never record this step.**
+> (Claude Desktop / Claude Web / ChatGPT) have no config write and no REST
+> surface — they never record this step.**
 
 ### Claude Code (self-install)
 
@@ -444,8 +445,8 @@ Guide the human through:
      https://api.premiselabs.co/v1/onboarding/state/checkpoint -H
      "Authorization: Bearer $TORTOISE_API_KEY" -H "Content-Type:
      application/json" -d '{"step":"harness-connected"}'`
-   - Claude Desktop / Claude Web: you have no REST/curl surface, and **no
-     dashboard click connects anything** — the server writes this same
+   - Claude Desktop / Claude Web / ChatGPT: you have no REST/curl surface, and
+     **no dashboard click connects anything** — the server writes this same
      checkpoint itself on your first successful graph write
      (`tortoise_create_point` / `tortoise_file_decision` →
      `_maybe_onboarding_auto_complete()`). File a first memory and the
@@ -453,7 +454,9 @@ Guide the human through:
      the moment your agent files. The connect step does NOT advance by itself
      — the poll runs only on the done step, so the user still clicks
      Continue/Skip to leave the connect step. Never tell the human a click
-     connects them.
+     connects them. **ChatGPT is the one harness with no chooser surface at
+     all** (#2912), so its user has no connect step to click — this document is
+     its live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —
    never from a dashboard click (lane B3, 2026-09-16).
