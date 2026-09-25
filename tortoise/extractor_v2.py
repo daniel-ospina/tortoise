@@ -3121,19 +3121,31 @@ _CONDITION_PHRASES = (
 # `_FRAME_STOPWORDS` holds the token by its commonest role and the content
 # skeleton is a set, so the role cannot be read from the token — it is read from
 # the PAIR: each entry below is one SLOT, and a pair is a rival claim when BOTH
-# sides fill the SAME slot with NO member in common (#5139).  The slot is the
-# family, never a position: a position-keyed comparison would refuse the
-# paraphrases below, and a set (not a sequence) is what keeps `and then` /
-# `, then` folding.
+# sides fill the SAME slot and each side owns a member the other LACKS (#5139).
+# The slot is the family, never a position: a position-keyed comparison would
+# refuse the paraphrases below, and a set (not a sequence) is what keeps
+# `and then` / `, then` folding.
+#
+# A slot is a DECLARED grouping of RIVAL operators — not a set of synonyms and
+# not a partition into relation sub-families.  Splitting the clause-relation
+# slot by relation would make `and` against `but` a CROSS-slot difference and so
+# fold it, reopening the memory-loss class this table exists to close; the cost
+# of keeping it coarse is that a swap between two members that happen to be
+# near-synonyms (`but`/`yet`, `because`/`as`, `for`/`as`) is refused too.  That
+# over-block is deliberate and is part of the declared residual set.
 #
 # What keeps the legitimate folds folding:
 #   * ONE side only — a comma list owns no `and`, so one side fills the slot, the
 #     connective did no work, and the pair is the documented broadening.
-#   * A SYNONYM is not a slot — `with`/`by` are spelled differently and assert
-#     the SAME relation, so "we ship with the courier" folds into "we ship by
-#     the courier".  The place (`in`/`on`/`at`) and relation (`of`/`for`/
-#     `about`) prepositions are that same kind of set and are likewise not slots,
-#     and `_COORDINATION_PHRASES` maps the ones that are phrases of `and`.
+#   * A SHARED member with a one-sided extra — "we wait for the build and the
+#     tests" against "we wait for the build, the tests" shares `for`; only ONE
+#     side is missing a member, which is the same broadening.
+#   * A SYNONYM pair that is nowhere a slot — `with`/`by` are spelled
+#     differently and assert the SAME relation, so "we ship with the courier"
+#     folds into "we ship by the courier"; the place (`in`/`on`/`at`) and
+#     relation (`of`/`for`/`about`) prepositions are that same kind of set.  ⚠️
+#     `for` is the EXCEPTION: it is a clause-relation slot member below, so its
+#     prepositional use is over-blocked — see the ⚠️ note after the table.
 #   * DIFFERENT slots are a rewording, not a swap — `to` (transfer direction)
 #     against `and` (clause relation) is the phase-D seam's own restatement, and
 #     it folds.
@@ -3141,15 +3153,22 @@ _CONDITION_PHRASES = (
 # "as it rained"); `and` is the counterpart of `or`, `but`, `nor`, `so`, `yet`,
 # `as` and `for` in one clause-relation slot.  Membership is read from the
 # TOKENS, so a member need not be a frame word to be caught — `yet`, `because`,
-# `although` and `before` are not frame words.
+# `although` and `whereas` are not frame words.
 #
-# ⚠️ A member whose non-operator use is common is a deliberate OVER-block, which
-# the boundary's asymmetry accepts (a wrong keep is noise; a wrong drop is memory
-# loss).  `for` is the case: as a causal conjunction it rivals `and`, and as a
-# preposition it does not — reading it as a slot member refuses the instrumental
-# `for`/`as` rewording ("use the tool for a hammer"/"as a hammer"), which is
-# pinned as a declared residual.  Pruning it out would reopen the memory-loss
-# class this table exists to close.
+# ⚠️ Deliberate OVER-blocks, taken because the boundary's asymmetry says a wrong
+# keep is noise while a wrong drop is memory loss, and each is pinned as a
+# declared residual rather than silently absorbed:
+#   * `for` as a clause-relation member refuses the instrumental rewording
+#     "use the tool for a hammer"/"as a hammer".  Pruning it out would reopen
+#     the memory-loss class this table exists to close.
+#   * the coarse clause-relation slot refuses the within-relation synonyms
+#     `but`/`yet` and `because`/`as`.
+#   * a one-sided EXTRA operator inside an already-shared slot still folds
+#     ("we ship and test" / "we ship and test but we wait") — the extra is read
+#     as the broadening case, and closing it needs syntax.
+# `before`/`after` are deliberately NOT slots: both are ordinary content tokens
+# (neither is a frame word), so each side keeps its own ordering word and the
+# two-sided substitution rule already refuses the swap.
 _CONNECTIVE_SLOTS = (
     # clause relation — the logical/causal/contrastive link between two
     # predications.
@@ -3158,16 +3177,21 @@ _CONNECTIVE_SLOTS = (
     frozenset({"then", "else"}),
     frozenset({"than", "as"}),
     frozenset({"to", "from"}),
-    frozenset({"before", "after"}),
 )
 _CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
 # Multi-word COORDINATIONS.  `as well as` IS `and`, so it is canonicalised to
-# its operator before the slots are read: left as written, its `as` would look
-# like the comparison `as` (refusing "we ship the server as well as the client"
-# against the comma list, a legitimate fold) and deleting the phrase instead
-# would lose the `and`/`or` contrast ("as well as" against `or` would read as
-# one-sided and fold).
+# its operator before the slots are read.  Left as written its `as` fills the
+# clause-relation slot and REFUSES the legitimate `as well as` ⇄ `and` fold;
+# deleting the phrase instead would lose the `and`/`or` contrast, because
+# `as well as` against `or` would then read as one-sided and fold.  Matched on
+# WORD boundaries, so "it was well as expected" and "the gas well as a fuel"
+# are not rewritten into a coordination they are not.
 _COORDINATION_PHRASES = (("as well as", "and"),)
+_COORDINATION_PHRASE_RE = tuple(
+    (re.compile(r"\b" + r"[\W_]+".join(re.escape(w) for w in phrase.split())
+                + r"\b"), operator)
+    for phrase, operator in _COORDINATION_PHRASES
+)
 # Relative days + month names.  Not interchangeable with the value dimension:
 # "shipped in march" vs "shipped in april" carries no number.
 _DATE_WORDS = frozenset({
@@ -3637,35 +3661,47 @@ def _wordlist_hits(content: str, words: frozenset[str]) -> frozenset[str]:
 def _connective_slots(content: str) -> tuple[frozenset[str], ...]:
     """Membership in each ``_CONNECTIVE_SLOTS`` slot, one entry per slot.
 
+    Read from the RAW token stream, through ``_wordlist_hits`` — and therefore
+    through ``_deaccent`` and the word-part split.  That matters: a member
+    carrying a non-composing combining mark ("a\u0338nd") is still that member,
+    and a member fused to a separator ("and/or") is found by its parts.  Reading
+    the FLATTENED form instead loses both — ``_flat_words`` turns a mark into a
+    separator, so the member is split in two before ``_deaccent`` can drop it.
+
     A multi-word coordination is canonicalised to its operator first
-    (``_COORDINATION_PHRASES``): "as well as" is `and`, and reading its `as` as
-    a slot member would refuse a legitimate fold.
+    (``_COORDINATION_PHRASES``, on word boundaries).
     """
-    text = _flat_words(content)
-    for phrase, operator in _COORDINATION_PHRASES:
-        text = text.replace(phrase, f" {operator} ")
+    text = str(content or "")
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        text = pattern.sub(f" {operator} ", text)
     found = _wordlist_hits(text, _CONNECTIVE_MEMBERS)
     return tuple(found & slot for slot in _CONNECTIVE_SLOTS)
 
 
 def _connective_swap(a: str, b: str) -> frozenset[str]:
-    """Members of a slot BOTH sides fill with NO member in common (#5139).
+    """A slot BOTH sides fill where EACH side owns a member the other lacks.
 
     Empty when the pair does not swap operators: a slot filled on ONE side only
-    is the documented broadening (`and` against a comma list), a slot filled on
-    neither says nothing, and a slot both sides fill with a member in common has
-    matched — the extra member is the broadening case again, not a swap
-    ("we wait for the build and the tests" against "we wait for the build, the
-    tests" shares `for`).  The role of a load-bearing connective is thus decided
-    by the pair, which is what a token-level predicate cannot do — and a
-    non-empty result is a substituted-content difference, the same dimension a
-    swapped content token reaches.
+    is the documented broadening (`and` against a comma list); a slot filled on
+    neither says nothing; and a shared member with a one-sided extra has a
+    member the other side lacks on ONE side only — the broadening case again,
+    not a swap ("we wait for the build and the tests" against "we wait for the
+    build, the tests" shares `for` and only one side is missing `and`).  Both
+    sides owning an extra is what a swap looks like, and it is why a SHARED
+    member cannot mask one: "we ship as planned and test" against "we ship as
+    planned or test" shares `as` and still swaps `and` for `or`.
+
+    The role of a load-bearing connective is thus decided by the pair, which is
+    what a token-level predicate cannot do — and a non-empty result is a
+    substituted-content difference, the same dimension a swapped content token
+    reaches.
     """
     out: set[str] = set()
     for slot_a, slot_b in zip(_connective_slots(a), _connective_slots(b),
                               strict=True):
-        if slot_a and slot_b and slot_a.isdisjoint(slot_b):
-            out |= slot_a | slot_b
+        only_a, only_b = slot_a - slot_b, slot_b - slot_a
+        if only_a and only_b:
+            out |= only_a | only_b
     return frozenset(out)
 
 
