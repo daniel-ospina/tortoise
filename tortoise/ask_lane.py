@@ -412,6 +412,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         _distinct_session_ids,
         apply_evidence_boost,
         ask_env_bool,
+        ask_session_key,
         assemble_context,
         dedup_pool,
         estimate_tokens_ask,
@@ -559,14 +560,14 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
         #    rerank → assembly (resolved / pool / byte caps from ``caps``).
         try:
-            def _ask_session_key(h: dict) -> str:
-                return (h.get("session_id")
-                        or h.get("session_date")
-                        or f"idx:{h.get('lme_session_index', -1)}")
-
+            # #4155: ``retrieval.ask_session_key`` is the single source for
+            # this key (snake ``session_id`` → the camel ``sessionId`` the
+            # point fetch populates → ``session_date`` → ``idx:``). Reading
+            # only the snake key collapsed every date-less captured chunk
+            # into ONE global ``idx:-1`` bucket, so the cap applied globally.
             deduped = dedup_pool(
                 annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
-                session_key=_ask_session_key)
+                session_key=ask_session_key)
             # A5 (#2070): evidence-mark boost before assembly (mark_for=None =
             # the stored-``has_answer`` fallback — source-session class,
             # conservative). Zero marks → byte-identical order (all factors
