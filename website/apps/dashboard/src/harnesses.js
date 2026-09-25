@@ -616,34 +616,20 @@ export function preferredSurface(family, current) {
 // stay the single 7-harness vocabulary; the harness table in the SERVED
 // onboarding instructions (#4365: an instruction document, not an installed
 // skill) is the agent-side self-adjudication source (the chooser's
-// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH); #2698 deleted its flat
-// dashboard tab and #2912's 4-family HARNESS_FAMILIES excluded it from the
-// chooser, so it renders on NO CHOOSER/connect branch. It is NOT absent from the
-// dashboard: the LIVE Memory-sources capture panel maps HARNESS_ORDER (which
-// includes it) and reads HARNESS_NAMES/HARNESS_CAPTURE_REASON to list it as
-// unsupported-with-a-reason. HARNESS_STEPS.chatgpt, HARNESS_INSTALL.chatgpt,
-// HARNESS_INTRO.chatgpt, HARNESS_COPY_LABEL.chatgpt and
-// HARNESS_CONTINUE_LABEL.chatgpt render nowhere live: main.jsx reads them only in
-// the ARCHIVED LEGACY_WIZARD_ARCHIVED block (indexed by `wizardHarness`), and that
-// A0 rollback surface must stay OFF for the chooser to keep #2912's four
-// families. Their other readers are the DE2E-5 roundtrip test (harnesses.test.js)
-// and the #4880 snapshot gate — which commits HARNESS_INTRO.chatgpt and
-// HARNESS_STEPS.chatgpt into src/wizardPrompts.snapshot.json, so editing those
-// two is a reviewed snapshot diff, not a dead-code edit.
-// HARNESS_CONTINUE_LABEL.chatgpt is therefore a LEGACY label: there is no
-// ChatGPT connect step for it to caption. UNIVERSAL_COMMAND.chatgpt is narrower:
-// no render indexes UNIVERSAL_COMMAND by harness (main.jsx reads only
-// `.codexDesktop`), so its readers are the roundtrip test and the snapshot
-// generator alone. Its LIVE
-// carrier is the public setup docs page (#4836): website/docs.html#chatgpt
-// names the Developer-mode path, the canonical connector URL and the onboarding
-// instructions URL, so a ChatGPT user is not left with only a test-consumed
-// constant. The block and that page differ in the INSTRUCTIONS they hand over,
-// NOT in the path: both enrol the same Developer-mode OAuth connector, but this
-// block embeds the workflows prompt and asks an in-chat question, while the page
-// hands over the onboarding document, whose §4 verifies with `tortoise_health`.
-// The block must not name `tortoise_health` (pinned in harnesses.test.js) — that
-// is a property of THIS copy, never evidence that ChatGPT lacks the tools.
+// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the chooser can never
+// select it: #2698 deleted its dashboard tab and #2912's 4-family
+// HARNESS_FAMILIES excluded it (the mount effect also resets a persisted
+// 'chatgpt' to a valid family). Its LIVE carrier is the public setup docs page
+// (#4836): website/docs.html#chatgpt names the Developer-mode path, the
+// canonical connector URL and the onboarding instructions URL, so a ChatGPT user
+// is not left with only a test-consumed constant. The block below and that page
+// hand over different INSTRUCTIONS, not different paths — both enrol the same
+// Developer-mode OAuth connector; this block embeds the workflows prompt and asks
+// an in-chat question, the page hands over the onboarding document, whose §4
+// verifies with `tortoise_health`. The block must not name `tortoise_health`
+// (pinned in harnesses.test.js); that is a property of THIS copy, not evidence
+// about what ChatGPT can call. Reachability of each `chatgpt` leaf below is a
+// `grep` question, deliberately not restated here.
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the

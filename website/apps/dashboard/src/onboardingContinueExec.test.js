@@ -116,7 +116,7 @@ const DEP_NAMES = [
   'api', 'fetch', 'supabaseClient', 'sessionTokenRef', 'orgIdRef',
   'onboardingRefreshSeqRef', 'onboardingTeamQ', 'onboardingStaleRef',
   'setOnboarding', 'setOnboardingComplete', 'setOnboardingLoading',
-  'setWizardConnectBusy', 'setWizardConnectError', 'setWizardPaused', 'setWizardStep',
+  'setWizardConnectBusy', 'setWizardPaused', 'setWizardStep',
 ]
 
 const SERVER_PAYLOAD = Object.freeze({
@@ -178,7 +178,6 @@ function environment(overrides = {}) {
     setOnboardingComplete: () => {},
     setOnboardingLoading: (v) => loadingCalls.push(v),
     setWizardConnectBusy: () => {},
-    setWizardConnectError: () => {},
     setWizardPaused: () => {},
     setWizardStep: () => {},
     refreshOnboarding: async () => ({ applied: true, superseded: false }),
