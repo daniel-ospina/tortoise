@@ -133,9 +133,9 @@ Two independent measurements exist, both already recorded on the issue:
 **⚠️ MEASUREMENT-COMPATIBILITY SPOTLIGHT — the 4,701 B figure and the doc's 1.50 KB stored / 2.05 KB resident figure are NOT the same quantity, and the two must not be interchanged.**
 - `4,701 B` is the **marginal `used_memory` delta of one embedded node** in a **fresh, small instance** — an allocation-level measurement that includes the node's own overhead, with **no vector index built**. It is a **floor for marginal growth**, not an amortised per-vector cost.
 - `STORAGE-ARCHITECTURE.md` §12.1 gives **1.50 KB stored** (the raw `vecf32` payload) and **2.05 KB resident** (payload + its share of HNSW).
-- **The check that settles it:** if 4,701 B/node were the resident cost, 33,580 embeddings would occupy **~158 MB — more than the whole 141 MB graph**, and `Point` attributes alone (≈20,667 embedded Points × 4,701 B ≈ 97 MB) would exceed the measured **50 MB `Point` attribute** line in §3.5. **So the 4,701 B figure cannot be multiplied by the embedding count.** The graph-wide number must come from the measured estimate (§3.5), which is why the pricing table below uses denominators, not the probe.
+- **The check that settles it:** if 4,701 B/node were the resident cost, 33,580 embeddings would occupy **~158 MB — more than the whole 141 MB graph**, and `Point` attributes alone (≈20,900 embedded Points — **derived from the counts**, 33,580 total − 7,859 `:Object` − 4,798 `:Event` — × 4,701 B ≈ 98 MB) would exceed the measured **50 MB `Point` attribute** line in §3.5. **So the 4,701 B figure cannot be multiplied by the embedding count.** The graph-wide number must come from the measured estimate (§3.5), which is why the pricing table below uses denominators, not the probe.
 
-**Graph-wide blend** (the number a pricing model actually needs) — 141 MB over the counted set, at **$73/GiB** (the vendor quotes "/GB"; the ≤5 % convention spread is smaller than the measurement uncertainty):
+**Graph-wide blend** (the number a pricing model actually needs) — 141 MB over the counted set, at **$73/GiB**. *(The vendor quotes "/GB". This table treats that as "/GiB", i.e. MiB-based; reading it literally as 10⁹ B would change the figures by **≈7 %** — 73 × 1.0737 = $78.4/GiB — so every $/10k row below is ≈7 % low under the literal reading. The convention is chosen explicitly here so the numbers can be reproduced.)*
 
 | denominator | bytes/node | B per 10k nodes | $/10k nodes/mo |
 |---|---|---|---|
@@ -144,7 +144,7 @@ Two independent measurements exist, both already recorded on the issue:
 | the storage doc's ≈3 KB working figure | 3,000 B | 30.0 MB | **$2.04** |
 | **cap-counted nodes (24,965)** | **≈ 5,600 B** | 56.0 MB | **$3.81** |
 
-⚠️ **The declared 1,024 B matches no state the system runs in**: ≈5× low for the product as shipped, ≈2.9× high for the degraded keyword-only mode. **The measured range is ≈$1.87–$3.81 / 10k nodes/mo**, and the **decided overage basis (≈$2 / 10k)** sits at the **low end** of it — a fact for the owner, not a recommendation.
+⚠️ **The declared 1,024 B matches no state the system runs in.** Read the two ratios with their denominators attached, because the two figures are different *kinds* of number: **5,600 B** is a **graph-wide blend on the cap denominator** (141 MB ÷ 24,965 cap-counted nodes), while **356 B** is a **marginal isolated-probe** figure (one properties-only Point, no index, in a fresh instance). So: the declared constant is **≈5× below the cap-denominator blend** (1,024 vs 5,600 B), and **≈2.9× above the marginal probe** (1,024 vs 356 B) — *not* two ratios over the same quantity. **The measured range is ≈$1.87–$3.81 / 10k nodes/mo**, and the **decided overage basis (≈$2 / 10k)** sits at the **low end** of it — a fact for the owner, not a recommendation.
 
 ### 3.5 Memory composition (measured estimate, 2026-09-24) **[MEDIUM]** ⚠️ emerging — a sampling estimate, and the index attribution is unresolved
 
@@ -191,30 +191,30 @@ Per the owner's standing rule, **the rows come first, the verdict after.**
 
 ### 4.2 `Point{pointKind:event}` — 18 real rows (the episodic class)
 
-*(Quoted content, truncated; markdown markup stripped for table rendering — the **ids are the recovery key**, so any row can be re-fetched verbatim.)*
+*(Quoted content, truncated; markdown markup stripped for table rendering. The **id column carries the full row id**, `<session-uuid>_t<N>` — the `_t<N>` turn suffix is what makes a row individually addressable; the source session alone does not.)*
 
-| id (truncated) | content (truncated) |
+| id (full) | content (truncated) |
 |---|---|
-| ac338d28-2e18-4542-acc6-f450adb985 | [user] You are spawned in the worktree .../agent-infra/.worktrees/fix-1088-retry-bound |
-| ac338d28-… | [assistant] Item 1 failed (3 tests). Continuing with items 2–5. |
-| ac338d28-… | [assistant] Item 2 ok exit 0; Item 3 ok 60000; Item 4 identical before/after. Now item 5. |
-| ac338d28-… | [assistant] 3 tests fail in test 30. Let me reproduce one failing case in isolation… |
-| ac338d28-… | [assistant] Proof A ok (parent fail-open exit 0; current exit 1 with cap-drift). Now Proof B. |
-| ac338d28-… | [assistant] Proof B ok. Now Proof C — locate test 25's heredoc. |
-| ac338d28-… | [assistant] All proofs pass. Cleaning up temps and confirming repo untouched. |
-| ac338d28-… | [assistant] Verification report: repo state note — worktree is dirty at start and end… |
-| 1b7e34f8-265d-46a0-b46f-0339180377 | [user] You are clearing a hosted deploy freeze for the Tortoise beta… |
-| 1b7e34f8-… | [assistant] Before state captured. Now checking openapi.json before, then dispatching step 1. |
-| 1b7e34f8-… | [assistant] Before baseline confirmed (112 paths, no /v1/organizations). Dispatching step 1. |
-| 1b7e34f8-… | [assistant] Dispatched supabase-deploy.yml → run 35136229640. Polling. |
-| 1b7e34f8-… | [assistant] supabase-deploy.yml → success. Immediately dispatching step 3… |
-| 1b7e34f8-… | [assistant] deploy-hosted.yml dispatched → run 35136316946. Polling. |
-| 1b7e34f8-… | [assistant] packaging-smoke ok; deploy-api in progress (this is the job containing the drift check). |
-| 1b7e34f8-… | [assistant] "Check migration drift (fail-closed)" passed (was the blocking step). Fly deploy in progress. |
-| 1b7e34f8-… | [assistant] Run 35136229640 in progress on 6d707851. Continuing to poll. |
-| 1b7e34f8-… | [assistant] I'll execute this bounded deploy operation. First, capturing the "before" state, then dispatching. |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t0` | [user] You are spawned in the worktree /Users/danielospina/…/agent-infra/.wor… |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t1` | [assistant] Item 1 failed (3 tests). Continuing with items 2–5. |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t2` | [assistant] Item 2 ✓ exit 0; Item 3 ✓ 60000; Item 4 identical before/after. Now item 5. |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t3` | [assistant] 3 tests fail in test 30. Let me reproduce one failing case in isolation (temp co… |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t5` | [assistant] Proof A ✓ (parent fail-open exit 0; current exit 1 with cap-drift). Now Proof B. |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t6` | [assistant] Proof B ✓. Now Proof C — locate test 25's heredoc. |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t8` | [assistant] All proofs pass. Cleaning up temps and confirming repo untouched. |
+| `ac338d28-2e18-4542-acc6-f450adb985c1_t9` | [assistant] Verification report  Repo state note: worktree is dirty at start and end — M d… |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t0` | [user] You are clearing a hosted deploy freeze for the Tortoise beta. This is a bounded prod… |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t2` | [assistant] Before state captured. Now checking openapi.json before, then dispatching step 1. |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t3` | [assistant] Before baseline confirmed (112 paths, no /v1/organizations). Dispatching step 1. |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t4` | [assistant] Dispatched supabase-deploy.yml → run 35136229640. Polling. |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t6` | [assistant] ✓ supabase-deploy.yml → success. Immediately dispatching step 3 (deploy-hosted.y… |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t7` | [assistant] deploy-hosted.yml dispatched → run 35136316946. Polling. |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t8` | [assistant] packaging-smoke ✓; deploy-api in progress (this is the job containing the drift … |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t9` | [assistant] Check migration drift (fail-closed) passed (was the blocking step). Fly deploy i… |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t5` | [assistant] Run 35136229640 in progress on 6d707851. Continuing to poll. |
+| `1b7e34f8-265d-46a0-b46f-033918037757_t1` | [assistant] I'll execute this bounded deploy operation. First, capturing the "before" state,… |
 
-**Verdict:** **`pointKind:event` is 21,214 nodes — 55 % of all Points — and is quota-free while fully RAM-resident.** These are episodic session/turn records; several sampled rows are **procedural chatter whose only durable content is an identifier** (a run id, a job name, a status word) — the `EMBED` gate's own named case. **Every one of them attempted an embedding at creation: there is no `is_episodic` guard on the embedding call in `create_point`** (`sdk.py:2989`; the encode is `sdk.py:3260-3267`). *(The issue's own citation, `sdk.py:2686`, is stale at `c4580b083` and points at an unrelated helper.)*
+**Verdict:** **`pointKind:event` is 21,214 nodes — 55 % of all Points — and is quota-free while fully RAM-resident.** These are episodic session/turn records, and the 18 rows above are turn-by-turn procedural records — run ids, job names, status words — a *qualitative* reading of that shape, and **it is not the same test as §6.1a's predicate**: the two predicates tested there are **proposition-shaped** (they ask whether a sentence states a durable proposition) and are not designed to catch a turn record, which is why both returned **0/40** on this class. So "several rows are identifier-only" is a hand reading, **not a measured drop rate** — the measured statement is *"no tested predicate drops any of the 40 sampled event rows"* (see §6.1a for the reconciliation). **Every one of them attempted an embedding at creation: there is no `is_episodic` guard on the embedding call in `create_point`** (`sdk.py:2989`; the encode is `sdk.py:3260-3267`). *(The issue's own citation, `sdk.py:2686`, is stale at `c4580b083` and points at an unrelated helper.)*
 
 ### 4.3 `:Event` label — 16 real rows (a measurement gap, shown)
 
@@ -243,7 +243,7 @@ The search surface exposes `content` from `n.subject`/`n.name`. All 16 sampled r
 
 ### 4.4 The three causes, separated
 
-- **(a) writing the wrong things** — present: 62.3 % of Objects are non-referential mentions; the owner's position (*"less noise is good"*, §16.3) already governs.
+- **(a) writing the wrong things** — present: **62.3 % of `:Object` names begin with `the `** (a definite description rather than a name). This is a *mention class*, not a synonym for "non-referential": the sampled rows include identifier-carrying definite descriptions (`the #1250 defect`, `the #1005 leaked-redislite-servers incident`), so most are non-referential but the class is not uniform. The owner's position (*"less noise is good"*, §16.3) already governs.
 - **(b) writing too many things** — present: the capped set is **2.04× smaller than the resident set**, Objects are 31.5 % of the capped set, and the largest class of all (episodic turns, 55 % of Points) is exempt from the cap entirely.
 - **(c) per-node cost** — present and **measured**: the declared constant matches no running regime (§3.4); the vector class ≈ half the graph (§3.5).
 
@@ -261,7 +261,7 @@ Multiple sources converge that memory-first graph systems tie cost to the datase
 The field's sizing formula is `1.1 × (4d + 8M)` bytes/vector — OpenSearch, AWS, and ScyllaDB all publish equivalent forms; Milvus shows graph overhead separate from raw vectors; the layer-0 `maxM0 = 2M` doubling is documented.
 *Sources:* OpenSearch docs (k-NN memory-optimized types); AWS Big Data Blog (k-NN at billion scale); ScyllaDB vector-search sizing; Milvus *Index Explained*; HNSW architecture write-ups.
 
-**⇒ For us:** with d = 384, M = 16 → **1,830 B ≈ 1.79 KB/vector** resident. **Our own measured index total is 45 MB against ~33,580 embeddings (~1.34 KB each)** — consistent with the formula, and it confirms the resident figure to use in any future model.
+**⇒ For us:** with d = 384, M = 16 → **1,830 B ≈ 1.79 KB/vector** of HNSW overhead. **But our own measurement is BELOW that, so the formula is an upper bound here, not a confirmation:** 1,830 B × 33,580 = **61.4 MB (58.6 MiB)**, which exceeds the *entire* 45 MB `indices_sz_mb` — and that 45 MB also contains every fulltext index, not just HNSW. So the measured total **bounds our whole index at ≤1.34 KB/vector** (`45 × 10⁶ B ÷ 33,580 ≈ 1,340 B` — decimal MB, the same basis as §3.5 and the storage doc's 33,580 × 1,536 B ≈ 51.6 MB), below the formula's HNSW-only 1.79 KB. The layer-0 doubling and `M` in our engine's configuration are not pinned by this read, so the honest statement is: **the published formula predicts ≈1.79 KB/vector; our measured index total is ≤1.34 KB/vector across *all* indexes — the formula over-predicts for our configuration and must not be substituted for the measured number.** (Note the same non-identity: the storage doc's **2.05 KB resident** = 1.50 KB payload + **0.55 KB** HNSW share, itself far below the formula's 1.79 KB HNSW-only term — the three figures are not on one basis.)
 
 ### X3 — Quantization is a real lever, but *not on hosted FalkorDB* **[HIGH — 3+ independent]**
 Scalar (int8) quantization gives **~4× compression with <1 % recall@10 loss**; binary gives up to 32× at 30–40 % recall loss unless rescaled. **But this requires an engine that stores the vectors in a quantized form** — our vectors are `vecf32` inside FalkorDB.
@@ -283,9 +283,9 @@ FalkorDB's published comparisons quote whole-instance RAM (100 MB vs 600 MB; 496
 
 ---
 
-## 6. Ranked optimisations (with expected savings and the write path touched)
+## 6. Ranked optimisations on the current stack (write-path levers only)
 
-**No item below changes a price or a cap.** Savings are stated as *bytes released*, and each names the surface it touches.
+**No item below changes a price or a cap.** Savings are stated as *bytes released*, and each names the surface it touches. **This list holds the two write-path levers (§6.1–§6.2) and nothing else.** Deployment and engine-hosting items are deliberately **not** ranked here — they are recorded and deferred as **§6.6 (per D11)**, so this section cannot be read as proposing a migration.
 
 ### 6.1 EMBED gate — stop embedding identifier-only text *(highest measured leverage on the dominant cost class)* **[MEDIUM]** ⚠️ emerging — the policy is decided; the saving is unmeasured
 - **What:** enforce the declared policy at a second point — *"a row earns a vector if its embedded text carries meaning that its identifiers do not"* (`STORAGE-ARCHITECTURE.md` §12.2a, **already DECIDED 2026-09-23**).
@@ -306,7 +306,9 @@ Per the owner's standing **small-sample-first** method, two candidate identifier
 | `:Object` (full set) | 7,859 | — | **4,900 (62.3 %)** — the definite-description class |
 | `:Event` label | 4,833 (measured 4,798 embedded) | — | text not visible in the read surface (§4.3) |
 
-**⇒ The identifier-only class is NOT concentrated in extracted statements** — a statement is a proposition by construction, so the strict predicate drops **0/40** and even a generous heuristic drops only 5 %. **The class the rule actually names lives in `:Object` (62.3 % definite descriptions, no description field) and in the episodic/`Event` classes** — which is exactly what §12.2's own table says (`Object{"the plan doc"}` → no vector).
+**⇒ The identifier-only class is NOT concentrated in extracted statements** — a statement is a proposition by construction, so the strict predicate drops **0/40** and even a generous heuristic drops only 5 %.
+
+**⚠️ Reconciliation — the event class is a *measured zero* and a *qualitative reading*, and the two must not be conflated.** Both predicates returned **0/40** on `pointKind:event`, yet §4.2 hand-reads those rows as identifier-heavy turn records. These are not in conflict once the predicates' shape is stated: **both are proposition-shaped** — they ask whether a row states a durable proposition — and a turn record (a run id, a job name, a status word) is not shaped that way, so the predicate cannot fire on it. **The measured fact is *"no tested predicate drops any of the 40 sampled event rows"*; "the class the rule names lives in the episodic class" is an inference from §4.2's reading, not a measured drop rate.** Making it measurable is the Stage-1 deliverable, and until then the episodic share is **unquantified**. The one *measured* large class remains `:Object` (**4,900 / 7,859 = 62.3 %** definite descriptions, no description field) — which is what §12.2's own table says (`Object{"the plan doc"}` → no vector).
 
 **The 2 looser-heuristic rows the owner must rule on — these are the boundary:**
 
@@ -331,21 +333,16 @@ Per the owner's standing **small-sample-first** method, two candidate identifier
 - **Expected saving:** the storage doc's own honest figures — **~2× mechanical; ~10× is a target, not a measurement** (§6.1). **Not a cost estimate; do not quote it as one.**
 - **Contradiction check:** none; it is the in-flight extractor work (E1).
 
-### 6.3 Densify — pack more graphs onto one instance **[LOW]** ⚠️ single-source — not measured here
-- **What:** the only lever that lowers *per-tenant* cost without dropping anything (≤ 75 % of instance RAM).
-- **Write path:** none — ops/deployment.
-- **Expected saving:** proportional to achieved density; needs the FalkorDB tenancy model, not measured here.
-- **Contradiction check:** none (D11 keeps the engine; density is not an engine change).
-
-### 6.4 The storage layer — deferred, and the deferred lever is *self-hosting first* **[HIGH — this is D11's own wording]**
-- **What:** D11's named revisit trigger → price **self-hosted FalkorDB (SSPLv1, same engine, no rewrite)** before any engine change. The Postgres+pgvector direction is `#3998`/D30's, deferred.
-- **Expected saving:** removes the $73/GiB rent; unbounded by the §6 storage multiply but gated on ops burden and the restore drill (`#3895`).
-- **Contradiction check:** ✅ **this is D11's own wording** — recorded, not proposed.
-
 ### 6.5 ⛔ Explicitly NOT levers on the current stack **[HIGH]**
 - **Quantization** — not applicable to `vecf32` on hosted FalkorDB (X3).
 - **Per-tenant index partitioning** — fails at ~2,100 tenants (lock exhaustion) and is unusable at 500; **withdrawn, not available** (`#12.1a`).
 - **Deriving/deleting `aboutObject`** — refused by the `OVERRIDES:` ruling; it also breaks two public surfaces.
+
+### 6.6 Deferred — recorded, NOT proposed (per D11) **[HIGH for the record; no action here]**
+
+These two items sit **outside the ranked list above** because each is either an ops/deployment action or an engine-hosting change, and neither is a write-path lever. They are recorded so the picture is complete; **this brief proposes neither.**
+- **Densify — pack more graphs onto one instance** (ops/deployment; ≤ 75 % of instance RAM). *The only lever that lowers per-tenant cost without dropping anything.* Saving is proportional to achieved density and needs the FalkorDB tenancy model, **not measured here**. It is not an engine change, so D11 does not block it — but it is not a write-path optimisation either.
+- **The storage layer — the deferred lever is *self-hosting first*.** D11's named revisit trigger → price **self-hosted FalkorDB (SSPLv1, same engine, no rewrite)** before any engine change. The Postgres+pgvector direction is `#3998`/D30's, deferred. *Expected saving if ever taken:* removes the $73/GiB rent; gated on ops burden and the restore drill (`#3895`). ✅ **This is D11's own wording — recorded, not proposed.**
 
 ---
 
