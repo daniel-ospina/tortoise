@@ -64,7 +64,7 @@ Layer vocabulary: **unit** = `_FakeDb`/`_FakeProj` or `object.__new__` (the `tes
 | 8 | **Opt-in env gates** — `_team_sweep_allowed` + the new legacy gate | Config / guard | **Unit** (env matrix) | Exact `== "1"`; fail-closed; refusal logged | Non-`"1"` enables an irreversible delete; OFF path deletes something new (**AC3**) | Fail-open, conditional guard | Task 3 |
 | 9 | **Env-vocabulary ledger** — `tests/test_env_truthy.py::_KNOWN_NARROW_READS` | Guard contract | **Unit** | A new `== "1"` read needs a ledger entry **with a reason** | New read without an entry ⇒ guard reds | Conditional guard | Task 3 Step 6 |
 | 10 | **pytest session lifecycle** — `_server_graph_hygiene`, `atexit` | Event / state | **Unit** + **AST pin** + session-e2e | Teardown once; name set captured **before** the sweep | Capture after the sweep ⇒ **vacuous gate** | Idempotency, fail-open | Task 5 |
-| 11 | **E2E-7 gate** — `_SERVER_SWEEP_GRAPH_LIST_CONSTANT`, `conftest.py:757`, `:781-808` | Guard / assertion | **Unit** + session-e2e | `set(owned ∧ journalled ∧ ¬default) ∩ GRAPH.LIST == ∅` | Today: WARNING-only. Hazards: the assert under the broad `except` ⇒ **vacuous**; an owned-set from the raw journal ⇒ **false-positive** on a preserved shared registry | Fail-open, conditional guard | Task 5 |
+| 11 | **E2E-7 gate** — `_SERVER_SWEEP_GRAPH_LIST_CONSTANT`, `conftest.py`'s `_server_graph_hygiene` (bound check + teardown capture) | Guard / assertion | **Unit** + session-e2e | `set(owned ∧ journalled ∧ ¬default) ∩ GRAPH.LIST == ∅` | Today: WARNING-only. Hazards: the assert under the broad `except` ⇒ **vacuous**; an owned-set from the raw journal ⇒ **false-positive** on a preserved shared registry | Fail-open, conditional guard | Task 5 |
 | 12 | **Backend attribution** — `_write_refusal_message`, `_WRITE_REFUSAL_MARKERS`, `_auto_health_recover` | Failure classification | **Unit** (`object.__new__` — the classifier *is* the unit) | Each cause maps to its **own** remedy; genuine corruption still reaches rebuild advice | A backend cause routed into the maxmemory message ⇒ misattribution; a widened substring list swallows corruption | Silent function skips, conditional guard | Task 4 |
 | 13 | **Concurrency** — peer suites on one shared server, the mint→journal window | Concurrent access | **Integration** (deterministic monkeypatched interleavings) | No atomic cross-channel delete (#3214, filed) | Peer's live graph deleted by a `scope=None` sweep | Race | **Unchanged** — `tests/test_wipe_server.py::test_wipe_server_toctou_*`; residual #3214 |
 
@@ -226,7 +226,7 @@ def is_legacy_residue(name: str, *, default_graph: str | None) -> bool:
     return name.startswith(_LEGACY_RESIDUE_PREFIXES)
 ```
 
-`_PRODUCT_GRAPH_PREFIXES` is declared **below** this block today (`tests/_embedded.py:1097`); **move it above the register** so the dict can reference it at import time by object identity (`is`), which is what the tie test asserts.
+`_PRODUCT_GRAPH_PREFIXES` is declared **below** this block today (its module-level declaration in `tests/_embedded.py`); **move it above the register** so the dict can reference it at import time by object identity (`is`), which is what the tie test asserts.
 
 **Rewire the consumers — do not leave a copy behind.** Three concrete edits, all in `tests/_embedded.py`:
 - `wipe_server`'s anonymous literal (`startswith(("test_", "tortoise_test"))` at ~`:825`) → `startswith(_SERVER_WIPE_PREFIXES)`.
@@ -272,10 +272,10 @@ def test_already_compliant_registry_name_is_not_double_prefixed(tmp_path):
 
 
 def test_shared_registry_name_is_never_prefixed(tmp_path):
-    """AC2's fail-closed direction. `namespace="registry"` makes _get_proj
-    force graph_name="registry_tortoise" (sdk.py:2519-2521) BEFORE our
-    override, so this is the real shared-name path — do not also assert a
-    separate `graph_name=None` leg, which is byte-identical to it."""
+    """AC2's fail-closed direction. `namespace="registry"` makes `_get_proj`'s
+    `namespace == "registry"` branch force graph_name="registry_tortoise"
+    BEFORE our override, so this is the real shared-name path — do not also
+    assert a separate `graph_name=None` leg, which is byte-identical to it."""
     assert _registry_name_for(tmp_path, "registry", None) == "registry_control_plane"
     assert _registry_name_for(tmp_path, "registry", "registry_tortoise") == "registry_control_plane"
 ```
@@ -501,12 +501,12 @@ In `tests/conftest.py`: add `_live_graph_names`, `_owned_survivors`, `_uri_defau
 
 Keep the whole-server count as a `print(... WARNING ...)` and **retain** the `server-hygiene-end.json` write.
 **Step 4:** Green on the unit tests.
-**Step 5: AST pin** the capture-before-sweep ordering in `tests/test_server_hygiene_gate.py` with a real `ast.walk` of the `_server_graph_hygiene` body: the `Call` to `_read_journal` must lexically precede the `Call` to `_session_end_own_sweep`.
-**Step 6: Session leg + reach.** The gate sits under `if not others` (`conftest.py:786`), so it is **last-suite-standing only**; record that as the reach. DO NOT claim in-process observability (Untestable #1). If `tests/test_tripwire.py`'s `_run_session` cannot be given a seeding path (it pops `TORTOISE_TEST_JOURNAL_FILE`), record AC4 as **AST-pinned, not session-observed** and skip the subprocess test rather than shipping an unrunnable one.
+**Step 5: AST pin** the capture-before-sweep ordering in `tests/test_server_hygiene_gate.py` with a real `ast.walk` of the `_server_graph_hygiene` body: the **`journal_names = set(_read_journal())` assignment's** `_read_journal()` call must lexically precede the `_session_end_own_sweep` call. The pin targets the GATE'S OWN capture, not merely any `_read_journal()` call — the whole-server bound's `journal_size = len(_read_journal())` also calls it, and matching on that read let the gate's capture move after the sweep and still pass.
+**Step 6: Session leg + reach.** The gate sits under `if not others` in `_server_graph_hygiene`, so it is **last-suite-standing only**; record that as the reach. DO NOT claim in-process observability (Untestable #1). If `tests/test_tripwire.py`'s `_run_session` cannot be given a seeding path (it pops `TORTOISE_TEST_JOURNAL_FILE`), record AC4 as **AST-pinned, not session-observed** and skip the subprocess test rather than shipping an unrunnable one.
 **Step 7: Record both departures** — `OVERRIDES:` comments **on issue #3634**:
 
 1. the gate's predicate: *the plan's `GRAPH.LIST count < journal_size + 20` assert as the gate* — a whole-server count cannot distinguish this session's residue from pre-existing/foreign graphs;
-2. the gate's interaction with the log-and-continue policy (epic cycle-8 P2-3/P2-4): the gate is scoped to `not own.get("failed")` so a transient delete error keeps the journal and does **not** red the suite; note the residual (a name left by a *silent* drop failure is not gated).
+2. the gate's interaction with the log-and-continue policy (epic cycle-8 P2-3/P2-4): the gate is scoped to `not own.get("failed")` so a transient delete error keeps the journal and does **not** red the suite; note the residual (the UNJOURNALLED mint — a graph materialized with no ownership record at all (LC4/LC7, #5048) is outside the owned ∧ journalled set by construction — plus the concurrent-suite window: under `if not others` the gate never runs while another suite is active). A *silent-success* drop is NOT a residual: the capture is pre-sweep and the post-sweep live probe never consults `own["dropped"]`, so the surviving owned name raises.
 
 Add the matching rows to the epic changelog table (`docs/epics/2026-08-24-test-db-migration/plan.md`, the CI-Fix Changelog / cycle-8 table).
 **Step 8: Commit.**
@@ -517,7 +517,7 @@ Add the matching rows to the epic changelog table (`docs/epics/2026-08-24-test-d
 **Acceptance:** A follow-up issue exists naming the sites and a trigger; the plan's Out-of-scope section names it.
 **Files:** a new GitHub issue; `docs/plans/2026-09-24-3634-graph-leak-reaping.md` (Out of scope)
 
-**Step 1:** File the issue covering `tortoise/hosted_backup.py:2356-2358`, `tortoise/sdk.py:16177`, `tortoise/projection/__init__.py:2550`/`:2919` — post-mint journalling leaves a crash window in which a graph exists with no ownership record. Name the trigger and the dependency on #3634.
+**Step 1:** File the issue covering `tortoise/hosted_backup.py`'s restore-staging mint, `tortoise/sdk.py`'s org/team mint, and `tortoise/projection/__init__.py`'s two `_journal_append_product` call sites (the redirect append and `from_uri`'s) — post-mint journalling leaves a crash window in which a graph exists with no ownership record. Name the trigger and the dependency on #3634.
 **Step 2:** Reference it in Out of scope with the trigger.
 **Step 3: Commit.**
 
@@ -553,6 +553,6 @@ grep -c 'startswith(("test_", "tortoise_test"))' tests/_embedded.py   # must pri
 
 Unjournalled legacy `org_*` (104) and the graph named `t` — reachable only via the existing `_sweep_team_strays` opt-in (note: *journalled* `org_*`/`team_*` **are** owned and dropped by the default journal path; only the journal-blind residue needs the gate). LC5 (the `from_uri`/`host=` redirect gap). The atomicity residual #3214. The product storage architecture #4333.
 
-**LC4/LC7 — constructor-time / staging write-ahead journalling: tracked in #5048** (the original #5187 was consolidated into it and is now closed). A graph can be materialized before any ownership record exists — the restore staging graphs in `tortoise/hosted_backup.py:2356-2358` (journalled nowhere in that file) and `FalkorProjection.__init__`'s `_ensure_indexes()` at `tortoise/projection/__init__.py:2773` when a direct construction bypasses the `from_uri`/redirect append. A crash in the window leaves a graph invisible to every journalled sweep, including the new E2E-7 gate, which asserts on **owned ∧ journalled** survivors (so an unjournalled graph is outside its owned set by construction). Distinct from #3634: #3634 owns graphs that *had* a record and drifted out of the sweep. **Trigger:** an AST trip extending `tests/test_write_ahead_mint.py`'s `_MINT_SITES` guard to the constructor/staging materialization sites, so a new unowned mint reddens CI instead of rotting; dated re-check at the next #4333 touch or the next quarterly infra-stability pass.
+**LC4/LC7 — constructor-time / staging write-ahead journalling: tracked in #5048** (the original #5187 was consolidated into it and is now closed). A graph can be materialized before any ownership record exists — the restore staging graphs in `tortoise/hosted_backup.py` (journalled nowhere in that file) and `FalkorProjection.__init__`'s `_ensure_indexes()` in `tortoise/projection/__init__.py` when a direct construction bypasses the `from_uri`/redirect append. A crash in the window leaves a graph invisible to every journalled sweep, including the new E2E-7 gate, which asserts on **owned ∧ journalled** survivors (so an unjournalled graph is outside its owned set by construction). Distinct from #3634: #3634 owns graphs that *had* a record and drifted out of the sweep. **Trigger:** an AST trip extending `tests/test_write_ahead_mint.py`'s `_MINT_SITES` guard to the constructor/staging materialization sites, so a new unowned mint reddens CI instead of rotting; dated re-check at the next #4333 touch or the next quarterly infra-stability pass.
 
-**Backfill-guard URI-path gate: filed as #5188.** `graph-scripts/backfill_invite_ghost_members.py:77-78` gates the destructive run on the URI-path graph name while the writes land on the SDK-resolved registry graph (`registry_control_plane`), so a test-prefixed `--uri` proceeds without `--yes` for a write to a shared non-test graph. Remedy: `test_guard(reg.name, args.yes)`, mirroring `graph-scripts/clear_max_sessions_4010.py:183`/`:186`. **Trigger:** the regression test in that issue (a test-prefixed URI path must not auto-approve a non-test resolved name).
+**Backfill-guard URI-path gate: #5188, fixed in PR #5222.** `graph-scripts/backfill_invite_ghost_members.py` gated the destructive run on the URI-path graph name while the writes land on the SDK-resolved registry graph (`registry_control_plane`), so a test-prefixed `--uri` proceeded without `--yes` for a write to a shared non-test graph. The guard now takes `test_guard(reg.name, args.yes)`, mirroring `clear_max_sessions_4010.py`'s `test_guard(target, args.yes)` on the SDK-resolved name. **Regression test:** `tests/test_backfill_ghost_members_guard.py` (a test-prefixed URI path does not auto-approve a non-test resolved name; a genuinely test-prefixed resolved name still does). #5188 stays open as the tracker until this lands.

@@ -494,6 +494,7 @@ surfaces:
   - test_4220_blog_residue_cleanup.py
   - test_4716_capture_operator_ref_remap.py
   - test_ask_eval_only.py
+  - test_backfill_ghost_members_guard.py
   # #4282: dual-registered with `api` because `api` is keyed on SOURCE PATTERNS, and
   # the files this guard protects are not api-owned: `tools/bridge_table.py`, the
   # GENERATED `docs/product/bridge-table.md`, and the three docs that restate its

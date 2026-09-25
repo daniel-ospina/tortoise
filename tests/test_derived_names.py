@@ -195,9 +195,9 @@ def test_already_compliant_registry_name_is_not_double_prefixed(tmp_path):
 
 
 def test_shared_registry_name_is_never_prefixed(tmp_path):
-    """AC2's fail-closed direction. `namespace="registry"` makes _get_proj
-    force graph_name="registry_tortoise" (sdk.py:2519-2521) BEFORE our
-    override, so this is the real shared-name path.
+    """AC2's fail-closed direction. `namespace="registry"` makes `_get_proj`'s
+    `namespace == "registry"` branch force graph_name="registry_tortoise"
+    BEFORE our override, so this is the real shared-name path.
 
     No separate `graph_name=None` leg: in a test session the projection
     redirect rewrites graph_name to `test_x_<hash>` inside `_get_proj()`
