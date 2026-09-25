@@ -3773,8 +3773,6 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     """
     import sys as _sys
 
-    from tortoise.capture_spool import flush_spool, read_spool_meta
-
     # #3615: capture is a DATA-SHARING act, not an authentication act. The
     # Bearer credential (api_key, already resolved by the caller) authenticates
     # the upload; it must never *authorize* it — exporting TORTOISE_API_KEY for
@@ -3792,9 +3790,12 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     # unconsented host and (b) still leave `session drain` — a THIRD upload
     # path — ungated, the "second upload primitive as a side door" class the
     # #3615 threat surface declares in scope.
-    from tortoise.capture_consent import (CAPTURE_DECLINED_HINT,
-                                          capture_consent_enabled,
-                                          record_capture_declined)
+    from tortoise.capture_consent import (
+        CAPTURE_DECLINED_HINT,
+        capture_consent_enabled,
+        record_capture_declined,
+    )
+    from tortoise.capture_spool import flush_spool, read_spool_meta
     if not capture_consent_enabled():
         # Durable + one-time: a stale copied hook discards this stderr
         # (`2>/dev/null`), so the same notice is also written to
@@ -3947,8 +3948,6 @@ def _cmd_session_drain(api_key: str, api_url: str,
     """
     import sys as _sys
 
-    from tortoise.capture_spool import flush_spool, spool_dir
-
     # #3615: the drain is a TRANSMISSION primitive (it POSTs spooled turns), so
     # it carries the same consent gate as `session capture` / `sessions
     # import`. Without it, a host that was consented earlier and has the switch
@@ -3957,9 +3956,12 @@ def _cmd_session_drain(api_key: str, api_url: str,
     # (`session spool`) stays ungated: consent authorizes transmission, not
     # durability. Best-effort contract preserved: report and exit 0, so a
     # backgrounded SessionStart drain never blocks the session.
-    from tortoise.capture_consent import (CAPTURE_DECLINED_HINT,
-                                          capture_consent_enabled,
-                                          record_capture_declined)
+    from tortoise.capture_consent import (
+        CAPTURE_DECLINED_HINT,
+        capture_consent_enabled,
+        record_capture_declined,
+    )
+    from tortoise.capture_spool import flush_spool, spool_dir
     if not capture_consent_enabled():
         record_capture_declined()
         print(f"spool drain: capture declined — {CAPTURE_DECLINED_HINT}",
