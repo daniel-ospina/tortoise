@@ -263,6 +263,7 @@ surfaces:
   - test_metering.py
   - test_oauth_mcp.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
+  - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
@@ -1908,6 +1909,7 @@ durations:
   test_init_apikey_validation.py: 4.2
   test_orient_direct_consolidation.py: 4.2
   test_oauth_mcp.py: 4.1
+  test_3036_oauth_retention.py: 0.2
   test_mcp_server.py: 4.0
   test_dashboard_login.py: 3.8
   test_capture_phase_d_dedup.py: 3.7

@@ -3,9 +3,16 @@
 -- referential integrity) and its retention/GC sibling.
 --
 -- The migration adds the two FKs 0016 omitted, both deliberately
--- ON DELETE SET NULL:
+-- ON DELETE SET NULL, plus `expires_at` indexes for the retention sweep:
 --   * oauth_access_tokens.refresh_token_id → oauth_refresh_tokens(id)
 --   * oauth_refresh_tokens.rotated_from    → oauth_refresh_tokens(id)
+--
+-- The migration's DANGLING-POINTER REPAIR (its only data-mutating statement) is
+-- exercised by the harness pre-seed hook in
+-- `supabase/tests/pglite/validate.mjs` (a dirty row is seeded BEFORE the
+-- migration is applied, then asserted NULL after) — not replayed here. Do not
+-- re-add a hand-copied repair predicate to this file: a copy cannot make the
+-- migration text the thing under test.
 --
 -- HOW TO RUN (no Docker — PGlite harness):
 --   npm --prefix supabase/tests/pglite run validate
@@ -55,9 +62,20 @@ SELECT tests.assert(
     WHERE conname = 'fk_oauth_refresh_tokens_rotated_from') = 'n',
   '3036: rotated_from FK is ON DELETE SET NULL (not CASCADE)');
 
--- ── 2. A dangling reference is REJECTED ────────────────────────────────────
+-- ── 2. Retention-sweep indexes on expires_at exist (all three tables) ──────
+SELECT tests.assert(
+  (SELECT count(*) FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname IN ('idx_oauth_codes_expires',
+                        'idx_oauth_access_tokens_expires',
+                        'idx_oauth_refresh_tokens_expires')) = 3,
+  '3036: all three expires_at sweep indexes exist');
+
+-- ── 3. A dangling reference is REJECTED — by the constraint under test ─────
+-- GET STACKED DIAGNOSTICS pins WHICH constraint fired: a future FK on the same
+-- table must not be able to make this probe pass for the wrong reason.
 DO $$
-DECLARE rejected boolean := false;
+DECLARE rejected boolean := false; which text;
 BEGIN
   BEGIN
     INSERT INTO public.oauth_access_tokens
@@ -65,14 +83,18 @@ BEGIN
     VALUES ('3036-access-dangling', '3036-h-dangling', '3036-client',
             '3036-user', '3036-org', now() + interval '1 hour',
             'no-such-refresh-row');
-  EXCEPTION WHEN foreign_key_violation THEN rejected := true;
+  EXCEPTION WHEN foreign_key_violation THEN
+    rejected := true;
+    GET STACKED DIAGNOSTICS which = CONSTRAINT_NAME;
   END;
   PERFORM tests.assert(rejected,
     '3036: an access.refresh_token_id pointing at a missing refresh row must be rejected');
+  PERFORM tests.assert(which = 'fk_oauth_access_tokens_refresh_token',
+    '3036: the rejection must come from fk_oauth_access_tokens_refresh_token, got ' || coalesce(which, '<none>'));
 END $$;
 
 DO $$
-DECLARE rejected boolean := false;
+DECLARE rejected boolean := false; which text;
 BEGIN
   BEGIN
     INSERT INTO public.oauth_refresh_tokens
@@ -80,13 +102,17 @@ BEGIN
     VALUES ('3036-refresh-dangling', '3036-h-r-dangling', '3036-client',
             '3036-user', '3036-org', now() + interval '1 hour',
             'no-such-ancestor-row');
-  EXCEPTION WHEN foreign_key_violation THEN rejected := true;
+  EXCEPTION WHEN foreign_key_violation THEN
+    rejected := true;
+    GET STACKED DIAGNOSTICS which = CONSTRAINT_NAME;
   END;
   PERFORM tests.assert(rejected,
     '3036: a refresh.rotated_from pointing at a missing row must be rejected');
+  PERFORM tests.assert(which = 'fk_oauth_refresh_tokens_rotated_from',
+    '3036: the rejection must come from fk_oauth_refresh_tokens_rotated_from, got ' || coalesce(which, '<none>'));
 END $$;
 
--- ── 3. Deleting a refresh row SETS NULL — it does not CASCADE ──────────────
+-- ── 4. Deleting a refresh row SETS NULL — it does not CASCADE ──────────────
 INSERT INTO public.oauth_refresh_tokens
   (id, token_hash, client_id, user_id, org_id, expires_at)
 VALUES ('3036-refresh-a', '3036-h-ra', '3036-client', '3036-user',
@@ -106,7 +132,7 @@ SELECT tests.assert(
     WHERE id = '3036-access-a') IS NULL,
   '3036: the surviving access row has refresh_token_id set to NULL');
 
--- ── 4. The rotation CHAIN does not cascade ─────────────────────────────────
+-- ── 5. The rotation CHAIN does not cascade ─────────────────────────────────
 INSERT INTO public.oauth_refresh_tokens
   (id, token_hash, client_id, user_id, org_id, expires_at)
 VALUES ('3036-chain-parent', '3036-h-cp', '3036-client', '3036-user',
@@ -127,7 +153,35 @@ SELECT tests.assert(
     WHERE id = '3036-chain-child') IS NULL,
   '3036: the surviving descendant has rotated_from set to NULL');
 
--- ── 5. No dangling references remain (the migration-repair invariant) ──────
+-- ── 6. A BULK chain delete (the sweep's real shape) is also safe ───────────
+-- The sweep issues one multi-row DELETE, not a single-row delete. Build a
+-- 3-deep chain, delete the two oldest in ONE statement, and assert the live
+-- tail survives with its link nulled.
+INSERT INTO public.oauth_refresh_tokens
+  (id, token_hash, client_id, user_id, org_id, expires_at)
+VALUES ('3036-bulk-1', '3036-h-b1', '3036-client', '3036-user',
+        '3036-org', now() + interval '1 hour');
+INSERT INTO public.oauth_refresh_tokens
+  (id, token_hash, client_id, user_id, org_id, expires_at, rotated_from)
+VALUES ('3036-bulk-2', '3036-h-b2', '3036-client', '3036-user',
+        '3036-org', now() + interval '1 hour', '3036-bulk-1');
+INSERT INTO public.oauth_refresh_tokens
+  (id, token_hash, client_id, user_id, org_id, expires_at, rotated_from)
+VALUES ('3036-bulk-3', '3036-h-b3', '3036-client', '3036-user',
+        '3036-org', now() + interval '1 hour', '3036-bulk-2');
+
+DELETE FROM public.oauth_refresh_tokens WHERE id IN ('3036-bulk-1', '3036-bulk-2');
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.oauth_refresh_tokens
+    WHERE id = '3036-bulk-3') = 1,
+  '3036: a bulk delete must NOT cascade through the chain to the live tail');
+SELECT tests.assert(
+  (SELECT rotated_from FROM public.oauth_refresh_tokens
+    WHERE id = '3036-bulk-3') IS NULL,
+  '3036: the live tail keeps its row with rotated_from nulled after a bulk delete');
+
+-- ── 7. No dangling references remain (the migration-repair invariant) ──────
 SELECT tests.assert(
   (SELECT count(*) FROM public.oauth_access_tokens a
     WHERE a.refresh_token_id IS NOT NULL
@@ -140,36 +194,6 @@ SELECT tests.assert(
       AND NOT EXISTS (SELECT 1 FROM public.oauth_refresh_tokens r
                        WHERE r.id = t.rotated_from)) = 0,
   '3036: no rotation link dangles after the migration repair');
-
--- ── 6. A pre-existing dangling row is repaired before the FK validates ─────
--- The FK now blocks NEW dangling refs, so simulate a DIRTY pre-migration DB:
--- drop the access FK, plant a dangling pointer, replay the migration's repair
--- predicate (20260925000001 step 1 — kept verbatim here; the migration is
--- append-only so it cannot drift), then re-add the FK. The ADD must succeed
--- and the planted pointer must be NULL — i.e. the backfill repair works.
-ALTER TABLE public.oauth_access_tokens
-    DROP CONSTRAINT IF EXISTS fk_oauth_access_tokens_refresh_token;
-INSERT INTO public.oauth_access_tokens
-  (id, token_hash, client_id, user_id, org_id, expires_at, refresh_token_id)
-VALUES ('3036-access-dirty', '3036-h-dirty', '3036-client', '3036-user',
-        '3036-org', now() + interval '1 hour', '3036-refresh-gone');
-
-UPDATE public.oauth_access_tokens AS a
-   SET refresh_token_id = NULL
- WHERE a.refresh_token_id IS NOT NULL
-   AND NOT EXISTS (SELECT 1 FROM public.oauth_refresh_tokens r
-                    WHERE r.id = a.refresh_token_id);
-
-ALTER TABLE public.oauth_access_tokens
-    ADD CONSTRAINT fk_oauth_access_tokens_refresh_token
-    FOREIGN KEY (refresh_token_id)
-    REFERENCES public.oauth_refresh_tokens (id)
-    ON DELETE SET NULL;
-
-SELECT tests.assert(
-  (SELECT refresh_token_id FROM public.oauth_access_tokens
-    WHERE id = '3036-access-dirty') IS NULL,
-  '3036: the migration repair nulls a pre-existing dangling pointer');
 
 -- ── Cleanup ────────────────────────────────────────────────────────────────
 DELETE FROM public.oauth_access_tokens  WHERE id LIKE '3036-%';

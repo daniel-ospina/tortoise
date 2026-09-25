@@ -73,16 +73,43 @@ AUTH_CODE_TTL_S = int(os.environ.get("TORTOISE_OAUTH_CODE_TTL", "600"))
 # ── Retention / GC windows (issue #3036) ────────────────────────────────────
 # Credential hygiene, a DIFFERENT AXIS from the user-content deletion promise:
 # these rows are service-role-only hashed secrets (0016 RLS), never user
-# content — the same carve-out the canonical doc records for the operational
-# event store. Canonical promise doc: docs/retention-and-deletion.md.
+# content. Canonical promise doc: docs/retention-and-deletion.md (which records
+# the same carve-out for the operational event store).
 #
-# Each value is the grace kept AFTER the row's own expires_at, so a row that is
-# revoked but not yet expired lives out its natural TTL first. That is what
-# makes a #2863 soft-revoke an accounting residue rather than a leak. Expressed
-# in seconds and overridable per env.
-OAUTH_CODE_RETENTION_S = int(os.environ.get("TORTOISE_OAUTH_CODE_RETENTION_S", "86400"))
-OAUTH_ACCESS_RETENTION_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_RETENTION_S", "86400"))
-OAUTH_REFRESH_RETENTION_S = int(os.environ.get("TORTOISE_OAUTH_REFRESH_RETENTION_S", "86400"))
+# Each value is the DEFAULT grace kept AFTER the row's own expires_at, so a row
+# that is revoked but not yet expired lives out its natural TTL first. That is
+# what makes a #2863 soft-revoke an accounting residue rather than a leak. The
+# env override is read and VALIDATED per sweep (see _retention_seconds), never
+# parsed blindly: a negative override would move the cutoff into the future and
+# delete LIVE credentials.
+OAUTH_CODE_RETENTION_S = 86400
+OAUTH_ACCESS_RETENTION_S = 86400
+OAUTH_REFRESH_RETENTION_S = 86400
+
+
+def _retention_seconds(env_name: str, default: int) -> int:
+    """Resolve a retention window from the environment, fail-safe (#3036).
+
+    Mirrors ``monitoring.event_retention_interval``: a value that is not a
+    positive whole number of seconds falls back to ``default`` with a warning.
+    This matters because the window is SUBTRACTED from ``now`` to form a
+    DELETE cutoff — a negative or malformed value would otherwise delete live
+    rows (or raise at import, silently disabling retention).
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("oauth: %s=%r is not an integer — using %ss",
+                       env_name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("oauth: %s=%r must be positive — using %ss",
+                       env_name, raw, default)
+        return default
+    return value
 # Distinct prefixes so the MCP auth middleware can route Bearer tokens without
 # a table scan (tt_ = tenant key, oat_ = OAuth access token). Refresh tokens
 # are never presented to /mcp — the prefix is a debugging aid.
@@ -1874,34 +1901,60 @@ def sweep_oauth_retention(cp, *, now: datetime | None = None) -> dict[str, int]:
     it. Those windows are credential hygiene — a different axis from the
     user-content deletion promise (``docs/retention-and-deletion.md``).
 
-    Delete order: access rows first, then refresh rows, then codes — so there
-    is nothing live for the access→refresh FK to act on. The ``ON DELETE SET
-    NULL`` policy added by migration 20260925000001 is the safety net for an
-    out-of-band / manual delete, not this path.
+    Delete order: access rows first, then refresh rows, then codes. That order
+    matters because ``refresh_grant`` DOES dereference the relationship (it
+    looks up the live access row by ``refresh_token_id`` to revoke it): an
+    access row is reaped before any refresh row it points at, so the
+    ``ON DELETE SET NULL`` action added by migration 20260925000001 is a safety
+    net for an out-of-band / manual delete, not this path. The invariant this
+    relies on is ``ACCESS_TOKEN_TTL_S + access window <= REFRESH_TOKEN_TTL_S +
+    refresh window`` — true for the defaults and independent of any override.
 
-    Returns the number of rows deleted per table. FAIL-CLOSED: a query failure
-    raises; the caller (``hosted_api._sweep_oauth_retention``) logs and skips
-    the cycle so retention can never crash the loop. Idempotent: a re-run finds
-    nothing and deletes nothing.
+    Each table is swept INDEPENDENTLY: a failure on one table is recorded and
+    the other two are still attempted, so a persistent query fault cannot
+    starve GC for the healthy tables. If any table failed, a RuntimeError is
+    raised AFTER the loop (fail-closed); every table already swept committed,
+    and the un-swept rows keep their past ``expires_at`` so the next cycle
+    retries them.
+
+    Returns, per table, the number of rows OBSERVED as eligible at sweep time.
+    It is a best-effort count, not an exact delete count: the eligibility read
+    is a separate PostgREST request (capped by the project's max-rows) and the
+    DELETE is a second request, so a full read page makes the number a lower
+    bound. Idempotent: a re-run finds nothing and deletes nothing.
     """
     now_dt = now or _now()
 
     def _cutoff(seconds: int) -> str:
-        return (now_dt - timedelta(seconds=seconds)).isoformat()
+        # Defensive floor: a cutoff of `now` only matches rows already expired.
+        return (now_dt - timedelta(seconds=max(0, int(seconds)))).isoformat()
 
-    deleted: dict[str, int] = {}
-    for table, seconds in (
-        ("oauth_access_tokens", OAUTH_ACCESS_RETENTION_S),
-        ("oauth_refresh_tokens", OAUTH_REFRESH_RETENTION_S),
-        ("oauth_codes", OAUTH_CODE_RETENTION_S),
-    ):
-        cutoff = _cutoff(seconds)
-        doomed = cp.query(table, select=["id"],
-                          filters=[("expires_at", "lt", cutoff)])
-        if not doomed:
-            deleted[table] = 0
-            continue
-        cp.query(table, method="DELETE",
-                 filters=[("expires_at", "lt", cutoff)])
-        deleted[table] = len(doomed)
-    return deleted
+    plan = (
+        ("oauth_access_tokens", "TORTOISE_OAUTH_ACCESS_RETENTION_S",
+         OAUTH_ACCESS_RETENTION_S),
+        ("oauth_refresh_tokens", "TORTOISE_OAUTH_REFRESH_RETENTION_S",
+         OAUTH_REFRESH_RETENTION_S),
+        ("oauth_codes", "TORTOISE_OAUTH_CODE_RETENTION_S",
+         OAUTH_CODE_RETENTION_S),
+    )
+    observed: dict[str, int] = {}
+    failures: dict[str, str] = {}
+    for table, env_name, default in plan:
+        observed[table] = 0
+        try:
+            cutoff = _cutoff(_retention_seconds(env_name, default))
+            doomed = cp.query(table, select=["id"],
+                              filters=[("expires_at", "lt", cutoff)])
+            if not doomed:
+                continue
+            cp.query(table, method="DELETE",
+                     filters=[("expires_at", "lt", cutoff)])
+            observed[table] = len(doomed)
+        except Exception as exc:  # per-table isolation — sweep the rest
+            failures[table] = str(exc)
+            logger.warning("oauth: retention sweep failed for %s: %s",
+                           table, exc)
+    if failures:
+        raise RuntimeError(
+            f"oauth retention sweep failed for {sorted(failures)}")
+    return observed

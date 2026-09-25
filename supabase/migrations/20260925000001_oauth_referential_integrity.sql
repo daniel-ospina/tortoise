@@ -8,8 +8,9 @@
 --   * oauth_refresh_tokens.rotated_from     → the refresh row this row
 --                                             replaced on rotation (a CHAIN)
 --
--- Every other cross-table column in 0016 IS constrained (client_id / team_id
--- with ON DELETE CASCADE). Without these two, reaping a refresh row leaves
+-- Every other cross-table column in 0016 IS constrained (client_id / org_id
+-- — the latter renamed from team_id by 20260915000001 — with ON DELETE
+-- CASCADE). Without these two, reaping a refresh row leaves
 -- access rows pointing at nothing, and the rotation chain is unenforced.
 -- #2863's compensation deliberately SOFT-REVOKES rather than deletes precisely
 -- because an ambiguous-commit delete would leave a live access row with a
@@ -18,12 +19,18 @@
 --
 -- ON DELETE POLICY — `SET NULL`, deliberately, for BOTH. Neither is CASCADE:
 --
---   * refresh_token_id. An access token is an INDEPENDENT bearer credential,
---     validated at the MCP boundary by its own hash + expires_at + revoked_at
---     (D6 introspection) — never by dereferencing its refresh row. Removing a
---     dead refresh row must therefore not revoke a live access token (CASCADE
---     would) nor block GC of the dead row (RESTRICT would). SET NULL drops the
---     provenance back-link and nothing else.
+--   * refresh_token_id. An access token is an INDEPENDENT bearer credential at
+--     the MCP boundary, validated by its own hash + expires_at + revoked_at (D6
+--     introspection). One path DOES dereference this link in the other
+--     direction: refresh_grant looks up the live access row by
+--     refresh_token_id in order to revoke it on rotation. SET NULL is still the
+--     right action — the sweep deletes ACCESS rows before the refresh rows they
+--     point at, and rotation can only run while the refresh row still exists —
+--     but the safety of that order rests on an explicit invariant:
+--     ACCESS_TOKEN_TTL_S + the access window <= REFRESH_TOKEN_TTL_S + the
+--     refresh window. Removing a dead refresh row must not revoke a live access
+--     token (CASCADE would) nor block GC of the dead row (RESTRICT would).
+--     SET NULL drops the provenance back-link and nothing else.
 --
 --   * rotated_from. This forms a rotation CHAIN (each new refresh row points at
 --     the row it replaced), so ON DELETE CASCADE would delete the entire
@@ -81,3 +88,14 @@ ALTER TABLE public.oauth_refresh_tokens
     FOREIGN KEY (rotated_from)
     REFERENCES public.oauth_refresh_tokens (id)
     ON DELETE SET NULL;
+
+-- 3) Retention-sweep indexes (issue #3036). The sweep's predicate is
+--    `expires_at < cutoff` on all three tables; 0016 indexed the lookup columns
+--    but never `expires_at`, so each hourly sweep would sequentially scan the
+--    tables. Plain btree is enough for the ordered comparison.
+CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires
+    ON public.oauth_codes (expires_at);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_expires
+    ON public.oauth_access_tokens (expires_at);
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_expires
+    ON public.oauth_refresh_tokens (expires_at);

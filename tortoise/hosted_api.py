@@ -980,7 +980,7 @@ def _sweep_oauth_retention() -> None:
         counts = sweep_oauth_retention(get_control_plane())
         total = sum(counts.values())
         if total:
-            _logger.info("oauth retention swept %s dead row(s): %s",
+            _logger.info("oauth retention swept %s eligible row(s): %s",
                          total, counts)
     except Exception as exc:  # a GC sweep must never crash the loop
         _logger.warning("oauth retention sweep failed: %s", exc)

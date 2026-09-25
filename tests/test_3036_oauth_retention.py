@@ -62,9 +62,9 @@ def test_removes_rows_past_their_window_and_keeps_rows_inside_it():
     for table, retention_s in _TABLES:
         _seed_three(cp, table, retention_s)
 
-    deleted = sweep_oauth_retention(cp, now=NOW)
+    observed = sweep_oauth_retention(cp, now=NOW)
 
-    assert deleted == {
+    assert observed == {
         "oauth_access_tokens": 1,
         "oauth_refresh_tokens": 1,
         "oauth_codes": 1,
@@ -109,25 +109,68 @@ def test_sweep_fails_closed_on_a_control_plane_error():
         sweep_oauth_retention(ErrorControlPlane(), now=NOW)
 
 
+def test_one_table_failure_does_not_starve_the_others():
+    """Per-table isolation: a persistent fault on one table must not deny GC to
+    the other two. The failed table is recorded and the function still raises
+    after attempting all three (fail-closed, retried next cycle)."""
+    cp = FakeControlPlane()
+    for table, retention_s in _TABLES:
+        _seed_three(cp, table, retention_s)
+    cp.fail_query(table="oauth_access_tokens", method="GET")
+
+    with pytest.raises(RuntimeError):
+        sweep_oauth_retention(cp, now=NOW)
+
+    # The two healthy tables were swept despite the access-table fault.
+    assert {row["id"] for row in cp.tables["oauth_refresh_tokens"]} == {
+        "oauth_refresh_tokens-inwindow", "oauth_refresh_tokens-live"}
+    assert {row["id"] for row in cp.tables["oauth_codes"]} == {
+        "oauth_codes-inwindow", "oauth_codes-live"}
+
+
 def test_retention_windows_are_positive():
     for value in (OAUTH_ACCESS_RETENTION_S, OAUTH_REFRESH_RETENTION_S,
                   OAUTH_CODE_RETENTION_S):
         assert isinstance(value, int) and value > 0
 
 
+def test_negative_retention_override_never_deletes_live_rows(monkeypatch):
+    """A negative window would move the cutoff INTO THE FUTURE and delete live
+    credentials. The resolver must fall back to the safe default instead."""
+    monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", "-3600")
+    monkeypatch.setenv("TORTOISE_OAUTH_REFRESH_RETENTION_S", "not-a-number")
+    monkeypatch.setenv("TORTOISE_OAUTH_CODE_RETENTION_S", "0")
+    cp = FakeControlPlane()
+    for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
+        cp.seed(table, [{"id": f"{table}-live",
+                         "expires_at": _iso(NOW + timedelta(hours=1))}])
+
+    observed = sweep_oauth_retention(cp, now=NOW)
+
+    assert observed == {"oauth_access_tokens": 0, "oauth_refresh_tokens": 0,
+                        "oauth_codes": 0}
+    for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
+        assert [row["id"] for row in cp.tables[table]] == [f"{table}-live"]
+
+
 # ── the caller / scheduling wiring ──────────────────────────────────────────
 
 def test_caller_is_a_noop_when_supabase_is_disabled(monkeypatch):
-    """OAuth is hosted-only (D3): registry/embedded mode must not touch it."""
+    """OAuth is hosted-only (D3): registry/embedded mode must not touch it.
+
+    Assert the NEGATIVE (no control-plane call), not the absence of a raise —
+    the caller swallows every Exception, so a raise-based sentinel is vacuous.
+    """
     from tortoise import supabase_control as sc
 
-    def _boom():  # must never be reached
-        raise AssertionError("get_control_plane called in registry mode")
-
+    calls: list[str] = []
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
-    monkeypatch.setattr(sc, "get_control_plane", _boom)
+    monkeypatch.setattr(sc, "get_control_plane",
+                        lambda: calls.append("called") or FakeControlPlane())
 
     ha_mod._sweep_oauth_retention()  # must not raise, must not query
+
+    assert calls == [], "registry mode must not fetch the control plane"
 
 
 def test_caller_sweeps_when_supabase_is_enabled(monkeypatch):
@@ -175,7 +218,9 @@ def test_boot_sweeps_include_the_oauth_sweep(monkeypatch):
 
 
 def test_hourly_retention_loop_schedules_the_oauth_sweep():
-    """The periodic runner must re-arm the OAuth sweep, not only boot.
+    """The periodic runner must re-arm the OAuth sweep INSIDE its ``while True``
+    body, not merely anywhere in the function — a call placed before the loop
+    fires once per process and would keep this test green.
 
     ``_event_retention_loop`` is a closure inside ``_lifespan``, so it is
     pinned statically (the established pattern in
@@ -189,7 +234,15 @@ def test_hourly_retention_loop_schedules_the_oauth_sweep():
         None,
     )
     assert loop is not None, "_event_retention_loop not found in hosted_api.py"
-    names = {node.id for node in ast.walk(loop) if isinstance(node, ast.Name)}
+    while_loop = next(
+        (node for node in ast.walk(loop)
+         if isinstance(node, ast.While) and isinstance(node.test, ast.Constant)
+         and node.test.value is True),
+        None,
+    )
+    assert while_loop is not None, "_event_retention_loop has no `while True:`"
+    names = {node.id for node in ast.walk(while_loop)
+             if isinstance(node, ast.Name)}
     assert "_sweep_oauth_retention" in names, (
-        "the hourly retention loop must schedule _sweep_oauth_retention"
+        "_sweep_oauth_retention must be scheduled INSIDE the hourly while-loop"
     )

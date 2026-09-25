@@ -134,7 +134,17 @@ still rejected (RFC 8707 §2).
 - OAuth is hosted-only: in registry/selfhost mode the functional endpoints
   fail closed with 503; metadata endpoints still serve static JSON.
 - Env knobs: `TORTOISE_OAUTH_ACCESS_TTL` (3600s), `TORTOISE_OAUTH_REFRESH_TTL`
-  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s).
+  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s); retention grace
+  `TORTOISE_OAUTH_ACCESS_RETENTION_S` / `TORTOISE_OAUTH_REFRESH_RETENTION_S` /
+  `TORTOISE_OAUTH_CODE_RETENTION_S` (each 86400s, positive-int validated — a
+  malformed or non-positive override falls back to the default).
+- Referential integrity + retention (#3036): `supabase/migrations/20260925000001_oauth_referential_integrity.sql`
+  adds the two FKs 0016 omitted (`refresh_token_id`, `rotated_from`, both
+  `ON DELETE SET NULL`) and `expires_at` indexes. A scheduled sweep
+  (`tortoise/oauth.py::sweep_oauth_retention`, wired into `hosted_api` boot +
+  `TORTOISE_EVENT_RETENTION_INTERVAL`) removes a row once its own `expires_at`
+  is past by the grace. These windows are credential hygiene — a different axis
+  from the user-content deletion promise; see `docs/retention-and-deletion.md`.
 
 ## Client identity: CIMD (#2847)
 
