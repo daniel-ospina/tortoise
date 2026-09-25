@@ -485,12 +485,57 @@ export const HARNESS_CAPTURE_REASON = {
 
 // #1728 (Task 17): receipt/probe labels for the 4-state capture status
 // (shared by the wizard step-1 and the dashboard panel).
+//
+// #3700: two states in this table are derived from a per-harness onboarding
+// key whose harness is the CALLER's DECLARATION, not a server observation:
+//   * `active` reads `session_capture_receipt_<harness>` — `body.harness` on a
+//     fresh session (an authenticated agent self-report), or the Session's
+//     STORED harness on a re-capture when it has one (itself recorded from the
+//     declaration that first stamped it); a Session with no stored harness
+//     falls back to the current caller's declaration (`stored or claimed`);
+//   * `waiting` reads `install_probe_<harness>` — `body.harness` on the
+//     install-probe POST the installed artifact fires.
+// Either way the harness is a caller declaration. No credential→harness binding
+// exists (a `tt_`/`tk_` key carries no harness), so the server never OBSERVES
+// which harness captured or installed; it observes that a credential reached
+// it. So the attribution is NOT baked into these state words — it is rendered
+// by `harnessAttributionForHarness` (captureStatus.js) next to the harness name,
+// which is where a self-reported harness belongs. The state VOCABULARY, the key
+// spellings and these state words are unchanged.
+//
+// `install-pending` is not in this group: it is the fall-through when NEITHER
+// per-harness STATE key (`session_capture_receipt_<h>` / `install_probe_<h>`) is
+// present, so its LABEL carries no attribution — hedging "not installed yet" as
+// agent-reported would invent a signal the server does not have. A row in this
+// state can still disclose one: a recorded per-harness FAILURE
+// (`session_capture_last_error_<h>`) is itself a per-harness signal, and
+// `harnessAttributionForHarness` attributes the row for it.
+export const HARNESS_ATTRIBUTION = 'harness reported by your agent'
 export const HARNESS_CAPTURE_STATUS_LABEL = {
   off: 'off',
   'install-pending': 'not installed yet',
   waiting: 'installed — waiting for first capture',
   active: 'active',
 }
+
+// #3700: the per-harness FAILURE sub-line's wording — the sibling of the labels
+// above, kept in this module (the
+// derivation reads state and guards the null case; it authors no copy). No
+// attribution here: this sentence renders inside a `role="alert"` live region,
+// where an assertive announcement must carry only the failure the user has to
+// act on, and where a trailing caveat would collide with server detail that
+// itself ends in a parenthesis or a full stop. The row already carries the
+// attribution (see above).
+//
+// The sentence deliberately names no HARNESS either, even though an assertive
+// announcement then reaches the screen reader without the row it belongs to:
+// the harness is the caller's own declaration, so naming it here would restate
+// a declared label OUTSIDE the disclosure above, in a region that cannot carry
+// it — re-creating the #3700 misreading the disclosure exists to prevent. The
+// alert is a child of the row, so its harness is the row's, named in the
+// head beside that disclosure.
+export const HARNESS_CAPTURE_LAST_ATTEMPT = (detail) =>
+  `Last attempt — ${detail}`
 
 // #1710: bare command with a comment lead-in — paste-safe in a terminal.
 export const HARNESS_PERSIST = (key) =>

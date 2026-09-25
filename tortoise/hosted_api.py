@@ -4466,18 +4466,28 @@ def _observed_capture_harness(org: dict, claimed: str | None,
     """The harness the SERVER may name in capture bookkeeping (receipt key /
     last-error key / the Session's own ``harness`` property).
 
+    #3700 — the NAME is historical. This returns a RESOLVED harness, not an
+    OBSERVED one: the server observes that an authenticated agent credential
+    captured, never WHICH harness (no credential→harness binding exists).
+    Read every value it returns as a caller declaration (see
+    ``tortoise/capture_receipts.py``).
+
     - A session-JWT caller (dashboard / browser) observes no harness — the
       per-harness claim is refused and the bare ``session_capture_receipt``
       (server-observed: a capture happened, harness unproven) is used.
-    - An agent credential: the server's OWN stored Session harness wins over
+    - An agent credential: the harness already stamped on the Session wins over
       a later claim (``stored or claimed``) — first-writer-wins, so a re-POST
       of an existing session_id can never RELABEL the harness and light
-      another harness's receipt. Only a FRESH session falls back to the
-      caller's claim, which for an agent credential is the agent's own
-      declaration (the agent is present — the connection is observed).
+      another harness's receipt. The caller's claim is used on a FRESH session
+      AND on a re-capture of a Session that has no stored harness (a
+      harness-unproven one, e.g. a session-JWT capture), where it is the
+      agent's own declaration (the agent is present — the connection is
+      observed).
 
     ``body.harness`` is therefore never authoritative on its own: it can only
-    ever introduce a harness on a session the server has not yet stamped."""
+    ever introduce a harness on a session the server has not yet stamped, and
+    either way the value it introduces is a caller declaration, never a harness
+    the server OBSERVED (#3700)."""
     if not _credential_is_agent(org):
         return None
     return stored or claimed
@@ -9519,13 +9529,24 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
     the quota 402) so disabled orgs do no quota work at all. The bookkeeping
     keys are per LANE (#3681): an AGENT credential's 2xx records
-    ``session_capture_receipt_{observed_harness}``, and its non-2xx records
-    ``session_capture_last_error_{observed_harness}`` (the dashboard failure
+    ``session_capture_receipt_{capture_harness}``, and its non-2xx records
+    ``session_capture_last_error_{capture_harness}`` (the dashboard failure
     sub-line reads this, NOT client state) — except the #3060 capacity 429 and
     the #3129 in-flight 409, which are server conditions. A session-JWT
     (dashboard/browser) caller observes no harness: it records NO per-harness
     last-error, and only the BARE ``session_capture_receipt`` — the same bare
     member legacy no-harness hooks write.
+
+    #3700: the harness in those keys is what
+    ``_observed_capture_harness(org, body.harness, <stored>)`` resolves (bound
+    as ``capture_harness`` in ``_capture_session_impl``, which writes the
+    receipt) — RESOLVED, not OBSERVED. The server observes that an
+    authenticated agent credential captured; the harness attribution is the
+    caller's declaration (``body.harness`` on a fresh session, or on a
+    re-capture of a Session with no stored harness; a Session that HAS a stored
+    harness keeps it, first-writer-wins). No credential→harness binding exists,
+    so no surface may read the per-harness key as proof the server saw that
+    harness — only the capture itself is observed.
     """
     _require_scope(org, "graphs:write", "capture_session")
     try:
@@ -9854,11 +9875,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # session_id (_session_capture_event_id), so both writers MERGE onto
     # ONE Event node instead of minting two.
     session_existed = bool(session_row[0])
-    # #3681 (server-stamped harness): the capture's harness is resolved from
-    # the SERVER's own record — a session-JWT caller never names one (bare
-    # receipt), and an agent credential can never RELABEL an already-captured
-    # session (the stored harness wins; first-writer-wins). ``body.harness``
-    # only ever introduces a harness on a session the server has not stamped.
+    # #3681 (first-writer-wins harness resolution): a session-JWT caller never names a
+    # harness (bare receipt), and an agent credential can never RELABEL an
+    # already-captured session — the STORED harness wins (first-writer-wins).
+    # ``body.harness`` only ever introduces a harness on a session the server
+    # has not stamped, and on that fresh-session path it is the CALLER's
+    # declaration, not a server observation (#3700: no credential→harness
+    # binding exists), so ``capture_harness`` is RESOLVED, not OBSERVED.
     stored_harness = session_row[3]
     capture_harness = _observed_capture_harness(org, body.harness,
                                                 stored_harness)
@@ -11078,16 +11101,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
 # ── #1727 Slice 2 (Task 11): per-harness receipt + last-error helpers ──────
 # The dashboard's capture-status surface reads THESE server-written keys
-# (never client state): session_capture_receipt_{harness} proves a durable
-# hosted 2xx capture; session_capture_last_error_{harness} carries the last
+# (never client state): session_capture_receipt_{harness} records a durable
+# hosted 2xx capture under an authenticated agent credential, attributed to
+# the RESOLVED harness — the caller's declaration (`body.harness` on a fresh
+# session, or on a re-capture of a Session with no stored harness; a stored
+# harness is kept, first-writer-wins), NOT a server observation of the harness
+# (#3700; see tortoise/capture_receipts.py).
+# session_capture_last_error_{harness} carries the last
 # non-2xx attempt's detail (the per-harness failure sub-line). Both are
 # REGISTERED onboarding state keys (Task 11's registration table) — an
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
 #
-# #3809: the key SPELLING lives in ONE place — ``tortoise.capture_receipts``
-# — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
-# so both this server and ``tortoise session verify`` derive the same name.
+# #3809: the key names come from ``tortoise.capture_receipts`` — imported above
+# as ``_capture_receipt_key`` / ``_capture_last_error_key``.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
@@ -11116,7 +11143,16 @@ def _record_capture_last_error(org_id: str, harness: str | None,
 # installed artifact itself fires. The in-repo session-start.sh hook (and the
 # Pi extension on load) POST this route; the org's onboarding state key
 # install_probe_{harness} (REGISTERED — Task 11's registration table)
-# records harness + server timestamp. The dashboard 4-state (off →
+# records harness + server timestamp. #3700: the `harness` in that key is the
+# CALLER's declaration (`InstallProbeRequest.harness`), not a server
+# observation — no credential→harness binding exists, so the server observed
+# that an install signal arrived, not which harness sent it. The dashboard
+# discloses that: the row rendering this probe-derived state shows the
+# attribution beside the harness NAME
+# (`website/apps/dashboard/src/captureStatus.js::harnessAttributionForHarness`,
+# using `harnesses.js::HARNESS_ATTRIBUTION`) — the plain `waiting` label
+# itself does not carry it.
+# The dashboard 4-state (off →
 # install-pending → waiting → active, Task 16/17 canonical names) reads it:
 # NO probe yet ⇒ install-pending; probe no receipt ⇒ waiting; receipt ⇒
 # active (receipt authoritative over probe).

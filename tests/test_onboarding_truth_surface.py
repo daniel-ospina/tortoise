@@ -395,7 +395,8 @@ class TestPatchRefusesFabricatedReceipt:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Part 2b — #3681: the receipt harness is SERVER-resolved
+# Part 2b — #3681: the receipt harness is CALLER-resolved (stored or claimed),
+# never server-observed — see #3700
 # ═══════════════════════════════════════════════════════════════════
 
 _CAPTURE_TEAM = {
@@ -418,14 +419,19 @@ _CONV = [
 ]
 
 
-class TestCaptureReceiptHarnessIsServerResolved:
+class TestCaptureReceiptHarnessResolution:
     """RED mutation: keep ``_capture_receipt_key(body.harness)`` → capture #2
     (a forged ``body.harness='cursor'`` replay of a claude session) writes
     ``session_capture_receipt_cursor`` → the 'no cursor receipt' assertion
     fails. Also: revert ``_observed_capture_harness`` to return ``claimed``
     for a session credential → the bare-receipt assertion fails.
     GREEN: the legitimate forms — a fresh agent capture names its own harness,
-    and a re-capture keeps the server's recorded harness."""
+    and a re-capture keeps the server's recorded harness.
+
+    #3700 — the harness is RESOLVED (stored-or-claimed), never OBSERVED: a
+    # re-capture keeps the Session's stored harness when it has one, and falls
+    # back to the current caller's declaration when it does not; either way the
+    # harness is a caller declaration, not something the server observed."""
 
     @pytest.fixture()
     def env(self, tmp_path, monkeypatch):
@@ -500,7 +506,8 @@ class TestCaptureReceiptHarnessIsServerResolved:
 
     def test_fresh_agent_capture_names_its_own_harness(self, env):
         """The legitimate form: a FRESH session's agent credential declares its
-        harness, and the receipt names it (the agent is the observation)."""
+        harness, and the receipt names it — a CALLER declaration, not a server
+        observation of the harness (#3700; the capture itself IS observed)."""
         tc, _holder, seen = env
         r = self._capture(tc, session_id="S-fresh", harness="cursor")
         assert r.status_code == 200, r.text

@@ -13,7 +13,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -22,7 +22,7 @@ import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizard
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, captureClaimForHarness, lastErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, harnessAttributionForHarness, captureErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
@@ -1460,6 +1460,12 @@ function claimIntentInFlight() {
   // here so the derivation is a plain value (unit-testable without a React
   // harness, which this repo does not have).
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
+  // #3700: the PLAIN per-harness status word (the attribution is rendered
+  // separately by `harnessAttribution` below) — the done screen's
+  // `install-pending` sentence reads it through the shared label helper. (The
+  // Settings pill calls the helper directly; the `present` / `future`
+  // sentences are literal prose that names no harness.)
+  const harnessCaptureStatusLabel = captureStatusLabelForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
   const onboardingRefreshedAtDoneRef = React.useRef(false)
@@ -6943,6 +6949,7 @@ function claimIntentInFlight() {
     ? (knownHarnessName(wizardHarness) || 'your agent')
     : 'your agent'
   const doneCaptureClaim = harnessPickEstablished ? harnessCaptureClaim : 'none'
+  const doneCaptureStatusLabel = harnessPickEstablished ? harnessCaptureStatusLabel : ''
   // #3428/#2937 (lane B3, review cycle 2 P2-4 / cycle 3 P1-D + P2-7): the
   // not-connected body's remedy clause is DERIVED, the same way the capture
   // claim is. "(running it creates a fresh key)" is true only where the user
@@ -7934,10 +7941,17 @@ function claimIntentInFlight() {
                                     corrected in cycle 4 (item 8), and #3782: the
                                     sentence printed follows the server's
                                     OBSERVATION, not the capability flag.
-                                    'present' prints only on an observed
-                                    per-harness RECEIPT; 'future' only once an
-                                    install PROBE was observed (the install is
-                                    confirmed server-side, capture has not fired);
+                                    'present' prints only on a per-harness
+                                    capture RECEIPT — and that receipt proves
+                                    the CAPTURE, not the harness: the harness in
+                                    the key is the caller's declaration (#3700),
+                                    so this sentence may claim the capture and
+                                    nothing more. 'future' only once an
+                                    install PROBE was observed (an install
+                                    signal arrived server-side, capture has not
+                                    fired) — and, #3700, the probe's harness is
+                                    likewise caller-declared, so this sentence
+                                    claims the install signal, not the harness;
                                     'install-pending' — recording on, nothing
                                     observed for this harness — prints the SAME
                                     "not installed yet" string Settings renders
@@ -7947,13 +7961,15 @@ function claimIntentInFlight() {
                                     said "not installed yet"). The capability
                                     flag still decides whether ANY sentence may
                                     print ('none' for no install path, recording
-                                    off, or NO HARNESS PICKER offered). A true
-                                    flag with no installed seam (#3575, lane B1)
-                                    is still a separate defect this screen cannot
-                                    detect. */}
+                                    off, or NO HARNESS PICKER offered). #3575 was
+                                    resolved by the in-repo Pi capture seam, so
+                                    the capability flag is derived from a real
+                                    install step; the general "flag true with no
+                                    installed seam" class is pinned by the
+                                    harness registry's tests, not here. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
                                 {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
-                                {doneCaptureClaim === 'install-pending' && `Session capture is ${HARNESS_CAPTURE_STATUS_LABEL['install-pending']}. `}
+                                {doneCaptureClaim === 'install-pending' && `Session capture is ${doneCaptureStatusLabel}. `}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
                               {/* The redirect is PROSE, not a control: we cannot open
@@ -10105,7 +10121,10 @@ function MemorySources(props) {
   const githubLastIndexed = formatRelativeTime(state.github_indexed_at, now)
 
   const status = (h) => captureStatusForHarness(state, h)
-  const lastError = (h) => lastErrorForHarness(state, h)
+  const lastError = (h) => captureErrorForHarness(state, h)
+  // #3700: the per-row harness attribution — rendered beside the harness name.
+  // Never inside the `role="alert"` failure sentence (see captureStatus.js).
+  const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
 
   return (
     <div className="memory-sources">
@@ -10357,20 +10376,43 @@ function MemorySources(props) {
               // source-grep tripwire.
               return (
                 <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
-                  <div className="harness-status-head">
-                    <strong>{HARNESS_NAMES[h]}</strong>
-                    {/* review P2-5: aria-live lives on the PILL (the state word
-                        only) — the container-level region announced the whole
-                        multi-line snippet. review P2-3: unsupported harnesses
-                        render the REASON only, no pill (no install path exists
-                        for web/cursor — a pill would contradict it). */}
-                    {supported && <span className="capture-state" aria-live="polite">{HARNESS_CAPTURE_STATUS_LABEL[st]}</span>}
+                  {/* review P2-5: the polite live region is scoped to the HEAD
+                      — the harness name, its disclosure and the state word — so
+                      it still does not announce the whole multi-line snippet
+                      below. That is a deliberate OVERRIDE of P2-5 (PR #1830),
+                      which moved the region OFF the container and ONTO the
+                      state pill: its hazard was the multi-line snippet, and the
+                      #3700 disclosure must be announced with the state it
+                      qualifies. Moving the region to the head keeps the snippet
+                      out while covering the name and the disclosure.
+                      review P2-3: unsupported harnesses render the REASON,
+                      with no pill and no failure line (an unsupported harness
+                      has no install path, so a per-harness claim would
+                      contradict the reason). That guard is what
+                      `harnessAttributionForHarness` mirrors, so an unsupported
+                      row makes no per-harness claim and needs no disclosure.
+                      #3700: the row NAMES a harness whose value is a caller
+                      declaration, so the disclosure (`harnessAttribution`) sits
+                      in the same group as the name — one flex item, so
+                      `space-between` separates the name group from the pill —
+                      and the state word stays plain; the attribution is what
+                      keeps the row from reading as a server-observed harness. */}
+                  <div className="harness-status-head" aria-live="polite">
+                    <span className="harness-status-name" id={`harness-note-${h}`}>
+                      <strong>{HARNESS_NAMES[h]}</strong>
+                      {harnessAttribution(h) && (
+                        <span className="dim small">· {harnessAttribution(h)}</span>
+                      )}
+                    </span>
+                    {supported && <span className="capture-state">{captureStatusLabelForHarness(state, h)}</span>}
                   </div>
                   {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
                   {supported && st === 'install-pending' && sessionsOn && (
                     <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
                   )}
-                  {lastError(h) && <p className="error small" role="alert">Last attempt: {lastError(h)}</p>}
+                  {/* #3700: the alert's description is the row's name group
+                      (name + disclosure). */}
+                  {supported && lastError(h) && <p className="error small" role="alert" aria-describedby={`harness-note-${h}`}>{lastError(h)}</p>}
                 </div>
               )
             })}
