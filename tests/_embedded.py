@@ -814,7 +814,7 @@ _DIVERGENCE_REGISTER = {
     "_PRODUCT_GRAPH_PREFIXES": {"set": _PRODUCT_GRAPH_PREFIXES,
                                 "reason": "real tenant graphs; opt-in via _sweep_team_strays."},
     "_LEGACY_RESIDUE_PREFIXES": {"set": _LEGACY_RESIDUE_PREFIXES,
-                                 "reason": "#3634 journal-blind residue; opt-in only."},
+                                 "reason": "#3634 journal-blind residue; opt-in only via _sweep_legacy_strays."},
 }
 
 
@@ -1350,6 +1350,70 @@ def _sweep_team_strays(proj, uri: str) -> list[str]:
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "leftover product-namespace drop failed for %r: %r", g, e)
+    return dropped
+
+
+def _legacy_sweep_allowed() -> bool:
+    """#3634: may the journal-blind LEGACY RESIDUE pass run?
+
+    The residue cohort (``_LEGACY_RESIDUE_PREFIXES``) is names whose journals
+    are GONE, so neither the journal sweep (``_sweep_drop``) nor
+    ``wipe_server``'s test-prefix filter can attribute them — the only handle
+    left is the name SHAPE. That makes this pass journal-blind, and it
+    authorises an irreversible DETACH DELETE + GRAPH.DELETE on shape alone,
+    so it is fail-closed: allowed ONLY via an explicit operator opt-in
+    (``TORTOISE_TEST_SWEEP_LEGACY=1``). The residue set is disjoint from every
+    owned family by construction
+    (``tests/test_graph_name_ownership.py::test_residue_is_disjoint_from_every_owned_family``),
+    so this pass can never become a third copy of ``wipe_server``. The
+    refusal is logged by ``_sweep_legacy_strays``, so the narrowing is
+    discoverable."""
+    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
+    # This gate requires the exact value "1": it is the SOLE authorization for an
+    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the residue
+    # cohort, and widening a destructive opt-in surface is not a
+    # vocabulary-coherence win. Pinned by
+    # tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design, and
+    # its deliberate divergence from the ledger's "can only shrink" invariant is
+    # recorded as a `_KNOWN_NARROW_READS` entry in tests/test_env_truthy.py and
+    # an OVERRIDES comment on issue #3634.
+    return os.environ.get("TORTOISE_TEST_SWEEP_LEGACY") == "1"
+
+
+def _sweep_legacy_strays(proj, *, default_graph: str | None) -> list[str]:
+    """Drop the journal-blind LEGACY RESIDUE cohort (#3634).
+
+    ⛔ MUST NEVER BE CALLED FROM A DEFAULT TEARDOWN PATH. This pass is
+    journal-blind: its input is ``GRAPH.LIST`` and its only authorization is
+    the name shape plus the explicit ``TORTOISE_TEST_SWEEP_LEGACY=1`` opt-in.
+    Wiring it into a session-end/atexit/stale path would turn a manual
+    reclamation into an automatic delete of unowned names. The AST pin in
+    ``tests/test_graph_name_ownership.py::test_legacy_sweep_has_no_default_call_site``
+    fails if this symbol is called from any of the default-path files it
+    scans.
+
+    Predicate: ``is_legacy_residue(name, default_graph=default_graph)`` — the
+    prefix list lives ONLY in ``_LEGACY_RESIDUE_PREFIXES`` (do not re-list it
+    here). ``default_graph`` is the URI-path default (or None) so the shared
+    default graph is refused exactly as in the journal path. DETACH+DELETE per
+    graph, log-and-continue; returns the dropped names."""
+    if not _legacy_sweep_allowed():
+        logging.getLogger(__name__).info(
+            "legacy residue pass SKIPPED — set TORTOISE_TEST_SWEEP_LEGACY=1 "
+            "to opt in (residue prefixes: %s)",
+            "/".join(_LEGACY_RESIDUE_PREFIXES))
+        return []
+    dropped: list[str] = []
+    for g in proj.db.list_graphs() or []:
+        if not is_legacy_residue(g, default_graph=default_graph):
+            continue
+        try:
+            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
+            proj.db.select_graph(g).delete()
+            dropped.append(g)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "legacy residue drop failed for %r: %r", g, e)
     return dropped
 
 

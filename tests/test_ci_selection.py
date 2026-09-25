@@ -1898,6 +1898,24 @@ def test_track_b_docker_lane_sets_team_stray_opt_in():
         "test-track-b (dedicated docker lane) must set the team_* stray opt-in"
 
 
+def test_legacy_residue_opt_in_is_never_set_in_ci():
+    """#3634 Task 3: TORTOISE_TEST_SWEEP_LEGACY is a MANUAL operator opt-in and
+    must appear NOWHERE in python-ci.yml.
+
+    Contrast with the team-stray opt-in pinned just above: that pass is safe on
+    a dedicated, fresh-per-job container (nothing accumulates there without it),
+    so CI sets it inside the full==true docker gate. The legacy residue cohort
+    lives on a LONG-LIVED dev docker whose residue may include a live eval or
+    tenant name the next automated session does not own, so CI sets it on no
+    lane — a future edit that exports it (any lane, any gate) reds by design.
+    """
+    wf_path = (Path(__file__).resolve().parents[1]
+               / ".github" / "workflows" / "python-ci.yml")
+    text = wf_path.read_text()
+    assert "TORTOISE_TEST_SWEEP_LEGACY" not in text, \
+        "the legacy residue opt-in is a manual operator action — never a CI env var"
+
+
 def test_drift_gate_cannot_skip_the_test_matrix():
     """#2656: the manifest drift gate must never be a prerequisite of the test
     matrix.

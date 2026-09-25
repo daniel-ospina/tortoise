@@ -475,9 +475,21 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
 #: reds; an EXTRA read of a listed pair reds (the count); a pair with ZERO sites left reds
 #: as closed and must be deleted — so the ledger can only shrink, and shrinking it is
 #: part of closing #4128.
+#:
+#: THE ONE DELIBERATE EXCEPTION — the ledger GREW once (#3634 Task 3,
+#: `TORTOISE_TEST_SWEEP_LEGACY`). The rule is "shrink by default; a new entry requires its
+#: own recorded decision", and this one has it: the read is the SOLE authorization for an
+#: irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the residue cohort, exactly
+#: the fail-open surface the ledger exists to freeze, so narrowing it is the safe policy
+#: and it is marked OVERRIDES. It is recorded on issue #3634 and in the epic CI-Fix
+#: Changelog, and pinned by
+#: tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design.
 _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
     ("tests/_embedded.py", "TORTOISE_TEST_SWEEP_TEAM_STRAYS"):
         (1, "OVERRIDES — sole authorization for an irreversible tenant-namespace delete"),
+    ("tests/_embedded.py", "TORTOISE_TEST_SWEEP_LEGACY"):
+        (1, "OVERRIDES (#3634) — sole authorization for an irreversible journal-blind "
+            "residue delete"),
     ("tortoise/sdk.py", "TORTOISE_ALLOW_PRODUCTION"): (1, "#4128 — grants production access"),
     ("tortoise/mcp_server.py", "TORTOISE_ALLOW_EMBEDDED"): (1, "#4128 — grants embedded mode"),
     ("tortoise/projection/__init__.py", "TORTOISE_ALLOW_NONSTANDARD_PATH"):
