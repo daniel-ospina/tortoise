@@ -18090,6 +18090,42 @@ class TortoiseSDK:
             from tortoise.commit_schema import validate_span
             validate_span(props.get("span_start"), props.get("span_end"))
         proj = self._get_proj()
+        # #5026/D10 (B6, third door — #5135): the retired document fields must
+        # not re-enter through THIS generic surface either. `_sanitize_props`
+        # deliberately ACCEPTS them, because they are legitimate on other
+        # labels (`objectKind` is the canonical Object kind, ONTOLOGY §5), so
+        # the denial has to be TARGET-AWARE: refuse them only when the mutation
+        # lands on a document `:Source`. Without this,
+        # `update_entity(<doc_id>, content=...)` wrote the retired keys and the
+        # non-Point branch below JOURNALED them as `state` — which the fold
+        # re-applies through `SET n += $s` — so they survived `rebuild_all`:
+        # a retired-field re-write that the document-path deny-sets cannot see.
+        #
+        # ⛔ The document test is `documentKind IS NOT NULL`, deliberately
+        # WITHOUT the `documents` meter's `<> 'transcript'` clause. The meter
+        # excludes transcripts because they are not counted against the
+        # `documents` cap; the RETIREMENT is not quota-scoped. The document
+        # path denies these fields on EVERY document —
+        # `_upsert_document`'s passthrough is `_SOURCE_HANDLED | _DOC_RETIRED`
+        # with no transcript filter — so copying the meter's narrower predicate
+        # here left a transcript document `:Source` as an open third door (the
+        # same field denied by one path and writable by the other on the SAME
+        # node). The parity that matters is with the retirement, not the cap.
+        _retired_hit = proj._DOC_RETIRED_KEYS.intersection(props)
+        if _retired_hit:
+            _is_doc = proj.g.query(
+                "MATCH (s:Source) WHERE (s.url = $id OR s.id = $id) "
+                "AND s.documentKind IS NOT NULL "
+                "RETURN count(s)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _is_doc:
+                raise ValueError(
+                    "retired document field(s) "
+                    f"{sorted(_retired_hit)} cannot be set through "
+                    "update_entity: D10 (#5026) retired "
+                    "content/doc_status/objectKind on a document, which is a "
+                    ":Source keyed by url, not a :Document node.")
         # W5 Phase F (#2104, review r4): eventId is the EVENT node's identity
         # (the projection MERGEs on it; capture Events carry the DETERMINISTIC
         # _session_capture_event_id(session_id) id — ev_<sha256("sessionCaptured:"

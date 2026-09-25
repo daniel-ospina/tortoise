@@ -2162,6 +2162,63 @@ def test_5026_b6_retired_fields_cannot_reenter(live_proj):
     assert ok[1] == "markdown", f"fixed-clause `format` dropped: {ok[1]!r}"
 
 
+def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
+    """B6, the THIRD DOOR (#5135, #5026): `update_entity` is a generic
+    `SET n += $props` surface, and its non-Point branch JOURNALS the write as
+    `state` — which the fold re-applies through `SET n += $s`. So retiring a
+    field on the document path is not enough on its own: while the generic
+    surface still accepted these keys, the field was written, journaled, and
+    SURVIVED `rebuild_all`. The two declared B6 tests cover
+    `_upsert_document` and `_upsert_source`, and neither can see this route.
+
+    The denial has to be TARGET-AWARE: `objectKind` is the canonical Object
+    kind (ONTOLOGY §5) and `content` is a legitimate Point key, so a blanket
+    `_sanitize_props` reject would break unrelated labels. It fires only on a
+    document `:Source` — the same predicate the `documents` meter uses.
+    """
+    sdk = sdk_factory()
+    doc = sdk.create_document("B6ThirdDoor", "report")
+    did = doc["id"]
+    assert doc["url"] == did, "a document Source is keyed by the doc id"
+    for key, val in (("content", "SECRET BODY"),
+                     ("doc_status", "captured"),
+                     ("docStatus", "captured"),
+                     ("objectKind", "document"),
+                     ("object_kind", "document")):
+        with pytest.raises(ValueError, match="retired document field"):
+            sdk.update_entity(did, **{key: val})
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) "
+        "RETURN s.content, s.doc_status, s.objectKind",
+        params={"u": did}).result_set[0]
+    assert list(rows) == [None, None, None], \
+        f"retired field written through update_entity: {rows!r}"
+    # ⛔ A TRANSCRIPT document is still a document for the RETIREMENT. The
+    # `documents` meter excludes transcripts from the CAP, but
+    # `_upsert_document` denies the retired fields on EVERY document — so this
+    # guard must too. An earlier revision copied the meter's `<> 'transcript'`
+    # clause, which left exactly this node as an open third door: the same
+    # field denied by the document path and writable by the generic one, on
+    # the same node.
+    tdoc = sdk.create_document("B6ThirdDoorTranscript", "transcript")
+    tid = tdoc["id"]
+    assert tdoc["documentKind"] == "transcript"
+    with pytest.raises(ValueError, match="retired document field"):
+        sdk.update_entity(tid, content="SECRET BODY")
+    trows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) "
+        "RETURN s.content, s.doc_status, s.objectKind",
+        params={"u": tid}).result_set[0]
+    assert list(trows) == [None, None, None], \
+        f"retired field written on a transcript document: {trows!r}"
+    # Non-over-reach: a NON-retired key still rides the same surface, so the
+    # refusal did not turn `update_entity` into a no-op for a document.
+    sdk.update_entity(did, domain="legal")
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.domain",
+        params={"u": did}).result_set[0][0] == "legal"
+
+
 def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
     """B6 (#5026): a document IS a :Source, so a SourceCreated whose url
     equals a document id MERGEs onto the SAME node the document path owns.
