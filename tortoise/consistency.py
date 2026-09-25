@@ -46,6 +46,7 @@ import logging
 import math
 import os
 import re
+import stat
 import struct
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -53,6 +54,7 @@ from datetime import datetime, timezone
 from .projection import (
     _apply_one,
     _load_prewipe_snapshot,
+    _norm,
     _promotion_point_with_operator,
     journal_hard_delete_seqs,
     prewipe_snapshot_path,
@@ -60,6 +62,7 @@ from .projection import (
 from .projection.entities import (
     _EntityHandlers,
     _is_persistable_prop_value,
+    _writable_journalled_vector,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,9 +190,6 @@ _UNCARRIED_CONTENT_PROPS: dict[str, str] = {
     ),
 }
 
-# D1/D4: the writer's own deny-list — merged rather than re-listed (see the
-# merge note at the bottom of this block).
-
 # A key whose EXISTENCE legitimately depends on the payload, so a one-sided
 # presence is a representation asymmetry rather than content the journal
 # authored. These ARE compared whenever both sides carry them — which is where a
@@ -257,13 +257,15 @@ _GRAPH_DEFAULTED_REASON = (
 # real value change.
 _FLOAT_REL_TOL = 1e-9
 
-# The drop rules of the journal→graph open-set passthrough, as ONE reason per
-# sub-rule. Read from the writer's own predicate so the two cannot drift.
+# A key the journal omits while the graph holds the writer's own deterministic
+# default for it — faithful, not the graph authoring a value.
 _WRITER_DEFAULTS_REASON = (
     "the journal omits it and the graph holds the writer's own deterministic "
     "default — faithful, not the graph authoring a value"
 )
 _MAX_DIVERGENT_POINTS = 50
+# The drop rules of the journal→graph open-set passthrough, as ONE reason per
+# sub-rule. Read from the writer's own predicate so the two cannot drift.
 _UNCARRIED_NULL = "explicit null — the writer cannot persist a null property"
 _UNCARRIED_NON_PERSISTABLE = (
     "a value FalkorDB rejects as a node property (map/dict at any depth, bytes, "
@@ -280,13 +282,55 @@ def _is_numeric(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _vec_raw_equal(a: list, b: list) -> bool:
+    """Total, nan-aware element comparison for a vector the STORE cannot hold.
+
+    Used only when at least one side refuses `_writable_journalled_vector`
+    (non-numeric / non-finite / over-range element): such a vector never reaches
+    the store, so both sides holding one is already abnormal. Compare the raw
+    values WITHOUT raising, and treat two identical non-finite elements as equal
+    — plain `==` says `nan != nan`, which would report an abnormal-but-faithful
+    pair as a divergence on every run with no repair able to clear it.
+    """
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b, strict=True):
+        if x == y:
+            continue
+        if isinstance(x, float) and isinstance(y, float) \
+                and math.isnan(x) and math.isnan(y):
+            continue
+        return False
+    return True
+
+
 def _values_equal(a, b) -> bool:
-    """Field equality, with the store's float round-trip tolerance applied."""
+    """Field equality, with the store's float round-trip tolerance applied.
+
+    TOTAL, and STRICT about booleans — both are correctness boundaries, not
+    style:
+
+    * a journal record is a FILE (hand-editable, or written by an older/newer
+      code path), so a value no double can hold must compare UNEQUAL rather
+      than raise. `_belief_prop_value_ok` (projection/entities.py) documents the
+      same class — "a >308-digit journaled posterior raised `OverflowError`";
+      here it would abort the whole check, durably, on every run.
+    * `isinstance(True, int)` is exactly why a flag cannot go through the
+      numeric branch: `True == 1`, so the plain `==` would report a graph
+      holding `1` for a journal `True` as faithful — a fail-open on the check's
+      own job (`_belief_bool_value_ok` documents the same boundary for the
+      writer).
+    """
+    if isinstance(a, bool) != isinstance(b, bool):
+        return False
     if a == b:
         return True
     if _is_numeric(a) and _is_numeric(b):
-        return math.isclose(float(a), float(b), rel_tol=_FLOAT_REL_TOL,
-                            abs_tol=0.0)
+        try:
+            return math.isclose(float(a), float(b), rel_tol=_FLOAT_REL_TOL,
+                                abs_tol=0.0)
+        except OverflowError:
+            return False
     return False
 
 
@@ -380,7 +424,12 @@ def _compare_views(journal_by_id: dict, graph_by_id: dict,
     divergence even when the SIZE is unchanged). Content is compared
     presence-conditionally — see the declared tables above.
 
-    Returns ``(mismatches, compared_embeddings, excluded_seen, one_sided_seen)``.
+    Returns ``(mismatches, divergent_count, compared_embeddings, excluded_seen,
+    one_sided_seen)``
+
+    — `mismatches` is CAPPED at `_MAX_DIVERGENT_POINTS` while
+    `divergent_count` is the true total, so a caller must never derive the
+    count from the list.
 
     Three rules are worth reading the code for rather than the summary:
 
@@ -457,7 +506,20 @@ def _compare_views(journal_by_id: dict, graph_by_id: dict,
             verbatim = bool(jprops.get("embedding_verbatim")) \
                 or bool(gprops.get("embedding_verbatim"))
             if verbatim:
-                same = [float(x) for x in jvec] == [float(x) for x in gvec]
+                # Through the writer's OWN normaliser: a journal vector is a
+                # FILE, so a non-numeric / non-finite / over-range element must
+                # DEGRADE to "not equal" rather than raise inside the check
+                # (`_writable_journalled_vector` handles exactly this class,
+                # #5004/#19 — a bare `float()` raised ValueError/OverflowError
+                # here and made the gate un-runnable until the journal was
+                # hand-repaired). A non-writable vector on either side falls
+                # back to a raw comparison, which cannot raise.
+                jnorm = _writable_journalled_vector(jvec)
+                gnorm = _writable_journalled_vector(gvec)
+                if jnorm is not None and gnorm is not None:
+                    same = jnorm == gnorm
+                else:
+                    same = _vec_raw_equal(list(jvec), list(gvec))
             else:
                 jf32, gf32 = _as_f32(jvec), _as_f32(gvec)
                 same = (jf32 is not None and jf32 == gf32)
@@ -511,9 +573,13 @@ def _graph_fingerprint(graph_by_id: dict,
 
     Covers the same declared content plus the embedding, so a vector-only
     rewrite of an otherwise-identical graph still moves the baseline (and so
-    cannot hide behind the presence-conditional embedding comparison). It is
-    independent of the journal by construction: hashing the union of the two
-    sides would make it journal-dependent.
+    cannot hide behind the presence-conditional embedding comparison).
+
+    It reads ONLY the graph, but it is NOT independent of the journal: one skip
+    set below (`uncarried`) is journal-derived, deliberately — a digest that
+    ignored it would move on every legitimate repair of a #2897 `tags` list and
+    report that repair as an unrecorded mutation. The journal dependence is
+    therefore narrow and declared, not absent.
 
     The keys the COMPARISON declares undecidable are dropped here too, because a
     DECLARED asymmetry must not move the baseline and be read as an unrecorded
@@ -560,6 +626,15 @@ def _graph_fingerprint(graph_by_id: dict,
 # probe, the recovery emptiness test), and `_EXPORT_SKIP_LABELS` is outside this
 # lane's file family. A sidecar touches none of them.
 #
+# ⚠️ This OVERRIDES the design decision recorded on #5011 (§3), which specified a
+# `:ProjectionState` node in the projection's own graph; the issue carries the
+# `OVERRIDES:` line and the reason (the export skip set is out of family). The
+# override has a CONSEQUENCE that the node form did not: a rebuild wipes the
+# graph and so would have cleared a node baseline, but nothing clears this file —
+# so a repair that lands without a check makes the next run report
+# `unrecorded-mutation` until the operator re-baselines, and that divergence's
+# `action` names the repair case.
+#
 # Trade-off, stated: the state is keyed to the JOURNAL path, so it is
 # per-projection where one journal feeds one projection — every supported
 # deployment shape, and the journal is the reconstruction source the invariant
@@ -583,8 +658,18 @@ def read_projection_state(log_path) -> tuple[dict | None, str | None]:
     over it either, so the reason is reported.
     """
     path = projection_state_path(log_path)
-    if not os.path.exists(path):
+    try:
+        # `lstat`, then a regular-file check: a FIFO planted at this path would
+        # hang an unbounded `open()` read, and a symlink would read a file the
+        # sidecar does not own. Both are operator-tier (the journal DIRECTORY is
+        # writable), and both are cheap to refuse.
+        st = os.lstat(path)
+    except FileNotFoundError:
         return None, None
+    except OSError as e:
+        return None, f"projection state unreadable: {e}"
+    if not stat.S_ISREG(st.st_mode):
+        return None, "projection state is not a regular file"
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -624,9 +709,16 @@ def record_projection_state(log_path, *, last_applied_seq: int,
         "updatedAt": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
     path = projection_state_path(log_path)
-    tmp = path + ".tmp"
+    # Per-process tmp: two concurrent runs sharing one tmp path would interleave
+    # and publish a TORN sidecar, and the next run would read it as unreadable
+    # and (correctly) refuse to re-baseline — permanently disabling the baseline
+    # half. `O_EXCL|O_NOFOLLOW` also refuses a planted symlink/FIFO at the tmp
+    # path (`embedded_reaper.py` uses the same per-pid convention).
+    tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                     0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, sort_keys=True, indent=2)
             fh.write("\n")
         os.replace(tmp, path)
@@ -649,13 +741,22 @@ def _fold_journal(events: list[dict]) -> dict:
     """The journal side of the comparison: the writer's own fold, PLUS the
     lifecycle arms `fold` does not have.
 
-    `fold` is the in-memory POINT-only index and has no arm for the four
-    point-lifecycle types — a documented, intentional scope gap its own
-    `_NO_POINT_FOLD` names. The GRAPH writer folds all four (`apply()` for the
-    promotions; `rebuild_all` — the path `recover_from_log` / `tortoise
-    rebuild` use — for the terminalizers), so a reference built on `fold` alone
-    reports a healthy graph as diverged on any promotion, and on any
-    retract/supersede/invalidate.
+    `fold` is the in-memory POINT-only index. It HAS an arm for `PointRetracted`
+    (status only — no belief decay), and none for `PointPromoted`,
+    `OperatorPromoted`, `PointSuperseded` or `PointInvalidated` — a documented,
+    intentional scope gap its own `_NO_POINT_FOLD` names (#3692 records the same
+    four). The GRAPH writer folds all of them: `apply()` for the promotions,
+    and `rebuild_all`'s deferred pass for supersede/invalidate, so a reference
+    built on `fold` alone reports a healthy graph as diverged on any promotion
+    and on any retract/supersede/invalidate.
+
+    ⚠️ `recover_from_log` does NOT reach `rebuild_all` on its normal path — it
+    replays through `projection.apply()`, which has no arm for
+    `PointSuperseded`/`PointInvalidated` (#3305) and so cannot rebuild the props
+    this arm folds. The reference is still `rebuild_all`'s full-fidelity replay
+    (it is what the invariant `derived = replay(journal)` means), but a graph
+    repaired that way stays diverged until #3305 lands, and the returned
+    `action` says so rather than sending the operator round a repair loop.
 
     Folded in ONE ORDERED PASS, deliberately: the writer applies each
     terminalizer's decay at its own journal position (#2884 A3 — the fold used
@@ -674,8 +775,9 @@ def _fold_journal(events: list[dict]) -> dict:
         keys the payload carries, except `content`/`is_operator`/`op_type`,
         which it sets UNCONDITIONALLY — so a snapshot that omits those RESETS
         them, and this arm pins them the same way.
-      PointRetracted  — `_retract`: `status='retracted'` + the `decay_clause`
-        belief decay.
+      PointRetracted  — `_retract` (`_apply_one`'s arm sets only the status):
+        `status='retracted'` + the `decay_clause` belief decay, which is why
+        this arm exists at all rather than deferring to `_apply_one`.
       PointSuperseded — `_fold_point_superseded`: requires `new_id` (a
         PointSuperseded without it is a no-op on the graph), then
         `status='superseded'`, `outdated=true`, `validTo`/`expiredAt` from the
@@ -692,9 +794,17 @@ def _fold_journal(events: list[dict]) -> dict:
     The right long-term fix is the arms on `fold` itself and lives outside this
     lane's file family (#3692 covers the promotions).
     """
+    # `journal_hard_delete_seqs` normalises internally, and stays on the RAW
+    # list (the anchor boundary is an envelope property).
     anchors = journal_hard_delete_seqs(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
+        # Same normalisation the writer applies (`_apply_one`/`apply`): the
+        # nested envelope shape is NOT a difference, so a terminalizer written
+        # as `{"type": ..., "point": {...}}` must not be read as id-less and
+        # dropped — that made a healthy graph report a `content` divergence and
+        # advise a wipe+replay (#3722).
+        ev = _norm(ev)
         t = ev.get("type")
         if t in ("PointPromoted", "OperatorPromoted"):
             p = ev.get("point")
@@ -897,8 +1007,12 @@ def check_consistency(log_path: str, projection, *,
                 "the missing events (or guarded replay) — do NOT wipe"),
         "unrecorded-mutation": ("a graph write moved the projection without "
                                "advancing the journal (#4240 class): find the "
-                               "unjournalled writer; re-baseline only after "
-                               "the change is explained"),
+                               "unjournalled writer. A REPAIR/rebuild that "
+                               "landed without a check reaches this branch "
+                               "too (the baseline is not cleared by a wipe, "
+                               "and this lane may not edit the rebuild path), "
+                               "so confirm no unjournalled writer exists "
+                               "before re-baselining"),
     }.get(divergence)
 
     return {
