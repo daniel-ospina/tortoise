@@ -77,6 +77,11 @@ SHAPE_UNKNOWN_EVENT_TYPE = "unknown-event-type"
 #: Shapes that are genuinely exempt from the fail-the-run assertion. Each MUST
 #: carry its degraded guarantee in writing — an unnamed exemption is a green
 #: pass over an unfolded event, which is exactly what R8 exists to prevent.
+#: The shapes and their bounds below are ALSO recorded in the identity decision
+#: doc (`docs/epics/2026-09-10-2835-capability-registry/identity-decision.md`,
+#: §"Stage 0 findings — the named, bounded non-folded exemptions (#3585)") —
+#: the artifact R8 designates for them, so the ruling is findable where a later
+#: lane would otherwise read an exemption as drift.
 #:
 #: ``delete-miss`` (recorded decision: `docs/plans/2026-09-22-unjournaled-mutation-class.md`
 #: §"Task 4" — Policy, and #4743's disposition): "already absent" IS the
