@@ -488,6 +488,148 @@ LOOP_LAG = Histogram(
 )
 
 
+# ── #4491: EGRESS (response bytes) per org — the network cost dimension ───
+#
+# #4491: inbound bytes were the ONLY byte accounting in the hosted API, and
+# only as a DoS cap (the `content-length` guard on the manifest route) — a
+# safety bound, not a cost metric. NOTHING counted outbound bytes, so the
+# network cost of serving a read-heavy org (retrieval/ask result sets, graph
+# read, export) had no signal at all while reads are free by decision
+# (`product/pricing.json` -> `billing.reads_free: true`).
+#
+# SHAPE — constrained by the #5045 consolidation comment on #4491, which asks
+# for egress to become a DECLARED dimension of one metering substrate "rather
+# than a sixth separate counter": ONE writer (``record_egress``) owns the unit
+# (bytes), the attribution key (org) and the route class, so a dimension
+# registry can enumerate it later without a call-site sweep, and no caller
+# touches a metric object directly (the #501/#3677 house shape). No endpoint,
+# no quota, no cap, no price — this measures; it does not price.
+#
+# BOUNDED CARDINALITY: BOTH labels are request-derived (an org id and a route),
+# so both are capped and everything past the cap folds into ONE shared child —
+# the ``_TELEMETRY_DROP_COUNTS`` doctrine in ``hosted_api``. Without the cap, a
+# client walking unknown paths (or a fleet of orgs) grows the Prometheus child
+# set without bound, which is a scrape-cost bug, not a measurement.
+EGRESS_MAX_ORGS = 512
+EGRESS_MAX_PATHS = 128
+EGRESS_OVERFLOW = "__other__"
+# PAIR SPACE: the two caps multiply — the worst case is EGRESS_MAX_ORGS x
+# EGRESS_MAX_PATHS children, reached only if EVERY admitted org touches EVERY
+# admitted route. In practice children track (orgs x routes actually served)
+# per process. The caps are deliberately generous on the ORG axis because org
+# attribution is the measurement #4491 asks for, and the route axis is bounded
+# by the API surface (FastAPI route templates are code literals), not by
+# traffic — so a hostile client cannot reach the pair bound by walking paths.
+
+#: Response body bytes by (org, route class). The Counter answers "how many
+#: bytes did this org's traffic cost us"; the Histogram below answers "how big
+#: ARE the responses", which is the shape a fair-use boundary needs.
+EGRESS_BYTES = Counter(
+    "tortoise_egress_bytes_total",
+    "Response body bytes written to clients, by org and route class (#4491)",
+    ["org", "path"],
+)
+#: #4491 indicator 1's "or, at minimum, a distribution of response sizes per
+#: org/path" arm. Labelled by route class ONLY: org x bucket would multiply the
+#: cardinality for a question ("is this route returning 10 MB?") that the org
+#: does not change.
+EGRESS_RESPONSE_BYTES = Histogram(
+    "tortoise_egress_response_bytes",
+    "Response body size distribution by route class (#4491)",
+    ["path"],
+    buckets=(256, 1024, 4096, 16384, 65536, 262144, 1048576, 8388608),
+)
+
+#: Labels admitted so far, per dimension. Membership IS the cap registry, so a
+#: warm label costs one set lookup with NO lock (the hot path: one response per
+#: admitted org/path pair); the lock is taken only while ADMITTING a new label.
+_EGRESS_ORGS: set[str] = set()
+_EGRESS_PATHS: set[str] = set()
+_EGRESS_LOCK = threading.Lock()
+
+
+def _admit_egress_label(label: str, seen: set[str], cap: int) -> str:
+    """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
+
+    Additive by construction: an already-admitted label never locks (and never
+    changes); a new label past the cap becomes ``EGRESS_OVERFLOW`` so the
+    metric stays bounded rather than raising or dropping the whole record.
+    """
+    if label in seen:
+        return label
+    with _EGRESS_LOCK:
+        if label in seen:
+            return label
+        if len(seen) >= cap:
+            seen.add(EGRESS_OVERFLOW)
+            return EGRESS_OVERFLOW
+        seen.add(label)
+        return label
+
+
+def record_egress(org: str | None, path: str, nbytes: int) -> None:
+    """Record response body bytes written for ``org`` on route class ``path``.
+
+    THE single writer for the egress dimension (#4491): the caller
+    (``hosted_api.EgressBytesMiddleware``) supplies what it measured — org,
+    route class, byte count — and never touches a metric object, so the unit
+    and the attribution key stay in one place.
+
+    ``org`` may be ``None``/empty: a request that never resolved an org (an
+    unauthenticated 401, a health probe, an MCP call whose org lives in the
+    MCP ContextVar this ASGI layer cannot see) is attributed to the empty
+    label — an honest "unattributed" child rather than an invented org id.
+
+    ``nbytes`` is clamped at 0: a negative count is impossible data, and a
+    negative increment would corrupt a monotonic counter.
+    """
+    amount = max(0, int(nbytes))
+    org_label = _admit_egress_label(org or "", _EGRESS_ORGS, EGRESS_MAX_ORGS)
+    path_label = _admit_egress_label(path or "", _EGRESS_PATHS, EGRESS_MAX_PATHS)
+    EGRESS_BYTES.labels(org=org_label, path=path_label).inc(amount)
+    EGRESS_RESPONSE_BYTES.labels(path=path_label).observe(amount)
+
+
+def egress_bytes_by_org() -> dict[str, int]:
+    """In-process snapshot of ``EGRESS_BYTES`` keyed by org (#4491 indicator 3).
+
+    The readable form of the metric, for a person or a test — no dashboard, no
+    UI, no new endpoint. ``/metrics`` carries the same figure as Prometheus
+    text (``sum by (org) (tortoise_egress_bytes_total)``); this is the direct
+    read, mirroring ``analytics_outcome_counts()``. Derived from ``collect()``
+    rather than a second tally, so the snapshot cannot drift from the metric.
+
+    The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` is the
+    folded tail of the cardinality cap; both are INCLUDED, so the snapshot
+    always reconciles to the whole measurement.
+    """
+    totals: dict[str, int] = {}
+    for family in EGRESS_BYTES.collect():
+        for sample in family.samples:
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            org = sample.labels.get("org")
+            if org is None:
+                continue
+            totals[org] = totals.get(org, 0) + int(sample.value)
+    return totals
+
+
+def _reset_egress() -> None:
+    """Test seam: forget every admitted label and this process's series.
+
+    Clears the cap registries as well as the children — leaving them behind
+    would make a following test see labels "already admitted" that no longer
+    exist in the metric, which is exactly the drift the cap must not have.
+    """
+    with _EGRESS_LOCK:
+        _EGRESS_ORGS.clear()
+        _EGRESS_PATHS.clear()
+    EGRESS_BYTES.clear()
+    EGRESS_RESPONSE_BYTES.clear()
+
+
 def register(sdk) -> None:
     """Wire SDK so /health can check FalkorDB connectivity + graph size."""
     global _sdk

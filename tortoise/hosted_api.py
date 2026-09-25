@@ -2182,6 +2182,141 @@ class McpPathCanonicalizerMiddleware:
 app.add_middleware(McpPathCanonicalizerMiddleware)
 
 
+# ── #4491: egress (response bytes) per org — the network cost dimension ────
+#
+# #4491: inbound bytes were the ONLY byte accounting in this app, and only as
+# a DoS cap (the manifest route's `content-length` guard) — a safety bound, not
+# a cost metric. NOTHING counted outbound bytes, so the network cost of serving
+# a read-heavy org (retrieval/ask result sets, graph read, export) had no
+# signal while reads are free by decision (`product/pricing.json` ->
+# `billing.reads_free: true`).
+#
+# ONE wrapper for every route, REST and the mounted MCP app alike (a FastAPI
+# mount is an ordinary route, so this middleware sees it): a new endpoint
+# cannot be born unmeasured and no handler needs editing.
+#
+# WHERE IT SITS — inside `InFlightMiddleware` and `WaitBoundMiddleware`, NOT
+# outermost:
+#   * `WaitBoundMiddleware` must stay outermost (#3834; pinned by
+#     `test_transport_wait_bound.py::test_middleware_is_installed_outermost`, and
+#     the gauge at index 1 by
+#     `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`) —
+#     an accounting wrapper must not take that seat. Starlette's `add_middleware`
+#     INSERTS at index 0, so this registration is placed BEFORE
+#     `InFlightMiddleware`'s to land at index 2.
+#   * Sitting INSIDE the bound is what makes the count truthful, not merely
+#     polite: on a breach the bound ABANDONS the handler and DROPS its response
+#     (`_guarded_send`), so bytes that never left must not be credited to the
+#     org. The drop is invisible in `send` (it returns normally), but the bound
+#     publishes it — `_WAIT_BOUND_REFUSED_STATE` — and this middleware reads
+#     that flag before recording. Without it, every breached request would
+#     credit a DISCARDED response to the org's egress.
+_WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
+
+#: Bounds on the fallback (request-derived) route label. A FastAPI route
+#: template is a code literal and always short; the normalised fallback is not,
+#: so it is truncated per segment and overall, and `record_egress` caps the
+#: number of distinct children again on top.
+_EGRESS_MAX_LABEL_LEN = 64
+_EGRESS_MAX_SEGMENT_LEN = 24
+
+
+def _egress_route_class(scope) -> str:
+    """The bounded route class a response is attributed to (#4491).
+
+    FastAPI stamps the MATCHED ROUTE TEMPLATE onto the scope
+    (``scope["route"].path`` is ``/v1/points/{pid}``), which is the exact,
+    bounded label — two point ids never become two metric children. Plain
+    Starlette routes and the mounted MCP app do NOT stamp it (measured: a
+    ``Mount``-ed sub-app leaves ``scope["route"]`` unset), so those fall back
+    to a NORMALISED path: at most two segments, with pure-numeric and long
+    digit-bearing segments collapsed to ``{id}`` (``/nope/123`` ->
+    ``/nope/{id}``; ``/v1/...`` is untouched because ``v1`` is a literal, not
+    an id). A client walking unknown paths therefore cannot grow the label set.
+    """
+    route = scope.get("route")
+    template = getattr(route, "path", None)
+    if isinstance(template, str) and template:
+        return template
+    segments = [seg for seg in str(scope.get("path") or "").split("/") if seg][:2]
+    if not segments:
+        return "/"
+    bounded = []
+    for seg in segments:
+        looks_like_id = seg.isdigit() or (len(seg) >= 8 and any(c.isdigit() for c in seg))
+        bounded.append("{id}" if looks_like_id else seg[:_EGRESS_MAX_SEGMENT_LEN])
+    return ("/" + "/".join(bounded))[:_EGRESS_MAX_LABEL_LEN]
+
+
+class EgressBytesMiddleware:
+    """Account response body bytes per org and route class (#4491).
+
+    Pure ASGI and cheap: it wraps ``send`` and adds the ``body`` length of each
+    ``http.response.body`` message. No request/response objects, no buffering,
+    no change to what is sent, no I/O — one integer add per body message plus
+    one counter increment per response.
+
+    The org is read from the SAME ``scope["state"]`` dict the auth dependency
+    writes ``org_id`` into (Starlette's ``request.state`` IS that dict, and
+    ``Mount`` forwards the same mapping to the MCP sub-app) and it is read
+    AFTER the app returns, so an org resolved mid-request is still attributed.
+    A request that never resolved one (a 401, a health probe, an MCP call whose
+    org lives in the MCP ContextVar this layer cannot see) is recorded as
+    unattributed (``""``) — never invented.
+
+    WHAT IT DOES NOT COUNT, stated rather than assumed:
+      * response headers — the body is the payload cost;
+      * the bound's own refusal, sent by the OUTERMOST ``WaitBoundMiddleware``
+        outside this wrapper;
+      * a response the bound DROPPED on breach (``_WAIT_BOUND_REFUSED_STATE``);
+      * a 500 synthesized by Starlette's ``ServerErrorMiddleware``, which sits
+        OUTSIDE this wrapper (the innermost ``ExceptionMiddleware`` is inside it,
+        so every handled response is counted);
+      * anything after a client disconnect whose ``send`` raised before the
+        final message (the count is "bytes handed to ``send``", so the message
+        that raised may still be credited — a bound, not an exact wire-byte
+        count; proxy compression is likewise invisible here).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not responses
+            await self.app(scope, receive, send)
+            return
+        nbytes = 0
+
+        async def _counting_send(message):
+            nonlocal nbytes
+            if message["type"] == "http.response.body":
+                nbytes += len(message.get("body") or b"")
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _counting_send)
+        finally:
+            state = scope.get("state")
+            # NO `return` in this block: a `return` here would SWALLOW an
+            # in-flight exception from the app and turn a real error into a
+            # silent 200-less hang. Skip the record with a flag instead.
+            dropped = (isinstance(state, dict)
+                       and bool(state.get(_WAIT_BOUND_REFUSED_STATE)))
+            if not dropped:
+                org_id = state.get("org_id") if isinstance(state, dict) else None
+                try:
+                    # Call-time attribute read (`_monitoring`), so a test or an
+                    # operator can substitute the writer; measurement must never
+                    # be a NEW failure mode for the request it measures.
+                    _monitoring.record_egress(
+                        org_id, _egress_route_class(scope), nbytes)
+                except Exception:
+                    _logger.debug("egress accounting failed", exc_info=True)
+
+
+app.add_middleware(EgressBytesMiddleware)
+
+
 class InFlightMiddleware:
     """Count requests in flight for the opt-in loop-stall self-kill (#2850 P0).
 
@@ -2647,7 +2782,11 @@ class WaitBoundMiddleware:
         # event is the only one — which is why this is a FLAG and not a
         # ``remaining <= 0`` guard at the seam.
         if isinstance(state, dict):
-            state["_wait_bound_refused"] = True
+            # Same key as ``mcp_server._WAIT_BOUND_REFUSED_KEY`` (one string, two
+            # modules) and as ``_WAIT_BOUND_REFUSED_STATE`` above, which the
+            # egress middleware reads to avoid crediting a DROPPED response
+            # (#4491) — keep the three in step by name, not by literal.
+            state[_WAIT_BOUND_REFUSED_STATE] = True
         org_id = state.get("org_id") if isinstance(state, dict) else None
         # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
         # with embedded CR/LF; logged verbatim that forges log lines. This is

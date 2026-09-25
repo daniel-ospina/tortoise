@@ -176,6 +176,11 @@ surfaces:
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
+  # #4491: egress (response bytes) per org — the network cost dimension. On
+  # `api` because the file it guards most (tortoise/hosted_api.py, where the
+  # counting middleware is installed) selects `api`; the metric it asserts lives
+  # in tortoise/monitoring.py.
+  - test_egress_bytes.py
   - test_email_integration_resend.py
   - test_email_notify.py
   - test_email_signup.py
