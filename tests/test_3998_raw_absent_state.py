@@ -93,6 +93,8 @@ ALLOWED_SOURCE_NODE_PROPS = frozenset({
     "sourcePath", "_searchText", "provenance_spans",
     # the session-capture writer (sdk._materialize_session_source)
     "sessionId", "capturedAt", "summary", "topics", "eventId",
+    # the reliability cache (sdk.get_source_reliability) — an in-tree producer
+    "reliability", "reliabilityComponents", "reliability_derived_at",
 })
 
 
@@ -128,6 +130,15 @@ def _memory(sdk, content: str = "a claim whose raw may be gone"):
     """A Point with a real ``extractedFrom`` edge to the raw's Source."""
     p = sdk.create_point("statement", content, extractedFrom=RAW_URL)
     return p["id"]
+
+
+def _raw(sdk, url: str = RAW_URL) -> dict:
+    """The ``raw`` block as a READER sees it — through ``get_provenance_chain``,
+    never by touching the node, so these assertions cannot pass by reading state
+    the read path would not surface."""
+    chain = sdk.get_provenance_chain(_memory(sdk))
+    assert chain, "no provenance row — the read went silent"
+    return chain[0]["raw"]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -604,9 +615,16 @@ def test_the_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
         sorted(chain[0]["source"])
     )
     assert body not in repr(chain), "the read handed the raw payload back"
+    # The PRIMARY entity read leaks the same way and is exposed as the MCP tool
+    # `tortoise_get_entity` (review round 4, P2) — filter both, or the fix is
+    # one function away from being no fix at all.
+    ent = s.get_entity(RAW_URL)
+    assert "content" not in ent and "text" not in ent, sorted(ent)
+    assert body not in repr(ent), "get_entity handed the raw payload back"
     # Legitimate declared props survive the filter.
     assert chain[0]["source"]["url"] == RAW_URL
     assert chain[0]["source"]["contentHash"] == "h1"
+    assert ent["url"] == RAW_URL
 
 
 def test_declared_metadata_values_are_not_length_bounded_the_stated_residual(sdk):
@@ -631,6 +649,138 @@ def test_declared_metadata_values_are_not_length_bounded_the_stated_residual(sdk
         "a length policy now exists for a declared metadata field — update this "
         "test and the residual note in projection/entities.py"
     )
+
+
+def test_rebuild_drops_a_payload_carried_by_an_entity_mutated_record(sdk):
+    """Review round 4, P1: the ``EntityMutated`` fold arm is a WRITE PATH.
+    ``_fold_entity_mutation``'s state-op branch replays the caller-supplied map
+    with ``SET n += $s`` and consulted no allowlist, so a record emitted by the
+    UNGUARDED ``_update_entity`` (round 3's hole) restored its payload on every
+    rebuild — on any deployment that already ran an earlier head, the bytes are
+    in the journal and no fix to the live writer retires them.
+
+    (1) FAILS if the declaration gates only the live writers: the replayed
+        ``EntityMutated`` carries the body straight onto the node.
+    (2) REACHABLE: the record below is emitted through the real producer with
+        the exact shape the unguarded ``_update_entity`` wrote.
+    """
+    s, events = sdk
+    body = "ENTITY_MUTATION PAYLOAD " + ("raw transcript body. " * 120)
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    s._journal_entity_mutation(
+        "Source", RAW_URL, "revise", state={"text": body, "format": "transcript"}
+    )
+
+    s._get_proj().rebuild_all(str(events))
+
+    props = _source_props(s)
+    assert "text" not in props, sorted(props)
+    assert body not in repr(props), "replay re-materialised the raw payload"
+    assert set(props) <= ALLOWED_SOURCE_NODE_PROPS, (
+        f"undeclared props survived replay: {sorted(set(props) - ALLOWED_SOURCE_NODE_PROPS)}"
+    )
+    # The DECLARED key in the same record still replays — the filter drops the
+    # payload, it does not drop the mutation.
+    assert props.get("format") == "transcript", sorted(props)
+
+
+def test_the_generic_route_cannot_clear_or_forge_the_absent_state(sdk):
+    """Review round 4, P1: the declaration HAS to admit ``rawState`` (or the
+    state could not be written) — so an allowlist check alone let the tenant MCP
+    route set it freely: ``rawState=None`` CLEARS a recorded absence (``SET n +=
+    {k: null}`` removes the key) and ``rawState='banana'`` persists an
+    unvalidated value. Both silently resurrect a raw the record says is gone —
+    the failure this issue exists to prevent — and the clear is journalled, so
+    it survives a rebuild.
+
+    (1) FAILS if the guard consults only ``_SOURCE_NODE_PROPS``: ``rawState`` is
+        a member, so the clear and the forgery both go through.
+    (2) REACHABLE: both spellings are passed through the real tenant surface,
+        and the read is checked after each to prove the state actually moved.
+    """
+    from tortoise.raw_state import RAW_DELETED
+
+    s, _events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
+    assert _raw(s) ["raw_state"] == RAW_DELETED
+
+    # The CLEAR: without the server-managed guard this reads back as `present`.
+    with pytest.raises(ValueError, match="server-managed"):
+        s.update_entity(RAW_URL, rawState=None)
+    assert _raw(s)["raw_state"] == RAW_DELETED, "the tenant route cleared the absence"
+
+    # The FORGERY: an unvalidated value must not be persistable either.
+    with pytest.raises(ValueError, match="server-managed"):
+        s.update_entity(RAW_URL, rawState="banana")
+    assert _raw(s)["raw_state"] == RAW_DELETED
+    assert "banana" not in repr(_source_props(s))
+
+    # The state is still reachable the sanctioned way — the refusal is not a
+    # dead end, and `present` remains the documented way back.
+    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state="present")
+    assert _raw(s)["available"] is True
+
+
+def test_the_declaration_covers_every_in_tree_source_writer(sdk):
+    """Review round 4, P2: the declaration drifted from the node. It was
+    written from the two writers I happened to be editing, but
+    ``get_source_reliability`` also mints three keys — so the read filter
+    silently DROPPED the reliability cache that the read had just returned to
+    the caller. Naming keys one at a time does not scale; this asserts the
+    invariant instead: every property an in-tree producer writes to a
+    ``:Source`` is DECLARED.
+
+    (1) FAILS the day a producer adds a key the declaration lacks — which is
+        exactly the drift that produced the dropped-cache defect.
+    (2) REACHABLE: each producer below is invoked for real and the node is read
+        back, so the surface measured is the one that exists, not a literal.
+    """
+    from tortoise.projection.entities import _SOURCE_NODE_PROP_NAMES
+
+    s, _events = sdk
+    s.create_source(RAW_URL, "document", contentHash="h1", title="t",
+                    source_path="/tmp/x.md")
+    s.get_source_reliability(RAW_URL)          # the reliability cache writer
+    produced = set(_source_props(s))
+    assert produced, "the fixture produced no :Source — the assertion would be vacuous"
+    undeclared = sorted(produced - set(_SOURCE_NODE_PROP_NAMES))
+    assert not undeclared, (
+        f"in-tree writers mint undeclared :Source properties {undeclared} — either "
+        f"declare them in entities._SOURCE_NODE_PROPS or stop them at the writer; an "
+        f"undeclared key is dropped from every filtered read"
+    )
+    # ...and the read keeps them, which is the defect this test was written for.
+    chain = s.get_provenance_chain(_memory(s))
+    assert chain and "reliabilityComponents" in chain[0]["source"], (
+        f"the reliability cache was dropped from the read bag: "
+        f"{sorted(chain[0]['source'] if chain else {})}"
+    )
+
+
+def test_the_declaration_covers_an_id_less_source_stub(sdk):
+    """Review round 4, P2: the guard resolved the node by ``n.url = $id OR
+    n.id = $id`` but the write matches ``{label: {_ENTITY_ID_PROP[label]: $id}}``
+    — ``:Source`` stubs minted by ``_link_source`` carry ``url`` and no ``id``. So
+    a declared update to a stub was refused with a message naming a node the
+    write could never have reached, while an undeclared one was refused for the
+    right reason by accident. The guard must use the WRITE's predicate.
+
+    (1) FAILS if the guard and the write use different predicates — the
+        declared-key update raises ``ValueError`` here.
+    (2) REACHABLE: the stub is minted by the real ``link_source_to_entity``
+        path, so it has the shape the guard got wrong.
+    """
+    s, _events = sdk
+    _memory(s)  # the Point whose raw the stub Source will belong to
+    obj = s.create_entity("Object", "the doc's subject")["node"]["id"]
+    s.link_source_to_entity(RAW_URL, obj, "Object")   # the real stub producer
+    stubs = s._get_proj().g.query(
+        "MATCH (n:Source {url:$u}) RETURN n.id", params={"u": RAW_URL}
+    ).result_set
+    assert stubs and stubs[0][0] is None, "the fixture node is not an id-less stub"
+    # A declared key: must NOT be refused (previously it raised, describing a
+    # node the write could not reach).
+    s.update_entity(RAW_URL, format="transcript")
 
 
 def test_index_entry_shape_carries_no_payload_field():

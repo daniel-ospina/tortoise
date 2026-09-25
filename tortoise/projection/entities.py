@@ -441,13 +441,24 @@ class _EntityHandlers:
     # handing back whatever a pre-#3998 writer left behind.
     #
     # ⚠️ WHAT THIS DOES AND DOES NOT ESTABLISH. It establishes that the node's
-    # property surface is DECLARED and closed: no undeclared key — and so no
-    # un-named-in-advance spelling of a raw payload — can reach the node, on any
-    # write path including journal replay. It does NOT bound the VALUES of the
+    # property surface is DECLARED: a caller-supplied property map cannot carry
+    # an undeclared key onto a `:Source` — and so no un-named-in-advance spelling
+    # of a raw payload can reach the node — on the caller-prop write paths
+    # (`create_source`/`_upsert_source`, `_update_entity`) and on journal replay
+    # (the `EntityMutated` fold arm below). It does NOT bound the VALUES of the
     # declared metadata fields: a caller who deliberately writes a 2 KB body
     # into `title` still stores 2 KB under `title`. Bounding those is a value
     # policy for short metadata (what IS the maximum title?), which is a product
     # decision this change does not take — stated here rather than implied away.
+    #
+    # This is the set of properties that may APPEAR on the node, which is why it
+    # is what the READ filter and the fold consult. It is deliberately BROADER
+    # than `_SOURCE_EXTRA_PROPS` (what a CALLER may set through the passthrough):
+    # `reliability*` is minted by an in-tree producer, not by a caller, so it
+    # must survive the read filter and must still be refused on the write side.
+    # `test_the_declaration_covers_every_in_tree_source_writer` enforces that
+    # this stays a superset of what the in-tree writers actually produce — the
+    # check whose absence let `reliability*` be dropped from the read bag.
     _SOURCE_NODE_PROPS: frozenset = frozenset({
         # identity
         "id", "url", "canonicalUrl", "urlAliases", "sourceKind", "externalId",
@@ -460,6 +471,10 @@ class _EntityHandlers:
         "sourcePath", "_searchText", "provenance_spans",
         # the session-capture writer (`sdk._materialize_session_source`)
         "sessionId", "capturedAt", "summary", "topics", "eventId",
+        # the reliability cache (`sdk.get_source_reliability`) — an in-tree
+        # producer, so these must survive the read filter. Omitting them made
+        # `get_provenance_chain` silently drop the cache it had just returned.
+        "reliability", "reliabilityComponents", "reliability_derived_at",
     })
     _SOURCE_EXTRA_PROPS: frozenset = frozenset({
         "credibilityTier",   # create_source(tier=)
@@ -2616,3 +2631,30 @@ class _EntityHandlers:
 #: and filter against the SAME declaration. Two copies of this set would be two
 #: contracts, and the one that drifts is the one that stops being true.
 _SOURCE_NODE_PROP_NAMES: frozenset = _EntityHandlers._SOURCE_NODE_PROPS
+# The SERVER-MANAGED subset of the declaration: written only by `_upsert_source`'s
+# fixed clauses (and validated by `raw_state.validate_raw_state`), never by a
+# caller-supplied property map. `_update_entity` refuses these on a `:Source` —
+# its allowlist is the whole declaration (which MUST admit `rawState`, or the
+# state could not be written at all), so without this second set the documented
+# tenant route could CLEAR a recorded absence by passing `rawState=None`, or
+# persist an unvalidated `rawState='banana'` (#3998 review round 4).
+#
+# Put this IN FRONT of the declaration, never instead of it: the declaration is
+# the read filter's contract (what may appear), this is the write filter's
+# (what a caller may set).
+_SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
+    "rawState", "rawStateAt",
+})
+
+
+def filter_source_props(props: dict) -> tuple[dict, list[str]]:
+    """Split a property map for a `:Source` into (declared, denied). #3998.
+
+    ONE filter, used by every consumer of the declaration — the caller-passthrough
+    write, the journal replay fold, and the read paths — so a route added later
+    cannot silently enforce a different rule (the exact drift that review
+    rounds 3 and 4 each found on a different path).
+    """
+    denied = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
+    kept = {k: v for k, v in props.items() if k in _SOURCE_NODE_PROP_NAMES}
+    return kept, denied

@@ -1201,7 +1201,16 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # recorded decision (PR #3018 review P2) that a caller-supplied vector is
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
-    "embedding_verbatim", "embedding_preserved"})
+    "embedding_verbatim", "embedding_preserved",
+    # #3998 (D30): the absent-raw state is server-managed — minted only by
+    # `_upsert_source`'s fixed clauses and validated by `validate_raw_state`.
+    # The SDK rejects these on a `:Source` through the generic entity route
+    # (`sdk._update_entity`); this is the fail-closed boundary in front of it,
+    # so the rejection happens before the write is attempted. Without it a
+    # tenant could `rawState=None` to CLEAR a recorded absence — silently
+    # resurrecting a raw the record says is gone — or persist an unvalidated
+    # `rawState='banana'`.
+    "rawState", "rawStateAt", "raw_state"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —

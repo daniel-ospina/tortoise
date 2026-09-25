@@ -44,15 +44,25 @@ from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
-from .raw_state import raw_entry, validate_raw_state  # #3998: the absent-raw state
+from .raw_state import (  # #3998: the absent-raw state
+    RAW_ABSENT_STATES,
+    RAW_PRESENT,
+    raw_entry,
+    validate_raw_state,
+)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         resolve_pool_size)
 from . import monitoring
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
-from .projection.entities import _SOURCE_NODE_PROP_NAMES  # #3998: the declared :Source surface
+from .projection.entities import (  # #3998: the declared :Source surface
+    _SOURCE_NODE_PROP_NAMES,
+    _SOURCE_SERVER_MANAGED_PROPS,
+    filter_source_props,
+)
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
+from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
@@ -17925,7 +17935,25 @@ class TortoiseSDK:
         # more deterministic than the previous scan-order-arbitrary LIMIT 1.
         resolved = self._get_proj()._resolve_entity(
             id_val, by_id=True, by_eventId=True, by_url=True)
-        return resolved[0]["properties"] if resolved else {}
+        if not resolved:
+            return {}
+        _props = resolved[0]["properties"]
+        # #3998 (D30) review round 4: this is the PRIMARY entity read and it is
+        # exposed as the MCP tool `tortoise_get_entity`, so a payload-bearing
+        # `:Source` written before the surface was declared came straight back
+        # through it. `get_provenance_chain` was filtered and this was not — the
+        # same leak, one function away, which is why the filter now lives in one
+        # place (`projection.entities.filter_source_props`) instead of being
+        # re-stated per read path.
+        if resolved[0].get("label") == "Source":
+            _props, _denied = filter_source_props(_props)
+            if _denied:
+                _logger.warning(
+                    "get_entity: a :Source node for %r carries %d undeclared "
+                    "property name(s) %s — WITHHELD from the read (#3998: the "
+                    "graph indexes the raw, it is not the raw store). Run "
+                    "`rebuild_all` to scrub them.", id_val, len(_denied), _denied)
+        return _props
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
@@ -17993,11 +18021,39 @@ class TortoiseSDK:
         # `update_entity(url, text=<2 KB body>)` persisted the body as `s.text`
         # and it SURVIVED `rebuild_all`.
         if props:
+            # The predicate MUST be the one the write below uses
+            # (`{label: {_ENTITY_ID_PROP[label]: $id}}`), or the guard protects a
+            # node the write cannot reach: an earlier version resolved by
+            # `n.url = $id OR n.id = $id`, so a `:Source` STUB (minted by
+            # `_link_source`, which carries `url` and no `id`) was refused a
+            # declared update whose write would have been a no-op anyway — an
+            # error message naming a node the caller was never touching.
+            _src_id_prop = _ENTITY_ID_PROP.get("Source", "id")
             _is_source = self._get_proj().g.query(
-                "MATCH (n:Source) WHERE n.url = $id OR n.id = $id RETURN count(n)",
+                f"MATCH (n:Source {{{_src_id_prop}:$id}}) RETURN count(n)",
                 params={"id": id_val},
             ).result_set[0][0]
             if _is_source:
+                _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
+                if _managed:
+                    # #3998: the state is SERVER-MANAGED — it is validated by
+                    # `validate_raw_state` and owned by the fixed clauses of
+                    # `_upsert_source`. The declaration must admit it (the state
+                    # has to be writable) but a caller-supplied map must not:
+                    # `rawState=None` CLEARS a recorded absence (`SET n += {k:
+                    # null}` removes the key) and `rawState='banana'` persists an
+                    # unvalidated value. Either one silently resurrects a raw the
+                    # record says is gone — the precise silent-loss failure
+                    # #3998 exists to prevent — and the clear is journalled, so it
+                    # survives a rebuild.
+                    raise ValueError(
+                        f"{_managed!r} is server-managed on a :Source and "
+                        f"cannot be set through the generic entity surface "
+                        f"(#3998/D30). Record an absence with "
+                        f"`create_source(..., raw_state=...)`, which validates "
+                        f"the value (accepted: {sorted(RAW_ABSENT_STATES)} or "
+                        f"{RAW_PRESENT!r})."
+                    )
                 _undeclared = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
                 if _undeclared:
                     raise ValueError(
@@ -21436,10 +21492,7 @@ class TortoiseSDK:
                 # "never a copy of the raw" claim above would be false for
                 # every pre-existing node. The filter is the same declaration
                 # the write side enforces, so the two cannot drift.
-                "source": {
-                    k: v for k, v in (row[0] or {}).items()
-                    if k in _SOURCE_NODE_PROP_NAMES
-                },
+                "source": filter_source_props(row[0] or {})[0],
                 "raw": raw_entry(row[0], source_id=(row[0] or {}).get("url")),
                 "entity": dict(row[1]) if row[1] is not None else None,
                 "labels": list(row[2]) if row[2] is not None else [],
