@@ -49,8 +49,10 @@ the value and must **never** fall back to `s.contentHash`; no SDK/MCP surface ch
 
 ## 3. The seam decision (the design work of this issue)
 
-**The version is a declared node property `sourceVersion` on the Point — edge-authoritative,
-prop-as-transit — written by its own explicit `SET` clause on both the live and replayed writers.
+**The version is carried by a declared node property `sourceVersionTransit` on the Point — the
+`r.sourceVersion` EDGE is authoritative, this node prop is the replay transit. It is named
+`...Transit` so a Point read never shadows §4.6's edge scalar with a pair-list.
+It is written by its own explicit `SET` clause on both the live and replayed writers.
 The edge MERGE stamps `r.sourceVersion` from the point snapshot, never from `s.contentHash`.**
 
 ### Why the node property (and not a journal-only payload key)
@@ -247,7 +249,7 @@ Every test names the input that makes it FAIL.
 | R2 | P1 | The capture path links before `_materialize_session_source` sets the hash ⇒ **absent** (O6) — the honest value; reordering is a separate owner decision. |
 | R3 | P2 | The ingest `extractedFrom` **connection** leg calls `_link_source` with **no** `source_versions`, so it produces **no anchor at all** (not an anchor that later dies). Its `extractedFrom` edge is also absent from the Point snapshot, so the edge itself dies at rebuild (pre-existing). Left bare. |
 | R4 | P2 | The `references` anchor (#5199) reads `s.contentHash` at link time and records its own stale-under-in-place-rebuild limitation; unchanged here. |
-| R5 | P2 | **Pre-existing, not introduced:** on a hard-delete→same-id-recreate, pass 2 re-creates the *old* incarnation's `extractedFrom` **edge** (which then carries its old `r.sourceVersion`) even though the live graph has none — the same class of gap `n.extractedFrom` itself already has (the recreate wipe @4042 clears node props, never edges). This change closes the **node-prop** half (the #4042 wipe) and records the edge half here; fixing edge-incarnation handling in pass 2 is a separate defect, out of scope. |
+| R5 | P2 | **Recast after code review — the edge resurrection is pre-existing, but the ANCHOR VALUE on it is new.** On a hard-delete→same-id-recreate, pass 2 re-creates the *old* incarnation's `extractedFrom` **edge**. That resurrection is pre-existing (the #4042 wipe clears node props, never edges) — but before this change the resurrected edge carried **no** `r.sourceVersion`; now it carries the dead incarnation's stale anchor while live has no edge at all. The **node-prop** half is closed here (the #4042 wipe + test 8b); the **edge half** is filed as a scoped follow-up (pass-2 edge-incarnation handling) and is deliberately NOT fixed in this PR. `test_recreated_point_does_not_inherit_the_node_transit` asserts the node only and says why; the follow-up must extend it to assert the edge is absent. |
 
 ## 10. Review cycle log
 
@@ -285,6 +287,15 @@ the (C) blind-spot claim softened to "excluded from the compared content view".
 scalar case is now test 1; `EventAPI.add_point` sets the transit **only when non-None** (no
 `sourceVersion: null`); `_upsert_point_edges` guards a falsy value before `dict(...)`; test 2 also
 asserts the journal payload has no key; test 15 scoped to the two in-scope producers (the R3
-connection leg excluded); the pre-existing recreate **edge** resurrection recorded as residual R5
-(test 8b asserts the node only, and says why); §3's shape wording aligned with the pinned
-`resolve_source_key` key contract.
+**Cycle 5 — code review (4 always-on + Architecture + Data + Config).** Folded: the generated
+`docs/product/sdk-rename-table.md` was REGENERATED after the `sdk.py` insertions shifted its line
+numbers (a red CI gate); the node carrier was RENAMED `sourceVersion` → `sourceVersionTransit` so a
+Point read does not shadow §4.6's edge scalar with a pair-list; `_upsert_point_props` now validates
+the payload shape exactly as `_upsert_point_edges` does (a malformed journal value would otherwise
+raise a Falkor `ResponseError` mid-`rebuild_all` and leave the graph wiped); `create_source` — the
+one writer that bypasses `_sanitize_props` — got its own reject for the three names (the security
+review's reproduced hole); the plan §6-17 supersede-boundary test was added (it passes today, so R1's
+“the transfer carries nothing” is now pinned); the `EventAPI` reject message no longer calls a
+provenance key an embedding field; and the ci-surfaces comments were corrected (`edges.py` selects
+`sdk`, not `ep`, so the `ep` registration was dropped as unjustified; the lane is
+embedded-without-URI / docker-server-with-URI via the #1647 redirect).
