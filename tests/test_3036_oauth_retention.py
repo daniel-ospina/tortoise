@@ -165,18 +165,56 @@ def test_default_window_applies_when_the_env_is_unset(monkeypatch):
     """Pin the DEFAULT magnitude independently of the constant the other tests
     seed from (they derive their rows from `retention_s`, so a wrong constant
     is invisible). With the env UNSET: 23h past expiry is kept, 25h is reaped
-    — which brackets the shipped 24h default without naming it."""
+    — which brackets the shipped 24h default without naming it.
+
+    ALL THREE tables: the defaults are three separate constants, so pinning
+    only the access one let a drifted refresh/codes default (anything > 2h)
+    pass the whole suite.
+    """
     for name in ("TORTOISE_OAUTH_ACCESS_RETENTION_S",
                  "TORTOISE_OAUTH_REFRESH_RETENTION_S",
                  "TORTOISE_OAUTH_CODE_RETENTION_S"):
         monkeypatch.delenv(name, raising=False)
-    cp = FakeControlPlane().seed("oauth_access_tokens", [
-        {"id": "h23", "expires_at": _iso(NOW - timedelta(hours=23))},
-        {"id": "h25", "expires_at": _iso(NOW - timedelta(hours=25))},
-    ])
+    cp = FakeControlPlane()
+    for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
+        cp.seed(table, [
+            {"id": f"{table}-h23",
+             "expires_at": _iso(NOW - timedelta(hours=23))},
+            {"id": f"{table}-h25",
+             "expires_at": _iso(NOW - timedelta(hours=25))},
+        ])
 
-    assert sweep_oauth_retention(cp, now=NOW)["oauth_access_tokens"] == 1
-    assert [r["id"] for r in cp.tables["oauth_access_tokens"]] == ["h23"]
+    observed = sweep_oauth_retention(cp, now=NOW)
+
+    assert observed == {"oauth_access_tokens": 1, "oauth_refresh_tokens": 1,
+                        "oauth_codes": 1}
+    for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
+        assert [r["id"] for r in cp.tables[table]] == [f"{table}-h23"], table
+
+
+def test_misconfigured_overrides_are_reported(monkeypatch, caplog):
+    """A misconfigured retention knob must be VISIBLE to the operator, not a
+    silent fallback/clamp — the docstring promises a warning on every branch.
+    Nothing else asserts these log calls, so deleting them was invisible."""
+    import logging
+
+    from tortoise.oauth import _MAX_RETENTION_S, _retention_seconds
+
+    cases = (
+        ("not-a-number", OAUTH_ACCESS_RETENTION_S, "not a positive integer"),
+        ("-5", OAUTH_ACCESS_RETENTION_S, "not a positive integer"),  # '-' is not a digit
+        ("0", OAUTH_ACCESS_RETENTION_S, "must be positive"),
+        ("999999999999", _MAX_RETENTION_S, "clamping"),
+        ("9" * 4301, _MAX_RETENTION_S, "clamping"),
+    )
+    for raw, expected, needle in cases:
+        monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", raw)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="tortoise.oauth"):
+            assert _retention_seconds("TORTOISE_OAUTH_ACCESS_RETENTION_S",
+                                      OAUTH_ACCESS_RETENTION_S) == expected
+        assert any(needle in r.getMessage() for r in caplog.records), (
+            f"no warning containing {needle!r} for {raw!r}")
 
 
 def test_negative_retention_override_never_deletes_live_rows(monkeypatch):
