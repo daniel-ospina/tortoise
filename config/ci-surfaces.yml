@@ -494,12 +494,17 @@ surfaces:
   - test_4220_blog_residue_cleanup.py
   - test_4716_capture_operator_ref_remap.py
   - test_ask_eval_only.py
+  - test_backfill_ghost_members_guard.py
   # #4282: dual-registered with `api` because `api` is keyed on SOURCE PATTERNS, and
   # the files this guard protects are not api-owned: `tools/bridge_table.py`, the
   # GENERATED `docs/product/bridge-table.md`, and the three docs that restate its
   # counts. Editing any of those selected NO surface, so the drift gate never ran
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
+  - test_graph_name_ownership.py
+  # #3634: guards the graph-name ownership vocabulary (the prefix sets that
+  # authorise a sweep) — the register, the deny-safe residue predicate, and the
+  # AST pin keeping the opt-in legacy sweep out of every default path.
   # #4282: dual-registered with `api` for the same reason as test_bridge_table.py
   # above — `tools/mcp_rename_table.py` is named in SOURCE_PATTERNS["api"], so a
   # GENERATOR-only edit selects `api` and runs this drift gate.
@@ -610,6 +615,7 @@ surfaces:
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
+  - test_server_hygiene_gate.py
   - test_source_dedup_registration.py
   - test_source_identity.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
