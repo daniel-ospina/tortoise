@@ -3530,7 +3530,7 @@ def _session_post(api_key: str, api_url: str):
             alone would confirm them. Uniformity is deliberate: a reviewer must
             not have to work out why one path confirms a 402 and the other does
             not. The deferral is recoverable either way (each is `retry`, so the
-            entry is kept and re-posted); #4925 holds the question of broadening
+            entry is kept and re-posted); #5051 holds the question of broadening
             both.
             """
             from tortoise.capture_spool import classify_failure
@@ -4386,7 +4386,7 @@ def _cmd_sessions_import(args) -> int:
         the spool, this decides what to RECEIPT. The cost of honouring it is a
         deferral, not a loss: a 402/503 whose commit landed is spooled (both are
         `retry`, so `_spool_if_retryable` keeps it) and filed by a later
-        attempt. #4925 records the tension — 503 and 504 are both 5xx and the
+        attempt. #5051 records the tension — 503 and 504 are both 5xx and the
         post-commit shape is identical; broadening needs that reopened.
 
         Writes the local receipt ONLY on :data:`FILED`. The turn rows are
@@ -5280,6 +5280,7 @@ def _cmd_pack_new(args) -> int:
         CANONICAL_EVENT_KINDS,
         CANONICAL_OBJECT_KINDS,
         CANONICAL_POINT_KINDS,
+        registered_source_types,
     )
 
     ns = (args.namespace or "").strip()
@@ -5292,8 +5293,14 @@ def _cmd_pack_new(args) -> int:
         errors.append(f"namespace '{ns}' should be camelCase (lowercase first letter)")
     if ns and ns in RESERVED_STARTER_NAMESPACES:
         errors.append(f"namespace '{ns}' is a reserved starter pack — pick a different name")
+    # D10 (#5013, ONTOLOGY v3.15, #5022) moved `document` from the object-kind
+    # axis to the SOURCE-kind axis (a document is a `:Source`), so the guard must
+    # read the source vocabulary too: the word was reserved before only
+    # incidentally, as an objectKind. The property is unchanged — a pack
+    # namespace must not collide with ANY canonical ontology word, whichever
+    # axis carries it.
     _canon = CANONICAL_OBJECT_KINDS | CANONICAL_POINT_KINDS | CANONICAL_EVENT_KINDS \
-        | CANONICAL_DOCUMENT_KINDS
+        | CANONICAL_DOCUMENT_KINDS | registered_source_types()
     if ns and ns in {k.lower() for k in _canon}:
         errors.append(f"namespace '{ns}' collides with a canonical kind — pick a different name")
     if errors:
