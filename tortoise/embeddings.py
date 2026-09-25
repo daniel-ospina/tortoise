@@ -623,11 +623,27 @@ def compute_embeddings(
         return [None] * len(texts)
     try:
         truncated = [_truncate_for_embedding(t, max_tokens) for t in texts]
+    except Exception:
+        return [None] * len(texts)
+    try:
         _t0 = time.perf_counter()
         vecs = model.encode(truncated)
-        _note_embed_encode(truncated, time.perf_counter() - _t0)
-        if vecs is None or len(vecs) != len(texts):
-            return [None] * len(texts)
+    except Exception:
+        # An encode that RAISED produced no model work, so it is counted as
+        # ``skipped`` rather than silently counted as neither — otherwise the
+        # figure (0 calls, 0 skipped) is indistinguishable from "no encode was
+        # ever attempted", which is exactly the ambiguity ``skipped`` exists to
+        # remove (#4488 failure-mode table).
+        _note_embed_skip(len(texts))
+        return [None] * len(texts)
+    # ⛔ The measurement call sits OUTSIDE every value-guarding ``try``: a
+    # measurement fault must never discard a batch of successfully computed
+    # vectors — the #4280 shape recorded in this function's own docstring, where
+    # a guard that raises inside the try silently NULLs the dense leg.
+    _note_embed_encode(truncated, time.perf_counter() - _t0)
+    if vecs is None or len(vecs) != len(texts):
+        return [None] * len(texts)
+    try:
         return [vec.tolist() for vec in vecs]
     except Exception:
         return [None] * len(texts)

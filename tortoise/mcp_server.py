@@ -1002,7 +1002,21 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
         # this lane. Fresh (never inherited) → it cannot double-count the hosted
         # capture lane's tally, and an exception still flushes what was encoded.
         # Resolved before the write so the tally knows its org from the start.
-        with _embed_metering.meted(org_id):
+        #
+        # ⛔ ARMED ONLY WHEN THERE IS AN ORG. On the stdio transport
+        # ``_current_org_id`` is legitimately None (_enforce_quota says so:
+        # "stdio/operator — no org context"), and every sibling writer exempts
+        # ``not org_id`` — ``record_embedding_usage`` included. Arming a tally
+        # with no org would make the write's encodes non-empty and
+        # unattributable, so ``flush_tally`` would fire an UNMETERED_INCREMENT
+        # incident on EVERY stdio write that encodes, telling the operator to
+        # investigate a window that was never unresolvable. Guarding here matches
+        # the write-op metering below (`if org_id:`) and the writer's own
+        # exemption contract.
+        if org_id:
+            with _embed_metering.meted(org_id):
+                result = fn(*args, **kwargs)
+        else:
             result = fn(*args, **kwargs)
         # Metering (#681): best-effort, after successful write
         if org_id:

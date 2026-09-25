@@ -22,8 +22,10 @@ notes, then takes-and-resets the tally and writes it once through
   from ``scope["state"]["org_id"]``, which the key-auth dependencies populate);
 * ``mcp_server._quota_gated`` — the MCP write lane;
 * :func:`meted` — work born in a DETACHED task (background index jobs, the dream
-  worker, the hosted capture body, the onboarding/starter seed runners) installs
-  a FRESH tally and flushes when it exits.
+  worker, the onboarding/starter seed runners) installs a FRESH tally and flushes
+  when it exits. The hosted CAPTURE body is NOT a ``meted`` site: a capture is a
+  REQUEST, so the middleware owns it — the pool thread's copied context shares
+  the request's tally object, and the boundary flush picks the notes up.
 
 WHY A MUTABLE TALLY RATHER THAN A COPY-ON-WRITE VALUE. The encode can run in a
 pool thread whose context was copied (``hosted_api._submit_off_loop`` uses
@@ -34,10 +36,12 @@ counter (PR #5292).
 
 TOTAL, NEVER RAISES. ``note_encode``/``note_skip``/``bind_org`` are total: an
 allocation fault on the measurement path must never fail a write. ``flush``
-absorbs every failure and reports it to the operator through
-``metering.report_unmetered_increment`` — the same lane-visible signal the six
-swallow sites use (this module is the seventh lane, ``embed``). A drop is never
-silent; it is never a refusal either (#3981).
+absorbs every failure and reports a **window-unresolvable** drop to the operator
+through ``metering.report_unmetered_increment`` — the same lane-visible signal
+the seven swallow sites use (this module is the ``embed`` lane). A failure of the
+increment RPC ITSELF is logged at WARNING and is the #3824 residual, shared with
+every other lane (see ``metering.record_embedding_usage``); the two are distinct
+and this is the only one that ever alerts.
 
 NOT ON THE WRITE PATH. There is deliberately NO flush from
 ``hosted_api._record_write_op``: that site is SYNCHRONOUS and runs ON the event
@@ -203,9 +207,15 @@ def flush_tally(tally: EmbedTally | None, org_id: str | None = None) -> dict | N
     when the org is unresolvable, or when the write was dropped. Every drop is
     reported to the operator on the ``embed`` lane (never silent).
     """
-    if tally is None or tally.consumed:
+    if tally is None:
         return None
-    tally.consumed = True
+    # The consumed transition is under the lock: two boundaries (a runner and the
+    # request middleware) can reach the same tally from different threads, and a
+    # check-then-set race would double-write it.
+    with _LOCK:
+        if tally.consumed:
+            return None
+        tally.consumed = True
     if tally.is_empty():
         return None
     org = org_id or tally.org_id
@@ -260,9 +270,10 @@ class _Meted:
 
     Fresh, never inherited: a detached work unit owns its own figure, so it can
     neither double-count a request-scoped tally nor steal one. Usable as a sync
-    CM (MCP ``_quota_gated``, the pool-thread runners) or an async CM (the
-    hosted capture body, index jobs, the dream worker) — the async arm offloads
-    the blocking ledger write so the loop is never stalled by metering.
+    CM (MCP ``_quota_gated``, the seed runners) or an async CM (the background
+    index jobs and the dream worker) — the async arm offloads the blocking
+    ledger write, and the sync arm offloads it too when it is entered from a
+    running loop, so the loop is never stalled by metering.
     """
 
     __slots__ = ("_org", "_tally", "_token")
@@ -284,7 +295,26 @@ class _Meted:
         if self._token is not None:
             with contextlib.suppress(Exception):
                 _ACTIVE.reset(self._token)
-        flush_tally(self._tally, self._org)
+        tally, org = self._tally, self._org
+        # ⛔ NEVER BLOCK THE EVENT LOOP. The sync arm is reached from "sync"
+        # runners that an ``async def`` handler invokes DIRECTLY
+        # (``_run_onboarding_seed`` / ``_run_starter_seed``) and from FastMCP's
+        # on-loop tool dispatch, so flushing inline would run a blocking ledger
+        # write under the loop — the #4451 class this change deliberately kept
+        # OFF the write path. Off the loop (a genuine pool thread) inline is
+        # correct and cheapest; on the loop the write is handed to a thread.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            flush_tally(tally, org)
+            return
+        with contextlib.suppress(Exception):
+            # Fire-and-forget by design: the measurement must never sit between
+            # a write and its response. ``take_and_reset`` is atomic, so if the
+            # request boundary also flushes, exactly one of the two writes wins.
+            loop.create_task(asyncio.to_thread(flush_tally, tally, org))
 
     # ── sync ────────────────────────────────────────────────────────────────
     def __enter__(self) -> EmbedTally:

@@ -64,7 +64,7 @@ surfaces:
   - test_analytics_offloop_4015.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
-  - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  - test_metering_window_admission.py  # #3981: the seven swallow sites report the dropped increment (caller-level; the coverage is the proof)
   # #4488: embedding-encode measurement. Dual/triple-registered with `core` and
   # `eval`: the hook lives in tortoise/embeddings.py (an `eval`-owned module) and
   # the writer in tortoise/metering.py, so a change to EITHER must run it — a

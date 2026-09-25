@@ -4236,6 +4236,15 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # auth_ip event or counted toward R3 read velocity). Same best-effort
     # semantics as the key lanes — abuse telemetry never breaks auth.
     await _abuse_post_auth(request, org)
+    # #4488: publish the resolved org on the ASGI scope, exactly as the key
+    # lanes do (``hosted_api.py`` get_current_org / _get_current_org_supabase).
+    # This lane resolves the org WITHOUT stamping it, so an embed tally armed by
+    # ``EmbedMeteringMiddleware`` had no org to attribute to at flush time: every
+    # SESSION-authed write that encoded (POST /v1/points, /v1/objects,
+    # /v1/subjects) was dropped AND misreported as a bookkeeping fault
+    # (UNMETERED_INCREMENT on a perfectly resolvable org). Setting it here —
+    # before the handler runs — makes the org resolvable at the boundary.
+    request.state.org_id = org["org_id"]
     return org
 
 

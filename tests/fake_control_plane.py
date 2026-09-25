@@ -287,6 +287,17 @@ class FakeControlPlane:
             # SQL does, so a test can tell "the window used two encoders" from
             # "the window used one" and from "a skip-only flush erased it".
             p = body or {}
+            # Mirror the SQL's degenerate-window guard: the real RPC RAISES
+            # before the INSERT, so without this the fake would accept a window
+            # production refuses, and a test would pass on behaviour that cannot
+            # happen (the SQL never executes in CI — this fake is the only
+            # behavioural proxy for the lane).
+            _ps, _pe = _as_dt(p.get("p_period_start")), _as_dt(
+                p.get("p_period_end"))
+            if _ps is not None and _pe is not None and _pe <= _ps:
+                raise RuntimeError(
+                    "metering_increment_embedding: period_end must be after "
+                    "period_start")
             rows = self.tables.setdefault("metering_records", [])
             row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
                         and r.get("period_start") == p.get("p_period_start")),
