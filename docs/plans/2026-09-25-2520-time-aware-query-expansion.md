@@ -242,12 +242,14 @@ implement until green.
 ### Task 2: `tortoise_fts_query` dense-leg anchor
 **Intent:** Make the date anchor reach the embedding.
 **Acceptance:** AC 4–5.
-**Files:** Modify `tortoise/sdk.py`; Test `tests/test_time_aware_sdk_2520.py` (docker) plus a
-hermetic monkeypatched-`encode` test in the same file that asserts the anchored string reaches
-`model.encode` when the embedder is absent from the lane (the docker half skips with the reason;
-the hermetic half always runs, so AC5 is never permanently skipped in CI).
-Steps: add kwargs + docstring; resolve intent once; use the anchored string for the vector encode
-only; off path byte-identical.
+**Files:** Modify `tortoise/sdk.py`; Test `tests/test_time_aware_sdk_2520.py` (docker half — the
+recording embedder proves the anchored string reaches `model.encode`), plus a HERMETIC half that
+always runs: the anchor decision is factored into `tortoise.time_aware.dense_query_for` (pure), so
+`test_time_aware_2520.py` and `test_time_aware_sdk_2520.py` pin it without a graph, and the graph
+halves carry per-test `skipif`s — AC5 is never permanently skipped in CI (a FalkorDB-less lane
+still proves the decision; the graph half proves the wiring).
+Steps: add kwargs + docstring; factor the decision into `dense_query_for`; use the returned string
+for the vector encode only; off path byte-identical (no import on the off path).
 
 ### Task 3: eval arm (`retrieve.py`)
 **Intent:** The sealed A/B can switch the lever on and reconstruct the arm; the reorder survives
@@ -343,4 +345,4 @@ consumes the kwargs Task 2 adds). Final verification is last.
 - The recency-weight lever (`recency_fields`/`recency_boost`) for non-TR questions changes retrieval
   ordering; its harm/benefit is deliberately left to the sealed A/B (that is the point of the gate).
 
-<!-- plan-review: cycle=4, issues=6 (0 P0, 1 P1, 5 P2), status=revising, version=2.3.0 -->
+<!-- plan-review: cycles=5, status=clean, version=2.3.0 -->

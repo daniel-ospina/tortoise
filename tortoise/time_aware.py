@@ -66,6 +66,7 @@ __all__ = [
     "PREFER_LATEST",
     "QUERY_DATE_SUFFIX",
     "TemporalIntent",
+    "dense_query_for",
     "detect_temporal_intent",
     "inject_query_date",
     "is_stale_entry",
@@ -218,6 +219,24 @@ def inject_query_date(query: str, question_date: str | None) -> str:
     return f"{query}{suffix}"
 
 
+def dense_query_for(query: str | None, *, time_aware: bool,
+                    query_date: str | None = None) -> str | None:
+    """The DENSE-leg query for a hybrid search — the SDK's whole anchor
+    decision, factored out so it is testable without a graph.
+
+    ``inject_query_date(query, query_date)`` when ``time_aware`` is on and
+    the query's freshness intent is :data:`PREFER_LATEST`; otherwise
+    ``query`` unchanged (a ``date-pinned`` query must NOT be anchored — the
+    invert-recency guard). ``None``/empty queries and a missing/unparseable
+    date are no-ops. Pure: no DB, no model, no clock.
+    """
+    if not time_aware or not query or not str(query).strip():
+        return query
+    if detect_temporal_intent(query).kind != PREFER_LATEST:
+        return query
+    return inject_query_date(query, query_date)
+
+
 # ── rank-time prefer-latest ─────────────────────────────────────────────────
 
 
@@ -262,10 +281,12 @@ def is_stale_entry(entry: dict, *, question_date: str | None = None) -> bool:
 
     * ``superseded_by`` is present (a CORRECTS successor exists), or
     * ``live.is_terminal_status(status)`` — the SINGLE shared status
-      predicate (the terminal vocabulary + the legacy ``outdated`` flag),
-      never re-declared here. This is the clause that catches
-      ``retract_point``, which writes ``status='retracted'`` and no window,
-      or
+      predicate, never re-declared here (the legacy ``outdated`` boolean is
+      NOT consulted: the eval's annotated surface does not carry it, and it
+      is redundant — ``invalidate_point`` writes the window alongside it,
+      which the clause below already catches). This is the clause that
+      catches ``retract_point``, which writes ``status='retracted'`` and no
+      window, or
     * a validity window has closed: ``valid_to``/``expired_at`` casts to a
       date ``<= question_date``. When ``question_date`` is missing or
       unparseable, the presence of the window is the fallback signal. An
@@ -279,7 +300,10 @@ def is_stale_entry(entry: dict, *, question_date: str | None = None) -> bool:
     qd = _as_date(question_date) if question_date else None
     for key in ("valid_to", "expired_at"):
         raw = entry.get(key)
-        if not raw:
+        # ``0``/``0.0`` is a VALID (falsy) epoch — absence, not falsiness,
+        # means "no window". A truthiness test would silently treat a
+        # 1970-01-01 window as no window at all.
+        if raw is None or raw == "":
             continue
         d = _as_date(raw)
         if d is None:

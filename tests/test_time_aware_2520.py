@@ -177,6 +177,25 @@ def test_stale_on_terminal_status_alone():
     assert not is_stale_entry({"status": "live"})
 
 
+def test_legacy_outdated_flag_alone_is_not_stale():
+    """FAIL VALUE: ``True`` for an ``outdated``-flag-only entry. The eval's
+    annotated surface does not carry the legacy boolean, and the window
+    clause already catches every flag-invalidated point — so the intended
+    behaviour is NOT stale on the flag alone. Reachable: the fixture carries
+    only the flag, with a non-terminal status. Pinned so a future reader
+    cannot "restore" a clause the design deliberately left out."""
+    assert not is_stale_entry({"outdated": True, "status": "live"})
+
+
+def test_falsy_numeric_window_is_still_a_window():
+    """FAIL VALUE: ``False`` for a falsy epoch (``0``) — a truthiness test
+    (``if not raw``) reads the 1970-01-01 epoch as "no window". Reachable:
+    ``_as_date(0)`` -> ``"1970-01-01"``, which closed long before any
+    question date."""
+    assert is_stale_entry({"valid_to": 0}, question_date="2026-09-25")
+    assert is_stale_entry({"expired_at": 0.0}, question_date="2026-09-25")
+
+
 def test_stale_on_closed_window():
     """FAIL VALUE: ``False`` for a window that closed before the question
     date."""
@@ -220,6 +239,43 @@ def test_unparseable_window_is_not_stale():
     assert not is_stale_entry({"valid_to": "not-a-date"},
                               question_date="2026-09-25")
     assert not is_stale_entry({"valid_to": "someday"})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# dense_query_for (the SDK's factored anchor decision — hermetic)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_dense_query_for_prefer_latest_is_anchored():
+    """FAIL VALUE: the bare query for an armed PREFER-LATEST question."""
+    from tortoise.time_aware import dense_query_for
+    assert dense_query_for("where do i live now", time_aware=True,
+                           query_date="2026-09-25") == (
+        "where do i live now (as of 2026-09-25)")
+
+
+def test_dense_query_for_date_pinned_is_not_anchored():
+    """FAIL VALUE: an anchor on a DATE-PINNED query (the invert-recency
+    guard is enforced in the factored decision, not only in the caller)."""
+    from tortoise.time_aware import dense_query_for
+    assert dense_query_for("where did i live in 2024", time_aware=True,
+                           query_date="2026-09-25") == (
+        "where did i live in 2024")
+
+
+def test_dense_query_for_off_path_and_edge_inputs_are_noops():
+    """FAIL VALUE: any anchor on the OFF path, or an invented date for a
+    missing/None/invalid ``query_date``. Reachable: the defaults."""
+    from tortoise.time_aware import dense_query_for
+    assert dense_query_for("where do i live now", time_aware=False,
+                           query_date="2026-09-25") == "where do i live now"
+    assert dense_query_for("where do i live now", time_aware=True,
+                           query_date=None) == "where do i live now"
+    assert dense_query_for("where do i live now", time_aware=True,
+                           query_date="not-a-date") == "where do i live now"
+    assert dense_query_for(None, time_aware=True,
+                           query_date="2026-09-25") is None
+    assert dense_query_for("", time_aware=True,
+                           query_date="2026-09-25") == ""
 
 
 def test_window_presence_fallback_without_question_date():

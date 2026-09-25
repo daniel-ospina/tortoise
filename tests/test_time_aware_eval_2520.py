@@ -254,6 +254,31 @@ def test_real_supersession_census_reaches_the_arm(seeded_sdk):
     assert stats["tr_excluded"] is False, stats
 
 
+def test_status_only_stale_row_is_demoted(seeded_sdk, monkeypatch):
+    """FAIL VALUE: a `retract_point`-shaped row (status='retracted', no
+    CORRECTS edge, no window) NOT demoted — the case that only the annotated
+    `status` key catches. Reachable: ``hybrid_search`` is stubbed to return
+    exactly that payload, so a missing/renamed `status` key leaves the row
+    live and the reorder a no-op."""
+    import tools.longmem_eval.retrieve as _r
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    stale = {"id": STALE_ID, "content": "i live in madrid",
+             "match_source": "fts", "status": "retracted"}
+    live = {"id": LIVE_ID, "content": "i live in lisbon",
+            "match_source": "fts"}
+    monkeypatch.setattr(_r, "hybrid_search",
+                        lambda sdk, query, **kw: [dict(stale), dict(live)])
+    on = retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                               pool_size=60, time_aware_qe=True)
+    assert on["time_aware_stats"]["stale"] == 1, on["time_aware_stats"]
+    ids = _ids(on["hits"])
+    assert ids.index(LIVE_ID) < ids.index(STALE_ID), (
+        "the status-only stale row must be reordered behind the live one")
+    # And the status must ride the measured annotated surface by name.
+    stale_hit = next(h for h in on["hits"] if h["id"] == STALE_ID)
+    assert stale_hit["status"] == "retracted"
+
+
 # ── (c) the env gate is fail-safe OFF ─────────────────────────────────────
 
 @pytest.mark.parametrize("env_value, expected", [

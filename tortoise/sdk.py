@@ -14366,10 +14366,10 @@ class TortoiseSDK:
         # (full-scan) is safe: the detector is None-safe. Off path: no
         # import, no scan, byte-identical.
         _dense_query = query
-        if time_aware and query and query.strip():
-            from .time_aware import detect_temporal_intent, inject_query_date
-            if detect_temporal_intent(query).kind == "prefer-latest":
-                _dense_query = inject_query_date(query, query_date)
+        if time_aware:
+            from .time_aware import dense_query_for
+            _dense_query = dense_query_for(query, time_aware=True,
+                                           query_date=query_date)
 
         # 2. Get query vector if needed (all core entity types now have embeddings #7845)
         # R3 (#1542) D4: no_embedder vs encode_failed are distinguished —
