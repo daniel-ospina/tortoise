@@ -34,6 +34,27 @@ created — a ``create_point`` that internally creates 1 node and a
 matches the pricing page's "$5 per additional 10k write ops" — a write op
 is one API call, not one graph element.
 
+⚠️ KNOWN DISCREPANCY — ``write_ops`` is NOT a graph-operation count (#3359)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The billed unit named "write op" is an **API call**, but the same name is
+what the pricing decision needs to be about **physical graph operations**,
+and the two differ by a large factor for ``capture_session``. A measured
+capture (``tortoise/graph_ops.py`` counts every ``_GuardedGraph.query``)
+issues a **median ~441 FalkorDB operations** (range 354-523) while the meter
+records **1 write op** — an under-count of roughly **440x** for capture.
+Measured phase split: extraction graph search ~56%, belief propagation ~28%,
+commit ~10%, session store ~6% (session store is ``2 x turns + ~12``;
+commit is ~9-12 ops per extracted claim; belief propagation grows with the
+tenant's accumulated graph, so it rises as a customer's memory grows).
+
+**This meter is deliberately left unchanged**: what it counts feeds billing,
+so redefining it to count graph operations would be a silent breaking change
+to live invoices. The physical per-session figure now lives continuously in
+the ``capture_graph_ops`` analytics row (``hosted_api._capture_session_impl``),
+attributed per capture phase and readable via
+``graph_ops.capture_graph_ops_distribution()``. Replacing the billed unit is a
+**pricing decision for the owner**, not something an agent changes here.
+
 Storage
 ~~~~~~~
 ::
