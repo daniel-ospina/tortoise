@@ -125,21 +125,77 @@ the backup/restore path.
 <!-- config-registry:watermark -->
 | Carried class | Carried field | Restore rule after replay |
 |---|---|---|
-| `:GraphEventMeta` | `last_seq` (high-water mark) | `max(carried, max(:GraphEvent.seq))`; `first_seq` is re-derived as `min(:GraphEvent.seq)`, or `last_seq + 1` when the log is empty |
+| `:GraphEventMeta` | `last_seq` (high-water mark) | `max(carried, max(:GraphEvent.seq), live)` — the MAXIMUM of the pre-wipe sidecar's value, the replayed log and any counter still in the graph, which is a counter's only safe merge and the value `first_seq` is then derived from; `first_seq` is `min(:GraphEvent.seq)`, or `last_seq + 1` when the log is empty, and is raised only (never lowered). `last_seq` is bounded by `event_store.MAX_SEQ`; `first_seq` is bounded by `event_store.MAX_INT64` and may legitimately sit at `MAX_SEQ + 1` when the log comes back empty |
 
 Defect and vehicle: this entry was added by **#4653**; the durable carrier is
 the #2943 pre-wipe sidecar's `event_meta` section, re-established by
 `event_store.reestablish_watermark` after every replay pass.
 <!-- config-registry:end -->
 
-`first_seq` is deliberately **not** carried — it is fully re-derivable from the
-surviving log, and `last_seq + 1` is the truthful floor once the log is empty
-(the stream was truncated, so `events_poll` answers 410 instead of returning
-`[]` forever to a subscriber parked above the fresh counter). The carrier is the
-durable #2943 pre-wipe sidecar (`event_meta` section), **not** the config
-registry above: this class has no identity property to key a node-class entry
-on, and snapshotting it as configuration would restore a value as if it were
-authored configuration rather than a monotonic counter. **#4653** is the defect.
+`first_seq` is deliberately **not** carried. On this path it is not recoverable
+from the surviving log either — the rebuild replays points, not `:GraphEvent`
+rows (#4664), so the log comes back EMPTY and `first_seq` is derived as
+`last_seq + 1`. That is the truthful floor once the stream is truncated, and it
+makes `events_poll` answer 410 instead of returning `[]` forever to a subscriber
+parked above the fresh counter (the pre-fix behaviour). Carrying `first_seq`
+would only relabel the same truncation. The pre-wipe purge floor is therefore
+LOST, which is why the backup/restore sibling (`hosted_backup._restore_event_meta`,
+#3902) does carry it: there the `:GraphEvent` rows are copied, so the floor is
+there to be carried.
+
+**The counter's domain is `0 .. MAX_SEQ`, and the ceiling is `2**53 - 1`, not
+INT64_MAX.** `ensure_event_schema` indexes `:GraphEvent.seq`, and FalkorDB
+compares numeric RANGES in double precision, where integers above `2**53` are no
+longer all representable — so `read_after`'s `WHERE e.seq > $after` **silently
+drops** rows in that range (verified on FalkorDB 4.20.4: with the index,
+`e.seq > 2**53` returns the row at `2**53 + 2` but not the one at `2**53 + 1`;
+without the index both come back). A counter in that range would re-create the
+exact #4653 harm — events that exist and are never delivered, with no 410 to
+tell the subscriber. `MAX_SEQ` is therefore the last counter value whose next
+`seq` is still compared exactly, and the bound is enforced in all three places
+that can introduce a value: the pre-wipe validator (untrusted file),
+`event_store.capture_watermark` (live counter) and
+`event_store.reestablish_watermark` (the write).
+
+**Residual — the ALLOCATOR itself has no ceiling.** `next_seq` is unchanged by
+#4653, so a graph that keeps emitting can still walk past `MAX_SEQ` (and would
+wrap negative at INT64_MAX); once it does, `capture_watermark` refuses to carry
+the value and the rebuild aborts before the wipe rather than restoring it. That
+is fail-closed but it is not a repair, and it is unreachable in practice at
+~9e15 events; capping allocation is a separate change (**#5379**).
+
+**Residual — the same gap, one step out.** With the log EMPTY (today's state,
+#4664) the floor is `last_seq + 1`, so no cursor survives; but the moment a
+replay writes `:GraphEvent` rows again, the floor becomes `min(:GraphEvent.seq)`
+and a subscriber parked between that and a live counter far above it reads `[]`
+with no 410. That starvation is the #4664 unreplayed/truncated-stream residual,
+not a regression from carrying the counter — the pre-fix allocator starved the
+same cursor — and it is why `first_seq` is raised, never lowered.
+
+The carrier is the durable #2943 pre-wipe sidecar (`event_meta` section),
+**not** the config registry above: this class has no identity property to key a
+node-class entry on, and snapshotting it as configuration would restore a value
+as if it were authored configuration rather than a monotonic counter. **#4653**
+is the defect.
+
+**A rescue file can carry no watermark, and when the graph it rescues came back
+with no counter either, the allocator restarts at 1.** Two sidecar shapes do
+this: a file written before #4653 (version 1 or 2) has no `event_meta` section at
+all, and a current-version file can carry an EMPTY one. The loader accepts both
+on purpose (a legacy file is still the only record of the graph-only nodes it
+holds), and the rebuild raises an ERROR naming the reset rather than proceeding
+silently. The file records only its capture-time state, so it cannot say whether
+a counter ever existed — for a graph that never emitted, restarting at 1 is the
+correct behaviour, and for a graph whose counter a wipe destroyed it is a loss.
+Only if an app emitted after that wipe does the live counter survive, in which
+case the union carries it and neither the reset nor the ERROR occurs.
+
+**A rebuild still requires a QUIESCED graph.** An event emitted between the
+pre-wipe capture and the `DETACH DELETE` is destroyed with the node, and because
+the journal carries no `seq` its number is lost too — so the allocator can
+re-issue that `seq` after the rebuild. The carry closes the entire post-wipe
+window and every non-racing path; it cannot close this one, which is inherent to
+replacing a graph with a full wipe+replay.
 
 <!-- config-registry:unenrolled -->
 - `:OnboardingState`, `:OnboardingStep`, and their `COMPLETED_STEP` edges —
@@ -258,7 +314,7 @@ gate in `tests/test_durability_posture.py` fails the build if a
   nothing and refuses nothing: the byte-identical unconditional wipe (which
   #2814 does **not** change, by owner decision — the surface belongs to PR
   #2996) destroys it exactly as before. The live instance is the
-  `unenrolled` list above (#4641, #4653).
+  `unenrolled` list above (#4641).
 - **#2814 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar reverts a **colliding** config key to its
   pre-wipe value, so a config deliberately deleted after the wipe can be

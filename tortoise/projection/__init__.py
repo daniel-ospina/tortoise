@@ -299,9 +299,10 @@ _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       "batch_point_links", "session_snapshot",
                       "session_point_links",
                       # #2814: authoritative configuration. Enrolled here so it
-                      # is validated before the wipe (:447) and so the
-                      # retirement payload and `rebuild_all`'s write payload can
-                      # be DERIVED from this tuple rather than re-listed.
+                      # is validated before the wipe (via
+                      # `_SNAPSHOT_ENTRY_CHECK`) and so the retirement payload
+                      # and `rebuild_all`'s write payload can be DERIVED from
+                      # this tuple rather than re-listed.
                       "config_snapshot",
                       # #4653: the `:GraphEventMeta` high-water mark. The wipe
                       # destroys the event-log allocator, and `last_seq` exists
@@ -309,12 +310,16 @@ _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       # carried like the classes above — but it is NOT a
                       # config-registry class (no identity property), so it
                       # rides its own section and its own restore rule. Enrolled
-                      # here so validation, the union, the write payload and the
+                      # here so pre-wipe validation (via
+                      # `_SNAPSHOT_ENTRY_CHECK`), the write payload and the
                       # RETIREMENT payload all derive it from this one tuple:
                       # a hand-list would go stale and leave the retirement
                       # artifact carrying a live high-water mark that the next
-                      # rebuild's union would re-merge — moving the allocator
-                      # BACKWARD.
+                      # rebuild's union would re-merge. The union's return
+                      # literal is hand-written for every section, so
+                      # `test_event_meta_section_and_validator_are_wired` pins
+                      # its key set against this tuple — a section added here and
+                      # forgotten there cannot pass silently.
                       "event_meta")
 # The sidecar is read whole into memory before the wipe, so an unbounded file
 # (a planted one especially — the log dir is caller-supplied) would exhaust
@@ -717,14 +722,20 @@ def _event_meta_last_seq(entries) -> int | None:
     The section is validated before the wipe, so this only unwraps it; a
     malformed entry is ignored rather than guessed at, because the pre-wipe
     validator has already refused the file (the loader never hands one here).
+
+    The section is WRITTEN as a singleton (0 or 1 entry), but the MAXIMUM over
+    whatever entries are present is taken rather than the first: the union is
+    fed hand-planted as well as writer-produced sections, and a counter's only
+    safe collapse is the maximum — last-wins or first-wins could both hand back
+    a LOWER value than the section actually carries.
     """
-    for entry in entries or []:
-        if not isinstance(entry, dict):
-            continue
-        value = entry.get("last_seq")
-        if isinstance(value, int) and not isinstance(value, bool):
-            return int(value)
-    return None
+    values = [
+        entry.get("last_seq") for entry in entries or []
+        if isinstance(entry, dict)
+        and isinstance(entry.get("last_seq"), int)
+        and not isinstance(entry.get("last_seq"), bool)
+    ]
+    return max(values) if values else None
 
 
 def _validate_point_entry(entry) -> str | None:
@@ -818,13 +829,21 @@ def _validate_link_entry(entry) -> str | None:
 def _validate_event_meta_entry(entry) -> str | None:
     """Return a complaint about an ``event_meta`` entry, else None.
 
-    #4653: the section carries at most ONE entry — the `:GraphEventMeta`
-    high-water mark — and its ``last_seq`` reaches Cypher as a bound
-    parameter. The type check is therefore load-bearing, not cosmetic: the
-    restore would otherwise run ``max(carried, max(:GraphEvent.seq))`` over a
-    string and silently choose the string (``max``'s ordering), handing the
-    next emitter a ``last_seq`` that can never advance. ``bool`` is excluded
-    explicitly for the same reason ``int(True) == 1`` is not a counter.
+    #4653: the section is WRITTEN with at most one entry — the
+    `:GraphEventMeta` high-water mark — and its ``last_seq`` is the value a
+    rebuild writes back into the live allocator. The type check is therefore
+    load-bearing, not cosmetic: it is the untrusted boundary, and a non-integer
+    is silently DROPPED downstream (``_event_meta_last_seq`` keeps only ``int``,
+    so a string ``last_seq`` would make the section look empty and the counter
+    would never be restored). ``bool`` is excluded explicitly because
+    ``int(True) == 1`` is not a counter. A hand-planted file may carry SEVERAL
+    entries; each is validated here and they are collapsed to their maximum by
+    ``_event_meta_last_seq``. The upper bound matters as much as the type: above
+    ``MAX_SEQ`` the ``seq`` range index no longer compares exactly, so those
+    events are silently undeliverable, and the range is therefore closed at both
+    ends here — and, for the same reason, on a live capture
+    (``event_store.capture_watermark``) and at the write itself
+    (``event_store.reestablish_watermark``).
     """
     if not isinstance(entry, dict):
         return f"not an object ({type(entry).__name__})"
@@ -834,6 +853,10 @@ def _validate_event_meta_entry(entry) -> str | None:
                 f"a sequence number")
     if last_seq < 0:
         return f"last_seq {last_seq} is negative"
+    from tortoise.event_store import MAX_SEQ
+    if last_seq > MAX_SEQ:
+        return (f"last_seq {last_seq} is outside the event-store integer "
+                f"domain (0 <= last_seq <= {MAX_SEQ})")
     for key, value in entry.items():
         if key == "last_seq":
             continue
@@ -1252,18 +1275,30 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             continue
         config_seen.add(key)
         config_entries.append(entry)
-    # #4653: the `:GraphEventMeta` high-water mark. A SINGLETON section, so the
-    # dedup key is a constant — at most one entry can survive — and
-    # `_merge_entry`'s fresh-wins-on-presence rule is exactly right here: the
-    # fresh capture is ABSENT on the sidecar-recovery path (the wipe already
-    # landed), so the leftover's value survives; when both exist the fresh one
-    # is the newer counter (the graph kept emitting after the sidecar was
-    # written). The restore leg still applies `max(carried, replayed seq)`, so
-    # even a stale-but-higher leftover can never move the allocator backward.
-    event_meta = _union(
-        list(leftover.get("event_meta") or [])
-        + list(fresh.get("event_meta") or []),
-        lambda _entry: "event_meta", "event_meta")
+    # #4653: the `:GraphEventMeta` high-water mark. A section WRITTEN as a
+    # singleton (0 or 1 entry) whose value is a MONOTONE COUNTER, so NEITHER of
+    # `_merge_entry`'s two rules applies: fresh-wins lets a LOWER post-wipe
+    # capture overwrite the carried value (the allocator moves BACKWARD), and
+    # leftover-wins keeps a stale value when the graph genuinely kept emitting.
+    # The only correct merge for a high-water mark is the MAXIMUM — an inflated
+    # value merely opens a gap in the seq space, which is harmless; a deflated
+    # one re-issues `seq` values the graph already handed out, which is the
+    # collision this whole section exists to prevent.
+    #
+    # The backward move is REACHABLE, not theoretical, and it is the reason
+    # for the max: the sidecar-recovery path is an interrupted rebuild, so the
+    # previous run's wipe already destroyed `:GraphEventMeta`, and any event
+    # emitted before the retry re-creates the counter LOW (`next_seq` MERGEs it
+    # at 1). The fresh capture is therefore NOT reliably the newer counter —
+    # after a reset it is the OLDER one. The post-replay guard cannot recover
+    # the discarded value either: it compares against the replayed log, and
+    # `:GraphEvent` rows are not replayed at all (#4664).
+    carried = max(
+        (v for v in (_event_meta_last_seq(leftover.get("event_meta")),
+                     _event_meta_last_seq(fresh.get("event_meta")))
+         if v is not None),
+        default=None)
+    event_meta = [{"last_seq": carried}] if carried is not None else []
     return {"synthetic_events": events, "batch_snapshot": batches,
             "batch_point_links": links,
             "session_snapshot": session_containers,
@@ -3958,12 +3993,13 @@ class FalkorProjection(
         # above) so the union's per-key leftover-wins rule is what the write
         # payload and the restore leg both see.
         config_snapshot = merged["config_snapshot"]
-        # #4653: same reason as the session/config sections — on the sidecar-
-        # recovery path the live graph is already empty (`:GraphEventMeta`
-        # gone), so the leftover's high-water mark is the only record of the
-        # allocator. Assigned from `merged` (not from the capture above) so the
-        # union's fresh-wins rule is what the write payload and the post-replay
-        # restore both see.
+        # #4653: assigned from `merged` (not from the capture above) so the
+        # union's MAXIMUM rule is what the write payload and the post-replay
+        # restore both see. The leftover is NOT necessarily the only record: on
+        # the sidecar-recovery path the live counter may be gone, but when the
+        # app emitted after the interrupted wipe the live capture exists too —
+        # and can be LOWER (that wipe reset the counter), which is exactly why
+        # the union takes the maximum of the two instead of picking a side.
         event_meta_snapshot = merged["event_meta"]
         # ── #2814 T2: a pre-preservation rescue file cannot record config ──
         # A sidecar written by a build that predates this change has no
@@ -5826,6 +5862,29 @@ class FalkorProjection(
                     "at last_seq=%d — the next event seq continues above "
                     "every seq the graph has already handed out (#4653)",
                     restored)
+            elif leftover is not None:
+                # The rescued graph came back with no watermark, and that is NOT
+                # evidence the graph never emitted: a counter-free live graph is
+                # also the post-wipe state, and the sidecar records only its
+                # capture-time state, so neither it nor the live read can
+                # establish whether a counter ever existed. Restarting at 1 is
+                # correct for a graph that never emitted (`capture_watermark`'s
+                # contract) and a silent under-count when a counter was lost —
+                # so the case is reported, at the severity the `config_reset`
+                # leg gives a `legacy_sidecar_no_config_record`, with the sidecar
+                # version logged as a diagnostic rather than as the cause.
+                logger.error(
+                    "rebuild: the graph came back with NO event-log "
+                    "watermark — the live graph holds no counter, the rescued "
+                    "pre-wipe snapshot (version %s) carries no usable "
+                    "`event_meta` watermark, and no replay pass recreates one "
+                    "(#4664), so the allocator restarts at 1 and every "
+                    "subscriber parked above it will silently under-count. "
+                    "That is correct for a graph that never emitted and a loss "
+                    "if one was destroyed; the snapshot records only its "
+                    "capture-time state, so it cannot tell the two apart. The "
+                    "graph itself is rebuilt (#4653)",
+                    leftover.get("version"))
         except Exception as e:  # noqa: BLE001, RUF100
             logger.error(
                 "rebuild: could not re-establish the :GraphEventMeta "
