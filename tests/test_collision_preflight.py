@@ -501,15 +501,33 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[open PRs]", out)
         self.assertIn("issue-number (3061) in title", out)
 
-    def test_closed_pr_body_and_branch_hits(self):
-        self.gh_fixtures(closed_prs=[{
-            "number": 9998, "title": "time-dependent ranking",
-            "body": "Addresses #3061.", "headRefName": "fix/3061-fts-determinism",
-        }])
-        rc, out = self.run_tool()
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn("[recently-closed PRs]", out)
+    def test_terminal_pr_hits_are_reported_but_non_blocking(self):
+        # A TERMINAL PR cannot be in flight (#4886, #5112, #4533). Before this,
+        # a merged docs-half PR whose title necessarily names its issue blocked
+        # that issue forever — having shipped part of the work was what stopped
+        # the rest from being dispatched. The hit is still REPORTED (it is
+        # evidence about the past) but at `weak` strength, which the verdict
+        # ignores. Both terminal shapes are covered, and `mergedAt` is asserted
+        # separately because GitHub's REST `/pulls` reports `state: "closed"`
+        # for merged AND unmerged PRs alike — a rule keyed on
+        # `state == "merged"` would silently never fire (the #5052 F10 trap).
+        for terminal in ({"state": "closed"},
+                         {"state": "CLOSED", "mergedAt": "2026-09-23T03:45:47Z"},
+                         {"mergedAt": "2026-09-23T03:45:47Z"}):
+            with self.subTest(terminal=terminal):
+                self.gh_fixtures(closed_prs=[{
+                    "number": 4356,
+                    "title": "fix(dashboard): the rotate mint's plaintext (#4356)",
+                    "body": "Closes #3061.",
+                    "headRefName": "fix/3061-fts-determinism",
+                    **terminal,
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"terminal={terminal!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                self.assertIn("immutable history, not in-flight work", out)
+                self.assertIn("WEAK SIGNALS", out)
 
     def test_closed_pr_body_prose_mention_is_not_a_collision(self):
         # LIVE-BUG FIXTURES. These are verbatim shapes from a real run:
@@ -559,18 +577,37 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("do NOT dispatch", out)
         self.assertIn("PR number == issue (3061)", out)
 
-    def test_closed_pr_closing_reference_is_still_a_hit(self):
-        # "Closes #N" IS a claim on the issue and must stay a strong hit.
+    def test_terminal_pr_closing_reference_is_reported_but_non_blocking(self):
+        # The contractual "Closes #N" is the strongest statement a PR body can
+        # make — and on a TERMINAL PR it is still history, not in-flight work.
+        # It stays a hard hit on the OPEN surface (the test below), which is
+        # where it can actually still be in flight.
+        self.gh_fixtures(closed_prs=[{
+            "number": 9997, "title": "unrelated title",
+            "body": "Closes #3061.", "headRefName": "chore/9997-unrelated",
+            "state": "closed",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("closing reference to #3061", out)
+        self.assertIn("PR is closed: immutable history", out)
+        self.assertNotIn("do NOT dispatch", out)
+
+    def test_open_pr_closing_reference_is_still_a_hard_hit(self):
+        # The live half of the same rule. "Closes #N" IS a claim on the issue,
+        # and an OPEN PR can still be in flight, so it must stay a strong hit.
         for body in ("Closes #3061.", "closes: #3061", "Fixes #3061",
                      "Resolves #3061", "fixed #3061"):
-            self.gh_fixtures(closed_prs=[{
-                "number": 9997, "title": "unrelated title",
-                "body": body, "headRefName": "chore/9997-unrelated",
-            }])
-            rc, out = self.run_tool()
-            self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
-            self.assertIn("VERDICT: COLLISION", out)
-            self.assertIn("closing reference to #3061", out)
+            with self.subTest(body=body):
+                self.gh_fixtures(open_prs=[{
+                    "number": 9997, "title": "unrelated title",
+                    "body": body, "headRefName": "chore/9997-unrelated",
+                    "state": "open",
+                }])
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("closing reference to #3061", out)
 
     def test_closed_pr_prose_without_closing_keyword_is_not_a_hit(self):
         # "fixed in #3061" / "see #3061" are prose, not closing keywords.
@@ -578,10 +615,107 @@ class CollisionPreflightTest(unittest.TestCase):
             self.gh_fixtures(closed_prs=[{
                 "number": 9996, "title": "unrelated title",
                 "body": body, "headRefName": "chore/9996-unrelated",
+                "state": "closed",
             }])
             rc, out = self.run_tool()
             self.assertEqual(rc, 0, f"body={body!r}\n{out}")
             self.assertNotIn("do NOT dispatch", out)
+
+    def test_number_inside_a_hex_digest_is_not_a_reference(self):
+        # #4935 / #3611: a review-signature value is hex, so every 4-digit
+        # substring occurs inside it by chance. The SHAPE of the containing run
+        # decides it — no vocabulary, no stop-word list.
+        #
+        # CYCLE 2 CAUGHT THIS TEST BEING VACUOUS: its fixtures carried no `3061`
+        # at all, so it passed because NOTHING matched rather than because the
+        # guard fired. Every fixture below now contains the issue number strictly
+        # INTERIOR to a hex run, which is the only condition under which a green
+        # result can mean the guard worked.
+        for digest in ("3f1a4889d6a3061b2e0c7f9a1d4b8e2c5a3f6d9b0e1c4a7f2b5d8e1a4c7f0",
+                       "sig=deadbeef3061cafe",
+                       "a3061bcd"):
+            with self.subTest(digest=digest):
+                self.gh_fixtures(open_prs=[{
+                    "number": 9995, "title": "chore: re-attest the review",
+                    "body": f"{digest}", "headRefName": "chore/9995-attest",
+                    "state": "open",
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"digest={digest!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                # The guard FIRED: the number is present in the fixture, so a
+                # green run cannot be a fixture artefact.
+                self.assertNotIn("matched issue-number (3061)", out)
+
+    def test_number_after_a_non_hex_letter_still_matches(self):
+        # The guard must not over-fire. `w3061` is a reference: `w` is not a hex
+        # digit, so the run is the bare `3061` — four characters, not a digest.
+        for head in ("fix/w3061-bare-run", "fix/3061-x", "fix/x3061"):
+            with self.subTest(head=head):
+                self.gh_fixtures(open_prs=[{
+                    "number": 9994, "title": "unrelated", "body": "",
+                    "headRefName": head, "state": "open",
+                }])
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"head={head!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+
+    def test_live_branch_whose_number_leads_a_hex_run_still_collides(self):
+        # REVIEW CYCLE 1 REPRODUCED A FAIL-OPEN BYPASS HERE. A shape-only guard
+        # (>= 8 hex chars containing a letter) swallowed `fix/3061cafe` as a
+        # digest while `w3061` matched: `cafe` is a word, and dropping the
+        # separator must not hide a LIVE branch naming #3061. The fix is
+        # POSITION — a number leading the run is a reference, a number embedded
+        # mid-run is a fragment — which is strictly more fail-closed, because
+        # the discarded case is now the blocking one.
+        for head in ("fix/3061cafe", "fix/3061abcd", "fix/3061beef",
+                     "fix/beef3061", "fix/facade3061", "fix/abcd3061"):
+            with self.subTest(head=head):
+                _git(self.repo, "branch", head)
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"{head}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("[local branches]", out)
+
+    def test_open_pr_with_a_stray_merged_timestamp_stays_a_hit(self):
+        # Hardening from review cycle 1: `state` is authoritative for liveness,
+        # so an OPEN PR is never terminal even if a payload carries a truthy
+        # `mergedAt`. No real transport does this (every open PR observed
+        # carries `mergedAt: null`), but the polarity must fail CLOSED.
+        self.gh_fixtures(open_prs=[{
+            "number": 9993, "title": "guard retrieval (#3061)", "body": "",
+            "headRefName": "fix/guard", "state": "open",
+            "mergedAt": "2026-09-23T03:45:47Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("immutable history", out)
+
+    def test_bad_timeout_and_limit_seams_are_usage_not_collision(self):
+        # #3619 / #4053. The old eager `float(os.environ[...])` / `int(...)` ran
+        # at add_argument time, so a typo'd env value raised an uncaught
+        # ValueError -> traceback + exit 1, which is EXIT_COLLISION: a
+        # misconfiguration read as "another lane is on it".
+        for env, value in (("COLLISION_PREFLIGHT_TIMEOUT", "abc"),
+                           ("COLLISION_PREFLIGHT_TIMEOUT", "nan"),
+                           ("COLLISION_PREFLIGHT_TIMEOUT", ""),
+                           ("COLLISION_PREFLIGHT_PR_LIMIT", "abc"),
+                           ("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", "1.5")):
+            with self.subTest(env=env, value=value):
+                rc, out = self.run_tool(env_extra={env: value})
+                self.assertEqual(rc, 3, f"{env}={value!r}\n{out}")
+                self.assertNotIn("VERDICT: COLLISION", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_bad_timeout_flag_is_usage_not_collision(self):
+        for bad in ("abc", "nan", "inf", "0", "-1", "60s"):
+            with self.subTest(bad=bad):
+                rc, out = self.run_tool(extra_args=[f"--timeout={bad}"])
+                self.assertEqual(rc, 3, f"{bad}: {out}")
+                self.assertIn("--timeout", out)
+                self.assertNotIn("Traceback", out)
 
     def test_remote_branch_hit(self):
         _git(self.repo, "update-ref", "refs/remotes/origin/fix/3061-collision", "HEAD")
@@ -977,6 +1111,10 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("state=closed", argv)
         self.assertIn("--paginate", argv)
         self.assertIn("headRefName: .head.ref", argv)
+        # The terminal-PR rule reads BOTH fields, so the projection must carry
+        # both: REST reports `state: "closed"` for merged and unmerged PRs
+        # alike, and `mergedAt` is the only field that names a merge.
+        self.assertIn("mergedAt: .merged_at", argv)
 
     # ── target repo: never certify a scope you did not establish (#4027) ────
 

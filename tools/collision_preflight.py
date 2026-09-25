@@ -148,6 +148,21 @@ hit; a bare number mention is recorded as a WEAK, non-blocking signal — it is
 printed for transparency but can never by itself produce a "do NOT dispatch"
 verdict. This is a live-bug fix: those two exact bodies produced a false
 COLLISION for #2745 and #2751 because every `#N` in prose was treated as work.
+  * A TERMINAL PR IS NOT IN-FLIGHT WORK. The argument above ("a closed PR
+cannot be in-flight") applies to the WHOLE PR, not only to its body prose: on
+the `recently-closed PRs` surface every match — a number in the title, a number
+in the head ref, a closing reference, a keyword in the head ref — is reported
+as a non-blocking WEAK signal naming the state that decided it (`merged` /
+`closed`). Immutable history is context, not work (#4886, #5112, #4533), and the
+LIVE surfaces — open PRs, local and remote branches, worktrees, claim comments —
+keep their strength unchanged, so a PR closed minutes ago whose branch is still
+live is still caught by the branch surface. Before this, having shipped part of
+an issue was what blocked shipping the rest: a merged follow-up PR's title
+necessarily names its issue, so the number-in-title match blocked that issue
+forever with no dismissal path.
+  * A DIGIT RUN INSIDE A HEX DIGEST IS NOT A REFERENCE. See `number_present`:
+the containing run's shape decides it, so a SHA-256 in a review attestation
+cannot fabricate a hit (#4935, #3611).
 
 Keywords are the issue title's DISTINCTIVE tokens (length >= 5, minus two
 excluded vocabularies: `_GENERIC` process words and `_COMMON_DOMAIN`
@@ -1059,8 +1074,74 @@ class ClaimClassifier:
 
 def number_present(text: str, issue: int) -> bool:
     """Boundary-exact issue-number match: 3061 matches '#3061', 'w3061',
-    'fix/3061-x' but NEVER '30610'."""
-    return re.search(rf"(?<![0-9]){issue}(?![0-9])", text or "") is not None
+    'fix/3061-x' but NEVER '30610' — and NOT a digit run inside a hex digest
+    (#4935, #3611).
+
+    The containing run decides it: a review-signature value (`sig=…1a4889d6a…`)
+    is 64 hex characters, so every 4-digit substring occurs inside it by
+    chance. Checking the SHAPE of the run rather than excluding vocabulary is
+    what keeps this deterministic."""
+    for match in re.finditer(rf"(?<![0-9]){issue}(?![0-9])", text or ""):
+        if _inside_hex_digest(text, match.start(), match.end()):
+            continue
+        return True
+    return False
+
+
+# A run of this many `[0-9a-fA-F]` characters containing at least one LETTER is
+# a DIGEST, not a set of issue references (#4935, #3611).
+_HEX_RUN_MIN = 8
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _inside_hex_digest(text: str, start: int, end: int) -> bool:
+    """True when ``text[start:end]`` sits inside a hex DIGEST.
+
+    The run is expanded over `[0-9a-fA-F]` in both directions. It is a digest
+    only when all three hold: the run is at least `_HEX_RUN_MIN` long, it holds
+    at least one letter, and the matched number does NOT lead it.
+
+    The SYMMETRIC test is what keeps this fail-CLOSED, and two review cycles are
+    why it is symmetric. A fragment has hex on BOTH sides of the number:
+    `d6233ab6`, `a4356bcd`, and a 64-hex review signature are strictly interior
+    matches. A number glued to a word on either edge is a reference — `3061cafe`
+    (`cafe` is a word; cycle 1 read this LIVE branch CLEAN) and `beef3061` /
+    `facade3061` (there the word is the hex-looking part and the number is the
+    reference; cycle 2 read these CLEAN). Requiring both edges to be interior
+    makes every discarded case the blocking one, so this is strictly more
+    fail-closed than either one-sided version it replaces."""
+    lo = start
+    while lo > 0 and text[lo - 1] in _HEX_DIGITS:
+        lo -= 1
+    hi = end
+    while hi < len(text) and text[hi] in _HEX_DIGITS:
+        hi += 1
+    run = text[lo:hi]
+    if len(run) < _HEX_RUN_MIN or not any(c.isalpha() for c in run):
+        return False
+    return lo < start and hi > end
+
+
+def _pr_terminal_state(pr: dict) -> str | None:
+    """The terminal state of a PR, or None while it can still be in flight.
+
+    BOTH fields are read on purpose. GitHub's REST `/pulls` reports
+    `state: "closed"` for merged and unmerged PRs alike, so `state` alone
+    cannot name which happened; `mergedAt` is the field that names a merge. A
+    rule keyed on `state == "merged"` would be dead code — REST never returns
+    it — and the guard would silently never fire (#5052, the F10 trap)."""
+    state = (pr.get("state") or "").strip().lower()
+    # Liveness is decided by `state` alone where it speaks: an OPEN PR is never
+    # terminal, so a stray `mergedAt` on an open payload cannot downrank a live
+    # hit. (Hardening from review cycle 1; no real transport was observed to do
+    # this — every open PR genuinely carries `mergedAt: null`.)
+    if state in ("open", "opened"):
+        return None
+    if pr.get("mergedAt") or pr.get("merged_at"):
+        return "merged"
+    if state == "closed":
+        return "closed"
+    return None
 
 
 def closing_reference(text: str, issue: int) -> bool:
@@ -1321,7 +1402,7 @@ def _closed_pr_list_rest(gh_bin: str, slug: str | None, cwd: str,
         "api", "--paginate",
         f"repos/{slug}/pulls?state=closed&per_page={REST_PAGE_SIZE}",
         "--jq",
-        "map({number, title, body, state, url, headRefName: .head.ref})",
+        "map({number, title, body, state, url, headRefName: .head.ref, mergedAt: .merged_at})",
     ]
     prs: list[dict] = []
     for page in _gh_json_stream(gh_bin, args, cwd, timeout):
@@ -1359,25 +1440,42 @@ def scan_pr_surface(
     cross-reference prose is not work (live bug: "restored in #2745" on closed
     PR #2926 and "filed as #2751" on PR #2754 read as strong COLLISIONs).
     Keyword matching applies to the head ref only (name-like), never prose.
+
+    A TERMINAL PR (merged or closed) cannot be in flight, so every match on one
+    is immutable history: it is REPORTED, but at `weak` strength, which
+    `format_report` never counts toward the verdict. The state is derived from
+    the PR itself, which leaves the open-PR surface untouched — its PRs are not
+    terminal by construction (#4886, #5112, #4533).
     """
     for pr in prs:
         title = pr.get("title") or ""
         body = pr.get("body") or ""
         head = pr.get("headRefName") or ""
+        terminal = _pr_terminal_state(pr)
+        suffix = "" if terminal is None else (
+            f" — PR is {terminal}: immutable history, not in-flight work "
+            "(non-blocking)"
+        )
         if number_present(title, issue):
-            surface.add(_pr_ref(pr), f"matched issue-number ({issue}) in title", "strong")
+            surface.add(_pr_ref(pr),
+                        f"matched issue-number ({issue}) in title{suffix}",
+                        "weak" if terminal else "strong")
             continue
         if number_present(head, issue):
-            surface.add(_pr_ref(pr), f"matched issue-number ({issue}) in branch", "strong")
+            surface.add(_pr_ref(pr),
+                        f"matched issue-number ({issue}) in branch{suffix}",
+                        "weak" if terminal else "strong")
             continue
         if closing_reference(body, issue):
             surface.add(_pr_ref(pr),
-                        f"closing reference to #{issue} in body", "strong")
+                        f"closing reference to #{issue} in body{suffix}",
+                        "weak" if terminal else "strong")
             continue
         kws = keyword_hit(head, keywords, min_keywords)
         if kws:
             surface.add(_pr_ref(pr),
-                        "keyword(s): " + ", ".join(kws), "keyword")
+                        "keyword(s): " + ", ".join(kws) + suffix,
+                        "weak" if terminal else "keyword")
             continue
         if str(pr.get("number")) == str(issue):
             surface.add(_pr_ref(pr),
@@ -1931,7 +2029,7 @@ def run_preflight(
             else:
                 args = ["pr", "list", "--state", state, "--repo", slug,
                         "--limit", str(limit + 1),
-                        "--json", "number,title,body,headRefName,state,url"]
+                        "--json", "number,title,body,headRefName,state,url,mergedAt"]
                 prs = _gh_json(gh_bin, args, cwd, timeout)
             if not isinstance(prs, list):
                 raise SurfaceError(f"gh {state}-PR enumeration returned non-list JSON")
@@ -2326,15 +2424,25 @@ def main(argv: list[str] | None = None) -> int:
                         help="gh binary (env COLLISION_PREFLIGHT_GH)")
     parser.add_argument("--git", default=os.environ.get("COLLISION_PREFLIGHT_GIT", "git"),
                         help="git binary (env COLLISION_PREFLIGHT_GIT)")
-    parser.add_argument("--timeout", type=float,
-                        default=float(os.environ.get("COLLISION_PREFLIGHT_TIMEOUT", DEFAULT_TIMEOUT)),
+    # Deliberately NO `type=` on --timeout / --pr-limit / --closed-pr-limit, and
+    # each env default is passed through RAW. A bad value must be EXIT_USAGE, and
+    # neither argparse's own error path (exits 2 == EXIT_INCOMPLETE) nor an
+    # eagerly-converted default (an uncaught ValueError out of `add_argument` ->
+    # traceback + exit 1 == EXIT_COLLISION) reports a misconfiguration as itself:
+    # `COLLISION_PREFLIGHT_TIMEOUT=abc` used to read as "another lane is on it"
+    # (#3619, #4053). Coerced and validated below.
+    parser.add_argument("--timeout",
+                        default=os.environ.get("COLLISION_PREFLIGHT_TIMEOUT", DEFAULT_TIMEOUT),
+                        metavar="SECS",
                         help="per-command timeout in seconds (env COLLISION_PREFLIGHT_TIMEOUT)")
-    parser.add_argument("--pr-limit", type=int,
-                        default=int(os.environ.get("COLLISION_PREFLIGHT_PR_LIMIT", PR_LIMIT)),
+    parser.add_argument("--pr-limit",
+                        default=os.environ.get("COLLISION_PREFLIGHT_PR_LIMIT", PR_LIMIT),
+                        metavar="N",
                         help="open-PR completeness cap; a longer list is TRUNCATED/INCOMPLETE "
                              f"(default {PR_LIMIT}; env COLLISION_PREFLIGHT_PR_LIMIT)")
-    parser.add_argument("--closed-pr-limit", type=int,
-                        default=int(os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", CLOSED_PR_LIMIT)),
+    parser.add_argument("--closed-pr-limit",
+                        default=os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", CLOSED_PR_LIMIT),
+                        metavar="N",
                         help="closed-PR completeness cap applied to the full REST enumeration; a "
                              "longer list is TRUNCATED/INCOMPLETE. It truncates the SCAN, not the "
                              "fetch — the enumeration itself is bounded only by --closed-pr-timeout "
@@ -2354,16 +2462,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.issue <= 0:
         print("collision-preflight: issue number must be positive", file=sys.stderr)
         return EXIT_USAGE
-    if args.timeout <= 0 or not math.isfinite(args.timeout):
+    # Coerce the raw seam strings above and report a bad one as EXIT_USAGE — the
+    # same treatment --closed-pr-timeout gets further down.
+    try:
+        args.timeout = float(args.timeout)
+    except (TypeError, ValueError):
+        print("collision-preflight: --timeout must be a number > 0", file=sys.stderr)
+        return EXIT_USAGE
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
         print("collision-preflight: --timeout must be finite and > 0", file=sys.stderr)
         return EXIT_USAGE
     if args.min_keywords < 1:
         print("collision-preflight: --min-keywords must be >= 1", file=sys.stderr)
         return EXIT_USAGE
-    if args.pr_limit < 1 or args.closed_pr_limit < 1:
-        print("collision-preflight: --pr-limit / --closed-pr-limit must be >= 1",
-              file=sys.stderr)
-        return EXIT_USAGE
+    for flag, attr in (("--pr-limit", "pr_limit"),
+                       ("--closed-pr-limit", "closed_pr_limit")):
+        try:
+            value = int(getattr(args, attr))
+        except (TypeError, ValueError):
+            print(f"collision-preflight: {flag} must be an integer >= 1",
+                  file=sys.stderr)
+            return EXIT_USAGE
+        if value < 1:
+            print(f"collision-preflight: {flag} must be >= 1", file=sys.stderr)
+            return EXIT_USAGE
+        setattr(args, attr, value)
 
     # `nan`/`inf` are the trap: `nan <= 0` and `inf <= 0` are both False, so a
     # bare positivity check passes them to subprocess.run(timeout=…), where they
