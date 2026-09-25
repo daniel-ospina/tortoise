@@ -68,4 +68,4 @@ class TestE1SessionKey:
         # E1 reads tier_limits to enforce recovery-key cap
         lim = pricing.tier_limits("free")
         assert lim["max_api_keys"] == 2
-        assert pricing.has_overage("pro") and not pricing.has_overage("solo")
+        assert pricing.has_overage("pro") and pricing.has_overage("solo")

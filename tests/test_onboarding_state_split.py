@@ -593,6 +593,43 @@ class TestCheckpoint:
         finally:
             tc.__exit__(None, None, None)
 
+    def test_restart_pending_is_served_on_the_wire_both_directions(self):
+        """#3451: the DERIVED restart-pending condition must reach the WIRE.
+
+        The projection is nested under ``onboarding`` behind
+        ``response_model=OnboardingStateResponse``, so a response-model change
+        could silently drop the key while every function-level pin stayed
+        green. This EXECUTES the real GET route end to end.
+
+        Both directions are load-bearing:
+        - a fresh org (no config written) → the wire says ``False``. An
+          abandoned install must never read as waiting for a restart, and a
+          MISSING key is a failure too (``is False``, never truthiness).
+        - after the agent records ``connection-written`` → ``True``.
+        - after ``harness-connected`` is verified → back to ``False``.
+        """
+        tc, _org_id = _registered_client()
+        try:
+            def _wire():
+                r = tc.get("/v1/onboarding/state")
+                assert r.status_code == 200, r.text
+                return r.json()["onboarding"]
+
+            fresh = _wire()
+            assert "restart_pending" in fresh, fresh
+            assert fresh["restart_pending"] is False, fresh
+
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"step": "connection-written"})
+            assert r.status_code == 200, r.text
+            assert _wire()["restart_pending"] is True
+
+            tc.post("/v1/onboarding/state/checkpoint",
+                    json={"step": "harness-connected"})
+            assert _wire()["restart_pending"] is False
+        finally:
+            tc.__exit__(None, None, None)
+
     def test_checkpoint_cross_org_isolation(self):
         """Cross-org forgery is impossible — the team comes from the auth
         context; a second team's key cannot write the first team's state
@@ -873,6 +910,7 @@ class TestPatchRouting:
                             {"harness_connected": True},
                             {"first_points_filed": True},
                             {"capture_disclosed": True},
+                            {"connection_written": True},
                             {"org_named": True}):
                 r = tc.patch("/v1/onboarding/state", json=payload)
                 assert r.status_code == 422, payload
@@ -1124,6 +1162,33 @@ class TestBackfill:
         onboarding_state.ensure_onboarding_state_node(gc, tc)
         assert onboarding_state.recompute_completion(gc, tc, False) == "unchanged"
         assert onboarding_state.read_onboarding_node(gc, tc)["status"] == "active"
+
+    def test_recompute_config_write_keeps_grandfathering(self):
+        """#3451: ``connection-written`` is a client-only trace, so the T7
+        sweep must not count it as an AGENT step — a grandfathered org that
+        filed only the config-write checkpoint must still be promoted to
+        complete, not gate-evaluated (it has no decision and would stall).
+
+        RED mutation: revert ``recompute_completion`` to ``s != "team-named"``
+        → this org falls through to gate eval and returns "unchanged" instead
+        of "complete-grandfathered".
+        """
+        import uuid
+        t = f"rcw{uuid.uuid4().hex[:8]}"
+        g = _make_sdk(namespace=t)._get_proj()
+        onboarding_state.ensure_onboarding_state_node(g, t)
+        onboarding_state.write_completed_step(g, t, "connection-written")
+        assert onboarding_state.recompute_completion(g, t, True) == (
+            "complete-grandfathered")
+        assert onboarding_state.read_onboarding_node(g, t)["status"] == "complete"
+        # a SERVER-OBSERVED act still ends the window (fail-closed)
+        t2 = f"rcw{uuid.uuid4().hex[:8]}"
+        g2 = _make_sdk(namespace=t2)._get_proj()
+        onboarding_state.ensure_onboarding_state_node(g2, t2)
+        onboarding_state.write_completed_step(g2, t2, "connection-written")
+        onboarding_state.write_completed_step(g2, t2, "harness-connected")
+        assert onboarding_state.recompute_completion(g2, t2, True) == "unchanged"
+        assert onboarding_state.read_onboarding_node(g2, t2)["status"] == "active"
 
 
 class TestCompletionWire:
