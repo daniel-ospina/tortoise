@@ -60,6 +60,42 @@ NEVER_ACROSS = [
      "the cache is the problem, the lock is not", "scope"),
     ("we ship if the build passes and rollback if the tests fail",
      "we ship if the tests fail and rollback if the build passes", "scope"),
+    # #5139 — a load-bearing connective is FRAME by its commonest role, so a
+    # swap between two operators of ONE slot left the content multiset equal
+    # and the pair folded.  `and`/`or` are conjunctions (the role that keeps a
+    # coordinating paraphrase foldable) and they are also operators; the same
+    # holds for `then`/`else`, `than`/`as` and `to`/`from`, and for the clause
+    # relations `but`/`so`/`yet`, which the issue title does not list.
+    ("we ship and test", "we ship or test", "substituted_content"),
+    ("we ship then test", "we ship else test", "substituted_content"),
+    ("he is taller than bob", "he is taller as bob", "substituted_content"),
+    ("we ship to the store", "we ship from the store",
+     "substituted_content"),
+    ("it rained so we stayed", "it rained and we stayed",
+     "substituted_content"),
+    ("we tried and failed", "we tried but failed", "substituted_content"),
+    # `yet` is NOT in the frame set, so it is not dropped from the skeleton —
+    # and it still folded, because the one-sided rule reads it as a detail
+    # added to the prior rather than a rival operator.
+    ("we tried and failed", "we tried yet failed", "substituted_content"),
+    ("we shipped as the build passed", "we shipped and the build passed",
+     "substituted_content"),
+    # `for` is the causal conjunction here, not the preposition — the one slot
+    # member whose non-operator use is common, which is why the instrumental
+    # `for`/`as` rewording is a pinned residual rather than a reason to prune it.
+    ("we paused for the build failed", "we paused and the build failed",
+     "substituted_content"),
+    # A subordinating connective is not in the frame set, so the content
+    # skeleton keeps it — and the pair still folded, because a one-sided token
+    # is read as a detail added to the prior (the broadening case).
+    ("we paused because the build failed", "we paused and the build failed",
+     "substituted_content"),
+    ("we ship before the tests pass", "we ship after the tests pass",
+     "substituted_content"),
+    # `as well as` IS `and`, canonicalised to its operator, so it still rivals
+    # `or` — deleting the phrase instead would have made it one-sided.
+    ("we ship the server as well as the client",
+     "we ship the server or the client", "substituted_content"),
     # An entity-bearing pronoun or possessive names the subject; changing it
     # re-subjects the claim.
     ("he won the race", "she won the race", "substituted_content"),
@@ -861,17 +897,126 @@ class TestDistinguishingDifference:
         assert not v2.supersede_allowed("we may ship friday",
                                         "we can ship friday")
 
-    def test_a_load_bearing_frame_connective_is_a_known_limit(self):
+    def test_a_coordinating_connective_still_folds(self):
+        """The FRAME use of a connective is still frame — the PAIR decides.
+
+        The role is read from the pair, not from the token list, so a frame
+        connective is refused only where it did OPERATOR work (#5139).  Three
+        shapes of legitimate fold must survive:
+
+        * ONE side only — a comma list owns no `and`, so a single side fills
+          the slot and the connective did no work;
+        * a SYNONYM in one slot — `with`/`by` assert the same relation, so
+          they are deliberately not one family and the rewording folds;
+        * a DIFFERENT slot — the phase-D seam's own restatement swaps `to`
+          (transfer direction) for `and` (clause relation), which is a
+          rewording, not a swap of one slot's member.
+        """
+        for both, comma in (
+                ("we ship the server and the client",
+                 "we ship the server, the client"),
+                ("we ship the server or the client",
+                 "we ship the server, the client")):
+            assert v2.distinguishing_difference(both, comma) is None, both
+            assert v2.fold_allowed(both, comma)
+        # `and then` and `, then` are one claim: `and` and `then` sit in
+        # DIFFERENT slots, so the `and` side adds a member without rivaling
+        # `then` — the reason the two are not one family.
+        assert v2.fold_allowed("we ship the build and then test",
+                               "we ship the build, then test")
+        # A multi-word COORDINATION is canonicalised to its operator: `as well
+        # as` is `and`, so it folds against both the `and` and the comma form,
+        # and still rivals `or` (pinned in the table above).
+        assert v2.fold_allowed("we ship the server as well as the client",
+                               "we ship the server and the client")
+        assert v2.fold_allowed("we ship the server as well as the client",
+                               "we ship the server, the client")
+        # ... and a one-sided mate INSIDE a shared slot is the broadening case
+        # again, not a swap: both sides carry `for`, only one carries `and`.
+        assert v2.fold_allowed("we wait for the build and the tests",
+                               "we wait for the build, the tests")
+        # ... and a slot member on ONE side only, so the commonest spelling of
+        # `for` stays foldable.
+        assert v2.fold_allowed("we ship the build for the client",
+                               "we ship the build")
+        assert v2.fold_allowed("we ship with the courier",
+                               "we ship by the courier")
+        assert v2.fold_allowed(
+            "We should ship the web server first to unblock the mobile team.",
+            "We should ship the web server first and unblock the mobile "
+            "team now.")
+
+    def test_a_connective_swap_between_two_slots_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5139).
 
-        `and` and `or` are conjunctions — the role that makes them frame words
-        and keeps a coordinating paraphrase foldable — and they are also
-        operators.  Swapping them changes what the claim asserts, and a set of
-        content tokens cannot tell the two uses apart.
+        The slot is the FAMILY, not the POSITION: comparing position in the
+        connective sequence would refuse the phase-D restatement above, whose
+        `to` and `and` sit in the same position in two different slots.  The
+        cost is that a swap BETWEEN slots is invisible — `and` (clause
+        relation) against `then` (branch/sequence) asserts a different
+        relation and still folds.  Grouping them would refuse `and then` /
+        `, then`, which is a real paraphrase.
         """
-        assert v2.fold_allowed("we ship and test", "we ship or test")
-        assert v2.fold_allowed("we ship to the store", "we ship from the store")
-        assert v2.fold_allowed("we ship with the courier", "we ship by the courier")
+        assert v2.fold_allowed("we ship and test", "we ship then test")
+
+    def test_a_connective_permutation_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5139).
+
+        Within a slot the comparison is a SET, because a set is what keeps the
+        documented broadening case folding.  The cost is that a change of
+        ATTACHMENT carries one multiset in two groupings and folds — the same
+        shape as the role inversion (#5131), which needs syntax.
+        """
+        assert v2.fold_allowed("we ship and test or we wait",
+                               "we ship or test and we wait")
+
+    def test_an_instrumental_for_as_rewording_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5139).
+
+        `for` is the one slot member whose NON-operator use is common: as a
+        causal conjunction it rivals `and`, and as a preposition it does not.
+        Reading it as a slot member therefore refuses the instrumental
+        `for`/`as` rewording, and the refusal is KEPT deliberately — the
+        boundary's own asymmetry is that a wrong keep is noise while a wrong
+        drop is memory loss, so pruning `for` out would reopen the class this
+        table exists to close.
+        """
+        assert not v2.fold_allowed("we use the tool for a hammer",
+                                   "we use the tool as a hammer")
+
+    def test_the_connective_slots_are_pinned_against_the_sibling_tables(self):
+        """One token's role is declared in three sets; the overlaps are pinned.
+
+        `and` is a frame word AND a clause-relation operator, and `nor` is also
+        a negator — three answers to three different questions (syntactically
+        inert? load-bearing relation operator? negation marker?) which the
+        module keeps separate on purpose.  Unpinned, an edit to either sibling
+        set silently changes what the boundary can see; `yet` is the worked
+        example, in no sibling list at all.
+        """
+        assert {
+            "and", "or", "but", "so", "as", "for", "then", "else",
+            "than", "to", "from"} == v2._FRAME_STOPWORDS & v2._CONNECTIVE_MEMBERS
+        assert {"nor"} == v2._NEGATION_MARKERS & v2._CONNECTIVE_MEMBERS
+        assert "yet" not in v2._FRAME_STOPWORDS
+        assert "yet" not in v2._NEGATION_MARKERS
+
+    @pytest.mark.parametrize("slot", v2._CONNECTIVE_SLOTS,
+                             ids=lambda s: "+".join(sorted(s)))
+    def test_every_slot_member_is_exercised_against_a_slot_mate(self, slot):
+        """Class coverage, not exemplars: every member of every slot, spelled
+        the way the table spells it.
+
+        The labeled dimension is not always the connective's: `nor` is also a
+        negator, so it reports `negation` — an identity dimension either way,
+        which is what the decision consults.
+        """
+        for member in sorted(slot):
+            mate = sorted(slot - {member})[0]
+            a, b = f"we ship {member} test", f"we ship {mate} test"
+            label = v2.distinguishing_difference(a, b)
+            assert label in v2._IDENTITY_DIMENSIONS, (member, mate, label)
+            assert not v2.fold_allowed(a, b)
 
     def test_a_sentence_initial_name_is_a_known_limit(self):
         """Documented residual, pinned with the uncapitalised name (#5134).

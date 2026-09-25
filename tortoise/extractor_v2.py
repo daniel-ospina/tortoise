@@ -2488,6 +2488,10 @@ _MIN_OVERLAP_TOKENS = 2
 # E5 fact-value contradiction frame: stopword-stripped shared tokens on the
 # longer side must reach 0.5. A small LOCAL closed-class set (importing the
 # eval's ingest_v2._STOPWORDS into tortoise/ would invert the layering).
+# ⛔ A frame word can still be a load-bearing OPERATOR — `and` in "we ship and
+# test" asserts a different relation from `or`, while the same `and` coordinates
+# two list items.  Membership here is by commonest role; the role is read from
+# the PAIR in `_connective_swap` (#5139).
 _FRAME_STOPWORDS = frozenset({
     "a", "an", "the", "and", "or", "but", "if", "then", "else", "of",
     "to", "in", "on", "at", "for", "with", "from", "by", "about",
@@ -3110,6 +3114,60 @@ _CONDITION_PHRASES = (
     "as long as", "so long as", "in case", "in the event", "on condition that",
     "provided that", "assuming that", "in the case that", "conditional on",
 )
+# A connective is FRAME (syntax) or an OPERATOR (meaning), and one spelling does
+# both jobs.  `and` COORDINATES two list items in "we ship the server and the
+# client", which must fold against the comma paraphrase; the same `and` is the
+# conjunction OPERATOR in "we ship and test", where `or` asserts something else.
+# `_FRAME_STOPWORDS` holds the token by its commonest role and the content
+# skeleton is a set, so the role cannot be read from the token — it is read from
+# the PAIR: each entry below is one SLOT, and a pair is a rival claim when BOTH
+# sides fill the SAME slot with NO member in common (#5139).  The slot is the
+# family, never a position: a position-keyed comparison would refuse the
+# paraphrases below, and a set (not a sequence) is what keeps `and then` /
+# `, then` folding.
+#
+# What keeps the legitimate folds folding:
+#   * ONE side only — a comma list owns no `and`, so one side fills the slot, the
+#     connective did no work, and the pair is the documented broadening.
+#   * A SYNONYM is not a slot — `with`/`by` are spelled differently and assert
+#     the SAME relation, so "we ship with the courier" folds into "we ship by
+#     the courier".  The place (`in`/`on`/`at`) and relation (`of`/`for`/
+#     `about`) prepositions are that same kind of set and are likewise not slots,
+#     and `_COORDINATION_PHRASES` maps the ones that are phrases of `and`.
+#   * DIFFERENT slots are a rewording, not a swap — `to` (transfer direction)
+#     against `and` (clause relation) is the phase-D seam's own restatement, and
+#     it folds.
+# `as` fills two slots because it is polysemous (comparative "taller as", causal
+# "as it rained"); `and` is the counterpart of `or`, `but`, `nor`, `so`, `yet`,
+# `as` and `for` in one clause-relation slot.  Membership is read from the
+# TOKENS, so a member need not be a frame word to be caught — `yet`, `because`,
+# `although` and `before` are not frame words.
+#
+# ⚠️ A member whose non-operator use is common is a deliberate OVER-block, which
+# the boundary's asymmetry accepts (a wrong keep is noise; a wrong drop is memory
+# loss).  `for` is the case: as a causal conjunction it rivals `and`, and as a
+# preposition it does not — reading it as a slot member refuses the instrumental
+# `for`/`as` rewording ("use the tool for a hammer"/"as a hammer"), which is
+# pinned as a declared residual.  Pruning it out would reopen the memory-loss
+# class this table exists to close.
+_CONNECTIVE_SLOTS = (
+    # clause relation — the logical/causal/contrastive link between two
+    # predications.
+    frozenset({"and", "or", "but", "nor", "so", "yet", "as", "for",
+               "because", "although", "though", "whereas"}),
+    frozenset({"then", "else"}),
+    frozenset({"than", "as"}),
+    frozenset({"to", "from"}),
+    frozenset({"before", "after"}),
+)
+_CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
+# Multi-word COORDINATIONS.  `as well as` IS `and`, so it is canonicalised to
+# its operator before the slots are read: left as written, its `as` would look
+# like the comparison `as` (refusing "we ship the server as well as the client"
+# against the comma list, a legitimate fold) and deleting the phrase instead
+# would lose the `and`/`or` contrast ("as well as" against `or` would read as
+# one-sided and fold).
+_COORDINATION_PHRASES = (("as well as", "and"),)
 # Relative days + month names.  Not interchangeable with the value dimension:
 # "shipped in march" vs "shipped in april" carries no number.
 _DATE_WORDS = frozenset({
@@ -3560,6 +3618,57 @@ def _deaccent(t: str) -> str:
         "NFC", "".join(c for c in decomposed if unicodedata.category(c) != "Mn"))
 
 
+def _wordlist_hits(content: str, words: frozenset[str]) -> frozenset[str]:
+    """Every member of a closed-class word list the claim carries.
+
+    ONE walk, shared by the marker tables: a token is looked up whole AND by
+    its word-parts (``_lookup_keys``), so a member fused to a separator
+    ("if!then", "and/or") is still that member and a de-accented spelling
+    agrees with the table's plain one.  A hit can only ADD a marker downstream,
+    and a marker only ever refuses a fold, so over-reading is the safe
+    direction.
+    """
+    found: set[str] = set()
+    for t in _guard_tokens(content):
+        found.update(k for k in _lookup_keys(t) if k in words)
+    return frozenset(found)
+
+
+def _connective_slots(content: str) -> tuple[frozenset[str], ...]:
+    """Membership in each ``_CONNECTIVE_SLOTS`` slot, one entry per slot.
+
+    A multi-word coordination is canonicalised to its operator first
+    (``_COORDINATION_PHRASES``): "as well as" is `and`, and reading its `as` as
+    a slot member would refuse a legitimate fold.
+    """
+    text = _flat_words(content)
+    for phrase, operator in _COORDINATION_PHRASES:
+        text = text.replace(phrase, f" {operator} ")
+    found = _wordlist_hits(text, _CONNECTIVE_MEMBERS)
+    return tuple(found & slot for slot in _CONNECTIVE_SLOTS)
+
+
+def _connective_swap(a: str, b: str) -> frozenset[str]:
+    """Members of a slot BOTH sides fill with NO member in common (#5139).
+
+    Empty when the pair does not swap operators: a slot filled on ONE side only
+    is the documented broadening (`and` against a comma list), a slot filled on
+    neither says nothing, and a slot both sides fill with a member in common has
+    matched — the extra member is the broadening case again, not a swap
+    ("we wait for the build and the tests" against "we wait for the build, the
+    tests" shares `for`).  The role of a load-bearing connective is thus decided
+    by the pair, which is what a token-level predicate cannot do — and a
+    non-empty result is a substituted-content difference, the same dimension a
+    swapped content token reaches.
+    """
+    out: set[str] = set()
+    for slot_a, slot_b in zip(_connective_slots(a), _connective_slots(b),
+                              strict=True):
+        if slot_a and slot_b and slot_a.isdisjoint(slot_b):
+            out |= slot_a | slot_b
+    return frozenset(out)
+
+
 def _flat_words(s: str) -> str:
     """The claim with every non-word character turned into a single space.
 
@@ -3590,9 +3699,7 @@ def _condition_markers(content: str) -> frozenset[str]:
     whitespace token whose parts are "if" and "the", and matching only the
     whole token left the condition invisible.
     """
-    found: set[str] = set()
-    for t in _guard_tokens(content):
-        found.update(k for k in _lookup_keys(t) if k in _CONDITION_MARKERS)
+    found = set(_wordlist_hits(content, _CONDITION_MARKERS))
     flat = _flat_words(content)
     found.update(p for p in _CONDITION_PHRASES if p in flat)
     return frozenset(found)
@@ -3813,6 +3920,15 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
         out.add("substituted_content")
     poss_a, poss_b = _possessives(a), _possessives(b)
     if (poss_a or poss_b) and poss_a != poss_b:
+        out.add("substituted_content")
+    # A load-bearing CONNECTIVE, read from the pair (#5139).  `and`/`or` are
+    # frame words by their commonest role — the role that keeps
+    # "we ship the server and the client" folding into the comma paraphrase —
+    # and they are also operators, so a swap between two members of one slot is
+    # a substituted content token even though neither side's skeleton holds it.
+    # See `_CONNECTIVE_SLOTS` for the one-sided, synonym and cross-slot cases
+    # that must keep folding.
+    if _connective_swap(a, b):
         out.add("substituted_content")
     # Negation and condition are SCOPE-bearing, and a set cannot express that:
     # "the cache is not the problem, the lock is" and "the cache is the
