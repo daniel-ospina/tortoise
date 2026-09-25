@@ -185,6 +185,19 @@ def _redact(uri: str) -> str:
             "rediss://u:pw@h:1\n:secretpw@h:2",
             "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
         ),
+        # ...including a scheme-less continuation whose userinfo has a
+        # NON-empty user (only the 'user:...' continuation was caught before).
+        # The scheme sat on line 1, so line 2's '@' is the only tell.
+        (
+            "rediss://user:\npw@host",
+            "<uri-redacted-unrecognised-shape>\n<uri-redacted-unrecognised-shape>",
+        ),
+        # ...and the same shape as a continuation of a value whose first line
+        # masked normally.
+        (
+            "rediss://u:pw@h:1\nuser:pw@host",
+            "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
+        ),
         # ...including a continuation line with NO scheme and no '@' — the
         # empty user before the ':' is the only safe tell on such a line.
         (
@@ -203,6 +216,25 @@ def _redact(uri: str) -> str:
         # ...while a bracketed IPv6 host (with or without a numeric port) is a
         # recognised-safe target and keeps printing unchanged.
         ("rediss://[::1]:6379/tortoise", "rediss://[::1]:6379/tortoise"),
+        # ...but the port must be ALL digits: the old `:[0-9]*` tail match
+        # accepted `:6379:S3n` (`[0-9]` matched the leading digit and `*` the
+        # rest), so a bracketed credential failed OPEN while the canonical
+        # masked it.
+        ("rediss://[::1]:6379:S3n", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://[::1]:6379abc", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://[::1]:6abc", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://[::1]:", "<uri-redacted-unrecognised-shape>"),
+        # #2987: an invalid or EMPTY scheme is treated as "no scheme" (the
+        # predicate runs over the text after the first '://'), matching the
+        # shell; the canonical used to walk past it and echo the credential.
+        ("1://user:pw", "<uri-redacted-unrecognised-shape>"),
+        ("://user:pw", "<uri-redacted-unrecognised-shape>"),
+        ("://:pw", "<uri-redacted-unrecognised-shape>"),
+        ("+://user:pw", "<uri-redacted-unrecognised-shape>"),
+        # Leading whitespace before a no-'@' credential: the whole line fails
+        # closed (the shell replaces it wholesale), so the canonical must not
+        # keep the prefix.
+        ("  rediss://:pw", "<uri-redacted-unrecognised-shape>"),
     ],
 )
 def test_redactor_masks_userinfo_and_keeps_the_target(uri: str, expected: str):
@@ -244,6 +276,17 @@ _BARE_URI_CORPUS = [
     "rediss://user:pw:6379",
     "rediss://host:",
     ":S3ntinelpw",
+    # An invalid/empty scheme and a scheme-less '@' continuation are treated as
+    # "no scheme" in both maskers (see _MALFORMED_VALUE_CORPUS for the leak
+    # assertion); keep them in the parity list too.
+    "1://user:pw",
+    "://user:pw",
+    "://:pw",
+    "+://user:pw",
+    "rediss://user:\npw@host",
+    "rediss://u:pw@h:1\nuser:pw@host",
+    "  rediss://:pw",
+    "rediss://[::1]:6379:S3n",
     # A multi-line value: both implementations now walk lines, so parity holds
     # here too (it did not before #2987 — the shell masked per line while the
     # canonical's last-'@' rule consumed the whole message).
@@ -390,6 +433,40 @@ _AUTHORITY_GRAMMAR = [
     "host:6379#y",
     "host:6379'x",
     "[::1]:6379/tortoise",
+    # #2987 T6: the bracketed-IPv6 port must be ALL digits. `[::1]:6379:S3n`
+    # (a dropped '@host' after the port) failed OPEN in the shell before the
+    # `:[0-9]*` tail match was tightened; `[::1]:6379abc`/`[::1]:6abc` are the
+    # same class with a non-numeric or digit-led suffix.
+    "[::1]:6379:S3n",
+    "[::1]:6379abc",
+    "[::1]:6abc",
+    "[::1]:",
+    # #2987 T6: the authority cut set is explicit ASCII in BOTH maskers. `\v`
+    # and `\f` are ASCII whitespace (the shell's old `[[:space:]]` cut there,
+    # the canonical's literal set did not); U+0660 is an Arabic-Indic digit
+    # (`str.isdigit()` accepts it, the shell's `[0-9]` does not).
+    "user:6379\vS3n",
+    "user:6379\fS3n",
+    "user:6379\u00a0S3n",
+    "host:\u0660",
+    "host:63\u0660",
+]
+
+
+# Full values (not just authorities) that a malformed or ABSENT scheme hides a
+# credential behind. Kept separate from `_AUTHORITY_GRAMMAR` (which prefixes a
+# valid scheme) because these violate the `scheme://authority` shape.
+_MALFORMED_VALUE_CORPUS = [
+    # invalid or EMPTY scheme — entrypoint.sh treats it as "no scheme"
+    "1://user:S3ntinel",
+    "://user:S3ntinel",
+    "://:S3ntinel",
+    "+://user:S3ntinel",
+    # a scheme-less continuation line with a non-empty user and an '@'
+    "rediss://user:\npw@host",
+    "rediss://u:pw@h:1\nuser:S3ntinel@host",
+    # leading whitespace before a no-'@' credential
+    "  rediss://:S3ntinel",
 ]
 
 
@@ -418,6 +495,33 @@ def test_shell_and_canonical_agree_over_an_enumerated_authority_grammar():
         )
 
 
+def test_shell_and_canonical_agree_on_malformed_scheme_and_schemeless_values():
+    """#2987 T6 — a malformed or ABSENT scheme must not hide a credential.
+
+    entrypoint.sh treats an invalid/empty scheme as "no scheme": it predicates
+    the text after the FIRST '://', and a scheme-less line fails closed on an
+    '@' anywhere (the scheme may be on an earlier line of a multi-line value).
+    The canonical walked past an invalid scheme and echoed the credential, and
+    only caught a colon-LED scheme-less line — a `pw@host` continuation leaked.
+
+    Class B: (1) the marker pair `S3n`/`tinel` makes this fail on any value that
+    still prints its credential, and the equality assertion fails on any
+    divergence; (2) each value is a copy-paste an operator can put in
+    `TORTOISE_DB_URI`, and both maskers are on that path.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    for value in _MALFORMED_VALUE_CORPUS:
+        shell = _redact(value)
+        canonical = _mask_uri_userinfo(value)
+        for out, label in ((shell, "shell"), (canonical, "canonical")):
+            assert "S3n" not in out, f"{label} leaked {value!r} -> {out!r}"
+            assert "tinel" not in out, f"{label} leaked {value!r} -> {out!r}"
+        assert shell == canonical, (
+            f"maskers disagree on {value!r}: shell={shell!r} canonical={canonical!r}"
+        )
+
+
 def test_neither_masker_emits_a_no_at_credential():
     """#2987 — the leak bar: the password marker never survives either masker.
 
@@ -440,6 +544,15 @@ def test_neither_masker_emits_a_no_at_credential():
         ":S3ntinel",
         "rediss://u:pw@h:1\n:S3ntinel",
         "rediss://u:pw@h:1\nrediss://:S3ntinel",
+        # A scheme-less continuation with a NON-empty user AND an '@': the
+        # scheme sat on line 1, so the '@' on line 2 is the only tell.
+        "rediss://u:pw@h:1\nuser:S3ntinel@host",
+        "rediss://user:\nS3ntinel@host",
+        # An invalid/empty scheme: the credential follows the '://'.
+        "1://user:S3ntinel",
+        "://user:S3ntinel",
+        "://:S3ntinel",
+        "+://user:S3ntinel",
     ]
     # NOT asserted: a continuation line with a NON-empty user (`user:pw:6379`).
     # `_mask_uri_userinfo` cannot tell it from ordinary prose (`C:\foo`, an

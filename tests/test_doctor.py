@@ -378,6 +378,33 @@ class TestDoctorPath:
         assert _mask_uri_userinfo("docker://127.0.0.1:7687/tortoise") == \
             "docker://127.0.0.1:7687/tortoise"
 
+    def test_mask_uri_userinfo_malformed_scheme_and_schemeless_fail_closed(self):
+        """#2987 cycle-2: an invalid/empty scheme is "no scheme", and a
+        scheme-less continuation line fails closed on any '@'.
+
+        Class B: (1) `1://user:T4ilPw` and `rediss://user:\npw@host` make this
+        fail — the first was walked past as an invalid scheme and echoed, the
+        second's `pw@host` continuation was echoed because only a colon-LED
+        scheme-less line was checked; (2) both are reachable through
+        `TORTOISE_DB_URI` / the CLI error paths, which print through this helper.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        for value in (
+            "1://user:T4ilPw",
+            "://user:T4ilPw",
+            "://:T4ilPw",
+            "+://user:T4ilPw",
+            "rediss://user:\npw@host",
+            "rediss://u:pw@h:1\nuser:T4ilPw@host",
+            "  rediss://:T4ilPw",
+            "rediss://[::1]:6379:S3n",
+            "rediss://[::1]:6abc",
+        ):
+            out = _mask_uri_userinfo(value)
+            assert "T4ilPw" not in out and "S3n" not in out, \
+                f"leaked {value!r} -> {out!r}"
+
     def test_mask_uri_userinfo_fuzz_never_emits_password_material(self):
         """#2983: exhaustive fuzz over passwords containing '?'/'#'/'@'/'/'.
 

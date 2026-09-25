@@ -57,7 +57,7 @@ set -euo pipefail
 # IPv6 host with an optional numeric port. Everything else fails closed.
 _redact_uri() {
     local uri="${1:-}" masked line out="" first=1 shaped=0 candidate \
-          tail before rest
+          tail before rest cut=$'[/?#"\047 \t\v\f\r\n]'
     if [ -z "$uri" ]; then
         return 0
     fi
@@ -87,12 +87,14 @@ _redact_uri() {
                     esac
                 fi
                 # Bound the authority at the first path/query/fragment
-                # delimiter, quote or whitespace: everything after it is not the
-                # authority. Keep `tortoise/__main__.py::_authority_region` in
-                # sync with this set — a different cut set is a divergence.
-                candidate="${candidate%%[/?#[:space:]]*}"
-                candidate="${candidate%%\'*}"
-                candidate="${candidate%%\"*}"
+                # delimiter, quote or ASCII whitespace: everything after it is
+                # not the authority. The set is spelled out rather than
+                # `[[:space:]]` so it is locale-independent and byte-identical
+                # to `tortoise/__main__.py::_authority_region`. Keep the two in
+                # sync — a different cut set is a divergence, and `[[:space:]]`
+                # additionally matches NBSP under a UTF-8 locale, which the
+                # canonical literal set does not (a parity break).
+                candidate="${candidate%%$cut*}"
                 if [ -n "$candidate" ]; then
                     case "$candidate" in
                         \[*)
@@ -100,7 +102,18 @@ _redact_uri() {
                             # optional numeric port; a malformed bracket is not.
                             tail="${candidate#*\]}"
                             case "$tail" in
-                                ''|:[0-9]*) ;;
+                                '') ;;
+                                :*)
+                                    # `[::1]:6379` is recognised-safe; the
+                                    # port must be ALL digits. `:[0-9]*`
+                                    # accepted a digit-led non-numeric suffix
+                                    # (`:[0-9]*` matches `:6379:S3n`), so a
+                                    # bracketed credential failed OPEN here
+                                    # while the canonical masked it.
+                                    case "${tail#:}" in
+                                        ''|*[!0-9]*) shaped=1 ;;
+                                    esac
+                                    ;;
                                 *) shaped=1 ;;
                             esac
                             ;;

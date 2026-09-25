@@ -4743,26 +4743,44 @@ def _mask_uri_userinfo(target: str) -> str:
     must be safe on its own. (The last-'@' rule used to consume a multi-line
     value ACROSS its newline, masking one line while echoing another, which is
     exactly the leak #2987 records; both implementations now walk lines.)
+
+    Both implementations are held to one rule at the LINE level: a malformed or
+    absent scheme is treated as "no scheme" (predicate the text after the first
+    '://'), an '@' anywhere on a scheme-less line fails closed (a continuation
+    line may carry the userinfo while the scheme sits on an earlier line), and
+    the authority cut set is the same explicit ASCII set. (RESIDUAL,
+    #2987-followup: a continuation line with a NON-empty user, e.g.
+    `user:pw:6379`, is not distinguishable from prose (`C:\foo`, an exception
+    containing a colon) in this helper, so it is emitted — recorded on the issue
+    rather than guessed at.)
     """
     from urllib.parse import urlsplit
 
     def _scheme_ok(scheme: str) -> bool:
-        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter.
-        return (scheme[:1].isalpha()
-                and all(c.isalnum() or c in "+-." for c in scheme))
+        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter. Restricted to ASCII
+        # to match entrypoint.sh's sed class `[a-zA-Z][a-zA-Z0-9+.-]*` —
+        # `str.isalpha()` alone accepts Unicode letters, which the shell does
+        # not, so a Unicode scheme would mask in one implementation and not the
+        # other.
+        return (scheme[:1].isascii() and scheme[:1].isalpha()
+                and all(c.isascii() and (c.isalnum() or c in "+-.")
+                        for c in scheme))
 
     def _authority_region(rest: str) -> str:
         """The authority portion of `rest` (everything after '://').
 
         #2987: bounded by the first path/query/fragment delimiter, quote or
-        whitespace — the SAME cut set as entrypoint.sh::_redact_uri's
-        `${candidate%%[/?#[:space:]]*}` followed by its quote strips. It is
-        deliberately NOT bounded by ':' or '@' (the credential's own shape
-        markers), so the two implementations bound the same region on every
-        input.
+        ASCII whitespace (`\t\n\v\f\r`) — the SAME cut set as
+        entrypoint.sh::_redact_uri's `candidate="${candidate%%$cut*}"` with
+        `cut=$'[/?#"\047 \t\v\f\r\n]'`. That set is spelled out rather
+        than `[[:space:]]` in BOTH implementations so it is locale-independent
+        (`[[:space:]]` matches NBSP under a UTF-8 locale in the shell but not
+        in this literal set — a parity break). It is deliberately NOT bounded
+        by ':' or '@' (the credential's own shape markers), so the two
+        implementations bound the same region on every input.
         """
         for idx, char in enumerate(rest):
-            if char in "/?#\"' \t\n\r":
+            if char in "/?#\"' \t\n\v\f\r":
                 return rest[:idx]
         return rest
 
@@ -4783,7 +4801,9 @@ def _mask_uri_userinfo(target: str) -> str:
         if region.startswith("["):
             _, sep, rest = region[1:].partition("]")
             safe = bool(sep) and (
-                rest == "" or (rest.startswith(":") and rest[1:].isdigit())
+                rest == ""
+                or (rest.startswith(":")
+                    and rest[1:].isascii() and rest[1:].isdigit())
             )
             return not safe
         if ":" not in region:
@@ -4793,19 +4813,27 @@ def _mask_uri_userinfo(target: str) -> str:
             return True  # empty user before the first ':' — a dropped '@host'
         if ":" in tail:
             return True  # a genuine host:port has exactly one ':'
-        return not tail.isdigit()  # a non-numeric (or empty) tail is not a port
+        # ASCII digits only: `str.isdigit()` also accepts non-ASCII digits
+        # (e.g. U+0660), which the shell's `[0-9]` does not.
+        return not (tail.isascii() and tail.isdigit())
 
     def _mask_line(line: str) -> str:
-        # A continuation line of a multi-line credential — the scheme was on an
-        # earlier line. Only the empty-user tell is safe here: an arbitrary
-        # 'a:b' line is prose or a path (`C:\foo`), not a credential, and this
-        # helper sees such text in error messages. (RESIDUAL, #2987-followup: a
-        # continuation line with a NON-empty user, e.g. `user:pw:6379`, is not
-        # distinguishable from prose here and is emitted — recorded on the
-        # issue rather than guessed at.)
-        if ("://" not in line and line.startswith(":")
-                and _credential_shaped(_authority_region(line))):
-            return "<uri-redacted-unrecognised-shape>"
+        # A line must be safe ON ITS OWN: the boot log emits lines, and the
+        # continuation line of a multi-line value carries its own credential.
+        # This mirrors entrypoint.sh::_redact_uri's per-line decision exactly.
+        if "://" not in line:
+            # No scheme on this line. entrypoint.sh fail-closes on ANY '@' here
+            # (the userinfo marker can be present with the scheme left on an
+            # earlier line), and on a colon-led line whose colon-prefixed text
+            # is credential-shaped. Without the '@' rule a scheme-less
+            # continuation like `pw@host` is echoed verbatim — the #2987 T1
+            # leak.
+            if "@" in line:
+                return "<uri-redacted-unrecognised-shape>"
+            if (line.startswith(":")
+                    and _credential_shaped(_authority_region(line))):
+                return "<uri-redacted-unrecognised-shape>"
+            return line
         out: list[str] = []
         i = 0
         while True:
@@ -4819,7 +4847,28 @@ def _mask_uri_userinfo(target: str) -> str:
             while k > i and (line[k - 1].isalnum() or line[k - 1] in "+-."):
                 k -= 1
             scheme = line[k:j]
+            # "Bare" = nothing but whitespace precedes the scheme.
+            # entrypoint.sh replaces such a line WHOLESALE with the sentinel,
+            # while an embedded URI keeps its prose prefix.
+            bare = i == 0 and not line[:k].strip()
             if not _scheme_ok(scheme):
+                # entrypoint.sh treats an invalid or empty scheme as "no
+                # scheme": it predicates the text after the FIRST '://' and
+                # fails closed on an '@' anywhere on the line. Mirror it, or a
+                # malformed `1://user:pw` / `://user:pw` is echoed verbatim
+                # while the shell masks it.
+                rest = line[j + 3:]
+                region = _authority_region(rest)
+                if "@" in line or _credential_shaped(region):
+                    if bare:
+                        out.append("<uri-redacted-unrecognised-shape>")
+                    else:
+                        out.append(
+                            line[i:k] + line[k:j + 3]
+                            + "<uri-redacted-unrecognised-shape>"
+                            + rest[len(region):]
+                        )
+                    break
                 out.append(line[i:j + 3])
                 i = j + 3
                 continue
@@ -4854,7 +4903,7 @@ def _mask_uri_userinfo(target: str) -> str:
                 # host, `host:port`, bracketed IPv6) is left byte-identical.
                 region = _authority_region(authority)
                 if _credential_shaped(region):
-                    if i == 0 and k == 0:
+                    if bare:
                         # Bare URI (the whole line): the sentinel replaces it,
                         # identical to entrypoint.sh::_redact_uri's per-line
                         # fail-closed output on the same value.
