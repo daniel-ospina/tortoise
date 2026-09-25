@@ -262,15 +262,25 @@ def test_over_cap_cohort_capture_refused_402_no_extraction_no_write(
 
     assert r.status_code == 402, r.text
     detail = r.json()["detail"]
-    assert "Cohort LLM spend cap reached" in detail, detail
+    # #4614: the cohort refusal is a structured detail with its OWN code. Both
+    # halves matter: the `message` is what a human reads, and the code is what
+    # a caller branches on — a spend cap read as `quota_exceeded` would send
+    # the user to buy a plan that cannot lift it.
+    assert isinstance(detail, dict), (
+        f"the spend-cap refusal is still prose — indistinguishable from a "
+        f"plan-limit refusal by any caller: {detail!r}")
+    assert detail["code"] == "cohort_cost_cap", detail
+    assert detail["code"] != "quota_exceeded", detail
+    message = detail["message"]
+    assert "Cohort LLM spend cap reached" in message, detail
     # The TENANT-VISIBLE body must NOT carry the cohort-wide aggregate: it is
     # the SUM across every org in the cohort, so publishing it would disclose
     # the other tenants' COGS (and, against a tenant's own observable
     # run-rate, theirs by subtraction). The figure belongs to the internal
     # sinks — the AlertStore incident and the server-side log. REDs on:
     # interpolating ``spent``/``len(ids)`` back into the message.
-    assert f"{CAP_USD + 1.0:.4f}" not in detail, detail
-    assert "$" not in detail, detail
+    assert f"{CAP_USD + 1.0:.4f}" not in message, detail
+    assert "$" not in message, detail
     assert capture_env.extraction_calls == [], (
         "the cap must refuse BEFORE any extraction is dispatched")
     assert _session_count(COHORT_ORG) == 0, "nothing may be written"

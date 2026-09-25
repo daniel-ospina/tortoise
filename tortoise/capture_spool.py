@@ -299,10 +299,13 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
 
     402 is TRANSIENT, and calling it permanent destroyed user data (#4714).
     The hosted quota gate refuses a capture whose *estimated* point cost would
-    cross the org's cap:
+    cross the org's cap. Since #4614 that refusal is a STRUCTURED detail, not
+    prose:
 
-        {"detail": "Team points limit reached: 24956 in use + 48 estimated
-                     for this capture exceeds 25000."}
+        {"detail": {"code": "quota_exceeded", "resource": "points",
+                     "used": 24956, "limit": 25000, "estimate": 48,
+                     "message": "Team points limit reached: 24956 in use + 48
+                                  estimated for this capture exceeds 25000."}}
 
     `est` is computed from the INCOMING capture, so the identical capture
     succeeds the moment a node is freed or the tier changes — exactly the
@@ -316,8 +319,20 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     precisely its own use case.
 
     Not detected by prose: the client ships independently of the server's
-    wording, and a capacity/billing refusal is a category, not a string. Any
-    402 is retried, with the ENTRY's `backoff_delay` capping the cadence —
+    wording, and a capacity/billing refusal is a category, not a string. #4614
+    gave the refusal that category (`detail.code`); this classifier still keys
+    on the STATUS, deliberately — see the note below.
+
+    ⚠️ The status-keyed verdict is a DATA-SAFETY decision and is NOT narrowed
+    by #4614. Now that a category exists, a caller *could* treat a
+    `quota_exceeded` 402 as terminal, and that would re-open the exact data
+    loss #4714 closed: any entry this drain would otherwise file later would be
+    unlinked instead. The category is for REPORTING and for the surfaces that
+    can act on it (`website/apps/dashboard`, the `capture-errors` breadcrumb);
+    the spool keeps deferring. #4925 holds the question of when a refusal is
+    genuinely terminal; until it is answered, retry is the safe direction.
+
+    Any 402 is retried, with the ENTRY's `backoff_delay` capping the cadence —
     carried across turns, so a growing session is retried on the backoff clock
     rather than once per turn. That converts immediate loss into a BOUNDED,
     DEFERRED one: `SPOOL_MAX_ENTRIES` / `SPOOL_MAX_TOTAL_BYTES` still apply, and

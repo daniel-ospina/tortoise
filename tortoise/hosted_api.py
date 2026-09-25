@@ -4642,6 +4642,21 @@ async def get_current_org_session_ungated(request: Request) -> dict:
     return await get_current_org_session(request, gate_key_login=False)
 
 
+def _key_limit_refusal(message: str = "Key limit reached — revoke an existing key") -> dict:
+    """The ONE structured `api_keys` quota refusal (#4614).
+
+    Every api_keys cap door answers with this shape — `/v1/team/keys`'s
+    pre-check via `_check_org_limit`, the mint/rotate `_KeyCapExceeded` race
+    backstops, and the two `/v1/session/key` recovery lanes. Before this they
+    were bare prose, so the SAME exhausted quota had one machine-readable
+    shape on one door and none on another — a caller branching on
+    `detail.code` could still not tell an api-keys refusal from any other 402.
+    """
+    from tortoise.quota import QuotaExceededError, quota_refusal_payload
+    return quota_refusal_payload(
+        QuotaExceededError(message, resource="api_keys"))
+
+
 def _check_org_limit(org: dict, resource: str, *,
                      slot_credit: int = 0) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
@@ -4672,11 +4687,28 @@ def _check_org_limit(org: dict, resource: str, *,
     org_id = org.get("org_id")
     if not org_id:
         return  # internal/no-org context — skip
-    from tortoise.quota import QuotaCheckError, QuotaExceededError, enforce_org_limit
+    from tortoise.quota import (
+        QuotaCheckError,
+        QuotaExceededError,
+        enforce_org_limit,
+        quota_refusal_payload,
+    )
     try:
         enforce_org_limit(org, resource, slot_credit=slot_credit)
     except QuotaExceededError as e:
-        raise HTTPException(status_code=402, detail=str(e))  # noqa: B904
+        # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
+        # plus the resource/used/limit the gate actually compared — not the
+        # bare prose string it was. A prose-only detail forced every consumer
+        # to match the message text, which our own clients are documented as
+        # forbidden from doing (`capture_spool.classify_failure`: "a
+        # capacity/billing refusal is a category, not a string"). The prose
+        # survives as `detail["message"]`, so #2789-aware readers
+        # (`website/apps/dashboard/src/main.jsx`'s `api()`, which maps
+        # `detail.message` -> `err.message`) are unaffected.
+        raise HTTPException(  # noqa: B904
+            status_code=402,
+            detail=quota_refusal_payload(e),
+        )
     except QuotaCheckError as e:
         # quota._count_resource already logged at ERROR level (#686);
         # avoid double-logging — this site only records the HTTP context.
@@ -8551,10 +8583,18 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
         # backstop); the SCOPED mint + deleg=0 child mints surface the C2
         # _KeyCapExceeded 409 semantic. Never a 500.
         is_owner_class_mint = not scoped_request and not child_mint
+        if not is_owner_class_mint:
+            # 409 is the C2 policy/concurrency class, NOT a quota refusal —
+            # there is no quota category to carry, so the detail stays prose.
+            raise HTTPException(
+                status_code=409, detail="API key limit reached.") from None
+        # #4614: the 402 arm IS the api_keys quota (the legacy pre-check's race
+        # backstop) — the same category `_check_org_limit` answers, so it
+        # carries the same structured shape.
         raise HTTPException(
-            status_code=402 if is_owner_class_mint else 409,
-            detail=("API key limit reached." if not is_owner_class_mint
-                    else "API key limit reached (legacy mint — upgrade or revoke)"),
+            status_code=402,
+            detail=_key_limit_refusal(
+                "API key limit reached (legacy mint — upgrade or revoke)"),
         ) from None
 
     kid = minted["id"]
@@ -8761,7 +8801,7 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
     except _KeyCapExceeded:
         raise HTTPException(
             status_code=402,
-            detail="API key limit reached.",
+            detail=_key_limit_refusal("API key limit reached."),
         ) from None
 
     kid = minted["id"]
@@ -9752,6 +9792,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     from tortoise.quota import (
         MAX_SESSION_TURNS,
         QuotaCheckError,
+        QuotaExceededError,
+        quota_refusal_payload,
     )
     from tortoise.sdk import _current_actor_user_id  # #2600 actor stamp
 
@@ -9965,8 +10007,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 org.get("tier"), org.get("org_id"), body.harness)
             raise HTTPException(
                 status_code=402,
-                detail=f"Team points limit reached: {count} in use + {est} estimated "
-                       f"for this capture exceeds {max_points}. Upgrade your plan.",
+                # #4614: the capture refusal is a distinguishable state. This
+                # is the door the "silent quota refusal" was filed against —
+                # the 402 carried only prose, so a caller could not tell a
+                # quota refusal from any other 402 without matching text, and
+                # the capture clients are documented as forbidden from doing
+                # that. `used` is the SAME count the gate compared
+                # (count_org_usage(..., "points") — non-episodic Points PLUS
+                # Object + Subject, NULL `is_episodic` counted as non-episodic;
+                # a `NOT n.is_episodic` count drops those NULLs and undercounts
+                # by thousands). `message` is byte-identical to the old prose.
+                detail=quota_refusal_payload(QuotaExceededError(
+                    f"Team points limit reached: {count} in use + {est} estimated "
+                    f"for this capture exceeds {max_points}. Upgrade your plan.",
+                    resource="points", used=count, limit=max_points,
+                    estimate=est,
+                )),
             )
 
         # #3665 (lane B7): the COHORT COST CAP — the pre-spend gate. It lives
@@ -10019,7 +10075,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # request for the round-trip (the #2988/#3498 sync-HTTP class).
             await asyncio.to_thread(
                 file_cohort_cost_incident, org["org_id"], e.incident_detail)
-            raise HTTPException(status_code=402, detail=str(e)) from None
+            # #4614: the spend cap is its own refusal CATEGORY
+            # (`cohort_cost_cap`, set on the exception) — a caller branching on
+            # `detail.code` must not read it as "out of plan allowance" and
+            # point the user at a plan that cannot lift it.
+            raise HTTPException(
+                status_code=402, detail=quota_refusal_payload(e)) from None
         except QuotaCheckError as e:
             raise HTTPException(
                 status_code=500, detail=f"Quota check failed: {e}") from None
@@ -19730,10 +19791,10 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                             params={"tid": tid, "now": now},
                         ).result_set[0][0]
                         if max_keys is not None and recheck >= max_keys:
-                            raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                            raise HTTPException(status_code=402, detail=_key_limit_refusal())
                         rotated = True
                     else:
-                        raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
             expires_at = None
             created_via = "recovery"
 
@@ -19942,10 +20003,10 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
                         recheck = [r for r in active_api_keys(cp, tid)
                                    if r.get("created_via") != "bootstrap"]
                         if max_keys is not None and len(recheck) >= max_keys:
-                            raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                            raise HTTPException(status_code=402, detail=_key_limit_refusal())
                         rotated = True
                     else:
-                        raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
             expires_at = None
             created_via = "recovery"
 
