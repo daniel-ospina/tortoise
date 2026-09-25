@@ -2219,6 +2219,37 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
         params={"u": did}).result_set[0][0] == "legal"
 
 
+def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
+    """B6, the FOURTH DOOR (review round 3): the retired fields must be
+    SCRUBBED when a node is PROMOTED to a document, not merely refused on
+    write. A non-document `:Source` may legitimately carry `content` or
+    `objectKind` — the target-aware `update_entity` guard above allows exactly
+    that — and a later document creator MERGEs onto that SAME node by `url`.
+    Without the scrub at the document MERGE, the inherited value survived both
+    live and on replay.
+
+    This is the complement of the third-door test: that one proves the write
+    is refused on a document, this one proves a value written while the node
+    was NOT a document does not become a retired field when it becomes one.
+    """
+    sdk = sdk_factory()
+    sdk.create_source("doc/promo.md", "document")
+    sdk.update_entity("doc/promo.md", content="SECRET", objectKind="X")
+    proj = sdk._get_proj()
+    assert proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) RETURN s.content"
+    ).result_set[0][0] == "SECRET", \
+        "precondition: writable while the node is not a document"
+    proj.apply({"type": "DocumentCreated", "id": "doc/promo.md",
+                "title": "Promo", "document_kind": "report"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) "
+        "RETURN s.documentKind, s.content, s.objectKind").result_set[0]
+    assert rows[0] == "report", f"promotion did not land: {rows!r}"
+    assert list(rows[1:]) == [None, None], \
+        f"promotion inherited the retired fields: {rows!r}"
+
+
 def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
     """B6 (#5026): a document IS a :Source, so a SourceCreated whose url
     equals a document id MERGEs onto the SAME node the document path owns.
