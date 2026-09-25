@@ -498,6 +498,9 @@ class TestClosedVocab:
             assert kind in vocab, f"{kind} missing from closed vocab"
             assert f"core:{kind}" in vocab, f"core:{kind} missing"
             assert kind.lower() in vocab, f"{kind.lower()} missing"
+        # The retired kind must stay OUT: the positive loop above cannot notice a
+        # RE-ADD (D10 — #5013, ONTOLOGY v3.15, #5022).
+        assert "document" not in vocab and "core:document" not in vocab
         # pack kinds present too
         assert "product-strategy:product" in vocab
 

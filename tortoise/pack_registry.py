@@ -632,7 +632,15 @@ class PackRegistry:
                             f"ontology.{kind_field}: '{k}' should be camelCase "
                             f"(lowercase first letter)"
                         )
-                    elif k in CANONICAL_KINDS.get(kind_field, set()):
+                    # D10 (#5013, ONTOLOGY v3.15, #5022) moved `document` from
+                    # the object-kind axis to the SOURCE-kind axis (a document is
+                    # a `:Source`), so the canonical-collision check must read that
+                    # vocabulary too. Without it a pack could re-register
+                    # `objectKinds: [document]`, and `pack.object_kinds` feeds
+                    # extractor_v2's writable kind forms and the classification
+                    # index — i.e. the retired kind would be writable again.
+                    elif k in CANONICAL_KINDS.get(kind_field, set()) \
+                            or k in registered_source_types():
                         errors.append(
                             f"ontology.{kind_field}: '{k}' is already in canonical "
                             f"vocabulary — no need to register"
