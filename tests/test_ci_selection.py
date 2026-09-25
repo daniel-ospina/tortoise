@@ -2046,6 +2046,13 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert "${{ join(needs.*.result, ' ') }}" in script, (
         "python-ci-gate must join `needs.*.result` — reading a subset means a "
         "red drift never reaches the check (#2656)")
+    # Defence in depth must not be deletable either: the per-leg rows below cover
+    # every declared leg, but the plain sweep is what catches a leg that reaches
+    # `needs:` WITHOUT a row (a shape the row-set assertion below forbids, so
+    # this is redundancy — deliberately kept and pinned rather than dropped).
+    assert re.search(r"grep -qE 'failure\|cancelled'", script), (
+        "the aggregate must keep the `failure|cancelled` sweep over "
+        "`needs.*.result` as defence in depth (#5219)")
 
     # Render the GitHub expressions into literal results and actually RUN the
     # aggregate's script: this is what turns "the words are present" into "a
@@ -2230,6 +2237,24 @@ def test_required_gate_covers_the_long_legs():
     assert "manifest-integrity" in closure, (
         "the required aggregate must still include the manifest drift gate, "
         "or a drift stops blocking merges (#2656)")
+
+    # The OTHER half of the dropped-shard defence (#5219). The drift test pins
+    # rows -> needs; this pins needs -> the workflow's own universe of PR-lane
+    # jobs. Without it, deleting a leg from `needs:` AND its row is a
+    # self-consistent edit that passes every test while the shard sits outside
+    # the required check — and that pair is the NATURAL edit, because dropping
+    # the entry alone leaves an orphan row, which IS caught, so the author
+    # deletes both.
+    #
+    # A push-only job is exempt by DERIVATION, not by name: on a pull request it
+    # reports only `skipped`, so it carries no PR-lane signal.
+    push_only = {name for name, spec in jobs.items()
+                 if "github.event_name" in str(spec.get("if") or "")}
+    must_aggregate = set(jobs) - set(direct) - {"python-ci-gate"} - push_only
+    assert not must_aggregate, (
+        "every job in this workflow that reports on the PR lane must be a "
+        "`python-ci-gate` need — otherwise its failure cannot block a merge, "
+        f"which is the #5219 defect. Missing: {sorted(must_aggregate)}")
 
     # `leg in jobs` alone only proves the leg is DEFINED. The contract leans on
     # the legs still EXECUTING on the PR lane — the `--admin` rail's lane parity
