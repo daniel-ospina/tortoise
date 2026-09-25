@@ -310,7 +310,7 @@ def _s2s4_rules() -> str:
 
 
 CORE_OBJECT_KEYS = (
-    "core:Project", "core:WorkItem", "core:Problem", "core:document", "core:tag",
+    "core:Project", "core:WorkItem", "core:Problem", "core:tag",
     "core:user", "core:skill", "core:tool", "core:agent",
     "core:workflow", "core:agreement", "core:standard", "core:other",
     "core:strategy", "core:plan", "core:goal", "core:target",
