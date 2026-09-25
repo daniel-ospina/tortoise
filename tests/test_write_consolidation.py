@@ -75,7 +75,9 @@ class TestCreateEntity:
     def test_routes_document(self, sdk):
         node = sdk.create_entity("document", "Q3 Plan", documentKind="planDoc")["node"]
         assert node.get("documentKind") == "planDoc"
-        assert node.get("doc_status") == "draft"  # documents enter as draft
+        # D10 (ONTOLOGY v3.15 §4.4): doc_status is retired — liveness is a read
+        # of the extracted entities, never a stored field on the document Source.
+        assert node.get("doc_status") is None
 
     def test_routes_event_requires_eventkind(self, sdk):
         with pytest.raises(ValueError, match="eventKind"):
@@ -546,8 +548,8 @@ class TestMcpHandlers:
         from tortoise.mcp_server import (  # noqa: I001
             tortoise_create_point, tortoise_supersede,
         )
-        a = tortoise_create_point("statement", "mcp old claim zz")
-        b = tortoise_create_point("statement", "mcp new claim zz")
+        a = tortoise_create_point("statement", "mcp old claim zz", dedup=False)
+        b = tortoise_create_point("statement", "mcp new claim zz", dedup=False)
         if "error" in a or "error" in b:
             pytest.skip("FalkorDB not available")
         r = tortoise_supersede(a["id"], b["id"], transfer_edges=False)

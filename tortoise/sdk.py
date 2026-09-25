@@ -1219,7 +1219,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
     operator ``--upgrade-all`` path (projection maps ``source_path`` →
-    ``d.sourcePath`` via ``_DOCUMENT_HANDLED``); a tenant setting them turns the
+    ``d.sourcePath`` via ``_SOURCE_HANDLED``/``_DOC_RETIRED``); a tenant setting them turns the
     graph into a file-read oracle. ``id`` overrides on entity surfaces mutate
     node identity / mint tenant-chosen Document ids. Both are rejected with a
     clear ValueError (fail-closed). ``api.add_document``'s explicit
@@ -7878,10 +7878,19 @@ class TortoiseSDK:
         return result
 
     def list_sources(self) -> list[dict]:
-        """All Sources with point counts. Returns [{url, sourceKind, points}]."""
+        """All PROVENANCE Sources with point counts.
+
+        Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
+        run-endpoint `doc_<rel>` document is also a `:Source`, but it is NOT a
+        provenance source — it carries `documentKind` and NO `sourceKind`, so
+        including it would (a) add a `sourceKind=None` row to a
+        `sourceKind`-keyed vocabulary and (b) double-count every indexed file
+        (its corpus Source AND its document node). Filtering keeps the
+        pre-D10 observable row set byte-identical (see #5082).
+        """
         proj = self._get_proj()
         rows = proj.g.query(
-            "MATCH (s:Source) "
+            "MATCH (s:Source) WHERE s.documentKind IS NULL "
             "OPTIONAL MATCH (p:Point)-[:extractedFrom]->(s) "
             "RETURN s.url, s.sourceKind, count(p) AS points "
             "ORDER BY points DESC"
@@ -8596,7 +8605,7 @@ class TortoiseSDK:
             conns.append((i, conn, route, [frm] + to_list))  # noqa: RUF005
         node_info = self._fetch_endpoint_info(external)
         entity_labels = {"subject": "Subject", "object": "Object",
-                         "event": "Event", "document": "Document"}
+                         "event": "Event", "document": "Source"}
         for i, conn, route, vals in conns:  # noqa: B007
             # #2062: the operator route (reify/mitigation/part-whole →
             # create_operator) accepts Point OR Event endpoints — the direct
@@ -10047,10 +10056,13 @@ class TortoiseSDK:
                 f"Cannot file human approval: Subject {approver_id!r} does not exist"
             )
 
-        # 2. Validate artifact exists (Object or Document)
+        # 2. Validate artifact exists (Object, or a document Source — a
+        #    document is a :Source since D10, ONTOLOGY v3.15 §4.4).
         r = proj.g.query(
-            "MATCH (n) WHERE (n:Object OR n:Document) "
-            "AND (n.id = $id OR n.name = $id) RETURN labels(n), n.id",
+            "MATCH (n) WHERE (n:Object OR "
+            "  (n:Source AND n.documentKind IS NOT NULL)) "
+            "AND (n.id = $id OR n.name = $id OR n.url = $id) "
+            "RETURN labels(n), n.id",
             params={"id": artifact_id},
         ).result_set
         if not r:
@@ -10280,9 +10292,11 @@ class TortoiseSDK:
             name, eid = row[0], row[1]
             if name:
                 entities[name.lower()] = eid
-        # Document: matched by title (primary display name) or name
+        # Document: a document is a :Source (D10); matched by title, restricted
+        # to document-bearing Sources.
         for row in proj.g.query(
-            "MATCH (d:Document) WHERE d.title IS NOT NULL RETURN d.title, d.id"
+            "MATCH (s:Source) WHERE s.title IS NOT NULL "
+            "AND s.documentKind IS NOT NULL RETURN s.title, s.id"
         ).result_set:
             title, did = row[0], row[1]
             if title:
@@ -13285,7 +13299,7 @@ class TortoiseSDK:
                         # YAML types (bool/int) must not leak into string fields
                         # (regression vs old line-by-line parser). Coerce known
                         # string fields to str.
-                        for _k in ("doc_status", "format", "version", "title",
+                        for _k in ("format", "version", "title",
                                    "sessionId", "session_id", "agent"):
                             if _k in frontmatter and frontmatter[_k] is not None:
                                 frontmatter[_k] = str(frontmatter[_k])
@@ -13553,7 +13567,6 @@ class TortoiseSDK:
                     "owned_by": frontmatter.get("ownedBy", ""),
                     "managed_by": frontmatter.get("managedBy", ""),
                     "governing_agreement": frontmatter.get("governedBy", frontmatter.get("governingAgreement", "")),
-                    "doc_status": frontmatter.get("doc_status", "draft"),
                     "format": "markdown",
                     "version": frontmatter.get("version", ""),
                     "createdAt": frontmatter.get("created", now),
@@ -14385,7 +14398,11 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         graph = proj.g
-        label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+        # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
+        # :Document graph label, so post-retrieval Cypher must never address
+        # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
+        # entity_type stays "document").
+        label = "Source" if entity_type == "document" else entity_type.capitalize()  # point→Point, event→Event, subject→Subject
         # Operator: Point nodes with is_operator=true, kind=op_type
         # Source: Source nodes, kind=sourceKind
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind", "operator": "op_type", "source": "sourceKind"}[entity_type]
@@ -14682,7 +14699,10 @@ class TortoiseSDK:
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
-        if entity_type == "source":
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source resolving by
+        # `url` (#149's canonical key), not by `id` — the same three-way
+        # id_field search_engine's legs use.
+        if entity_type in ("source", "document"):
             id_field = "url"
         elif entity_type == "event":
             id_field = "eventId"
@@ -14912,7 +14932,8 @@ class TortoiseSDK:
                     }
             elif entity_type == "document":
                 rows = graph.query(
-                    "MATCH (n:Document) WHERE n.id IN $ids "
+                    "MATCH (n:Source) WHERE n.url IN $ids "
+                    "AND n.documentKind IS NOT NULL "
                     "RETURN n.id, n.title, n.documentKind, n.topics, n.summary, "
                     "n.sessionId, n.eventId, n.sourcePath",
                     params={"ids": result_ids},
@@ -16137,7 +16158,10 @@ class TortoiseSDK:
         Returns ``{nodes, edges, stats}``:
             nodes: [{id, type, content, kind, is_operator?, status?,
                 confidence?}] — type is the lowercased graph label
-                (point/object/subject/event/source/document).
+                (point/object/subject/event/source). D10 (ONTOLOGY v3.15
+                §4.4): a document is a `:Source`, so a document node's
+                ``type`` is ``source``; its genre is the ``kind`` field
+                (``documentKind``), not a separate label.
             edges: [{source, type, target}] — every edge with BOTH endpoints
                 in the node set (the subgraph is closed over its edges).
             stats: {node_count, edge_count, depth, seed_count, truncated}.
@@ -16178,7 +16202,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             "MATCH (n) WHERE (n.id = $seed OR n.url = $seed) "
             "AND labels(n)[0] IN ['Point', 'Object', 'Subject', 'Event', "
-            "                      'Source', 'Document'] "
+            "                      'Source'] "
             "RETURN n.id",
             params={"seed": seed.strip()},
         ).result_set
@@ -17759,8 +17783,15 @@ class TortoiseSDK:
             event["subject_kind"] = props["subjectKind"]
         if label == "Object" and "objectKind" in props:
             event["object_kind"] = props["objectKind"]
-        if label == "Document" and "documentKind" in props:
-            event["document_kind"] = props["documentKind"]
+        if label == "Document":
+            # D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is
+            # a :Source keyed ``url = id``. This is a DEPRECATED ALIAS: the
+            # doc-kind key is normalized here, then the node write routes as a
+            # Source. The journaled event type stays "DocumentCreated" (rebuild
+            # compatibility — the event vocabulary is unchanged).
+            if "documentKind" in props:
+                event["document_kind"] = props["documentKind"]
+            label = "Source"
         if label == "Event" and "eventKind" in props:
             event["eventKind"] = event.get("eventKind", props.get("eventKind"))
             if "eventId" not in event:
@@ -18059,6 +18090,42 @@ class TortoiseSDK:
             from tortoise.commit_schema import validate_span
             validate_span(props.get("span_start"), props.get("span_end"))
         proj = self._get_proj()
+        # #5026/D10 (B6, third door — #5135): the retired document fields must
+        # not re-enter through THIS generic surface either. `_sanitize_props`
+        # deliberately ACCEPTS them, because they are legitimate on other
+        # labels (`objectKind` is the canonical Object kind, ONTOLOGY §5), so
+        # the denial has to be TARGET-AWARE: refuse them only when the mutation
+        # lands on a document `:Source`. Without this,
+        # `update_entity(<doc_id>, content=...)` wrote the retired keys and the
+        # non-Point branch below JOURNALED them as `state` — which the fold
+        # re-applies through `SET n += $s` — so they survived `rebuild_all`:
+        # a retired-field re-write that the document-path deny-sets cannot see.
+        #
+        # ⛔ The document test is `documentKind IS NOT NULL`, deliberately
+        # WITHOUT the `documents` meter's `<> 'transcript'` clause. The meter
+        # excludes transcripts because they are not counted against the
+        # `documents` cap; the RETIREMENT is not quota-scoped. The document
+        # path denies these fields on EVERY document —
+        # `_upsert_document`'s passthrough is `_SOURCE_HANDLED | _DOC_RETIRED`
+        # with no transcript filter — so copying the meter's narrower predicate
+        # here left a transcript document `:Source` as an open third door (the
+        # same field denied by one path and writable by the other on the SAME
+        # node). The parity that matters is with the retirement, not the cap.
+        _retired_hit = proj._DOC_RETIRED_KEYS.intersection(props)
+        if _retired_hit:
+            _is_doc = proj.g.query(
+                "MATCH (s:Source) WHERE (s.url = $id OR s.id = $id) "
+                "AND s.documentKind IS NOT NULL "
+                "RETURN count(s)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _is_doc:
+                raise ValueError(
+                    "retired document field(s) "
+                    f"{sorted(_retired_hit)} cannot be set through "
+                    "update_entity: D10 (#5026) retired "
+                    "content/doc_status/objectKind on a document, which is a "
+                    ":Source keyed by url, not a :Document node.")
         # W5 Phase F (#2104, review r4): eventId is the EVENT node's identity
         # (the projection MERGEs on it; capture Events carry the DETERMINISTIC
         # _session_capture_event_id(session_id) id — ev_<sha256("sessionCaptured:"
@@ -18458,8 +18525,7 @@ class TortoiseSDK:
                     "create_entity(type='document') requires documentKind")
             did = self.ulid()
             node = self._create_entity("Document", did, {
-                "title": name, "documentKind": documentKind,
-                "objectKind": "document", "status": "draft", **props},
+                "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
         else:
             raise ValueError(
@@ -18553,7 +18619,7 @@ class TortoiseSDK:
           (Event)-[:aboutSubject]->(Subject)
           (Event)-[:aboutObject]->(Object)
           (Event)-[:aboutPoint]->(Point)
-          (Event)-[:aboutDocument]->(Document)
+          (Event)-[:aboutDocument]->(Source)   # D10: a document IS a :Source
         rather than stored as string properties.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -19198,8 +19264,11 @@ class TortoiseSDK:
                 g["marker"] = rows[0][1]
                 g["stored_source_file"] = rows[0][2]
         elif doc_id:
+            # D10: a document is a :Source (ONTOLOGY v3.15 §4.4) — the
+            # unit-completeness `entity` clause reads the document Source.
             rows = proj.g.query(
-                "MATCH (d:Document {id:$did}) RETURN 1",
+                "MATCH (s:Source {url:$did}) "
+                "WHERE s.documentKind IS NOT NULL RETURN 1",
                 params={"did": doc_id},
             ).result_set
             g["entity"] = bool(rows)
@@ -19569,9 +19638,10 @@ class TortoiseSDK:
                     else:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
                         repair_work = not base_complete or merge_outcome == "updated"
-                    # wire (Source)-[:references]->(Event|Document) — plain edge
+                    # wire (Source)-[:references]->(Event|Source) — plain edge
+                    # (D10: a document is a :Source, so the doc target is Source)
                     target = event_id if classifier != "doc" else doc_id
-                    label = "Event" if classifier != "doc" else "Document"
+                    label = "Event" if classifier != "doc" else "Source"
                     proj.link_source_to_entity(url, target, label)
 
             # ── embedding repair (sessions; extract_metadata=True) — runs only
@@ -19945,7 +20015,6 @@ class TortoiseSDK:
             "id": doc_id,
             "title": title,
             "document_kind": doc_kind or "brief",  # §8.3 flag 1 fallback
-            "doc_status": str(frontmatter.get("doc_status") or "draft"),
             "format": "markdown",
             "source_path": str(abs_path),
             "source_url": source_url,
@@ -20749,11 +20818,12 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
 
         did = self.ulid()
-        result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
-        # #394: provenance parity with create_point — link Document → Source
-        # via extractedFrom (Ontology v3.3) when the caller passes a source ref.
+        result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, **props}, "DocumentCreated")
+        # #394: provenance parity with create_point — link the document Source
+        # → Source via extractedFrom (Ontology v3.3) when the caller passes a
+        # source ref. D10: the entity label is Source (a document is a :Source).
         if props.get("extractedFrom"):
-            self._get_proj()._link_source(did, props["extractedFrom"], label="Document")
+            self._get_proj()._link_source(did, props["extractedFrom"], label="Source")
         return result
 
     def _resolve_source_url(self, url: str) -> str:
@@ -21394,11 +21464,31 @@ class TortoiseSDK:
         return [dict(row[0]) for row in r.result_set]
 
     def get_provenance_chain(self, point_id: str) -> list:
-        """Return full provenance chain for a Point."""
+        """Return full provenance chain for a Point.
+
+        Layered provenance (ONTOLOGY §3.4) is ``(Point)-[:extractedFrom]->
+        (Source)-[:references]->(Entity)``. D10 (v3.15 §4.4) makes a document
+        a ``:Source``, so for a document written WITHOUT a distinct corpus
+        ``source_url`` — the legacy ``tortoise/ingest.py`` path, where every
+        ``add_document`` site omits it — the document node and its Source are
+        ONE node: there is no second node to carry a ``references`` hop, and
+        minting one from the node to itself would be a degenerate self-loop
+        (the reason ``_upsert_document`` suppresses it). The ``references``
+        hop is therefore OPTIONAL here: when it resolves, its target is
+        returned as ``entity`` exactly as before; when the source references
+        nothing, the source ITSELF is the terminal provenance and is returned
+        as ``entity`` rather than dropping the row. Rows that DO resolve a
+        reference are preferred, so a Point extracted from several sources
+        keeps returning a referenced entity whenever one exists.
+        """
         proj = self._get_proj()
         r = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source)-[:references]->(entity) "
-            "RETURN properties(src) as source, properties(entity) as entity, labels(entity) as labels LIMIT 1",
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
+            "OPTIONAL MATCH (src)-[:references]->(ref) "
+            "WITH src, ref ORDER BY ref IS NULL LIMIT 1 "
+            "RETURN properties(src) as source, "
+            "properties(coalesce(ref, src)) as entity, "
+            "labels(coalesce(ref, src)) as labels",
             params={"pid": point_id},
         )
         return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
@@ -21411,12 +21501,14 @@ class TortoiseSDK:
 
         Args:
             source_url: the Source node's url (auto-created if missing)
-            entity_id: the Document/Event/Object node id the source references
-            entity_label: the entity label (Document|Event|Object) for the MATCH
+            entity_id: the Source/Event/Object node id the source references
+            entity_label: the entity label (Source|Event|Object) for the MATCH.
+                The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
+                resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
         Raises:
-            ValueError: if entity_label is not one of Document, Event, Object
+            ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
         """
         proj = self._get_proj()

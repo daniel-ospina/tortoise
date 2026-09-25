@@ -11331,12 +11331,12 @@ async def session_install_probe(body: InstallProbeRequest,
 # local path never leaves the machine. The session Source's IDENTITY is the
 # canonical ``session:<session_id>`` (ONTOLOGY §4.6, #4005) — the same url the
 # capture path materializes and ``delete_session`` deletes; the W-7 basename
-# rides as a PROPERTY (``sourcePath`` on the Source/Document), never in the url.
+# rides as a PROPERTY (``sourcePath`` on the Source), never in the url.
 
 
 def _document_source_basename(payload: CommitPayload) -> str:  # noqa: F821
     """The payload's W-7 basename (FIRST provenance_ref) — the value written
-    to ``Document.sourcePath``. NOT the session Source identity (that is the
+    to ``Source.sourcePath``. NOT the session Source identity (that is the
     canonical ``session:<session_id>``, #4005). Empty when the payload has no
     provenance_refs (valid empty commit). Derived through the ONE shared
     ``file_indexer.provenance_basename`` primitive — the same one Layer-1 uses
@@ -11524,14 +11524,17 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "drafts": drafts},
     )
 
-    # ── 2. Document transcript (deterministic id — replay-safe MERGE). NO
-    # content on the derived path (§4.1: summary/story_arc/sessionId only). ──
+    # ── 2. Document transcript (D10, ONTOLOGY v3.15 §4.4: a document is a
+    # :Source) — deterministic id, replay-safe MERGE. NO content on the
+    # derived path (§4.1: summary/story_arc/sessionId only); doc_status is
+    # retired (§9.5 Q3). ──
     proj.g.query(
-        "MERGE (d:Document {id:$did}) "
-        "SET d.documentKind='transcript', d.title=$title, d.summary=$summary, "
-        "    d.story_arc=$arc, d.sessionId=$sid, d.eventId=$eid, "
-        "    d.sourcePath=$srcpath, d.doc_status='extracted', d.is_episodic=true, "
-        "    d.updatedAt=$now",
+        "MERGE (s:Source {url:$did}) "
+        "SET s.id=coalesce(s.id, $did), "
+        "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
+        "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
+        "    s.sourcePath=$srcpath, s.is_episodic=true, "
+        "    s.updatedAt=$now",
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,
                 "sid": session_id, "eid": event_id,
@@ -11557,8 +11560,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "kw": [session_id], "now": now},
     )
     proj.g.query(
-        "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
-        "MERGE (e)-[:produces]->(d)",
+        "MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) "
+        "MERGE (e)-[:produces]->(s)",
         params={"eid": event_id, "did": doc_id},
     )
 
@@ -11578,8 +11581,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "now": now},
         )
         proj.g.query(
-            "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
-            "MERGE (e)-[:produces]->(d)",
+            "MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) "
+            "MERGE (e)-[:produces]->(s)",
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
@@ -11651,7 +11654,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             contentHash=src.contentHash or "", is_episodic=True,
         )
     for url in session_urls:
-        sdk.link_source_to_entity(url, doc_id, "Document")
+        sdk.link_source_to_entity(url, doc_id, "Source")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(
