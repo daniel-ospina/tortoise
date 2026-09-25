@@ -1857,13 +1857,16 @@ durations:
   test_dr_endpoints.py: 8.4
   test_retrieval.py: 8.3
   test_consolidation_4way.py: 8.2
-  # #5011: 54 tests, docker lane — measured 9-14s warm per file run (one full
-  # fold+graph-diff per assertion; nine of them rebuild_all a journal, and the
-  # shared test container + session-hygiene sweep dominate the tail). 9 tests
-  # skip on the embedded lane, where the store holds no vector index and so
-  # reports no embedding width. Loose middle so the LPT packer does not
-  # under-weight it against default_weight=2.0.
-  test_consistency_divergence_5011.py: 30.0
+  # #5011: 64 tests, docker lane — one full fold+graph-diff per assertion, nine of
+  # them rebuild_all a journal, so the shared test container + the session-hygiene
+  # sweep dominate the tail. Measured 13.7-15.0s warm (9-13s on earlier runs of
+  # the same container), ~23-27s on the embedded lane. 10 tests skip on the
+  # embedded lane, where the store holds no vector index and so reports no
+  # embedding width. The value is NOT the earlier 30.0 — that sat above the whole
+  # measured range while the comment called it "a loose middle", which is the
+  # shape #3620 flagged in test_pages_bindings.py. Cold-CI runners are slower than
+  # this box, so the value errs high without leaving the band.
+  test_consistency_divergence_5011.py: 15.0
   test_invite_fusion_http.py: 8.1
   test_signup_token_revoke.py: 8.0
   test_w4_why_enrichment.py: 8.0
