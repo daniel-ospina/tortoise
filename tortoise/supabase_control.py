@@ -3339,6 +3339,80 @@ def metering_increment_capture_cost(cp, org_id: str, period_start: str,
     )
 
 
+def metering_get_embed_usage(cp, org_id: str, period_start: str) -> dict:
+    """Embedding-encode WORKLOAD for an org's window STARTING at
+    *period_start* (#4488) — the supabase-mode READ path for
+    ``get_embedding_usage``. Returns the ``embed_*`` columns as a dict (ZEROS
+    and a ``None`` identity when the row is absent — the MERGE only creates the
+    record on the first write).
+
+    A plain table READ, deliberately mirroring ``metering_get_usage`` rather
+    than adding a SQL function: this is one row per (org, period) read by its
+    PRIMARY KEY, so there is no row LIST for PostgREST's ``db-max-rows`` cap to
+    truncate (the truncation mode ``metering_cohort_spend`` exists to design
+    out applies to COHORT aggregates, not to a single-row PK read).
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
+    zeros = {"embed_calls": 0, "embed_texts": 0, "embed_chars": 0,
+             "embed_wall_ms": 0.0, "embed_skipped": 0,
+             "embed_model": None, "embed_revision": None,
+             "embed_identity_mixed": False}
+    rows = cp.query(
+        "metering_records",
+        select=["embed_calls", "embed_texts", "embed_chars", "embed_wall_ms",
+                "embed_skipped", "embed_model", "embed_revision",
+                "embed_identity_mixed"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return zeros
+    row = rows[0]
+    return {
+        "embed_calls": int(row.get("embed_calls") or 0),
+        "embed_texts": int(row.get("embed_texts") or 0),
+        "embed_chars": int(row.get("embed_chars") or 0),
+        "embed_wall_ms": float(row.get("embed_wall_ms") or 0.0),
+        "embed_skipped": int(row.get("embed_skipped") or 0),
+        "embed_model": row.get("embed_model"),
+        "embed_revision": row.get("embed_revision"),
+        "embed_identity_mixed": bool(row.get("embed_identity_mixed")),
+    }
+
+
+def metering_increment_embedding(cp, org_id: str, period_start: str,
+                                 period_end: str, *, calls: int = 0,
+                                 texts: int = 0, chars: int = 0,
+                                 wall_ms: float = 0.0, skipped: int = 0,
+                                 model: str | None = None,
+                                 revision: str | None = None,
+                                 identity_mixed: bool = False) -> None:
+    """Increment the org's embedding-encode WORKLOAD for the window
+    ``[period_start, period_end)`` (#4488) via the
+    ``metering_increment_embedding`` SQL RPC — the embed-side mirror of
+    ``metering_increment_capture_cost`` (atomic under Postgres row locking;
+    best-effort by contract — the caller swallows exceptions).
+
+    ``p_identity_mixed`` carries an IN-TALLY swap (two different encoders inside
+    one work unit); a swap ACROSS windows is derived server-side from the stored
+    identity, which is why the flag is sticky there too.
+
+    #3825: the window, not a month label, is the row key. NOTE the RPC is
+    DROPPED and recreated by its migration rather than replaced in place: a new
+    argument list would otherwise be an OVERLOAD, leaving the old signature
+    callable — the silent second path #3825 removes.
+    """
+    cp.rpc(
+        "metering_increment_embedding",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_calls": calls, "p_texts": texts,
+         "p_chars": chars, "p_wall_ms": wall_ms, "p_skipped": skipped,
+         "p_model": model, "p_revision": revision,
+         "p_identity_mixed": identity_mixed},
+    )
+
+
 def metering_cohort_spend(cp, org_ids: list[str], period_start: str,
                           period_end: str) -> float:
     """Measured LLM spend for a COHORT over one metering WINDOW

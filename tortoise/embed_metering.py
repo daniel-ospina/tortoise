@@ -1,0 +1,357 @@
+"""Per-org EMBEDDING-ENCODE workload measurement (#4488).
+
+WHY THIS EXISTS. The cost meter (#3359/#3824) covers LLM PROVIDER calls, which
+have a billable token count. A local ``sentence-transformers`` encode consumes
+CPU seconds and RAM and produces no such count — so embedding work is invisible
+to every existing figure. This module measures it on the SAME durable
+per-(org, period) ledger the ask/capture lanes use, so the reading needs no new
+store and no new read path: texts, characters, wall time and the model identity
+that produced them, keyed by org.
+
+WHAT IT IS NOT. It records WORKLOAD, never price, tier or quota (#4488's
+explicit out-of-scope list). Nothing here can refuse, throttle or bill. The
+figure is descriptive.
+
+SHAPE. A mutable :class:`EmbedTally` lives in a :class:`contextvars.ContextVar`.
+The encode funnel — :func:`tortoise.embeddings.compute_embeddings` — MUTATES it
+in place: O(1), no I/O, no lock on the hot path. A WORK-OWNING boundary arms /
+notes, then takes-and-resets the tally and writes it once through
+``metering.record_embedding_usage``:
+
+* :class:`EmbedMeteringMiddleware` — every non-GET HTTP request (org resolved
+  from ``scope["state"]["org_id"]``, which the key-auth dependencies populate);
+* ``mcp_server._quota_gated`` — the MCP write lane;
+* :func:`meted` — work born in a DETACHED task (background index jobs, the dream
+  worker, the hosted capture body, the onboarding/starter seed runners) installs
+  a FRESH tally and flushes when it exits.
+
+WHY A MUTABLE TALLY RATHER THAN A COPY-ON-WRITE VALUE. The encode can run in a
+pool thread whose context was copied (``hosted_api._submit_off_loop`` uses
+``contextvars.copy_context()``). A ContextVar set in the request context is
+visible to that copy, but a REBIND (``set``) inside the worker is not propagated
+back — mutating a shared object IS. Same reasoning as the sibling ``graph_ops``
+counter (PR #5292).
+
+TOTAL, NEVER RAISES. ``note_encode``/``note_skip``/``bind_org`` are total: an
+allocation fault on the measurement path must never fail a write. ``flush``
+absorbs every failure and reports it to the operator through
+``metering.report_unmetered_increment`` — the same lane-visible signal the six
+swallow sites use (this module is the seventh lane, ``embed``). A drop is never
+silent; it is never a refusal either (#3981).
+
+NOT ON THE WRITE PATH. There is deliberately NO flush from
+``hosted_api._record_write_op``: that site is SYNCHRONOUS and runs ON the event
+loop (the #4451 residual), and flushing there would add a SECOND blocking
+ledger write per write op — lengthening every response on a transport that
+carries a hard wait bound. The middleware flush is offloaded
+(``asyncio.to_thread``) and the runner flushes are offloaded too, so the
+measurement never sits between a write and its response.
+
+MEASURED VS EXCLUDED. Only :func:`tortoise.embeddings.compute_embeddings` — the
+store-vector funnel — is hooked. ``_encode``/``search_points``/``kind_index``
+pass ``show_progress_bar``, which the active encoder does not accept, so they
+raise-and-degrade to TF-IDF and run no model work today (#5321); read/query-side
+paths are out of scope. If #5321 is fixed, the same hook extends to them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import threading
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+
+_logger = logging.getLogger(__name__)
+
+#: The active tally for the current context, or None outside any boundary.
+#: ``default=None`` keeps the unarmed path to one cheap ``get()`` per encode.
+_ACTIVE: ContextVar[EmbedTally | None] = ContextVar(
+    "tortoise_embed_tally", default=None
+)
+
+#: Guards ONLY the take-and-reset snapshot — never held across the ledger RPC.
+#: A blocking write under this lock would serialize concurrent encodes, which
+#: is exactly the hot path this module exists to keep free.
+_LOCK = threading.Lock()
+
+
+@dataclass
+class EmbedTally:
+    """One work unit's embedding-encode tally.
+
+    Mutable by design (see the module docstring). ``model``/``revision`` are the
+    identity of the FIRST real encode observed; ``identity_mixed`` latches True
+    when a real encode under a DIFFERENT identity is observed inside the same
+    tally (a mid-request swap — rare, but it must not be invisible).
+    """
+
+    calls: int = 0
+    texts: int = 0
+    chars: int = 0
+    wall_ms: float = 0.0
+    skipped: int = 0
+    model: str | None = None
+    revision: str | None = None
+    identity_mixed: bool = False
+    org_id: str | None = None
+    #: Set by :func:`take_and_reset`/``flush_tally`` — a second flush of the
+    #: same object is a no-op (two boundaries in one request record once).
+    consumed: bool = False
+    #: True once a real encode has stamped an identity (distinguishes "never
+    #: encoded" from "encoded under an identity that happens to be None").
+    _identity_seen: bool = field(default=False, repr=False)
+
+    def note_encode(self, *, texts: int, chars: int, wall_ms: float) -> None:
+        """Accumulate one real model encode. Total — never raises."""
+        self.calls += 1
+        self.texts += texts
+        self.chars += chars
+        self.wall_ms += wall_ms
+        model, revision = _resolve_identity()
+        if not self._identity_seen:
+            self._identity_seen = True
+            self.model, self.revision = model, revision
+        elif (model, revision) != (self.model, self.revision):
+            # Keep the FIRST identity: the writer compares the incoming pair
+            # against the STORED one, and this flag carries the in-tally change.
+            self.identity_mixed = True
+
+    def note_skip(self, n: int = 1) -> None:
+        """Count encode attempts that ran no model work (model unavailable)."""
+        self.skipped += n
+
+    def bind_org(self, org_id: str | None) -> None:
+        """Attach the org this work belongs to. No-op for a falsy id."""
+        if org_id:
+            self.org_id = org_id
+
+    def is_empty(self) -> bool:
+        """True when this tally carries nothing worth a ledger row."""
+        return not (self.calls or self.skipped)
+
+
+def _resolve_identity() -> tuple[str | None, str | None]:
+    """Resolve ``(model, revision)`` at CALL time (rebinding-friendly)."""
+    try:
+        from tortoise.embeddings import embedding_identity
+        return embedding_identity()
+    except Exception:  # pragma: no cover — identity must never raise
+        return None, None
+
+
+def arm(org_id: str | None = None) -> EmbedTally:
+    """Install (once) and return the active tally; optionally bind the org.
+
+    Idempotent: a second call in the same context returns the SAME tally rather
+    than starting a fresh one (two boundaries in one request share one figure).
+    """
+    tally = _ACTIVE.get()
+    if tally is None:
+        tally = EmbedTally()
+        _ACTIVE.set(tally)
+    if org_id:
+        tally.bind_org(org_id)
+    return tally
+
+
+def current_tally() -> EmbedTally | None:
+    """The active tally, or None when unarmed (tests/diagnostics)."""
+    return _ACTIVE.get()
+
+
+def bind_org(org_id: str | None) -> None:
+    """Bind *org_id* to the active tally. Total; no-op when unarmed or falsy."""
+    tally = _ACTIVE.get()
+    if tally is not None and org_id:
+        tally.bind_org(org_id)
+
+
+def note_encode(*, texts: int, chars: int, wall_ms: float) -> None:
+    """Note one real encode against the active tally. Unarmed → no-op."""
+    tally = _ACTIVE.get()
+    if tally is not None:
+        tally.note_encode(texts=texts, chars=chars, wall_ms=wall_ms)
+
+
+def note_skip(n: int = 1) -> None:
+    """Note *n* encode attempts that performed no model work."""
+    tally = _ACTIVE.get()
+    if tally is not None:
+        tally.note_skip(n)
+
+
+def take_and_reset() -> EmbedTally | None:
+    """Atomically claim the active tally and clear it. Returns None if unarmed.
+
+    The ONLY operation under :data:`_LOCK`. The claimed tally is marked consumed
+    by :func:`flush_tally`, so a second flush of the same object is a no-op.
+    """
+    with _LOCK:
+        tally = _ACTIVE.get()
+        if tally is None:
+            return None
+        _ACTIVE.set(None)
+        return tally
+
+
+def flush_tally(tally: EmbedTally | None, org_id: str | None = None) -> dict | None:
+    """Write one tally to the ledger. TOTAL — never raises.
+
+    Returns the writer's summary dict, or None when there was nothing to write,
+    when the org is unresolvable, or when the write was dropped. Every drop is
+    reported to the operator on the ``embed`` lane (never silent).
+    """
+    if tally is None or tally.consumed:
+        return None
+    tally.consumed = True
+    if tally.is_empty():
+        return None
+    org = org_id or tally.org_id
+    if not org:
+        # A non-empty tally with no org is a BOOKKEEPING fault of ours: the
+        # work happened and cannot be attributed. Same lane, same alert.
+        _report(org_id=None, error=RuntimeError(
+            "embedding tally has no resolvable org — the encode work was done "
+            "but cannot be attributed to a ledger row"
+        ))
+        return None
+    try:
+        from tortoise import metering
+        return metering.record_embedding_usage(
+            org,
+            calls=tally.calls,
+            texts=tally.texts,
+            chars=tally.chars,
+            wall_ms=tally.wall_ms,
+            skipped=tally.skipped,
+            model=tally.model,
+            revision=tally.revision,
+            identity_mixed=tally.identity_mixed,
+        )
+    except Exception as e:
+        _report(org_id=org, error=e)
+        return None
+
+
+def flush(org_id: str | None = None) -> dict | None:
+    """Take-and-reset the active tally and write it. TOTAL — never raises."""
+    return flush_tally(take_and_reset(), org_id)
+
+
+def _report(*, org_id: str | None, error: BaseException) -> None:
+    """Announce a dropped increment on the ``embed`` lane. Never raises.
+
+    The ``lane=`` KEYWORD FORM is load-bearing: the swallow-site completeness
+    fence censuses literal ``report_unmetered_increment(lane="…")`` calls
+    (``tests/test_metering_window_admission.py``), so a positional call would
+    make this lane invisible to it.
+    """
+    with contextlib.suppress(Exception):
+        from tortoise import metering
+        metering.report_unmetered_increment(
+            lane="embed", org_id=org_id, error=error
+        )
+
+
+class _Meted:
+    """Context manager installing a FRESH tally and flushing it on exit.
+
+    Fresh, never inherited: a detached work unit owns its own figure, so it can
+    neither double-count a request-scoped tally nor steal one. Usable as a sync
+    CM (MCP ``_quota_gated``, the pool-thread runners) or an async CM (the
+    hosted capture body, index jobs, the dream worker) — the async arm offloads
+    the blocking ledger write so the loop is never stalled by metering.
+    """
+
+    __slots__ = ("_org", "_tally", "_token")
+
+    def __init__(self, org_id: str | None) -> None:
+        self._org = org_id
+        self._token = None
+        self._tally: EmbedTally | None = None
+
+    # ── shared ──────────────────────────────────────────────────────────────
+    def _install(self) -> EmbedTally:
+        tally = EmbedTally()
+        tally.bind_org(self._org)
+        self._tally = tally
+        self._token = _ACTIVE.set(tally)
+        return tally
+
+    def _finish(self) -> None:
+        if self._token is not None:
+            with contextlib.suppress(Exception):
+                _ACTIVE.reset(self._token)
+        flush_tally(self._tally, self._org)
+
+    # ── sync ────────────────────────────────────────────────────────────────
+    def __enter__(self) -> EmbedTally:
+        return self._install()
+
+    def __exit__(self, *exc) -> bool:
+        with contextlib.suppress(Exception):
+            self._finish()
+        return False
+
+    # ── async ───────────────────────────────────────────────────────────────
+    async def __aenter__(self) -> EmbedTally:
+        return self._install()
+
+    async def __aexit__(self, *exc) -> bool:
+        tally, org, token = self._tally, self._org, self._token
+        if token is not None:
+            with contextlib.suppress(Exception):
+                _ACTIVE.reset(token)
+        try:
+            # Offload: the ledger write is blocking (FalkorDB/HTTP) and must not
+            # stall the loop — the same discipline as the write paths.
+            await asyncio.to_thread(flush_tally, tally, org)
+        except Exception:
+            _logger.debug("embed meted flush failed", exc_info=True)
+        return False
+
+
+def meted(org_id: str | None) -> _Meted:
+    """Install a FRESH tally for *org_id* and flush it on exit.
+
+    Use where work is BORN (a detached task or a runner that owns its lane), so
+    the figure is attributed to the org that caused it even when no HTTP
+    boundary will ever flush it.
+    """
+    return _Meted(org_id)
+
+
+class EmbedMeteringMiddleware:
+    """Pure-ASGI middleware: arm non-GET requests, flush once on exit.
+
+    Registered INSIDE ``InFlightMiddleware`` (and therefore inside the
+    WaitBound-owned task) but outside every route, so it sees the request that
+    caused the work — not the pool thread that ran it.
+
+    The org is resolved at FLUSH time, after the handler has run: the key-auth
+    dependencies write ``scope["state"]["org_id"]`` during the request, and
+    ``scope`` is the same dict by then. Routes that publish their org another way
+    (session auth, the internal seed lanes) are covered by ``meted`` at the
+    runner instead — see the call sites.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http" or scope.get("method") == "GET":
+            await self.app(scope, receive, send)
+            return
+        tally = arm()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            org = tally.org_id
+            if not org:
+                state = scope.get("state")
+                org = state.get("org_id") if isinstance(state, dict) else None
+            await asyncio.to_thread(
+                flush_tally, take_and_reset() or tally, org
+            )

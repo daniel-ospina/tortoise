@@ -377,9 +377,9 @@ def report_unmetered_increment(lane: str, org_id: str | None,
 
     ``lane`` names the swallow site (one stable token per site) so an alert is
     attributable to the handler that dropped the increment rather than to
-    "metering failed somewhere". The six lanes are ``write_op``,
+    "metering failed somewhere". The seven lanes are ``write_op``,
     ``object_write_op``, ``subject_write_op``, ``capture_ledger``,
-    ``mcp_write_op`` and ``ask_ledger``.
+    ``mcp_write_op``, ``ask_ledger`` and ``embed``.
 
     Never raises: the alert itself must not become a new failure path (a signal
     that can raise is a refusal by another name). The incident — a GitHub issue
@@ -840,6 +840,223 @@ def get_ask_usage(org_id: str) -> dict:
     except Exception as e:
         _logger.warning(
             "ask usage query failed (degrading to zero view): team=%s "
+            "period=%s error=%s", org_id, period.label, e,
+        )
+        return _zero_view(period.label, period)
+
+
+# ── Embed lane: per-org ENCODE workload (#4488) ─────────────────────────────
+#
+# WHY. The ask/capture lanes record LLM PROVIDER work, which has a billable
+# token count. A local `sentence-transformers` encode consumes CPU seconds and
+# RAM and produces no such count, so embedding work was invisible to every
+# existing figure. These two functions put that workload on the SAME durable
+# per-period row, so the reading needs no new store and no new read path.
+#
+# NOT a billing change (#4488 is explicit): nothing here prices, caps, throttles
+# or bills. The columns are WORKLOAD, and `get_cohort_spend_usd` does not read
+# them — the spend ceiling is untouched by construction.
+
+
+def record_embedding_usage(org_id: str | None, *, calls: int = 0,
+                           texts: int = 0, chars: int = 0,
+                           wall_ms: float = 0.0, skipped: int = 0,
+                           model: str | None = None,
+                           revision: str | None = None,
+                           identity_mixed: bool = False,
+                           _selfhost_transport: bool = False) -> dict | None:
+    """Record one batch of embedding-encode WORKLOAD for *org_id* (#4488).
+
+    Window resolution RAISES on an unresolvable anchor (#3825), exactly like the
+    other writers. That raise is a SIGNAL, not a refusal (#3981): the caller
+    (``embed_metering.flush_tally``) absorbs it, the write is served, and the
+    dropped increment is reported to the operator on the ``embed`` lane. A
+    failure of the increment RPC itself stays non-fatal — logged at WARNING and
+    dropped, not retried at any call site (representing that increment is
+    #3824, the same residual as the other lanes).
+
+    ``model``/``revision`` are the identity of the encoder that did the work
+    (``embeddings.embedding_identity()``): they travel WITH the figure so a
+    reading cannot be silently attributed to an encoder that did not run.
+    ``identity_mixed`` latches once a second, DIFFERENT identity is seen in the
+    same window (see the MERGE below). ``skipped`` counts encode attempts that
+    ran NO model work (embedder unavailable) — recorded so a zero cannot be
+    read as "the embedder ran and produced nothing".
+
+    Exemptions mirror ``record_ask_usage``: ``not org_id`` (stdio/None) or the
+    selfhost-transport ContextVar (the value ``selfhost`` is NEVER the key).
+
+    A NON-FINITE ``wall_ms`` is dropped to 0.0 (with a warning): the value is
+    summed into a figure an operator reads, and a ``nan`` would poison it.
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if not math.isfinite(wall_ms):
+        _logger.warning(
+            "embed metering dropped a non-finite wall_ms (team=%s wall_ms=%r) "
+            "— recording 0.0 rather than poisoning the figure",
+            org_id, wall_ms,
+        )
+        wall_ms = 0.0
+    period = _require_period(org_id, "embed metering increment")
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(org_id):
+        return _record_embedding_usage_locked(
+            org_id, period, now_iso, calls=calls, texts=texts, chars=chars,
+            wall_ms=wall_ms, skipped=skipped, model=model, revision=revision,
+            identity_mixed=identity_mixed,
+        )
+
+
+def _record_embedding_usage_locked(org_id: str, period: MeteringPeriod,
+                                   now_iso: str, *, calls: int, texts: int,
+                                   chars: int, wall_ms: float, skipped: int,
+                                   model: str | None, revision: str | None,
+                                   identity_mixed: bool) -> dict | None:
+    """The serialized embed increment body.
+
+    THE MIXED FLAG IS STICKY, PAIRED, AND SKIP-SAFE. It is computed in its own
+    SET clause, BEFORE the identity is assigned, from the STORED identity — so
+    the flag reflects the change that was observed, not the value we are about
+    to write. ``coalesce($model, m.embed_model)`` makes a skipped-only flush
+    (``model=NULL``) leave the stored identity INTACT and the flag UNCHANGED: a
+    tally that ran no model work must never erase the identity of the encoder
+    the window actually used, nor claim a swap that did not happen. And because
+    the term latching a swap requires ``$model IS NOT NULL``, a skip-only row
+    cannot flip it either.
+    """
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_increment_embedding,
+            )
+            metering_increment_embedding(
+                get_control_plane(), org_id, period.start_iso, period.end_iso,
+                calls=calls, texts=texts, chars=chars, wall_ms=wall_ms,
+                skipped=skipped, model=model, revision=revision,
+                identity_mixed=identity_mixed,
+            )
+            return {"period": period.label,
+                    "period_start": period.start_iso,
+                    "period_end": period.end_iso,
+                    "embed_calls": calls, "embed_texts": texts,
+                    "embed_chars": chars, "embed_wall_ms": wall_ms,
+                    "embed_skipped": skipped, "embed_model": model,
+                    "embed_revision": revision,
+                    "embed_identity_mixed": identity_mixed}
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "SET m.period = $label, m.period_end = $pend, "
+            "    m.embed_identity_mixed = "
+            "        coalesce(m.embed_identity_mixed, false) OR $mixed "
+            "        OR (m.embed_model IS NOT NULL AND $model IS NOT NULL "
+            "            AND (coalesce(m.embed_model, '') <> $model "
+            "                 OR coalesce(m.embed_revision, '') "
+            "                    <> coalesce($revision, ''))) "
+            "SET m.embed_model = coalesce($model, m.embed_model), "
+            "    m.embed_revision = coalesce($revision, m.embed_revision), "
+            "    m.embed_calls = coalesce(m.embed_calls, 0) + $calls, "
+            "    m.embed_texts = coalesce(m.embed_texts, 0) + $texts, "
+            "    m.embed_chars = coalesce(m.embed_chars, 0) + $chars, "
+            "    m.embed_wall_ms = coalesce(m.embed_wall_ms, 0.0) + $wall_ms, "
+            "    m.embed_skipped = coalesce(m.embed_skipped, 0) + $skipped, "
+            "    m.updated_at = $now",
+            params={"tid": org_id, "pstart": period.start_iso,
+                    "pend": period.end_iso, "label": period.label,
+                    "calls": calls, "texts": texts, "chars": chars,
+                    "wall_ms": wall_ms, "skipped": skipped,
+                    "model": model, "revision": revision,
+                    "mixed": identity_mixed, "now": now_iso},
+        )
+        return {"period": period.label,
+                "period_start": period.start_iso,
+                "period_end": period.end_iso,
+                "embed_calls": calls, "embed_texts": texts,
+                "embed_chars": chars, "embed_wall_ms": wall_ms,
+                "embed_skipped": skipped, "embed_model": model,
+                "embed_revision": revision,
+                "embed_identity_mixed": identity_mixed}
+    except Exception as e:
+        _logger.warning(
+            "embed metering increment failed (non-fatal): team=%s period=%s "
+            "error=%s", org_id, period.label, e,
+        )
+        return None
+
+
+def get_embedding_usage(org_id: str) -> dict:
+    """Embedding-encode workload for *org_id* in the current period (#4488).
+
+    Returns the ``embed_*`` fields for the org's current window — ZEROS (and a
+    ``None`` identity) for an org with no embed records yet: a successful read
+    returning NO row is not an error (the MERGE only creates the record on the
+    first write, P2-14). Read failures degrade to the zero view (never 500,
+    #923), including an unresolvable window.
+    """
+    zeros: dict = {"embed_calls": 0, "embed_texts": 0, "embed_chars": 0,
+                   "embed_wall_ms": 0.0, "embed_skipped": 0,
+                   "embed_model": None, "embed_revision": None,
+                   "embed_identity_mixed": False}
+
+    def _zero_view(label: str,
+                   period: MeteringPeriod | None = None) -> dict:
+        return {**zeros, "period": label,
+                "period_start": period.start_iso if period else None,
+                "period_end": period.end_iso if period else None}
+
+    if not org_id:
+        return _zero_view(_display_period_label())
+    try:
+        period = _current_period(org_id)
+    except Exception as e:
+        _logger.warning(
+            "embed usage query failed (degrading to zero view): team=%s "
+            "error=%s", org_id, e,
+        )
+        return _zero_view(_display_period_label())
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_get_embed_usage,
+            )
+            row = metering_get_embed_usage(get_control_plane(), org_id,
+                                           period.start_iso)
+            out = {**zeros}
+            out.update({k: row.get(k) for k in zeros if k in row})
+            out.update({"period": period.label,
+                        "period_start": period.start_iso,
+                        "period_end": period.end_iso})
+            return out
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "RETURN m.embed_calls, m.embed_texts, m.embed_chars, "
+            "m.embed_wall_ms, m.embed_skipped, m.embed_model, "
+            "m.embed_revision, m.embed_identity_mixed",
+            params={"tid": org_id, "pstart": period.start_iso},
+        ).result_set
+        if not rows:
+            return _zero_view(period.label, period)
+        r = rows[0]
+        return {
+            "embed_calls": int(r[0] or 0),
+            "embed_texts": int(r[1] or 0),
+            "embed_chars": int(r[2] or 0),
+            "embed_wall_ms": float(r[3] or 0.0),
+            "embed_skipped": int(r[4] or 0),
+            "embed_model": r[5],
+            "embed_revision": r[6],
+            "embed_identity_mixed": bool(r[7]) if r[7] is not None else False,
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+        }
+    except Exception as e:
+        _logger.warning(
+            "embed usage query failed (degrading to zero view): team=%s "
             "period=%s error=%s", org_id, period.label, e,
         )
         return _zero_view(period.label, period)
