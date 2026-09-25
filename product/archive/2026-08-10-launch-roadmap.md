@@ -2,12 +2,27 @@
 title: Tortoise Launch Roadmap — issue triage + prioritization
 type: roadmap
 domain: product
-status: live
+status: superseded
 created: 2026-08-10
 updated: 2026-08-10
+superseded: 2026-09-25
+superseded_by: premise-labs product/2026-09-22-tortoise-beta-plan.md
 ---
 
 # Tortoise Launch Roadmap
+
+> ⛔ **SUPERSEDED and ARCHIVED — history only. Do not plan or dispatch from this document.**
+>
+> The beta's current plan is **`premise-labs` `product/2026-09-22-tortoise-beta-plan.md`** — the
+> objectives, the lanes, and the §10 master list (every open issue, ranked by user impact) — with its
+> status companion **`premise-labs` `product/2026-09-22-tortoise-beta-roadmap.md`**.
+>
+> Moved to `product/archive/` on 2026-09-25 so that it is out of the way of current work.
+>
+> This is a **2026-08-10 snapshot**: it audited "~145 open issues" and laid out Waves 0–3 against an
+> MVP definition of its own. Every count in it is stale (the tracker now holds ~1,156 open issues),
+> its wave plan is superseded by the objectives, and the issues it directs you to close were triaged
+> at the time. It is kept for the audit trail of what was decided that day — **not** as pending work.
 
 Result of a full audit of all ~145 open issues (10 parallel reviewers, each verified
 against `origin/main` @ `23942d2`). Full per-issue evidence: `/tmp/tortoise-audit/cluster-{A..I2}.md`.

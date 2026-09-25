@@ -1989,9 +1989,25 @@ class TestKeyAllowance3874:
 
             # (d) AT-CAP: the refusal names the SAME allowance (the dashboard
             # parses this number for its at-cap notice).
+            # #4614: the 402 detail is now the STRUCTURED refusal (a dict with
+            # `code`/`resource`/`used`/`limit`), not a bare string. The prose
+            # survives as `detail["message"]` — byte-identical to the old
+            # detail, which is what keeps the dashboard's number parse working
+            # (`website/apps/dashboard/src/main.jsx`'s `api()` maps
+            # `detail.message` -> `err.message`; `keyAllowance.capLimitFrom`
+            # regexes that message). The structured fields are asserted too:
+            # a `code` is what lets a caller tell a quota refusal from any
+            # other 402 without matching text.
             r = client.post("/v1/team/keys", headers=h)
             assert r.status_code == 402, r.text
-            m = re.search(r"limit reached \((\d+)\)", r.json()["detail"])
+            detail = r.json()["detail"]
+            assert isinstance(detail, dict), r.text
+            assert detail.get("code") == "quota_exceeded", r.text
+            assert detail.get("resource") == "api_keys", r.text
+            assert detail.get("limit") == allowance, (
+                f"the refusal's structured limit {detail.get('limit')!r} != the "
+                f"advertised allowance {allowance!r}")
+            m = re.search(r"limit reached \((\d+)\)", detail.get("message") or "")
             assert m is not None, r.text
             assert int(m.group(1)) == allowance, (
                 f"pre-cap allowance {allowance} != at-cap refusal {m.group(1)} "
@@ -4195,6 +4211,46 @@ class TestSessionFloodGate:
         # est-at-refusal, count, max, tier all present
         assert "est=" in msg and "max=" in msg, msg
         assert "tier=" in msg, msg
+
+    def test_the_capture_402_is_a_structured_refusal_not_prose(self, client):
+        """#4614: the capture points refusal is a DISTINGUISHABLE state.
+
+        The gate refused with a bare prose ``detail``, so a caller could not
+        tell a quota refusal from any other 402 without matching the message
+        text — and our own capture clients are documented as forbidden from
+        doing exactly that (``capture_spool.classify_failure``: *"a
+        capacity/billing refusal is a category, not a string"*). Assert the
+        machine-readable category and the numbers the gate actually compared,
+        and that the prose survives as ``detail["message"]`` — whose shape the
+        dashboard's number parse and its ``Last attempt — <detail>`` sub-line
+        both depend on.
+        """
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conversation = [{"role": "user", "content": dense}] * 51
+        r = client.post("/v1/sessions", json={
+            "session_id": "quota-structured-session",
+            "conversation": conversation,
+        })
+        assert r.status_code == 402, r.text[:200]
+        detail = r.json()["detail"]
+        assert isinstance(detail, dict), (
+            f"the refusal is still a bare string — no caller can distinguish "
+            f"it without matching prose: {detail!r}")
+        assert detail["code"] == "quota_exceeded", detail
+        assert detail["resource"] == "points", detail
+        # The numbers the gate actually COMPARED — never a fresh recount.
+        assert isinstance(detail["used"], int) and detail["used"] >= 0, detail
+        assert isinstance(detail["limit"], int) and detail["limit"] > 0, detail
+        assert isinstance(detail["estimate"], int) and detail["estimate"] > 0, detail
+        # The GATE invariant (the property the refusal actually expresses) —
+        # not `used < limit`, which is only true because this fixture's org
+        # starts empty. An org already at/over its cap is refused with
+        # `used >= limit`, and that case must not read as a broken refusal.
+        assert detail["used"] + detail["estimate"] > detail["limit"], detail
+        msg = detail["message"]
+        assert msg.startswith("Team points limit reached: "), msg
+        assert f"{detail['used']} in use + {detail['estimate']} estimated" in msg, msg
+        assert f"exceeds {detail['limit']}." in msg, msg
 
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
@@ -9634,3 +9690,51 @@ class TestCapturePathSkipsDiscardedProjection:
         assert proj_calls == [], (
             "_record_capture_last_error computed the projection it discards — "
             "this is the per-capture hot path across the fleet")
+
+    def test_record_capture_last_error_flattens_a_structured_refusal(
+            self, monkeypatch):
+        """#4614: a dict 402 detail reaches the dashboard as the message.
+
+        Since the quota refusal became the structured house shape, this is the
+        LIVE path — the capture 402 handler passes ``e.detail`` straight in —
+        and the dashboard renders the stored value as
+        ``Last attempt — <detail>`` (`harnesses.js`). A Python repr
+        (``{'code': ...}``) would leak structure into that sentence, and a
+        naive ``str(detail)`` is what the flattening exists to prevent.
+        """
+        _ha = _ha_mod
+        _, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._record_capture_last_error("org-4614", "codex", {
+            "code": "quota_exceeded", "resource": "points",
+            "used": 24965, "limit": 25000,
+            "message": "Team points limit reached: 24965 in use + 1044 "
+                       "estimated for this capture exceeds 25000. "
+                       "Upgrade your plan.",
+        })
+
+        written = writes[0][1].get(key)
+        assert isinstance(written, str), (
+            f"the dashboard sub-line is text — a dict leaked through: {written!r}")
+        assert written.startswith("Team points limit reached: "), written
+        assert "code" not in written and "{" not in written, (
+            f"a Python repr leaked structure into the failure sentence: {written!r}")
+
+    def test_record_capture_last_error_survives_a_dict_without_a_message(
+            self, monkeypatch):
+        """A structured detail with no ``message`` must still write text.
+
+        The flattening falls back to ``str(detail)`` in that case; the point
+        of pinning it is that the write stays a STRING (the dashboard renders
+        it inside a sentence) even for a shape we do not emit today.
+        """
+        _ha = _ha_mod
+        _, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+
+        _ha._record_capture_last_error("org-4614", "codex", {"code": "weird"})
+
+        written = writes[0][1].get(key)
+        assert isinstance(written, str) and written, written

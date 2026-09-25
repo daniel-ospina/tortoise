@@ -306,7 +306,10 @@ class TestRecoveryMint:
                       created_via="provisioned", created_at=_hours_ago(1))
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 402
-        assert "Key limit reached" in r.json()["detail"]
+        # #4614: the refusal is a STRUCTURED detail (a dict), not a bare string.
+        detail = r.json()["detail"]
+        assert detail["code"] == "quota_exceeded", detail
+        assert "Key limit reached" in detail["message"], detail
         # Own keys untouched
         rows = reg.query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-1','own-2'] RETURN k.revoked_at",
@@ -345,7 +348,9 @@ class TestRecoveryMint:
         # P2-1: fail-closed — the rotation freed NO persistent slot (modern
         # bootstraps never count), so the re-check 402s (no cap+1 overshoot).
         assert r.status_code == 402, r.text
-        assert "Key limit reached" in r.json()["detail"]
+        detail = r.json()["detail"]
+        assert detail["code"] == "quota_exceeded", detail
+        assert "Key limit reached" in detail["message"], detail
         rows = reg.query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-boot-1','own-boot-2'] "
             "RETURN k.id, k.revoked_at",
