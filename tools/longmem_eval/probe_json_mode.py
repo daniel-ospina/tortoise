@@ -24,7 +24,7 @@ same ``build_extractor_model`` resolution the eval run uses
 — so the verdict tests H1, not a different route.
 
 Usage:
-    python tools/longmem_eval/probe_json_mode.py --n 10 [--model deepseek/deepseek-v4-flash] [--out /tmp/probe.json] [--dry-run]
+    uv run python -m tools.longmem_eval.probe_json_mode --n 10 [--model deepseek/deepseek-v4-flash] [--out /tmp/probe.json] [--dry-run]
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/longmem_eval/probe_json_mode.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/longmem_eval/probe_json_mode.py`"
+        f"`uv run python -m tools.longmem_eval.probe_json_mode`"
     )
 
 import argparse

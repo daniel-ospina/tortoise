@@ -26,7 +26,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/longmem_eval/measure_temporal.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/longmem_eval/measure_temporal.py`"
+        f"`uv run python -m tools.longmem_eval.measure_temporal`"
     )
 
 import json

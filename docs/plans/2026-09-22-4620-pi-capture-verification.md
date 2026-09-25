@@ -214,7 +214,7 @@ Order: **1 → 2 → 3 → 4 → 5** (Task 1 is the critical path; Tasks 2–5 a
    (carve-out lane — both are DB-free).
 2. `node --experimental-strip-types --test tortoise/pi-hooks/tortoise-capture.test.ts` → 51/51.
 3. Task 1's anti-vacuity test passes (the probe REDs on a non-self-contained installed copy).
-4. `printf '%s\n' tests/test_pi_capture_hooks.py tortoise/session_verify.py tortoise/pi-hooks/README.md | python3 tools/ci_selection.py --changed-files -`
+4. `printf '%s\n' tests/test_pi_capture_hooks.py tortoise/session_verify.py tortoise/pi-hooks/README.md | uv run python tools/ci_selection.py --changed-files -`
    → assert `test_pi_capture_hooks.py` and `test_session_verify.py` are in the emitted `test_files`.
 5. `bash scripts/check-pipeline-compliance.sh` (pre-commit docs/version gate; `scripts` → `$AGENT_INFRA_PATH/scripts`).
 6. Node gate, both directions: `CI=true` with a stub `node` reporting v20.11.0 → the two

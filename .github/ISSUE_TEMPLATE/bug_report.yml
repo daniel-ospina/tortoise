@@ -94,7 +94,7 @@ body:
       label: Measured at (if you have a checkout)
       description: >-
         The exact commit you measured against. In your checkout run
-        `python3 tools/finding_provenance.py --emit` and paste the single line
+        `uv run python tools/finding_provenance.py --emit` and paste the single line
         it prints. The `finding-provenance` CI job uses this line to tell a
         stale measurement from a live defect (#4290). If you are reporting
         against a hosted/released version, leave this blank.
