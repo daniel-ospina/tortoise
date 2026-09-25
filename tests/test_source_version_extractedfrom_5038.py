@@ -273,7 +273,7 @@ def test_unregistered_source_gets_no_anchor(prov):
 def test_journal_payload_omits_the_key_when_there_is_no_anchor(prov):
     """Input: the un-hashed case above.
 
-    FAILS IF the payload carries ``sourceVersion: null`` — presence is ownership
+    FAILS IF the payload carries ``sourceVersionTransit: null`` — presence is ownership
     in this journal, and an explicit null would make the replay treat a field
     the writer never recorded as journal-owned.
     """
@@ -553,34 +553,45 @@ def test_supersede_transfer_carries_no_anchor(prov):
 # ── malformed-journal resilience ───────────────────────────────────────────
 
 
-def test_malformed_carrier_payload_does_not_abort_the_rebuild(prov):
-    """A corrupt/foreign journal line must contribute NO anchor, not abort
-    ``rebuild_all`` midway.
+def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
+    """A corrupt/foreign journal line must contribute NO anchor on EITHER writer,
+    and must not abort ``rebuild_all`` midway.
 
-    FAILS IF ``_upsert_point_props`` writes the payload value unvalidated: a
+    FAILS IF ``_upsert_point_props``/``_upsert_point_edges`` trust the payload: a
     non-persistable value (a dict, or a list containing one) raises a Falkor
     ``ResponseError`` mid-rebuild and leaves the graph WIPED — the recovery path
     aborting on the very corruption it exists to repair.
+
+    The ``bad-edge`` case pins the SHARED all-or-nothing predicate: with a
+    per-pair filter on the edge side, the one valid pair would stamp
+    ``r.sourceVersion`` while the node clause wrote no carrier — an edge anchor
+    with no gate-compared record. It must produce NEITHER.
     """
     sdk, events, log_path = prov
     sdk.create_point("statement", "the good point")
+    entries = [
+        ("bad-dict", {"sourceVersionTransit": {"not": "persistable"}}),
+        ("bad-list", {"sourceVersionTransit": [["a", "h"], {"x": 1}]}),
+        ("bad-scalar", {"sourceVersionTransit": "loose"}),
+        ("bad-edge", {"extractedFrom": DOC,
+                      "sourceVersionTransit": [[DOC, "h9"], {"x": 1}]}),
+    ]
     with open(log_path, "a", encoding="utf-8") as fh:
-        for bad in ({"not": "persistable"}, [["a", "h"], {"x": 1}], "loose"):
+        for pid, extra in entries:
             fh.write(json.dumps({
                 "type": "PointAdded",
-                "point": {"id": f"bad-{abs(hash(str(bad))) % 9999}",
-                          "content": "bad", "kind": "statement",
-                          "status": "live", "sourceVersionTransit": bad},
+                "point": {"id": pid, "content": "bad", "kind": "statement",
+                          "status": "live", **extra},
             }) + "\n")
 
     sdk._get_proj().rebuild_all(str(events))  # must NOT raise
     proj = _proj(sdk)
-    bad_ids = [r[0] for r in proj.g.query(
-        "MATCH (p:Point) WHERE p.id STARTS WITH 'bad-' RETURN p.id"
-    ).result_set]
-    assert bad_ids, "guard: the malformed points must exist to be checked"
-    for pid in bad_ids:
+    for pid, extra in entries:
         assert _node_transit(proj, pid) == "ABSENT", pid
+        if "extractedFrom" in extra:
+            assert _has_edge(proj, pid, DOC), f"{pid}: guard — the edge must exist"
+            assert _edge_version(proj, pid, DOC) is None, \
+                f"{pid}: a partially-malformed carrier must not stamp the edge"
 
 
 # ── the gate sees it and stays green on a faithful graph ───────────────────

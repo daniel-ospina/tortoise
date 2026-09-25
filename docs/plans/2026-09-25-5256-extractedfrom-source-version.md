@@ -3,7 +3,7 @@
 **Issue:** #5256 (`complexity:complex`, Level: task, epic #5088) · **Repo:** `daniel-ospina/tortoise`
 **Branch:** `feat/5256-extractedfrom-anchor` · **Base:** `origin/docs/5199-version-scope @ 52e703f89` (STACKED on PR #5207)
 **Predecessor:** `docs/plans/2026-09-25-5038-source-version-anchor.md` (Task 1, branch `docs/5038-scoping`)
-**Review cycle:** 3 (see §10).
+**Review cycle:** 5 (see §10).
 
 ---
 
@@ -94,17 +94,17 @@ node, never the Point — it is not a second Point write.)
 ```
 LIVE  create_point(..., extractedFrom=refs)                      # FRESH-CREATE path only
         ├─ sv = resolve_source_versions(proj.g, refs)             # dict[str,str]
-        ├─ on the CREATE map:  sourceVersion = _source_version_transit(sv)  # pair-list; omitted when empty
+        ├─ on the CREATE map:  sourceVersionTransit = _source_version_transit(sv)  # pair-list; omitted when empty
         ├─ CREATE (n:Point {…})                                   # ONE write (#2952)
         ├─ proj._link_source(pid, refs, source_versions=sv)       # _link_source takes the DICT
         │     └─ per ref: MATCH … MERGE (n)-[r:extractedFrom]->(s)  ON CREATE SET r.sourceVersion
         └─ _emit_event("PointAdded", ..., point=self.get_point(pid))  # snapshot carries the prop
 
 LIVE  EventAPI.add_point(..., extractedFrom=…)
-        ├─ if self.projection is not None:  p["sourceVersion"] = <the SAME builder>(…)
+        ├─ if self.projection is not None:  p["sourceVersionTransit"] = <the SAME builder>(…)
         └─ _emit("PointAdded", point=p) → log.append + projection.apply
-              ├─ pass-1 _upsert_point_props  → explicit SET n.sourceVersion=$sv
-              └─ pass-2 _upsert_point_edges  → _link_source(..., source_versions=dict(p["sourceVersion"]))
+              ├─ pass-1 _upsert_point_props  → explicit SET n.sourceVersionTransit=$sv
+              └─ pass-2 _upsert_point_edges  → _link_source(..., source_versions=dict(p["sourceVersionTransit"]))
 
 REPLAY (rebuild_all / recover_from_log) — the SAME two writers, reading p == ev["point"]
 ```
@@ -126,12 +126,12 @@ bypasses `_sanitize_props`, #5004 round-7 precedent).
 | # | file | change |
 |---|---|---|
 | 1 | `tortoise/projection/edges.py` | `resolve_source_versions(g, refs)` — the **LIVE-only** resolver (keyed by `resolve_source_key`, skips empty/`''`/absent). It MUST normalize `refs` exactly as `_link_source` does — `refs = [refs] if isinstance(refs, str) else list(refs)` — else a scalar ref iterates **characters** and mints per-character Sources (`create_point` keeps the common single-source ref a scalar). `_source_version_transit(versions)` — the ONE pair-list builder (None when empty). `_link_source(..., source_versions: dict[str,str] \| None = None)`: the MERGE binds `r` and appends `_anchor_on_create("$v")` (reuses the #5199 helper — one source of truth for the `''`/NULL guard); `$v` is **always bound** (None when absent, for the bare callers: `create_document`, the ingest connection leg, `_link_extracted_from`, direct test calls). **Never** reads `s.contentHash`. |
-| 2 | `tortoise/projection/entities.py` | `_POINT_HANDLED \| {"sourceVersion"}`; an explicit conditional `SET n.sourceVersion=$sv` clause in `_upsert_point_props` (only when the payload carries a non-empty list of pairs); `_upsert_point_edges` uses `p.get("sourceVersion")` and, **only when it is a non-empty list of 2-element sequences**, hands `dict(...)` to `_link_source` (a falsy/None value must never reach `dict()`). |
-| 2b | `tortoise/projection/__init__.py` | add `n.sourceVersion = NULL` to the #4042 pass-1a **recreate wipe** (`embedding` / `content_hash` / `embedding_verbatim`). Without it, a delete→same-id-recreate whose new snapshot omits `extractedFrom` retains the dead incarnation's transit in the rebuilt graph while live has none — a `derived = replay(journal)` break of exactly the `embedding_verbatim` class (#5004 round-4 precedent). |
+| 2 | `tortoise/projection/entities.py` | `_POINT_HANDLED \| {"sourceVersion"}`; an explicit conditional `SET n.sourceVersionTransit=$sv` clause in `_upsert_point_props` (only when the payload carries a non-empty list of pairs); `_upsert_point_edges` uses `p.get("sourceVersionTransit")` and, **only when it is a non-empty list of 2-element sequences**, hands `dict(...)` to `_link_source` (a falsy/None value must never reach `dict()`). |
+| 2b | `tortoise/projection/__init__.py` | add `n.sourceVersionTransit = NULL` to the #4042 pass-1a **recreate wipe** (`embedding` / `content_hash` / `embedding_verbatim`). Without it, a delete→same-id-recreate whose new snapshot omits `extractedFrom` retains the dead incarnation's transit in the rebuilt graph while live has none — a `derived = replay(journal)` break of exactly the `embedding_verbatim` class (#5004 round-4 precedent). |
 | 3 | `tortoise/sdk.py` | `_sanitize_props` rejects `sourceVersion`/`sourceVersions`; `_check_item_shape` rejects them on bundle items (Phase 1, free); `create_point` resolves the LIVE versions on the **fresh-create** path and puts the transit in the `CREATE` map (no second write — #2952). |
-| 4 | `tortoise/api.py` | `EventAPI.add_point`: reject `sourceVersion`/`sourceVersions` in the existing `_forged` set; when `getattr(self.projection, "g", None) is not None`, resolve and set `p["sourceVersion"]` via the shared builder — **only when the builder returns non-None** (an un-sourced Point's payload must not carry `sourceVersion: null`). The `getattr` guard covers **both** `projection=None` and an `InMemoryProjection` (no `.g`). |
-| 5 | `tortoise/consistency.py` | a declaration comment only: `sourceVersion` is a **declared, compared** node property (`_POINT_HANDLED`), deliberately **not** `_EXCLUSION_REASONS`-excluded — excluding it would be a blind spot. |
-| 6 | `tortoise/mcp_server.py` | `_SERVER_MANAGED_PROPS \| {"sourceVersion", "sourceVersions"}` (#5004 convention). No surface change. *(Component addition: #5256's list omits `api.py`/`mcp_server.py`; both are required by indicator 3.)* |
+| 4 | `tortoise/api.py` | `EventAPI.add_point`: reject `sourceVersion`/`sourceVersions` in the existing `_forged` set; when `getattr(self.projection, "g", None) is not None`, resolve and set `p["sourceVersionTransit"]` via the shared builder — **only when the builder returns non-None** (an un-sourced Point's payload must not carry `sourceVersionTransit: null`). The `getattr` guard covers **both** `projection=None` and an `InMemoryProjection` (no `.g`). |
+| 5 | `tortoise/consistency.py` | a declaration comment only: `sourceVersionTransit` is a **declared, compared** node property (`_POINT_HANDLED`), deliberately **not** `_EXCLUSION_REASONS`-excluded — excluding it would be a blind spot. |
+| 6 | `tortoise/mcp_server.py` | _SERVER_MANAGED_PROPS \| {"sourceVersion", "sourceVersions", "sourceVersionTransit"}` (#5004 convention). No surface change. *(Component addition: #5256's list omits `api.py`/`mcp_server.py`; both are required by indicator 3.)* |
 | 7 | `config/ci-surfaces.yml` | register `tests/test_source_version_extractedfrom_5038.py`. |
 | 8 | `tests/test_source_version_extractedfrom_5038.py` | the new suite (§6). |
 
@@ -170,7 +170,7 @@ Precedent: `tests/test_provenance_extractedfrom_3263.py` (DB lane, embedded-safe
    (Acceptance 1 + the gate-visible record; pins the scalar-normalization guard.)
 2. **honest-absent** — Source `contentHash=''` / no Source ⇒ the edge property is absent **and** the
    node transit is absent (never `''`, never `[]`), **and** the journal payload carries no
-   `sourceVersion` key. (Acceptance 2, at every home.)
+   `sourceVersionTransit` key. (Acceptance 2, at every home.)
 3. **false-current guard** — create at `h1`; advance the Source to `h2` via a **journaled**
    `create_source(contentHash='h2')`; `rebuild_all` ⇒ the edge still reads `'h1'`, not `'h2'`.
 4. **per-link** — two Sources with distinct hashes ⇒ each edge carries its own; survives rebuild.
@@ -183,7 +183,7 @@ Precedent: `tests/test_provenance_extractedfrom_3263.py` (DB lane, embedded-safe
 8. **dedup re-commit** — `create_or_update_point(..., extractedFrom=…)` twice ⇒ no raise, no
    divergence.
 8b. **delete→same-id-recreate** — hard-delete a sourced Point, then create a new Point with the
-    same id and **no** `extractedFrom`; `rebuild_all` ⇒ no `sourceVersion` on the rebuilt **node**
+    same id and **no** `extractedFrom`; `rebuild_all` ⇒ no `sourceVersionTransit` on the rebuilt **node**
     (mirrors `test_a_recreated_point_does_not_inherit_the_verbatim_marker`, #5004). ⚠️ The test
     asserts the NODE only and says why: the old incarnation's **`extractedFrom` edge** is already
     resurrected by pass 2 today (pre-existing, independent of this anchor) — see residual R5; the
@@ -197,14 +197,14 @@ Precedent: `tests/test_provenance_extractedfrom_3263.py` (DB lane, embedded-safe
 15. **no scalar stray / transit⇔edge** — for a **hash-bearing** fixture created through
     `create_point`/`EventAPI.add_point`, the node transit is a list of `[ref, hash]` pairs and, at
     creation, exists **iff** the Point has an `extractedFrom` edge; no Point carries a scalar
-    `sourceVersion`. (Scoped twice: the honest-absent case in test 2 legitimately has an edge and
+    `sourceVersionTransit`. (Scoped twice: the honest-absent case in test 2 legitimately has an edge and
     **no** transit; and the ingest **connection** leg, R3, is out of scope.)
 16. **gate comparison** — seed the graph through the **replay writer** (`rebuild_all`/`apply`, as
     `test_consistency_divergence_5011.py`'s `_seed` does — NOT `create_point`, whose CREATE-map
     write bypasses the clause), assert the faithful fixture is healthy (`check_consistency(...)["ok"]
-    is True`), **then** tamper the graph's `n.sourceVersion` and assert it is reported as a
+    is True`), **then** tamper the graph's `n.sourceVersionTransit` and assert it is reported as a
     divergence. The positive half is what pins the clause; the mapped mutation is removing
-    `sourceVersion` from `_POINT_HANDLED` (see §7 item 6).
+    `sourceVersionTransit` from `_POINT_HANDLED` (see §7 item 6; the node carrier is `sourceVersionTransit`).
 17. **supersede boundary (4 steps)** — predecessor created against a Source(`h1`) → live
     `supersede_point` ⇒ the successor's **transferred** edge has `r.sourceVersion IS NULL` and the
     predecessor's edge is gone (its node transit unchanged) → `rebuild_all` ⇒ re-assert.
@@ -230,7 +230,7 @@ Every test names the input that makes it FAIL.
      invisible — the gate's `ok` goes back to True and test 16 goes RED. (Separately: removing the
      `_upsert_point_props` clause → test 1 / test 16's positive half.)
   7. `EventAPI.add_point`'s graph guard → test 7;
-  8. the #4042 recreate wipe (`n.sourceVersion = NULL`) → test 8b.
+  8. the #4042 recreate wipe (`n.sourceVersionTransit = NULL`) → test 8b.
 
 ## 8. Complexity
 
@@ -274,7 +274,7 @@ and its test; test 14 reframed as the CI command (not a pytest); `_upsert_point_
 its Source-only adopt-on-touch write clarified; the (C)-rejection's false half ("loses the edge on a
 re-emit") deleted.
 
-**Cycle 3 — 2 verifiers.** Folded: the #4042 pass-1a **recreate wipe** must clear `n.sourceVersion`
+**Cycle 3 — 2 verifiers.** Folded: the #4042 pass-1a **recreate wipe** must clear `n.sourceVersionTransit`
 (new task row 2b + test 8b); test 16 must seed through the replay writer and assert the faithful
 fixture healthy **first**; mutation-verify #6 re-targeted to the `_POINT_HANDLED` membership (the
 non-discriminating replay-clause mutation demoted); test 15 scoped so it no longer contradicts
@@ -285,17 +285,20 @@ the (C) blind-spot claim softened to "excluded from the compared content view".
 **Cycle 4 — 2 verifiers.** Folded: `resolve_source_versions` **must** normalize a scalar ref
 (`create_point` keeps a single ref a `str`; iterating it would mint per-character Sources) + the
 scalar case is now test 1; `EventAPI.add_point` sets the transit **only when non-None** (no
-`sourceVersion: null`); `_upsert_point_edges` guards a falsy value before `dict(...)`; test 2 also
-asserts the journal payload has no key; test 15 scoped to the two in-scope producers (the R3
+`sourceVersionTransit: null`); `_upsert_point_edges` guards a falsy value before `dict(...)`; test 2 also
+asserts the journal payload has no key; test 15 scoped to the two in-scope producers (the R3 connection leg excluded).
+
 **Cycle 5 — code review (4 always-on + Architecture + Data + Config).** Folded: the generated
 `docs/product/sdk-rename-table.md` was REGENERATED after the `sdk.py` insertions shifted its line
 numbers (a red CI gate); the node carrier was RENAMED `sourceVersion` → `sourceVersionTransit` so a
 Point read does not shadow §4.6's edge scalar with a pair-list; `_upsert_point_props` now validates
-the payload shape exactly as `_upsert_point_edges` does (a malformed journal value would otherwise
-raise a Falkor `ResponseError` mid-`rebuild_all` and leave the graph wiped); `create_source` — the
-one writer that bypasses `_sanitize_props` — got its own reject for the three names (the security
+the payload shape via ONE shared all-or-nothing `_valid_transit_pairs` predicate, also used by
+`_upsert_point_edges` — a per-pair filter on one side and `all()` on the other let a
+partially-malformed carrier stamp the edge while writing no node record; `create_source` — the one
+writer that bypasses `_sanitize_props` — got its own reject for the three names (the security
 review's reproduced hole); the plan §6-17 supersede-boundary test was added (it passes today, so R1's
-“the transfer carries nothing” is now pinned); the `EventAPI` reject message no longer calls a
-provenance key an embedding field; and the ci-surfaces comments were corrected (`edges.py` selects
-`sdk`, not `ep`, so the `ep` registration was dropped as unjustified; the lane is
+“the transfer carries nothing” is now pinned); the malformed-payload test now covers a carrier
+WITH `extractedFrom` and asserts NEITHER writer anchors; the `EventAPI` reject message no longer
+calls a provenance key an embedding field; and the ci-surfaces comments were corrected
+(`edges.py` selects `sdk`, not `ep`, so the `ep` registration was dropped as unjustified; the lane is
 embedded-without-URI / docker-server-with-URI via the #1647 redirect).
