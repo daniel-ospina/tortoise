@@ -436,7 +436,9 @@ class _InMemoryEventLog:
 # silently omitted from the dedup reply, re-minting the #2813 class on the
 # dedup path.
 _CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
-                              "source_turn_id")
+                              "source_turn_id",
+                              # E4 (#5007): the verbatim span pointer
+                              "span_start", "span_end")
 _CAPTURE_PASSTHROUGH_PROPS = frozenset(_CAPTURE_PASSTHROUGH_ORDER)
 
 
@@ -3038,6 +3040,15 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # E4 (#5007): the span is an ADDRESS — enforce the all-or-nothing /
+        # ordered / in-range rule HERE as well as on the `Point` model. These
+        # two props ride the generic passthrough, so without this a caller
+        # could persist a half span, an inverted pair or a stringly-typed
+        # offset — precisely the states `validate_span` declares impossible
+        # (#5007 review P2: the invariant was commit-schema-only).
+        if "span_start" in props or "span_end" in props:
+            from tortoise.commit_schema import validate_span
+            validate_span(props.get("span_start"), props.get("span_end"))
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -5503,6 +5514,13 @@ class TortoiseSDK:
         props = _sanitize_props(props, reject_id=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # E4 (#5007): same rule as `create_point` / the `Point` model — an
+        # update may not leave a half span, an inverted pair or an
+        # out-of-range offset on the node. The pair is all-or-nothing, so an
+        # update that moves one edge of the span passes BOTH edges.
+        if "span_start" in props or "span_end" in props:
+            from tortoise.commit_schema import validate_span
+            validate_span(props.get("span_start"), props.get("span_end"))
         # #1904 (bug-hunt 2026-08-28 P1-3): a content edit MUST recompute
         # content_hash in the same round trip — every dedup surface matches
         # on the stored hash (create_point dedup, ingest, _content_exists),
@@ -17936,6 +17954,18 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
+        # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
+        # This is the generic tenant surface (`tortoise_update_entity`) and
+        # its Point branch below writes caller props straight through
+        # `SET n += $p` — `_sanitize_props` accepts the two keys and the MCP
+        # boundary does not list them as server-managed, so without this a
+        # tenant could persist a half span or a stringly-typed offset: the
+        # exact states `validate_span` declares impossible. Checked ONCE,
+        # before the per-label loop, because that loop visits every label
+        # with the SAME props dict.
+        if "span_start" in props or "span_end" in props:
+            from tortoise.commit_schema import validate_span
+            validate_span(props.get("span_start"), props.get("span_end"))
         proj = self._get_proj()
         # W5 Phase F (#2104, review r4): eventId is the EVENT node's identity
         # (the projection MERGEs on it; capture Events carry the DETERMINISTIC

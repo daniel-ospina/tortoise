@@ -351,10 +351,15 @@ def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
     clause. A runtime drop (a field missing from the derivation) REDs here.
     ``search_keys`` is read back in its stored flat-string form."""
     from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+    # #5007: the probe writes EVERY whitelisted field, so the "node holds"
+    # set stays equal to the whitelist — a newly whitelisted OPTIONAL field
+    # (span_start/span_end are absent on a spanless point) would otherwise
+    # make this assertion vacuous rather than red.
     pid = sdk.create_point(
         "statement", "read helper probe", quote="q-2949",
         when="2026-01-01", search_keys=["a", "b"],
-        source_turn_id="turn-2949")["id"]
+        source_turn_id="turn-2949",
+        span_start=0, span_end=5)["id"]
     stored = sdk._read_capture_passthrough_props(sdk._get_proj(), pid)
     assert set(stored) == set(_CAPTURE_PASSTHROUGH_PROPS), stored
     assert stored == {
@@ -362,6 +367,8 @@ def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
         "when": "2026-01-01",
         "search_keys": "a b",
         "source_turn_id": "turn-2949",
+        "span_start": 0,
+        "span_end": 5,
     }, stored
 
 

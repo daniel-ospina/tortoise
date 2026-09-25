@@ -170,6 +170,7 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  - test_verbatim_span.py  # #5007: the fourth layer's SPAN link is a POINTER into the Source's raw text, not a payload — schema all-or-nothing + node round-trip + the "no verbatim text on the node" trap (registered here with test_commit_schema.py: it guards the same contract, and `tortoise/sdk.py` selects this surface)
   - test_cross_subdomain_cookie_sync.py
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
   - test_dashboard_login.py
@@ -1792,6 +1793,7 @@ durations:
   eval/retrieval/test_gate_1349.py: 26.0
   eval/why_suite/test_why_suite_benchmark.py: 25.1
   test_commit_schema.py: 24.9
+  test_verbatim_span.py: 0.5
   test_onboarding_seed_endpoint.py: 24.3
   test_battery_r1_seed.py: 23.4
   test_onboarding_w6_member_authz.py: 22.6

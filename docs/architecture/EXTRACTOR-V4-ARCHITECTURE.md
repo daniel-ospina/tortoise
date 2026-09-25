@@ -199,7 +199,7 @@ raw fact (Supabase — immutable text. Carries NO status. Ever.)
 
 | type | how it reaches raw | mechanism | measured |
 |---|---|---|---|
-| **`Point`** | **directly** | `(Point)-[:extractedFrom]->(Source)` | **14,567 — the ONLY edge that lands on a `Source`** |
+| **`Point`** | **directly** | `(Point)-[:extractedFrom]->(Source)` | **14,567 — the only edge type with instances that lands on a `Source`; `aboutSource` (`Point|Document|Event`→`Source`) is registered in `session_link.ENTITY_LINKED_TRIPLES` but has no instances** |
 | **`Object`** | **only through a `Point`** | `(Point)-[:aboutObject]->(Object)` | 27,310 inbound |
 | **`Event`** | through a `Source` | `(Source)-[:references]->(Event)` | 2,190 |
 | **`Subject`** | through an `Event` | `(Subject)-[:performs/participatesIn]->(Event)` → `Source` | 16 |
@@ -207,6 +207,16 @@ raw fact (Supabase — immutable text. Carries NO status. Ever.)
 **Two facts worth keeping separately:**
 - **`extractedFrom` is a `Point`→`Source` edge** (`projection/entities.py:655`, `:1864`) — **not** an `Object`→`Source` edge. *(An earlier reading of this document assumed `extractedFrom` hung off entities. It does not.)*
 - **ZERO edges originate from an `Object`** — 27,310 in, **0** out. Objects are **pure sinks**, reached only from `Point`s.
+
+**Why the span still rides `Point` even though other edges can reach a `Source`:** the carrier is
+the node that makes a *deformable claim* — a `Point` is the propositional unit whose truth is
+re-ranked by EP, so it is the thing whose support has to be re-fetchable at answer time. `Object`
+and `Subject` are referents, and `aboutSource` — registered for `Point`, `Document` and `Event`
+sources alike (`session_link.ENTITY_LINKED_TRIPLES`, mirrored in `projection/entities.py`) — has no
+instances in the live graph, so no non-`Point` node reaches a `Source` today.
+*(An earlier revision of this section reasoned from "the only edge on a `Source`" to "so `Point` is
+the only possible carrier" — that does not follow, and the premise was an edge-type over-claim; the
+carrier choice rests on the argument above, not on the edge census. #5007 review.)*
 
 **⇒ Today, `Point`s are the sole raw-linked type. Everything else reaches raw transitively.**
 

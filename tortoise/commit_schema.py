@@ -44,7 +44,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Literal  # noqa: UP035
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .file_indexer import provenance_basename
 from .ids import content_hash
@@ -315,6 +322,50 @@ class ParticipantSlots(BaseModel):
     event: list[SlotRef] = Field(default_factory=list)
 
 
+# E4 (#5007): the store's integer ceiling — a span offset is written to a
+# FalkorDB node, whose integers are int64. An offset past this is silently
+# clamped on write, so the committed address and the stored address diverge
+# and a consumer re-fetching with the committed offset is out of range.
+SPAN_OFFSET_MAX = 2**63 - 1
+
+
+def validate_span(span_start: object, span_end: object) -> None:
+    """E4 (#5007): a span is an ADDRESS, so it must be complete and sane.
+
+    THE ONE HOME for the rule, called by the ``Point`` model validator AND by
+    every SDK write path (``create_point`` / ``update_point``). It has to live
+    on both: the model only guards the commit-schema path, while
+    ``create_point``/``update_point`` carry these two props through their
+    generic passthrough and would otherwise persist exactly the half-written,
+    inverted, stringly-typed or clamped address that the field comment
+    declares impossible (#5007 review P2).
+
+    Raises ValueError — callers that want a 422/ValueError boundary get one.
+    """
+    if (span_start is None) != (span_end is None):
+        raise ValueError(
+            "span_start and span_end must be provided together "
+            "(a half span is not an address)"
+        )
+    if span_start is None:
+        return
+    # bool first: `isinstance(True, int)` is True, and `True` is not an offset.
+    for _name, _v in (("span_start", span_start), ("span_end", span_end)):
+        if isinstance(_v, bool) or not isinstance(_v, int):
+            raise ValueError(
+                f"{_name} must be an integer character offset (got {_v!r})"
+            )
+        if not 0 <= _v <= SPAN_OFFSET_MAX:
+            raise ValueError(
+                f"{_name} ({_v}) is outside the storeable offset range "
+                f"0..{SPAN_OFFSET_MAX}"
+            )
+    if span_end <= span_start:
+        raise ValueError(
+            f"span_end ({span_end}) must be greater than span_start ({span_start})"
+        )
+
+
 class Point(BaseModel):
     """A single extracted point — content-addressed id, closed kind vocab."""
 
@@ -332,6 +383,14 @@ class Point(BaseModel):
     when: str = Field(default="", max_length=40)  # "" = undated (E1, #1533)
     search_keys: list[str] = Field(default_factory=list)  # E3: 2-4 aliases + verbatim tokens
     source_turn_id: int | None = Field(default=None, ge=0)  # E3: 0-based conversation turn index
+    # E4 (#5007) — the verbatim SPAN link: character offsets into the Source's
+    # raw text, so a consumer can RE-FETCH the exact sentence at answer time.
+    # ⛔ A POINTER, not a payload (D10 §9.5 / R3): the raw text stays in raw
+    # storage (Supabase) and its location is addressed by these offsets — the
+    # span TEXT is never stored on the Point. A half span is not an address,
+    # so the two are all-or-nothing and `span_end` must be past `span_start`.
+    span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)
+    span_end: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)
     status: Literal["live", "draft"] = "draft"
     tier: Literal["A", "B"] | None = Field(
         default=None,
@@ -339,6 +398,18 @@ class Point(BaseModel):
                     "hint; absence = Tier-B default",
     )
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
+
+    @model_validator(mode="after")
+    def _span_is_an_address(self) -> Point:
+        """E4 (#5007): a span is a pointer, so it must be COMPLETE and sane.
+
+        All-or-nothing: `source_turn_id` + one offset is not an address, and a
+        consumer that cannot re-fetch is exactly the failure the fourth layer
+        exists to prevent. Empty spans are also rejected (`end > start`) — a
+        zero-length address names no text.
+        """
+        validate_span(self.span_start, self.span_end)
+        return self
 
     @field_validator("when")
     @classmethod
@@ -1089,6 +1160,12 @@ def _point_canonical(p: Any) -> dict:
         out["search_keys"] = sorted(_f(p, "search_keys", []) or [])
     if _f(p, "source_turn_id", None) is not None:
         out["source_turn_id"] = _f(p, "source_turn_id")
+    # E4 (#5007): the span link folds in ONLY when present — a payload with no
+    # span keeps a byte-identical canonical entry (the #1350 additive contract).
+    ss, se = _f(p, "span_start", None), _f(p, "span_end", None)
+    if ss is not None and se is not None:
+        out["span_start"] = ss
+        out["span_end"] = se
     return out
 
 
