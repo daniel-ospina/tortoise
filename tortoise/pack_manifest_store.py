@@ -46,6 +46,7 @@ from tortoise.pack_state import (
     _pack_install_lock,
     _resolved_graph_name,
     _target_graph,
+    graph_installed_namespaces,
 )
 
 log = logging.getLogger(__name__)
@@ -327,12 +328,41 @@ def tenant_view(sdk) -> dict:
     the brief on the hosted path, so the compile happens once per
     (graph_identity, pack_config_version) — the #1350 perf guard rides the
     memo.
+
+    #2714 layer 1: the brief is narrowed to the graph's INSTALLED pack set
+    (``installed_namespaces`` on the returned view holds what was used;
+    ``None`` = no ``:PackInstall`` records, catalog union). Because
+    ``build_master_list(sdk)`` renders its ``pack_kinds`` from
+    ``view["brief"]``, narrowing the brief narrows the extractor prompt —
+    without editing ``extractor_v2.py`` (owned by lane L3, #5095). The
+    approval set is part of the memo key, so an install/uninstall OR a new
+    namespace appearing in the graph's data recompiles.
     """
     gid = _graph_identity(sdk)
     manifests = get_tenant_manifests(sdk)
+    # #2714 layer 1 (APPROVAL): the graph's installed pack set gates the
+    # compile. ``None`` ⇒ the graph has NO :PackInstall records ⇒ the catalog
+    # union (back-compat, indicator 3 — every pre-#318 graph).
+    #
+    # The FULL approval set (records ∪ namespaces already present in the
+    # data) is part of the memo key, not just the records. A memoized value
+    # must be a function of its key; a data union excluded from the key would
+    # let the key stay put while the value should change — an imported or
+    # restored graph, or (until #5163 lands) a commit through a write door
+    # that does not yet consult the gate. Keying on it removes that staleness
+    # by construction. Cost: the union runs one whole-graph kind scan
+    # (measured ~6 ms at 300 nodes); an index on the kind properties, or a
+    # cheap data-version signal, is the optimization — correctness first.
+    installed = graph_installed_namespaces(sdk)
+    # repr(sorted(...)) is INJECTIVE over the namespace set; a comma-joined
+    # string is not (a namespace may contain ',', and the data leg derives
+    # namespaces without charset-validating them), and "value is a function
+    # of its key" is the property that keeps this memo from serving a stale
+    # approval set.
+    _installed_key = "*" if installed is None else repr(sorted(installed))
     version = hashlib.sha1(
-        repr(sorted((m["namespace"], m["version"], m["sha256"])
-                    for m in manifests)).encode()
+        repr([*sorted((m["namespace"], m["version"], m["sha256"])
+                      for m in manifests), _installed_key]).encode()
     ).hexdigest()[:12]
     key = (gid, version)
     with _TENANT_VIEWS_GUARD:
@@ -344,9 +374,10 @@ def tenant_view(sdk) -> dict:
     catalog = reg.pack_summaries() if reg is not None else {}
     yamls = _get_tenant_manifest_yamls(sdk)
     from tortoise.value_extractor import compile_value_brief
-    brief = compile_value_brief(tenant_manifests=yamls)
+    brief = compile_value_brief(tenant_manifests=yamls,
+                               installed_namespaces=installed)
     view = {"catalog": catalog, "tenant": manifests, "yaml": yamls,
-            "brief": brief}
+            "brief": brief, "installed_namespaces": installed}
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.discard(gid)
         # #2031 review fix: evict this tenant's prior (gid, version) entries

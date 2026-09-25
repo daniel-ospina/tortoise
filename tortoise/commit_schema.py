@@ -38,6 +38,7 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -140,7 +141,8 @@ class Vocab:
                 or kind in self.event_kinds)
 
 
-def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
+def compile_vocab(packs_dir: Path | str | None = None,
+                  installed_namespaces: Collection[str] | None = None) -> Vocab:
     """Compile the closed vocab from PackRegistry at RUNTIME.
 
     Point kinds = core §5 point kinds (incl. ``humanApproval`` + ``event``)
@@ -152,16 +154,38 @@ def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
     extraction sourceTypes. Event kinds = the canonical core set ∪ each
     pack's declared eventKinds in BOTH bare and ``ns:kind`` form (#1933 —
     the extractor strips event kinds to bare form in the payload).
+
+    ``installed_namespaces`` (#2714 layer 1 — APPROVAL) gates the PACK legs
+    to one graph's installed set: ``None`` = no gate (the catalog union —
+    today's behaviour, and the mandatory back-compat path when a graph has
+    no ``:PackInstall`` records, indicator 3); a collection = only those
+    namespaces contribute pack pointKinds/sourceTypes/eventKinds. The CORE
+    legs (CORE_POINT_KINDS / CORE_SOURCE_KINDS / EVENT_KINDS) are never
+    gated — a graph always accepts core vocabulary. This is the WRITE-gate
+    twin of ``compile_value_brief``'s prompt-side gate: both accept the
+    output of the same resolver (``pack_state.graph_installed_namespaces``),
+    so the set the extractor is *offered* and the set it may *write* are
+    derived from one decision.
+
+    ⚠️ Accepting the resolver's output is not the same as RECEIVING it: the
+    prompt side is wired in production (``tenant_view`` threads the gate
+    into ``compile_value_brief``), but **no production caller passes this
+    argument yet** — ``get_vocab``/``refresh_vocab`` still compile the union,
+    so Layer-1 does not enforce per-graph approval on the live commit path.
+    The remaining plumbing is filed as #5163 (see also #2728).
     """
     if packs_dir is None:
         from tortoise.pack_registry import default_packs_dir
         packs_dir = default_packs_dir()
     registry = PackRegistry(packs_dir)
     registry.load_all()
+    _gate = None if installed_namespaces is None else set(installed_namespaces)
     pack_point: set[str] = set()
     pack_sources: set[str] = set()
     pack_events: set[str] = set()
     for ns, pack in registry.packs.items():
+        if _gate is not None and ns not in _gate:
+            continue
         pack_point.update(pack.point_kinds)
         pack_point.update(f"{ns}:{k}" for k in pack.point_kinds)
         pack_sources.update(pack.extraction.get("sourceTypes") or [])
