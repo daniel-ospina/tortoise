@@ -28,7 +28,10 @@ from tortoise.oauth import (
     sweep_oauth_retention,
 )
 
-NOW = datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+# Deliberately FAR from wall-clock: `now` is an injected parameter, and a clock
+# near the real one lets a `now`-ignoring mutant pass during a coincidence
+# window. Decades away makes the injection load-bearing.
+NOW = datetime(2020, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 _TABLES = (
     ("oauth_access_tokens", OAUTH_ACCESS_RETENTION_S),
@@ -186,6 +189,38 @@ def test_a_valid_positive_override_is_applied(monkeypatch):
         "access-inwindow"]
 
 
+def test_each_table_reads_its_own_retention_env(monkeypatch):
+    """A copy-paste swap of the env_name column in the sweep's plan tuple would
+    silently wire one table's window to another's key. Three DISTINCT windows
+    and two row ages make each cutoff observable and non-interchangeable.
+
+    650s is outside access's 600s but inside refresh's 700s and codes' 800s;
+    750s is outside refresh's 700s too. No single shared key reproduces the
+    resulting pattern.
+    """
+    monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", "600")
+    monkeypatch.setenv("TORTOISE_OAUTH_REFRESH_RETENTION_S", "700")
+    monkeypatch.setenv("TORTOISE_OAUTH_CODE_RETENTION_S", "800")
+    cp = FakeControlPlane()
+    for table in ("oauth_access_tokens", "oauth_refresh_tokens", "oauth_codes"):
+        cp.seed(table, [
+            {"id": f"{table}-650",
+             "expires_at": _iso(NOW - timedelta(seconds=650))},
+            {"id": f"{table}-750",
+             "expires_at": _iso(NOW - timedelta(seconds=750))},
+        ])
+
+    observed = sweep_oauth_retention(cp, now=NOW)
+
+    assert observed == {"oauth_access_tokens": 2, "oauth_refresh_tokens": 1,
+                        "oauth_codes": 0}
+    assert cp.tables["oauth_access_tokens"] == []
+    assert [r["id"] for r in cp.tables["oauth_refresh_tokens"]] == [
+        "oauth_refresh_tokens-650"]
+    assert {r["id"] for r in cp.tables["oauth_codes"]} == {
+        "oauth_codes-650", "oauth_codes-750"}
+
+
 @pytest.mark.parametrize("raw", ["+5", "1_0", "\u0663", "0", "", " 5", "5 ", "1e9"])
 def test_malformed_or_nonpositive_override_falls_back_to_default(raw, monkeypatch):
     """Strict parse: `int()` alone accepts ``+5``, ``1_0`` and non-ASCII digits
@@ -202,17 +237,35 @@ def test_malformed_or_nonpositive_override_falls_back_to_default(raw, monkeypatc
     str(315_360_000 + 1),       # one second over the ceiling
     "999999999999",             # 12 digits, above the ceiling
     "9" * 4301,                 # beyond CPython's int() digit limit
+    "000000" + str(315_360_000 + 1),  # leading zeros must not hide the value
 ])
 def test_out_of_range_override_clamps_to_the_ceiling(raw, monkeypatch):
     """Directional: an operator asking for MORE than the ceiling gets the
     ceiling, not the 1-day default — falling back would delete EARLIER than
     requested. The 4301-digit case is the one bare `int()` cannot even parse
-    (CPython's 4300-digit limit), so the width guard must come first."""
+    (CPython's 4300-digit limit), so a width check must come before it, and
+    that check must compare SIGNIFICANT digits (leading zeros pad the string
+    without raising the value)."""
     from tortoise.oauth import _MAX_RETENTION_S, _retention_seconds
 
     monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", raw)
     assert _retention_seconds("TORTOISE_OAUTH_ACCESS_RETENTION_S",
                               OAUTH_ACCESS_RETENTION_S) == _MAX_RETENTION_S
+
+
+@pytest.mark.parametrize("raw", [
+    "00000086400",   # leading zeros: a VALID in-range window, not a clamp
+    "00000600",
+])
+def test_leading_zeros_do_not_inflate_the_width_check(raw, monkeypatch):
+    """A width check on `len(raw)` would read `00000086400` (11 chars) as
+    above the ceiling and clamp a legitimate 86400s window to 10 years —
+    silently disabling GC. The check must strip leading zeros first."""
+    from tortoise.oauth import _retention_seconds
+
+    monkeypatch.setenv("TORTOISE_OAUTH_ACCESS_RETENTION_S", raw)
+    assert _retention_seconds("TORTOISE_OAUTH_ACCESS_RETENTION_S",
+                              OAUTH_ACCESS_RETENTION_S) == int(raw.lstrip("0"))
 
 
 # ── the caller / scheduling wiring ──────────────────────────────────────────

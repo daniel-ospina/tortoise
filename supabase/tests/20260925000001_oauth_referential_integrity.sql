@@ -71,14 +71,17 @@ SELECT tests.assert(
 -- ── 2. Retention-sweep indexes on expires_at exist (all three tables) ──────
 -- Row-VALUE pairing, not two independent INs: a cross-product would be
 -- satisfied by all three index names landing on ONE table (a copy-paste swap),
--- leaving two tables unindexed while the count still read 3.
+-- leaving two tables unindexed while the count still read 3. The indexdef
+-- guard additionally pins the INDEXED COLUMN, so an index on the right table
+-- but the wrong column does not satisfy the sweep's `expires_at < cutoff`.
 SELECT tests.assert(
   (SELECT count(*) FROM pg_indexes
     WHERE schemaname = 'public'
       AND (tablename, indexname) IN (
             ('oauth_codes', 'idx_oauth_codes_expires'),
             ('oauth_access_tokens', 'idx_oauth_access_tokens_expires'),
-            ('oauth_refresh_tokens', 'idx_oauth_refresh_tokens_expires'))) = 3,
+            ('oauth_refresh_tokens', 'idx_oauth_refresh_tokens_expires'))
+      AND indexdef LIKE '%(expires_at)') = 3,
   '3036: all three expires_at sweep indexes exist on their own table');
 
 -- ── 3. A dangling reference is REJECTED — by the constraint under test ─────

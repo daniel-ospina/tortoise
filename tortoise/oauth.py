@@ -122,12 +122,16 @@ def _retention_seconds(env_name: str, default: int) -> int:
         return default
     # Width check BEFORE int(): CPython refuses a string longer than
     # ``sys.get_int_max_str_digits()`` (4300) with an uncaught ValueError, and
-    # anything wider than the ceiling is above it by construction anyway.
-    if len(raw) > len(_MAX_RETENTION_STR):
+    # no digits-only value this wide can be below the ceiling. Compare
+    # SIGNIFICANT digits, not ``len(raw)``: leading zeros inflate the string
+    # without inflating the value, so ``00000086400`` must resolve to 86400
+    # (not clamp) and ``0000000000`` must hit the non-positive branch.
+    significant = raw.lstrip("0") or "0"
+    if len(significant) > len(_MAX_RETENTION_STR):
         logger.warning("oauth: %s is wider than %d digits — clamping to %ds",
                        env_name, len(_MAX_RETENTION_STR), _MAX_RETENTION_S)
         return _MAX_RETENTION_S
-    value = int(raw)
+    value = int(significant)
     if value <= 0:
         logger.warning("oauth: %s=%r must be positive — using %ss",
                        env_name, raw, default)

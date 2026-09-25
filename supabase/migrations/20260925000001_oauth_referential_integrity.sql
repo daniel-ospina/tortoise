@@ -58,9 +58,11 @@
 -- No column added/dropped, no row inserted/updated except the dangling-pointer
 -- repair above. Lock footprint, because a bare "additive" header under-counts
 -- it: each `DROP CONSTRAINT IF EXISTS` takes ACCESS EXCLUSIVE on its table, and
--- each validated `ADD CONSTRAINT` takes SHARE ROW EXCLUSIVE plus a full
--- validation scan of both tables; each CREATE INDEX is NON-concurrent and takes
--- a write lock on its token table for the duration of the build.
+-- each validated `ADD CONSTRAINT` takes SHARE ROW EXCLUSIVE on BOTH the
+-- referencing and the referenced table (blocking concurrent writes for the
+-- duration) plus a full validation scan of the REFERENCING table, with index
+-- lookups on the referenced primary key; each CREATE INDEX is NON-concurrent
+-- and locks out writes (not reads) on its token table until the build finishes.
 -- ============================================================================
 
 -- 1) Repair dangling pointers so the constraints can be added and validated.
