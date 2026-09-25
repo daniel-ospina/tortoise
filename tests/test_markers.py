@@ -167,6 +167,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_backfill_sources.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_restore.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_directory.py": {"e2e-900": "redirect-derived per-path"},
+    # #5137 landed this fixture without a route, which reds this guard on main.
+    # The gold fixture writes :Source rows into an EMBEDDED graph reached through
+    # the `shared_embedded_db` path (the redirect derives a per-path test_* graph);
+    # "gold" is a fixture graph name, not a server graph the SDK resolves from the
+    # registry and not a production-shape namespace.
+    "test_document_source_gold.py": {"gold": "test-constructed"},
 }
 
 # ── ROUTED_SELECT_GRAPH_SITES (cycle-6 P2-10) ───────────────────────────────

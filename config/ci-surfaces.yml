@@ -251,6 +251,7 @@ surfaces:
   - test_index_mcp.py
   - test_init_apikey_validation.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
+  - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   - test_mcp_client.py
   - test_mcp_http.py
@@ -1810,6 +1811,17 @@ durations:
   test_hosted_volunteer_context.py: 14.0
   test_tripwire.py: 14.0
   test_battery_corpus.py: 13.8
+  # #3645: newly-declared fast file — placed at its value-ordered slot rather
+  # than the map's tail, because main's #3400 refresh appends there and a tail
+  # insert conflicts on every rebase. This PR's base sat ON the #3400 coverage
+  # floor (544/604 = 90.07% PASS), so the one file it adds to the fast pool
+  # dropped it to 544/605 = 89.9% and reddened `manifest-integrity`
+  # (tools/ci_selection.py --integrity) and `test (b)`
+  # (test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic)
+  # from that single condition. Measured 13 tests / 13.83s local; the base has
+  # no junit for a file it introduces. Supersede from the first post-merge main
+  # run that includes it (#4817/#4729).
+  test_org_graph_open_tripwire.py: 13.8
   test_backup_e2e.py: 13.1
   test_commit_endpoint.py: 13.0
   test_invites_http.py: 13.0
