@@ -677,6 +677,12 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
     ``r.sourceVersion`` while the node clause wrote no carrier — an edge anchor
     with no gate-compared record. It must produce NEITHER.
 
+    The ``bad-scalar`` case pins the SHAPE guard on a STRING (already a truthy
+    iterable, so the pair loop is what rejects it); ``bad-noniterable`` pins the
+    ``isinstance(value, (list, tuple))`` clause itself — without it a journal line
+    carrying a number raises ``TypeError`` inside ``rebuild_all``, aborting the
+    very recovery path this test exists to keep total.
+
     The ``bad-empty-hash``/``bad-blank-hash`` cases pin the non-empty member
     rule: an empty or blank hash is an ABSENT read version (the producers omit
     both — ``resolve_source_versions`` strip-tests), so a hand-written
@@ -691,6 +697,7 @@ def test_malformed_carrier_payload_contributes_no_anchor_and_no_crash(prov):
         ("bad-dict", {"sourceVersionTransit": {"not": "persistable"}}),
         ("bad-list", {"sourceVersionTransit": [["a", "h"], {"x": 1}]}),
         ("bad-scalar", {"sourceVersionTransit": "loose"}),
+        ("bad-noniterable", {"sourceVersionTransit": 5}),
         ("bad-short-pair", {"sourceVersionTransit": [["only-one-element"]]}),
         ("bad-numeric", {"sourceVersionTransit": [[1, 2]]}),
         ("bad-empty-hash", {"extractedFrom": DOC,
@@ -818,6 +825,61 @@ def test_carrier_with_only_foreign_keys_is_not_written(prov):
         "guard: the Point's own edge must still exist"
     assert _edge_version(proj, "foreign-only", DOC2) is None, \
         "the foreign pair must not stamp the Point's own edge"
+
+
+def test_blank_key_pair_is_dropped(prov):
+    """A carrier pair whose KEY is blank is dropped even when the Point's own
+    ``extractedFrom`` is the same blank spelling.
+
+    FAILS IF ``_valid_transit_pairs`` tests the key on truthiness alone
+    (``pair[0]`` instead of ``pair[0].strip()``): a blank-but-truthy ref then
+    matches the own-ref filter (``_point_source_refs`` keeps truthy members), so
+    the carrier pair is written and an anchor is stamped for a ref that is not a
+    Source.
+    """
+    sdk, events, log_path = prov
+    sdk.create_point("statement", "plain")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "PointAdded",
+            "point": {"id": "blank-key", "content": "x",
+                      "kind": "statement", "status": "live",
+                      "extractedFrom": "   ",
+                      "sourceVersionTransit": [["   ", "h9"]]},
+        }) + "\n")
+
+    sdk._get_proj().rebuild_all(str(events))
+    proj = _proj(sdk)
+    assert _node_transit(proj, "blank-key") == "ABSENT", \
+        "a pair keyed by a blank ref must not be written"
+    assert proj.g.query(
+        "MATCH (p:Point {id:$id})-[r:extractedFrom]->(s:Source) "
+        "RETURN s.url, r.sourceVersion",
+        params={"id": "blank-key"}).result_set == [], \
+        "no edge (and no anchor) for a blank ref"
+
+
+def test_link_source_accepts_a_registry_keyed_by_the_resolved_url(prov):
+    """``_link_source``'s ``source_versions`` may be keyed by the RESOLVED node
+    url (``_mint_source_stub``'s return) — the resolved-first lookup — not only
+    by the raw ref.
+
+    FAILS IF the resolved-first lookup is removed, leaving only
+    ``versions.get(raw_ref)``: a caller that keyed by the resolution then anchors
+    NOTHING and the edge is bare. Both in-repo producers key by the raw ref, so
+    this pins the defensive contract for a direct caller — the reason the branch
+    exists.
+    """
+    sdk, _events, _log = prov
+    sdk.create_source(DOC, "document", contentHash="h1")
+    p = sdk.create_point("statement", "no source")
+
+    variant = "HTTPS://Doc.Example/a/?utm_source=x"
+    proj = _proj(sdk)
+    # a registry keyed ONLY by the resolved url — the raw ref is absent from it
+    proj._link_source(p["id"], variant, source_versions={DOC: "h1"})
+    assert _edge_version(proj, p["id"], DOC) == "h1", \
+        "the resolved-key lookup must find the version"
 
 
 # ── the gate sees it and stays green on a faithful graph ───────────────────
