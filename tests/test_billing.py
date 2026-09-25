@@ -1633,9 +1633,182 @@ class TestTeamInfoBillingSurface:
         assert body["checkout_price_id"] is None
         assert body["checkout_price_ids"] == {}
 
+    def test_team_info_catalog_failure_logged_once(self, billing_client,
+                                                    monkeypatch, caplog):
+        """#4335: an unconfigured/broken catalog must be OBSERVABLE — exactly
+        ONE WARNING naming the exception class, cached so a second /v1/team
+        does not re-log. The message never carries the secret value."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.delenv("STRIPE_PRICE_IDS", raising=False)
+        # The latch is process-global; start this test from a clean state.
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r1 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+            r2 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+        assert r1.status_code == 200, r1.text
+        assert r2.status_code == 200, r2.text
+        warnings = [rec for rec in caplog.records
+                    if "checkout price catalog unavailable" in rec.getMessage()]
+        assert len(warnings) == 1, (
+            f"expected exactly one cached WARNING, got {len(warnings)}")
+        assert "BillingConfigError" in warnings[0].getMessage()
+
+    def test_team_info_catalog_failure_log_scrubs_secret_value(
+            self, billing_client, monkeypatch, caplog):
+        """#4335: a malformed catalog can carry a secret-shaped value (a Stripe
+        key — or credentials-in-URI — pasted into a price-id slot).
+        PriceCatalog quotes the offending id in its error, so the WARNING must
+        scrub it through the composite redactor — the secret must never reach
+        the log."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        for secret in ("sk_live_SUPERSECRET1234567890", "docker://user:pass@host"):
+            bad = json.loads(json.dumps(VALID_CATALOG))
+            bad["solo"]["monthly"]["id"] = secret
+            monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(bad))
+            monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                                raising=False)
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+                r = billing_client["client"].get("/v1/team",
+                                                 headers=billing_client["headers"])
+            assert r.status_code == 200, r.text
+            warnings = [rec.getMessage() for rec in caplog.records
+                        if "checkout price catalog unavailable" in rec.getMessage()]
+            assert len(warnings) == 1, warnings
+            msg = warnings[0]
+            assert secret not in msg, msg
+            assert "***" in msg, f"expected redaction for {secret!r}: {msg}"
+            assert "BillingError" in msg, msg
+
+    def test_checkout_catalog_latch_clears_after_success(self, billing_client,
+                                                         monkeypatch):
+        """#4335: a success resets the latch, so a NEW outage after a recovery
+        is reported again instead of being silently absorbed forever."""
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", True,
+                            raising=False)
+        assert hosted_api._checkout_price_ids()  # valid catalog from the fixture env
+        assert hosted_api._checkout_catalog_failure_logged is False
+
+    def test_team_info_empty_paid_catalog_logged_once(self, billing_client,
+                                                      monkeypatch, caplog):
+        """#4335: a catalog that PARSES but resolves no paid tier is a total
+        checkout outage — it must be reported once, and the latch must survive
+        a second request (the missing default price must not re-arm it)."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(
+            {"free": VALID_CATALOG["free"]}))
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r1 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+            r2 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+        assert r1.status_code == 200, r1.text
+        assert r2.status_code == 200, r2.text
+        assert r1.json()["checkout_price_ids"] == {}
+        warnings = [rec.getMessage() for rec in caplog.records
+                    if "no paid checkout tier" in rec.getMessage()]
+        assert len(warnings) == 1, (
+            f"expected exactly one zero-paid-tier WARNING, got {warnings}")
+
+    def test_team_info_partial_paid_catalog_stays_silent(self, billing_client,
+                                                         monkeypatch, caplog):
+        """#2789: a deployment may sell a subset of tiers (solo/team only, no
+        pro). That is a supported configuration, not a catalog failure — it
+        must NOT warn."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        partial = {k: v for k, v in VALID_CATALOG.items() if k != "pro"}
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(partial))
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = billing_client["client"].get("/v1/team",
+                                             headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["checkout_price_ids"] == {
+            "solo": VALID_CATALOG["solo"]["monthly"]["id"],
+            "team": VALID_CATALOG["team"]["monthly"]["id"],
+        }
+        assert body["checkout_price_id"] is None  # pro absent — default CTA disabled
+        assert not [rec for rec in caplog.records
+                    if "checkout price catalog unavailable" in rec.getMessage()], \
+            "a legitimately partial catalog must not warn"
+
     def test_team_info_subscription_status_none_when_unset(self, billing_client):
         """Node field unset → None (the Billing page renders 'Free plan')."""
         r = billing_client["client"].get("/v1/team",
                                          headers=billing_client["headers"])
         assert r.status_code == 200, r.text
         assert r.json()["subscription_status"] is None
+
+    def test_team_info_exposes_nodes_used_and_max_nodes(self, billing_client, tmp_path):
+        """#4331: /v1/team carries the node figure the cap ACTUALLY gates
+        (`count_org_usage(org, 'points')`: non-episodic Points + Object +
+        Subject, #1911) and the org's enforced node cap (`max_points`).
+        `point_count` is NOT that figure — it is :Point-only."""
+        org_id = billing_client["org_id"]
+        from tortoise.sdk import TortoiseSDK
+        tenant = TortoiseSDK(os.path.join(tmp_path, "billing_api.db"),
+                             namespace=org_id)
+        try:
+            tenant.create_object("acme", objectKind="org")
+            r = billing_client["client"].get(
+                "/v1/team", headers=billing_client["headers"])
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["nodes_used"] == 1          # the Object counts
+            assert body["point_count"] == 0         # :Point-only stays 0
+            assert body["max_nodes"] == 10000       # free tier default
+        finally:
+            tenant.close()
+
+    def test_team_info_max_nodes_honors_stored_override(self, billing_client):
+        """#4331: `max_nodes` is the org's OWN cap (`max_points`), not the
+        tier's nominal default — a stored override must be what the display
+        compares against, because it is what the write gate enforces."""
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_points = 12345",
+            params={"id": billing_client["org_id"]})
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        assert r.json()["max_nodes"] == 12345
+
+    def test_team_info_nodes_used_fails_soft(self, monkeypatch, billing_client):
+        """#4331: a quota-read failure must NOT 500 /v1/team — the node stat
+        degrades to None (unknown; a failed read is never a genuine 0) while
+        the rest of the billing surface still renders."""
+        import tortoise.quota as quota
+
+        def _boom(*a, **kw):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(quota, "count_org_usage", _boom)
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # None, not 0: a failed read must not look like a genuinely empty org
+        # (the client renders no figure for None).
+        assert body["nodes_used"] is None
+        assert body["max_nodes"] == 10000
+        assert body["tier"] == "free"

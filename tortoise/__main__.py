@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -551,9 +552,10 @@ def _cmd_init(args):
         print()
         _print_mcp_configs(args.api_key, base_url, harness)
         print()
-        print("── Onboarding skill ──")
-        print("Give this skill to your agent to complete setup (tortoise-onboarding —")
-        print("the successor to the archived onboarding prompt, M8):")
+        print("── Onboarding instructions ──")
+        print("Give these instructions to your agent to complete setup — they are a")
+        print("document your agent reads, never an installed skill (the successor to")
+        print("the archived onboarding prompt, M8):")
         print(f"  {ONBOARDING_PROMPT_URL}")
         print()
         print("Next steps:")
@@ -589,6 +591,22 @@ def _cmd_init(args):
 
     graph_ready = False
     uri_mode = False
+    # #4579: bound before the mode branches so every error return below can
+    # release a probe that was created before the failure.
+    _proj = None
+
+    def _close_probe() -> None:
+        """#4579: release the reachability probe (idempotent, never raises).
+
+        Every error return in the two mode branches routes through here —
+        including the `except ImportError` arms, which are declared FIRST and
+        therefore also catch an ImportError raised by a LATER statement
+        (`_proj.g.query`, the `_mark_embedded_opened` import, the fallback
+        notice import) after the probe is already bound.
+        """
+        with contextlib.suppress(Exception):
+            if _proj is not None:
+                _proj.close()
 
     if is_db_uri(target):
         # 1. URI mode — connect to the configured URI target itself (never a
@@ -604,6 +622,7 @@ def _cmd_init(args):
         except ImportError:
             print(f"  ❌ falkordb not installed — required for URI mode")  # noqa: F541
             print(f"     pip install falkordb")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
             err = str(e).lower()
@@ -612,6 +631,7 @@ def _cmd_init(args):
             else:
                 print(f"  ❌ FalkorDB unreachable ({e})")
             print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
+            _close_probe()
             return 1
     else:
         # 2. Fallback: embedded mode (SQLite-backed) at the resolved path
@@ -660,8 +680,13 @@ def _cmd_init(args):
             print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")  # noqa: F541
             print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")  # noqa: F541
             print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")  # noqa: F541
+            _close_probe()
             return 1
         except Exception as e:
+            # #4579: release a probe that succeeded before a later step in
+            # this branch failed — otherwise it can outlive the call and,
+            # collected late, leave the daemon running uninstrumented.
+            _close_probe()
             print(f"  ❌ Embedded mode init failed: {e}")
             return 1
 
@@ -669,6 +694,7 @@ def _cmd_init(args):
         return 1
 
     # Write welcome Point to the graph
+    sdk = None  # #4579: bound before the try so the close seam always sees it
     try:
         from tortoise.sdk import TortoiseSDK
         if uri_mode:
@@ -702,6 +728,33 @@ def _cmd_init(args):
         # '?' placeholder a user can't act on. Omit the count and point at
         # doctor so the failure is diagnosable, not masked.
         point_count = None
+    finally:
+        # #4579: release the clients THIS call opened, on every path.
+        #
+        # `tortoise init` is an in-process entry point (`_cmd_onboard`
+        # invokes it directly; agents/tests call `main(["init"])`), and it
+        # opens TWO clients on the same embedded daemon: the reachability
+        # probe projection and the welcome-write `TortoiseSDK`. Neither was
+        # closed here, which is correct for a one-shot CLI process — the
+        # exit cascade closes them — but wrong for any in-process caller.
+        #
+        # Left to GC/atexit, the two clients share the daemon, so the
+        # co-tenant release path withdraws each `.tortoise-owners` record
+        # WITHOUT shutting the daemon down (the shared branch only
+        # disconnects). The daemon then outlives the call UNINSTRUMENTED
+        # with its registry data dir present — exactly the class #3767
+        # deliberately refuses to fast-kill — so a long-lived host process
+        # (or the `test-slow (b)` leg, whose session sweep is the last
+        # reaper pass) leaks it. Closing explicitly makes the LAST client
+        # take the normal `_cleanup()` path, which shuts the daemon down and
+        # reclaims its socket dir. Order-independent: only the final close
+        # performs the shutdown; the other is a co-tenant disconnect.
+        for _client in (sdk, _proj):
+            if _client is None:
+                continue
+            with contextlib.suppress(Exception):
+                # teardown context: a failed close must not fail init
+                _client.close()
 
     if point_count is None:
         print("  Graph: tortoise  |  Points: unavailable — run 'tortoise doctor'")
@@ -3720,7 +3773,37 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     """
     import sys as _sys
 
+    # #3615: capture is a DATA-SHARING act, not an authentication act. The
+    # Bearer credential (api_key, already resolved by the caller) authenticates
+    # the upload; it must never *authorize* it — exporting TORTOISE_API_KEY for
+    # the MCP Authorization header must not opt the machine into shipping
+    # transcripts. Explicit consent or nothing (default OFF). Gated here, on
+    # the TRANSMISSION primitive, so a stale copied hook calling this CLI
+    # cannot bypass it.
+    #
+    # MERGE NOTE (main's #3963 spool layer + this PR): `TORTOISE_CAPTURE` is
+    # "client transmission authorization" (the #3615 scoping layer model), so
+    # the gate belongs on the primitives that TRANSMIT — this one, `sessions
+    # import`, and `session drain` — never on the shared `_spool_transcript`
+    # helper. That helper is also `session spool`, the per-turn LOCAL hook: a
+    # gate there would (a) disable main's local durability for every
+    # unconsented host and (b) still leave `session drain` — a THIRD upload
+    # path — ungated, the "second upload primitive as a side door" class the
+    # #3615 threat surface declares in scope.
+    from tortoise.capture_consent import (
+        CAPTURE_DECLINED_HINT,
+        capture_consent_enabled,
+        record_capture_declined,
+    )
     from tortoise.capture_spool import flush_spool, read_spool_meta
+    if not capture_consent_enabled():
+        # Durable + one-time: a stale copied hook discards this stderr
+        # (`2>/dev/null`), so the same notice is also written to
+        # ~/.tortoise/capture-consent-notice and pushed to stderr by the next
+        # interactive command (see `_flush_pending_capture_notice`).
+        record_capture_declined()
+        print(f"capture declined — {CAPTURE_DECLINED_HINT}", file=_sys.stderr)
+        return 1
 
     prep = _spool_transcript(args)
     if prep["rc"] != 0:
@@ -3870,7 +3953,25 @@ def _cmd_session_drain(api_key: str, api_url: str,
     """
     import sys as _sys
 
+    # #3615: the drain is a TRANSMISSION primitive (it POSTs spooled turns), so
+    # it carries the same consent gate as `session capture` / `sessions
+    # import`. Without it, a host that was consented earlier and has the switch
+    # withdrawn would still ship its spool on the next SessionStart — the
+    # "second upload primitive as a side door" class. The LOCAL spool write
+    # (`session spool`) stays ungated: consent authorizes transmission, not
+    # durability. Best-effort contract preserved: report and exit 0, so a
+    # backgrounded SessionStart drain never blocks the session.
+    from tortoise.capture_consent import (
+        CAPTURE_DECLINED_HINT,
+        capture_consent_enabled,
+        record_capture_declined,
+    )
     from tortoise.capture_spool import flush_spool, spool_dir
+    if not capture_consent_enabled():
+        record_capture_declined()
+        print(f"spool drain: capture declined — {CAPTURE_DECLINED_HINT}",
+              file=_sys.stderr)
+        return 0
 
     summary = flush_spool(spool_dir(), _session_post(api_key, api_url),
                           exclude_session_id=exclude_session_id)
@@ -4074,6 +4175,21 @@ def _cmd_sessions_import(args) -> int:
     from http.client import HTTPException as _HTTPException
 
     from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
+    # #3615: this is the SECOND transcript-upload primitive (same
+    # POST /v1/sessions) — it carries the same explicit-consent gate so it
+    # cannot be used as a consent bypass for the first.
+    from tortoise.capture_consent import (CAPTURE_DECLINED_HINT,
+                                          capture_consent_enabled,
+                                          record_capture_declined)
+    if not capture_consent_enabled():
+        # Intent: the gate is FIRST (before the local receipt no-op at the
+        # bottom) because consent is a precondition OF THIS COMMAND, and a
+        # fail-fast refusal has no *import* side effects (no receipt, no parse).
+        # The durable notice mirrors `session capture` (stale hooks discard
+        # stderr; the next interactive command pushes it).
+        record_capture_declined()
+        print(f"import declined — {CAPTURE_DECLINED_HINT}", file=_sys.stderr)
+        return 1
 
     file_path = Path(args.file)
     # CLI alias: --harness desktop ⇒ wire harness claude-desktop (canonical
@@ -4939,11 +5055,12 @@ def _cmd_onboard(args) -> int:
     print("Next: tortoise serve    — start MCP server for agents")
     print("      tortoise setup    — configure per-role memory")
     print()
-    # #544/#1998 (M8): reference the ONE live onboarding skill — install it
-    # (curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness <h>)
-    # or hand its markdown to your agent after connecting it to the local MCP
-    # server (the archived prompt is retired — never two live scripts).
-    print("Onboarding skill — install or fetch this to complete setup:")
+    # #544/#1998 (M8) / #4365: reference the ONE live onboarding document.
+    # It is INSTRUCTIONS the agent reads — the skill installer ships the three
+    # reusable capabilities only, never onboarding. Hand its markdown to your
+    # agent after connecting it to the local MCP server (the archived prompt is
+    # retired — never two live scripts).
+    print("Onboarding instructions — give this document to your agent to complete setup:")
     print("  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md")
     return 0
 
@@ -5428,6 +5545,9 @@ def _cmd_setup(args) -> int:
 
     # Interactive mode
     from pathlib import Path
+
+    from tortoise.capture_install import PI_EXTENSION_NAME, pi_home
+
     home = Path.home()
 
     print("Tortoise Setup — Agent Memory Configuration")
@@ -5436,7 +5556,7 @@ def _cmd_setup(args) -> int:
 
     # ── Harness detection ──────────────────────────────────────
     detections: dict[str, bool] = {}
-    if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+    if (pi_home(home) / PI_EXTENSION_NAME).exists():
         detections["pi"] = True
     if (home / ".claude").exists() or Path(".claude").exists():
         detections["claude"] = True
@@ -6120,6 +6240,27 @@ def _cmd_doctor(args):
             except Exception as e:
                 results.append(("Graph: health", "❌", str(e)[:60]))
 
+    # 4.6 Session capture consent (#3615) — capture is a DATA-SHARING act and
+    # requires the explicit TORTOISE_CAPTURE opt-in; a lone credential no longer
+    # authorizes it. Surfaced here because `doctor` is a diagnostic surface a
+    # user reaches when capture silently stopped. The glyph is deliberately NOT
+    # ⚠️: capture-off is the privacy-correct DEFAULT, and painting every healthy
+    # install as "1 warn" is the alert-fatigue pattern this migration avoids.
+    from tortoise.capture_consent import (
+        CAPTURE_OPT_IN_ENV,
+        capture_consent_enabled,
+        capture_notice_path,
+    )
+    if capture_consent_enabled():
+        results.append(("Session capture", "✅",
+                        f"explicit consent granted ({CAPTURE_OPT_IN_ENV})"))
+    else:
+        _notice = capture_notice_path()
+        _hint = (f" — migration notice at {_notice}" if _notice.exists() else "")
+        results.append(("Session capture", "ℹ️",
+                        "off (default) — explicit consent not granted; set "
+                        f"{CAPTURE_OPT_IN_ENV}=1 to file sessions{_hint}"))
+
     # 5. MCP server
     mcp_running = False
     try:
@@ -6224,11 +6365,13 @@ def _cmd_doctor(args):
     # tortoise/capture_install.py).  A failed resolution is a WARNING row and
     # leaves `home` None, so the detection block below is skipped rather than
     # run against a substituted root.
+    from tortoise.capture_install import PI_EXTENSION_NAME, pi_home
+
     home: Path | None = None
     try:
         home = Path.home()
         detections: list[str] = []
-        if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+        if (pi_home(home) / PI_EXTENSION_NAME).exists():
             detections.append("Pi (extension found)")
         if (home / ".claude").exists() or Path(".claude").exists():
             detections.append("Claude Code")
@@ -7208,6 +7351,13 @@ def _cmd_key_create(args) -> int:
     # Seed the org_{org_id} graph the tools actually resolve (hosted parity).
     try:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #3390 WRITE-AHEAD: journal the seeded org_{org_id} graph BEFORE the
+        # CREATE materializes it. sdk.org_create above journaled org_{name} —
+        # a DIFFERENT graph — so this seed was otherwise an unjournaled org_*
+        # orphan, invisible to the journal-driven sweep. No-op outside a test
+        # session (the journal is a test-session artifact).
+        from tortoise.projection import journal_mint_write_ahead
+        journal_mint_write_ahead(f"org_{org_id}")
         org_graph = sdk._get_proj().db.select_graph(f"org_{org_id}")
         org_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
@@ -7238,6 +7388,62 @@ def _cmd_key_create(args) -> int:
         print("    LAN address, not 0.0.0.0)")
     print("   Authorization header: Bearer <key>")
     return 0
+
+
+def _stderr_is_human_facing() -> bool:
+    """True only when stderr is a terminal — #3615's notice-delivery gate.
+
+    Anything that can silently swallow stderr (a harness hook's `2>/dev/null`,
+    a background sweep, an agent-run subprocess with a pipe or a file) must not
+    be able to consume the human's one sighting of the migration notice.
+    Testing the surface instead of enumerating commands closes the DEFAULT path
+    — the `tortoise context 2>/dev/null` SessionStart hook included — regardless
+    of how the command list grows.
+
+    DECLARED RESIDUAL (not closed by construction): a caller that allocates a
+    pty (`script`, `expect`, `unbuffer`, `docker run -t`, …) has a terminal
+    stderr by construction, so it will print and stamp the notice even with no
+    human watching. There is no reliable process-level test that separates a
+    human terminal from a pty, so this is accepted rather than chased with a
+    command denylist (the mechanism this gate replaced). The impact is capped
+    at notice delivery: the flush never authorizes capture —
+    `capture_consent_enabled()` is the sole authority and never consults stderr.
+    """
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError, OSError):
+        # `sys.stderr` can be None (pythonw) or a closed/replaced stream.
+        return False
+
+
+def _flush_pending_capture_notice() -> None:
+    """Push the #3615 migration notice to stderr at most once per machine.
+
+    `record_capture_declined` writes the notice whenever a capture is refused —
+    including from a STALE copied hook that swallows the CLI's stderr
+    (`2>/dev/null`), which is exactly the population a breaking change must not
+    migrate silently. A file nobody reads is evidence, not notification: the
+    user's whole view of this change would be "capture quietly stopped", with
+    `tortoise doctor` — which they have no reason to run — as the only consumer.
+    So the next HUMAN-FACING command delivers it, once (stamped separately from
+    the notice file so an unattended run cannot consume the single sighting).
+
+    Security review P1: the first cut gated delivery on a five-entry command
+    denylist and missed `context` — the command the SessionStart hook runs as
+    `tortoise context 2>/dev/null`, so the notice was printed into /dev/null and
+    stamped "shown" on every session START, silently consuming it on exactly the
+    hosts the migration exists for (as did `volunteer`, whose hook relays only
+    prefixed lines). The TTY test above closes that default path; the
+    pty-allocating residual is declared on `_stderr_is_human_facing`.
+    """
+    if not _stderr_is_human_facing():
+        return
+    from tortoise.capture_consent import mark_capture_notice_shown, pending_capture_notice
+    text = pending_capture_notice()
+    if not text:
+        return
+    print(text, file=sys.stderr)
+    mark_capture_notice_shown()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -7483,7 +7689,11 @@ def main(argv: list[str] | None = None) -> int:
     # tortoise session <subcommand>
     session = sp.add_parser("session", help="Manage Tortoise Cloud sessions")
     session_sp = session.add_subparsers(dest="session_cmd")
-    session_capture = session_sp.add_parser("capture", help="Capture a session from a transcript file")
+    session_capture = session_sp.add_parser(
+        "capture",
+        help="Capture a session from a transcript file "
+             "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
+             "is not consent)")
     session_capture.add_argument("--file", required=True, help="Path to transcript file")
     # #1727 Slice 2 (Task 14, T1-P11): the hook forwards Claude Code's real
     # session_id (idempotency key — re-capture converges to one Session) and
@@ -7574,7 +7784,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Backfill agent sessions from historical transcripts (#1727 Task 15)")
     sessions_sp = sessions.add_subparsers(dest="sessions_cmd")
     sess_import = sessions_sp.add_parser(
-        "import", help="Import a session transcript from a harness store")
+        "import",
+        help="Import a session transcript from a harness store "
+             "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
+             "is not consent)")
     sess_import.add_argument("--file", required=True,
                              help="Path to the session transcript (JSONL or text)")
     sess_import.add_argument(
@@ -7694,6 +7907,7 @@ def main(argv: list[str] | None = None) -> int:
     # Idempotent; a no-op for commands that never open an embedded server.
     from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
     install_embedded_signal_cleanup()
+    _flush_pending_capture_notice()
     if args.cmd == "rebuild":
         # #3947 review (cycle 3): propagate the refusal's exit code — the
         # handler's documented non-zero exit is worthless if the dispatcher

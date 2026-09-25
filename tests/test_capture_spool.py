@@ -732,6 +732,11 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
     monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+    # #3615: these tests drive the TRANSMISSION paths (`session capture` /
+    # `session drain`), which now require explicit consent. The local
+    # `session spool` write stays ungated, so tests that only spool do not need
+    # this — setting it here is harmless for them.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
 
 
 def test_cli_capture_writes_the_spool_BEFORE_the_network(tmp_path, monkeypatch):
@@ -1713,6 +1718,8 @@ def test_cli_drain_accepts_exclude_session_id(tmp_path, monkeypatch, capsys):
     """
     from tortoise import __main__ as cli
 
+    # #3615: the drain TRANSMITS, so it requires explicit consent.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     write_spool_entry(tmp_path, _snapshot("live-resumed"))
     write_spool_entry(tmp_path, _snapshot("interrupted-other"))
     server = _Server()

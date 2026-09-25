@@ -590,6 +590,41 @@ micro_diff_marker > "$T/body-i2"
 STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-i2"
 assert_rc 0 "(i2) clean-micro diff-match passes"
 
+echo "── (i3) verdict=clean-low on both acceptance paths (#4755) ────"
+clean_low_sha_marker() {
+    local m="review recorded: reviews/${PR_NUMBER}.json verdict=clean-low @ ${HEAD} (${REPO_NAME})"
+    printf '%s sig=%s\n' "$m" "$(sign "$m")"
+}
+clean_low_diff_marker() {
+    local m="review recorded: reviews/${PR_NUMBER}.json verdict=clean-low @ ${STALE} diff=${DH} (${REPO_NAME})"
+    printf '%s sig=%s\n' "$m" "$(sign "$m")"
+}
+clean_low_sha_marker > "$T/body-i3a"
+STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-i3a"
+assert_rc 0 "(i3a) clean-low sha-match passes"
+clean_low_diff_marker > "$T/body-i3b"
+STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-i3b"
+assert_rc 0 "(i3b) clean-low diff-match passes"
+
+# The vocabulary must stay CLOSED (#4755). A verdict OUTSIDE it is refused even
+# with a valid HMAC over the marker text — the signature covers the verdict
+# string, so a relabel verifies only if the recorder signed that relabel, and
+# the regex must not admit it in the first place.
+oov_sha_marker() {
+    local m="review recorded: reviews/${PR_NUMBER}.json verdict=clean-anything @ ${HEAD} (${REPO_NAME})"
+    printf '%s sig=%s\n' "$m" "$(sign "$m")"
+}
+oov_diff_marker() {
+    local m="review recorded: reviews/${PR_NUMBER}.json verdict=clean-anything @ ${STALE} diff=${DH} (${REPO_NAME})"
+    printf '%s sig=%s\n' "$m" "$(sign "$m")"
+}
+oov_sha_marker > "$T/body-i3c"
+STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-i3c"
+assert_rc 1 "(i3c) an out-of-vocabulary verdict is refused at the head"
+oov_diff_marker > "$T/body-i3d"
+STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-i3d"
+assert_rc 1 "(i3d) an out-of-vocabulary verdict is refused on the diff-match path"
+
 echo "── (j) marker selection: a bad candidate never masks a good one ─"
 # j1: a correctly-signed marker for the WRONG diff precedes the good one.
 { diff_marker "$STALE" "$DH2"; diff_marker "$STALE" "$DH"; } > "$T/body-j1"

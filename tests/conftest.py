@@ -523,7 +523,7 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # iteration at batch 200 with kill_pacing 0.4 takes ~80s
                     # of pacing, so a multi-hundred backlog can run past the
                     # 30s soft budget (review P2; it still terminates). The
-                    # cron sweeps every 10 min make up the difference.
+                    # cron sweeps every 20 min make up the difference.
                     # #4740 review 9: the raw composition — the pre-sweep
                     # probe (`before`), the sweep, the post-sweep probe
                     # (`left`) and their arrangement into the report — lives in
@@ -631,6 +631,33 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
     # #1642 FIX 4 review P2: keep the diagnostic signal real (was hardcoded
     # False after the pgrep-based foreign detection was removed).
     foreign = bool(foreign_matches)
+    # #1005 (epic #1647 E2E-7): close this process's OWN live embedded clients
+    # BEFORE the end-sweep probes the population. The sweep's `left` is a
+    # pgrep taken during fixture teardown; while the suite's own clients are
+    # still open, every server they hold reads as a live-client server and
+    # reap() declines it (embedded_reaper.py's 0-client gate) — so `left`
+    # measures the suite's own client count (147 in the post-#4927 CI
+    # sample) while the workflow's post-exit probe measures the residue (5).
+    # Comparing those two is not a same-seam comparison, so `COUNT <= left`
+    # is structurally incapable of failing on the leak it exists to catch.
+    # Closing through the SAME idempotent seams atexit uses
+    # (close_embedded_clients — the #1371 fast-close, the guarded `_t_close`,
+    # and the raw-client `_cleanup` fallback) disconnects the pools while the
+    # process is alive, so the sweep probe now measures the population the
+    # workflow probe will, and the bound becomes meaningful. This runs AFTER
+    # the other session finalizers: `_redislite_hygiene` tears down last
+    # (every fixture that depends on it, including `_server_graph_hygiene`,
+    # has already been finalized), so no finalizer is left holding a client
+    # it still needs. Best-effort: hygiene never fails the suite over this.
+    try:
+        from tortoise.embedded_lifecycle import close_embedded_clients
+        _pre_closed = close_embedded_clients()
+        if _pre_closed:
+            print(
+                "[redislite-hygiene] in-process close before end sweep: "
+                f"{_pre_closed} client(s)")
+    except Exception:
+        pass  # a failed close must not fail the suite (the sweep still runs)
     end_result = _sweep(only_safe=bool(others))
     print(f"[redislite-hygiene] end sweep (other-suites={len(others)}): "
           f"{end_result}")
@@ -1264,3 +1291,15 @@ def force_sparse_tfidf(monkeypatch):
     monkeypatch.setattr(EmbeddingModel, "get", classmethod(
         lambda cls, load_timeout=None: None))
     return None
+
+
+# ── #4069: per-test temp-directory teardown ────────────────────────────────
+# `$TMPDIR` churned to 362,962 entries with nothing older than three days:
+# the suite's `tempfile.mkdtemp(prefix=...)` call sites create a directory
+# per invocation and never remove it, and that tree is the one the reaper's
+# socket census walks (~41% CPU per call at 224k depth-2 entries). The fix
+# is structural — re-exported here so the autouse fixture applies suite-wide,
+# tracking every `mkdtemp` a test creates and removing it at teardown. The
+# mechanism and its safety properties live in `tests/_tmpdir_hygiene.py`;
+# the operator-invoked backlog sweep is `tools/tmpdir_sweep.py`.
+from tests._tmpdir_hygiene import track_tempfile_artifacts  # noqa: E402, F401

@@ -62,6 +62,7 @@ import random
 import re
 import threading
 import time
+import unicodedata
 import warnings
 import weakref
 from typing import Any
@@ -2929,6 +2930,14 @@ def _num_word_value(s: str) -> int | None:
 
 _NUM_WORD_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
 
+# The clock forms' single authority: "6pm" | "6:00 pm" | "six pm" |
+# "six thirty pm".  Shared by ``_value_signature`` (which normalises them) and
+# the D12/O4 guard (which strips them, so a differing number beside an equal
+# clock value is still compared).
+_CLOCK_RE = re.compile(
+    rf"\b(\d{{1,2}}(?::\d{{2}})?|(?:{_NUM_WORD_ALT})(?:[\s-]+"
+    rf"(?:{_NUM_WORD_ALT}))?)\s*(a\.?m\.?|p\.?m\.?)\b")
+
 
 def _value_signature(content: str) -> str | None:
     """Deterministic value-token normalization (D2, Q3) — the value-identity
@@ -2945,10 +2954,7 @@ def _value_signature(content: str) -> str | None:
     # clock forms: "6pm" | "6:00 pm" | "six pm" | "six thirty pm" — the
     # hour word is constrained to the number-word vocabulary so "at six pm"
     # cannot greedily capture "at six" as the hour (deterministic).
-    clock_re = re.compile(
-        rf"\b(\d{{1,2}}(?::\d{{2}})?|(?:{_NUM_WORD_ALT})(?:[\s-]+"
-        rf"(?:{_NUM_WORD_ALT}))?)\s*(a\.?m\.?|p\.?m\.?)\b")
-    for m in clock_re.finditer(c):
+    for m in _CLOCK_RE.finditer(c):
         raw, amp = m.group(1), m.group(2)[0].lower()
         if ":" in raw:
             hh, mm = raw.split(":")
@@ -2960,8 +2966,18 @@ def _value_signature(content: str) -> str | None:
             hour_v = _num_word_value(words[0])
             if hour_v is None:
                 continue
-            minute_v = (_MINUTE_WORDS.get(" ".join(words[1:]), 0)
-                        if len(words) > 1 else 0)
+            minute_v = _MINUTE_WORDS.get(" ".join(words[1:])) if len(words) > 1 else 0
+            if minute_v is None:
+                # A spelled-out minute the table does not name ("six fifty pm")
+                # is still a minute.  Defaulting it to :00 made the whole clock
+                # normalise to the hour-only value, so "6:00pm" and "six fifty
+                # pm" carried the SAME signature and one deleted the other.
+                minute_v = _num_word_value(" ".join(words[1:])) \
+                    if len(words) > 1 else 0
+            if minute_v is None or not 0 <= minute_v <= 59:
+                # Unreadable minute: leave the clock un-normalised rather than
+                # claim it agrees with every other reading of that hour.
+                continue
             sigs.append(f"{amp}{hour_v % 12 or 12:02d}:{minute_v:02d}")
     # compound numbers: "27:12", "1:02:30", "27m12s" (clock forms already
     # captured above — a following am/pm excludes the compound pass)
@@ -2969,11 +2985,21 @@ def _value_signature(content: str) -> str | None:
             r"\b\d{1,4}(?::\d{2})+(?:\.\d+)?\b(?!\s*(?:a\.?m\.?|"
             r"p\.?m\.?))|\b\d+m\d+s\b", c):
         sigs.append(re.sub(r"\s+", "", m.group(0)))
-    # quantity+unit: "5k", "10km", "2 hours"
+    # quantity+unit: "5k", "10km", "2 hours", "two hours".  The word form is
+    # matched too, and normalised to digits, or "2 hours"/"two hours" reported
+    # a value difference between two spellings of one quantity and identical
+    # claims superseded one another.
     for m in re.finditer(
-            r"\b\d+(?:\.\d+)?\s*(?:k|km|mi|m|kg|lb|min|mins|h|hr|hrs|"
+            rf"\b(\d+(?:\.\d+)?|(?:{_NUM_WORD_ALT})(?:\s*(?:{_NUM_WORD_ALT}))?)"
+            r"\s*(k|km|mi|m|kg|lb|min|mins|h|hr|hrs|"
             r"s|sec|secs|minutes|hours)\b", c):
-        sigs.append(re.sub(r"\s+", "", m.group(0)))
+        quant, unit = m.group(1), m.group(2)
+        if quant[:1].isdigit():
+            sigs.append(re.sub(r"\s+", "", quant) + unit)
+        else:
+            v = _num_word_value(quant)
+            if v is not None:
+                sigs.append(f"{v}{unit}")
     if not sigs:
         return None
     return "|".join(sorted(set(sigs)))
@@ -3028,6 +3054,847 @@ def _date_is_later_or_undated(current_date: str | None, prior: dict) -> bool:
     except (TypeError, ValueError):
         pass
     return True
+
+
+# ── D12/O4 — the never-across boundary (#5080) ─────────────────────────────
+# The owner ruling of 2026-09-24 (recorded on #4899; EXT4 §16.4) authorises
+# merging near-duplicate claims and forbids a merge "across a difference in: a
+# number or quantity, a named entity, a language, a negation, or a condition".
+# The ruling, D12 and §16.4 state different-length lists of that boundary, so
+# the union is the floor enforced here.
+#
+# The asymmetry is also the ruling's: a false merge costs more than a kept
+# near-duplicate.  An unreadable comparison therefore reads as a DIFFERENCE
+# (both claims survive) and never as agreement.
+#
+# The dimension list alone does not cover a claim that OPPOSES its prior
+# without a marker — "failed at 3pm" vs "succeeded at 3pm" differ in no
+# number, name, negation or condition; the predicates differ — so a second,
+# more general test applies: the mechanical form of §4.2's "merged only when
+# nothing distinguishing is lost".  A fold may BROADEN a claim ("the team
+# meets weekly in main office" ← "the team meets weekly"); it may not
+# SUBSTITUTE its content.  If each side owns a content token the other lacks,
+# something distinguishing would be lost and the fold is refused.
+_NEGATION_MARKERS = frozenset({
+    "not", "no", "never", "none", "nor", "nothing", "without", "cannot",
+    "cant", "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
+    "wont", "wouldnt", "shouldnt", "couldnt", "hasnt", "havent", "aint",
+    # The apostrophe-omitted spellings `_CLITIC_RE` cannot see: with the
+    # separator gone the token is an ordinary word, so it has to be named.
+    "mustnt", "neednt", "shant", "mightnt", "oughtnt", "darent", "hadnt",
+})
+_CONDITION_MARKERS = frozenset({
+    "if", "unless", "until", "when", "whenever", "provided", "assuming",
+    "whether", "iff", "pending", "once", "while", "given",
+})
+# Connectives that carry a condition in more than one word.  A single-word
+# marker list misses them entirely, and the pair then reads as one claim with a
+# detail added rather than two claims with and without a condition.
+_CONDITION_PHRASES = (
+    "as long as", "so long as", "in case", "in the event", "on condition that",
+    "provided that", "assuming that", "in the case that", "conditional on",
+)
+# Relative days + month names.  Not interchangeable with the value dimension:
+# "shipped in march" vs "shipped in april" carries no number.
+_DATE_WORDS = frozenset({
+    "today", "tomorrow", "yesterday",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday",
+    "january", "february", "march", "april", "june", "july",
+    "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
+})
+# "may" is NOT in the set.  It is a month AND the commonest English modal, and
+# neither reading is safe as a blanket rule: as a date word everywhere it turns
+# "we may ship" vs "we can ship" into a DATE change — a value dimension, so a
+# hedge would terminalize the claim — and as a date word nowhere it loses a real
+# month difference ("we ship in may and receive in june" vs its mirror).  It is
+# read as a month only in a date position; see `_date_tokens`.
+_DATE_PREPOSITIONS = frozenset({"in", "of", "by", "during", "since", "until"})
+_MONTH_AMBIGUOUS = frozenset({"may"})
+# Relative days spelled in more than one word.  The single-word set alone
+# cannot see the modifier, so "tomorrow morning" and "the day after tomorrow
+# morning" share the token "tomorrow" and read as one claim.
+_DATE_PHRASES = (
+    "the day after tomorrow", "the day before yesterday", "the day after next",
+    "the day before last", "next week", "last week", "next month",
+    "last month", "next year", "last year", "the other day",
+)
+# Clock units are dropped from the content skeleton: "six pm" and "6pm" are
+# one value spelled twice, and the value dimension compares them.
+_CLOCK_UNITS = frozenset({"pm", "am"})
+# Pronouns and possessives are the one stopword class that CARRIES an entity:
+# "he won the race" vs "she won the race" and "my manager approved the plan"
+# vs "your manager approved the plan" name different subjects, so dropping
+# them would leave the two claims with identical content skeletons and fold a
+# re-subjected claim.  They are therefore content tokens, not frame.
+_ENTITY_PRONOUNS = frozenset({
+    "i", "me", "my", "mine", "myself",
+    "we", "us", "our", "ours", "ourselves",
+    "you", "your", "yours", "yourself", "yourselves",
+    "he", "him", "his", "himself", "she", "her", "hers", "herself",
+    "it", "its", "itself", "they", "them", "their", "theirs",
+    "themselves", "this", "that", "these", "those",
+})
+_CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS
+# "on" is a frame stopword because of its preposition use, but it also names a
+# STATE ("the flag is on").  Leaving it frame makes a state pair lopsided —
+# only "off" is one-sided — and a lopsided pair is the broadening case the
+# boundary allows, so "the flag is on" folded into "the flag is off".  As
+# content, the two are one-sided against each other and the substitution rule
+# sees them.
+_CONTENT_STOPWORDS = _CONTENT_STOPWORDS - {"on"}
+_UNREADABLE = frozenset({"unreadable"})
+
+# Token edges stripped before comparison.  `_norm` lowercases and collapses
+# whitespace but keeps punctuation, so "team." and "team" would otherwise read
+# as different tokens and the substitution test would fire on a full stop.
+_TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
+# A numeric token's own edges are part of its value, and three shapes have to
+# survive the strip: a LEADING separator that begins a numeral (".5"), a
+# CURRENCY or SIGN in any script ("£50", "−50"), and a TRAILING suffix that
+# changes what is counted ("50%").  The sign and currency classes are read
+# from the character category, because the ASCII spellings are a fraction of
+# them: `$`, `+` and `-` are one word each of `Sc`/`Sm`, and a whitelist of
+# ASCII characters let `£50` fold into `50` and `£50` into `€50`.
+_NUMERIC_LEAD = frozenset(".,:+-$#")
+_NUMERIC_TRAIL = frozenset("%$#\u2030\u2031\u00b0")# Clitic apostrophes, normalised to the ASCII form before tokenising.  LLM
+# output routinely spells "don't" with U+2019, and a negator the marker list
+# cannot see is a negator the boundary fails to guard.
+_APOSTROPHES = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u02bc": "'", "\u02b9": "'", "\u2032": "'", "\u2035": "'",
+    "\uff07": "'", "\u00b4": "'", "\u02be": "'", "\u02bf": "'",
+    "\u02c8": "'", "\u055a": "'", "\u05f3": "'", "\uff02": "'",
+    "\ua78c": "'", "\u02bb": "'", "\u02bd": "'", "\u02c0": "'",
+    "\u02c1": "'", "\u02ca": "'", "\u02cb": "'", "\u02cc": "'",
+    "\u02d0": "'",
+})
+# Codepoint-agnostic fallbacks for the two things an apostrophe carries.  A
+# translate table cannot enumerate the apostrophe inventory (U+055A, U+02BE,
+# U+02BF, U+00B4, U+FF02, U+A78C …), and a negator or a possessor the table
+# misses is one the boundary fails to guard, so the RULE is written as a shape:
+# a clitic is "n", one or two separator characters, "t", and a possessive is
+# a separator then "s".  At least one separator is required — zero would make
+# "want", "went" and "count" negators.
+_CLITIC_RE = re.compile(r"n[^\w\s]{1,2}t$")
+_POSSESSIVE_RE = re.compile(r"[^\w\s]{1,2}s$")
+
+
+def _canon_token(t: str) -> str:
+    """A token with every non-word character removed, so that one word's
+    spellings agree across apostrophe codepoints."""
+    return re.sub(r"[^\w]", "", t)
+
+
+def _apostrophe_free(t: str) -> str:
+    """A token with its apostrophes removed and everything else kept.
+
+    The right canonicalisation where the token is CONTENT: removing every
+    non-word character would also collapse "re-sign" onto "resign" and
+    "co-op" onto "coop", and an internal separator that changes the word is a
+    content substitution the ownership test has to see.
+    """
+    return t.replace("'", "")
+# Non-Latin scripts, by the codepoint block that identifies them.
+_SCRIPT_BLOCKS = (
+    ("greek", 0x0370, 0x03FF),
+    ("cyrillic", 0x0400, 0x04FF),
+    ("hebrew", 0x0590, 0x05FF),
+    ("arabic", 0x0600, 0x06FF),
+    ("devanagari", 0x0900, 0x097F),
+    ("kana", 0x3040, 0x30FF),
+    ("han", 0x4E00, 0x9FFF),
+    ("hangul", 0xAC00, 0xD7AF),
+)
+
+
+# Differences that make two claims RIVALS rather than one claim in two
+# spellings.  The value dimensions (number, date) are absent by design: a
+# differing value is a new value for the same attribute, which is exactly what
+# UPDATE exists to record.  These are the differences where nothing may be
+# destroyed — neither a fold nor a supersede.
+_IDENTITY_DIMENSIONS = frozenset({
+    "negation", "condition", "scope", "language", "substituted_content",
+    "unreadable",
+})
+
+
+def _fold_unicode(s: str) -> str:
+    """NFC, with invisible format characters turned into separators.
+
+    A zero-width space inside a word is neither whitespace nor punctuation, so
+    it fused a word to its neighbour: "for\u200bAlice" was ONE token, it
+    began lower case, and the name stopped reading as a name at all — the
+    entity dimension went silent on an invisible character.  Composition runs
+    first so a decomposed accent is the same word as its precomposed form.
+    """
+    text = unicodedata.normalize("NFC", str(s or ""))
+    return "".join(" " if unicodedata.category(c) == "Cf" else c for c in text)
+
+
+def _rejoin_numeric_signs(seq: list[str]) -> list[str]:
+    """A sign or currency written apart from its numeral is part of it.
+
+    "£ 50" and "50 %" are the same values as "£50" and "50%"; left apart, the
+    symbol was a one-sided content token, the numeral read as a bare value, and
+    "we paid £ 50" folded into "we paid 50".  Only a lone symbol token is
+    merged, and only against a token that is genuinely numeric, so an "and - but"
+    is left alone.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(seq):
+        t = seq[i]
+        nxt = seq[i + 1] if i + 1 < len(seq) else ""
+        sign_only = len(t) == 1 and _keeps_numeric_edge(t, True)
+        numeric_next = (any(c.isdigit() for c in nxt)
+                        or _num_word_value(nxt) is not None)
+        if sign_only and numeric_next:
+            out.append(t + nxt)
+            i += 2
+            continue
+        if (out and len(t) == 1 and _keeps_numeric_edge(t, False)
+                and out[-1][-1:].isdigit()):
+            out[-1] = out[-1] + t
+            i += 1
+            continue
+        out.append(t)
+        i += 1
+    return out
+
+
+def _guard_token_seq(content: str) -> list[str]:
+    """Lowercased whitespace tokens with edge punctuation stripped, IN ORDER.
+
+    ``_guard_tokens`` returns a set, which is what most checks want; a scope
+    check must not use it, because set iteration order is by hash and discards
+    the positions the comparison is about.
+    """
+    text = _fold_unicode(_norm(content)).translate(_APOSTROPHES)
+    # A possessive clitic detached from its owner ("bob\u200b's", where the
+    # format character became a space) is still that owner's possessive; the
+    # edge strip would otherwise reduce the clitic to a bare "s".
+    joined: list[str] = []
+    for t in text.split():
+        if joined and t in ("'s", "'"):
+            joined[-1] = joined[-1] + t
+            continue
+        joined.append(t)
+    seq = [t for t in (_strip_edges(_s) for _s in joined) if t]
+    return _rejoin_numeric_signs(seq)
+
+
+def _is_edge_punct(ch: str) -> bool:
+    """Punctuation, symbol, mark or format character, in any script.
+
+    ``_TOKEN_EDGE_PUNCT`` alone is ASCII, and LLM output wraps words in the
+    typographic characters too.  A name or a negator fused to one of them
+    ("\u201cAlice\u201d", "not\u2026", "tomorrow\u2026") kept the quoting
+    character, so it stopped being the word it was and its whole dimension went
+    silent.
+
+    Marks and format characters belong here for the same reason and are easy to
+    miss, because neither is punctuation: a zero-width space or a combining
+    mark at a token edge is invisible and fuses a word to whatever is beside
+    it, so "for\u200bAlice" read as one lower-case token and the name vanished.
+    """
+    return (ch in _TOKEN_EDGE_PUNCT
+            or unicodedata.category(ch)[:1] in ("P", "S", "C", "M"))
+
+
+def _is_percent_like(ch: str) -> bool:
+    """A percent/permille/degree-family sign, in any script.
+
+    A whitelist of ASCII spellings let U+FF05 and U+FE6A be stripped as
+    decoration, so "50\uff05" folded into "50".  Unicode names the family, and
+    the name is what distinguishes it from the punctuation beside it.
+    """
+    try:
+        name = unicodedata.name(ch)
+    except ValueError:
+        return False
+    return ("PERCENT" in name or "PER MILLE" in name
+            or "PER TEN THOUSAND" in name or name == "DEGREE SIGN")
+
+
+def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
+    """A symbol that changes what the numeral beside it counts.
+
+    A currency sign or a mathematical sign in ANY script, plus the ASCII
+    separators and the percent-like suffixes.  Category, not a whitelist: the
+    ASCII list named ``$`` and ``+`` and missed every other currency and sign,
+    which folded "\u00a350" into "50" and "\u00a350" into "\u20ac50".
+
+    Direction matters: a leading separator may BEGIN a numeral (".5") but the
+    same character must not survive at the END, or "5." and "5" stop being one
+    value.
+    """
+    if unicodedata.category(ch) in ("Sc", "Sm") or _is_percent_like(ch):
+        return True
+    return ch in (_NUMERIC_LEAD if leading else _NUMERIC_TRAIL)
+
+
+def _leading_symbol_run(t: str, start: int, end: int) -> int:
+    """Where the token starts once its leading symbols are accounted for.
+
+    A CHAIN of them is common and each one counts ("-\u00a350", "\u00a3-50",
+    "-.5").  Keeping only the symbol next to the first digit discarded the
+    sign, and a negative amount then folded into a positive one.  Zero when
+    the whole run belongs to the numeral, otherwise the index past it.
+    """
+    seen = 0
+    while seen < end and _is_edge_punct(t[seen]):
+        seen += 1
+    # Punctuation that cannot belong to a numeral (a bracket, a quote) is
+    # decoration, so it comes off before the numeric run is judged.
+    while start < seen and not _keeps_numeric_edge(t[start], True):
+        start += 1
+    if start == seen or not any(c.isdigit() for c in t[seen:end]):
+        return seen
+    if not all(_keeps_numeric_edge(c, True) for c in t[start:seen]):
+        return seen
+    return start
+
+
+def _is_numeric_sign_token(t: str) -> bool:
+    """A token that is only a currency or sign, waiting for its numeral.
+
+    Written apart ("we paid £ 50"), the sign is its own whitespace token and
+    the edge strip removed it as decoration — the numeral then read as a bare
+    value and the difference folded.
+    """
+    if not t:
+        return False
+    return all(c == "-" or unicodedata.category(c) in ("Sc", "Sm")
+               or _is_percent_like(c) or c in _NUMERIC_TRAIL for c in t)
+
+
+def _strip_edges(t: str) -> str:
+    """Edge punctuation and symbols stripped, in any script.
+
+    Two numeric shapes are preserved: a leading separator that begins a numeral
+    (".5", "$50") and a trailing suffix that changes what it counts ("50%").
+    Leading only for the first, so "5." and "5" stay one value.
+    """
+    if _is_numeric_sign_token(t):
+        return t
+    start, end = 0, len(t)
+    start = _leading_symbol_run(t, start, end)
+    while end > start and _is_edge_punct(t[end - 1]):
+        if _keeps_numeric_edge(t[end - 1], False) and t[start:end - 1][-1:].isdigit():
+            break
+        end -= 1
+    return t[start:end]
+
+
+def _guard_tokens(content: str) -> set[str]:
+    """Lowercased whitespace tokens with edge punctuation stripped."""
+    return set(_guard_token_seq(content))
+
+
+def _canonicalise_clocks(content: str) -> str:
+    """Every clock form replaced by one placeholder token.
+
+    "6pm", "six pm" and "6:00 pm" are one value, and the placeholder makes a
+    clock comparable to a number — so a clock can be BOUND to the noun beside
+    it and KEPT in a marker's scope.  Deleting it, which is what the value
+    comparison alone used to do, loses both: "we start at 6pm and end at 9pm"
+    and "we start at 9pm and end at 6pm" then carry one value signature.
+    """
+    def sub(m: re.Match) -> str:
+        sig = _value_signature(m.group(0))
+        return "clock" + (sig.replace(":", "") if sig else m.group(0))
+
+    return _CLOCK_RE.sub(sub, _norm(content))
+
+
+_UNIT_WORDS = frozenset({
+    "k", "km", "mi", "m", "kg", "lb", "min", "mins", "h", "hr", "hrs",
+    "s", "sec", "secs", "minutes", "hours",
+})
+
+
+def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
+    """Each value token paired with the content token BEFORE it, IN ORDER.
+
+    Number words map to their value ("six" → "6") and clock forms to one
+    placeholder, because ``_value_signature`` compares those in its own
+    normalised encoding, where "6pm", "six pm" and "6:00 pm" are one value.
+    The signature alone is not sufficient: it returns early once both sides
+    carry one, so it misses a differing number sitting BESIDE an equal clock
+    value ("3 crates at 9am" vs "4 crates at 9am").
+
+    The PAIRING is the point, and it is why neither a set nor a bare sequence
+    will do.  "we have 2 cats and 3 dogs" and "we have 2 dogs and 3 cats" carry
+    one number sequence and two quantities; "3 crates to 2 stores" and "2
+    crates to 3 stores" likewise.  Anchoring each value to the content token it
+    sits beside separates the pairings.  The anchor is the token already seen,
+    so no lookahead is needed and a paraphrase that reorders clauses still
+    anchors each value to the same word — which is what keeps #4652's
+    marker-free paraphrase foldable.
+
+    A compound number spelled in two words is ONE value ("twenty three" →
+    "23"), not two: read apart, "twenty three boxes" bound "20" and "3" and
+    matched the genuine pair 20 and 3.
+    """
+    seq = _guard_token_seq(_canonicalise_clocks(content))
+    out: list[tuple[str, str]] = []
+    anchor = ""
+    i = 0
+    while i < len(seq):
+        t = seq[i]
+        # The token itself, NOT `_canon_token(t)`: stripping non-word
+        # characters collapses "1.2" into "12", "50%" into "50" and "$50"
+        # into "50", turning a different quantity into the same binding.  The
+        # token is already normalised and a clock is already a placeholder.
+        value = t if any(c.isdigit() for c in t) else None
+        if value is None and t in _CLOCK_UNITS:
+            # A meridiem _CLOCK_RE could not bind to an hour ("6 in the am")
+            # is still a value: dropping it let an am/pm difference fold.
+            value = "meridiem-" + t
+        if value is None:
+            v = _num_word_value(t)
+            if v is not None and i + 1 < len(seq):
+                two = _num_word_value(t + " " + seq[i + 1])
+                if two is not None:
+                    value, i = str(two), i + 1
+            if value is None:
+                value = str(v) if v is not None else None
+        if value is not None and i + 1 < len(seq) and seq[i + 1] in _UNIT_WORDS \
+                and any(c.isdigit() for c in value):
+            # A unit word written apart belongs to the value: "ten km" and
+            # "10km" are one quantity, and "2 hours"/"two hours" must agree
+            # whichever way the unit is written.
+            value = value + seq[i + 1]
+            i += 1
+        if value is not None:
+            out.append((anchor, value))
+            i += 1
+            continue
+        if t not in _CONTENT_STOPWORDS and t not in _CLOCK_UNITS \
+                and t not in _DATE_WORDS:
+            anchor = t
+        i += 1
+    return tuple(out)
+
+
+def _sub_tokens(t: str) -> tuple[str, ...]:
+    """The word-parts of one whitespace token, when it is more than a word.
+
+    A negator can be fused on its LEFT edge too, and then the separator belongs
+    to the word BEFORE it: "is!not", "do-not", "do…not" are each one
+    whitespace token, and an edge-strip cannot reach a separator that is in the
+    middle.  Canonicalised whole, they read as "isnot"/"donot", which is no
+    negation marker, and the negated claim folded into the positive one.
+    """
+    if t.isalnum():
+        return ()
+    out: list[str] = []
+    for part in re.split(r"[^\w']+|_+", t):
+        if not part:
+            continue
+        out.append(_apostrophe_free(part))
+        # An apostrophe used as a SEPARATOR is not a clitic: "do'not" is one
+        # token whose parts are "do" and "not".  Reading it whole gave
+        # "donot", which is no marker, and the negated claim folded.
+        out.extend(p for p in re.split(r"'+", part) if p)
+    return tuple(out)
+
+
+def _negation_markers(content: str) -> frozenset[str]:
+    """Negation markers, in one canonical spelling.
+
+    The clitic rule is a SHAPE (``_CLITIC_RE``), not a word list: a fixed list
+    cannot enumerate every verb a negator attaches to, nor every codepoint an
+    apostrophe is written with — "mustn't" is a negation and appears in no
+    hand-written list.
+
+    Each token is read whole AND by its word-parts.  Reading it whole is what
+    makes a clitic a negator whatever the apostrophe; reading the parts is what
+    finds one fused to a separator on its left.  A part can only ADD a marker,
+    and a marker only ever refuses a fold, so over-reading is the safe
+    direction.
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        canon = _canon_token(_deaccent(t))
+        if canon in _NEGATION_MARKERS or _CLITIC_RE.search(canon):
+            out.add(canon)
+            continue
+        for part in _sub_tokens(t):
+            part = _deaccent(part)
+            if part in _NEGATION_MARKERS or _CLITIC_RE.search(part):
+                out.add(part)
+    return frozenset(out)
+
+
+def _deaccent(t: str) -> str:
+    """The word with its diacritics removed.
+
+    A combining mark is invisible in the sense that matters here: it does not
+    separate two words, so a marker with one against it is still that marker to
+    a reader, while every lookup that matches a word exactly misses it.  NFD +
+    drop the marks + NFC makes "h\u00eds" read as "his" and "today\u0308" as
+    "today".
+    """
+    decomposed = unicodedata.normalize("NFD", str(t or ""))
+    return unicodedata.normalize(
+        "NFC", "".join(c for c in decomposed if unicodedata.category(c) != "Mn"))
+
+
+def _flat_words(s: str) -> str:
+    """The claim with every non-word character turned into a single space.
+
+    A multi-word table entry is written with plain spaces, so an interior
+    separator defeats a substring test: "as-long-as" and "next\u200bweek" are
+    not the entries they are.  Normalised this way, both are.
+    """
+    return re.sub(r"[^\w']+|_+", " ", _fold_unicode(_norm(s))).strip()
+
+
+def _lookup_keys(t: str) -> tuple[str, ...]:
+    """Every form of a token a word list must be matched against.
+
+    Three, because a word reaches a list through three spellings: as written
+    (``t``), with its diacritics dropped, and by its word-parts when it is
+    fused to a separator ("if!the" holds "if"; "do'not" holds "not").  A key
+    can only ADD a marker downstream, and a marker only ever refuses a fold.
+    """
+    keys = [_deaccent(t)]
+    keys.extend(_sub_tokens(t))
+    return tuple(k for k in keys if k)
+
+
+def _condition_markers(content: str) -> frozenset[str]:
+    """Condition/qualifier markers — single words and multi-word connectives.
+
+    Read whole AND by parts, as the negators are: "if!the build passes" is one
+    whitespace token whose parts are "if" and "the", and matching only the
+    whole token left the condition invisible.
+    """
+    found: set[str] = set()
+    for t in _guard_tokens(content):
+        found.update(k for k in _lookup_keys(t) if k in _CONDITION_MARKERS)
+    flat = _flat_words(content)
+    found.update(p for p in _CONDITION_PHRASES if p in flat)
+    return frozenset(found)
+
+
+def _date_tokens(content: str) -> tuple[str, ...]:
+    """Date/scope words IN ORDER — month names, relative days, multi-word days.
+
+    Deliberately WITHOUT digit-bearing tokens: those are the value dimension's
+    job, and it normalises them ("6pm"/"six pm" are one value).  Including
+    them here would read a value spelling change as a date change.
+
+    Ordered, not a set: a date is as bound to its verb as a number is to its
+    noun, and "we ship on monday and receive on tuesday" vs its mirror carries
+    one date set and two meanings.
+
+    Position, not category: multi-word days are merged with the single-word
+    ones by where they sit in the claim.  Appending them in the phrase list's
+    own order made the tuple permutation-invariant, which put the phrase form
+    straight back where the set had been.
+    """
+    flat = _flat_words(content)
+    seq = _guard_token_seq(flat)
+    found: list[tuple[int, str]] = []
+    for i, t in enumerate(seq):
+        # A date word fused to a separator is still a date word: "tomorrow-"
+        # and "tomorrow/the launch" are one token each, and reading only the
+        # whole token made the day invisible.
+        keys = _lookup_keys(t)
+        hit = next((k for k in keys if k in _DATE_WORDS), None)
+        if hit is not None:
+            found.append((i, hit))
+            continue
+        # A month that is also a modal counts only in a date position —
+        # immediately after a date preposition.
+        ambiguous = (any(k in _MONTH_AMBIGUOUS for k in keys) and i
+                     and seq[i - 1] in _DATE_PREPOSITIONS)
+        if ambiguous:
+            found.append((i, t))
+    for phrase in _DATE_PHRASES:
+        start = flat.find(phrase)
+        if start >= 0:
+            found.append((flat[:start].count(" "), phrase))
+    found.sort()
+    return tuple(t for _, t in found)
+
+
+def _proper_nouns(content: str) -> frozenset[str]:
+    """Tokens capitalised in the RAW content, less the sentence-initial one.
+
+    Capitalisation is the one shape signal a name has without a model, and
+    ``_norm`` discards it.  The first token is excluded because it is
+    capitalised by position rather than by being a name.
+    """
+    raw = [_strip_edges(t)
+           for t in _fold_unicode(content).translate(_APOSTROPHES).split()]
+    named: set[str] = set()
+    for i, t in enumerate(raw):
+        # The first token is excluded: it is capitalised by position rather
+        # than by being a name.
+        if i == 0 or not t:
+            continue
+        # A name fused to the word before it ("for@Alice") is ONE whitespace
+        # token beginning lower case, so a whole-token capital test never saw
+        # it.  BOTH spellings are registered: the part matches the split form,
+        # and the fused spelling matches what the content skeleton holds, which
+        # is what the one-sided test intersects against.
+        parts = [t] if t.isalnum() else [p for p in re.split(r"[^\w]|_+", t) if p]
+        # ANY uppercase letter, not only one at a part's start: a combining
+        # mark that COMPOSES leaves the capital inside the word ("fo\u0155Alice"),
+        # so a start-of-part test saw no name at all.
+        if any(any(c.isupper() for c in p) for p in parts):
+            named.update(_apostrophe_free(_deaccent(_norm(p))) for p in parts)
+            named.add(_apostrophe_free(_deaccent(_norm(t))))
+    return frozenset(named)
+
+
+def _content_tokens(content: str) -> set[str]:
+    """A claim's distinguishing skeleton — frame- and value-free tokens.
+
+    Values are removed deliberately: they are compared by their own
+    dimension, and "six pm"/"6pm" must not read as a content substitution.
+    Date words go with them — "shipped in march" vs "shipped in april" is a
+    DATE difference, and counting the month as substituted content as well
+    would refuse the value update the date dimension exists to permit.  The
+    cost is that a month used as a proper name ("june is our contact" vs
+    "april is our contact") reaches no dimension that could veto the update;
+    telling a month from a name there needs a model, so it is left to one.
+
+    Entity-bearing pronouns and possessives are KEPT (``_CONTENT_STOPWORDS``
+    is the frame set minus them): a change of subject is a change of entity.
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        t = _apostrophe_free(_deaccent(t))
+        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
+            continue
+        if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
+            continue
+        out.add(t)
+    return out
+
+
+def _possessives(content: str) -> frozenset[str]:
+    """Possessive owners ("bob's", "the team's"), in canonical spelling.
+
+    Read from the token stream, which keeps the separator, because
+    ``_content_tokens`` strips it to make one word's two spellings agree and
+    the possessive signal is exactly what that loses.
+
+    Both the whole token and its parts are searched, so a NON-composing
+    combining mark standing where the clitic separator belongs is not erased
+    before the shape rule can see it.
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        for cand in (t, *_sub_tokens(t)):
+            if _POSSESSIVE_RE.search(cand):
+                out.add(_canon_token(_deaccent(cand)))
+    return frozenset(out)
+
+
+def _marker_scope(content: str) -> tuple[str, ...]:
+    """The ordered marker-and-content sequence of a marker-bearing claim.
+
+    Negation and condition are SCOPE-bearing, and a bag of tokens cannot
+    express that.  "the cache is not the problem, the lock is" and "the cache
+    is the problem, the lock is not" carry the same marker and the same
+    content tokens, as do "we ship if the build passes and rollback if the
+    tests fail" and its clause-swapped mirror — each pair differs only in
+    what the marker attaches to.  An ordered comparison sees that; a set
+    comparison does not, and the pair would fold (at the in-capture seam,
+    that is a DELETE).
+
+    Values and clock units are kept as placeholders and date words in
+    position: their own dimensions compare them, but a marker attached to a
+    different one of them is a different claim, and dropping them hid that.
+    """
+    out: list[str] = []
+    for t in _guard_token_seq(_canonicalise_clocks(content)):
+        if t in _NEGATION_MARKERS or _CLITIC_RE.search(t) \
+                or t in _CONDITION_MARKERS:
+            out.append(_canon_token(t))
+            continue
+        if t in _DATE_WORDS:
+            # Kept in position, and checked BEFORE the frame stop set: several
+            # relative days are frame words, so a marker on one of two dates
+            # would otherwise vanish ("we ship today, not tomorrow" vs its
+            # mirror) — the difference a date-word set cannot see.
+            out.append(t)
+            continue
+        if t in _CONTENT_STOPWORDS:
+            continue
+        if t in _CLOCK_UNITS:
+            # Kept, as the value it is: a meridiem no clock form absorbed.
+            out.append("#meridiem-" + t)
+            continue
+        if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
+            # A placeholder, so a marker attached to a different value is
+            # visible ("we ship at 6pm, not at 5pm" vs its mirror).  The token
+            # itself, not its word characters: `_canon_token` would collapse
+            # "1.2", "50%" and "$50" onto "12" and "50".
+            out.append("#" + t)
+            continue
+        out.append(t)
+    return tuple(out)
+
+
+def _scripts(content: str) -> frozenset[str]:
+    """Scripts the claim's letters are drawn from — a language difference in
+    the one form decidable without a model."""
+    found: set[str] = set()
+    for ch in str(content or "").translate(_APOSTROPHES):
+        if ch.isascii() and ch.isalpha():
+            found.add("latin")
+            continue
+        cp = ord(ch)
+        for name, lo, hi in _SCRIPT_BLOCKS:
+            if lo <= cp <= hi:
+                found.add(name)
+                break
+    return frozenset(found)
+
+
+def _identity_differences(a: str, b: str) -> frozenset[str]:
+    """Every identity dimension in which ``a`` and ``b`` differ.
+
+    Deliberately independent of the value dimensions.  Asking only for the
+    FIRST differing dimension lets a value difference MASK an identity one:
+    "the deploy succeeded at 3pm" and "the deploy failed at 5pm" differ in a
+    number and in the predicate, and returning the number would license
+    superseding the predicate — the harm this boundary exists to prevent.
+    """
+    out: set[str] = set()
+    neg_a, neg_b = _negation_markers(a), _negation_markers(b)
+    con_a, con_b = _condition_markers(a), _condition_markers(b)
+    if neg_a != neg_b:
+        out.add("negation")
+    if con_a != con_b:
+        out.add("condition")
+    script_a, script_b = _scripts(a), _scripts(b)
+    if script_a and script_b and script_a != script_b:
+        out.add("language")
+    content_a, content_b = _content_tokens(a), _content_tokens(b)
+    only_a, only_b = content_a - content_b, content_b - content_a
+    one_sided = only_a | only_b
+    named = _proper_nouns(a) | _proper_nouns(b)
+    if only_a and only_b:
+        out.add("substituted_content")
+    elif (one_sided & _ENTITY_PRONOUNS) or (one_sided & named):
+        # A pronoun on ONE side re-subjects the claim, and so does a name: "the
+        # manager approved the plan" and "his manager approved the plan" are
+        # not one claim in two spellings, and neither are "the deploy failed"
+        # and "the deploy failed for alice".  A possessive is caught by the
+        # set comparison below.  Every other one-sided token is the documented
+        # broadening case ("the team meets weekly in main office" ← "the team
+        # meets weekly"), which must stay foldable.
+        out.add("substituted_content")
+    poss_a, poss_b = _possessives(a), _possessives(b)
+    if (poss_a or poss_b) and poss_a != poss_b:
+        out.add("substituted_content")
+    # Negation and condition are SCOPE-bearing, and a set cannot express that:
+    # "the cache is not the problem, the lock is" and "the cache is the
+    # problem, the lock is not" carry one marker and one multiset in two
+    # attachments.  Restricted to marker-bearing pairs, because a legitimate
+    # paraphrase may reorder freely — "backpressure control is missing from
+    # the ingest queue" and "the ingest queue is missing backpressure
+    # control" are one claim, and #4652 pins that they fold.
+    if (neg_a or neg_b or con_a or con_b) \
+            and _marker_scope(a) != _marker_scope(b):
+        out.add("scope")
+    return frozenset(out)
+
+
+def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
+    """``(first distinguishing dimension or None, every identity difference)``.
+
+    The first element is the audit label — the dimension a caller reports.  The
+    second is the decision: a pair whose identity set is non-empty may be
+    neither folded nor superseded, however its value dimensions compare.
+
+    Total and fail-closed — every input is coerced by ``_norm`` and every
+    operation is a string, regex or set operation, so LLM-shaped input cannot
+    raise here; if anything does, the sentinel reads as a difference.
+    """
+    try:
+        ta, tb = _guard_tokens(a), _guard_tokens(b)
+        if not ta or not tb:
+            # Nothing to compare: refuse the fold rather than assume agreement.
+            return "unreadable", _UNREADABLE
+        identity = _identity_differences(a, b)
+        dimension: str | None = None
+        # The identity dimensions come first, because they are the ones that
+        # constrain BOTH decisions; a value dimension is reported only when no
+        # identity dimension differs.  Reporting a value dimension for a pair
+        # that also substitutes content would tell a reader the pair is a value
+        # change when the case for refusing it is the substitution.
+        if identity:
+            # Sorted so the reported label is deterministic across runs.
+            dimension = sorted(identity)[0]
+        else:
+            sig_a, sig_b = _value_signature(a), _value_signature(b)
+            # Both halves are needed.  The signature normalises the clock and
+            # quantity forms ("6pm"/"six pm" are one value); the binding pairs
+            # each value with the content token beside it, which catches a
+            # differing number ANYWHERE in the claim — including one beside an
+            # equal signature, and two numbers permuted.
+            if sig_a != sig_b or _value_bindings(a) != _value_bindings(b):
+                dimension = "number"
+            elif _date_tokens(a) != _date_tokens(b):
+                dimension = "date"
+        return dimension, identity
+    except Exception:  # noqa: BLE001, RUF100
+        return "unreadable", _UNREADABLE
+
+
+def distinguishing_difference(a: str, b: str) -> str | None:
+    """The never-across dimension in which ``a`` and ``b`` differ, else None.
+
+    Returns one of ``number``, ``negation``, ``condition``, ``scope``,
+    ``date``, ``language``, ``substituted_content`` or ``unreadable``.  Any of
+    them means the pair may not be folded into one claim: two claims differing
+    in a distinguishing dimension are rival claims, not duplicates.
+
+    When a pair differs in more than one dimension this reports the identity
+    one first, because that is what constrains the decision; the DECISION itself
+    belongs to ``fold_allowed`` / ``supersede_allowed``, which consult the full
+    identity set rather than this label.
+    """
+    return _boundary(a, b)[0]
+
+
+def _difference(a: str, b: str) -> str | None:
+    """``distinguishing_difference``, already fail-closed."""
+    return _boundary(a, b)[0]
+
+
+def fold_allowed(a: str, b: str) -> bool:
+    """True when ``a`` and ``b`` may be treated as the same claim.
+
+    Fail-closed toward KEEP: any failure to read either side refuses the fold,
+    so an unreadable comparison preserves both claims instead of dropping one
+    (D12/O4's asymmetry — a wrong keep is noise, a wrong drop is memory loss).
+    """
+    return _boundary(a, b)[0] is None
+
+
+def supersede_allowed(a: str, b: str) -> bool:
+    """True when ``a`` may supersede ``b`` (an UPDATE of the same attribute).
+
+    A differing NUMBER or DATE is a new value for one attribute, which is what
+    UPDATE is for — the boundary does not block it.  A differing NEGATION,
+    CONDITION, marker SCOPE, LANGUAGE or substituted content means the two are
+    RIVAL claims: a rival may be neither folded nor superseded, so both
+    survive.  This asks the full identity set, so a value difference elsewhere
+    in the claim cannot mask it.
+    """
+    return not _boundary(a, b)[1]
 
 
 def classify_consolidation(point: dict, priors: list[dict], *,
@@ -3097,15 +3964,24 @@ def classify_consolidation(point: dict, priors: list[dict], *,
             value_differs = bool(_frame_tokens(content)
                                  - _frame_tokens(old_content))
         later = _date_is_later_or_undated(current_date, p)
+        # D12/O4 (#5080): the boundary guards every decision that would
+        # destroy the prior, not only the fold.  ``identity`` is the full set
+        # of identity differences, so a value difference elsewhere in the
+        # claim cannot mask one of them.
+        difference, identity = _boundary(old_content, content)
         # 2) UPDATE — priority over NOOP
-        if gate and later and value_differs:
+        if gate and later and value_differs and not identity:
             band_ok = ov >= REVISES_MIN_OVERLAP
             contradiction = _fact_value_contradiction(
                 content, mentions, p, when=current_date)
             if (band_ok or contradiction) \
                     and (best_update is None or ov > best_update[0]):
                 best_update = (ov, p)
-        # 3) NOOP — paraphrase
+        # 3) NOOP — paraphrase.  A fold may never cross a distinguishing
+        # difference (D12/O4, #5080).  The boundary is checked per prior, so a
+        # refused fold falls through to ADD — both claims survive.
+        if difference is not None:
+            continue
         if sig_equal and (tier_a or bool(mentions)) and gate:
             # value identity — short-circuits both bands
             if best_noop is None or ov > best_noop[0]:

@@ -8,6 +8,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 """
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import shutil
@@ -93,6 +94,47 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert r["carve_out_run"] is False
         assert r["slow_selected"] == []
         assert "test_website_docs_consistency.py" in r["test_files"], changed
+
+
+def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
+    """#3673 indicator (2): the parity gate runs on every PR touching either copy.
+
+    The gate is `test_onboarding_variants.py::test_m8_deploy_mirror_matches_canonical`.
+    Before this entry existed, `website/apps/dashboard/public/skills/` matched NO
+    SOURCE_PATTERNS entry, so an edit to the SERVED copy alone produced
+    `surfaces=[]` and the parity test ran only through the tier-1 fallback —
+    coverage that held by accident and that would vanish the moment the file left
+    `tier1`. For the installer the consequence was worse: its guard,
+    `test_installer_preserves_foreign_skill_content.py`, is on `core` and NOT in
+    `tier1`, so an installer-only PR ran no guard for the installer at all — the
+    #1349/#3332/#3616 silent-drop class this file exists to prevent.
+
+    Asserted on the SURFACE, not merely on the test-file list: the tier-1
+    fallback also puts `test_onboarding_variants.py` in `test_files`, so a
+    test-file-only assertion passes with the wiring absent — a gate that can only
+    ever pass. Watched RED before the SOURCE_PATTERNS entries existed, GREEN
+    after, which is the only evidence that distinguishes the two.
+    """
+    cases = (
+        # the two tracked copies whose byte-identity IS the parity contract
+        ("tortoise/onboarding/SKILL.md", "test_onboarding_variants.py"),
+        ("website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md",
+         "test_onboarding_variants.py"),
+        # a served sibling — the same directory, the same gate
+        ("website/apps/dashboard/public/skills/how-to-use-tortoise/SKILL.md",
+         "test_onboarding_variants.py"),
+        # the installer whose SKILLS=(...) the dashboard's claim is pinned against
+        ("website/apps/dashboard/public/install-tortoise-skills.sh",
+         "test_installer_preserves_foreign_skill_content.py"),
+    )
+    root = Path(__file__).resolve().parents[1]
+    for changed, guard in cases:
+        assert (root / changed).exists(), f"guarded path is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — its guard runs only via the "
+            f"tier-1 fallback, which is not a wiring")
+        assert guard in r["test_files"], f"{changed} does not select {guard}"
 
 
 def test_every_source_pattern_is_selectable():
@@ -251,6 +293,65 @@ def test_shared_module_goes_full():
     assert r["test_files"] == "ALL"
     r2 = _sel(["tests/conftest.py"])
     assert r2["full"] is True
+
+
+def test_every_conftest_module_level_tests_import_is_shared():
+    """#4069: a `tests/` helper conftest imports at MODULE level is suite-wide.
+
+    `tests/conftest.py` re-exports suite-wide fixtures, so a `tests/` helper it imports at
+    module level runs for EVERY surface's tests; the manifest never classifies it (it is
+    not a `test_*.py` file), so unless it is in `SHARED_MODULES` a change to it selects
+    `core` only and an api/onboarding/battery break it induces never runs on the PR that
+    made it (the #1349/#3332/#3910 silent-under-selection class).
+
+    Scope is deliberately `tests.*` only: this criterion justifies a *test helper* being
+    suite-wide, not a product module (whose classification is its own path pattern plus
+    the cross-cutting judgment list `SHARED_MODULES` carries). The product modules conftest
+    imports at module level are therefore NOT covered here; that residual is measured on
+    #4486, not asserted away.
+
+    The import set is read from the AST and the walk is GENERIC: it recurses into every
+    nested statement container (class bodies, `match` cases, `except*` blocks, with/for
+    bodies, ...) and stops only at function-like nodes, whose bodies are not module level.
+    Enumerating the containers to descend into is what let an earlier version of this ratchet
+    be narrower than the rule it documents, so there is no such list here. Relative imports
+    (`from . import _x`) are deliberately unmatched: `tests/` has no `__init__.py`, so they
+    cannot appear at conftest module level today, and this test states that rather than
+    pretending they are covered.
+    """
+    conftest_path = Path(__file__).resolve().parent / "conftest.py"
+    module = ast.parse(conftest_path.read_text())
+    imported: set[str] = set()
+
+    def walk(node) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue  # a function-local import is not module level
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    if alias.name == "tests" or alias.name.startswith("tests."):
+                        imported.add(alias.name)
+                continue
+            if isinstance(child, ast.ImportFrom):
+                if child.level == 0 and child.module == "tests":
+                    for alias in child.names:
+                        imported.add(f"tests.{alias.name}")
+                elif child.level == 0 and child.module and child.module.startswith("tests."):
+                    imported.add(child.module)
+                continue
+            walk(child)
+
+    walk(module)
+    assert imported, "expected tests/conftest.py to import a tests.* module at module level"
+    for module in sorted(imported):
+        rel = module.replace(".", "/") + ".py"
+        assert rel in SHARED_MODULES, (
+            f"{rel} is imported at conftest MODULE level (so it runs for every "
+            f"surface's tests) but is not in SHARED_MODULES — a change to it would "
+            f"select core only")
+        result = _sel([rel])
+        assert result["full"] is True, result
+        assert result["test_files"] == "ALL", result
 
 
 def test_every_shared_module_entry_selects_the_full_matrix():
@@ -463,6 +564,23 @@ def test_gen_ask_transcripts_change_selects_sdk_not_tier1():
     assert "sdk" in r["surfaces"], r
     assert "test_ask_seed_shape.py" in r["test_files"], r
     assert "test_ask_regression_llm.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
+    # #4069: tools/tmpdir_sweep.py owns tests/test_tmpdir_sweep.py and
+    # tests/test_tmpdir_hygiene.py. The mechanism is the CORE_ALSO entry:
+    # `_selection_relevant()` consults it, so the `tools/` path survives the
+    # flat NON_PYTHON_PREFIXES filter, and the match loop then adds `core` and
+    # marks the path found — so a tool-only change selects `core` instead of
+    # tier-1 smoke or the unknown-path full matrix. Mutation check: removing
+    # the CORE_ALSO entry filters the path out (docs-only early return → empty
+    # surfaces, tier-1 smoke), which fails asserts 2–5 below.
+    r = _sel(["tools/tmpdir_sweep.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_tmpdir_sweep.py" in r["test_files"], r
+    assert "test_tmpdir_hygiene.py" in r["test_files"], r
     assert set(r["test_files"]) != _tier1()
 
 

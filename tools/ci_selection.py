@@ -116,6 +116,15 @@ SHARED_MODULES = (
     "tortoise/projection/__init__.py",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
+    # #4069: suite-wide test helpers re-exported by `tests/conftest.py`. Both are
+    # imported at conftest MODULE level and hand their fixtures to every surface's
+    # tests, and neither is a `test_*.py` file, so the manifest never classifies
+    # them: without these entries a change to one selected `core` only, and a break
+    # it induced in an api/eval/onboarding/ep/battery test never ran on the PR that
+    # made it (#1349/#3332/#3910). The `tests.*` half of that rule is enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
+    "tests/_tmpdir_hygiene.py",
+    "tests/_embedded.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -159,6 +168,22 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #3673: the served skill documents and the installer belong to
+                   # this surface. The parity contract between
+                   # `tortoise/onboarding/SKILL.md` and its served mirror is
+                   # asserted by test_onboarding_variants.py, and the installer's
+                   # `SKILLS=(...)` is what the dashboard's shipped-set claim is
+                   # pinned against (test_installer_preserves_foreign_skill_
+                   # content.py, dual-registered onto this surface below).
+                   #
+                   # Before these entries a change to the SERVED copy alone matched
+                   # no pattern: `surfaces=[]` -> the parity gate ran only via the
+                   # tier-1 fallback (coverage by accident, not by design, and it
+                   # would vanish the moment the test left `tier1`). Worse, the
+                   # installer ran NO guard at all — its guard is on `core` and is
+                   # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
+                   "website/apps/dashboard/public/skills/",
+                   "website/apps/dashboard/public/install-tortoise-skills.sh",
                    # #3952: the blog-admin console SPA's build config and its
                    # committed build snapshot own the guard tests added in
                    # tests/test_admin_return_to.py (the build base, and
@@ -524,8 +549,20 @@ SOURCE_PATTERNS = {
 # `--manifest-only` alone selected only tier-1 smoke — the pin for the code being
 # changed would not have run. That is the #1349/#3332/#3616 silent-drop class, on
 # the file this PR modifies.
+#
+# #4069: the temp-dir sweep is test-infra whose guard tests
+# (tests/test_tmpdir_sweep.py, tests/test_tmpdir_hygiene.py) are
+# core-registered. `_selection_relevant()` consults CORE_ALSO, so
+# this entry has a DUAL role: it admits a `tools/` path past the
+# flat NON_PYTHON_PREFIXES filter AND, in the match loop below,
+# adds `core` and marks the path found — so a tool-only change
+# selects `core` instead of the unknown-path fail-closed full
+# matrix, and never drops to tier-1 smoke (the #1349/#3332/#3910
+# silent-drop class). No TOOL_CARVEOUTS entry is needed: that
+# tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
-             "tortoise/projection/edges.py")
+             "tortoise/projection/edges.py",
+             "tools/tmpdir_sweep.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (

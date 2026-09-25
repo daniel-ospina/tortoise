@@ -51,8 +51,7 @@ export function headerUpgradeEligible(team) {
 
 // Where the banner's limit nudge should send the user — or null when this
 // team/deployment has no working route, in which case the nudge is not
-// rendered at all (never a dead control; mirrors the header gate and
-// CapNotice's "See pricing" fallback).
+// rendered at all (never a dead control; mirrors the header gate).
 //   'checkout' — free/anon with a server-resolved price id: start the purchase
 //   'portal'   — a team that already has a Stripe customer (active/trialing/
 //                past_due/canceled/unpaid): checkout 409s on an active
@@ -61,7 +60,11 @@ export function headerUpgradeEligible(team) {
 export function nudgeRoute(team) {
   if (!team) return null
   if (headerUpgradeEligible(team) && team.checkout_price_id) return 'checkout'
-  if (PAID_STATUSES.includes(team.subscription_status)) return 'portal'
+  // Route on the SAME fail-safe the header uses: a PAID TIER whose status is
+  // absent/unrecognized (e.g. a manually granted solo) is still a payer, and
+  // checkout 409s on an active subscription — so it must reach the portal, not
+  // a button that can only fail.
+  if (isPaidTeam(team)) return 'portal'
   return null
 }
 
