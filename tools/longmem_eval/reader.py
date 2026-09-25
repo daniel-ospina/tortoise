@@ -44,8 +44,7 @@ import sys
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/longmem_eval/reader.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/longmem_eval/reader.py`"
+        f"{sys.version_info[0]}.{sys.version_info[1]})"
     )
 
 import os
