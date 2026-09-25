@@ -130,6 +130,15 @@ class TestPhase1Phase2Parity:
                 "points": [{"ref": "sub-0123456789abcdef0123456789",
                             "kind": "statement", "content": "a"}],
             },
+            # #3586: the shape predicate is deliberately lenient about the
+            # minted digest's casing/length (an id's spelling belongs to the
+            # minter, and a future minted format must not become a silent ref
+            # shadow) — so a ref the canonical shape would have accepted as a
+            # label is rejected fail-closed here too.
+            "uppercase prefixed entity-id-shaped ref": {
+                "points": [{"ref": "sub-0123456789ABCDEF0123456789",
+                            "kind": "statement", "content": "a"}],
+            },
         }
         for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
