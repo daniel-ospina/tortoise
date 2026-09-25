@@ -20462,10 +20462,12 @@ class TortoiseSDK:
         silently no-op on them — the edge must bind the legacy node directly.
         """
         proj = self._get_proj()
-        # Anchored ON CREATE by the shared derivation writer (#5199) — the SAME
-        # writer the live path uses, so a crash-repaired edge is indistinguishable
-        # from one written on the happy path.
-        proj.link_source_to_event(url, event_id)
+        # Anchored ON CREATE, from the version the EVENT records it was read from
+        # (`e.file_hash`) — NOT the Source's current hash. This path runs when the
+        # file was edited since capture (W2): the Source holds the CURRENT hash
+        # while the legacy Event kept its stored `file_hash`, so anchoring the
+        # Source's hash here would report a STALE Event as current.
+        proj.link_source_to_legacy_event(url, event_id)
 
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
@@ -21318,6 +21320,12 @@ class TortoiseSDK:
             entity_id: the Document/Event/Object node id the source references
             entity_label: the entity label (Document|Event|Object) for the MATCH
             source_kind: sourceKind to set on auto-created Source (default: "document")
+
+        Anchor (#5199): a DERIVATION link (``Event`` | ``Document``) records the
+        source version its target was read from as an optional ``sourceVersion``,
+        read HERE from the source's own ``contentHash`` so no caller passes it and
+        this signature is unchanged. Written ``ON CREATE`` only. ``Object`` links
+        stay property-free. See ``docs/architecture/STORAGE-ARCHITECTURE.md`` §9.6.
 
         Raises:
             ValueError: if entity_label is not one of Document, Event, Object

@@ -200,9 +200,17 @@ _VALID_EDGE_PREDICATES = frozenset({
 })
 
 # `references` targets whose node is BUILT FROM the source's content, and therefore
-# carry the version anchor `sourceVersion` (ONTOLOGY §3.4/§4.6 — owner-approved
-# 2026-09-25, #5199). The anchor is set at LINK TIME from the source's current
-# `contentHash`, which is why the public SDK signature does not change.
+# carry the version anchor `sourceVersion` (owner-approved option A, 2026-09-25, #5199;
+# the operative record is `STORAGE-ARCHITECTURE.md` §9.6). The anchor is set at LINK
+# TIME from the source's current `contentHash`, which is why the public SDK signature
+# does not change.
+#
+# ⚠️ Source of authority: the approved scope is "the `contentHash` of the source version
+# the target was built from", and it is the CODE's writers that the set is pinned to —
+# NOT a §3.4 enumeration. ONTOLOGY §3.4 declares the `references` target list as
+# `Event|Object|Source` (noting a document is itself a `:Source`) and §4.6 still scopes
+# the anchor to `extractedFrom` (Point-level); that wording is deliberately frozen on
+# this branch, in owner review on #5199.
 #
 # `Object` is deliberately ABSENT. Every in-repo writer of a Source→Object
 # `references` link is identity/mention — a connector artifact whose Source `url`
@@ -212,25 +220,43 @@ _VALID_EDGE_PREDICATES = frozenset({
 # `DERIVABLE_STRUCTURAL_RELS`, so this anchor adds nothing to the replay surface.
 #
 # The discriminator is the target LABEL, which is a proxy for "derived" — the only
-# signature-preserving signal available. Every in-repo `Event` link is built from
-# the source (connector choke point + meeting path); if the ontology later rules
-# that the connector Event is identity rather than derivation, only this set moves.
+# signature-preserving signal available. `Document` is a member because in-repo writers
+# do mint `(Source)-[:references]->(:Document)` (`projection/entities.py:1901`,
+# `hosted_api.py:11558`, the doc classifier of the ingest path); excluding it would
+# leave that derivation half unanchored. If the ontology rules that the connector
+# `Event` is identity rather than derivation, only this set moves.
 _DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
 
-# CQL suffix stamping the derivation anchor on a `references` MERGE. Shared by EVERY
-# writer of a derivation edge so the anchor cannot be written by one path and silently
-# omitted by another (#5199 review, finding 1).
+# CQL suffix stamping the derivation anchor on a `references` MERGE, `ON CREATE` only.
 #
-# `ON CREATE` only: a re-link (connectors re-poll; `link_source_to_entity` is an
-# idempotent MERGE) must NOT advance the recorded version, or the staleness the anchor
-# exists to expose would silently read as current. And `''` — the auto-created-Source
-# placeholder — must NOT be stamped: `'' = ''` compares equal to the source's current
-# hash and would read as a FALSE current.
-_DERIVATION_ANCHOR_SET = (
-    "ON CREATE SET r.sourceVersion = "
-    "CASE WHEN s.contentHash IS NULL OR s.contentHash = '' "
-    "THEN NULL ELSE s.contentHash END"
-)
+# `ON CREATE` is load-bearing: connectors re-poll and the `link_source_to_*` writers are
+# idempotent MERGEs, so advancing a recorded version on a re-link would erase exactly the
+# staleness the anchor exists to expose. And `''` must NOT be stamped: it is the
+# auto-created-Source placeholder (and the "no recorded hash" value on an Event), and
+# `'' = ''` compares equal to the source's current hash — a FALSE current.
+#
+# `version_expr` names the version the edge was READ at. That is ``s.contentHash`` on the
+# live writers (the Source was just written from the content the target describes), but
+# ``e.file_hash`` on the repair path — see :meth:`_EdgeHandlers.link_source_to_legacy_event`.
+#
+# ⚠️ KNOWN LIMITATION — the anchor does not advance when the TARGET is rewritten in place
+# (#5199, under owner review). ``ON CREATE`` means a target rebuilt from a NEWER version
+# through the same node id (the agent-session re-index path reuses
+# ``event_id = f"session_{session_id}"``) keeps the ORIGINAL anchor and so reads STALE
+# while the target is in fact current — the converse of the false-current guarded below,
+# and the conservative direction the model prefers (``stale != wrong``, §4.6). Advancing
+# it safely requires distinguishing a target rebuild from a source-only re-poll, which
+# the ON CREATE/ON MATCH pair alone cannot; see the question recorded on #5199.
+def _anchor_on_create(version_expr: str) -> str:
+    return (
+        "ON CREATE SET r.sourceVersion = "
+        f"CASE WHEN {version_expr} IS NULL OR {version_expr} = '' "
+        f"THEN NULL ELSE {version_expr} END"
+    )
+
+
+_DERIVATION_ANCHOR_SET = _anchor_on_create("s.contentHash")
+_BACKFILL_ANCHOR_SET = _anchor_on_create("e.file_hash")
 
 
 class _EdgeHandlers:
@@ -528,20 +554,45 @@ class _EdgeHandlers:
 
     def link_source_to_event(self, source_key: str, event_id: str) -> None:
         """MERGE ``(Source {url})-[:references]->(Event {eventId})`` — the
-        ``eventId``-keyed derivation writer, with the anchor stamped identically.
+        ``eventId``-keyed derivation writer, anchoring the version the SOURCE holds.
 
         Separate from :meth:`link_source_to_entity` because legacy raw-Cypher Events
-        carry no ``id``, so that method's id-keyed MATCH would silently no-op on them
-        (the reason ``TortoiseSDK._backfill_link`` exists). One writer per key shape,
-        both stamping ``sourceVersion`` — so a derivation edge cannot be created
-        anchored on one path and unanchored on another (#5199 review, finding 1).
+        carry no ``id``, so that method's id-keyed MATCH would silently no-op on them.
+        Used by the connector choke point and the capture path. Every provenance
+        writer stamps, so a derivation edge cannot be anchored on one such path and
+        unanchored on another (the generic ``create_edge`` escape hatch and
+        ``graph-scripts/backfill_references.py`` are not provenance writers and are
+        not auto-anchored; see ``STORAGE-ARCHITECTURE.md`` §9.6).
 
         ``source_key`` is passed through AS the Source key — callers pass the same
         value they used for the Source MERGE, so this adds no new resolution step.
+
+        NOTE: on the repair path use :meth:`link_source_to_legacy_event` instead — the
+        Source there is deliberately NOT the version the Event was read from.
         """
         self.g.query(
             "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
             "MERGE (s)-[r:references]->(e) " + _DERIVATION_ANCHOR_SET,
+            params={"url": source_key, "eid": event_id},
+        )
+
+    def link_source_to_legacy_event(self, source_key: str, event_id: str) -> None:
+        """Repair-link a LEGACY ``Event`` to its ``Source``, anchoring the version
+        **the Event records it was read from** — never the Source's current hash.
+
+        Why this cannot be :meth:`link_source_to_event`: ``backfill_sources`` moves the
+        Source to the file's **CURRENT** hash while the legacy Event keeps the
+        ``file_hash`` it was captured with (W2, "file edited since capture"). The
+        Source's hash there is therefore NOT the version this Event was built from, and
+        anchoring ``s.contentHash`` would report a STALE Event as **current** — the
+        precise failure ``sourceVersion`` exists to expose. ``e.file_hash`` *is* that
+        version (it equals ``s.contentHash`` whenever the file has not changed), so it
+        is the honest anchor; an Event with no recorded hash anchors **nothing** rather
+        than guessing.
+        """
+        self.g.query(
+            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
+            "MERGE (s)-[r:references]->(e) " + _BACKFILL_ANCHOR_SET,
             params={"url": source_key, "eid": event_id},
         )
 
