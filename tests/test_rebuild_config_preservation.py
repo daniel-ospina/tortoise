@@ -1185,6 +1185,17 @@ def test_config_registry_doc_consistency():
     assert f":{ONBOARDING_NODE_LABEL}" in audit
     assert f":{ONBOARDING_STEP_LABEL}" in audit
     assert COMPLETED_STEP_EDGE in audit
+    # The section-preserved CONTAINER classes each get an audit row too, or the
+    # operator query under-reports the classes the query block above promises.
+    # This list is hand-maintained with the doc: a class preserved by a
+    # declared section and missing here is exactly the drift this test exists
+    # to catch, and `:Batch` / `:Session` were absent until #4641 filled them
+    # in.
+    for container in ("Batch", "Session"):
+        assert f":{container}" in preserved_sections, (
+            f"the preserved-sections block does not declare :{container}")
+        assert f":{container}" in audit, (
+            f"audit query omits the section-preserved :{container}")
 
 
 def test_v1_leftover_with_self_healed_config_still_reports_unknown(graph):
@@ -1361,7 +1372,7 @@ def test_rebuild_all_preserves_onboarding_state(graph):
     assert before["org-b"][1] == ["harness-connected", "team-named"]
     assert _onboards_targets(sdk, "org-a") == [anchor["id"]]
 
-    sdk._get_proj().rebuild_all(str(events))
+    result = sdk._get_proj().rebuild_all(str(events))
 
     after = {oid: _read_onboarding(sdk, oid) for oid in ("org-a", "org-b")}
     assert after["org-a"][0] == before["org-a"][0], (
@@ -1372,6 +1383,13 @@ def test_rebuild_all_preserves_onboarding_state(graph):
     assert after["org-b"][1] == before["org-b"][1]
     assert _onboards_targets(sdk, "org-a") == [anchor["id"]], (
         "the org-anchor `onboards` edge must survive")
+    # The positive control for the gap check below: with every anchor journaled
+    # (`create_subject` emits SubjectAdded) the verification must report NO
+    # gap — otherwise that check would be measuring nothing.
+    assert result["onboarding_missing_orgs"] == 0
+    assert result["onboarding_missing_links"] == 0
+    assert result["onboarding_missing_onboards"] == 0
+    assert result["onboarding_restore_failures"] == 0
 
 
 def test_rebuild_all_restores_onboarding_from_pending_sidecar(graph):
@@ -1561,4 +1579,71 @@ def test_rebuild_all_reports_onboarding_restore_counts(graph):
     assert result["onboarding_expected"] == 1
     assert result["onboarding_restored"] == 1
     assert result["onboarding_missing_links"] == 0
+    assert result["onboarding_missing_onboards"] == 0
     assert result["onboarding_restore_failures"] == 0
+
+
+def test_onboarding_onboards_edge_gap_is_reported_not_silent(graph):
+    """A dropped `onboards` edge must NOT read as a clean, full restore.
+
+    REAL path: `write_onboards_edge` MERGEs the anchor `:Subject` itself, so an
+    org whose anchor was minted by that raw write (and never journaled — the
+    #2194/#2295 class) has an edge the journal cannot reproduce. The restore
+    `MATCH`es BOTH endpoints, so the absent anchor makes the `MATCH` yield ZERO
+    rows: the `MERGE` never runs and NO exception is raised. Without an
+    edge-aware verification the run returns `onboarding_restored == expected`
+    and a clean `recover_from_log` — reporting success over a destroyed edge,
+    the silent partial restore #4641 exists to remove.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-raw", fork="build",
+                            steps=("harness-connected",),
+                            subject_id="raw-anchor-minted-by-the-writer")
+    assert _onboards_targets(sdk, "org-raw") == [
+        "raw-anchor-minted-by-the-writer"]
+    assert _g(sdk).query(
+        "MATCH (s:Subject {id:'raw-anchor-minted-by-the-writer'}) "
+        "RETURN count(s)").result_set[0][0] == 1
+
+    result = sdk._get_proj().rebuild_all(str(events))
+
+    # The node rode the sidecar, but its anchor edge could not be rebuilt: the
+    # caller-visible signal must say so, not silently report a full pass.
+    assert result["onboarding_restored"] == 1
+    assert result["onboarding_missing_links"] == 0
+    assert result["onboarding_missing_onboards"] == 1, (
+        "the unrebuildable `onboards` edge must be counted as missing")
+    assert _onboards_targets(sdk, "org-raw") == [], (
+        "precondition: the unjournaled anchor really is gone")
+
+
+def test_onboarding_gap_is_visible_to_automatic_recovery(graph):
+    """The embedded auto-recovery caller must not read a clean success.
+
+    The pending sidecar is retired after the replay by design (#4305), so
+    `reason` plus the `onboarding_gap` count are the only record
+    `consistency.recover_from_log` can hand its caller. `recovered` stays True
+    (the rebuild DID complete — a post-wipe raise would strand the store empty,
+    #2943), exactly as the sticky config-reset marker does.
+    """
+    from tortoise.consistency import recover_from_log
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-r", "status": "complete",
+                              "org_subject_id": "subj-never-journaled"}],
+        onboarding_step_links=[["org-r", "harness-connected"]]))
+
+    # `recover_from_log` only rebuilds a graph it finds EMPTY (a wiped store):
+    # the SDK's own seed nodes make the count non-zero, so clear them to model
+    # the crash-after-wipe state the automatic recovery exists for.
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+    rec = recover_from_log(str(events), sdk._get_proj())
+
+    assert rec["recovered"] is True, "the rebuild itself did complete"
+    assert rec.get("onboarding_gap") == 1, (
+        "a partial onboarding restore must be machine-visible to the "
+        "auto-recovery caller")
+    assert "onboarding" in rec["reason"]

@@ -759,10 +759,24 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
     # output ⊆ what `_validate_onboarding_step_link` accepts. The step-id
     # filter is deliberate rather than accidental: every gate in
     # `tortoise/onboarding/state.py` resolves canonical ids, so a foreign id
-    # carries no semantics and must not make the rescue file unloadable.
+    # carries no semantics and must not make the rescue file unloadable — but
+    # its loss is LOGGED rather than left silent, so a live non-canonical edge
+    # destroyed by the wipe is visible instead of passing as a clean restore
+    # (the post-restore comparison reads through this same filter).
     links = [(r[0], r[1]) for r in link_rows
              if isinstance(r[0], str) and isinstance(r[1], str)
              and r[1] in ONBOARDING_STEPS]
+    non_canonical = sorted({r[1] for r in link_rows or []
+                            if isinstance(r[1], str)
+                            and r[1] not in ONBOARDING_STEPS})
+    if non_canonical:
+        logger.warning(
+            "rebuild: %d COMPLETED_STEP edge(s) carry a step id outside the "
+            "canonical onboarding vocabulary (%s) — they are NOT carried "
+            "into the pre-wipe snapshot. Every onboarding gate resolves "
+            "canonical ids, so such an edge is inert, but its loss is "
+            "recorded here rather than left silent (#4641).",
+            len(non_canonical), non_canonical[:5])
     return nodes, links
 
 
@@ -879,12 +893,15 @@ def _validate_onboarding_step_link(entry) -> str | None:
 
     Shape first (a 2-element pair of strings, like the other link sections),
     then MEMBERSHIP: the ``step_id`` must be a canonical onboarding step. The
-    sidecar is caller-supplied and a `COMPLETED_STEP` edge is what
-    ``completed_steps()`` feeds into the fork-aware completion gate and into
-    ``find_false_decide_completion`` — so a planted out-of-vocabulary id would
-    forge a completion, not merely carry a stray property. The id set is
-    imported from the DOMAIN module (never re-typed here), exactly as the
-    labels are.
+    sidecar is caller-supplied, so this is defence-in-depth — it keeps the
+    section's vocabulary canonical and the rescue file loader-acceptable, and
+    refuses to write an `:OnboardingStep` no gate reads. It is deliberately NOT
+    claimed as a completion-forgery guard: the gates in
+    ``tortoise/onboarding/state.py`` are subset tests over canonical ids, so a
+    foreign id is INERT there — it could only ever BLOCK a completion (the
+    grandfathered branch counts it as an agent step), never create one. The id
+    set is imported from the DOMAIN module (never re-typed here), exactly as
+    the labels are.
     """
     complaint = _validate_link_entry(entry)
     if complaint is not None:
@@ -1198,7 +1215,7 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     positional seq space the fold sweeps index on is preserved by keeping
     every leftover entry and appending only fresh-only ids). A colliding id in
     a NODE section is merged FIELD-wise by ``_merge_entry`` — fresh truth
-    where it exists, leftover values where the fresh capture has none. The two
+    where it exists, leftover values where the fresh capture has none. The
     LINK sections are deduped WITHOUT a merge (``merge=False``), because an
     entry there is a two-element pair, not a property map: the surviving
     occurrence is merely kept. The pair order differs by section:
@@ -5441,8 +5458,12 @@ class FalkorProjection(
             # (which rode the node entry), so no separate section is needed.
             # `MATCH` on BOTH endpoints — the anchor `:Subject` is journaled
             # (`sdk.create_subject` emits SubjectAdded) so replay re-creates
-            # it; a MATCH means a genuinely absent Subject drops the edge
-            # rather than minting an endpoint-less one.
+            # it; a MATCH means a genuinely absent Subject (a pre-#2194/#2295
+            # or hosted write path that journals nothing) drops the edge
+            # rather than minting an endpoint-less one. That drop raises NO
+            # exception, so it is caught by the post-restore verification
+            # below, which reads this edge and compares it to the captured
+            # `(org_id, org_subject_id)` pairs (#4641).
             sid = props.get("org_subject_id")
             if isinstance(sid, str):
                 try:
@@ -5495,17 +5516,37 @@ class FalkorProjection(
             if isinstance(e, dict) and isinstance(e.get("org_id"), str)}
         onboarding_expected_links = {
             (o, s) for o, s in onboarding_step_links}
+        # The `onboards` edge is restored from each node entry's captured
+        # `org_subject_id`, but the restore `MATCH`es BOTH endpoints — so when
+        # the anchor `:Subject` is genuinely absent (a pre-#2194/#2295 or
+        # hosted write path that journals nothing) the MATCH yields no rows,
+        # the MERGE never runs, and NO exception is raised. Without this leg
+        # the run would report a clean, complete restore while the edge was
+        # destroyed — the silent partial restore this change exists to remove.
+        onboarding_expected_onboards = {
+            (e.get("org_id"), e.get("org_subject_id"))
+            for e in onboarding_snapshot
+            if isinstance(e, dict) and isinstance(e.get("org_id"), str)
+            and isinstance(e.get("org_subject_id"), str)}
         onboarding_missing_orgs: set = set()
         onboarding_missing_links: set = set()
+        onboarding_missing_onboards: set = set()
         onboarding_verified = True
         try:
             live_nodes, live_links = _capture_onboarding_snapshot(self.g)
             live_orgs = {e.get("org_id") for e in live_nodes
                          if isinstance(e, dict)}
             live_link_pairs = {(o, s) for o, s in live_links}
+            live_onboards = {
+                (r[0], r[1]) for r in self.g.query(
+                    f"MATCH (n:{ONBOARDING_NODE_LABEL})"
+                    f"-[:{ONBOARDS_EDGE}]->(s:Subject) "
+                    "RETURN n.org_id, s.id").result_set}
             onboarding_missing_orgs = onboarding_expected_orgs - live_orgs
             onboarding_missing_links = (onboarding_expected_links
                                         - live_link_pairs)
+            onboarding_missing_onboards = (onboarding_expected_onboards
+                                           - live_onboards)
         except Exception as e:
             onboarding_verified = False
             logger.error(
@@ -5514,11 +5555,13 @@ class FalkorProjection(
                 type(e).__name__, e,
             )
         if onboarding_restore_failures or not onboarding_verified or \
-                onboarding_missing_orgs or onboarding_missing_links:
+                onboarding_missing_orgs or onboarding_missing_links or \
+                onboarding_missing_onboards:
             logger.error(
                 "rebuild: onboarding-state post-restore verification FAILED "
-                "— %d restore failure(s); %d of %d expected org state(s) and "
-                "%d of %d expected step edge(s) are ABSENT from the rebuilt "
+                "— %d restore failure(s); %d of %d expected org state(s), "
+                "%d of %d expected step edge(s) and %d of %d expected "
+                "`onboards` anchor edge(s) are ABSENT from the rebuilt "
                 "graph. This is a TRUE POSITIVE, not a silent success: the "
                 "wipe is unconditional and only the journal is replayed, so "
                 "those onboarding states/edges are gone. Re-run onboarding "
@@ -5530,6 +5573,9 @@ class FalkorProjection(
                 len(onboarding_missing_links) if onboarding_verified
                 else len(onboarding_expected_links),
                 len(onboarding_expected_links),
+                len(onboarding_missing_onboards) if onboarding_verified
+                else len(onboarding_expected_onboards),
+                len(onboarding_expected_onboards),
             )
 
         # ── #2814: restore the authoritative configuration ──────────────
@@ -6160,11 +6206,18 @@ class FalkorProjection(
                 # verification READ failed ("could not confirm" must not read
                 # as "confirmed").
                 "onboarding_expected": len(onboarding_expected_orgs),
+                "onboarding_verified": onboarding_verified,
+                "onboarding_missing_orgs": (
+                    len(onboarding_missing_orgs)
+                    if onboarding_verified else None),
                 "onboarding_restored": (len(onboarding_expected_orgs)
                                        - len(onboarding_missing_orgs))
                 if onboarding_verified else 0,
                 "onboarding_missing_links": (len(onboarding_missing_links)
                                              if onboarding_verified else None),
+                "onboarding_missing_onboards": (
+                    len(onboarding_missing_onboards)
+                    if onboarding_verified else None),
                 "onboarding_restore_failures": onboarding_restore_failures}
 
     def query(self, cypher: str, **params):

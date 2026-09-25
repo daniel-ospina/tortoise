@@ -124,7 +124,20 @@ property). It gets its own declared sidecar sections instead:
   node property maps, and `(org_id, step_id)` link pairs. The `onboards` edge
   to the org-anchor `:Subject` is restored from the captured
   `org_subject_id` (the `:Subject` is journaled, so replay re-creates it);
-  the edge carries no section of its own.
+  the edge carries no section of its own. One deliberate scope limit: a
+  `COMPLETED_STEP` edge whose `step_id` is **outside the canonical vocabulary**
+  is not carried (the capture filters to canonical ids and logs a warning) —
+  every gate in `tortoise/onboarding/state.py` is a subset test over canonical
+  ids, so such an edge is inert, but it is reported rather than silently
+  dropped.
+- `:Batch` + the `Point.batch_id` membership — preserved by the
+  `batch_snapshot` / `batch_point_links` sections (**#990**): the
+  quarantine/commit marker is raw Cypher that rides no journal record, so the
+  sidecar is its only durable copy once the wipe lands.
+- `:Session` + the `CONTAINS` edges — preserved by the
+  `session_snapshot` / `session_point_links` sections (**#3947** × **#3010**),
+  for the same reason: the live turn loop's container write is raw and is not
+  re-derived by `projection`.
 <!-- config-registry:end -->
 
 <!-- config-registry:unenrolled -->
@@ -140,9 +153,12 @@ property). It gets its own declared sidecar sections instead:
   collides the next `next_seq` with replayed sequence numbers. **#4653**
 <!-- config-registry:end -->
 
-**Operator audit** — read-only; every preserved class is enumerated by the
-registry **or** by a declared sidecar section above, so this query cannot
-silently under-report after a class is added:
+**Operator audit** — read-only; it enumerates the configuration classes the
+registry declares **and** the container/link classes the declared sidecar
+sections preserve, so an operator can tell what survived a rebuild. The
+onboarding rows are pinned by the doc-consistency test (a section's classes
+must appear here); the container rows are hand-maintained there too, but as a
+presence check — the test does not prove the list is exhaustive.
 
 <!-- config-registry:audit-query -->
 ```cypher
@@ -152,6 +168,10 @@ MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
 UNION ALL
 MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset']
 RETURN 'Meta' AS cls, x.key AS ident
+UNION ALL
+MATCH (b:Batch) RETURN 'Batch' AS cls, b.id AS ident
+UNION ALL
+MATCH (s:Session) RETURN 'Session' AS cls, s.id AS ident
 UNION ALL
 MATCH (n:OnboardingState) RETURN 'OnboardingState' AS cls, n.org_id AS ident
 UNION ALL

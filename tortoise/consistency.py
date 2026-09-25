@@ -974,7 +974,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
         raised — the caller decides fail-loud policy. Torn trailing lines
         (crash mid-append) are skipped, not fatal.
 
-    Returns {recovered, log_points, db_points, reason}.
+    Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`
+    (only when a completed replay left an onboarding state/edge restore gap it
+    could not close, #4641). `recovered` is still True in that case: the
+    rebuild did complete and refusing to open the store would be strictly
+    worse, so the gap is PROPAGATED for the caller to branch on rather than
+    swallowed into a success-shaped result.
     """
     import json as _json
     import os
@@ -1060,11 +1065,42 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # the #990 half (a quarantined :Batch with no Points), and reporting
         # that as `recovered: False` makes the caller (`_recover_or_raise`)
         # refuse to open a DB whose quarantine state was just restored.
-        return {"recovered": True,
-                "log_points": events,
-                "db_points": nodes,
-                "reason": ("rebuilt from the pending pre-wipe snapshot "
-                           f"(#2943): {nodes} nodes, {edges} edges")}
+        #
+        # `rebuild_all` CAN, however, complete with a gap it could not close
+        # (#4641): onboarding state/edges are raw writes no journal event
+        # carries, so a post-wipe raise would strand the store empty (#2943).
+        # Reporting `recovered: True` while swallowing that gap is the silent
+        # partial loss itself, so the counts are PROPAGATED (additively — the
+        # `recovered` truth value is unchanged, exactly as the sticky
+        # config-reset marker is) and NAMED in `reason`. A machine caller can
+        # therefore branch on `onboarding_gap` instead of reading a clean
+        # success it did not get.
+        onboarding_gap = sum(
+            int(counts.get(k) or 0) for k in (
+                "onboarding_restore_failures",
+                "onboarding_missing_orgs",
+                "onboarding_missing_links",
+                "onboarding_missing_onboards"))
+        # "Could not confirm" must not read as "confirmed": a failed
+        # verification READ reports `onboarding_verified is False` with the
+        # missing counts `None` (so the sum above is 0), which is itself a gap
+        # — but only when there WAS onboarding state to confirm, so a graph
+        # with none never reports a phantom gap for a read failure.
+        if counts.get("onboarding_verified") is False and \
+                counts.get("onboarding_expected"):
+            onboarding_gap = max(onboarding_gap, 1)
+        result = {"recovered": True,
+                  "log_points": events,
+                  "db_points": nodes,
+                  "reason": ("rebuilt from the pending pre-wipe snapshot "
+                             f"(#2943): {nodes} nodes, {edges} edges")}
+        if onboarding_gap:
+            result["onboarding_gap"] = onboarding_gap
+            result["reason"] += (
+                f"; WARNING: {onboarding_gap} onboarding state/edge "
+                "restore gap(s) the replay could not close — see the "
+                "rebuild ERROR log (#4641)")
+        return result
 
     if not files:
         return {"recovered": False, "log_points": 0, "db_points": 0,
