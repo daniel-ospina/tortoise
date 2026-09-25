@@ -348,6 +348,36 @@ class TestDoctorPath:
             "rediss://host1:1/db and rediss://u:p@host2:2/db") == \
             "rediss://:***@host2:2/db"
 
+    def test_mask_uri_userinfo_scheme_with_password_and_no_at_fails_closed(self):
+        """#2987: a value that lost its '@host' tail still carries a password.
+
+        Class B: (1) `rediss://:T4ilPw` and `rediss://user:T4ilPw` make this
+        fail — with no '@' the last-'@' boundary finds nothing and the value
+        passed through verbatim, so the password was printed; (2) reachable:
+        the CLI prints `_mask_uri_userinfo(target)` / `_mask_uri_userinfo(str(e))`
+        for a bad target (doctor, init), and an operator-supplied target may be
+        any bytes.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        # the empty-user form: `rediss://:pw@host` with the '@host' dropped
+        assert _mask_uri_userinfo("rediss://:T4ilPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # a non-empty user whose 'password' is not a port (ports are numeric)
+        assert _mask_uri_userinfo("rediss://user:T4ilPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # the SAME class hidden inside an error message: only the URI is
+        # replaced, so the prose stays diagnosable
+        assert _mask_uri_userinfo("Relative DB path 'rediss://:T4ilPw' rejected") == \
+            "Relative DB path 'rediss://<uri-redacted-unrecognised-shape>' rejected"
+        # ANTI-VACUOUS: a password-less host:port (numeric after the last ':')
+        # is not credential-shaped and must keep printing unchanged — otherwise
+        # this rule would fail closed on every normal target.
+        assert _mask_uri_userinfo("rediss://r-example.host.cloud:50317") == \
+            "rediss://r-example.host.cloud:50317"
+        assert _mask_uri_userinfo("docker://127.0.0.1:7687/tortoise") == \
+            "docker://127.0.0.1:7687/tortoise"
+
     def test_mask_uri_userinfo_fuzz_never_emits_password_material(self):
         """#2983: exhaustive fuzz over passwords containing '?'/'#'/'@'/'/'.
 

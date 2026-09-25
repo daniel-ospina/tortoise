@@ -39,24 +39,69 @@ set -euo pipefail
 # masks every `scheme://` occurrence inside a longer message; the shell helper is
 # `^`-anchored and does not, by design. tests/test_boot_regressions.py pins the
 # two to identical output over the corpus it enumerates.
+#
+# #2987 — redaction is PER LINE, and fail-closed is PER LINE. The rule above was
+# applied to the whole value and then the fail-closed guard compared the whole
+# value, so (1) sed, being line-oriented, masked only the line carrying the
+# scheme and echoed the rest, and (2) the guard never fired because line 1 had
+# already changed the comparison. A line is the unit the boot log emits, so a
+# line must be safe on its own.
 _redact_uri() {
-    local uri="${1:-}" masked
+    local uri="${1:-}" masked line out="" first=1 shaped=0 authority before after
     if [ -z "$uri" ]; then
         return 0
     fi
-    masked=$(printf '%s' "$uri" | sed -E 's|^([[:space:]]*[a-zA-Z][a-zA-Z0-9+.-]*://).*@|\1:***@|') || masked=""
-    # Fail closed on a shape this rule cannot recognise. A malformed value that
-    # still carries userinfo (a copy-paste that dropped the scheme, say) is
-    # matched by nothing above, so without this it would be printed verbatim —
-    # the app would reject it, but the password would already be in the log.
-    if [ "$masked" = "$uri" ] && [ "${uri#*@}" != "$uri" ]; then
-        printf '%s' "<uri-redacted-unrecognised-shape>"
-        return 0
-    fi
-    # A redaction failure must not silently blank the target either: without this
-    # the line reads "→ " and the diagnosability the redaction exists to preserve
-    # is gone with no signal.
-    printf '%s' "${masked:-<unprintable-uri>}"
+    while IFS= read -r line || [ -n "$line" ]; do
+        if ! masked=$(printf '%s' "$line" | sed -E 's|^([[:space:]]*[a-zA-Z][a-zA-Z0-9+.-]*://).*@|\1:***@|'); then
+            # A redaction failure must not silently blank the target either:
+            # without this the line reads "→ " and the diagnosability the
+            # redaction exists to preserve is gone with no signal.
+            masked="<unprintable-uri>"
+        elif [ "$masked" = "$line" ]; then
+            # Fail closed on a line this rule cannot recognise. '@' is the usual
+            # marker (a copy-paste that dropped the scheme, say). It is NOT the
+            # only one: `rediss://:pw` and `rediss://user:pw` are credentials
+            # whose '@host' tail was dropped, and the mask above cannot see them
+            # because it requires an '@'. The absence of a maskable form is
+            # therefore treated as its own failure mode rather than as "nothing
+            # to mask".
+            shaped=0
+            case "$line" in
+                *@*) shaped=1 ;;
+            esac
+            if [ "$shaped" -eq 0 ] && [ "$line" != "${line#*://}" ]; then
+                authority="${line#*://}"
+                # Bound the authority at the first path/query/fragment
+                # delimiter: everything after it is not the authority.
+                authority="${authority%%[/?#]*}"
+                if [ "$authority" != "${authority#*:}" ]; then
+                    before="${authority%%:*}"
+                    after="${authority##*:}"
+                    if [ -z "$before" ]; then
+                        shaped=1
+                    else
+                        # A NUMERIC field after the last ':' is a port
+                        # (host:6379), not a credential — so a password-less
+                        # target keeps printing unchanged rather than being
+                        # replaced wholesale.
+                        case "$after" in
+                            *[!0-9]*) shaped=1 ;;
+                        esac
+                    fi
+                fi
+            fi
+            if [ "$shaped" -eq 1 ]; then
+                masked="<uri-redacted-unrecognised-shape>"
+            fi
+        fi
+        if [ "$first" -eq 1 ]; then
+            first=0
+            out="$masked"
+        else
+            out+=$'\n'"$masked"
+        fi
+    done <<< "$uri"
+    printf '%s' "$out"
 }
 
 # #1349 T11: reject the benchmark-only probe seam in the hosted image.

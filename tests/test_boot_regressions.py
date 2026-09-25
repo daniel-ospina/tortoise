@@ -162,10 +162,28 @@ def _redact(uri: str) -> str:
         (":pw@host:6379/graph", "<uri-redacted-unrecognised-shape>"),
         # no userinfo → unchanged, so a target without credentials stays readable
         ("rediss://r-example.host.cloud:50317", "rediss://r-example.host.cloud:50317"),
+        # `host:port` is NOT credential-shaped — a numeric field after the last
+        # ':' is a port, so a password-less target must keep printing unchanged
+        ("rediss://127.0.0.1:7687/tortoise", "rediss://127.0.0.1:7687/tortoise"),
         # embedded/dev target
         (
             "docker://:falkordb@localhost:6379/tortoise_test_matrix",
             "docker://:***@localhost:6379/tortoise_test_matrix",
+        ),
+        # #2987 residual 2: a scheme with a password but NO '@' — the copy-paste
+        # that dropped the '@host' tail. The '@'-only guard and the '@'-requiring
+        # sed rule both miss it, so it used to be echoed verbatim. The empty user
+        # before the ':' is the tell.
+        ("rediss://:falkordb", "<uri-redacted-unrecognised-shape>"),
+        # ...and the same shape with a non-empty user: the field after the last
+        # ':' is not a port (ports are numeric), so it is credential material.
+        ("rediss://user:pw", "<uri-redacted-unrecognised-shape>"),
+        # #2987 residual 1: sed is line-oriented, so only the line carrying the
+        # scheme was masked; the whole-value guard could not see line 2 because
+        # line 1 had already changed. Fail closed PER LINE instead.
+        (
+            "rediss://u:pw@h:1\n:secretpw@h:2",
+            "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
         ),
     ],
 )
@@ -215,7 +233,14 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
     the canonical helper additionally masks every `scheme://` occurrence inside
     a longer message; the shell helper is `^`-anchored and does not, by design.
     Both now fail closed on a '?'/'#', a bare '://', or an '@' inside a
-    password (#2983).
+    password (#2983), and on a no-'@' credential shape (#2987).
+
+    #2987 — one divergence is stated rather than shared: the shell masks PER
+    LINE (the unit the boot log emits), while the canonical last-'@' rule
+    consumes a whole message and therefore masks a multi-line value ACROSS its
+    newline. Both outputs are leak-free and they are not byte-identical, so the
+    corpus below holds single-line values only; the multi-line behaviour of each
+    is pinned by its own test.
     """
     from tortoise.__main__ import _mask_uri_userinfo
 
@@ -226,6 +251,52 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
 def test_redactor_tolerates_an_empty_argument():
     """`set -u` is on in the entrypoint: an absent URI must not abort boot."""
     assert _redact("") == ""
+
+
+def test_redactor_fails_closed_per_line_on_a_multiline_value():
+    """#2987 residual 1 — the leak was a LINE, not a value.
+
+    Class B: (1) this fails on the value `rediss://u:pw@h:1\n:secretpw@h:2` —
+    `sed` is line-oriented, so line 2 was echoed and the whole-value guard could
+    not fire because line 1 had already changed; (2) the value is reachable
+    because the boot block prints whatever `$TORTOISE_DB_URI` holds, and an env
+    var may contain a newline.
+    """
+    assert _redact("rediss://u:pw@h:1\n:secretpw@h:2") == (
+        "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>"
+    )
+    # A trailing newline with NO second-line userinfo is the safe shape: line 1
+    # masks and the blank tail carries nothing. It must not be over-redacted
+    # into a sentinel.
+    assert _redact("rediss://u:pw@h:1\n") == "rediss://:***@h:1\n"
+
+
+def test_multiline_divergence_is_stated_and_neither_masker_leaks():
+    """#2987 — the one deliberate asymmetry, named rather than accidental.
+
+    The shell masks per line; the canonical helper's last-'@' rule consumes a
+    whole message and so masks a multi-line value across its newline. The
+    outputs differ and BOTH must be leak-free — which is why this asymmetry is
+    asserted here instead of being silently excluded from the parity corpus.
+
+    Class B: (1) the marker pair `S3n`/`tinel` makes this fail if either
+    implementation emits the second line's password; (2) reachable — the boot
+    block prints the raw env value, newline included.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    uri = "rediss://u:S3npw@h:1\n:S3ntinelpw@h:2"
+    shell = _redact(uri)
+    canonical = _mask_uri_userinfo(uri)
+
+    for out, label in ((shell, "shell"), (canonical, "canonical")):
+        assert "S3n" not in out, f"{label} leaked the password marker: {out!r}"
+        assert "tinel" not in out, f"{label} leaked the password marker: {out!r}"
+    assert shell != canonical, (
+        "the per-line / whole-message divergence no longer exists — if the two "
+        "implementations now agree on multi-line values, fold the shape into "
+        "_BARE_URI_CORPUS and delete this test"
+    )
 
 
 def _extract_boot_db_block(source: str) -> str:
@@ -264,6 +335,41 @@ def test_boot_db_block_never_emits_the_password(secret: str, branch: str):
     combined = proc.stdout + proc.stderr
     assert secret not in combined, f"password reached the boot log: {combined!r}"
     assert host in combined, "the target host should stay diagnosable"
+
+
+@pytest.mark.parametrize(
+    ("uri", "secret"),
+    [
+        # residual 1: the password is on the SECOND line, where the old
+        # line-oriented sed never looked.
+        ("rediss://Tortoise2:hunter2@r-example.host.cloud:50317\n:S3ntinelPw@r-example.host.cloud:50318", "S3ntinelPw"),
+        # residual 2: no '@' at all — the copy-paste that dropped '@host'.
+        ("rediss://:S3ntinelPw", "S3ntinelPw"),
+        ("rediss://Tortoise2:S3ntinelPw", "S3ntinelPw"),
+        # no scheme at all, but userinfo: the pre-existing guard's shape.
+        (":S3ntinelPw@r-example.host.cloud:50317", "S3ntinelPw"),
+    ],
+)
+@pytest.mark.parametrize("branch", ["explicit", "cloud"])
+def test_boot_db_block_never_emits_a_malformed_uri_password(uri: str, secret: str, branch: str):
+    """#2987 — the black-box check over the MALFORMED shapes.
+
+    Class B: (1) the value that makes this fail is a password reachable only
+    through a shape the per-value guard cannot see — line 2 of a multi-line
+    value, or a `scheme://:pw` with no '@'; (2) it is reachable because the boot
+    block prints whatever the env var holds, and an operator-supplied secret is
+    exactly the malformed case the function exists for.
+    """
+    source = ENTRYPOINT.read_text()
+    script = "set -euo pipefail\n" + _redactor_body() + "\n" + _extract_boot_db_block(source)
+    var = "FALKORDB_CLOUD_URI" if branch == "cloud" else "TORTOISE_DB_URI"
+    env = {"PATH": os.environ.get("PATH", ""), var: uri}  # deliberately excludes the other var
+
+    proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+    assert proc.returncode == 0, f"boot block failed: {proc.stderr}"
+    combined = proc.stdout + proc.stderr
+    assert secret not in combined, f"password reached the boot log: {combined!r}"
 
 
 def test_entrypoint_prints_no_uri_through_a_raw_interpolation():
