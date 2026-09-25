@@ -51,6 +51,7 @@ from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
 from . import monitoring
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
+from .projection.entities import _SOURCE_NODE_PROP_NAMES  # #3998: the declared :Source surface
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
@@ -17982,6 +17983,29 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
+        # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
+        # per-label branch below writes caller props with a live `SET n += $p`.
+        # Without this the closed :Source surface declared in
+        # `projection/entities.py` would be bypassed by the documented tenant
+        # route (`tortoise_update_entity`), putting raw bytes on the node AND
+        # into the EntityMutated journal record — where a rebuild restores them.
+        # Measured before this guard: `create_source(...)` then
+        # `update_entity(url, text=<2 KB body>)` persisted the body as `s.text`
+        # and it SURVIVED `rebuild_all`.
+        if props:
+            _is_source = self._get_proj().g.query(
+                "MATCH (n:Source) WHERE n.url = $id OR n.id = $id RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _is_source:
+                _undeclared = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
+                if _undeclared:
+                    raise ValueError(
+                        f"{_undeclared!r} cannot be set on a :Source — the "
+                        f"graph INDEXES the raw, it is not the raw store "
+                        f"(D30/#3919, #3998). Declared :Source properties: "
+                        f"{sorted(_SOURCE_NODE_PROP_NAMES)}."
+                    )
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
         # its Point branch below writes caller props straight through
@@ -21404,7 +21428,18 @@ class TortoiseSDK:
         )
         return [
             {
-                "source": dict(row[0]),
+                # #3998 (D30): the bag is filtered to the DECLARED :Source
+                # surface. A graph written before this change can still hold a
+                # payload-bearing Source (the passthrough was open), and this
+                # method edits `source` — so without the filter the read hands
+                # back the very bytes the write path now refuses, and the
+                # "never a copy of the raw" claim above would be false for
+                # every pre-existing node. The filter is the same declaration
+                # the write side enforces, so the two cannot drift.
+                "source": {
+                    k: v for k, v in (row[0] or {}).items()
+                    if k in _SOURCE_NODE_PROP_NAMES
+                },
                 "raw": raw_entry(row[0], source_id=(row[0] or {}).get("url")),
                 "entity": dict(row[1]) if row[1] is not None else None,
                 "labels": list(row[2]) if row[2] is not None else [],

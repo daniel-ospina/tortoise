@@ -432,6 +432,35 @@ class _EntityHandlers:
     # so a journal written while the passthrough was open would otherwise
     # re-materialise its payload on every rebuild, the documented recovery path
     # restoring the exact bytes the contract forbids.
+    # #3998 (D30): the full DECLARED node-property surface of a :Source — the
+    # single source of truth for "what may be on this node". Three things read
+    # it: the closed passthrough below (:data:`_SOURCE_EXTRA_PROPS` is its
+    # extra-props subset), the generic entity write in `sdk._update_entity`
+    # (which reaches `:Source` too and would otherwise bypass the declaration),
+    # and the provenance read, which filters the returned bag to it rather than
+    # handing back whatever a pre-#3998 writer left behind.
+    #
+    # ⚠️ WHAT THIS DOES AND DOES NOT ESTABLISH. It establishes that the node's
+    # property surface is DECLARED and closed: no undeclared key — and so no
+    # un-named-in-advance spelling of a raw payload — can reach the node, on any
+    # write path including journal replay. It does NOT bound the VALUES of the
+    # declared metadata fields: a caller who deliberately writes a 2 KB body
+    # into `title` still stores 2 KB under `title`. Bounding those is a value
+    # policy for short metadata (what IS the maximum title?), which is a product
+    # decision this change does not take — stated here rather than implied away.
+    _SOURCE_NODE_PROPS: frozenset = frozenset({
+        # identity
+        "id", "url", "canonicalUrl", "urlAliases", "sourceKind", "externalId",
+        # version
+        "contentHash", "version", "ingestedAt", "updatedAt", "sourceDate",
+        # availability (#3998 — the third value on the source record)
+        "rawState", "rawStateAt",
+        # declared metadata
+        "title", "format", "name", "team", "credibilityTier", "is_episodic",
+        "sourcePath", "_searchText", "provenance_spans",
+        # the session-capture writer (`sdk._materialize_session_source`)
+        "sessionId", "capturedAt", "summary", "topics", "eventId",
+    })
     _SOURCE_EXTRA_PROPS: frozenset = frozenset({
         "credibilityTier",   # create_source(tier=)
         "sourceDate",        # create_source(sourceDate=) — the evidence-age clock
@@ -2558,8 +2587,32 @@ class _EntityHandlers:
         # declared :Source surface since #3998 (see _SOURCE_EXTRA_PROPS). An
         # undeclared key is DENIED rather than written, so no spelling of a raw
         # payload can reach the node and no journal replay can restore one.
-        self._persist_extra_props(
+        # The DENIAL is logged (#2795's drift warning, applied to this layer):
+        # silently dropping a prop a caller sent is how a declaration rots into
+        # a mystery, and the return value exists precisely to feed this.
+        _persisted = self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
             ev, self._SOURCE_HANDLED, allow_keys=self._SOURCE_EXTRA_PROPS,
         )
+        _denied = {
+            k for k in ev
+            if k not in _persisted and k not in self._META_KEYS
+            and k not in self._SOURCE_HANDLED and k not in self._SOURCE_EXTRA_PROPS
+            and ev.get(k) is not None
+        }
+        if _denied:
+            logger.warning(
+                "#3998: denied %d undeclared :Source prop(s) on %s: %s — the "
+                "graph INDEXES the raw and is not the raw store (D30). Add the "
+                "key to _SOURCE_EXTRA_PROPS if it is genuine metadata.",
+                len(_denied), key, sorted(_denied),
+            )
         return r
+
+
+#: #3998 (D30): the declared `:Source` node-property surface, exposed at module
+#: level so the OTHER write path that reaches `:Source` — the generic
+#: `sdk._update_entity` tenant surface — and the provenance READ can enforce
+#: and filter against the SAME declaration. Two copies of this set would be two
+#: contracts, and the one that drifts is the one that stops being true.
+_SOURCE_NODE_PROP_NAMES: frozenset = _EntityHandlers._SOURCE_NODE_PROPS

@@ -31,8 +31,18 @@ not None`` is not a test of "correctly labelled".
     deliberately left to the caller, and is **not** implemented here.
   - **retention** — R1 gives no default retention window, so there is nothing
     to test; a test asserting "no window exists" would be decorative.
-  - the search-hit provenance block (``search_engine.SearchHit.to_dict``) —
+  - **the search-hit provenance block** (``search_engine.SearchHit.to_dict``) —
     it does not yet carry the raw state; that read path is **unmodified**.
+  - ⚠️ **VALUE-level payload bounds — the honest residual of criterion (4).**
+    The declared surface is CLOSED: no undeclared key, and so no spelling of a
+    raw payload that nobody enumerated, can reach a ``:Source`` on any write
+    path including journal replay. It does NOT bound the *values* of the
+    declared metadata fields, so a caller that deliberately writes a body into
+    ``title`` still stores it (pinned by
+    ``test_declared_metadata_values_are_not_length_bounded_the_stated_residual``).
+    A value policy for short metadata is a product decision this lane did not
+    take. So criterion (4) is established at the **surface** level, not the
+    **value** level, and that distinction is stated rather than blurred.
 
 DB-lane (live FalkorDB under ``TORTOISE_DB_URI``) and embedded-safe.
 """
@@ -81,6 +91,8 @@ ALLOWED_SOURCE_NODE_PROPS = frozenset({
     # declared metadata
     "title", "format", "name", "team", "credibilityTier", "is_episodic",
     "sourcePath", "_searchText", "provenance_spans",
+    # the session-capture writer (sdk._materialize_session_source)
+    "sessionId", "capturedAt", "summary", "topics", "eventId",
 })
 
 
@@ -538,6 +550,86 @@ def test_rebuild_does_not_re_materialise_a_payload_from_the_journal(sdk):
     assert body not in repr(props), "the rebuild restored the raw payload"
     assert set(props) <= ALLOWED_SOURCE_NODE_PROPS, (
         f"undeclared props survived replay: {sorted(set(props) - ALLOWED_SOURCE_NODE_PROPS)}"
+    )
+
+
+def test_the_generic_entity_route_cannot_reach_a_source_with_a_payload(sdk):
+    """Review round 3, P1: the closed surface was enforced only in
+    `_upsert_source`, leaving the DOCUMENTED tenant route open. `update_entity`
+    writes caller props with a live `SET n += $p` on every canonical label
+    including `:Source`, and journals them — so the payload landed AND survived
+    rebuild, falsifying the change's own claim.
+
+    (1) FAILS if `_update_entity` does not consult the declared surface: the
+        body lands on the node as `text`/`transcript`.
+    (2) REACHABLE: the body is passed through the real tenant surface below.
+    """
+    s, _events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    body = "UPDATE_ROUTE_PAYLOAD " + ("raw transcript. " * 150)
+    for key in ("text", "transcript", "content", "body"):
+        with pytest.raises(ValueError, match="cannot be set on a :Source"):
+            s.update_entity(RAW_URL, **{key: body})
+    props = _source_props(s)
+    assert body not in repr(props), "the generic entity route carried the payload"
+    assert set(props) <= ALLOWED_SOURCE_NODE_PROPS
+    # A DECLARED property is still updatable through the same route.
+    s.update_entity(RAW_URL, format="transcript")
+    assert _source_props(s)["format"] == "transcript"
+
+
+def test_the_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
+    """Review round 3, P2: a Source written BEFORE this change still holds its
+    payload, and `get_provenance_chain` edits the `source` bag — so without a
+    filter the read hands back the bytes the write path now refuses, and the
+    "never a copy of the raw" docstring is false for every pre-existing node.
+
+    (1) FAILS if the returned bag is the raw stored property map (`dict(row[0])`)
+        — the payload comes straight back.
+    (2) REACHABLE: the payload is written with raw Cypher, exactly as the
+        pre-fix writer did, so the node genuinely holds it before the read.
+    """
+    s, _events = sdk
+    body = "LEGACY_PAYLOAD " + ("old raw bytes. " * 150)
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    pid = _memory(s)
+    # The PRE-GUARD writer's shape: the bytes are on the node already.
+    s._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) SET s.content=$b, s.text=$b",
+        params={"u": RAW_URL, "b": body},
+    )
+    chain = s.get_provenance_chain(pid)
+    assert len(chain) == 1
+    assert "content" not in chain[0]["source"] and "text" not in chain[0]["source"], (
+        sorted(chain[0]["source"])
+    )
+    assert body not in repr(chain), "the read handed the raw payload back"
+    # Legitimate declared props survive the filter.
+    assert chain[0]["source"]["url"] == RAW_URL
+    assert chain[0]["source"]["contentHash"] == "h1"
+
+
+def test_declared_metadata_values_are_not_length_bounded_the_stated_residual(sdk):
+    """⚠️ PINS THE STATED RESIDUAL, so it is a known bound rather than an
+    implied one. The closed surface establishes that the node's property set is
+    DECLARED; it does NOT bound the VALUES of the declared metadata fields. A
+    caller that deliberately writes a body into ``title`` still stores it.
+
+    Bounding short-metadata fields (what IS the maximum title?) is a VALUE
+    policy and a product decision — this change does not take it. This test
+    exists so the boundary is visible and so that ADDING such a policy is a
+    deliberate, test-updating act.
+
+    (1) It fails the day someone adds a length policy — which is the signal to
+        update this test and the documentation that describes the residual.
+    (2) REACHABLE: the body is routed through a declared key below.
+    """
+    s, _events = sdk
+    body = "TITLE_SIZED_PAYLOAD " + ("raw. " * 300)
+    s.create_source(RAW_URL, "conversation", contentHash="h1", title=body)
+    assert _source_props(s)["title"] == body, (
+        "a length policy now exists for a declared metadata field — update this "
+        "test and the residual note in projection/entities.py"
     )
 
 
