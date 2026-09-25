@@ -2258,12 +2258,16 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # dict, and a 0-row match. Mirroring only the last one left two
             # fail-opens (re-review): `label=Widget` with a REAL Point id, and a
             # `state`-less state op, both refused by the graph and passed here.
-            # A NON-STR id is deliberately NOT mirrored — the graph returns 0
-            # for it SILENTLY (#331 parity: a malformed id must not crash the
-            # fold), so recording here would refuse where the graph accepts.
+            # The pre-guard is `isinstance(rid, str)` — the GRAPH's own clause
+            # (`_fold_entity_mutation`: `if not isinstance(rid, str): return 0`),
+            # not `_writable_id`: a non-str id is skipped SILENTLY there and
+            # accepted by `rebuild_all`, so refusing it here would be a false
+            # red. A str id the graph cannot even query (a NUL/surrogate id
+            # raises ResponseError in the fold) still reaches the clauses below
+            # and records, so the reference fold is red where the graph is.
             # The non-Point canonical labels are the entity fold's to resolve
             # (`_fold_journal_entities`) — this index cannot see them.
-            if (_writable_id(_srid) and not _nonpoint and (
+            if (isinstance(_srid, str) and not _nonpoint and (
                     not isinstance(_slabel, str)
                     or _slabel not in _CANONICAL_ENTITY_LABELS
                     or not isinstance(ev.get("state"), dict)
@@ -2345,6 +2349,12 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # Point exists but whose every carried value fails the value gate is
             # `rebuild_all`-only (it folds 0 rows there); mirroring THAT would
             # need the value gate re-run here, and it is a documented bound.
+            # BOUND (filed on #3305): the id must be created SOMEWHERE, so a
+            # create → hard-delete → belief-write journal (the graph's own
+            # "delete race") is still not refused here while `rebuild_all`
+            # refuses it; separating that from the forward reference needs the
+            # per-position delete boundary, which this chronological fold does
+            # not carry.
             record_non_folded(
                 SHAPE_POINT_BELIEF_MISS, event_id=ev.get("event_id"),
                 event_type="ConfidenceChanged", id=rid,
