@@ -599,13 +599,16 @@ class TestDocsPageAndSkillConfig:
         # the document's teach-human recipes carry `Bearer <TORTOISE_API_KEY>`,
         # so the row has to say the key-less path is the only one. The warning
         # names BOTH minted prefixes (`tk_` for scoped/graph-bound keys,
-        # `tt_` for legacy shapes — hosted_api.py).
+        # `tt_` for legacy shapes — hosted_api.py), so both are asserted here.
         assert "left the OAuth path" in row, (
             "the ChatGPT row must warn that no key/Authorization header belongs "
             "in ChatGPT — the OAuth path is the only one")
         assert "<code>tk_…</code>" in row, (
             "the warning must name the tk_ prefix too — a scoped key is tk_, and "
             "a warning that only says tt_ reads as not applying to its holder")
+        assert "<code>tt_…</code>" in row, (
+            "the warning must name the tt_ prefix too — dropping it would leave "
+            "legacy-shaped keys looking acceptable to ChatGPT")
 
     def test_4836_document_section2_and_the_chooser_agree_on_chatgpt(self):
         """#4836 acceptance: `SKILL.md` §2's 7th-harness note and
