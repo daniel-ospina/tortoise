@@ -16,7 +16,8 @@ The streaming core (``read_capped_body``) was #2029's ``_read_capped_body`` in
 The core lives here rather than in ``hosted_api.py`` because
 ``tortoise/mcp_auth.py`` must import it: ``mcp_auth`` is imported BY
 ``mcp_server`` (which ``hosted_api`` imports), so importing ``hosted_api`` from
-``mcp_auth`` would be a cycle. This module imports only ``starlette``.
+``mcp_auth`` would be a cycle. This module imports only ``starlette`` and
+``tortoise.capture_spool`` (stdlib-only — no cycle).
 """
 from __future__ import annotations
 
@@ -25,6 +26,9 @@ from typing import Any
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.routing import get_route_path
+
+from tortoise.capture_spool import SPOOL_MAX_ENTRY_BYTES
 
 #: Default cap for the small JSON/form surfaces (#2032), now also applied by
 #: ``CappedBodyMiddleware`` to the pydantic/``dict``-body endpoints that
@@ -41,7 +45,15 @@ BODY_413_DETAIL = f"request body exceeds the size cap ({BODY_MAX_BYTES // 1024} 
 #: JSON) plus envelope room (tortoise/pi-hooks/tortoise-capture.ts,
 #: ``SPOOL_MAX_ENTRY_BYTES``). The server accepts at least the client's ceiling
 #: for the same class #2032 sized at 8 MiB for commit_session.
-CAPTURE_SESSION_MAX_BYTES = 16 * 1024 * 1024
+#:
+#: It is an ALIAS, not a second literal: the TypeScript capture contract states
+#: the client spool ceiling "must exceed the SERVER's own legal maximum", so a
+#: retune of ``SPOOL_MAX_ENTRY_BYTES`` that did not move this constant would
+#: make the server 413 a capture the client believes is legal. The alias makes
+#: the two move together (``tortoise/capture_spool.py`` is stdlib-only, so the
+#: import is cycle-free). The worst-case admission arithmetic is pinned in
+#: ``tests/test_body_cap_sweep.py::TestCaptureSessionCapOverride``.
+CAPTURE_SESSION_MAX_BYTES = SPOOL_MAX_ENTRY_BYTES
 CAPTURE_SESSION_413_DETAIL = (
     f"session request body exceeds the size cap "
     f"({CAPTURE_SESSION_MAX_BYTES // (1024 * 1024)} MiB)"
@@ -129,25 +141,54 @@ class CappedBodyMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.default_max_bytes = default_max_bytes
         self.default_detail = default_detail
-        self.path_caps = dict(path_caps or {})
+        # Normalize the KEYS at registration too, so a trailing-slash key can
+        # never be registered in a form the lookup would miss.
+        self.path_caps = {self._normalize_path(k): v
+                          for k, v in (path_caps or {}).items()}
         self.exempt_prefixes = tuple(exempt_prefixes)
         self.exempt_regexes = tuple(exempt_regexes)
 
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Route path with any trailing slash removed (``"/"`` preserved).
+
+        Every ``exempt_regexes`` entry tolerates an optional trailing slash
+        (``/?$``), so the ``path_caps`` lookup must too: ``/v1/sessions/`` used
+        to miss the ``/v1/sessions`` override and fall back to the 256 KiB
+        default, false-413ing a legal ~10 MB capture POSTed with a trailing
+        slash (Starlette's ``redirect_slashes`` would have 307'd it to the
+        override path).
+        """
+        return path if path == "/" else path.rstrip("/")
+
     def resolve_cap(self, path: str) -> tuple[int, str] | None:
-        """``(max_bytes, detail)`` for ``path``, or ``None`` to pass through."""
-        override = self.path_caps.get(path)
+        """``(max_bytes, detail)`` for ``path``, or ``None`` to pass through.
+
+        ``path`` must be the ROUTE path (root_path-stripped) — see
+        ``dispatch``.
+        """
+        key = self._normalize_path(path)
+        override = self.path_caps.get(key)
         if override is not None:
             return override
         for pattern in self.exempt_regexes:
-            if pattern.match(path):
+            if pattern.match(path) or pattern.match(key):
                 return None
         for prefix in self.exempt_prefixes:
-            if path == prefix or path.startswith(prefix.rstrip("/") + "/"):
+            if key == prefix or key.startswith(prefix.rstrip("/") + "/"):
                 return None
         return (self.default_max_bytes, self.default_detail)
 
     async def dispatch(self, request: Request, call_next):
-        cap = self.resolve_cap(request.scope.get("path", ""))
+        # Compare on the ROUTE path (Starlette strips root_path there), not the
+        # raw path: under an ASGI mount prefix (`uvicorn --root-path /x`)
+        # scope["path"] is "/x/v1/sessions" while the route path is
+        # "/v1/sessions", so a raw-path lookup would miss the override AND
+        # every exemption — reading `/v1/internal/**` bodies BEFORE the auth
+        # gate (breaking #4939's "not one byte read before auth") and
+        # false-413ing the larger legal bodies on the import / commit / stripe
+        # routes. Mirrors McpPathCanonicalizerMiddleware in hosted_api.py.
+        cap = self.resolve_cap(get_route_path(request.scope))
         if cap is not None:
             try:
                 request._body = await read_capped_body(
