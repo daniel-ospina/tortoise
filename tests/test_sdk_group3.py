@@ -539,3 +539,47 @@ class TestConnectIssueObjectsAboutObject:
             "RETURN o.name, o.repo, o.issue_number, o.url",
             params={"eid": ev["eventId"]}).result_set
         assert pr == [["just-a-string-pr", None, None, None]]  # lists, not tuples
+
+    def test_long_object_name_stored_verbatim_by_both_writers(self, sdk):
+        """#3574 — a >200-char Object name must be persisted IDENTICALLY by
+        both Object writers: the registered-entity path (``create_object`` →
+        ``_create_entity`` → ``_upsert_object``, which MERGEs on the name)
+        and the session-indexing path (``_connect_issue_objects``).
+
+        ``name`` IS the Object's identity — ``_upsert_object`` MERGEs on it,
+        ``_fold_object_superseded`` MATCHes it, and ``_entity_name_id``
+        derives the canonical id from the FULL name. Before this fix
+        ``_connect_issue_objects`` silently truncated its ``SET o.name`` to
+        200 chars, so one logical GitHub issue landed under two different
+        names depending on the door it entered, and the truncated carrier was
+        unreachable by every name-keyed read/write path (it could never be
+        matched, updated, or superseded by name).
+
+        The assertion is deliberately "the two writers agree", not "the name
+        is long": a future third writer that re-introduces a cap trips it too.
+        """
+        long_name = "gh-issue-title-" + ("x" * 240)
+        assert len(long_name) > 200
+
+        # writer 1 — registered entity, journaled, MERGE-by-name.
+        sdk.create_object(long_name, objectKind="issue")
+        # writer 2 — the session-indexing lane's aboutObject writer.
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession",
+                              session_id="s3574")
+        sdk._connect_issue_objects(ev["eventId"], {"issues": [{"title": long_name}]})
+
+        g = sdk._get_proj().g
+        stored = [r[0] for r in g.query(
+            "MATCH (o:Object) RETURN o.name").result_set]
+        assert stored, "both writers must have persisted an Object"
+        assert all(n == long_name for n in stored), (
+            "Object name diverges between the two writers: "
+            f"{sorted(stored)!r} — both must store the full name "
+            f"({len(long_name)} chars); a truncated name is invisible to "
+            "every name-keyed reader and writer (#3574)")
+        # Every persisted carrier is addressable by the full name, and NONE
+        # is stored under the 200-char prefix.
+        assert g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                       params={"n": long_name}).result_set[0][0] == len(stored)
+        assert g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
+                       params={"n": long_name[:200]}).result_set[0][0] == 0
