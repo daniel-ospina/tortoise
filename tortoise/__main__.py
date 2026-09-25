@@ -5280,6 +5280,7 @@ def _cmd_pack_new(args) -> int:
         CANONICAL_EVENT_KINDS,
         CANONICAL_OBJECT_KINDS,
         CANONICAL_POINT_KINDS,
+        registered_source_types,
     )
 
     ns = (args.namespace or "").strip()
@@ -5292,8 +5293,14 @@ def _cmd_pack_new(args) -> int:
         errors.append(f"namespace '{ns}' should be camelCase (lowercase first letter)")
     if ns and ns in RESERVED_STARTER_NAMESPACES:
         errors.append(f"namespace '{ns}' is a reserved starter pack — pick a different name")
+    # D10 (#5013, ONTOLOGY v3.15, #5022) moved `document` from the object-kind
+    # axis to the SOURCE-kind axis (a document is a `:Source`), so the guard must
+    # read the source vocabulary too: the word was reserved before only
+    # incidentally, as an objectKind. The property is unchanged — a pack
+    # namespace must not collide with ANY canonical ontology word, whichever
+    # axis carries it.
     _canon = CANONICAL_OBJECT_KINDS | CANONICAL_POINT_KINDS | CANONICAL_EVENT_KINDS \
-        | CANONICAL_DOCUMENT_KINDS
+        | CANONICAL_DOCUMENT_KINDS | registered_source_types()
     if ns and ns in {k.lower() for k in _canon}:
         errors.append(f"namespace '{ns}' collides with a canonical kind — pick a different name")
     if errors:

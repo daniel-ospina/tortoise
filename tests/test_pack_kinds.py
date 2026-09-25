@@ -1270,15 +1270,15 @@ class TestCanonicalObjectKindAlignment:
 
         Loads a real pack subclassing each newly added kind rather than asserting
         the constant against itself — ``expand_kind`` returns ``[kind]`` for an
-        unknown kind, so an identity check would pass vacuously. Also pins the
-        `document` (objectKind) vs `Document` (core entity type) duality: both
-        validate as parents and expand SEPARATELY (the expansion keys on the
-        literal string).
+        unknown kind, so an identity check would pass vacuously. The pre-D10
+        `document` (objectKind) vs `Document` (core entity type) duality pin is
+        REPLACED by the decision that retired it: D10 (#5013, ONTOLOGY v3.15,
+        #5022) made a document a `:Source`, so lowercase `document` no longer
+        validates as a parent while `Document` still expands.
         """
         manifests = {
             "tranche": "target", "northStar": "goal", "roadmap": "plan",
-            "playbook": "strategy", "label": "tag",
-            "lowerDoc": "document", "upperDoc": "Document",
+            "playbook": "strategy", "label": "tag", "upperDoc": "Document",
         }
         pack_dir = tmp_path / "alignment"
         pack_dir.mkdir()
@@ -1295,10 +1295,24 @@ class TestCanonicalObjectKindAlignment:
         assert not registry.errors, registry.errors
         for kind, parent in manifests.items():
             assert f"alignment:{kind}" in registry.expand_kind(parent), parent
-        # The duality: lowercase objectKind and PascalCase entity type are
-        # distinct expansion roots — neither absorbs the other's subclasses.
-        assert "alignment:upperDoc" not in registry.expand_kind("document")
-        assert "alignment:lowerDoc" not in registry.expand_kind("Document")
+        # D10: lowercase `document` is no longer a canonical objectKind, so it is
+        # not a subclassable parent; `Document` (the core expansion root the
+        # documentKinds genre axis subclasses) is unaffected.
+        assert "document" not in CANONICAL_OBJECT_KINDS
+        assert "alignment:upperDoc" in registry.expand_kind("Document")
+        retired_root = tmp_path / "retired_root"
+        retired_root.mkdir()
+        _write_pack(retired_root, "retired", {
+            "namespace": "retired", "name": "Retired",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["lowerDoc"],
+                "subclassOf": {"lowerDoc": "document"},
+            },
+        })
+        retired = PackRegistry(retired_root)
+        assert retired.load_all() == 0
+        assert "retired" in retired.errors
 
     def test_legacy_extractor_vocab_is_a_documented_subset(self):
         """The legacy Phase-2 entity stage pins a NARROWER object-kind vocab
