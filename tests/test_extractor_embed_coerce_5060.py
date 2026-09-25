@@ -35,8 +35,10 @@ _SOURCE = (Path(__file__).resolve().parent.parent / "tortoise"
 #: whose caller supplies graph content that `execute_embed`'s write gate has
 #: `str`-coerced (`content = str(p.get("content", "")).strip()[:1000]`). The
 #: slice itself is NOT inherently safe: called directly with a non-string
-#: `content` it raises. The FUNCTION is part of the key, so the same expression
-#: text appearing in another function still reds.
+#: `content` it raises. The key's function name is a BARE name, so the same
+#: expression text in a differently-named function still reds, and two
+#: same-named scopes red as an ambiguity rather than silently sharing the
+#: allowance.
 #: Growth rule: an entry is added only with evidence that the site renders
 #: graph content — never to silence a real defect.
 _GRAPH_SIDE_RAW_SLICES: dict[tuple[str, str], int] = {
@@ -287,13 +289,27 @@ def _raw_get_slice_problems(tree: ast.Module) -> list[str]:
                 "allowlist — route it through `_clip` (#5060), or add a "
                 "reviewed entry with evidence that it renders graph content")
     for (func, code), n in counts.items():
-        allowed = _GRAPH_SIDE_RAW_SLICES.get((func, code), 0)
-        if n > allowed:
+        allowed = _GRAPH_SIDE_RAW_SLICES.get((func, code))
+        # `allowed is not None` matters: for an UNallowlisted key the message
+        # below would be nonsense ("appears 1x ... route the duplicate"), so an
+        # unallowlisted slice is reported by the loop above ONLY.
+        if allowed is not None and n > allowed:
             problems.append(
                 f"{func}: {code} appears {n}x but the allowlist allows "
-                f"{allowed} — route the duplicate through `_clip` (#5060), or "
-                "raise the reviewed occurrence count if the second slice "
-                "really renders graph content")
+                f"{allowed} — route the extra occurrence(s) through `_clip` "
+                "(#5060), or raise this (function, expression)'s reviewed "
+                "count if every occurrence renders graph content")
+    # The allowlist key uses the BARE function name, so a second same-named
+    # scope would silently inherit the allowance. Red on the ambiguity.
+    names = Counter(n.name for n in ast.walk(tree)
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    for name, n in names.items():
+        if n > 1 and any(name == func for func, _ in _GRAPH_SIDE_RAW_SLICES):
+            problems.append(
+                f"{name!r} is defined {n}x — the allowlist key is the bare "
+                "function name, so a same-named second scope would silently "
+                "inherit the allowance; rename one, or qualify the key by "
+                "scope")
     for (func, code), allowed in _GRAPH_SIDE_RAW_SLICES.items():
         if counts.get((func, code), 0) < allowed:
             problems.append(
@@ -336,7 +352,22 @@ def test_the_guard_flags_an_unallowlisted_slice():
     tree = ast.parse(_GRAPH_SIDE_BASELINE +
                      "def _report(e):\n"
                      "    return e.get('name', '')[:60]\n")
-    assert any("_report" in p and "not on the graph-side allowlist" in p
+    problems = _raw_get_slice_problems(tree)
+    # EXACTLY one problem: the count branch must not also fire for an
+    # unallowlisted key (`allowed` is None) and emit a nonsense "duplicate"
+    # message for a slice that appears once.
+    assert len(problems) == 1, problems
+    assert "_report" in problems[0]
+    assert "not on the graph-side allowlist" in problems[0]
+
+
+def test_the_guard_flags_an_ambiguous_allowlisted_function_name():
+    """The allowlist key is a BARE function name, so two same-named scopes
+    must red rather than silently share the allowance."""
+    tree = ast.parse(_GRAPH_SIDE_BASELINE +
+                     "def _render_search_results(other):\n"
+                     "    return other.get('content', '')[:120]\n")
+    assert any("is defined 2x" in p
                for p in _raw_get_slice_problems(tree))
 
 
