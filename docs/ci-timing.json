@@ -1,4 +1,1012 @@
 {
+  "candidate_flakes": [],
+  "failed_tests": [],
+  "files": {},
+  "history": [
+    {
+      "branch": "main",
+      "conclusion": "success",
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 0,
+        "skipped": 0,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "created_at": "2026-09-25T21:26:36Z",
+      "event": "push",
+      "failed_tests": [],
+      "killed": false,
+      "run_id": "36191573303",
+      "sample_time": "2026-09-25T23:38:27Z",
+      "sha": "c2a193d54832f622a01282b41938e4c67e716ed6",
+      "steps_max_job_ms": 2198000,
+      "steps_total_ms": 7586000
+    }
+  ],
+  "log_sources": [],
+  "outcome": {
+    "error": 0,
+    "failed": 0,
+    "killed": false,
+    "passed": 0,
+    "skipped": 0,
+    "xfailed": 0,
+    "xpassed": 0
+  },
+  "sampled_run": {
+    "conclusion": "success",
+    "created_at": "2026-09-25T21:26:36Z",
+    "head_sha": "c2a193d54832f622a01282b41938e4c67e716ed6",
+    "run_id": "36191573303",
+    "sample_time": "2026-09-25T23:38:27Z",
+    "selection": "latest completed event=push&branch=main run, exclude_pull_requests=true, cancelled skipped"
+  },
   "schema_version": 1,
-  "history": []
+  "steps": {
+    "canary-streak": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 4000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Download half-b artifacts (the P1-7 canary contract)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 3000,
+        "name": "Download previous streak artifact (chain continuity)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Classify run + update the canary streak (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload canary streak artifact"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post canary-streak summary"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "changes": [
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 10000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Tiered selection"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Emit push matrix (#1472)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Tier-2 duration split (#1473)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Secrets scan (evidence artifacts,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "manifest-integrity": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 6000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Install pyyaml"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Manifest integrity (drift gate, #1262)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "packs-compile": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 26000,
+        "name": "Install package"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Whole-registry compile (all packs, zero validation errors)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "python-ci-gate": [
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Aggregate matrix result"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "surface-guard": [
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 23000,
+        "name": "Install"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Pin the gate's tooling to the base ref"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "The surface cannot expand without an explicit human decision"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "The ordering lint (AC13)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "The list is generated from the manifest and cannot drift from it"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test (a)": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 12000,
+        "name": "Initialize containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 109000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 81000,
+        "name": "Generate coverage manifest (expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Canary producer (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1976000,
+        "name": "Run fast test suite (slow files run in the test-slow job)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump redislite-hygiene end-sweep decision (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Stop containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test (b)": [
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 12000,
+        "name": "Initialize containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 114000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 70000,
+        "name": "Generate coverage manifest (expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Canary producer (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1514000,
+        "name": "Run fast test suite (slow files run in the test-slow job)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump redislite-hygiene end-sweep decision (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Stop containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test-carve-out": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 110000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 10000,
+        "name": "Generate coverage manifest (carve-out \u2014 expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 857000,
+        "name": "Run carve-out suite (embedded, URI unset \u2014 E2E-4)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard (carve-out, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload carve-out log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test-concurrency-falkor": [
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 12000,
+        "name": "Initialize containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 95000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 7000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 29000,
+        "name": "Run live concurrency tests (real FalkorDB sidecar)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Validate docker-compose.yml (ports + header edits)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Docs-consistency guard (embedded must never be \"default\" again)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Stop containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Complete job"
+      }
+    ],
+    "test-d14-hosted-api": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 132000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 96000,
+        "name": "Run the embedded_only marker selection (URI unset \u2014"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload D14 log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test-slow (a)": [
+      {
+        "conclusion": "success",
+        "duration_ms": 3000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 16000,
+        "name": "Initialize containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 3000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 110000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 6000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Drift guard \u2014 legs cover slow_files minus carve-out (#1471)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 6000,
+        "name": "Generate coverage manifest (slow legs \u2014 expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 210000,
+        "name": "Run slow test suite \u2014 leg a (known-slow files,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard (slow legs, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Stop containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test-slow (b)": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 11000,
+        "name": "Initialize containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 106000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Drift guard \u2014 legs cover slow_files minus carve-out (#1471)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Generate coverage manifest (slow legs \u2014 expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1631000,
+        "name": "Run slow test suite \u2014 leg b (known-slow files,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard (slow legs, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Stop containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test-track-b": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 16000,
+        "name": "Initialize containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 4000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 3000,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 16000,
+        "name": "Install"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Generate coverage manifest (track-b, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 3000,
+        "name": "Run Track B tests (explicit marker)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard (track-b, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload track-b log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 6000,
+        "name": "Stop containers"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ]
+  }
 }
