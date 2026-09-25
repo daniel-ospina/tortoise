@@ -17,9 +17,14 @@ silently drops the pathname the SPA branches on.
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
+
+import pytest
 
 PUBLIC = (
     Path(__file__).resolve().parents[1]
@@ -672,3 +677,166 @@ def test_missing_assets_are_a_non_html_404_not_the_shell() -> None:
         "the /assets/* Function serves index.html — that is the SPA fallback "
         "this issue exists to remove from the asset prefix (#3048)"
     )
+
+
+# ── #3048 — execute the not-found branch, do not describe it ────────────────
+#
+# The source pins above are necessary but NOT sufficient, and two of the
+# defects this test exists for proved it: `text/plain` also appears in the 503
+# branch (so swapping the not-found branch's type to `text/html` still
+# satisfied the pin), and NO pin asserted the STATUS at all (so rewinding the
+# not-found branch to `200` also passed). Those are the issue's own defects —
+# the `200 text/html` soft-404 and its `404 text/html` residue. The response
+# the Function BUILDS is only observable by EXECUTING the real exported
+# handler with a stubbed `env.ASSETS`, the convention of
+# tests/test_blog_agent_delete_guard.py and tests/test_admin_return_to.py.
+#
+# Node is optional (same convention): the source pins above still run when it
+# is unavailable, and this half skips cleanly.
+
+_ASSETS_DRIVER = """
+const mod = await import(process.argv[2]);
+const cases = JSON.parse(process.argv[3]);
+const out = [];
+for (const c of cases) {
+  const env = c.binding === false ? {} : {
+    ASSETS: {
+      fetch: async () => new Response(c.body === undefined ? null : c.body, {
+        status: c.status,
+        headers: c.headers || {},
+      }),
+    },
+  };
+  const request = new Request('https://app.premiselabs.co' + c.path);
+  const res = await mod.onRequest({ request, env, params: { path: [] }, waitUntil: () => {} });
+  out.push({
+    status: res.status,
+    contentType: res.headers.get('Content-Type'),
+    cacheControl: res.headers.get('Cache-Control'),
+    etag: res.headers.get('ETag'),
+    body: await res.text(),
+  });
+}
+console.log(JSON.stringify(out));
+"""
+
+# `miss` is the state the asset router is in for an undeployed chunk — the
+# #4006 `404.html` fallback, i.e. `404` with an HTML body. The rest model the
+# responses the pass-through must preserve unchanged: a real bundle asset, a
+# revalidation `304`, and a range `206`.
+_ASSETS_CASES: dict[str, dict] = {
+    "miss": {
+        "path": "/assets/index-DOES-NOT-EXIST.js",
+        "status": 404,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+    },
+    "real_asset": {
+        "path": "/assets/index-DSI3aDc5i.js",
+        "status": 200,
+        "body": "console.log(1)",
+        "headers": {
+            "Content-Type": "application/javascript",
+            "ETag": '"abc123"',
+            "Cache-Control": "public, max-age=0, must-revalidate",
+        },
+    },
+    "not_modified": {
+        "path": "/assets/index-DSI3aDc5i.js",
+        "status": 304,
+        "headers": {"ETag": '"abc123"'},
+    },
+    "range": {
+        "path": "/assets/font.woff2",
+        "status": 206,
+        "body": "x",
+        "headers": {"Content-Type": "font/woff2", "Content-Range": "bytes 0-0/4"},
+    },
+    "no_binding": {"path": "/assets/anything.js", "binding": False},
+}
+
+
+# A module-scoped fixture: each node start costs seconds and the cases are
+# independent, so the real handler is invoked once for the whole module.
+@pytest.fixture(scope="module")
+def assets_results() -> dict[str, dict]:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    import tempfile
+
+    order = list(_ASSETS_CASES)
+    with tempfile.TemporaryDirectory() as td:
+        driver = Path(td) / "driver.mjs"
+        driver.write_text(_ASSETS_DRIVER, encoding="utf-8")
+        proc = subprocess.run(
+            [
+                node,
+                "--experimental-strip-types",
+                str(driver),
+                str(ASSETS_FUNCTION),
+                json.dumps([_ASSETS_CASES[k] for k in order]),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
+    out = json.loads(proc.stdout)
+    assert len(out) == len(order), f"driver returned {len(out)} results for {len(order)} cases"
+    return dict(zip(order, out, strict=True))
+
+
+def test_missing_asset_answers_404_with_a_non_html_content_type(assets_results) -> None:
+    """#3048: the not-found branch must ANSWER the miss, not pass it through.
+
+    Behavioural, not source-shape. The handler is executed with a stub
+    `env.ASSETS` whose `fetch` answers like the asset router does for a miss
+    (`404 text/html`), and the response the Function BUILDS is asserted.
+
+    Falsifiable against the exact defects that motivated this test:
+      * re-widening the fallback to `200 text/html` fails the status pin — the
+        failure the source pins could NOT see;
+      * leaving the #3048 residue, `404 text/html`, fails the content-type pin;
+      * so does answering `404` with any other asset-ish type, because
+        `text/plain` is the deliberate one (the status is the existence signal,
+        and the body must not impersonate what was asked for).
+    """
+    res = assets_results["miss"]
+    assert res["status"] == 404, (
+        f"a missing asset answered {res['status']} — an asset that does not "
+        f"exist must not read as present (#3048): {res}"
+    )
+    ctype = (res["contentType"] or "").lower()
+    assert not ctype.startswith("text/html"), (
+        f"the missing-asset 404 carries Content-Type {res['contentType']!r} — an "
+        f"HTML body is what makes a missing .js read as a document (#3048): {res}"
+    )
+    assert ctype.startswith("text/plain"), (
+        f"the missing-asset body is no longer text/plain but "
+        f"{res['contentType']!r} (#3048): {res}"
+    )
+    assert res["cacheControl"] == "no-store", (
+        "a cacheable missing-asset 404 keeps answering for a path a later deploy "
+        f"may legitimately ship (#3048): {res}"
+    )
+
+
+def test_real_asset_responses_pass_through_verbatim(assets_results) -> None:
+    """A matching Function is consulted BEFORE the asset router, so the real
+    bundle's responses must survive it: a Function answering every request with
+    its own 404 would take the dashboard down while a "missing assets 404"
+    assertion stayed green (#3048).
+    """
+    real = assets_results["real_asset"]
+    assert (real["status"], real["contentType"]) == (200, "application/javascript"), real
+    assert real["etag"] == '"abc123"', f"the pass-through dropped the ETag: {real}"
+    assert real["cacheControl"] == "public, max-age=0, must-revalidate", real
+    assert assets_results["not_modified"]["status"] == 304, assets_results["not_modified"]
+    assert assets_results["range"]["status"] == 206, assets_results["range"]
+
+
+def test_missing_assets_binding_is_a_503_not_a_404(assets_results) -> None:
+    """An unbound ASSETS is a deployment fault, never "your asset is missing"."""
+    res = assets_results["no_binding"]
+    assert res["status"] == 503, f"a missing ASSETS binding answered {res['status']}: {res}"
+    assert res["status"] != 404, "a deployment fault was reported as a missing asset (#3048)"
