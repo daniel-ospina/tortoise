@@ -218,7 +218,14 @@ class TestPointBurst:
             for i in range(5):
                 self._post_point(tc, 51 + i)
             assert fake.tables["organizations"][0]["suspended_at"] is None
-        assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
+        # The second burst is a NEW episode and must RE-FLAG (the false-positive
+        # guarantee: it never suspends). Assert the durable re-flag, NOT a
+        # notification count: alerts are bounded to one per (org, rule) per
+        # staging window (#3631), and this test ages the stored rows rather than
+        # the engine clock, so both episodes land inside one wall-clock window.
+        flag_rows = [e for e in fake.tables["abuse_events"]
+                     if e["event_type"] == "flag"]
+        assert len(flag_rows) >= 2
 
     def test_boundary_crossing_suspends_and_403(self, env):
         """A breach persisting past flagged_at + window suspends (delta 13).

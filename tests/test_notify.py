@@ -284,17 +284,39 @@ def test_billing_email_skipped_when_shared_budget_exhausted(monkeypatch, caplog)
                for r in caplog.records)
 
 
+def test_billing_budget_skip_files_a_deduped_incident(monkeypatch, caplog):
+    """#3631: a budget-skipped billing leg is ops-visible on the same deduped
+    incident the provider-failure path uses — the webhook has already claimed
+    its idempotency marker, so the alert can never re-fire."""
+    filed, _pushed = _install_alert_store(monkeypatch)
+    monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "0")
+    monkeypatch.setattr(
+        notify.httpx, "post",
+        lambda url, **kw: (_ for _ in ()).throw(AssertionError("no send")))
+    with caplog.at_level(logging.WARNING):
+        notify.notify_billing_event("billing_payment_failed", TEAM, DETAILS)
+        notify.notify_billing_event("billing_payment_failed", TEAM, DETAILS)
+    assert len(filed) == 1, f"expected one deduped incident, got {filed}"
+    assert notify._BILLING_SEND_FAILED_KIND in filed[0]
+
+
 def test_billing_email_refunds_its_slot_on_provider_failure(monkeypatch):
     """#3631: a provider-rejected billing POST returns the slot to the shared
-    budget — no permanent leak that would silently starve later invites."""
+    budget — no permanent leak that would silently starve later invites. The
+    counter is observed INSIDE the failing POST so a no-op skip (which would
+    also leave it at 0) cannot pass."""
     from tortoise import email_notify
 
     monkeypatch.setenv("RESEND_SEND_BUDGET_DAILY", "1")
+    reserved_at_post = []
 
     def boom(url, **kwargs):
+        if url == notify.RESEND_URL:  # telegram_push shares httpx.post
+            reserved_at_post.append(email_notify._send_counts_day)
         raise RuntimeError("network down")
 
     monkeypatch.setattr(notify.httpx, "post", boom)
     notify.notify_billing_event("billing_upgrade", TEAM, {"tier": "pro"})
-    assert email_notify._send_counts_day == 0
+    assert reserved_at_post == [1]  # the send was attempted, and it was counted
+    assert email_notify._send_counts_day == 0    # ... then refunded on failure
     assert email_notify._send_counts_month == 0

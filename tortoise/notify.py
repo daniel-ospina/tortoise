@@ -171,33 +171,51 @@ def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> N
         # #3631: billing email shares the Resend account with transactional
         # email, so it reserves from the SAME send budget (not a second one) —
         # an uncounted billing storm could otherwise starve invites/OTPs. The
-        # module imports at call time: email_notify imports file_incident from
-        # here, so a module-level import would cycle.
-        from tortoise.email_notify import refund_send_slot, reserve_send_slot
-        reason = reserve_send_slot()
-        if reason is not None:
+        # import is function-level (email_notify imports file_incident from
+        # here, so a module-level import would cycle) and guarded: this
+        # function's never-raise contract is load-bearing on the Stripe
+        # webhook path, which has ALREADY claimed its event marker by the time
+        # it calls us.
+        try:
+            from tortoise.email_notify import refund_send_slot, reserve_send_slot
+        except Exception as e:  # noqa: BLE001, RUF100
             logger.warning(
-                "billing notify: resend SKIPPED — send budget exhausted (%s)",
-                reason)
+                "billing notify: send-budget guard unavailable (%s)",
+                redact_safe(e))
         else:
-            try:
-                subject = f"Tortoise Billing — {kind}"
-                body = _email_text(kind, org, details).replace("\n", "<br>")
-                _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
-            except Exception as e:  # noqa: BLE001, RUF100
-                refund_send_slot()  # provider rejected/failed — free the slot
-                logger.warning("billing notify: resend failed (%s)", redact_safe(e))
-                # Ops incident (GH issue + Telegram) — a billing notification that
-                # never left the building was previously visible only in a log
-                # line. Platform subject ("") on purpose: ONE Resend account serves
-                # every team, so keying by team would file one issue per affected
-                # team for a single outage. The team is still in the detail.
+            reason = reserve_send_slot()
+            if reason is not None:
+                logger.warning(
+                    "billing notify: resend SKIPPED — send budget exhausted (%s)",
+                    reason)
+                # The webhook has already consumed its idempotency marker, so a
+                # dropped billing alert cannot re-fire — surface it on the same
+                # deduped ops incident the provider-failure path uses.
                 file_incident(_BILLING_SEND_FAILED_KIND, "", {
                     "channel": "resend",
                     "event_kind": kind,
                     "org_id": org.get("org_id", "?"),
-                    "error": redact_safe(e),
+                    "reason": f"budget exhausted ({reason})",
                 })
+            else:
+                try:
+                    subject = f"Tortoise Billing — {kind}"
+                    body = _email_text(kind, org, details).replace("\n", "<br>")
+                    _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
+                except Exception as e:  # noqa: BLE001, RUF100
+                    refund_send_slot()  # provider rejected/failed — free the slot
+                    logger.warning("billing notify: resend failed (%s)", redact_safe(e))
+                    # Ops incident (GH issue + Telegram) — a billing notification that
+                    # never left the building was previously visible only in a log
+                    # line. Platform subject ("") on purpose: ONE Resend account serves
+                    # every team, so keying by team would file one issue per affected
+                    # team for a single outage. The team is still in the detail.
+                    file_incident(_BILLING_SEND_FAILED_KIND, "", {
+                        "channel": "resend",
+                        "event_kind": kind,
+                        "org_id": org.get("org_id", "?"),
+                        "error": redact_safe(e),
+                    })
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     chat_id = _env("TELEGRAM_CHAT_ID")

@@ -575,10 +575,19 @@ class _FlakyFlagStore(MemoryAbuseStore):
 
 class _BlindReadStore(MemoryAbuseStore):
     """flag_org persists, but latest_flag_at ALWAYS raises — a write-healthy,
-    read-blind store (replica lag / read outage)."""
+    read-blind store (read outage)."""
 
     def latest_flag_at(self, org_id, rule):
         raise RuntimeError("flag read failed")
+
+
+class _StaleNoneStore(MemoryAbuseStore):
+    """flag_org persists, but latest_flag_at always returns a stale ``None``
+    (replica lag) — the issue's other named mechanism, and the case a
+    raise-only guard used to miss."""
+
+    def latest_flag_at(self, org_id, rule):
+        return None
 
 
 class _FakeResendResponse:
@@ -594,6 +603,9 @@ class TestFlagNotificationBudget:
     repeatedly, and a flag that was not persisted alerts at all."""
 
     def test_storm_in_one_window_notifies_once(self, notified):
+        """Durable-path regression guard: with a healthy store the anchor
+        itself bounds the alert (this is pre-existing behaviour, kept so a
+        future change to _evaluate cannot silently reintroduce the storm)."""
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)
@@ -609,6 +621,27 @@ class TestFlagNotificationBudget:
         for i in range(50):
             eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
         assert [c[0] for c in notified] == ["abuse_flag"]
+
+    def test_stale_none_read_does_not_refire_per_evaluation(self, notified):
+        """(a): a read that returns a stale ``None`` (replica lag — no
+        exception) must be bounded exactly like a raising read. A guard
+        conditioned on the read RAISING missed this and stormed."""
+        eng = AbuseEngine(_StaleNoneStore())
+        for i in range(50):
+            eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
+        assert [c[0] for c in notified] == ["abuse_flag"]
+
+    def test_claim_prune_respects_each_entrys_window(self):
+        """R1 (1h) and R2 (24h) share the dedup map: a flood of expired
+        short-window claims must not evict a still-live long-window claim."""
+        eng = AbuseEngine(MemoryAbuseStore())
+        now = T0
+        eng._last_notified[("o", "key_create", "flag")] = now + timedelta(hours=24)
+        for i in range(10_001):  # exceed the threshold; all already expired
+            eng._last_notified[("o", f"r{i}", "flag")] = now - timedelta(seconds=1)
+        assert eng._claim_notify("o", "point_create", "flag", now, 3600) is True
+        # the 24h entry survived its own expiry, not the 1h caller's window
+        assert ("o", "key_create", "flag") in eng._last_notified
 
     def test_no_notification_when_flag_not_persisted(self, notified):
         """(b): a store write failure emits ZERO abuse alerts — the pre-fix
@@ -662,21 +695,29 @@ class TestAbuseStormDoesNotStarveTransactional:
         monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
         notify_mod._skip_logged.clear()
         en._skip_logged.clear()
-        en._send_counts_day = 0
-        en._send_counts_month = 0
-        en._send_counts_day_period = ""
-        en._send_counts_month_period = ""
+        # monkeypatch (not bare assignment) so the budget globals are restored.
+        monkeypatch.setattr(en, "_send_counts_day", 0)
+        monkeypatch.setattr(en, "_send_counts_month", 0)
+        monkeypatch.setattr(en, "_send_counts_day_period", "")
+        monkeypatch.setattr(en, "_send_counts_month_period", "")
 
         telegram_sent: list[str] = []
         # Real notify_abuse (Telegram-only, #3639) — only the transport faked.
         monkeypatch.setattr(
             notify_mod, "telegram_send",
             lambda bot, chat, text, **k: telegram_sent.append(text))
+        # The sync Resend path notify.py would use if the abuse leg were ever
+        # restored: it must stay untouched for the whole storm.
+        abuse_resend: list[str] = []
+        monkeypatch.setattr(
+            notify_mod.httpx, "post",
+            lambda url, **kw: abuse_resend.append(url))
 
-        eng = AbuseEngine(_BlindReadStore())
+        eng = AbuseEngine(_StaleNoneStore())
         for i in range(60):
             eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
         assert len(telegram_sent) == 1  # bounded storm — not 60
+        assert abuse_resend == [], "the abuse path must never touch Resend"
 
         posts: list[str] = []
 

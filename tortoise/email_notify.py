@@ -103,9 +103,10 @@ _send_counts_day: int = 0
 _send_counts_month: int = 0
 _send_counts_day_period: str = ""   # "YYYY-MM-DD" UTC — day counter resets on day change
 _send_counts_month_period: str = ""  # "YYYY-MM" UTC — month counter resets on month change
-# Serializes check-then-reserve: billing reserves from a worker thread
-# (asyncio.to_thread), so the asyncio schedule paths and that thread must not
-# interleave between _budget_exceeded() and _reserve_send() (#3631).
+# Serializes check-then-reserve so the pair is atomic. All CURRENT callers
+# (the schedule paths here and the billing leg in notify.py) run on the event
+# loop, so it is uncontended today — it is retained as defence for any future
+# off-loop caller, and it never wraps the network POST (#3631).
 _budget_lock = threading.Lock()
 
 
@@ -185,9 +186,9 @@ def reserve_send_slot() -> str | None:
 
     The single entry point for a Resend sender outside this module (billing
     email, ``tortoise.notify``). Returns ``None`` when a slot was reserved,
-    else the exhausted-budget reason for the caller to log. Held under a lock
-    so the check-then-reserve pair is atomic against the asyncio schedule
-    paths — billing reserves from a worker thread.
+    else the exhausted-budget reason for the caller to log. The
+    check-then-reserve pair is held under a lock so it stays atomic if a
+    caller ever runs off the event loop; it never wraps the POST itself.
     """
     with _budget_lock:
         exceeded, reason = _budget_exceeded()
