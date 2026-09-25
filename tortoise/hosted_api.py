@@ -38,6 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import get_route_path
 
 import tortoise
 
@@ -2213,11 +2214,20 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 #     credit a DISCARDED response to the org's egress.
 _WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
 
+#: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
+#: request under one is admitted on the ROUTE axis (see ``monitoring``'s
+#: two-axis note) rather than the request-derived one. That matters because a
+#: mounted surface is a primary read path: on the derived axis, eight cheap 404s
+#: on UNRELATED paths starve it for the process lifetime (measured), while here
+#: unrelated junk cannot touch it at all. The prefix is the label — no
+#: per-sub-route precision is claimed for a sub-app whose inner routes this
+#: layer does not enumerate.
+_EGRESS_DECLARED_PREFIXES = ("/mcp",)
+
 #: Bounds on the fallback (request-derived) route label. A FastAPI route
 #: template is a code literal and always short; the normalised fallback is not,
-#: so it is truncated per segment and overall, and `record_egress` caps the
-#: number of distinct children again on top.
-_EGRESS_MAX_LABEL_LEN = 64
+#: so it is truncated per segment — at most two segments of
+#: ``_EGRESS_MAX_SEGMENT_LEN``, so the whole label is bounded by construction.
 _EGRESS_MAX_SEGMENT_LEN = 24
 
 
@@ -2229,21 +2239,23 @@ def _route_describes(route, path: str) -> bool:
     reached through a ``Mount`` has a pattern relative to the mount, so it does
     NOT describe the prefixed request path and is rejected — which is the point:
     the sub-route must not stand in for the surface the caller actually hit.
+
+    TOTAL: any failure to answer is ``False`` (fall back to the request-derived
+    label), never an exception a caller could turn into a failed request.
     """
     regex = getattr(route, "path_regex", None)
     if regex is None:
         return getattr(route, "path", None) == path
     try:
         return regex.fullmatch(path) is not None
-    except (TypeError, AttributeError):  # pragma: no cover - defensive
+    except Exception:  # noqa: BLE001, RUF100 - a label is never worth a 500
         return False
 
 
-def _egress_route_class(scope, entry_path: str | None = None
-                        ) -> tuple[str, bool]:
+def _egress_route_class(scope, entry_path: str) -> tuple[str, bool]:
     """The route class a response is attributed to, and whether it was DERIVED.
 
-    FastAPI stamps the MATCHED ROUTE TEMPLATE onto the scope
+    A matched FastAPI route stamps its TEMPLATE onto the scope
     (``scope["route"].path`` is ``/v1/points/{pid}``), which is the exact,
     bounded label — two point ids never become two metric children. When no
     template describes the request, the label falls back to a NORMALISED path:
@@ -2251,28 +2263,35 @@ def _egress_route_class(scope, entry_path: str | None = None
     collapsed to ``{id}`` (``/nope/123`` -> ``/nope/{id}``; ``/v1/...`` is
     untouched because ``v1`` is a literal, not an id).
 
-    ``entry_path`` is the path the request ARRIVED with, captured before the
-    router runs, and it is what the fallback names. The scope's ``path`` is NOT
-    a safe source at RESPONSE time: a mounted sub-app's router may rewrite it in
-    place, and WHETHER it does is a Starlette version detail, not a contract —
-    measured across the two environments this suite runs in, a request to
-    ``/mcp/export`` arrives as ``/mcp/export`` and, at response time, is either
-    still ``/mcp/export`` (starlette 1.6.0, the lock) or already the sub-app's
-    ``/export`` (1.7.0, what CI's unpinned ``pip install -e '.[test,extras]'``
-    resolves). Attributing by the mutated path would silently collapse every
-    mounted surface into its sub-route label — and two mounts sharing a
-    sub-route would share one child. The entry path is the same in both.
+    ``entry_path`` is the path the request ARRIVED with, and it is REQUIRED: it
+    is simply not safe to read the scope at response time (measured across the
+    two environments this suite runs in, i.e. what the lock resolves and what
+    CI's unpinned ``pip install -e '.[test,embeddings]'`` resolves). For a
+    request to ``/mcp/export`` both leave ``scope["path"]`` alone, but starlette
+    1.7.0 STAMPS ``scope["route"]`` with the sub-app's INNER route
+    (``Route('/export')``) while 1.6.0 stamps nothing — so trusting
+    ``scope["route"]`` unconditionally attributed the mounted request to
+    ``/export``. Trusting it here is conditional instead: the template must
+    describe the arrival path.
 
-    The template is therefore accepted only when the route reports itself as
-    matching that entry path (its own ``path_regex``, so path params still
-    resolve to the template); a sub-app route reached through a ``Mount`` does
-    not match the prefixed path and is rejected rather than trusted. The
-    ``derived`` flag is returned because that fallback is REQUEST-DERIVED:
-    ``monitoring.record_egress`` admits it into a SEPARATE, tightly capped
-    registry so unknown traffic can never consume the code-literal route
-    budget and fold real routes into overflow (review round 1).
+    Callers must pass ``starlette.routing.get_route_path(scope)`` taken BEFORE
+    the app runs: it is the request path minus ``root_path``, which is what a
+    route's ``path_regex`` is matched against. Reading ``scope["path"]``
+    instead would break template matching outright under a server
+    ``--root-path`` (the regex is root_path-relative, the path is prefixed) and
+    — for a ``Mount`` — would also pick up the mount prefix in ``root_path``
+    once the sub-app has run.
+
+    A path under a declared mount prefix is a CODE-LITERAL label on the ROUTE
+    axis, and the ``derived`` flag marks the rest as REQUEST-DERIVED so
+    ``monitoring.record_egress`` can admit them into a separate, tightly capped
+    budget: unknown traffic can never consume the code-literal route budget and
+    fold real routes into overflow.
     """
-    path = str(scope.get("path") or "") if entry_path is None else entry_path
+    path = entry_path or ""
+    for prefix in _EGRESS_DECLARED_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            return prefix, False
     route = scope.get("route")
     template = getattr(route, "path", None)
     if isinstance(template, str) and template and _route_describes(route, path):
@@ -2284,7 +2303,7 @@ def _egress_route_class(scope, entry_path: str | None = None
     for seg in segments:
         looks_like_id = seg.isdigit() or (len(seg) >= 8 and any(c.isdigit() for c in seg))
         bounded.append("{id}" if looks_like_id else seg[:_EGRESS_MAX_SEGMENT_LEN])
-    return ("/" + "/".join(bounded))[:_EGRESS_MAX_LABEL_LEN], True
+    return "/" + "/".join(bounded), True
 
 
 class EgressBytesMiddleware:
@@ -2325,10 +2344,11 @@ class EgressBytesMiddleware:
             await self.app(scope, receive, send)
             return
         nbytes = 0
-        # Captured BEFORE routing: the router may rewrite ``scope["path"]``
-        # in place for a mounted sub-app, and whether it does is a Starlette
-        # version detail — the arrival path is the same in every version.
-        entry_path = str(scope.get("path") or "")
+        # ``get_route_path`` (path minus ``root_path``) taken BEFORE the app
+        # runs: that is what a route's pattern is matched against, and it is
+        # fixed for the request — a ``Mount`` mutates ``root_path`` as it
+        # descends, so the same call at response time would no longer name it.
+        entry_path = get_route_path(scope)
 
         async def _counting_send(message):
             nonlocal nbytes
@@ -2347,11 +2367,13 @@ class EgressBytesMiddleware:
                        and bool(state.get(_WAIT_BOUND_REFUSED_STATE)))
             if not dropped:
                 org_id = state.get("org_id") if isinstance(state, dict) else None
-                path_label, derived = _egress_route_class(scope, entry_path)
                 try:
                     # Call-time attribute read (`_monitoring`), so a test or an
                     # operator can substitute the writer; measurement must never
-                    # be a NEW failure mode for the request it measures.
+                    # be a NEW failure mode for the request it measures — which
+                    # covers the LABEL derivation too, not just the increment:
+                    # a raise here would replace the app's own exception.
+                    path_label, derived = _egress_route_class(scope, entry_path)
                     _monitoring.record_egress(
                         org_id, path_label, nbytes, derived=derived)
                 except Exception:

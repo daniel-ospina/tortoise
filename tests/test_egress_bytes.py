@@ -6,7 +6,7 @@ a cost metric. Nothing counted OUTBOUND bytes, so a read-heavy org's network
 cost (retrieval/ask result sets, graph read, export) had no signal at all while
 reads are free by decision (``product/pricing.json`` -> ``billing.reads_free``).
 
-This file pins the four properties the issue's indicators ask for, plus the two
+This file pins the four properties the issue's indicators ask for, plus the ones
 that rot silently:
 
 * **per-org attributed bytes** exist and accumulate (indicator 1);
@@ -19,9 +19,14 @@ that rot silently:
   registered-but-zero metric reads as a measurement. ``test_wiring`` asserts the
   middleware is installed on the real app AND that a real request through the
   real stack records its exact response size;
-* **both labels are bounded** — the metric is request-derived, so a client
+* **the labels are bounded** — the metric is request-derived, so a client
   walking unknown paths (or a fleet of orgs) must not be able to grow the
-  Prometheus child set without bound.
+  Prometheus child set without bound;
+* **the two provenances cannot mix** — a request-derived label and a code-literal
+  route label that happen to be the same STRING must not share a series (the
+  histogram carries no org, so mixing there is cross-tenant), and a code-literal
+  surface (a mount prefix) must not be starvable by unrelated junk, which is
+  what the two axes plus the ``origin`` label and the declared prefixes buy.
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ import time
 import pytest
 from fastapi import FastAPI, Request, Response
 from prometheus_client import generate_latest
+from prometheus_client.parser import text_string_to_metric_families
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
@@ -40,6 +46,9 @@ from starlette.testclient import TestClient
 from tortoise import hosted_api as ha
 from tortoise import mcp_auth as ma
 from tortoise import monitoring
+
+ORIGIN_ROUTE = "route"
+ORIGIN_DERIVED = "derived"
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -56,25 +65,32 @@ def _clean_egress():
     monitoring._reset_egress()
 
 
-def _bytes_by_org_path() -> dict[tuple[str, str], int]:
-    """The ``(org, path)`` children of ``EGRESS_BYTES``, from the metric itself."""
-    out: dict[tuple[str, str], int] = {}
+def _bytes_by_child() -> dict[tuple[str, str, str], int]:
+    """``(org, path, origin)`` children of ``EGRESS_BYTES``, from the metric.
+
+    ``origin`` is part of the key deliberately: the whole point of the axis is
+    that the same ``(org, path)`` may exist twice, once per provenance, and a
+    helper that merged them would hide exactly the bug the axis prevents.
+    """
+    out: dict[tuple[str, str, str], int] = {}
     for family in monitoring.EGRESS_BYTES.collect():
         for sample in family.samples:
             if (not sample.name.endswith("_total")
                     or sample.name.endswith("_created_total")):
                 continue
-            out[(sample.labels["org"], sample.labels["path"])] = int(sample.value)
+            labels = sample.labels
+            out[(labels["org"], labels["path"], labels["origin"])] = int(sample.value)
     return out
 
 
-def _histogram(path_label: str) -> tuple[int, int]:
+def _histogram(path_label: str, origin: str = ORIGIN_ROUTE) -> tuple[int, int]:
     """``(count, sum)`` of the response-size histogram for one route class."""
     for family in monitoring.EGRESS_RESPONSE_BYTES.collect():
         count = total = 0
         matched = False
         for sample in family.samples:
-            if sample.labels.get("path") != path_label:
+            labels = sample.labels
+            if labels.get("path") != path_label or labels.get("origin") != origin:
                 continue
             matched = True
             if sample.name.endswith("_count"):
@@ -115,9 +131,9 @@ class TestWriter:
         monitoring.record_egress("org_b", "/v1/export", 7)
 
         assert monitoring.egress_bytes_by_org() == {"org_a": 150, "org_b": 7}
-        assert _bytes_by_org_path() == {
-            ("org_a", "/v1/points/{pid}"): 150,
-            ("org_b", "/v1/export"): 7,
+        assert _bytes_by_child() == {
+            ("org_a", "/v1/points/{pid}", ORIGIN_ROUTE): 150,
+            ("org_b", "/v1/export", ORIGIN_ROUTE): 7,
         }
 
     def test_unresolved_org_is_the_unattributed_child_not_an_invented_org(self):
@@ -125,7 +141,7 @@ class TestWriter:
         monitoring.record_egress("", "/v1/version", 4)
 
         assert monitoring.egress_bytes_by_org() == {"": 15}
-        assert ("", "/v1/version") in _bytes_by_org_path()
+        assert ("", "/v1/version", ORIGIN_ROUTE) in _bytes_by_child()
 
     def test_negative_bytes_are_clamped_not_subtracted(self):
         """A negative increment would corrupt a monotonic counter."""
@@ -159,8 +175,9 @@ class TestWriter:
             monitoring.record_egress("org_a", f"/v1/unknown-{i}", 1)
         monitoring.record_egress("org_a", "/v1/unknown-overflow", 9)
 
-        assert ("org_a", "/v1/unknown-overflow") not in _bytes_by_org_path()
-        assert _bytes_by_org_path()[("org_a", monitoring.EGRESS_OVERFLOW)] == 9
+        children = _bytes_by_child()
+        assert ("org_a", "/v1/unknown-overflow", ORIGIN_ROUTE) not in children
+        assert children[("org_a", monitoring.EGRESS_OVERFLOW, ORIGIN_ROUTE)] == 9
 
     def test_derived_path_cardinality_folds_into_one_fixed_child(self):
         """Request-derived labels have their OWN, much smaller budget."""
@@ -168,9 +185,10 @@ class TestWriter:
             monitoring.record_egress("org_a", f"/scan-{i}", 1, derived=True)
         monitoring.record_egress("org_a", "/scan-overflow", 9, derived=True)
 
-        assert ("org_a", "/scan-overflow") not in _bytes_by_org_path()
-        assert ("org_a", monitoring.EGRESS_UNROUTED) in _bytes_by_org_path()
-        paths = {path for _, path in _bytes_by_org_path()}
+        children = _bytes_by_child()
+        assert ("org_a", "/scan-overflow", ORIGIN_DERIVED) not in children
+        assert ("org_a", monitoring.EGRESS_UNROUTED, ORIGIN_DERIVED) in children
+        paths = {path for _, path, origin in children if origin == ORIGIN_DERIVED}
         assert len(paths) == monitoring.EGRESS_MAX_DERIVED_PATHS + 1
 
     def test_request_derived_labels_cannot_starve_route_templates(self):
@@ -188,8 +206,8 @@ class TestWriter:
 
         monitoring.record_egress("org_a", "/v1/retrieval/{rid}", 500)
 
-        assert _bytes_by_org_path()[
-            ("org_a", "/v1/retrieval/{rid}")] == 500, (
+        assert _bytes_by_child()[
+            ("org_a", "/v1/retrieval/{rid}", ORIGIN_ROUTE)] == 500, (
             "request-derived volume displaced a code-literal route template")
 
     def test_admitted_labels_are_stable_once_past_the_cap(self):
@@ -218,16 +236,66 @@ class TestWriter:
         # change an answer to "is this route returning 10 MB?".
         assert _histogram("/v1/points/{pid}") == (0, 0)
 
+    def test_derived_label_never_writes_into_a_template_series(self):
+        """The round-2 review finding, pinned (bug + security, converged).
+
+        The budgets were separate but the label STRING was the series key, so a
+        request-derived label equal to a route template (`/v1/version` is what an
+        unmatched `/v1/version/<junk>` normalises to) wrote its bytes into that
+        template's counter — and into its histogram, which carries no org label
+        at all. The ``origin`` axis makes the same string two distinct children.
+        """
+        monitoring.record_egress("org_a", "/v1/version", 100)
+        monitoring.record_egress("", "/v1/version", 22, derived=True)
+
+        children = _bytes_by_child()
+        assert children[("org_a", "/v1/version", ORIGIN_ROUTE)] == 100, (
+            "a request-derived label added bytes to a template's series")
+        assert children[("", "/v1/version", ORIGIN_DERIVED)] == 22
+
+        assert _histogram("/v1/version", ORIGIN_ROUTE) == (1, 100), (
+            "a request-derived observation entered a template's distribution")
+        assert _histogram("/v1/version", ORIGIN_DERIVED) == (1, 22)
+
     def test_metric_is_in_the_existing_prometheus_exposition(self):
-        """Indicator 3: readable from the metric surface that already exists."""
+        """Indicator 3: readable from the metric surface that already exists.
+
+        Parsed, not string-matched: the exposition orders labels canonically
+        (alphabetically), so a literal substring would pin the ORDER rather
+        than the content.
+        """
         monitoring.record_egress("org_a", "/v1/points/{pid}", 42)
+        monitoring.record_egress("", "/nope", 3, derived=True)
 
         text = generate_latest().decode()
-        assert (
-            'tortoise_egress_bytes_total{org="org_a",path="/v1/points/{pid}"} 42.0'
-            in text
-        ), "per-org egress is not in the /metrics exposition"
         assert "tortoise_egress_response_bytes_bucket" in text
+
+        samples: list[tuple[dict[str, str], float]] = []
+        for family in text_string_to_metric_families(text):
+            if family.name != "tortoise_egress_bytes":
+                continue
+            samples.extend((s.labels, s.value) for s in family.samples)
+
+        assert ({"org": "org_a", "path": "/v1/points/{pid}", "origin": "route"},
+                42.0) in samples, (
+            f"per-org egress is not in the /metrics exposition: {samples!r}")
+        assert ({"org": "", "path": "/nope", "origin": "derived"}, 3.0) in samples, (
+            "the provenance axis is not readable from the exposition")
+
+    def test_unencodable_label_is_repaired_so_metrics_still_serve(self):
+        """A lone surrogate would make ``generate_latest()`` raise forever.
+
+        ``/metrics`` encodes label values, and the handler returns 500 on a
+        raise — so ONE unencodable label would blind every alert in the process,
+        not just this dimension. The single writer is the place that can prevent
+        it. (Not reachable from HTTP today: uvicorn replaces invalid bytes and
+        org ids are charset-validated.)
+        """
+        monitoring.record_egress("org_a", "/v1/\ud800bad", 1)
+
+        text = generate_latest().decode()  # must not raise
+        assert "tortoise_egress_bytes_total" in text
+        assert ("org_a", "/v1/?bad", ORIGIN_ROUTE) in _bytes_by_child()
 
     def test_record_egress_is_the_only_writer_of_the_metric(self):
         """The #501/#3677 house shape: callers never touch the metric directly.
@@ -263,7 +331,7 @@ class TestMiddleware:
         assert r.content == payload
         assert monitoring.egress_bytes_by_org() == {"org_a": len(payload)}
         # The label is the ROUTE TEMPLATE, not the raw path.
-        assert ("org_a", "/v1/thing/{tid}") in _bytes_by_org_path()
+        assert ("org_a", "/v1/thing/{tid}", ORIGIN_ROUTE) in _bytes_by_child()
 
     def test_two_ids_collapse_to_one_child(self):
         """A route template label is what keeps cardinality bounded per route."""
@@ -272,7 +340,7 @@ class TestMiddleware:
         client.get("/v1/thing/one")
         client.get("/v1/thing/two")
 
-        assert _bytes_by_org_path() == {("org_a", "/v1/thing/{tid}"): 6}
+        assert _bytes_by_child() == {("org_a", "/v1/thing/{tid}", ORIGIN_ROUTE): 6}
 
     def test_attribution_is_per_org_not_global(self):
         first = TestClient(_app_with_payload(b"aaaa", org="org_a"))
@@ -309,9 +377,16 @@ class TestMiddleware:
         client.get("/nope/67890")
 
         # Numeric ids collapse, so two unknown ids are ONE child.
-        assert _bytes_by_org_path() == {("", "/nope/{id}"): 0}
+        assert _bytes_by_child() == {("", "/nope/{id}", ORIGIN_DERIVED): 0}
 
     def test_fallback_keeps_literal_segments_and_bounds_length(self):
+        """The fallback is bounded BY CONSTRUCTION — assert the real bound.
+
+        An over-long segment is truncated to ``_EGRESS_MAX_SEGMENT_LEN`` and at
+        most two segments are kept, so the longest possible label is exactly
+        ``/`` + 24 + ``/`` + 24. (Asserting an overall cap that the segment cap
+        already implies would be unfalsifiable.)
+        """
         async def _app(scope, receive, send):
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": b"ok"})
@@ -321,10 +396,11 @@ class TestMiddleware:
         client.get("/v1/version")
         client.get("/" + "z" * 500 + "/" + "y" * 500)
 
-        labels = {path for _, path in _bytes_by_org_path()}
+        labels = {path for _, path, _ in _bytes_by_child()}
         assert "/v1/version" in labels, "`v1` is a literal, not an id"
-        over_long = [lab for lab in labels if len(lab) > ha._EGRESS_MAX_LABEL_LEN]
-        assert not over_long, f"unbounded fallback label: {over_long!r}"
+        longest = "/" + "z" * ha._EGRESS_MAX_SEGMENT_LEN + "/" + "y" * ha._EGRESS_MAX_SEGMENT_LEN
+        assert longest in labels, f"over-long segments were not truncated: {labels!r}"
+        assert max(len(lab) for lab in labels) == len(longest)
 
     def test_unrouted_traffic_through_the_middleware_cannot_starve_templates(self):
         """End-to-end version of the round-1 finding: real unauthenticated 404
@@ -346,24 +422,21 @@ class TestMiddleware:
 
         monitoring.record_egress("org_real", "/v1/export/{rid}", 1234)
 
-        assert _bytes_by_org_path()[("org_real", "/v1/export/{rid}")] == 1234
+        assert _bytes_by_child()[("org_real", "/v1/export/{rid}", ORIGIN_ROUTE)] == 1234
 
-    def test_mounted_sub_app_is_counted_and_attributed_by_its_own_path(self):
+    def test_mounted_surface_is_a_declared_route_label(self):
         """The large-payload read paths include mounted surfaces (the MCP mount).
 
-        A mounted sub-app MUST be attributed by the path the client requested
-        (``/mcp/export``), never by the sub-app's own route (``/export``) —
-        otherwise every mounted surface collapses into its sub-route label and
-        two mounts sharing a sub-route share one child.
+        A mounted sub-app must be attributed to the SURFACE the client hit, not
+        to the sub-app's own route: on the derived axis the sub-route label
+        (`/export`) would be shared by any two mounts with the same inner path.
+        A mount prefix is a code literal, so it is declared (see
+        ``ha._EGRESS_DECLARED_PREFIXES``) and admitted as a ROUTE-axis label —
+        which is also what makes it un-starvable (next test).
 
-        This is also the coverage proof for the normalised fallback (admitted as
-        a DERIVED label, in its own budget). It is deliberately run against the
-        REAL router rather than a hand-forged scope, because WHETHER the
-        sub-app's router rewrites ``scope["path"]`` in place is a Starlette
-        version detail (measured: it does not under 1.6.0 — the lock — and does
-        under 1.7.0, which CI's unpinned install resolves). Asserting here that
-        the client-facing path survives is what makes the test mean the same
-        thing in both; CI caught the raw-scope version of this as a red.
+        Run against the REAL router, not a hand-forged scope: whether Starlette
+        stamps ``scope["route"]`` with the sub-app's inner route is a version
+        detail (1.6.0 does not, 1.7.0 does — measured), and CI runs the second.
         """
         sub = Starlette(routes=[Route("/export", lambda request: JSONResponse({"data": "d" * 300}))])
         app = Starlette(routes=[Mount("/mcp", app=sub)])
@@ -373,23 +446,73 @@ class TestMiddleware:
             r = client.get("/mcp/export")
 
         assert r.status_code == 200
-        assert ("", "/mcp/export") in _bytes_by_org_path()
-        assert ("", "/export") not in _bytes_by_org_path()
+        assert ("", "/mcp", ORIGIN_ROUTE) in _bytes_by_child()
+        assert not [c for c in _bytes_by_child() if c[1] in ("/export", "/mcp/export")], (
+            "the mounted request must be labelled by the declared prefix only")
         assert monitoring.egress_bytes_by_org()[""] == len(r.content)
 
-    def test_mounted_route_is_not_accepted_as_the_template(self):
-        """The 1.7.0 shape, forced: a scope carrying a sub-app route must not
-        hand the sub-route label to the writer.
+    def test_declared_mount_prefix_survives_an_unrelated_junk_flood(self):
+        """The round-2 review finding, pinned (bug + security, converged).
 
-        Direct unit proof of the version-independent rule, so the fix does not
-        depend on which Starlette behavior the environment happens to have.
+        Mounted surfaces used to live on the request-derived axis, so eight
+        cheap 404s on UNRELATED paths filled its budget and folded every later
+        ``/mcp`` response into ``/__unrouted__`` for the process lifetime. The
+        prefix is a code literal and now sits on the route axis: unrelated junk
+        cannot reach it.
+        """
+        sub = Starlette(routes=[Route("/export", lambda request: JSONResponse({"data": "d" * 300}))])
+        app = Starlette(routes=[Mount("/mcp", app=sub)])
+        app.add_middleware(ha.EgressBytesMiddleware)
+
+        with TestClient(app) as client:
+            for i in range(monitoring.EGRESS_MAX_DERIVED_PATHS + 5):
+                client.get(f"/junk{i}/x")  # unauthenticated 404s, fill the derived axis
+            r = client.get("/mcp/export")
+
+            assert ("", "/mcp", ORIGIN_ROUTE) in _bytes_by_child(), (
+                "unrelated junk starved the mounted surface's label")
+            assert ("", monitoring.EGRESS_UNROUTED, ORIGIN_DERIVED) in _bytes_by_child()
+            assert sum(
+                value for (_, _, origin), value in _bytes_by_child().items()
+                if origin == ORIGIN_ROUTE) == len(r.content)
+
+    def test_middleware_labels_by_the_arrival_path_not_the_response_scope(self):
+        """Version-independent pin of the arrival-path capture.
+
+        The router may stamp ``scope["route"]`` and rewrite ``scope["path"]``
+        before the response is sent (1.7.0 stamps; a future version could do
+        more), so the label must come from what arrived. This inner app does
+        both, deliberately: reading the scope at response time would record
+        `/export`.
+        """
+        async def _inner(scope, receive, send):
+            scope.setdefault("state", {})["org_id"] = "org_pin"
+            scope["path"] = "/export"
+            scope["route"] = Route("/export", lambda request: JSONResponse({}))
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"abcd"})
+
+        app = ha.EgressBytesMiddleware(_inner)
+        client = TestClient(app)  # no context manager: this raw ASGI app has no lifespan
+        r = client.get("/plugins/export")
+
+        assert r.status_code == 200
+        assert ("org_pin", "/plugins/export", ORIGIN_DERIVED) in _bytes_by_child()
+        assert not [c for c in _bytes_by_child() if c[1] == "/export"], (
+            "the label came from the mutated response scope, not the arrival path")
+
+    def test_mounted_route_is_not_accepted_as_the_template(self):
+        """The 1.7.0 shape, forced, for a mount prefix that is NOT declared.
+
+        The declared prefixes cover the app's own mounts (`/mcp`); any other
+        mount still must not hand its sub-route label to the writer.
         """
         sub_route = Route("/export", lambda request: JSONResponse({}))
         scope = {"type": "http", "path": "/export", "route": sub_route}
 
-        label, derived = ha._egress_route_class(scope, entry_path="/mcp/export")
+        label, derived = ha._egress_route_class(scope, entry_path="/plugins/export")
 
-        assert (label, derived) == ("/mcp/export", True)
+        assert (label, derived) == ("/plugins/export", True)
 
     def test_template_is_kept_when_it_describes_the_entry_path(self):
         """The normal case must NOT regress: a matched template still wins.
@@ -408,6 +531,98 @@ class TestMiddleware:
         assert ha._egress_route_class(
             scope, entry_path="/v1/points/abc/children") == (
                 "/v1/points", True)
+
+    def test_template_matching_survives_a_server_root_path(self):
+        """``entry_path`` is ``get_route_path(scope)``, i.e. path minus root_path.
+
+        uvicorn puts the prefix in BOTH ``scope["path"]`` and ``root_path``, and
+        a route's regex is matched against the root_path-RELATIVE path. Comparing
+        the regex against the prefixed path would match nothing, so every
+        response under ``--root-path`` would land on the derived axis.
+        """
+        template = Route("/v1/version", lambda request: JSONResponse({}))
+        scope = {"type": "http", "path": "/x/v1/version",
+                 "root_path": "/x", "route": template}
+
+        assert ha._egress_route_class(scope, entry_path="/v1/version") == (
+            "/v1/version", False)
+
+    def test_middleware_uses_the_root_path_relative_path(self):
+        """A server ``--root-path`` must not push every response onto the fallback.
+
+        Driven at the ASGI layer so ``path`` and ``root_path`` are both set the
+        way a real server sets them: uvicorn puts the prefix in BOTH, while a
+        route's regex is matched against the root_path-RELATIVE path. Reading
+        ``scope["path"]`` here would match no template at all and label every
+        response ``/x/v1`` on the derived axis.
+        """
+        async def _inner(scope, receive, send):
+            scope.setdefault("state", {})["org_id"] = "org_root"
+            scope["route"] = Route("/v1/version", lambda request: JSONResponse({}))
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        sent: list[dict] = []
+
+        async def _receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def _send(message):
+            sent.append(message)
+
+        app = ha.EgressBytesMiddleware(_inner)
+        scope = {
+            "type": "http", "http_version": "1.1", "method": "GET",
+            "path": "/x/v1/version", "root_path": "/x", "raw_path": b"/x/v1/version",
+            "query_string": b"", "headers": [], "scheme": "http",
+            "server": ("testserver", 80), "client": ("1.2.3.4", 1234), "state": {},
+        }
+        asyncio.run(app(scope, _receive, _send))
+
+        assert sent[-1]["type"] == "http.response.body"
+        assert ("org_root", "/v1/version", ORIGIN_ROUTE) in _bytes_by_child(), (
+            "the root_path prefix leaked into the label: "
+            f"{sorted(_bytes_by_child())!r}")
+
+    def test_empty_path_falls_back_to_the_root_child(self):
+        """No segment at all is not an exception — it is the root child."""
+        assert ha._egress_route_class({"type": "http"}, entry_path="") == ("/", True)
+        assert ha._egress_route_class({"type": "http"}, entry_path="/") == ("/", True)
+
+    def test_route_without_a_path_regex_matches_by_exact_path(self):
+        """A route object with no ``path_regex`` is matched by its path exactly.
+
+        Two provenances, one string — which is why the flag matters even here.
+        """
+        class _NoRegexRoute:
+            path = "/v1/version"
+
+        scope = {"type": "http", "route": _NoRegexRoute()}
+
+        assert ha._egress_route_class(scope, entry_path="/v1/version") == (
+            "/v1/version", False)
+        assert ha._egress_route_class(scope, entry_path="/v1/version/x") == (
+            "/v1/version", True)
+
+    def test_label_resolution_failure_never_fails_the_request(self, monkeypatch):
+        """The label derivation is inside the guard, not just the increment.
+
+        A raise there would escape the middleware's ``finally`` and replace the
+        app's own exception (or break a request whose 200 was already sent).
+        """
+        payload = b"still served"
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("label derivation exploded")
+
+        monkeypatch.setattr(ha, "_egress_route_class", _boom)
+        client = TestClient(_app_with_payload(payload, org="org_a"))
+
+        r = client.get("/v1/thing/x")
+
+        assert r.status_code == 200
+        assert r.content == payload
+        assert monitoring.egress_bytes_by_org() == {}
 
     def test_response_the_bound_dropped_is_not_credited(self, monkeypatch):
         """#3834 interaction: on a breach the bound DROPS the late response.
@@ -489,6 +704,18 @@ class TestWiring:
         assert egress > classes.index(ha.WaitBoundMiddleware)
         assert egress > classes.index(ha.InFlightMiddleware)
 
+    def test_declared_mount_prefixes_match_the_apps_real_mounts(self):
+        """The declared list is a code literal — pin it against the real mounts.
+
+        A mount that is not declared falls back to the request-derived axis,
+        where unrelated junk can starve it; so the declaration must not drift
+        from ``app.mount(...)``.
+        """
+        mounted = {route.path for route in ha.app.routes if isinstance(route, Mount)}
+        assert set(ha._EGRESS_DECLARED_PREFIXES) == mounted, (
+            "the egress declared-prefix list drifted from the app's mounts: "
+            f"declared={ha._EGRESS_DECLARED_PREFIXES!r} mounted={sorted(mounted)!r}")
+
     def test_real_app_request_records_its_response_bytes(self):
         """A real request through the real stack, with nothing stubbed.
 
@@ -502,7 +729,7 @@ class TestWiring:
             health = client.get("/health")
 
         assert version.status_code == 200 and health.status_code == 200
-        assert _bytes_by_org_path()[("", "/v1/version")] == len(version.content)
+        assert _bytes_by_child()[("", "/v1/version", ORIGIN_ROUTE)] == len(version.content)
         assert monitoring.egress_bytes_by_org().get("") == (
             len(version.content) + len(health.content)), (
             "the real app did not record its own response sizes: "

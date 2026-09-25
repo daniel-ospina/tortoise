@@ -511,55 +511,71 @@ LOOP_LAG = Histogram(
 # the Prometheus child set without bound, which is a scrape-cost bug, not a
 # measurement.
 #
-# ROUTE LABELS ARE TWO REGISTRIES, NOT ONE (review round 1, bug + security,
-# converged): a FastAPI route TEMPLATE is a code literal, but the fallback label
-# for an unmatched path (``/nope/{id}``, ``/mcp``) is REQUEST-DERIVED. Sharing
-# one 128-slot registry let an UNAUTHENTICATED client fill the budget with
-# distinct unknown paths (measured: the live app already carries 121 templates,
-# so ~7 slots remained) and fold real routes — and the size histogram — into
-# ``__other__`` for the whole process. The two are therefore admitted
-# separately: ``EGRESS_MAX_PATHS`` bounds the CODE-literal axis (traffic can
-# never add a template, so a generous cap cannot be reached by traffic), and
-# ``EGRESS_MAX_DERIVED_PATHS`` bounds the request-derived axis, whose overflow
-# is one fixed ``/__unrouted__`` child. An attacker can now add at most
-# ``EGRESS_MAX_DERIVED_PATHS + 1`` children and cannot displace a single route
-# template.
+# ROUTE LABELS SIT ON TWO AXES: the ROUTE axis is CODE LITERAL (a FastAPI route
+# template ``/v1/points/{pid}`` or a declared mount prefix — see
+# ``hosted_api._EGRESS_DECLARED_PREFIXES``), which traffic can never add a child
+# to; the DERIVED axis is REQUEST-derived and therefore UNTRUSTED (a path that
+# matched no route). ``EGRESS_MAX_PATHS`` / ``EGRESS_MAX_DERIVED_PATHS`` bound
+# them separately, and each has one shared overflow child.
+#
+# WHY NOT ONE REGISTRY (measured): the live app already carried 121 templates, so
+# a single 128-slot registry left ~7 slots for unknown traffic — an
+# unauthenticated client could fill them with distinct paths and fold REAL routes
+# (and the size histogram) into ``__other__`` for the whole process.
+#
+# TWO MEASURED HOLES IN THAT SPLIT ALONE, both closed here:
+#   * one label STRING could be emitted from either axis, so a request-derived
+#     label could be written into a template's series — and the histogram
+#     carries no org label, which made that contamination cross-tenant. The
+#     ``origin`` label below makes the same string two distinct children.
+#   * ``/mcp`` sat on the derived axis, where 8 cheap 404s on unrelated paths
+#     starved it for the process lifetime. A mount prefix is a code literal, so
+#     it is declared and admitted on the ROUTE axis: unrelated junk can no
+#     longer displace it, and no per-sub-route precision is claimed for it.
+# What remains on the derived axis is ONLY untrusted traffic, where losing
+# precision is the accepted price of boundedness (the ``_TELEMETRY_DROP_COUNTS``
+# doctrine in ``hosted_api``): no legitimate surface is starved to advantage an
+# attacker.
 EGRESS_MAX_ORGS = 512
-#: The route-template axis — code literals, ~121 today (measured on the live
-#: app), so 512 is comfortable headroom for new routes rather than a tight fit.
+#: The route axis — code literals, ~121 templates today (measured on the live
+#: app) plus the declared mount prefixes, so 512 is headroom for new routes
+#: rather than a tight fit.
 EGRESS_MAX_PATHS = 512
-#: The request-derived axis (unmatched paths, mounted sub-apps). Small on
-#: purpose: a handful of real fallbacks (`/mcp`, a webhook path) is all the
-#: granularity worth having for traffic that names its own label.
+#: The request-derived axis (paths matching no route). Small on purpose: NOTHING
+#: legitimate lives here — every code-known surface is on the route axis — so
+#: this is the granularity worth paying for traffic that names its own label.
 EGRESS_MAX_DERIVED_PATHS = 8
 EGRESS_OVERFLOW = "__other__"
 #: Where excess REQUEST-DERIVED path labels fold. Distinct from
 #: ``EGRESS_OVERFLOW`` because it answers a different question: "traffic on
 #: paths that match no route", not "the cap was hit".
 EGRESS_UNROUTED = "/__unrouted__"
-# PAIR SPACE: the caps multiply — the worst case is EGRESS_MAX_ORGS x
+# PAIR SPACE: the caps multiply — the worst case is EGRESS_MAX_ORGS x 2 origins x
 # (EGRESS_MAX_PATHS + EGRESS_MAX_DERIVED_PATHS + 2) children. The ORG axis is
 # deliberately generous because org attribution IS the measurement #4491 asks
 # for, and it is not traffic-reachable: every unauthenticated request shares the
 # ``""`` child, and a new org label costs a real org id. The path axis is the
-# bounded one, per the two-registry split above.
+# bounded one, per the two-axis split above.
 
-#: Response body bytes by (org, route class). The Counter answers "how many
-#: bytes did this org's traffic cost us"; the Histogram below answers "how big
-#: ARE the responses", which is the shape a fair-use boundary needs.
+#: Response body bytes by (org, route class, origin). The Counter answers "how
+#: many bytes did this org's traffic cost us"; the Histogram below answers "how
+#: big ARE the responses", which is the shape a fair-use boundary needs.
+#: ``origin`` is ``route`` (code literal) or ``derived`` (request-derived) — the
+#: provenance axis that keeps the two apart in the emitted series.
 EGRESS_BYTES = Counter(
     "tortoise_egress_bytes_total",
     "Response body bytes written to clients, by org and route class (#4491)",
-    ["org", "path"],
+    ["org", "path", "origin"],
 )
 #: #4491 indicator 1's "or, at minimum, a distribution of response sizes per
 #: org/path" arm. Labelled by route class ONLY: org x bucket would multiply the
 #: cardinality for a question ("is this route returning 10 MB?") that the org
-#: does not change.
+#: does not change. It carries ``origin`` for the reason above — a derived label
+#: must never add observations to a template's distribution.
 EGRESS_RESPONSE_BYTES = Histogram(
     "tortoise_egress_response_bytes",
     "Response body size distribution by route class (#4491)",
-    ["path"],
+    ["path", "origin"],
     buckets=(256, 1024, 4096, 16384, 65536, 262144, 1048576, 8388608),
 )
 
@@ -570,6 +586,15 @@ _EGRESS_ORGS: set[str] = set()
 _EGRESS_PATHS: set[str] = set()
 _EGRESS_DERIVED_PATHS: set[str] = set()
 _EGRESS_LOCK = threading.Lock()
+
+
+def _utf8_safe(label: str) -> str:
+    """Repair a label value that cannot be UTF-8 encoded (see ``record_egress``)."""
+    try:
+        label.encode("utf-8")
+    except UnicodeEncodeError:
+        return label.encode("utf-8", "replace").decode("utf-8")
+    return label
 
 
 def _admit_egress_label(label: str, seen: set[str], cap: int,
@@ -601,11 +626,13 @@ def record_egress(org: str | None, path: str, nbytes: int, *,
     route class, byte count — and never touches a metric object, so the unit
     and the attribution key stay in one place.
 
-    ``derived`` names WHICH route-label registry ``path`` belongs to: ``False``
-    (default) for a code-literal route template, ``True`` for a label the
-    caller derived from the request path because no route matched. They are
-    separate budgets so request-derived labels can never consume the template
-    budget — see the two-registry note above.
+    ``derived`` names WHICH route-label axis ``path`` belongs to: ``False``
+    (default) for a code-literal label (a matched route template, or a declared
+    mount prefix), ``True`` for a label the caller derived from the request path
+    because no route matched. They are separate budgets so request-derived
+    labels can never consume the route budget, and the axis is emitted as the
+    ``origin`` label so the same string can never mix two provenances' series —
+    see the two-axis note above.
 
     ``org`` may be ``None``/empty: a request that never resolved an org (an
     unauthenticated 401, a health probe, an MCP call whose org lives in the
@@ -614,17 +641,28 @@ def record_egress(org: str | None, path: str, nbytes: int, *,
 
     ``nbytes`` is clamped at 0: a negative count is impossible data, and a
     negative increment would corrupt a monotonic counter.
+
+    Labels are repaired to be UTF-8 encodable here, at the single writer,
+    because ``generate_latest()`` encodes label values: ONE unencodable value (a
+    lone surrogate) would make the whole ``/metrics`` endpoint raise for the
+    process lifetime, blinding every alert rather than this one dimension. Not
+    reachable from the HTTP path today (uvicorn replaces invalid bytes and org
+    ids are charset-validated — measured), but this is the only place that can
+    enforce it.
     """
     amount = max(0, int(nbytes))
-    org_label = _admit_egress_label(org or "", _EGRESS_ORGS, EGRESS_MAX_ORGS)
+    origin = "derived" if derived else "route"
+    org_label = _utf8_safe(org or "")
+    org_label = _admit_egress_label(org_label, _EGRESS_ORGS, EGRESS_MAX_ORGS)
+    path = _utf8_safe(path or "")
     if derived:
         path_label = _admit_egress_label(
-            path or "", _EGRESS_DERIVED_PATHS, EGRESS_MAX_DERIVED_PATHS,
+            path, _EGRESS_DERIVED_PATHS, EGRESS_MAX_DERIVED_PATHS,
             overflow=EGRESS_UNROUTED)
     else:
-        path_label = _admit_egress_label(path or "", _EGRESS_PATHS, EGRESS_MAX_PATHS)
-    EGRESS_BYTES.labels(org=org_label, path=path_label).inc(amount)
-    EGRESS_RESPONSE_BYTES.labels(path=path_label).observe(amount)
+        path_label = _admit_egress_label(path, _EGRESS_PATHS, EGRESS_MAX_PATHS)
+    EGRESS_BYTES.labels(org=org_label, path=path_label, origin=origin).inc(amount)
+    EGRESS_RESPONSE_BYTES.labels(path=path_label, origin=origin).observe(amount)
 
 
 def egress_bytes_by_org() -> dict[str, int]:
@@ -636,10 +674,11 @@ def egress_bytes_by_org() -> dict[str, int]:
     read, mirroring ``analytics_outcome_counts()``. Derived from ``collect()``
     rather than a second tally, so the snapshot cannot drift from the metric.
 
-    The ``""`` key is the unattributed share, ``EGRESS_OVERFLOW`` the folded
-    tail of the org/path-template caps, and ``EGRESS_UNROUTED`` the folded tail
-    of the request-derived path cap; all are INCLUDED, so the snapshot always
-    reconciles to the whole measurement.
+    The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` the folded
+    tail of the org/path caps; both are INCLUDED, so the snapshot always
+    reconciles to the whole measurement. (``EGRESS_UNROUTED`` needs no mention
+    here: it is a PATH label, so it appears under whichever org incurred the
+    unrouted traffic, never as a key of this org-keyed dict.)
     """
     totals: dict[str, int] = {}
     for family in EGRESS_BYTES.collect():
