@@ -414,6 +414,40 @@ class _EntityHandlers:
         # they were historically dropped by the fixed-field MERGE and
         # are now persisted as arbitrary props via _persist_extra_props.
     })
+    # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
+    # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
+    # open passthrough (mirroring `_POINT_LIST_PROPS`' undeclared-list denial).
+    #
+    # ⛔ A blocklist of payload KEY NAMES is not a fix and cannot be one:
+    # measured on the open passthrough, `text`, `snippet`, `excerpt`,
+    # `transcript`, `bodyText`, `rawText`, `raw_text`, `data`, `blob`, `bytes`,
+    # `payloadText`, `contentText`, `content_text`, `fullText`, `full_text` AND
+    # a list-valued `chunks` ALL persisted a 2 KB raw body verbatim on the node,
+    # so "0 raw payload bytes" was false for every name nobody had thought of
+    # yet. Declaring the surface is what makes the criterion a property of the
+    # WRITE PATH rather than of a list someone must keep extending.
+    #
+    # ⛔ Enforced HERE, not only in the SDK: `create_source` is not the only
+    # producer — `rebuild_all` replays `SourceCreated` through this same method,
+    # so a journal written while the passthrough was open would otherwise
+    # re-materialise its payload on every rebuild, the documented recovery path
+    # restoring the exact bytes the contract forbids.
+    _SOURCE_EXTRA_PROPS: frozenset = frozenset({
+        "credibilityTier",   # create_source(tier=)
+        "sourceDate",        # create_source(sourceDate=) — the evidence-age clock
+        "is_episodic",       # create_source(is_episodic=) — the quota discriminator
+        "name", "team", "format", "provenance_spans",  # in-tree callers
+        # D10 B6 non-over-reach (#228): a document IS a :Source, so a Source
+        # may legitimately carry keys the document fixed clause owns but does
+        # NOT retire. They MUST stay declared here — the closed surface denies
+        # anything undeclared, so omitting one silently drops it —
+        # `test_projection.py` pins `domain`/`summary`/`topics`/`status`.
+        # `source_url` and `suppress_embedding` are deliberately ABSENT: they
+        # ride the DocumentCreated event and must never persist as node props.
+        "domain", "summary", "topics", "status", "embedding", "about_entities",
+        "document_kind", "documentKind", "session_id", "event_id",
+        "source_path",
+    })
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
         "title", "ingestedAt", "version", "externalId", "updatedAt",
@@ -594,7 +628,8 @@ class _EntityHandlers:
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
                               ev: dict, handled_keys: frozenset,
-                              list_props: frozenset | None = None) -> dict:
+                              list_props: frozenset | None = None,
+                              allow_keys: frozenset | None = None) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -612,6 +647,10 @@ class _EntityHandlers:
         # persisted only when its key is declared there; an undeclared list is
         # denied, never written raw. `None` keeps the pre-existing permissive
         # behaviour for the non-Point layers.
+        #3998 (D30): when `allow_keys` is supplied the passthrough becomes a
+        CLOSED set — a key not in it is denied, whatever its name. This is the
+        only form that can carry a "no raw payload" guarantee, because the
+        payload-bearing name space is unbounded. Used by the `:Source` layer.
 
         Returns the dict of props actually persisted (empty when none) so the
         caller can report unrecognised keys (#2795 drift warning).
@@ -620,6 +659,8 @@ class _EntityHandlers:
         extra = {}
         for k, v in ev.items():
             if k in skip or v is None or not _is_persistable_prop_value(v):
+                continue
+            if allow_keys is not None and k not in allow_keys:
                 continue
             # #2958 review: a TUPLE is persisted by the engine as an array
             # exactly like a list, so the list policy must cover both —
@@ -2722,21 +2763,21 @@ class _EntityHandlers:
                 **({"rid": merge_run_id} if merge_run_id is not None else {}),
             },
         )
-        # #228: persist arbitrary caller-supplied props.
+        # #228: persist arbitrary caller-supplied props — CLOSED to the
+        # declared :Source surface since #3998 (see _SOURCE_EXTRA_PROPS). An
+        # undeclared key is DENIED rather than written, so no spelling of a raw
+        # payload can reach the node and no journal replay can restore one.
         # D10 B6 (adversarial): a document IS a :Source (url = <doc id>), so a
         # SourceCreated whose url equals a document id MERGEs onto the SAME
-        # node the document path owns — without a deny-set here a SourceCreated
-        # could write `content`/`doc_status`/`objectKind` (or their snake/camel
-        # synonyms) back onto a document Source, and the write would survive a
-        # rebuild.
-        # ⛔ `_DOC_RETIRED_KEYS`, NOT `_DOC_RETIRED`: the retired-KEYS set is used
-        # deliberately, because `_DOC_RETIRED` is a superset of the historical
-        # `_DOCUMENT_HANDLED` and would also park `summary`/`topics`/
-        # `embedding`/`status`/`about_entities` off a Source passthrough — keys
-        # this Source fixed clause does not write and a Source legitimately
-        # carries (see the `_DOC_RETIRED_KEYS` definition).
+        # node the document path owns. The retired doc-owned spellings
+        # (`_DOC_RETIRED_KEYS`: content / doc_status / docStatus / objectKind /
+        # object_kind) are undeclared here, so the same closed check denies
+        # them — a deny-set widened to a whitelist. The keys that deny-set
+        # deliberately did NOT retire (`summary`/`topics`/`embedding`/
+        # `status`/`about_entities`) ARE declared, so a Source that
+        # legitimately carries them is not silently dropped.
         self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
-            ev, self._SOURCE_HANDLED | self._DOC_RETIRED_KEYS,
+            ev, self._SOURCE_HANDLED, allow_keys=self._SOURCE_EXTRA_PROPS,
         )
         return r
