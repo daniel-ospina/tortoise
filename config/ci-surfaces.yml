@@ -221,6 +221,15 @@ surfaces:
   # roll-up it drives). Same #2938 dual-membership convention as
   # test_graphcopy_boolean_index_3154.py.
   - test_capture_cost_measurement.py
+  # #4911: the capture write path redacts credential-shaped spans before
+  # persistence. DUAL-REGISTERED (also under `core`, where its primary entry
+  # carries the full rationale): the hosted lane's own redaction receipt is
+  # written in tortoise/hosted_api.py, which SELECTS the `api` surface, and a
+  # named-surface match REPLACES the `core` fallback — so a core-only
+  # registration would never run this guard on a hosted_api.py-only PR, which
+  # is exactly the PR that could silently drop the receipt. Same #2938
+  # dual-membership convention as the two entries above.
+  - test_capture_secret_redaction_4911.py
   # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
   # admission gate, the ledger write, the reader and the RPC wrappers all live
   # in tortoise/hosted_api.py, metering.py and supabase_control.py, which
@@ -1016,6 +1025,7 @@ surfaces:
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
+  - test_capture_secret_redaction_4911.py  # #4911: the capture write path redacts credential-shaped spans before persistence (guards tortoise/security.py's scrubber + sdk._capture_turn_texts; `core` is security.py's surface and `sdk` is a SHARED_MODULE so this runs on the full matrix — DUAL-REGISTERED under `api` for a hosted_api.py-only PR, see the entry there)
   - test_security.py
   - test_semantic_extractor.py
   - test_ship_test_onboarding.py   # #3806: the ship-test probe's guard (classifier + page-wide claim sweep + DOM/server readers + RED/GREEN mutation evidence); the browser half is tests/e2e/test_ship_test_onboarding.py, run by the dashboard-e2e job
