@@ -840,15 +840,39 @@ def _server_graph_hygiene(_redislite_hygiene):
         except Exception as exc:
             print(f"[server-graph-hygiene] GRAPH.LIST bound check skipped: {exc}")
 
-        # ── E2E-7 gate (#3634 Task 5). Lives under the `if not others` guard above
-        # (last-suite-standing only — do NOT widen that), and MUST sit outside the
-        # broad `except Exception`, or AssertionError is swallowed and the gate is
-        # vacuous. Short-circuit on `error` too: a sweep that RAISED sets
-        # own={"error": ...} with no `failed` key, so `not own.get("failed")` alone
-        # would run the gate over names a dead sweep left and red the suite
-        # (violating cycle-8 P2-3).
+    # ── E2E-7 gate (#3634 Task 5). A SIBLING of the bound-check `if` above and a
+    # direct child of `if not others:` (last-suite-standing only — do NOT widen
+    # that). It gates ONLY on `not others` + the three own-sweep flags, NEVER on
+    # the bound check's `full_sweep` condition (P1-A, Task 5 review): nested
+    # inside that `if`, the gate was DISABLED exactly when the leftover sweep
+    # failed or reported full_sweep=False — i.e. precisely when cleanup was
+    # incomplete and survivors are most likely. It must also stay OUTSIDE every
+    # `try` (an AssertionError under a broad `except Exception` is swallowed and
+    # the gate is vacuous). Short-circuit on `error` too: a sweep that RAISED
+    # sets own={"error": ...} with no `failed` key, so `not own.get("failed")`
+    # alone would run the gate over names a dead sweep left and red the suite
+    # (violating cycle-8 P2-3).
+    # The nesting is DELIBERATE (SIM102): the `if not others` node must remain a
+    # distinct AST ancestor of the gate's Raise (its own guard), not be folded
+    # into the three-flag condition — the placement is itself pinned by
+    # tests/test_server_hygiene_gate.py.
+    if not others:  # noqa: SIM102
         if not own.get("skipped") and not own.get("failed") and not own.get("error"):
-            survivors = _owned_survivors(journal_names, _live_graph_names(uri),
+            # P1-C (Task 5 review): the survivor probe is the ONLY unguarded
+            # server call on the teardown path. Its failure (connection, auth,
+            # maxmemory, LOADING, a stall) must print-and-continue like the
+            # bound check above — an infra failure that reds the suite is
+            # INDISTINGUISHABLE in CI from a real E2E-7 leak, the one signal
+            # this gate exists to make unambiguous. Only the genuine leak
+            # AssertionError below may raise from this block; a failed probe
+            # leaves `live_names` empty, so the gate reports no survivors.
+            live_names: set[str] = set()
+            try:
+                live_names = _live_graph_names(uri)
+            except Exception as exc:
+                print(f"[server-graph-hygiene] E2E-7 survivor probe failed — "
+                      f"gate skipped (infra skip, NOT a leak signal): {exc}")
+            survivors = _owned_survivors(journal_names, live_names,
                                          _uri_default_graph_name())
             if survivors:
                 raise AssertionError(

@@ -1187,6 +1187,23 @@ def _remove_journal_file(journal_file: str) -> None:
             pass
 
 
+def _owned_names(names, default_graph) -> set[str]:
+    """The shared ownership filter: owned ∧ journalled ∧ ¬default.
+
+    This is exactly the set `_sweep_drop` may DETACH+DELETE, and the only set
+    `_owned_survivors` may count as an E2E-7 leak (#3634 Task 5 review P2).
+    Factored so the delete path and the leak predicate cannot drift apart: a
+    name the sweep refuses to own must never be reported as a leak the sweep
+    failed to drop, and a name the sweep owns must never be silently exempt.
+
+    The URI-path default graph is excluded here because a per-session sweep
+    must not race other concurrent sessions' writes on the shared default
+    (cycle-4 P2-2 / cycle-8 P1-1); the last-suite-standing full sweep owns it.
+    """
+    return {n for n in names
+            if owns_by_ownership_record(n) and n != default_graph}
+
+
 def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
                 skip_on_non_loopback: bool = True) -> dict:
     """Drop the FILE journal's graph set on proj's server (cycle-8 P1-2:
@@ -1223,24 +1240,20 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
         return {"skipped": f"non-loopback {host!r}", "journal_removed": False}
     names = _read_journal_file(journal_file)
     default_graph = _uri_default_graph_name()
+    # Duplicate entries (per-test seam re-appends) are idempotent — dedupe once,
+    # preserving order, so `preserved` reports each name exactly once.
+    unique = list(dict.fromkeys(names))
+    # The SAME ownership filter `_owned_survivors` (the E2E-7 gate) counts on —
+    # the delete set and the leak predicate are one predicate by construction.
+    owned = _owned_names(unique, default_graph)
+    # #7795 fail-closed: a name the sweep does not own is PRESERVED — never
+    # DETACH+DELETE a dev/compose/Cloud graph. See the docstring. `unique`
+    # minus `owned` minus the default is exactly that preserved set.
+    preserved = [g for g in unique if g != default_graph and g not in owned]
     dropped: list[str] = []
     failed: list[str] = []
-    preserved: list[str] = []
-    seen: set[str] = set()
-    for g in names:
-        if g in seen:
-            continue  # duplicate entries (per-test seam re-appends) — idempotent
-        seen.add(g)
-        if g == default_graph:
-            # Cycle-4 P2-2 / cycle-8 P1-1: the shared URI-default graph is
-            # swept ONLY by the last-suite-standing full sweep (scope=None) —
-            # a per-session own/stale drop would race other concurrent
-            # sessions' live writes on the shared default.
-            continue
-        if not owns_by_ownership_record(g):
-            # #7795 fail-closed: a name the sweep does not own is PRESERVED —
-            # never DETACH+DELETE a dev/compose/Cloud graph. See the docstring.
-            preserved.append(g)
+    for g in unique:
+        if g not in owned:
             continue
         if _drop_one_graph(proj, g, drop=drop):
             dropped.append(g)
@@ -1289,11 +1302,11 @@ def _live_graph_names(uri: str) -> set[str]:
 
 
 def _owned_survivors(journal_names, live_names, default_graph) -> set[str]:
-    """Owned ∧ journalled ∧ ¬default ∧ still live. Mirrors _sweep_drop's skips:
-    only a name the OWNERSHIP RECORD authorises is ever a leak."""
-    owned = {n for n in journal_names if owns_by_ownership_record(n)}
-    owned.discard(default_graph)
-    return owned & set(live_names)
+    """Owned ∧ journalled ∧ ¬default ∧ still live.
+
+    Uses the SAME ownership filter `_sweep_drop` drops on (`_owned_names`) —
+    only a name the OWNERSHIP RECORD (the journal) authorises is ever a leak."""
+    return _owned_names(journal_names, default_graph) & set(live_names)
 
 
 def _team_sweep_allowed(uri: str) -> bool:
