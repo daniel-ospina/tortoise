@@ -845,6 +845,16 @@ class FakeControlPlane:
                 # mirror the DB column default now() — window gt-filters need it
                 from datetime import datetime, timezone
                 row["created_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            if table == "oauth_codes" and row.get("id") is None:
+                # mirror `id bigint GENERATED ALWAYS AS IDENTITY` (0016). #3027
+                # records a redemption outcome BY id and links minted tokens
+                # with `code_id`, so a fake row with no id would make the
+                # durable path silently unwritable in tests. Derived from the
+                # stored rows (not a counter) so it also cannot collide with a
+                # row a test seeded by hand.
+                numeric = [r.get("id") for r in self.tables.get(table, [])
+                           if isinstance(r.get("id"), int)]
+                row["id"] = (max(numeric) + 1) if numeric else 1
             self.tables.setdefault(table, []).append(row)
             if table == "api_keys":
                 # migration 0015 trigger emulation (#308)

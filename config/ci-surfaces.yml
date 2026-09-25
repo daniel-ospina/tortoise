@@ -251,6 +251,7 @@ surfaces:
   - test_index_mcp.py
   - test_init_apikey_validation.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
+  - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   - test_mcp_client.py
   - test_mcp_http.py
@@ -262,6 +263,8 @@ surfaces:
   - test_metering.py
   - test_oauth_mcp.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
+  - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
+  - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
@@ -493,12 +496,17 @@ surfaces:
   - test_4220_blog_residue_cleanup.py
   - test_4716_capture_operator_ref_remap.py
   - test_ask_eval_only.py
+  - test_backfill_ghost_members_guard.py
   # #4282: dual-registered with `api` because `api` is keyed on SOURCE PATTERNS, and
   # the files this guard protects are not api-owned: `tools/bridge_table.py`, the
   # GENERATED `docs/product/bridge-table.md`, and the three docs that restate its
   # counts. Editing any of those selected NO surface, so the drift gate never ran
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
+  - test_graph_name_ownership.py
+  # #3634: guards the graph-name ownership vocabulary (the prefix sets that
+  # authorise a sweep) — the register, the deny-safe residue predicate, and the
+  # AST pin keeping the opt-in legacy sweep out of every default path.
   # #4282: dual-registered with `api` for the same reason as test_bridge_table.py
   # above — `tools/mcp_rename_table.py` is named in SOURCE_PATTERNS["api"], so a
   # GENERATOR-only edit selects `api` and runs this drift gate.
@@ -609,6 +617,7 @@ surfaces:
   - test_branch_reaper.py   # #4408: local-branch reaper — PR-state classification + safety guards
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
+  - test_server_hygiene_gate.py
   - test_source_dedup_registration.py
   - test_source_identity.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
@@ -1056,6 +1065,11 @@ surfaces:
   # (the sibling pack tests are here), embedded-graph lane.
   - test_vocab_gating_by_graph.py
   - test_vet_gate_5005.py
+  # #4899: the S2.2b mechanical value gate (`tortoise/value_gate.py`, the
+  # identifier-only DISCARD predicate) and its S2.2b wiring in `vet_gate.py`
+  # + the `vet_enabled` fold in `extractor_v2.py`. Registered beside its
+  # sibling `test_vet_gate_5005.py` because it guards the same seam.
+  - test_value_gate_4899.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
@@ -1810,6 +1824,17 @@ durations:
   test_hosted_volunteer_context.py: 14.0
   test_tripwire.py: 14.0
   test_battery_corpus.py: 13.8
+  # #3645: newly-declared fast file — placed at its value-ordered slot rather
+  # than the map's tail, because main's #3400 refresh appends there and a tail
+  # insert conflicts on every rebase. This PR's base sat ON the #3400 coverage
+  # floor (544/604 = 90.07% PASS), so the one file it adds to the fast pool
+  # dropped it to 544/605 = 89.9% and reddened `manifest-integrity`
+  # (tools/ci_selection.py --integrity) and `test (b)`
+  # (test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic)
+  # from that single condition. Measured 13 tests / 13.83s local; the base has
+  # no junit for a file it introduces. Supersede from the first post-merge main
+  # run that includes it (#4817/#4729).
+  test_org_graph_open_tripwire.py: 13.8
   test_backup_e2e.py: 13.1
   test_commit_endpoint.py: 13.0
   test_invites_http.py: 13.0
@@ -1896,6 +1921,8 @@ durations:
   test_init_apikey_validation.py: 4.2
   test_orient_direct_consolidation.py: 4.2
   test_oauth_mcp.py: 4.1
+  test_oauth_redemption_state.py: 3.2  # #3027: local estimate (25 fake-CP tests, no live DB) — superseded once CI measures it.
+  test_3036_oauth_retention.py: 0.2
   test_mcp_server.py: 4.0
   test_dashboard_login.py: 3.8
   test_capture_phase_d_dedup.py: 3.7
