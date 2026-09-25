@@ -94,6 +94,28 @@ class TestGoldSetMetadata:
         with pytest.raises(ValueError, match="closed vocabulary"):
             validate_gold_metadata(bits, vocab)
 
+    def test_rejects_retired_document_gold_kind(self, vocab, tmp_path):
+        """D10 (#5013, merged #5022) retired `objectKind: document` — a
+        document is a `:Source` (§4.4), not an Object subclass — and #5236's
+        sweep removed it from the code vocabularies. The mini-gold's g-015
+        was still pinned to it and was re-pointed to the dev pack kind that
+        canonicalises the same artifact (`dev:runbook`). This is the
+        closed-vocab-side pin: it names the specific retired token, so it
+        fails if a D10 reversal re-adds `core:document` to `master_kind_forms`
+        while an arbitrary minted word (`worktree`, the generic sibling pin)
+        stays invalid. The fixture-side guard is the `validate_gold_metadata`
+        call the real fixture's own tests already make; the pack-manifest side
+        is test_pack_kinds.py::test_a_pack_cannot_re_register_the_retired_kind."""
+        p = tmp_path / "retired.jsonl"
+        p.write_text(
+            '{"id": "x", "content": "the deploy runbook", "type": "entity", '
+            '"gold_kind": "core:document", "split": "calibrate", '
+            '"provenance": {"source": "t", "author": "a"}}\n'
+        )
+        bits = load_gold(p)
+        with pytest.raises(ValueError, match="closed vocabulary"):
+            validate_gold_metadata(bits, vocab)
+
     def test_rejects_missing_split(self, tmp_path):
         p = tmp_path / "bad.jsonl"
         p.write_text(
