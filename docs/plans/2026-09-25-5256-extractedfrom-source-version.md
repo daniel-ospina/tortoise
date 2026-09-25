@@ -3,7 +3,7 @@
 **Issue:** #5256 (`complexity:complex`, Level: task, epic #5088) · **Repo:** `daniel-ospina/tortoise`
 **Branch:** `feat/5256-extractedfrom-anchor` · **Base:** `origin/docs/5199-version-scope @ 52e703f89` (STACKED on PR #5207)
 **Predecessor:** `docs/plans/2026-09-25-5038-source-version-anchor.md` (Task 1, branch `docs/5038-scoping`)
-**Review cycle:** 5 (see §10).
+**Review cycle:** 7 (see §10).
 
 ---
 
@@ -75,25 +75,29 @@ writer.
 `ONTOLOGY.md` §4.6: *"a Point read from more than one source carries a `sourceVersion` **per
 link**"*. A scalar cannot express that; a dict is not persistable (`_is_persistable_prop_value`
 rejects maps — a dict would make the journal carry a key the graph cannot, and the #5011 gate would
-report a divergence on **every** sourced Point). The transit is therefore a list of 2-element
-`[resolve_source_key(g, ref), contentHash]` pairs (nested arrays **are** persistable). The **edge**
+report a divergence on **every** sourced Point). The transit is therefore a list of 2-element `[raw_ref, contentHash]` pairs (nested arrays **are** persistable). The **edge**
 carries the per-link scalar `r.sourceVersion`.
 
 **ONE builder — `_source_version_transit(versions: dict) -> list | None`** (in `edges.py`) — is used
 by **both** producers; it returns `None` (key omitted entirely) when the mapping is empty, so an
 un-sourced Point never carries `[]`.
 
-**Key contract (pinned):** a pair's first element is exactly `_mint_source_stub`'s return value —
-`resolve_source_key(g, ref)`, the node's stored `url` (NOT `normalize_source_url`). The live resolver
-and `_link_source` call the **same** function, so a URL variant cannot silently produce an absent
-anchor. (`resolve_source_key` is idempotent; its adopt-on-touch write only touches the **Source**
-node, never the Point — it is not a second Point write.)
+**Key contract (pinned, corrected round 5):** a pair's first element is the Point's **raw
+`extractedFrom` ref** — the journal-stable spelling, which is also the Point's own payload key.
+`resolve_source_key(g, ref)` is still called by the live resolver, but **only to FIND the Source
+node** whose `contentHash` to read; it is never the carrier's key. (An earlier version of this plan
+pinned the resolved key — that was exactly backwards, and it is the round-5 P1: a value keyed by a
+*resolution* is unstable, because the Source node's stored `url` can differ between live and replay
+when an unjournaled stub minted by an earlier Point is absent at pass-1, so the same ref resolves to
+a different key, the replay lookup misses, and the edge lands bare.) The raw ref is the one spelling
+both lanes share. (`resolve_source_key` is idempotent; its adopt-on-touch write only touches the
+**Source** node, never the Point — it is not a second Point write.)
 
 ### Data flow
 
 ```
 LIVE  create_point(..., extractedFrom=refs)                      # FRESH-CREATE path only
-        ├─ sv = resolve_source_versions(proj.g, refs)             # dict[str,str]
+        ├─ sv = resolve_source_versions(proj.g, refs)             # dict[str,str] keyed by the RAW ref
         ├─ on the CREATE map:  sourceVersionTransit = _source_version_transit(sv)  # pair-list; omitted when empty
         ├─ CREATE (n:Point {…})                                   # ONE write (#2952)
         ├─ proj._link_source(pid, refs, source_versions=sv)       # _link_source takes the DICT
@@ -127,8 +131,8 @@ the fresh-create path, after the early return, so an idempotent re-commit cannot
 
 | # | file | change |
 |---|---|---|
-| 1 | `tortoise/projection/edges.py` | `resolve_source_versions(g, refs)` — the **LIVE-only** resolver (keyed by `resolve_source_key`, skips empty/`''`/absent). It MUST normalize `refs` exactly as `_link_source` does — `refs = [refs] if isinstance(refs, str) else list(refs)` — else a scalar ref iterates **characters** and mints per-character Sources (`create_point` keeps the common single-source ref a scalar). `_source_version_transit(versions)` — the ONE pair-list builder (None when empty). `_link_source(..., source_versions: dict[str,str] \| None = None)`: the MERGE binds `r` and appends `_anchor_on_create("$v")` (reuses the #5199 helper — one source of truth for the `''`/NULL guard); `$v` is **always bound** (None when absent, for the bare callers: `create_document`, the ingest connection leg, `_link_extracted_from`, direct test calls). **Never** reads `s.contentHash`. |
-| 2 | `tortoise/projection/entities.py` | `_POINT_HANDLED \| {"sourceVersionTransit"}`; an explicit conditional `SET n.sourceVersionTransit=$sv` clause in `_upsert_point_props`; `_upsert_point_edges` folds the payload to `dict(...)` and hands it to `_link_source` (a falsy/None value must never reach `dict()`). BOTH writers validate through the ONE shared all-or-nothing `_valid_transit_pairs` predicate — non-empty list of 2-element `[str, str]` pairs whose members are both non-empty/non-blank — so a corrupt carrier contributes NO anchor on either side (and a hand-written `[[DOC,'']]` cannot leave the node claiming a pair while `_anchor_on_create` nulls the edge). |
+| 1 | `tortoise/projection/edges.py` | `resolve_source_versions(g, refs)` — the **LIVE-only** resolver (keyed by the **RAW ref**; `resolve_source_key` only FINDS the node, never keys the map; skips empty/`''`/absent). It MUST normalize `refs` exactly as `_link_source` does — `refs = [refs] if isinstance(refs, str) else list(refs)` — else a scalar ref iterates **characters** and mints per-character Sources (`create_point` keeps the common single-source ref a scalar). `_source_version_transit(versions)` — the ONE pair-list builder (None when empty). `_link_source(..., source_versions: dict[str,str] \| None = None)`: the MERGE binds `r` and appends `_anchor_on_create("$v")` (reuses the #5199 helper — one source of truth for the `''`/NULL guard); `$v` is **always bound** (None when absent, for the bare callers: `create_document`, the ingest connection leg, `_link_extracted_from`, direct test calls). **Never** reads `s.contentHash`. |
+| 2 | `tortoise/projection/entities.py` | `_POINT_HANDLED \| {"sourceVersionTransit"}`; an explicit conditional `SET n.sourceVersionTransit=$sv` clause in `_upsert_point_props`; `_upsert_point_edges` folds the payload to `dict(...)` and hands it to `_link_source` (a falsy/None value must never reach `dict()`). BOTH writers select the carrier through the ONE shared `_point_source_transit` (all-or-nothing `_valid_transit_pairs` — non-empty list of 2-element `[str, str]` pairs whose members are both non-empty/non-blank — **plus** the own-ref gate/filter: the carrier is written only when the Point OWNS an `extractedFrom`, and only for that Point's own raw refs, normalized exactly as `_link_source` normalizes a bare `str` as ONE ref). So a corrupt carrier contributes NO anchor on either side, **and** a hand-written/foreign payload can neither plant a stray carrier with no edge (round-5 P2) nor an anchor for a source the Point does not reference. |
 | 2b | `tortoise/projection/__init__.py` | add `n.sourceVersionTransit = NULL` to the #4042 pass-1a **recreate wipe** (`embedding` / `content_hash` / `embedding_verbatim`). Without it, a delete→same-id-recreate whose new snapshot omits `extractedFrom` retains the dead incarnation's transit in the rebuilt graph while live has none — a `derived = replay(journal)` break of exactly the `embedding_verbatim` class (#5004 round-4 precedent). |
 | 3 | `tortoise/sdk.py` | `_sanitize_props` rejects `sourceVersion`/`sourceVersions`/`sourceVersionTransit`; `_check_item_shape` rejects them on bundle items (Phase 1, free); `create_source` carries its own reject (it bypasses `_sanitize_props` via `_skip_sanitize=True`); `create_point` resolves the LIVE versions on the **fresh-create** path and puts the transit in the `CREATE` map (no second write — #2952). |
 | 4 | `tortoise/api.py` | `EventAPI.add_point`: reject `sourceVersion`/`sourceVersions`/`sourceVersionTransit` in the existing `_forged` set; when `getattr(self.projection, "g", None) is not None`, resolve and set `p["sourceVersionTransit"]` via the shared builder — **only when the builder returns non-None** (an un-sourced Point's payload must not carry `sourceVersionTransit: null`). The `getattr` guard covers **both** `projection=None` and an `InMemoryProjection` (no `.g`). |
@@ -176,8 +180,14 @@ Precedent: `tests/test_provenance_extractedfrom_3263.py` (DB lane, embedded-safe
 3. **false-current guard** — create at `h1`; advance the Source to `h2` via a **journaled**
    `create_source(contentHash='h2')`; `rebuild_all` ⇒ the edge still reads `'h1'`, not `'h2'`.
 4. **per-link** — two Sources with distinct hashes ⇒ each edge carries its own; survives rebuild.
-5. **URL-variant key contract** — a Source registered canonically, linked via a variant ref ⇒ the
-   edge carries the hash and survives rebuild.
+5. **URL-variant key contract (+ the round-5 P1 regression)** — (a) a Source registered canonically,
+   linked via a variant ref ⇒ the edge carries the hash and survives rebuild, and the node carrier is
+   keyed by the **raw** variant spelling; (b) **the round-5 P1**: a Point created BEFORE the Source is
+   registered (minting an unjournaled canonical stub) followed by a Source registered under a VARIANT
+   spelling ⇒ the Point's `extractedFrom.sourceVersion` is byte-identical live and after `rebuild_all`
+   even though the Source NODE identity differs between the lanes (R6), and `check_consistency` stays
+   healthy. **FAILS on the pre-fix parent** (replay edge bare) and if the carrier reverts to the
+   resolved key.
 6. **EventAPI lane** — `add_point(..., extractedFrom=…)` with a projection ⇒ anchored; survives
    rebuild.
 7. **EventAPI without a Falkor graph** — `add_point(..., extractedFrom=…)` with `projection=None`
@@ -200,6 +210,9 @@ Precedent: `tests/test_provenance_extractedfrom_3263.py` (DB lane, embedded-safe
 14c. **malformed carrier** — a hand-written `PointAdded` payload with a non-list, a dict, a
     short pair, a numeric pair, or an empty/blank hash contributes **NEITHER** the node carrier nor
     the edge version, and does not abort `rebuild_all`.
+14d. **no-edge / foreign-pair carrier (round-5 P2)** — a shape-valid `sourceVersionTransit` on a
+    Point with **no** `extractedFrom` writes NOTHING (no stray anchor without an edge), and a pair
+    whose key is not one of the Point's own raw refs is filtered out by both writers.
 15. **no scalar stray / transit⇔edge** — for a **hash-bearing** fixture created through
     `create_point`/`EventAPI.add_point`, the node transit is a list of `[ref, hash]` pairs and, at
     creation, exists **iff** the Point has an `extractedFrom` edge; no Point carries a scalar
@@ -230,7 +243,15 @@ Every test names the input that makes it FAIL.
   2. the "never `s.contentHash`" rule (make `_link_source` read the source) → test 3;
   3. each reject site → tests 9/10/11/12/13/14/14b (all five surfaces);
   4. the replay transit consumption (`_upsert_point_edges`) → test 1 (rebuild parity);
-  5. the resolver key (`resolve_source_key` → raw ref) → test 5;
+  5. the resolver key (**raw ref → `resolve_source_key`**) → test 5 (the round-5 P1 regression must go
+     RED: the replay lookup misses and the edge lands bare). *(This mutant is now the DEFECT; the
+     pre-round-5 row said the reverse — `resolve_source_key` → raw ref was the fix — which is no
+     longer true.);
+  5b. the own-ref gate/filter (`_point_source_transit`) — removing the own-ref **filter** alone → the
+     own-refs P2 test; removing the gate *and* filter → the stray-carrier P2 test as well. Note the
+     **gate alone is an EQUIVALENT mutant**: with no `extractedFrom` the own-ref filter's ref set is
+     empty and drops every pair anyway, so only the filter-removing mutant is discriminating (the
+     stray-carrier behaviour is still mutation-covered, by that mutant);
   6. **`_POINT_HANDLED` membership** (remove it) → test 16: the key then falls to `_uncarried`
      (`_UNCARRIED_LIST`) and is `skip`-ped from both sides, so the tampered mismatch becomes
      invisible — the gate's `ok` goes back to True and test 16 goes RED. (Separately: removing the
@@ -259,6 +280,7 @@ Every test names the input that makes it FAIL.
 | R3 | P2 | The ingest `extractedFrom` **connection** leg calls `_link_source` with **no** `source_versions`, so it produces **no anchor at all** (not an anchor that later dies). Its `extractedFrom` edge is also absent from the Point snapshot, so the edge itself dies at rebuild (pre-existing). Left bare. |
 | R4 | P2 | The `references` anchor (#5199) reads `s.contentHash` at link time and records its own stale-under-in-place-rebuild limitation; unchanged here. |
 | R5 | P2 | **Recast after code review — the edge resurrection is pre-existing, but the ANCHOR VALUE on it is new.** On a hard-delete→same-id-recreate, pass 2 re-creates the *old* incarnation's `extractedFrom` **edge**. That resurrection is pre-existing (the #4042 wipe clears node props, never edges) — but before this change the resurrected edge carried **no** `r.sourceVersion`; now it carries the dead incarnation's stale anchor while live has no edge at all. The **node-prop** half is closed here (the #4042 wipe + test 8b); the **edge half** is filed as a scoped follow-up (pass-2 edge-incarnation handling) and is deliberately NOT fixed in this PR. `test_recreated_point_does_not_inherit_the_node_transit` asserts the node only and says why; the follow-up must extend it to assert the edge is absent. |
+| R6 | P2 | **The Source NODE IDENTITY is not lane-stable when an unjournaled stub precedes the Source record.** `create_point(..., extractedFrom=CANON)` mints a stub at `CANON`; a later `create_source(VARIANT, …)` lands on it live (node url `CANON`), but replay pass-1 builds the Source from the VARIANT-spelled record, so the same ref re-resolves to `VARIANT` and the `extractedFrom` edge lands on a *different* `:Source` node per lane. **Pre-existing** (verified on the pre-round-5 parent: live edge `CANON`, replay edge `VARIANT`), independent of the anchor; reconciling it needs the stub write journaled (or the pass order changed) — out of scope. The **anchor is now stable across it** because the carrier is keyed by the raw ref (round-5 P1), and `test_variant_ref_after_an_unjournaled_stub_keeps_the_anchor` pins the scalar across the identity difference. |
 
 ## 10. Review cycle log
 
@@ -325,8 +347,37 @@ a LIVE-producer test (`test_whitespace_hash_gets_no_anchor_and_survives_rebuild`
 replay AND `check_consistency` healthy, so the two halves are pinned together; the
 `_valid_transit_pairs` docstring no longer claims "`_source_version_transit` skips blank" (it is a
 pure mapper and skips nothing — only the now-strip-testing `resolve_source_versions` does); both
-call-site shape comments name the non-blank member rule; and the §3 `EventAPI` sketch, the §8
+call-site shape comments name the non-blank member rule (⚠️ the `_upsert_point_edges` half was
+actually still missing — corrected in Cycle 7); and the §3 `EventAPI` sketch, the §8
 "four reject surfaces" row and §10's lane sentence were corrected to match §2/§3/§4/§7 and the
 corrected ci-surfaces comment. Also: the whitespace-KEY half was checked and is NOT reachable — a
 blank `url` is refused by `create_source` (`url must be a non-empty string`), and a padded url
 resolves to its non-blank padded key, so `pair[0].strip()` cannot drop a legitimate pair.
+
+**Cycle 7 — code review round 5 (re-review of `748cd6799`).** A confirmed **P1**: a URL-variant ref
+LOST the anchor across `rebuild_all` and the gate could not see it. `resolve_source_versions` keyed
+its map by `resolve_source_key(g, ref)` — a **live-time resolution** — while `_link_source`
+re-resolves the raw ref at replay; when an earlier Point has minted an **unjournaled** stub, the
+Source node's stored `url` differs between lanes (live `CANON`, replay `VARIANT`, R6), so the replay
+lookup missed and the edge landed bare (reproduced: live `'h1'`, replay `NO_EDGE`/`NULL`,
+`check_consistency` green). **Folded:** (1) the carrier is now keyed by the journal-stable **raw
+ref** and `resolve_source_key` is used **only to find the Source node** — so `_link_source`'s raw-ref
+lookup hits on both lanes; the resolver docstring, `_link_source`'s comment/docstring and
+`_source_version_transit` were all corrected (the old rationale was exactly backwards); a regression
+test (`test_variant_ref_after_an_unjournaled_stub_keeps_the_anchor`) that FAILS on the pre-fix parent
+pins it, and `test_url_variant_ref_uses_the_resolved_key` was **rewritten** (it registered the Source
+FIRST and therefore sidestepped the bug, asserting the defect's premise) to
+`test_url_variant_ref_keeps_the_anchor_across_rebuild`, which now pins the raw-ref carrier key. (2)
+**P2** — the node carrier was gated on its own shape only, so a shape-valid carrier on a Point with
+**no** `extractedFrom` planted a stray anchor with no edge (gate-invisible). Both writers now select
+the carrier through the shared `_point_source_transit`: written only when the Point OWNS an
+`extractedFrom`, and filtered to that Point's **own raw refs** (normalized as `_link_source` does);
+`test_carrier_without_an_extractedfrom_is_not_written` and
+`test_carrier_keeps_only_the_points_own_refs` pin the two halves. (3) **P3** — the Cycle-6 claim that
+BOTH call-site shape comments name the non-blank member rule was false; the rule was added to the
+`_upsert_point_edges` call-site comment, making the claim true. Mutation-verified: raw-ref key →
+resolved key reddens the new P1 test (and the rewritten variant test); the own-ref filter mutant
+reddens the own-refs test, and removing the gate *and* filter additionally reddens the stray-carrier
+test (the gate alone is an **equivalent mutant** — the empty ref set makes the filter drop every
+pair — recorded as such in §7). The replayed **Source node identity** difference (R6) is pre-existing
+and left unfixed; only the anchor is now stable across it.
