@@ -718,7 +718,7 @@ Run:
 cd <worktree>
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/ -q -x
 uv run ruff check tortoise/commit_ops.py tortoise/hosted_api.py tests/test_capture_session.py tests/test_commit_endpoint.py
-python3 tools/ci_selection.py --integrity
+uv run python tools/ci_selection.py --integrity
 ```
 Expected: all tests green (no -x failure), ruff clean, integrity clean (no new test files).
 

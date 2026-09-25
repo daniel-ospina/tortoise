@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
 """(#6707) Verification script for shock propagation on FalkorDB."""
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/test_6707_shock.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/test_6707_shock.py`"
+    )
+
 sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
 
 from tortoise.projection import FalkorProjection

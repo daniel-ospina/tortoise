@@ -27,9 +27,19 @@ effect until the follow-up lands and is re-verified.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/detector_parity.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python -m tools.longmem_eval.detector_parity`"
+    )
+
 import argparse
 import os
-import sys
 import sys as _sys
 from collections import Counter
 

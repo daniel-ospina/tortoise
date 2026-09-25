@@ -5,7 +5,14 @@ repos:
     hooks:
       - id: redis-guard
         name: redis-guard (redislite leak patterns)
-        entry: python tools/redis-guard.py
+        # #5128: `tools/redis-guard.py` now REFUSES a <3.12 interpreter inline
+        # (its guard), so a bare, unpinned `python` turns this hook from a pass
+        # into a failure on any host whose `python` is older — and on the #5128
+        # host `python` does not exist at all (only `python3`). Resolve the
+        # project interpreter the same way `.husky/pre-commit` does: the
+        # worktree venv when it is executable, else `uv run` (which finds the
+        # pinned 3.12). Filenames are appended after `--`.
+        entry: sh -c 'if [ -x .venv/bin/python ]; then exec .venv/bin/python tools/redis-guard.py "$@"; else exec uv run python tools/redis-guard.py "$@"; fi' --
         language: system
         types: [python]
         pass_filenames: true

@@ -48,6 +48,20 @@ python3 tools/tmpdir_sweep.py --apply --json
 Exit codes: `0` ran cleanly (dry or apply), `2` refused / could not run / an
 `--apply` removal failed.
 
+> **Ambient interpreter, deliberately — this tool carries NO `>=3.12` guard.**
+> Unlike every other `tools/` entry point (the #5128 class fix),
+> `tools/tmpdir_sweep.py` is **3.9-clean** and is deliberately left runnable by
+> the ambient `python3`: its documented scheduled invocation is
+> `/usr/bin/python3 tools/tmpdir_sweep.py`, the only interpreter a minimal-PATH
+> cron is guaranteed, and the sweep is the backstop that should still run from a
+> degraded environment. A guard here would turn a working scheduled job into a
+> refusal for no diagnostic benefit — it does not crash on an old interpreter,
+> it runs. The carve-out is recorded in `tests/test_entry_point_python_guard.py`
+> (`RUNTIME_39`) and **re-derived there** by actually running this file under a
+> real pre-3.12 interpreter, so it cannot rot silently. Do not "fix" this by
+> adding the guard; if the tool ever stops being 3.9-clean, that test reds and
+> names it.
+
 ## Safety by construction
 
 | Guard | Behaviour |

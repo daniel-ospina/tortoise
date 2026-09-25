@@ -27,11 +27,21 @@ option-5 full-context comparison (never misread as a retrieval-backed run).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/full_context.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python -m tools.longmem_eval.full_context`"
+    )
+
 import argparse
 import json
 import os
 import random
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path

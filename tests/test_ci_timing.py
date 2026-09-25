@@ -453,6 +453,23 @@ def test_ci_timing_workflow_embeds_no_inline_python() -> None:
     assert "python3 tools/ci_timing.py --pick-run" in _find_step_body()
 
 
+def install_ci_python3(bin_dir: Path) -> None:
+    """Put a 3.12 `python3` on the step's PATH, the way the runner has one.
+
+    The `find` step invokes `python3 tools/ci_timing.py --pick-run` — correct in
+    CI, where `actions/setup-python@v5` pins `python3` to 3.12. Executing that
+    step LOCALLY without this shim runs it under the developer's ambient
+    interpreter, which since #5128 can be older and is (correctly) refused by
+    `tools/ci_timing.py`'s inline `>=3.12` guard — a local-only failure that says
+    nothing about the workflow. Shadow it with the interpreter running this
+    suite: the same stub-bin idiom as tests/test_ci_guard_invocation.py.
+    """
+    for name in ("python3", "python"):
+        target = bin_dir / name
+        if not target.exists():
+            target.symlink_to(sys.executable)
+
+
 def test_find_step_writes_run_id_to_github_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -468,6 +485,7 @@ def test_find_step_writes_run_id_to_github_output(
         {"id": 303, "conclusion": "success"},
         {"id": 404, "conclusion": "failure"},
     ], record=record)
+    install_ci_python3(bin_dir)
     gh_output = tmp_path / "github_output"
     gh_output.write_text("")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
@@ -492,6 +510,7 @@ def test_find_step_warns_when_no_eligible_run(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     make_fake_gh_runs(bin_dir, [{"id": 1, "conclusion": "cancelled"}])
+    install_ci_python3(bin_dir)
     gh_output = tmp_path / "github_output"
     gh_output.write_text("")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")

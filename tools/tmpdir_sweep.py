@@ -54,6 +54,14 @@ Usage:
 
 Exit codes: 0 = ran cleanly (dry or apply), 2 = refused, could not run,
      or an `--apply` removal failed.
+
+Deliberately UNGUARDED (the #5128 class fix): this file is 3.9-clean and its
+     documented scheduled invocation is `/usr/bin/python3 tools/tmpdir_sweep.py` —
+     the only interpreter a minimal-PATH cron is guaranteed. It does NOT crash
+     on an old interpreter, so the inline `>=3.12` guard every other `tools/`
+     entry point carries would only turn a working scheduled job into a
+     refusal. The carve-out is recorded and re-derived in
+     `tests/test_entry_point_python_guard.py` (`RUNTIME_39`).
 """
 from __future__ import annotations
 

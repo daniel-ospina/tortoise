@@ -69,12 +69,22 @@ USAGE:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ask_recall_bench.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ask_recall_bench.py`"
+    )
+
 import argparse
 import contextlib
 import json
 import logging
 import os
-import sys
 import tempfile
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

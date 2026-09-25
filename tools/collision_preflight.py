@@ -217,6 +217,17 @@ Env seams (tests point these at stubs; production defaults are the real tools)
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/collision_preflight.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/collision_preflight.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -227,7 +238,6 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request

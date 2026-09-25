@@ -19,6 +19,16 @@ dataset is re-audited.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/longmem_eval/dataset_audit.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]})"
+    )
+
 from typing import Any
 
 #: The 2026-08-20 measured census of the cleaned S split — the audit's

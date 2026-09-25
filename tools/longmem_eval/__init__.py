@@ -12,5 +12,5 @@ Submodules:
     reader    — reader LLM (provider-config via env; offline mock seam)
     judge     — official answer-check judge prompts + judge LLM wrapper
     report    — aggregate metrics + methodology provenance JSON
-    run       — CLI entry point (``python -m tools.longmem_eval.run``)
+    run       — CLI entry point (``uv run python -m tools.longmem_eval.run``)
 """

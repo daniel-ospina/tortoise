@@ -11,5 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # tools/redis-guard.py carries the inline >=3.12 guard (#5128), so the
+      # ambient python3 is no longer good enough — pin it explicitly.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Run redis-guard
         run: python3 tools/redis-guard.py
