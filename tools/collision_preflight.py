@@ -52,9 +52,11 @@ Design contract
    list is not INCOMPLETE, and it is the one place it cannot be: this surface
    can never block, so its partiality cannot authorize a dispatch that a full
    enumeration would have refused.
-3. A hit exits non-zero and names the surface. An unqueryable surface exits
-   non-zero as INCOMPLETE. "No collision" (0) and "could not check" (2) are
-   different outcomes by construction.
+3. A hit on a BLOCKING surface exits non-zero and names the surface. An
+   unqueryable BLOCKING surface exits non-zero as INCOMPLETE. "No collision"
+   (0) and "could not check" (2) are different outcomes by construction. An
+   ADVISORY surface obeys neither: it is reported, but it can force neither
+   outcome (see point 1).
 4. Matching is boundary-exact for the issue number — the regex
    ``(?<![0-9])N(?![0-9])`` means ``3061`` never matches ``30610`` — so the
    tool cannot manufacture a collision out of an unrelated number.
@@ -1375,19 +1377,34 @@ def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
         ) from exc
 
 
-_LINK_LAST_RE = re.compile(r'[?&]page=(\d+)>;\s*rel="last"')
+# An RFC-8288 link relation may be QUOTED or UNQUOTED (`rel="last"` / `rel=last`),
+# and a response may carry MORE THAN ONE `Link:` header line. Both forms are
+# matched here, and the caller joins every header line before parsing, because a
+# header this pattern cannot read must never be mistaken for "no header" — that
+# is the sample-presented-as-everything failure this file exists to prevent.
+#
+# The trailing guard is `(?![\w-])`, NOT `\b`: after a QUOTED relation the next
+# character is a quote or a space, both non-word, so `\b` can never match there
+# and the pattern would silently fail on exactly the form GitHub sends.
+_LINK_LAST_RE = re.compile(r'[?&]page=(\d+)>;\s*rel=(?:"last"|last)(?![\w-])')
+_LINK_NEXT_RE = re.compile(r'rel=(?:"next"|next)(?![\w-])')
 
 
 def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
-                      timeout: float, sample: int) -> tuple[list[dict], int | None]:
+                      timeout: float,
+                      sample: int) -> tuple[list[dict], int | None, bool]:
     """Fetch the closed-PR surface in ONE bounded request (#5251).
 
-    Returns ``(prs, approx_total)``. ``approx_total`` comes from the response's
-    OWN ``Link: rel="last"`` header, so completeness is observable on the same
-    call that fetches the sample: the caller reports "100 of ~1,848" instead of
-    silently presenting 100 as everything. It is ``None`` when the header is
-    absent — which is itself the meaningful answer "this page IS the whole
-    list".
+    Returns ``(prs, approx_total, partial)``. ``approx_total`` comes from the
+    response's OWN ``Link: rel="last"`` header, so completeness is observable on
+    the same call that fetches the sample: the caller reports "100 of ~1,848"
+    instead of silently presenting 100 as everything.
+
+    ``partial`` is decided by EVIDENCE, never by whether a parse succeeded: it is
+    True when more pages provably exist (a ``rel="next"``, or a ``rel="last"``
+    total larger than the page) and False only when the response carries no
+    ``Link`` header at all. Any ``Link`` header the parser cannot read is treated
+    as partial with a floor total rather than as completeness.
 
     ``--paginate`` is deliberately absent. Following the ``rel="next"`` chain
     to exhaustion cost ~19 requests on this repo (measured ``Link: rel="last"``
@@ -1458,21 +1475,30 @@ def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
     # precise total it did not measure.
     #
     # `partial` is decided by EVIDENCE, not by whether the parse succeeded. A
-    # `Link` header carrying `rel="next"` PROVES more pages exist, so it must
-    # never be reported as "this page is the complete list" — even when the
-    # `rel="last"` entry is absent or unparseable. Treating a failed parse as
-    # "no header present" would re-introduce exactly the failure this tool
-    # exists to prevent: presenting a sample as everything.
-    link_match = re.search(r'(?im)^link:\s*(.*)$', head)
-    link_value = link_match.group(1).strip() if link_match else ""
-    last_match = _LINK_LAST_RE.search(link_value)
+    # `Link` carrying `rel="next"` PROVES more pages exist, so it must never be
+    # reported as "this page is the complete list" — even when the `rel="last"`
+    # entry is absent or unparseable. Treating a failed parse as "no header
+    # present" would re-introduce exactly the failure this tool exists to
+    # prevent: presenting a sample as everything.
+    #
+    # EVERY `Link` header line is joined before parsing (a response may send more
+    # than one), and both the quoted and unquoted relation forms are accepted —
+    # the tests' own stub emits two lines, so a parser that read only the first
+    # would disagree with the transport it is meant to model (review cycle 2).
+    link_values = " ".join(
+        m.group(1).strip()
+        for m in re.finditer(r'(?im)^link:\s*(.*)$', head)
+    )
+    last_match = _LINK_LAST_RE.search(link_values)
+    has_next = _LINK_NEXT_RE.search(link_values) is not None
     if last_match:
         approx_total = int(last_match.group(1)) * page_size
         partial = approx_total > len(prs)
-    elif 'rel="next"' in link_value:
-        # More pages provably exist but the total could not be read. Report
-        # partial-with-unknown-total rather than claiming completeness, and use
-        # a floor (not a fabricated number) so the wording cannot overstate.
+    elif has_next or link_values:
+        # More pages provably exist, or a Link header exists that this parser
+        # could not interpret. Report partial-with-a-floor rather than claiming
+        # completeness, and use a floor (never a fabricated number) so the
+        # wording cannot overstate.
         approx_total = len(prs) + 1
         partial = True
     else:
@@ -2122,7 +2148,10 @@ def run_preflight(
                         "closed PR(s) in ONE request; the remainder were NOT "
                         "scanned. This surface is ADVISORY — the sample cannot "
                         "block a dispatch, and its partiality does NOT make the "
-                        "run INCOMPLETE. Widen with --closed-pr-limit."
+                        "run INCOMPLETE. The sample size is bounded by GitHub's "
+                        "per_page maximum (100), so a repo with more closed PRs "
+                        "than that can never show this surface complete — that "
+                        "is the point of the bound, not a setting to widen."
                     )
                 else:
                     surface.note = (
@@ -2140,8 +2169,8 @@ def run_preflight(
                 surface.mark_truncated(
                     f"truncated at the {limit} cap — more than {limit} {state} "
                     f"PR(s) exist and were NOT scanned; this surface is "
-                    "INCOMPLETE (never CLEAN). Widen with --pr-limit / "
-                    "--closed-pr-limit (or COLLISION_PREFLIGHT_*_PR_LIMIT)."
+                    "INCOMPLETE (never CLEAN). Widen with --pr-limit "
+                    "(or COLLISION_PREFLIGHT_PR_LIMIT)."
                 )
                 prs = prs[:limit]
             scan_pr_surface(surface, prs, issue, keywords, min_keywords)

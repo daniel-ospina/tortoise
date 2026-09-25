@@ -1202,6 +1202,24 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertRegex(out, r"recently-closed PRs\s+ADVISORY")
         self.assertIn("ADVISORY SURFACES", out)
 
+    def test_clean_report_counts_only_surfaces_actually_queried(self):
+        # Review cycle 2 (P2-7): the CLEAN line counts surfaces actually READ.
+        # Before #5251 it was reachable only when every surface had been
+        # queried, so `7/7` was literally true; with an advisory surface it can
+        # now mean 6 of 7 were read. A silent revert of that count would
+        # otherwise pass the whole suite, because the pre-existing `7/7`
+        # assertion still matches a fully-queried run.
+        self.gh_fixtures(open_prs=[])
+        # Fail ONLY the (advisory) closed-PR request: every blocking surface
+        # stays clean, so the run must still reach CLEAN.
+        rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        # 6, not 7 — and the shortfall is NAMED, not hidden.
+        self.assertIn("6/7 surfaces queried", out)
+        self.assertNotIn("7/7 surfaces queried", out)
+        self.assertIn("advisory surface(s) partial or unqueried", out)
+
     def test_advisory_demotion_is_scoped_to_the_advisory_surface(self):
         # The OVERRIDE must not weaken the blocking surfaces. (a) An advisory
         # failure alongside an OPEN-PR hit is still a COLLISION. (b) An advisory
