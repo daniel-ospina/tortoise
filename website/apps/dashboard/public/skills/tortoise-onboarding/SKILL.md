@@ -309,9 +309,19 @@ export TORTOISE_MCP_API_KEY=<key>                  # the MCP Bearer header
 export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"
 ```
 
-The alias is safe since #3615 — hosted capture is gated on explicit
-`TORTOISE_CAPTURE=1` consent, never on the credential, so exporting the
-canonical name no longer opts the machine into data-sharing.
+What gates hosted capture is **per-surface**, and not yet uniform (#3615):
+
+- **The consent-gated in-repo paths** fail closed on the explicit
+  `TORTOISE_CAPTURE=1` opt-in (`tortoise/capture_consent.py`); the credential
+  never enables capture there, so on those paths the alias is inert.
+- **The Pi `reflect-hook` is not gated that way.**
+  `agent-infra/extensions/reflect-hook.ts` resolves the credential itself
+  (`env.TORTOISE_API_KEY || file.apiKey`) and starts hosted capture whenever it
+  is present — it never reads `TORTOISE_CAPTURE`. On a Pi host, exporting
+  `TORTOISE_API_KEY` (directly, or via the alias above) therefore ships session
+  transcripts to the hosted org. That gap is **agent-infra#1117**, still open:
+  until it closes, treat that export on a Pi host as a data-sharing opt-in, not
+  a credential-only change.
 
 **2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
 existing `mcpServers` block; if the EFFECTIVE config already has a `tortoise`
@@ -351,9 +361,12 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    "already correct — no repoint needed" and STOP: no confirm, no preserve,
 >    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
 >    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: a
->    profile may deliberately name its MCP credential separately. It is no
->    longer required for that purpose — hosted capture is gated on EXPLICIT
->    consent (`TORTOISE_CAPTURE=1`), never on the credential (#3615). Report it
+>    profile may deliberately name its MCP credential separately — worth
+>    preserving, because capture gating is per-surface (#3615): the in-repo
+>    consent-gated paths fail closed on explicit `TORTOISE_CAPTURE=1`, but the
+>    Pi `reflect-hook` starts hosted capture on credential presence alone
+>    (agent-infra#1117, open), so a separately-named credential that is NOT
+>    aliased is still one way to keep a Pi host capture-free. Report it
 >    and ASK; do not rewrite it on your own initiative, and treat "this profile
 >    intentionally defines that variable" as the human's decision rather than a
 >    misconfiguration to repair. It is only *complete*, though, when that
@@ -570,8 +583,11 @@ Contract notes:
   default-ON (ToS-covered) with a quiet 409 off-switch (#1927) — unchanged.
   *Client transmission authorization* is per-host and requires the EXPLICIT
   opt-in `TORTOISE_CAPTURE=1`; a credential (`TORTOISE_API_KEY`) never enables
-  capture. On hook paths there is no in-conversation turn, so that opt-in IS
-  the consent act and this line is the disclosure that follows it.
+  capture on those consent-gated paths. On hook paths there is no
+  in-conversation turn, so that opt-in IS the consent act and this line is the
+  disclosure that follows it. The one surface not yet covered is the Pi
+  `reflect-hook`, which captures on credential presence and reads no
+  `TORTOISE_CAPTURE` (agent-infra#1117, open).
 - **Timing:** first capture only, in-conversation, one line, non-blocking.
   The off-switch stays quiet-409 (no re-gate, #1927).
 - **Destination (#2002):** `Settings → Captured sessions` — the capture

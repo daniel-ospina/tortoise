@@ -190,7 +190,17 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     — fails here.
 
     Canonical only: the mirror is pinned byte-identical by
-    `test_m8_deploy_mirror_matches_canonical`, so this covers both copies."""
+    `test_m8_deploy_mirror_matches_canonical`, so this covers both copies.
+
+    #5153 P1 review: the paragraph must NOT re-assert the credential-
+    independent capture reassurance. That reassurance is FALSE on the Pi host
+    this very step instructs: `agent-infra/extensions/reflect-hook.ts`
+    resolves the credential itself and starts hosted capture on its mere
+    PRESENCE (`env.TORTOISE_API_KEY || file.apiKey`), reading no
+    `TORTOISE_CAPTURE`. The claim is true only of the in-repo consent-gated
+    paths (`tortoise/capture_consent.py`), so the document must name the
+    per-surface split and the open dependency (`agent-infra#1117`) instead of
+    generalising."""
     skill = LIVE_SKILL.read_text(encoding="utf-8")
     assert "is the canonical name, and the **only** one any code path" in skill, (
         "the Pi step must state that TORTOISE_API_KEY is the only name read")
@@ -207,6 +217,34 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
     assert not unread, (
         "the served Bearer snippet references a variable the MCP HTTP client "
         f"never reads ({', '.join('$' + v for v in unread)}) — the 401 in #5153")
+
+    # ── #5153 P1: no credential-independent capture reassurance ────────────
+    # The false claim, in the two forms the doc carried it. "The alias is safe
+    # since #3615" is the added sentence; "never on the credential" is the
+    # generalisation that made it read as authoritative. Both are false on a
+    # Pi host and must not come back.
+    for stale in ("The alias is safe since #3615", "never on the credential",
+                  "no longer required for that purpose"):
+        assert stale not in skill, (
+            "the false credential-independent capture reassurance returned "
+            f"({stale!r}): the Pi reflect-hook captures on credential presence, "
+            "not on TORTOISE_CAPTURE — agent-infra#1117")
+    # The replacement must be per-surface and name the truth on each side:
+    # the in-repo consent gate, the ungated Pi reflect-hook, and the open
+    # dependency that makes the Pi side a known gap rather than a settled fact.
+    for required in ("tortoise/capture_consent.py", "reflect-hook",
+                     "agent-infra#1117"):
+        assert required in skill, (
+            "the capture-gating claim must be per-surface and name "
+            f"{required!r} (#5153 P1)")
+
+    # The same reassurance was mirrored in .env.example; pin it there too.
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    for stale in ("The alias is safe since #3615", "never on the credential"):
+        assert stale not in env_example, (
+            f".env.example repeats the false reassurance ({stale!r})")
+    assert "agent-infra#1117" in env_example, (
+        ".env.example must name the open Pi reflect-hook dependency (#1117)")
 
 
 def _installer_skills() -> list[str]:
