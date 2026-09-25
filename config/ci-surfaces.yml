@@ -397,6 +397,11 @@ surfaces:
   # operator surface for the config third state); a __main__-only PR would
   # otherwise select `api` and never run it.
   - test_rebuild_config_preservation.py
+  # #4653: the :GraphEventMeta watermark across the same wipe+replay —
+  # `:GraphEventMeta` is export-skipped by the `api` surface (hosted_api
+  # `_EXPORT_SKIP_LABELS`), so a change to that classifier alone must still
+  # run the pin that says export-skip is not a durability statement.
+  - test_rebuild_event_meta_watermark_4653.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -960,6 +965,10 @@ surfaces:
   # and pack_state/pack_manifest_store are the writer modules whose labels
   # the registry must agree with.
   - test_rebuild_config_preservation.py
+  # #4653: the same wipe+replay drives the `event_meta` sidecar section and the
+  # watermark re-derivation, both in tortoise/projection/ (core fallback) over
+  # tortoise/event_store.py's allocator.
+  - test_rebuild_event_meta_watermark_4653.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
   - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
@@ -2327,6 +2336,8 @@ durations:
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.2
   test_rebuild_turn_points_3947.py: 4.5
+  test_rebuild_event_meta_watermark_4653.py: 24.9  # #4653: 25 tests, docker FalkorDB; locally measured
+  test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2

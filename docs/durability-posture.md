@@ -108,18 +108,49 @@ The `:Meta` class is therefore enrolled **key-scoped**. A label-wide `:Meta`
 read would sweep the two derived `point_fts_v2`/`event_fts_v2` markers into the
 preserved set and restore them as if they were authoritative configuration.
 
+### The one carried high-water mark: `:GraphEventMeta`
+
+The map above is keyed on **node classes**; this entry is a single **counter**,
+and it is carried for a different reason. The rebuild wipe destroys
+`:GraphEventMeta`, whose `last_seq` is the per-graph allocator handed to
+`event_store.next_seq` — and it is **not re-derivable**: `rebuild_all` does not
+replay `:GraphEvent` rows at all (**#4664**, consolidated into #5048, unfixed)
+and the JSONL journal carries no `seq`, so a post-replay scan reads `null`. Left
+uncarried, the next emit MERGEs a fresh counter at 1 and hands out a `seq` the
+graph already issued; because `read_after` is `seq > cursor`, every subscriber
+holding a cursor at or above the restart **silently under-counts**. That is the
+identical harm `hosted_backup._restore_event_meta` (#3902) already prevents on
+the backup/restore path.
+
+<!-- config-registry:watermark -->
+| Carried class | Carried field | Restore rule after replay |
+|---|---|---|
+| `:GraphEventMeta` | `last_seq` (high-water mark) | `max(carried, max(:GraphEvent.seq))`; `first_seq` is re-derived as `min(:GraphEvent.seq)`, or `last_seq + 1` when the log is empty |
+
+Defect and vehicle: this entry was added by **#4653**; the durable carrier is
+the #2943 pre-wipe sidecar's `event_meta` section, re-established by
+`event_store.reestablish_watermark` after every replay pass.
+<!-- config-registry:end -->
+
+`first_seq` is deliberately **not** carried — it is fully re-derivable from the
+surviving log, and `last_seq + 1` is the truthful floor once the log is empty
+(the stream was truncated, so `events_poll` answers 410 instead of returning
+`[]` forever to a subscriber parked above the fresh counter). The carrier is the
+durable #2943 pre-wipe sidecar (`event_meta` section), **not** the config
+registry above: this class has no identity property to key a node-class entry
+on, and snapshotting it as configuration would restore a value as if it were
+authored configuration rather than a monotonic counter. **#4653** is the defect.
+
 <!-- config-registry:unenrolled -->
 - `:OnboardingState`, `:OnboardingStep`, and their `COMPLETED_STEP` edges —
   destroyed silently by `rebuild_all` today; no vehicle in this change.
   **#4641**
 - `:TeamMeta` — same disposition, same vehicle. **#4641**
-- `:GraphEventMeta` — an event watermark that **is** re-derivable, so it is
-  re-derived post-replay rather than snapshotted; today it is reset, which
-  collides the next `next_seq` with replayed sequence numbers. **#4653**
 <!-- config-registry:end -->
 
 **Operator audit** — read-only; every preserved class is enumerated by the
-registry, so this query cannot silently under-report after a class is added:
+registry, and the one carried counter by the query's last leg, so this query
+cannot silently under-report after a class is added:
 
 <!-- config-registry:audit-query -->
 ```cypher
@@ -129,6 +160,9 @@ MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
 UNION ALL
 MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset']
 RETURN 'Meta' AS cls, x.key AS ident
+UNION ALL
+MATCH (m:GraphEventMeta)
+RETURN 'GraphEventMeta' AS cls, toString(m.last_seq) AS ident
 ```
 <!-- config-registry:end -->
 

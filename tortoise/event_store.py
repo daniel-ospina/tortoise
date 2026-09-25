@@ -77,6 +77,79 @@ def next_seq(proj) -> int:
     return int(rows[0][0])
 
 
+def capture_watermark(proj) -> dict | None:
+    """Read the per-graph ``:GraphEventMeta`` HIGH-WATER MARK, or ``None``.
+
+    #4653: returned as a sidecar-shaped entry (``{"last_seq": int}``) so a
+    pre-wipe capture can be carried through a wipe+replay. ``None`` — never
+    ``{"last_seq": 0}`` — when no counter node exists: a graph that has never
+    emitted an event must come back with no counter, so the next
+    ``next_seq`` creates it at 1 exactly as it always did. Inventing a
+    counter here would make "never emitted" indistinguishable from "emitted
+    an event with seq 0", and ``events_poll``'s ``after_seq == 0`` sentinel
+    already owns the latter meaning.
+
+    ``last_seq`` is the ONLY part of the watermark that is not re-derivable
+    (see ``reestablish_watermark``): the node is the sole record of the
+    highest ``seq`` ever handed out, and the JSONL journal carries no ``seq``
+    at all — ``_emit_event`` even writes a ``:GraphEvent`` with no JSONL
+    record for payload-only emits (``sdk.py`` ``_emit_event("PointRetracted",
+    {"id": ...})``). The journal therefore cannot supply it, which is why a
+    rebuild has to carry it rather than recompute it.
+    """
+    rows = proj.g.query(
+        "MATCH (m:GraphEventMeta) RETURN max(m.last_seq)").result_set
+    if not rows or rows[0][0] is None:
+        return None
+    return {"last_seq": int(rows[0][0])}
+
+
+def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
+    """Re-establish ``:GraphEventMeta`` after a wipe+replay (#4653).
+
+    The rebuild counterpart of ``hosted_backup._restore_event_meta`` (#3902),
+    with the same two rules and the same order:
+
+    * ``last_seq = max(carried, max(:GraphEvent.seq))`` — the MONOTONICITY
+      GUARD. Whatever the carried value is, the ordering key must never sit
+      below the top seq the replayed log already uses; that equality IS the
+      collision this exists to prevent.
+    * ``first_seq = min(:GraphEvent.seq)``, or ``last_seq + 1`` when the log is
+      empty — the ``_refresh_first_seq`` contract (every cursor below the next
+      write is expired). After a rebuild the ``:GraphEvent`` rows are NOT
+      replayed today (#4664), so this is normally ``last_seq + 1``: the
+      truthful statement that the stream was truncated, which lets
+      ``events_poll`` answer 410 instead of silently returning ``[]`` forever
+      to a subscriber parked above the fresh counter.
+
+    ``carried_last_seq is None`` **and** no replayed event → the node is left
+    ABSENT and ``None`` is returned, mirroring the restore path's "old dump,
+    no events, no counter — nothing to seed". A graph that never emitted does
+    not gain a counter from a rebuild.
+
+    The caller owns error handling: this runs after the wipe, so a raise here
+    would leave the store without its watermark — ``rebuild_all``/``rebuild``
+    catch and log the consequence rather than propagate it (#2943 "no loss
+    without proof").
+    """
+    rows = proj.g.query(
+        "MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)").result_set
+    max_seq, min_seq = (rows[0] if rows else (None, None))
+    max_seq = int(max_seq) if max_seq is not None else None
+    min_seq = int(min_seq) if min_seq is not None else None
+    last_seq = int(carried_last_seq) if carried_last_seq is not None else None
+    if max_seq is not None:
+        last_seq = max_seq if last_seq is None else max(last_seq, max_seq)
+    if last_seq is None:
+        return None
+    first_seq = min_seq if min_seq is not None else last_seq + 1
+    proj.g.query(
+        "MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first",
+        params={"last": last_seq, "first": first_seq},
+    )
+    return last_seq
+
+
 def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
                  ts: str | None = None) -> bool:
     """Append a :GraphEvent node. Returns True on append, False on dup-skip.
