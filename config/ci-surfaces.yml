@@ -732,6 +732,13 @@ surfaces:
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
+  # #5011: divergence detection is by CONTENT, not size — the per-projection
+  # watermark + graph baseline live in a sidecar next to the journal, written by
+  # tortoise/consistency.py, which matches no SOURCE_PATTERNS entry and
+  # therefore selects the `core` surface (the fallback). Registered here so a
+  # consistency.py-only change runs the file that proves the check can fail for
+  # the right reason.
+  - test_consistency_divergence_5011.py
   - test_consolidation_4way.py
   - test_control_plane.py
   - test_crash_recovery.py
@@ -1811,6 +1818,13 @@ durations:
   test_dr_endpoints.py: 8.4
   test_retrieval.py: 8.3
   test_consolidation_4way.py: 8.2
+  # #5011: 54 tests, docker lane — measured 9-14s warm per file run (one full
+  # fold+graph-diff per assertion; nine of them rebuild_all a journal, and the
+  # shared test container + session-hygiene sweep dominate the tail). 9 tests
+  # skip on the embedded lane, where the store holds no vector index and so
+  # reports no embedding width. Loose middle so the LPT packer does not
+  # under-weight it against default_weight=2.0.
+  test_consistency_divergence_5011.py: 30.0
   test_invite_fusion_http.py: 8.1
   test_signup_token_revoke.py: 8.0
   test_w4_why_enrichment.py: 8.0
