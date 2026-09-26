@@ -193,9 +193,10 @@ def migrate(force: bool = False) -> dict:
             # record), an unverified restore, or a state-UNKNOWN rescue file.
             # Reporting `migrated` while swallowing it is the silent partial
             # loss the class exists to stop, so name it here as the other
-            # callers (`consistency.recover_from_log`, the CLI) now do. Which
-            # of the three shapes applies is on the rebuild ERROR lines and in
-            # the returned counts, so this line must not describe them all as
+            # callers (`consistency.recover_from_log`, the CLI) now do. This
+            # route discards the counts (`migrate()` returns only status/
+            # nodes/backup), so the warning can only POINT at the rebuild ERROR
+            # lines, which carry the shape; it must not describe all three as
             # a loss the replay could not close.
             if rebuild_counts.get("onboarding_gap"):
                 logger.warning(
