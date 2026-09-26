@@ -26,7 +26,7 @@
 // (review cycle 7 item 1: two mutations built and run against the real guards).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -109,6 +109,133 @@ function shippedScripts() {
       const rel = ref.replace(/^\//, '')
       add(rel, join(dist, rel))
     }
+  }
+  return out
+}
+
+// #3787: the FIRST occurrence of an attribute name, lower-cased, or null. HTML
+// gives an attribute name the ASCII case-insensitivity of its tag, allows an
+// attribute to start with `/` as well as whitespace, and IGNORES a duplicate —
+// the first wins in every browser. All three defeated a `src` regex scan
+// (review cycle 2, each reproduced against a real build and confirmed in
+// Chromium: `<SCRIPT SRC=…>` was read as an inline body with empty text,
+// `<script/src=…>` was missed entirely, and `<script src=A src=B>` read the LAST
+// src while the browser loaded A).
+function firstAttr(attrs, name) {
+  for (const a of attrs.matchAll(/(?:^|[\s/])([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/g)) {
+    if (a[1].toLowerCase() === name) return a[2].replace(/^(["'])([\s\S]*)\1$/, '$2')
+  }
+  return null
+}
+
+// #3787: every `<script …>` element in a page, with the src the BROWSER would
+// load (first duplicate wins) and the element's text. A tag carrying a `src` is
+// never an inline body, and a tag whose text is discarded by that rule (a `src`
+// tag with no closing tag swallows the rest of the document as its ignored text)
+// is discarded here too, because that is what the browser does.
+function scriptTags(html) {
+  const out = []
+  const re = /<script\b([^>]*)>/gi
+  let m
+  while ((m = re.exec(html)) !== null) {
+    const rest = html.slice(re.lastIndex)
+    const close = rest.search(/<\/script\s*>/i)
+    const body = close === -1 ? rest : rest.slice(0, close)
+    out.push({ src: firstAttr(m[1], 'src'), body })
+    re.lastIndex = m.index + m[0].length + (close === -1 ? rest.length : body.length)
+  }
+  return out
+}
+
+// #3787: every HTML document the build emits, each with its INLINE <script>
+// bodies and its <script src> targets. Deliberately LOCAL to this file:
+// `shippedScripts()`'s inline handling is index.html-only by contract, and
+// widening it would silently redefine the scan set the #3428/#2937 and #3913
+// probes below are claims about. Recursive, so a nested page (or one added to
+// `public/`) cannot escape the fragment-consumer scan that uses this.
+function shippedHtmlPages() {
+  const out = []
+  const walk = (dir, rel) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${ent.name}` : ent.name
+      if (ent.isDirectory()) walk(join(dir, ent.name), r)
+      else if (ent.name.endsWith('.html')) {
+        const html = readFileSync(join(dir, ent.name), 'utf8')
+        const inlineBodies = []
+        const srcs = []
+        for (const t of scriptTags(html)) {
+          if (t.src === null) inlineBodies.push({ name: `${r}#inline-${inlineBodies.length + 1}`, js: t.body })
+          else srcs.push(t.src)
+        }
+        out.push({ name: r, html, inlineBodies, srcs })
+      }
+    }
+  }
+  walk(dist, '')
+  return out
+}
+
+// #3787: the ANCHORED vendored-library pattern. The anchor is load-bearing — a
+// bare suffix match would also exempt an app-owned `assets/*supabase*.min.js`,
+// which is a false-negative path for the guard below.
+const LIBRARY_BUILD = /^vendor\/supabase[\w.-]*\.min\.js$/
+// A supabase-js build specifier OR URL. Deliberately NOT a bare `supabase`
+// word probe: `dist/signup.html`'s funnel inline body names supabase.com/docs/…
+// and the retired supabase-session.js in comments, and a word probe would red a
+// clean build. Note this is why it cannot match `supabase-session.js` — the
+// pattern requires `.min.js`.
+const SUPABASE_SPECIFIER = /@supabase\/supabase-js|supabase[\w.-]*\.min\.js/
+// #3787: the vendored library's own DIRECTORY. Every way of addressing the only
+// in-dist supabase-js build — a `<script src>`, a `createElement` loader — has
+// to name this path, and the substring survives a literal split (`'/vendor/supa'
+// + 'base-2.112.2.min.js'` still contains `vendor/`) as well as the fold below.
+// This is what closes the dynamic-loader gap a bare specifier probe leaves open
+// (the file's own #3913 MUT-D note records that lesson). Verified 0 hits in every
+// non-library context and every page of the clean build, so it is a free probe.
+const VENDOR_ROOT = /vendor\//
+// #3787: the EXECUTABLE-file predicate. `.js` is what `shippedScripts()` walks;
+// `.mjs`/`.cjs` execute too, and vite copies `public/` verbatim — so a
+// `public/*.mjs` module would otherwise be shipped, executed and never scanned
+// (review cycle 1 finding, reproduced with a module doing a real
+// `import … '@supabase/supabase-js'` + `createClient(`). No `g` flag: `.test()`
+// in a loop must not be stateful.
+const EXECUTABLE = /\.(?:js|mjs|cjs)$/
+// The #3503 P1 surface: a supabase-js client CONSTRUCTION. Every constructor the
+// ecosystem exposes is covered by the `create[A-Za-z]*Client(` form — `createClient(`,
+// `createBrowserClient(` (`@supabase/ssr`) and `createServerClient(` — because a
+// fragment can only be ingested by a client that exists. The `detectSessionInUrl`
+// flag is deliberately NOT a bare alternative: a flag is only meaningful ON a
+// client, so the construction is what this probe pins, and a flag-shaped probe over
+// raw text cannot tell code from a comment in a `public/`-copied file — a run of
+// prose quoting the historical `detectSessionInUrl: true` reddened the guard on a
+// clean build (review cycle 2, reproduced). A guard that reds clean builds is a
+// guard that gets deleted, and the load path that would make such a flag reachable
+// is closed by clause 2 regardless.
+const FRAGMENT_CONSUMER = /\bcreate[A-Za-z]*Client\s*\(|SupabaseClient\s*\(/
+// #3787: fold the literal-building idioms a `public/`-copied file can use to
+// hold a path its raw text never contains. Two rewrites, both applied globally
+// per pass so a chain of 2^k fragments resolves in k passes, and the loop stops
+// as soon as a pass changes nothing:
+//   * adjacent concatenation — `'/ven' + 'dor/supa' + 'base-2.min.js'`;
+//   * array-join — `['/ven','dor/supa','base-2.min.js'].join('')`, plus a static
+//     template substitution (`` `/ven${'dor/supa'}base-2.min.js` ``) folded into
+//     a plain string.
+// Array-join is not hypothetical: a prior review of this file flagged it by name
+// (PR #3704's M3c, "the dist scans do not cover the array-join form"), and it
+// defeated a `+`-only fold against a real build in review cycle 2. The RAW text
+// is probed as well, so folding can only widen what the guard sees.
+const ARRAY_JOIN = /\[\s*((?:['"][^'"\n]*['"]\s*,?\s*)+)\]\s*\.\s*join\s*\(\s*['"]\s*['"]\s*\)/g
+const CONCAT_PAIR = /(['"])([^'"\n]*)\1\s*\+\s*(['"])([^'"\n]*)\3/g
+function foldStringLiterals(text, passes = 6) {
+  let out = text
+  for (let i = 0; i < passes; i++) {
+    const next = out
+      .replace(ARRAY_JOIN, (all, list) =>
+        "'" + [...list.matchAll(/['"]([^'"\n]*)['"]/g)].map((m) => m[1]).join('') + "'")
+      .replace(/\$\{\s*(['"])([^'"\n]*)\1\s*\}/g, '$2')
+      .replace(CONCAT_PAIR, '$1$2$4$1')
+    if (next === out) break
+    out = next
   }
   return out
 }
@@ -312,4 +439,236 @@ test('#3428/#2937 (cycle 8 item 2): no shipped script writes completed_steps cli
     `${hits.map((s) => s.name).join(', ') || 'a shipped script'} writes completed_steps with a ` +
     'harness-connected value — the wizard could manufacture the connection claim with no request ' +
     'at all (#3428/#2937). Rebuild dist/ and remove the client-side write if this fires')
+})
+
+test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ingest a credential fragment', () => {
+  // The artifact is what runs, and until this guard there was NO artifact-level
+  // pin for the #3503 invariant.
+  // tests/test_session_bridge_fragment_retention.py::
+  // test_one_fragment_consumer_per_page asserts on the SOURCES (`main.jsx`,
+  // `supabase-session.js`, `tortoise/oauth.py`, `public/signup.html`,
+  // `index.html`, `blog-admin/src/lib/supabase.ts`) plus an ABSENCE assertion
+  // that `website/signin.html` does not exist — and never on the built `dist/`
+  // bundle;
+  // the #2865 probes above assert shipped *strings*, not the fragment-consumer
+  // property. #3775 then untracked `dist/`, so the *committed* bundle #3787 was
+  // filed about no longer exists (there is nothing to rebuild or byte-compare) —
+  // the residual risk is that a future rebuild re-arms a consumer with no test to
+  // notice. This is that test.
+  //
+  // The defect it pins (#3503 P1): a supabase-js client built with
+  // `detectSessionInUrl: true` calls `_getSessionFromURL()`, which assigns
+  // `window.location.hash = ''` BEFORE awaiting `_saveSession()` — destroying
+  // the fragment a second time and defeating the bridge's retention. supabase-js
+  // DEFAULTS that flag to true, so a re-introduced client with no auth override
+  // is the defect, not a safe default.
+  //
+  // The closed argument, in four clauses over the dist's fragment-consumer
+  // surface. To consume the fragment supabase-js must first be LOADED (the
+  // library owns `detectSessionInUrl:!0`) and it can only be loaded by:
+  //   (a) a static `<script src>` on a shipped page → clause 2(a), asserted
+  //       local-only and matched case-insensitively;
+  //   (b) a bundler-processed import → clause 2(b): the library's own strings
+  //       (`@supabase/supabase-js`) end up IN the emitted chunk;
+  //   (c) a runtime dynamic injection naming a URL → clause 2(c): every address
+  //       of the only in-dist copy names `vendor/`, and no non-library context
+  //       may mention it (literals are folded before probing, so the
+  //       split-literal evasion the file's own #3913 MUT-D note records is
+  //       resolved first);
+  //   (d) an off-origin URL → refused outright by clause 2(a)'s local-only
+  //       assertion. The shipped CSP is defence-in-depth only, NOT a closure: its
+  //       `script-src` admits `'unsafe-inline'` and a general third-party CDN
+  //       (`public/_headers`), so an off-origin load is not prevented by the
+  //       header alone — which is why the artifact pin is asserted here.
+  // Clause 1 rules on the client construction itself; clause 3 pins the scan's
+  // coverage so a page or file cannot escape any of the above.
+  //
+  // Class-B (the lane's doctrine): each message names the value that makes it
+  // fail, and each context is REACHABLE — these are the scripts and pages the
+  // built site executes, and the vendored UMD defines `window.supabase`, whose
+  // `createClient` with no auth override performs exactly the #3503
+  // double-destroy. The two-outcome record (M1/M2/M3) is in the PR.
+  const pages = shippedHtmlPages()
+  const inline = pages.flatMap((p) => p.inlineBodies)
+
+  // (3) COVERAGE FIRST. A scan that inspected nothing passes vacuously, and a
+  // shipped file that escapes the scan is a silent hole. Every on-disk
+  // EXECUTABLE and page must be represented, every script a page references must
+  // exist on disk AND be scanned, and at least one app-owned script and one
+  // inline body must actually be scanned. (index.html has ZERO inline bodies, so
+  // the inline claim is a union across every page — not an index.html count;
+  // asserting an index count here would have red on a clean build.)
+  //
+  // `EXECUTABLE` covers `.mjs`/`.cjs` as well as `.js`: vite copies `public/`
+  // verbatim, so a `public/*.mjs` module is shipped and executed but is invisible
+  // to `shippedScripts()`'s `.js`-only walk (review cycle 1 finding).
+  const onDisk = { js: new Set(), html: new Set() }
+  const walk = (dir, rel) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${ent.name}` : ent.name
+      if (ent.isDirectory()) walk(join(dir, ent.name), r)
+      else if (EXECUTABLE.test(ent.name)) onDisk.js.add(r)
+      else if (ent.name.endsWith('.html')) onDisk.html.add(r)
+    }
+  }
+  walk(dist, '')
+
+  // Every local `<script src>` on EVERY shipped page is part of the executable
+  // surface whatever its extension, so it must exist on disk and be scanned. A
+  // reference the build did not emit is a hard fail (a broken/half-written
+  // build), never a silently skipped file. `p.srcs` comes from `scriptTags()`,
+  // so it holds the src the BROWSER would load — not the one a greedy regex
+  // happens to match (review cycle 2: a duplicate attribute and a `/`-prefixed
+  // one both defeated a regex scan while the page named the vendored library
+  // verbatim).
+  const refs = new Map()
+  const dangling = []
+  const offOrigin = []
+  for (const p of pages) {
+    for (const ref of p.srcs) {
+      if (/^(?:https?:)?\/\//.test(ref) || ref.startsWith('data:') || ref.startsWith('blob:')) {
+        offOrigin.push(`${p.name} → ${ref}`)
+        continue
+      }
+      const rel = ref.replace(/^\//, '')
+      const abs = join(dist, rel)
+      // `isFile()` matters: a page naming a DIRECTORY (`<script src="/assets">`)
+      // passed `existsSync` and then threw EISDIR out of `readFileSync`, losing
+      // the designed diagnosis (review cycle 2).
+      if (!existsSync(abs) || !statSync(abs).isFile()) { dangling.push(`${p.name} → ${ref}`); continue }
+      if (!refs.has(rel)) refs.set(rel, readFileSync(abs, 'utf8'))
+    }
+  }
+  assert.deepEqual(dangling, [],
+    `a shipped page references a script the build did not emit — the bundle is incomplete: ${dangling.join(', ')}`)
+  // Clause 2(d): an off-origin script is outside every content probe in this
+  // guard, and the CSP that would block one at runtime is a header, not a build
+  // property — so the artifact pin is asserted here.
+  assert.deepEqual(offOrigin, [],
+    `${offOrigin.join(', ')} loads a script from another origin — an off-origin bundle is outside ` +
+    'every content probe in this guard, so it is refused outright (#3787)')
+
+  // The scan set: `shippedScripts()` (the shared whole-dist `.js` walk — kept
+  // un-widened, because its scan set is what the #3428/#2937 and #3913 probes
+  // above are claims about) ∪ every on-disk executable it does not reach ∪ every
+  // page-referenced script.
+  const sharedNames = new Set(shippedScripts().map((s) => s.name))
+  const scanned = new Map()
+  for (const s of shippedScripts()) scanned.set(s.name, s.js)
+  for (const name of onDisk.js) {
+    if (!scanned.has(name)) scanned.set(name, readFileSync(join(dist, name), 'utf8'))
+  }
+  for (const [name, js] of refs) if (!scanned.has(name)) scanned.set(name, js)
+
+  // ⚠️ `dist/admin/**` is NOT exempted. The deployed dashboard is larger than
+  // the CI-built dist this guard enumerates (deploy-pages.yml's deploy-dashboard
+  // job, and tests/e2e/auth/test_admin_app_origin.py, both stage blog-admin into
+  // `dist/admin/`), and an exemption was tried and REVERTED here: keyed on the
+  // `admin/` path prefix it also exempted a dashboard-authored `public/admin/*.js`
+  // from the very build this guard scans — a real false negative, reproduced —
+  // and it could never have exempted the staged subtree anyway, which is written
+  // outside this build. `admin/**` reaching this guard therefore means something
+  // staged it AFTER the build — `vite build` empties `outDir`, so a pre-existing
+  // subtree is wiped by the build the suite runs first, and only a post-build
+  // stage (e.g. tests/e2e/auth/test_admin_app_origin.py copying the committed
+  // blog-admin dist into a local `dist/admin/`) leaves one behind. Verified: with
+  // that subtree staged and no rebuild, this guard reds — fail-closed, not exempt.
+  // The blog-admin artifact's own gap is tracked in #5502.
+  const appScripts = [...scanned].filter(([name]) => !LIBRARY_BUILD.test(name))
+  assert.ok(appScripts.length >= 1, 'the scan must include at least one app-owned script')
+  assert.ok(inline.length >= 1, 'the scan must include at least one inline <script> body')
+
+  // Fold literal-building idioms before probing: a `public/`-copied file is never
+  // bundler-processed, so a path split across literals ships SPLIT
+  // (`'/vendor/supa' + 'base-2.112.2.min.js'`, or
+  // `['/ven','dor/supa','base-2.112.2.min.js'].join('')`) — the shapes the file's
+  // own #3913 MUT-D note and PR #3704's M3c record staying green. Both the raw
+  // AND the folded text are probed, so folding only ever widens what this guard
+  // can see.
+  const contexts = [
+    ...appScripts.map(([name, js]) => ({ name, js, folded: foldStringLiterals(js) })),
+    ...inline.map((b) => ({ name: b.name, js: b.js, folded: foldStringLiterals(b.js) })),
+  ]
+
+  // (3) COVERAGE — asserted against the CONTEXTS the content clauses actually
+  // probe, NOT against the set they were assembled from. Asserting that every
+  // member of `scanned` is in `scanned` fires never (review cycle 2): it was the
+  // reason an earlier `admin/**` filter on the probe list slipped through with
+  // the coverage check green. Comparing the PROBE LIST against the independently
+  // enumerated universe is the assertion that can catch a filter — which is
+  // exactly the regression it exists for.
+  const probed = new Set(contexts.map((c) => c.name))
+  for (const name of onDisk.js) {
+    assert.ok(probed.has(name) || LIBRARY_BUILD.test(name),
+      `dist/${name} ships and is executable, and is not the exempt vendored library, yet no ` +
+      'content clause probes it — a file the guard would silently bless (#3787)')
+  }
+  for (const name of refs.keys()) {
+    assert.ok(probed.has(name) || LIBRARY_BUILD.test(name),
+      `dist/${name} is referenced by a shipped page and is not the exempt vendored library, yet no ` +
+      'content clause probes it (#3787)')
+  }
+  for (const p of pages) {
+    for (const b of p.inlineBodies) {
+      assert.ok(probed.has(b.name),
+        `dist/${b.name} is an inline script body that no content clause probes (#3787)`)
+    }
+  }
+  // This walk and `shippedScripts()` are independent enumerations of the same
+  // `.js` surface, so this comparison can actually fail — unlike re-testing one
+  // set against itself.
+  for (const name of onDisk.js) {
+    if (name.endsWith('.js')) {
+      assert.ok(sharedNames.has(name),
+        `dist/${name} is a shipped .js that the shared whole-dist walk does not scan (#3787)`)
+    }
+  }
+  const scannedPages = new Set(pages.map((p) => p.name))
+  for (const name of onDisk.html) {
+    assert.ok(scannedPages.has(name),
+      `dist/${name} ships but is not in the fragment-consumer scan — every shipped page must be scanned (#3787)`)
+  }
+
+  // (1) No fragment-ingesting client construction in a non-library context.
+  for (const c of contexts) {
+    for (const text of [c.js, c.folded]) {
+      assert.doesNotMatch(text, FRAGMENT_CONSUMER,
+        `dist/${c.name} builds a supabase-js client again. A fragment can only be ingested by a ` +
+        'client that exists, and supabase-js DEFAULTS detectSessionInUrl to true, so a client ' +
+        'here ingests #access_token, clears window.location.hash before _saveSession(), and ' +
+        'destroys the fragment a second time (#3503 P1). The dashboard is BFF-migrated (#4054) ' +
+        '— keep supabase-js out of the app bundle')
+    }
+  }
+
+  // (2) Reachability of the library whose own defaults turn ingestion ON.
+  // (a) no shipped page may name a supabase-js build as a script source.
+  const loaded = []
+  for (const p of pages) {
+    for (const ref of p.srcs) {
+      if (/supabase/i.test(ref)) loaded.push(`${p.name} → ${ref}`)
+    }
+  }
+  assert.deepEqual(loaded, [],
+    `${loaded.join(', ')} loads a supabase-js build — the vendored UMD's own defaults ` +
+    '({…, detectSessionInUrl:!0}) turn fragment ingestion ON, so loading it re-arms the ' +
+    '#3503 double-destroy on that page (#3787/#4054)')
+  for (const c of contexts) {
+    for (const text of [c.js, c.folded]) {
+      // (b) a contiguous specifier/URL — a dynamic loader (createElement('script')/
+      // document.write) must keep it in one of these contexts.
+      assert.doesNotMatch(text, SUPABASE_SPECIFIER,
+        `dist/${c.name} references a supabase-js build — a dynamic loader ` +
+        "(createElement('script')/document.write) would re-arm fragment ingestion even " +
+        'though no <script src> names it (#3787/#4054)')
+      // (c) the vendored library's directory. This is the clause that survives a
+      // literal SPLIT: `/vendor/supa` + `base-2.112.2.min.js` has no contiguous
+      // specifier but still names `vendor/`.
+      assert.doesNotMatch(text, VENDOR_ROOT,
+        `dist/${c.name} addresses vendor/ — the vendored supabase-js UMD lives at ` +
+        'vendor/supabase-*.min.js and is the only in-dist copy of the library whose ' +
+        'defaults turn fragment ingestion ON, so a reference to that directory is a ' +
+        'loader for it (#3787/#4054)')
+    }
+  }
 })
