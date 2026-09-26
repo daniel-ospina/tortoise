@@ -1052,12 +1052,12 @@ def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
     try:
         import json
 
-        from tortoise.hook_install import KIND_CAPTURE_FAILURE
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE, local_state_dir
 
-        receipt_dir = Path(os.environ.get(
-            "TORTOISE_IMPORT_RECEIPT_DIR",
-            str(Path.home() / ".tortoise" / "import-receipts")))
-        path = receipt_dir.parent / "capture-errors" / f"{harness}.json"
+        # The WRITER's derivation, not a second one: under an empty or absent
+        # override both resolve under ``$HOME``, so a breadcrumb the writer
+        # placed is the one this clears (``local_state_dir`` owns the rule).
+        path = local_state_dir("capture-errors") / f"{harness}.json"
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
