@@ -2214,11 +2214,14 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 # dependency writes into (already read at `WaitBoundMiddleware` below) — never a
 # client-supplied header or query param, so it cannot be spoofed. WHICH lanes
 # resolve one is a real limit, stated rather than implied: the API-KEY data-plane
-# lanes publish the org (`hosted_api.py:3809`, `:3927`); the SESSION-JWT lane
-# resolves one but deliberately does not publish it (publishing would also change
-# analytics — `AnalyticsMiddleware` reads it at `:1867`), and an MCP call's org
-# lives in a ContextVar this ASGI layer does not own. Those lanes are attributed
-# to `""` (honest unattributed), the same documented limit #5315 accepted.
+# lanes publish the org (`get_current_org`, `_get_current_org_supabase`); the
+# SESSION-JWT lane resolves one but deliberately does not publish it (publishing
+# would also change analytics — `AnalyticsMiddleware` reads it), and an MCP call's
+# org lives in a ContextVar this ASGI layer does not own. Those lanes are
+# attributed to `""` (honest unattributed), the same documented limit #5315
+# accepted. Cited by SYMBOL, not line number: the numbers this comment used to
+# carry had already gone stale by the PR's own +172 lines, and a reader checking
+# a wrong number reaches the opposite conclusion about the coverage it bounds.
 
 #: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
 #: request under one is admitted on the code-literal axis rather than falling to
