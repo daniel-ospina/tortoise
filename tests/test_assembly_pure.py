@@ -1461,6 +1461,40 @@ def test_render_successor_absent_name_only_annotation():
     assert "no successor record found" in content, content
 
 
+def test_render_long_successor_verified_keys_on_full_name_not_display():
+    """#5370: a >200-char successor name is truncated FOR DISPLAY only.
+
+    ``successors_verified`` is keyed on the stored FULL name (the ask-path
+    probe's name set is the raw ``supersededBy`` values), so truncating
+    BEFORE the membership test made a verified successor look unverified and
+    the renderer emitted the NAME-ONLY "no successor record found"
+    annotation for a successor that exists and is live. The lookup must run
+    on the full name; only the rendered clause may truncate.
+    """
+    long_name = "gh-issue-title-" + ("y" * 240)
+    assert len(long_name) > 200
+    slices = AssemblySlices(
+        state_rows=(({"object_id": "obj-long", "name": "long-src",
+                      "status": "superseded",
+                      "superseded_by": long_name,
+                      "superseded_at": "2026-09-01T00:00:00Z"}),),
+        timeline_rows=(), evidence_rows=(),
+        admission={"rows_requested": 0, "rows_admitted": 0,
+                   "truncated": False})
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           candidates=[_cand("obj-long", "long-src", 0)],
+                           successors_verified=frozenset({long_name}))
+    content = hits[0]["content"]
+    assert "no successor record found" not in content, content
+    assert content == (
+        f"STATE (long-src): superseded by {long_name[:200]}… "
+        f"on 2026-09-01"), content
+    # the structured field stays the DISPLAY-bounded name (the probe key is
+    # full, but the reader/marker text is kept bounded by _MAX_SUCC_NAME).
+    assert hits[0]["superseded_by"] == {
+        "content_snippet": long_name[:200] + "…"}, hits[0]["superseded_by"]
+
+
 def test_render_torn_row_empty_superseded_by():
     """R12/C6(b): status='superseded' with EMPTY supersededBy (hand-written
     /torn row) → 'successor unknown' annotation; the EMPTY value must not

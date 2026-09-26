@@ -585,28 +585,25 @@ class TestConnectIssueObjectsAboutObject:
                        params={"n": long_name[:200]}).result_set[0][0] == 0
 
 
-# ── #3574 follow-up: the supersession fold's OWN 200-char cap ────────────
+# ── #3574 follow-up: the supersession fold stores the successor verbatim ─
 
-def test_fold_truncates_superseded_by_independently_of_the_write_path(sdk):
+def test_fold_stores_superseded_by_verbatim_independently_of_the_write_path(sdk):
     """#3574 follow-up / #5370: the Object supersession fold stores
-    ``supersededBy = str(successor)[:200]`` — the FOLD's OWN cap, NOT a
-    mirror of a write-path name cap. The write path holds no cap any more
-    (``test_long_object_name_stored_verbatim_by_both_writers`` above pins
-    that), so a >200-char successor name is stored verbatim while the fold
-    records only its 200-char prefix — a value that names NO Object.
+    ``supersededBy`` VERBATIM — the FOLD's OWN 200-char cap is gone, and it
+    was never a mirror of a write-path name cap. The write path holds no cap
+    either (``test_long_object_name_stored_verbatim_by_both_writers`` above
+    pins that), so a >200-char successor name is stored verbatim on both
+    sides and the stored value NAMES the successor Object.
 
-    This is a CHARACTERIZATION pin for a filed defect, not an endorsement:
-    the divergence is live on the ask path — ``_probe_visible_successors``
-    (assembly.py) builds its name set from the STORED value, so a >200-char
-    successor is never verified and ``_state_header_hit`` renders
-    "no successor record found" for a successor that exists and is live.
-    Reported as #5370 and intentionally left unfixed here (a distinct
-    surface from the writer cap #3574 removes).
+    This pin flipped when #5370 landed, as its own characterization
+    docstring required: the fold used to record only the successor's
+    200-char prefix — a value that named NO Object, so the ask path's
+    name-keyed probe (``_probe_visible_successors``, assembly.py) could not
+    verify it and ``_state_header_hit`` rendered "no successor record found"
+    for a successor that exists and is live.
 
-    **When #5370 is fixed this test MUST FLIP**: the fold asserts (b) below
-    becomes ``stored == long_name`` and assertion (c) becomes 1. The test
-    exists so the `commit_ops.apply_supersessions` comment cannot drift back
-    into claiming the fold's cap mirrors a write-path cap.
+    The test exists so the `commit_ops.apply_supersessions` comment cannot
+    drift back into claiming the fold's cap mirrors a write-path cap.
     """
     from tortoise.commit_ops import apply_supersessions
 
@@ -635,12 +632,11 @@ def test_fold_truncates_superseded_by_independently_of_the_write_path(sdk):
     ).result_set
     assert rows and rows[0][0] == "superseded", rows
     stored = rows[0][1]
-    # (b) the FOLD applied its own 200-char cap to that verbatim name.
-    assert stored == long_name[:200], (
+    # (b) the FOLD stored that verbatim name — it holds no cap of its own.
+    assert stored == long_name, (
         f"fold's stored supersededBy is {len(stored)} chars, expected the "
-        f"200-char prefix of the {len(long_name)}-char successor name")
-    assert stored != long_name, "the fold cap must not be mistaken for a no-op"
-    # (c) hence the stored value names NO Object — a name-keyed probe on it
-    #     (the ask path's own probe) finds nothing (the #5370 hazard).
+        f"full {len(long_name)}-char successor name (#5370)")
+    # (c) hence the stored value NAMES the successor Object — a name-keyed
+    #     probe on it (the ask path's own probe) finds it (the #5370 fix).
     assert proj.g.query("MATCH (o:Object {name:$n}) RETURN count(o)",
-                        params={"n": stored}).result_set[0][0] == 0
+                        params={"n": stored}).result_set[0][0] == 1
