@@ -94,6 +94,14 @@ test('#3890: the deep-link hash resolves to the Settings tab AND the section', (
   assert.deepEqual(resolveSectionHash('#settings-memory-heading'),
     { tab: 'settings', sectionId: 'settings-memory-heading' },
     'a section deep-link must route to the tab that holds the section')
+  // The two route literals are pinned as LITERALS: every other assertion in this
+  // file compares a render against the constant that produced it, so a typo in
+  // the extraction itself sailed through (an independent reviewer's mutation
+  // '…/welcome' -> '…/welcome2' left the whole suite green).
+  assert.equal(ONBOARDING_FUNNEL_HREF, 'https://tortoise.premiselabs.co/welcome',
+    'the self-fork route is the onboarding funnel')
+  assert.equal(SDK_DOCS_HREF, 'https://tortoise.premiselabs.co/docs',
+    'the build-fork route is the SDK documentation')
   assert.equal(MEMORY_SOURCES_HREF, '#settings-memory-heading',
     'the rendered href and the resolver must name the same section')
   assert.equal(MEMORY_SOURCES_TAB, 'settings', 'the section lives in the Settings tab')

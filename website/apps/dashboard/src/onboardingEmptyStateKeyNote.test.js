@@ -796,10 +796,23 @@ test('#4637 wiring: the graph-missing card renders the snippet only with the gat
           snippetKey: "''",
           firstDataSnippet: JSON.stringify(SENTINEL),
           shownOrgName: "'Acme'",
-          setTab: '() => {}',
+          setTab: 'globalThis.__recordTab',
         },
       })
       const html = String(rendered.html)
+      // The card's "Go to API Keys" sink must actually OPEN the API Keys tab:
+      // react-dom can see neither the handler nor its route, so mutating
+      // `onGoToKeys` to `setTab('settings')` (or deleting it) left every
+      // render-level assertion green — a button labelled for a tab it does not open.
+      if (holdsKey) {
+        const dropToAction = findElementByName(rendered.value, 'GraphMissingEmptyStateActions')
+        assert.ok(dropToAction, 'the card must render its action set')
+        assert.equal(typeof dropToAction.props.onGoToKeys, 'function',
+          'the action set must receive a keys-tab handler')
+        recordedTab = null
+        dropToAction.props.onGoToKeys()
+        assert.equal(recordedTab, 'keys', 'the card\u2019s API Keys route must open the API Keys tab')
+      }
       // the SNIPPET needs the gate's own plaintext (`existing` holds no plaintext
       // even though the Organization has a usable row — the two facts differ)
       assert.equal(html.includes(SENTINEL), holdsKey,
@@ -820,6 +833,23 @@ test('#4637 wiring: the graph-missing card renders the snippet only with the gat
     }
   }
 })
+
+// Walk a rendered element tree to the first element whose type carries `name`.
+// react-dom/server never serialises handlers, so a handler can only be checked on
+// the ELEMENT — an inert or mis-routed button would otherwise render identically.
+function findElementByName(node, name) {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElementByName(child, name)
+      if (found) return found
+    }
+    return null
+  }
+  if (!node || typeof node !== 'object') return null
+  if (typeof node.type === 'function' && node.type.name === name) return node
+  const children = node.props ? node.props.children : undefined
+  return children === undefined ? null : findElementByName(children, name)
+}
 
 test('#4637: the five empty-state lead-ins are those exact sentences', () => {
   // The lead-ins are the user-facing copy this PR exists to make fork- and
@@ -868,8 +898,10 @@ test('#4637 wiring: the re-entry card RENDERS the member lead-in its key state s
         isOwnerAdmin: 'false',
         isBuildFork: state.isBuildFork,
         snippetKey: state.snippetKey,
+        // `keyIsLive` is NOT bound: the identifier no longer exists in main.jsx
+        // (this PR removed it), and a binding the app never reads would let the
+        // rig certify a value the app does not use.
         connectGate: JSON.stringify(gate),
-        keyIsLive: String(ownerKeyLive(gate.mode)),
         firstDataSnippet: "'snippet'",
         shownOrgName: "'Acme'",
         setTab: '() => {}',
@@ -886,6 +918,11 @@ test('#4637 wiring: the re-entry card RENDERS the member lead-in its key state s
     }
   }
 })
+
+// The tab a control opens is invisible to react-dom/server, so the handlers are
+// invoked on the rendered element and their destination recorded here.
+let recordedTab = null
+globalThis.__recordTab = (tab) => { recordedTab = tab }
 
 test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivation’s verdict', async () => {
   // The WHOLE guard is compiled and rendered, not just the inner call: evaluating
@@ -914,7 +951,7 @@ test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivat
     for (const reveal of reveals) {
       const [rendered] = await evalExpressions(expression, {
         imports: MAIN_IMPORTS,
-        bindings: { snippetKey: reveal.source, connectGate: JSON.stringify(gate), setTab: '() => {}' },
+        bindings: { snippetKey: reveal.source, connectGate: JSON.stringify(gate), setTab: 'globalThis.__recordTab' },
       })
       const html = String(rendered.html)
       const shown = html.includes('Go to API Keys →')
@@ -924,6 +961,15 @@ test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivat
       const expected = keyTabAffordance({ snippetKey: reveal.value, connectGate: gate })
       assert.equal(shown, expected,
         `gate ${JSON.stringify(gate)} + snippetKey=${reveal.source}: the guard must render exactly the derivation's verdict — got ${html}`)
+      if (shown) {
+        // and the button must OPEN the API Keys tab: `setTab('settings')` or a
+        // deleted handler renders byte-identically (react-dom drops handlers).
+        assert.equal(typeof rendered.value.props.onClick, 'function',
+          'the affordance must carry a click handler')
+        recordedTab = null
+        rendered.value.props.onClick()
+        assert.equal(recordedTab, 'keys', 'the affordance must open the API Keys tab')
+      }
       // #4637's direction: a STALE in-memory reveal must not withhold the button
       // in a render whose owner clause names the API Keys tab, and an unresolved
       // read must not withhold it either.
