@@ -6875,8 +6875,10 @@ def _is_key_limit_error(e: BaseException) -> bool:
 
     Delegates to ``tortoise.model_adapters.is_billing_exhausted`` (#4860 /
     #4951) — the SINGLE seam that owns the key-limit body signatures — so the
-    census class and the rotation decision agree on every requests-shaped
-    error this lane produces (#4959). The seam's signature set is deliberately
+    census class and the rotation seam make the same key-limit/billing
+    discrimination on every requests-shaped error this lane produces (#4959).
+    (The two consumers still disagree in OTHER ways — see
+    ``_classify_error``'s KNOWN DIVERGENCES; #5525.) The seam's signature set is deliberately
     BROAD (#4952: the trailing ``"limit exceeded"`` also matches "rate limit
     exceeded" / "organization limit exceeded" / "token limit exceeded"), and
     the census INHERITS that breadth — a 403 whose body matches any of those
