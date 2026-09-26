@@ -40,9 +40,9 @@ import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, res
 // of grepping the two inline strings (onboardingEmptyStateKeyNote.test.js).
 // #4637: the OWNER note and the four empty-state lead-ins live in the same
 // module — the lead-in is where the chooser route is named, so the owner arms
-// consume the same literals the member arms do instead of deciding for
+// consume the same lead-in constants the member arms do instead of deciding for
 // themselves what the fork offers.
-import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote,
+import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote, ownerKeyLive, graphMissingCta,
   REENTRY_BUILD_LEAD_IN, REENTRY_SELF_LEAD_IN,
   GRAPH_MISSING_BUILD_LEAD_IN, GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
@@ -6918,6 +6918,13 @@ function claimIntentInFlight() {
   // same source) said an existing key was usable. Consumed by
   // `wizardKeyAffordance` below.
   const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
+  // #4637: the Overview empty-state cards' "the Organization's key is already
+  // live" state — ONE derivation (`ownerKeyLive`, note module), read by both
+  // owner arms. The GATE is the authority, not `snippetKey` (welcomeKey ||
+  // apiKey, below): a stale `apiKey` left in localStorage is truthy while the
+  // gate resolves 'mint' — i.e. while the organization provably holds no usable
+  // key — and the card would then say a key was live and a step away.
+  const ownerKeyIsLive = ownerKeyLive(connectGate.mode)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -8894,16 +8901,19 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey || connectGate.mode === 'existing'
-                ? (isOwnerAdmin
-                    ? <OwnerEmptyStateKeyNote variant="reentry" buildFork={isBuildFork}
-                        connectGateMode={connectGate.mode} keyLive />
-                    : <>{isBuildFork
+              {/* #4637: the OWNER arm's key state comes from ONE derivation —
+                  `ownerKeyIsLive`, above — and not from the branch that selects
+                  the MEMBER copy. The member's branch stays `snippetKey ||
+                  mode === 'existing'`: those two lead-ins assert nothing about
+                  which key is usable (its live arm says "You're in"), so the
+                  derivation that matters is the owner's, and it is the gate's. */}
+              {isOwnerAdmin
+                ? <OwnerEmptyStateKeyNote variant="reentry" buildFork={isBuildFork}
+                    connectGateMode={connectGate.mode} keyLive={ownerKeyIsLive} />
+                : (snippetKey || connectGate.mode === 'existing'
+                    ? <>{isBuildFork
                         ? REENTRY_BUILD_LEAD_IN
-                        : "You're in — finish the setup below to connect your agent. "}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)
-                : (isOwnerAdmin
-                    ? <OwnerEmptyStateKeyNote variant="reentry" buildFork={isBuildFork}
-                        connectGateMode={connectGate.mode} keyLive={false} />
+                        : "You're in — finish the setup below to connect your agent. "}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>
                     : <>{isBuildFork
                         ? REENTRY_BUILD_LEAD_IN
                         : REENTRY_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
@@ -8934,8 +8944,11 @@ function claimIntentInFlight() {
               // first-timer's in-memory reveal, never a localStorage read.
               <>
                 <p className="dim">
+                  {/* #4637: the call to action names the connect route too, so it
+                      is fork-derived from the same shared source as the arms
+                      above (the build fork sets up the SDK and has no chooser). */}
                   Your Organization and API key are live — the graph is created the moment
-                  you add data. Connect your agent, or add a memory yourself:
+                  you add data. {graphMissingCta(isBuildFork)}
                 </p>
                 <div className="snippet-wrap">
                   <pre className="snippet">{firstDataSnippet}</pre>
@@ -8957,10 +8970,12 @@ function claimIntentInFlight() {
               // a second fresh create would 402 once the 2-key allowance is
               // used. Members get the ask-owner path; the keys tab is still
               // one click away for owners (their only first-party surface).
+              // #4637: the owner's key state is `ownerKeyIsLive` (the gate's),
+              // not this card's `snippetKey` branch.
               <p className="dim">
                 {isOwnerAdmin
                   ? <OwnerEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork}
-                      connectGateMode={connectGate.mode} keyLive={connectGate.mode === 'existing'} />
+                      connectGateMode={connectGate.mode} keyLive={ownerKeyIsLive} />
                   : <>{isBuildFork
                       ? GRAPH_MISSING_BUILD_LEAD_IN
                       : GRAPH_MISSING_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}

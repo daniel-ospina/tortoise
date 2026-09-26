@@ -1493,8 +1493,16 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   const src = stripBlockAndWholeLineComments(mainJsx)
   assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
     'no surface may re-derive the rows-durable source outside connectKeyGate')
-  assert.match(src, /\{snippetKey \|\| connectGate\.mode === 'existing'/,
+  // #4637: the Overview's live-key claim is now ONE derivation — `ownerKeyLive`
+  // of the gate's mode — consumed by BOTH owner arms, so the gate remains its
+  // only authority (the old form tested the gate but ALSO the in-memory
+  // `snippetKey`, which a stale localStorage plaintext can satisfy while the
+  // gate resolves 'mint'). The member arm keeps its own key-state branch: its
+  // two lead-ins assert nothing about which key is usable.
+  assert.match(src, /const ownerKeyIsLive = ownerKeyLive\(connectGate\.mode\)/,
     'the re-entry Overview routes its live-key claim through the gate')
+  assert.match(src, /\(snippetKey \|\| connectGate\.mode === 'existing'/,
+    'the member arm of the re-entry card still consults the gate for its key state')
   // BOTH keyed arms render the derived affordance (no drift between them)
   assert.equal((src.match(/\bwizardKeyAffordance\b/g) || []).length, 4,
     'one definition + exactly three render sites (build fork + shared arm + Codex Desktop arm)')

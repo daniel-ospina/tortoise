@@ -90,23 +90,38 @@ export function OverviewEmptyActions({ snippetKey }) {
 
 // ── #4637: the graph-missing card's ACTION ROUTE ───────────────────────────
 //
-// The graph-missing card's second action is a ROUTE to "connect your agent" —
-// which IS the harness chooser. The BUILD fork renders no chooser at all (its
-// step 2 is the SDK block, `main.jsx` `wizardStep === 2 && (isBuildFork ?`), so
-// the card offered a build-fork owner a route that branch never creates. This
-// module owns that derivation: ONE function of the SAME `buildFork` main.jsx
-// already derives, consumed by the action below — not a second surface deciding
-// for itself what the fork offers (#4637's mechanism).
+// The graph-missing card's second action is a ROUTE to "connect your agent"
+// and the BUILD fork renders no such route at all (its step 2 is the SDK block,
+// `main.jsx` `wizardStep === 2 && (isBuildFork ?`), so the card offered a
+// build-fork organization a route that branch never creates. This module owns
+// that derivation: ONE function of the SAME `buildFork` main.jsx already
+// derives, consumed by the action below — not a second surface deciding for
+// itself what the fork offers (#4637's mechanism).
 //
 // The build arm names the route the build fork's OWN step-2 block offers (the
 // SDK documentation anchor there), so the two cannot promise different things.
+// ⚠️ Two named limits of this module's single-sourcing, so the claim is not
+// overread:
+//   * the self/undecided arm keeps the destination the card has always had —
+//     the onboarding funnel URL, which for a SIGNED-IN user is a round trip
+//     (it 301s to the app origin, where the funnel's server function sends a
+//     signed-in visitor to the app root). That dead destination is PRE-EXISTING
+//     and out of #4637's scope: evidence recorded on #3890, which owns that root
+//     (it removed the same destination from the D5 card).
+//   * the docs URL also appears in `wizardPrompts.js` as prompt-text content;
+//     those literals are not consolidated here (that module is owned by another
+//     in-flight change) and the SDK_DOCS_HREF claim is scoped to the two
+//     `main.jsx` surfaces this change unifies.
 export const SDK_DOCS_HREF = 'https://tortoise.premiselabs.co/docs'
-export const CHOOSER_ROUTE_HREF = 'https://tortoise.premiselabs.co/welcome'
+// The agent-connection route the self/undecided arm has always offered. Named
+// for what it IS (the onboarding funnel's url), not for the surface it is
+// supposed to lead to: for a signed-in user it round-trips (see the ⚠️ above).
+export const ONBOARDING_FUNNEL_HREF = 'https://tortoise.premiselabs.co/welcome'
 
 export function emptyStateActionRoute(buildFork) {
   return buildFork === true
     ? { label: 'SDK documentation →', href: SDK_DOCS_HREF }
-    : { label: 'Connect your agent →', href: CHOOSER_ROUTE_HREF }
+    : { label: 'Connect your agent →', href: ONBOARDING_FUNNEL_HREF }
 }
 
 // The graph-missing empty state's action set: the API Keys tab (a real

@@ -27,7 +27,7 @@ import {
   OverviewEmptyActions,
   GraphMissingEmptyStateActions,
   SDK_DOCS_HREF,
-  CHOOSER_ROUTE_HREF,
+  ONBOARDING_FUNNEL_HREF,
   emptyStateActionRoute,
   resolveSectionHash,
   focusDeepLinkTarget,
@@ -177,12 +177,12 @@ test('#3890 wiring: the D5 empty state renders the guarded action (no inline des
 const renderActions = (buildFork, onGoToKeys = () => {}) =>
   renderToStaticMarkup(React.createElement(GraphMissingEmptyStateActions, { buildFork, onGoToKeys }))
 
-test('#4637: a BUILD-fork organization is never offered the chooser route', () => {
+test('#4637: a BUILD-fork organization is never offered the agent-connection route', () => {
   const html = renderActions(true)
   assert.ok(!/Connect your agent/.test(html),
     `the build fork renders no chooser — got ${html}`)
-  assert.ok(!html.includes(CHOOSER_ROUTE_HREF),
-    'the chooser route must not be linked on the build fork')
+  assert.ok(!html.includes(ONBOARDING_FUNNEL_HREF),
+    'the agent-connection route must not be linked on the build fork')
   // the route it IS offered is the one its own step 2 offers
   assert.ok(html.includes(`href="${SDK_DOCS_HREF}"`),
     `the build fork must link the SDK route — got ${html}`)
@@ -191,12 +191,19 @@ test('#4637: a BUILD-fork organization is never offered the chooser route', () =
   assert.match(html, /Go to API Keys →/)
 })
 
-test('#4637: the self/undecided fork keeps the chooser route, and the two forks never collapse', () => {
+// ⚠️ The self arm keeps the DESTINATION the card has always had — the
+// onboarding FUNNEL url — and this test pins only that fact. It is NOT the
+// harness chooser for a signed-in user: the funnel 301s to the app origin,
+// where the server sends a signed-in visitor to the app root. That dead
+// destination is pre-existing and tracked on #3890 (evidence recorded there);
+// #4637 is about the BUILD fork being offered that route at all, which is what
+// this test's negative pins.
+test('#4637: the self/undecided fork keeps the agent-connection route, and the two forks never collapse', () => {
   for (const rawFork of [false, undefined, 'self', 'unsure', 'build', 1, 0]) {
     const html = renderActions(rawFork)
     assert.match(html, /Connect your agent →/,
-      `a non-boolean buildFork ${JSON.stringify(rawFork)} must take the chooser arm — got ${html}`)
-    assert.ok(html.includes(`href="${CHOOSER_ROUTE_HREF}"`), 'the chooser route stays on a self fork')
+      `a non-boolean buildFork ${JSON.stringify(rawFork)} must take the funnel arm — got ${html}`)
+    assert.ok(html.includes(`href="${ONBOARDING_FUNNEL_HREF}"`), 'the funnel route stays on a self fork')
   }
   assert.ok(!/SDK documentation/.test(renderActions(false)),
     'the SDK route is the build fork ARM, never co-rendered')
@@ -205,7 +212,7 @@ test('#4637: the self/undecided fork keeps the chooser route, and the two forks 
   // the route table is the ONE derivation both this component and the wizard's
   // build-fork step-2 link consume
   assert.deepEqual(emptyStateActionRoute(true), { label: 'SDK documentation →', href: SDK_DOCS_HREF })
-  assert.deepEqual(emptyStateActionRoute(false), { label: 'Connect your agent →', href: CHOOSER_ROUTE_HREF })
+  assert.deepEqual(emptyStateActionRoute(false), { label: 'Connect your agent →', href: ONBOARDING_FUNNEL_HREF })
 })
 
 test('#4637: the action set still drives the API Keys tab (the primary surface)', () => {
@@ -223,17 +230,29 @@ test('#4637: the action set still drives the API Keys tab (the primary surface)'
 
 test('#4637 wiring: main.jsx renders the guarded action set with the derived fork', () => {
   const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
-  assert.match(mainJsx, /<GraphMissingEmptyStateActions buildFork=\{isBuildFork\} onGoToKeys=\{\(\) => setTab\('keys'\)\} \/>/,
-    'the graph-missing card must render the guarded action set, not an inline route')
-  // …and no inline chooser action may survive beside it
+  // PROP-SET based, not order/formatted based: extract the tag, then check the
+  // bindings (a regex anchored on the attribute ORDER or on the line break
+  // passes while the binding is wrong, or fails when it is right and a
+  // formatter reflows the tag)
+  const actionTags = mainJsx.match(/<GraphMissingEmptyStateActions[\s\S]*?\/>/g) || []
+  assert.equal(actionTags.length, 1,
+    `the graph-missing card must render the guarded action set once — found ${actionTags.length}`)
+  assert.match(actionTags[0], /buildFork=\{isBuildFork\}/,
+    `the action set must take the derived fork — got ${actionTags[0]}`)
+  assert.match(actionTags[0], /onGoToKeys=\{\(\) => setTab\('keys'\)\}/,
+    `the first-party API Keys action must stay wired — got ${actionTags[0]}`)
+  // …and no inline route action may survive beside it
   assert.ok(!mainJsx.includes('Connect your agent →'),
-    'the inline chooser action must be gone from main.jsx')
-  assert.ok(!mainJsx.includes(CHOOSER_ROUTE_HREF),
-    'the chooser route literal must live only in the action module')
-  // the wizard's build-fork SDK link consumes the SAME route constant, so the
+    'the inline agent-connection action must be gone from main.jsx')
+  assert.ok(!mainJsx.includes(ONBOARDING_FUNNEL_HREF),
+    'main.jsx must not re-type the agent-connection URL — the action module owns it')
+  // the wizard's build-fork SDK links consume the SAME route constant, so the
   // Overview action and the branch it describes cannot drift
-  assert.match(mainJsx, /<a className="ghost" href=\{SDK_DOCS_HREF\} target="_blank" rel="noreferrer">\n\s+SDK documentation →/,
-    "the build fork's step-2 SDK link must consume SDK_DOCS_HREF")
+  const docsHrefLinks = mainJsx.match(/<a[^>]*href=\{SDK_DOCS_HREF\}[^>]*>/g) || []
+  assert.equal(docsHrefLinks.length, 2,
+    `both SDK docs anchors (the wizard's step-2 block and its closing card) must consume SDK_DOCS_HREF — found ${docsHrefLinks.length}`)
+  assert.match(mainJsx, /href=\{SDK_DOCS_HREF\}[^>]*>\s*SDK documentation →/,
+    'the step-2 SDK anchor must still label the route the Overview build-fork action names')
   assert.ok(!mainJsx.includes('tortoise.premiselabs.co/docs'),
-    'the SDK docs URL literal must live only in the action module')
+    'main.jsx must not re-type the SDK docs URL — it consumes SDK_DOCS_HREF')
 })
