@@ -210,6 +210,21 @@ function tagAttrs(html, from, end) {
   return out
 }
 
+// #3787: every `<name …>` start-tag OCCURRENCE in a document, as `{ from, end }`
+// offsets of its attribute slice. Occurrences are enumerated directly, never from
+// an element walk, so a phantom element (a `<script` literal inside a comment)
+// cannot hide a later real one. An occurrence whose `tagEnd` is -1 is skipped:
+// the browser emits no element for an unterminated tag.
+function* tagOccurrences(html, name) {
+  const opener = new RegExp(`<${name}(?=[\\t\\n\\f\\r />])`, 'gi')
+  let o
+  while ((o = opener.exec(html)) !== null) {
+    const end = tagEnd(html, opener.lastIndex)
+    if (end === -1) continue
+    yield { from: opener.lastIndex, end }
+  }
+}
+
 // #3787: the value a browser would actually FETCH for an attribute — the HTML
 // tokenizer's NUL → U+FFFD replacement, then the URL parser's OWN leading/trailing
 // trim (C0 controls and space, NOT JS `String.prototype.trim()`, which also strips
@@ -692,8 +707,13 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //      bound covers statically-resolvable shapes the fold does not model at all:
   //      `+=` accumulation of literals, and `.join()` over a VARIABLE holding the
   //      separator.
-  //   2. an off-origin bundle loaded from an opaque runtime-built URL inside a
-  //      script (see (d));
+  //   2. an off-origin bundle loaded at RUNTIME — from an opaque runtime-built
+  //      URL, or from a contiguous literal a loader executes (`document.write`,
+  //      `importScripts`, a dynamic `import()`). Clause (d) reads the STATIC page;
+  //      a script that builds a loader URL at runtime is not read. Closing it
+  //      needs a loader-context allow-list, not a blanket off-origin probe over
+  //      script text: the clean build legitimately names googletagmanager,
+  //      Turnstile and PostHog by absolute URL.
   //   3. the allow-listed vendored library file is exempt from the CONTENT
   //      clauses — it must be, its own build contains `createClient(` — so what
   //      is pinned for it is reachability (clause 2), not content. Owner question
@@ -729,14 +749,18 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //      The LOCAL-reference and supabase-name consumers are backstopped (see the
   //      `p.srcs` note), and the off-origin refusal enumerates `<script`
   //      occurrences independently of the element walk, so a desync cannot hide
-  //      one. That refusal reads `src`, `href` and `xlink:href`; a load channel
-  //      outside that set is not covered.
+  //      one. That refusal reads `src`, `href` and `xlink:href`, refuses an
+  //      off-origin `<base href>` (it retargets every relative URL) and an
+  //      off-origin `<link rel=modulepreload>`/`preload`/`prefetch` `as=script|
+  //      worker>. A load channel outside that set is not covered; residual 2 covers
+  //      the runtime ones.
   //   9. clause 2(d) refuses a `src`/`href` the browser never FETCHES: a data
   //      block (`type="text/template"`/`application/json`/`text/html`), a
   //      `nomodule` script, a `<script>` inside `<template>` (inert content), and
-  //      the foreign-namespace `src` spelling — an `<svg>`/`<math>` script loads
-  //      through `href`, so `src` there is refused only as a favour to the live
-  //      `href` vector. All fail closed, and none of them is in the built site.
+  //      the `href`/`xlink:href` spelling on an HTML-namespace `<script>` or on
+  //      `<math>` — an `<svg>` script does load through `href`, and only that one
+  //      was reproduced as a real fetch. All fail closed, and none of them is in
+  //      the built site.
   //
   // Class-B (the lane's doctrine): each message names the value that makes it
   // fail, and each context is REACHABLE — these are the scripts and pages the
@@ -753,7 +777,7 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // attribute. Closing that one syntactic form at a time is the loop cycles 1-2
   // already ran twice, so the closure is STRUCTURAL: every page's whole raw
   // document becomes a probed context, which covers every attribute channel
-  // (event handlers, `javascript:` URLs, `<base href>`, meta refresh, data-*) in
+  // (event handlers, `javascript:` URLs, meta refresh, data-*) in
   // the spelling the page's own source uses. It costs nothing on a clean build —
   // every probe is 0-hit against all five shipped pages, verified before adding
   // this. A CHARACTER-REFERENCE-spelled payload is residual 7: the browser decodes
@@ -851,27 +875,51 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // 9): a `<script` literal in a COMMENT, in an RCDATA/RAWTEXT/PLAINTEXT/
   // `noscript` region, in a script's OWN data, or in an ATTRIBUTE VALUE is read
   // as a tag, and a data block, a `nomodule` script or a script inside
-  // `<template>` is refused although the browser never fetches it.
+  // `<template>` is refused although the browser never fetches it. It refuses
+  // `<base href>` and `<link>` script fetches too, because a page addressing them
+  // is a change to how the site is loaded rather than a build detail.
   const OFF_ORIGIN = /^(?:https?:)?\/\//i
+  // `<link rel=modulepreload>`, and `preload`/`prefetch` with `as=script|worker`,
+  // are script FETCHES; `<link>` for icons, a stylesheet or a canonical URL is
+  // not, and the built site uses it only for those.
+  const LINK_REL = /^(?:modulepreload|preload|prefetch)$/
+  const LINK_AS = /^(?:script|worker)$/
   const offOrigin = []
   for (const p of pages) {
-    const opener = /<script(?=[\t\n\f\r />])/gi
-    let o
-    while ((o = opener.exec(p.html)) !== null) {
-      const end = tagEnd(p.html, opener.lastIndex)
-      if (end === -1) continue // the browser emits no element for an unterminated tag
-      const attrs = tagAttrs(p.html, opener.lastIndex, end)
-      // Every spelling a script can LOAD through is read, and ALL of them are
-      // tested: a foreign-namespace script uses `href`/`xlink:href` and ignores
-      // `src`, so `<svg><script href="https://evil/x.js">` IS fetched while the
-      // matching `src` spelling is not — and stopping at the first PRESENT
-      // spelling let a local `src` mask a live `href` (review cycle 9,
-      // reproduced against a real fetch).
+    for (const { from, end } of tagOccurrences(p.html, 'script')) {
+      const attrs = tagAttrs(p.html, from, end)
+      // Every attribute a script can LOAD through is read, and ALL of them are
+      // tested: an `<svg>` script uses `href` and ignores `src`, so
+      // `<svg><script href="https://evil/x.js">` IS fetched — and stopping at the
+      // first PRESENT spelling let a local `src` mask a live `href` (review
+      // cycle 9, reproduced against a real fetch).
       for (const name of ['src', 'href', 'xlink:href']) {
         const raw = firstAttr(attrs, name)
         if (raw === null || !OFF_ORIGIN.test(urlValue(raw))) continue
-        offOrigin.push(`${p.name} → ${name}="${urlValue(raw)}"`)
+        offOrigin.push(`${p.name} → <script ${name}="${urlValue(raw)}">`)
       }
+    }
+    // `<base href>` retargets EVERY relative URL on the page, so a
+    // same-origin-looking `<script src="/consent.js">` is fetched from the base
+    // origin — this clause read the local spelling and stayed GREEN while a real
+    // browser requested the script off-origin (review cycle 10, reproduced). A
+    // LOCAL `<base href>` cannot retarget an absolute-path reference to another
+    // origin, and the built site has no `<base>` at all, so an off-origin one is
+    // refused outright.
+    for (const { from, end } of tagOccurrences(p.html, 'base')) {
+      const raw = firstAttr(tagAttrs(p.html, from, end), 'href')
+      if (raw !== null && OFF_ORIGIN.test(urlValue(raw))) {
+        offOrigin.push(`${p.name} → <base href="${urlValue(raw)}"> retargets relative script URLs`)
+      }
+    }
+    for (const { from, end } of tagOccurrences(p.html, 'link')) {
+      const attrs = tagAttrs(p.html, from, end)
+      const rel = firstAttr(attrs, 'rel')
+      const href = firstAttr(attrs, 'href')
+      if (rel === null || href === null || !LINK_REL.test(rel)) continue
+      if (rel !== 'modulepreload' && !LINK_AS.test(firstAttr(attrs, 'as') ?? '')) continue
+      if (!OFF_ORIGIN.test(urlValue(href))) continue
+      offOrigin.push(`${p.name} → <link rel="${rel}" href="${urlValue(href)}">`)
     }
   }
   assert.deepEqual(offOrigin, [],
