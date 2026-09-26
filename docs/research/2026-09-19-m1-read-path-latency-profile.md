@@ -177,7 +177,8 @@ phase is). Retrieval tuning changes single-digit percent of the ask total; it ma
 
 **Method.** For each of the 5 questions, seed that question's haystack from the frozen fixture (capture
 shape), run the ask lane's retrieval at the **then-shipped defaults** (`limit=40`, `pool_size=None` → leg depth
-`max(80,120)` — this profile predates #4105, which resolves `limit=200`, explicit `pool_size=200`), and locate the
+`max(80,120)` — this profile predates #4105, which resolves `limit=200`, explicit `pool_size=200`; the ask lane now
+resolves `pool_size=400` since #4235's `limit*2` candidate floor), and locate the
 **`has_answer`-marked** answer-bearing turn's rank in the fused ordering. The
 gold turns were verified against the fixture's own `has_answer` flags (they match the turns named in
 `docs/planning/2026-08-31-2070-scoping-package.md`).

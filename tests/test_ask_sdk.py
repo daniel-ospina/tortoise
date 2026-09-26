@@ -7,7 +7,7 @@ byte-identical, has_answer passthrough.
 Task 5 — the eval-only ask lane (``tortoise/ask_lane.py``, #3849): local-lane
 pipeline (validation FIRST,
 exactly ONE model call incl. empty context — no pre-gate), resolved caps
-(200/200/16000/derived since #4105; the cap-binding tests pin their own
+(200/400/200/16000/128000 since #4105/#4235; the cap-binding tests pin their own
 shape), resolved question_date semantics, the per-namespace reader cache
 (tokens-race, key isolation, failed-build, lifecycle), and both-not-either
 (search surfaces
@@ -355,7 +355,7 @@ def test_date_leg_attaches_no_session_id():
     DATE source only. The attached ``session_id`` set must be byte-identical
     with and without it (only the ``eventId`` Event join may attach one — a
     new identity source would re-bucket ``dedup_pool`` and move the resolved
-    ask-lane reader window (200/200/16000/derived since #4105; 8k/32KiB
+    ask-lane reader window (200/400/200/16000/128000 since #4105/#4235; 8k/32KiB
     before it))."""
     sdk = _new_sdk()
     turns = _seed_capture_turns(
@@ -946,8 +946,8 @@ def test_oversized_hit_skip_and_caps(monkeypatch):
     """8k/40 caps honored; the byte cap (32 KiB) binds independently; the
     evidence never splits a character (no U+FFFD).
 
-    The caps are SET explicitly: #4105 raised the ask-lane defaults to
-    200/200/16000/128000 bytes, and this test pins the CAP-BINDING mechanism at a
+    The caps are SET explicitly: #4105/#4235 raised the ask-lane defaults to
+    200/400/200/16000/128000 bytes, and this test pins the CAP-BINDING mechanism at a
     known small shape rather than depending on the product defaults."""
     monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "40")
     monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "40")

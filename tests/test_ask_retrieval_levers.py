@@ -329,14 +329,14 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         # is now env-resolvable AND honest — the historical 40/40/8000
         # truncated at a 32 KiB literal, so a raise above it was a no-op).
         # Here we pin the shipped window LITERALLY: the cap posture is the
-        # measured 200/200/200/16000/128000. Inequalities alone cannot
+        # measured 200/400/200/16000/128000. Inequalities alone cannot
         # detect a changed literal, and the pre-#4105 pin was an exact dict —
         # replacing it with three tautologies left the window unpinned.
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
         assert caps == {
             "limit": 200,
-            "pool_size": 200,
+            "pool_size": 400,
             "context_item_cap": 200,
             "context_token_cap": 16000,
             "context_byte_cap": 128000,

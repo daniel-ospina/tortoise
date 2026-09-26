@@ -710,7 +710,7 @@ def test_caps_bind_and_no_starvation(sdk, monkeypatch):
     the item cap (admission.truncated on the hub).
 
     The caps are SET here to a known small shape rather than read from the
-    product defaults (#4105 raised the ask-lane defaults to 200/200/200/
+    product defaults (#4105 raised the ask-lane defaults to 200/400/200/
     16000/128000 bytes) - this test pins the cap-BINDING mechanism, and a
     default change must not silently un-bind it."""
     from tortoise.retrieval import (
