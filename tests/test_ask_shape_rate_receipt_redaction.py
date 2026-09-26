@@ -22,10 +22,16 @@ and a password fragment landing in the port slot surfaced in a raw
 These tests pin the fix by VALUE — the returned label (and any refusal
 message) must contain no character of the credential — not by grepping the
 source.
+
+This file is also the D3 instrument's regression home for its READER PIN
+(#4582): ``pinned_reader_env`` narrows the non-pinned provider keys out of
+the build env, and ``tortoise.mcp_server``'s import-time ``_load_dotenv()``
+used to re-arm them mid-run (see the ``#4582`` section at the bottom).
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -36,12 +42,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.ask_shape_rate import (
+    NARROWED_PROVIDER_KEYS,
+    PINNED_MODEL,
+    PINNED_PROVIDER,
     _fresh_db,
     _install_redacting_excepthook,
     _redact_substrate_text,
     _substrate_label,
     _write_receipt,
+    assert_reader_pin,
+    pinned_reader_env,
 )
+from tortoise.mcp_server import _load_dotenv
+from tortoise.model_adapters import resolve_reader_provider
 
 #: Distinctive secrets that do NOT appear in the function's static example
 #: text (``docker://:pw@host:6379/<graph>``), so a match is a real leak.
@@ -547,3 +560,143 @@ def test_a_short_credential_cannot_rename_the_receipt_schema(monkeypatch,
     # documented, acceptable cost for a VALUE (here every "e")
     assert "e" not in parsed["instrument"]
     assert parsed["live"]["per_question"][0]["question_id"] == "q1"
+
+
+# ── #4582 — the READER PIN must be durable, not order-dependent ────────────
+#
+# ``pinned_reader_env`` narrows the non-pinned provider keys out of the build
+# env, then ``assert_reader_pin`` requires the resolved pool to be exactly
+# ``['deepseek-direct']``. That assertion runs ONCE, before the live loop.
+#
+# The leak: the narrowing POPPED the keys, so they were ABSENT.
+# ``tortoise.mcp_server`` runs ``_load_dotenv()`` at import time, and that
+# loader fills every key NOT present from the repo-root ``.env``. The
+# instrument imports ``tortoise.mcp_server`` only later, inside
+# ``_shipping_handlers`` on the first ask — so the first ask re-injected
+# ``OPENROUTER_API_KEY`` / ``VENICE_API_KEY`` and widened the pool back to
+# ``['deepseek-direct', 'openrouter', 'venice']``, re-arming the #476 failover.
+# One transient deepseek error then hopped the run off the pin (measured:
+# question ``1de5cff2``, provider ``openrouter``, run VOID).
+#
+# The tests below drive the REAL loader (``tortoise.mcp_server._load_dotenv``)
+# from inside the pin, against a temp ``.env`` — the exact function the
+# import-time call runs and the exact keys it fills. (pytest's ``sys.modules``
+# guard only skips the import-time *call*; the loader is what re-arms the
+# provider, so invoking it directly is the faithful test.)
+
+#: The loader's default path resolves to the repo-root ``.env`` relative to
+#: the ``tortoise`` package — the same file the later ``_shipping_handlers``
+#: import consumes.
+_PINNED_POOL = (PINNED_PROVIDER, [PINNED_PROVIDER])
+
+
+def _dotenv_with_all_provider_keys(tmp_path: Path) -> Path:
+    """A repo-root-shaped ``.env`` carrying every provider key — the shape
+    that widens the pool when the loader re-fills a popped key."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DEEPSEEK_API_KEY=from-dotenv-deepseek\n"
+        "OPENROUTER_API_KEY=from-dotenv-openrouter\n"
+        "VENICE_API_KEY=from-dotenv-venice\n",
+        encoding="utf-8",
+    )
+    return env_file
+
+
+def test_narrowed_keys_are_emptied_not_removed(monkeypatch):
+    """The durability mechanism: a narrowed PROVIDER key stays PRESENT
+    (empty), so the loader's ``key not in os.environ`` guard refuses to refill
+    it. Popping it leaves it absent and the guard re-fills it — #4582.
+
+    ``TORTOISE_API_URL`` is the deliberate exception: it keeps the original
+    POP (it is never `.env`-sourced, and its SDK/CLI consumers read
+    ``.get(name, default)``, which an empty string would poison) — so absence
+    is asserted for it, not an empty value."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "present-before")
+    monkeypatch.setenv("VENICE_API_KEY", "present-before")
+    monkeypatch.setenv("TORTOISE_API_URL", "https://hosted.example")
+
+    with pinned_reader_env() as info:
+        for key in NARROWED_PROVIDER_KEYS:
+            assert key in os.environ, (
+                f"{key} was REMOVED by the pin — the loader will re-append it "
+                "from .env on the next import (#4582)")
+            assert os.environ[key] == "", f"{key} is still keyed"
+        assert "TORTOISE_API_URL" not in os.environ
+        assert info["narrowed"] == [
+            "OPENROUTER_API_KEY", "VENICE_API_KEY", "TORTOISE_API_URL"]
+
+
+def test_loader_refill_inside_the_pin_cannot_re_arm_the_provider(
+        tmp_path, monkeypatch):
+    """The exact leak: inside the pin, run the loader the way
+    ``import tortoise.mcp_server`` runs it (repo-root ``.env``) and assert the
+    resolved pool is STILL the single pinned provider."""
+    env_file = _dotenv_with_all_provider_keys(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "live-deepseek")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "live-openrouter")
+    monkeypatch.setenv("VENICE_API_KEY", "live-venice")
+
+    with pinned_reader_env():
+        assert resolve_reader_provider(PINNED_MODEL) == _PINNED_POOL
+        _load_dotenv(path=str(env_file))
+        assert resolve_reader_provider(PINNED_MODEL) == _PINNED_POOL, (
+            "the .env loader re-armed a narrowed provider — the #476 failover "
+            "leg is live again and the measured wire is not the pinned one")
+
+
+def test_assert_reader_pin_survives_the_later_import(tmp_path, monkeypatch):
+    """The instrument's own ordering, in order: assert the pin (as
+    ``run_full`` does, before the live loop), THEN let the loader run (as the
+    first ``_shipping_handlers`` import does), then assert again. The second
+    assertion is the one the leak defeated."""
+    env_file = _dotenv_with_all_provider_keys(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "live-deepseek")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "live-openrouter")
+    monkeypatch.setenv("VENICE_API_KEY", "live-venice")
+
+    with pinned_reader_env():
+        assert_reader_pin()                 # run_full, pre-live-loop
+        _load_dotenv(path=str(env_file))    # first _shipping_handlers import
+        try:
+            info = assert_reader_pin()      # the pin must still hold
+        except SystemExit as e:
+            pytest.fail(
+                "assert_reader_pin aborted with "
+                f"exit {e.code} after the import-time .env load — the pin was "
+                "defeated mid-run (#4582)")
+
+    assert info["provider"] == PINNED_PROVIDER
+    assert info["reader_class"] in ("RoutingModel", "RotatingModel")
+
+
+def test_the_pin_restores_the_prior_environment(monkeypatch):
+    """The narrowing must not leak out of the pin: a key that was set comes
+    back with its value, a key that was absent is absent again."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "live-openrouter")
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://hosted.example")
+    monkeypatch.setenv("TORTOISE_ASK_PROVIDER", "auto")
+
+    with pinned_reader_env():
+        assert os.environ["OPENROUTER_API_KEY"] == ""   # narrowed inside ...
+        assert "TORTOISE_API_URL" not in os.environ     # ... and popped
+
+    assert os.environ["OPENROUTER_API_KEY"] == "live-openrouter"  # ... restored
+    assert "VENICE_API_KEY" not in os.environ
+    assert os.environ["TORTOISE_API_URL"] == "https://hosted.example"
+    assert os.environ["TORTOISE_ASK_PROVIDER"] == "auto"
+
+
+def test_the_loader_never_refills_a_present_but_empty_key(tmp_path, monkeypatch):
+    """The contract the empty-string narrowing rests on: ``_load_dotenv``
+    treats a PRESENT key as explicit, even an empty one. If this loader ever
+    switches to a truthiness test, the pin silently stops holding — this test
+    is the tripwire for that."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENROUTER_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+
+    _load_dotenv(path=str(env_file))
+
+    assert os.environ["OPENROUTER_API_KEY"] == ""
