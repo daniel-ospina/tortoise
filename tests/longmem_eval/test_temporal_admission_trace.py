@@ -19,8 +19,9 @@ the pool for every question — but the READER-WINDOW CUT:
   not an independent reader defect;
 * the TR temporal machinery that is supposed to reorder the pool
   (``_apply_time_window``) is INERT on this corpus: ``detect_time_constraint``
-  returns ``interval``/``recency`` for **0 of 55** (34 → ``None``,
-  21 → ``ordering``), so no window filter ever runs and ``tr_window_fallback``
+  returns ``interval``/``recency`` for **0 of 55** (all 55 → ``ordering``;
+  pre-#2976 it was 34 → ``None``, 21 → ``ordering``), so no window filter ever
+  runs and ``tr_window_fallback``
   never fires;
 * widening the window inside the RRF order (``tr_top_k`` 16/20/24) is measured
   null (0/0/1 admitted) because the band starts at rank 40, beyond even 24;
@@ -240,25 +241,36 @@ def test_a_hit_below_the_item_cap_is_in_the_pool_but_not_the_window():
 def test_tr_time_constraint_detector_never_fires_a_window_on_the_census():
     """``_apply_time_window`` never runs on the 55-Q subset.
 
-    ``detect_time_constraint`` returns ``interval``/``recency`` for 0 of 55
-    (34 → ``None``, 21 → ``ordering``), so the only TR mechanism that can
-    reorder/narrow the pool before the cut is dead code on this corpus:
-    ``tr_window_fallback`` is never even reached, and TR questions keep the
-    raw semantic RRF order.
+    ``detect_time_constraint`` returns ``interval``/``recency`` for 0 of 55 —
+    since #2976 added the event-referenced ordering shapes ("how many days
+    passed between A and B", "which … first, A or B", "most recently",
+    "last <weekday>") every question in the subset classifies as ``ordering``,
+    where pre-#2976 it was 34 → ``None``, 21 → ``ordering``. So the only TR
+    mechanism that can reorder/narrow the pool before the cut is still dead
+    code on this corpus: ``tr_window_fallback`` is never even reached, and TR
+    questions keep the raw semantic RRF order.
+
+    The distribution is pinned rather than merely bounded because it is
+    checked data, not a guess: every question in this subset is a span or
+    event-ordering question, which is exactly what ``ordering`` means. The
+    guarantee this test exists for is the last assertion — no HARD window
+    (``interval``/``recency``) may fire, because that is what could starve the
+    evidence out of the pool.
     """
     census = json.loads(CENSUS.read_text())
     subset = [r for r in census["rows"] if r["cls"] in SUBSET_CLASSES]
     assert len(subset) == 55
 
     kinds = Counter(detect_time_constraint(r["question"]).kind for r in subset)
-    measured = Counter({"ordering": 21, None: 34})
+    measured = Counter({"ordering": 55})
     assert kinds == measured
+    # The load-bearing assertion: no hard filter fires on the census.
     assert kinds["interval"] == 0 and kinds["recency"] == 0
 
 
 def test_ordering_constraint_does_not_reorder_or_filter_the_pool():
     """An ``ordering`` detection is a no-op on the pool (the docstring's
-    'no filter, no reorder') — so 21/55 questions get no temporal handling
+    'no filter, no reorder') — so all 55 questions get no temporal handling
     beyond the flat ``recency_boost`` and the post-cut date re-sort."""
     pool = _synthetic_pool(20, marked_rank=15)
     out = _apply_time_window(pool, TimeConstraint("ordering"),

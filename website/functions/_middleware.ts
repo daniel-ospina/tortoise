@@ -8,10 +8,16 @@
 // Cloudflare Pages serves one project per custom domain, so we route by
 // Host header in a middleware: tortoise.* gets product.html, everything
 // else (premiselabs.co + *.pages.dev previews) gets index.html.
-// All other static assets (welcome.html, signup.html, signin.html) pass
-// through unchanged — EXCEPT on the exact premiselabs.co hostname, where
-// the tortoise-only pages 301 to their canonical (host consolidation,
-// 2026-08-17; see the TORTOISE_ONLY block below).
+// All other static assets (signin.html) pass through unchanged — EXCEPT on
+// the exact premiselabs.co hostname, where the tortoise-only pages 301 to
+// their canonical (host consolidation, 2026-08-17; see the TORTOISE_ONLY
+// block below). The AUTH surface (auth, signup, welcome, invite-accept) moved
+// to the app origin — issue #4054 — and redirects there instead: the bare
+// `/auth` with the grandfathered 301, the `/auth/*` subtree with a 302
+// (#4346 — a NEW branch is 302 per `SCOPE.md` §12/F12).
+// The blog admin console moved to the app origin too — issue #4171 — because
+// its session (`__Host-session`) is host-only on app.premiselabs.co; a single
+// unconditional /admin 302 lives below (#4409 resolved it from 301).
 //
 // The product page lives ONLY on the tortoise host (served at its root via
 // the rewrite below). The raw /product and /product.html paths are static
@@ -24,6 +30,8 @@
 // context.next() are covered by website/_headers). Value matches the API
 // (tortoise/hosted_api.py): max-age=31536000; includeSubDomains — no
 // `preload` yet, soak first per #1003 §1.
+import { RELAXED_CSP } from "./_shared/security-headers.ts";
+
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
 export const onRequest: PagesFunction = async (context) => {
@@ -51,10 +59,26 @@ export const onRequest: PagesFunction = async (context) => {
   // Scoped to the EXACT company hostname: local dev (wrangler pages dev,
   // host=127.0.0.1) and *.pages.dev previews keep the pass-through so the
   // legal E2E suite can run against a dev server and previews stay
-  // navigable (neither is indexed; no SEO impact). Auth flows already
-  // target the tortoise host (welcome_url, invite emails, OAuth redirectTo)
-  // and are unaffected. Runtime fetches (the tortoise-onboarding skill at
-  // app.premiselabs.co/skills/...) are not in the set.
+  // navigable (neither is indexed; no SEO impact). Runtime fetches (the
+  // tortoise-onboarding instructions at app.premiselabs.co/skills/...) are not in the
+  // set. The auth surface has its own origin split — see APP_ONLY below.
+  // The auth surface moved to the APP origin (#4054): `tortoise-dashboard`
+  // (app.premiselabs.co) owns the BFF and the three pages it serves
+  // (signup.html = /auth, welcome.html, invite-accept.html). Those pages 301
+  // to the APP host, not the tortoise host. `/signin` deliberately stays in
+  // the tortoise set: it is a legacy alias (`_redirects` maps it to `/auth`),
+  // which then lands on the app origin via the /auth redirect below — the app
+  // origin has no `/signin` route.
+  const APP_ORIGIN = "https://app.premiselabs.co";
+  const TORTOISE_ORIGIN = "https://tortoise.premiselabs.co";
+
+  const APP_ONLY = new Set([
+    "/signup", "/signup.html",
+    "/auth", "/auth.html",
+    "/welcome", "/welcome.html",
+    "/invite-accept", "/invite-accept.html",
+  ]);
+
   const TORTOISE_ONLY = new Set([
     "/docs", "/docs.html",
     "/faq", "/faq.html",
@@ -65,11 +89,7 @@ export const onRequest: PagesFunction = async (context) => {
     "/license", "/license.html",
     "/dpa", "/dpa.html",
     "/aviso-privacidad", "/aviso-privacidad.html",
-    "/signup", "/signup.html",
     "/signin", "/signin.html",
-    "/auth", "/auth.html",
-    "/welcome", "/welcome.html",
-    "/invite-accept", "/invite-accept.html",
   ]);
   const COMPANY_HOSTS = new Set(["premiselabs.co"]);
 
@@ -96,13 +116,22 @@ export const onRequest: PagesFunction = async (context) => {
         headers: { Location: target, ...HSTS },
       });
     }
+    // Auth moved to the APP origin (#4054) — the company-host copies 301
+    // there. Same normalization and query-string preservation as below:
+    // invite ?token=…, recovery ?type=recovery and OAuth ?error=… must survive.
+    if (path !== "/" && APP_ONLY.has(path)) {
+      const target = APP_ORIGIN + path.replace(/\.html$/, "") + url.search;
+      return new Response(null, {
+        status: 301,
+        headers: { Location: target, ...HSTS },
+      });
+    }
     if (path !== "/" && TORTOISE_ONLY.has(path)) {
       // Normalize the target to the extensionless canonical (single hop; the
       // .html raw-asset form would otherwise need a second _redirects hop on
       // the tortoise host) and PRESERVE the query string — invite-accept
       // (?token=…) and recovery links (?type=recovery) must not lose params.
-      const target =
-        "https://tortoise.premiselabs.co" + path.replace(/\.html$/, "") + url.search;
+      const target = TORTOISE_ORIGIN + path.replace(/\.html$/, "") + url.search;
       // Build the 301 manually — Response.redirect() returns a response with
       // IMMUTABLE headers, so stamping HSTS on it throws (Cloudflare 1101 /
       // 500 on every consolidated URL). Headers passed in the constructor
@@ -114,22 +143,86 @@ export const onRequest: PagesFunction = async (context) => {
     }
   }
 
-  // ── Single auth page at /auth ─────────────────────────────────────────
-  // One auth screen for the whole funnel (topbar login buttons,
-  // welcome/dashboard redirects, marketing CTAs, OAuth + recovery links).
-  // /auth serves the signup.html asset — the combined Log in / Sign up
-  // card. The company-host block above already 301'd /auth onto the
-  // tortoise host; on every other host (tortoise, pages.dev previews,
-  // local dev) serve the asset directly. /signin (all variants) is 301'd to
-  // /auth via _redirects; /signup remains a redirect-free alias of the same
-  // page (canonical /auth).
+  // ── Auth lives on the APP origin (#4054) ──────────────────────────────
+  // This project used to serve the one auth screen at /auth from the
+  // signup.html asset. The BFF and the three pages it serves moved to the
+  // `tortoise-dashboard` project (app.premiselabs.co), so this project can no
+  // longer render them. The company-host block above already 301'd the auth
+  // paths to the app origin; this covers the tortoise host (and previews/dev)
+  // so a request for /auth does not fall through to a DELETED asset. PRESERVE
+  // the query string — the #1224 OAuth state-expiry banner reads ?error=…
+  // here, and invite / recovery links carry ?token=… / ?type=recovery.
   if (url.pathname === "/auth" || url.pathname === "/auth.html") {
-    // Rewrite to the extensionless auth asset, PRESERVING the query string —
-    // the #1224 OAuth state-expiry banner reads ?error=… on this page, so a
-    // callback landing on /auth must keep its params. context.next()
-    // continues to the static-asset fallback (clean-URL resolution serves
-    // signup.html), NOT back through this middleware — no redirect loop.
-    return context.next(new Request(url.origin + "/signup" + url.search, context.request));
+    return new Response(null, {
+      status: 301,
+      headers: { Location: APP_ORIGIN + "/auth" + url.search, ...HSTS },
+    });
+  }
+
+  // ── The BFF's OWN endpoints, same move (#4054) ────────────────────────
+  // `/auth/start`, `/auth/callback`, `/auth/confirm`, `/auth/update-password`,
+  // `/auth/reset`, `/auth/resend`, `/auth/link`, `/auth/api-key` and
+  // `/auth/set-email` moved to the app origin with the BFF. The exact-path rule
+  // above does NOT cover them, so without this branch they fall through to a
+  // DELETED asset and answer 404 — which is what a stale bookmark, a
+  // pre-cutover email link, or a relative link resolved against the marketing
+  // host used to hit.
+  //
+  // 302, NOT 301 — a deliberate departure from the ordinary "moved ⇒ 301"
+  // practice, which is why the OVERRIDES marker for it lives on #3501 / #3521 /
+  // #4409 and in `SCOPE.md` §12: a 301 is browser-persistent and CANNOT be
+  // reclaimed by a later deploy, so every NEW branch for the moved surface is 302
+  // (`SCOPE.md` §12 “302, never a new 301”). The `/auth` 301 directly above is
+  // the one #4054 shipped and is deliberately left alone — it is already in
+  // browsers' caches, so changing it is its own decision.
+  //
+  // Query-preserving and single-hop, both per W2. The bare `/auth/` collapses
+  // onto `/auth` here rather than bouncing through `_redirects` first, which
+  // also removes the old two-hop chain (`/auth/` → `/auth` → app).
+  if (url.pathname.startsWith("/auth/")) {
+    const path = url.pathname === "/auth/" ? "/auth" : url.pathname;
+    return new Response(null, {
+      status: 302,
+      headers: { Location: APP_ORIGIN + path + url.search, ...HSTS },
+    });
+  }
+
+  // ── The blog admin console lives on the APP origin (#4171) ────────────
+  // #4054 moved the BFF (and the `__Host-session` cookie) to
+  // app.premiselabs.co, but the console stayed on this project — so its
+  // relative `/api/session` check fell through to the SPA shell (a 200 HTML
+  // page), the operator was bounced to sign-in, and the app-origin host-only
+  // cookie could never authenticate the `/blog/api/*` calls it makes against
+  // tortoise.*. The console's decided home is the session origin (`SCOPE.md`
+  // §1.5, §3), so it is served there now and this is a SINGLE-HOP redirect to
+  // app.premiselabs.co/admin — never a chained one (`SCOPE.md` §4 W2 / F12).
+  // `/blog/api/*` is deliberately untouched: it does not match `/admin` and must
+  // keep reaching this project (see the blog rule above — a redirect would drop
+  // a POST body). Hash routes (`#/edit/:id`) are carried by the user agent
+  // across the redirect, so deep links survive.
+  //
+  // 302, NOT 301 — RESOLVED in #4409. This branch was added under a rule that
+  // already existed: §12 of the auth decision record (`premise-labs`
+  // `engineering/auth/SCOPE.md`) reads “302, never a new 301”, with no “chained”
+  // qualifier, and §1's in-scope list names `/admin` among the surfaces moving
+  // to `app.*`. This rule therefore fixes the status of a NEW branch, and the
+  // OVERRIDES marker on #3501/#3521 states it plainly ("New branches: 302").
+  // The shipped 301 read W2's “never a chained new 301” as forbidding only
+  // *chained* 301s; that reading does not survive §12's plain text. The marker
+  // post-dates this branch, so the misreading was genuinely available at the
+  // time — it is recorded here because the next lane should not re-make it.
+  // The rationale applies in full here: `/admin` is an authenticated operator
+  // surface with no SEO stake, so a permanent signal buys nothing and the
+  // irreversibility is paid for nothing.
+  if (
+    url.pathname === "/admin" ||
+    url.pathname === "/admin/" ||
+    url.pathname.startsWith("/admin/")
+  ) {
+    return new Response(null, {
+      status: 302,
+      headers: { Location: APP_ORIGIN + "/admin" + url.search, ...HSTS },
+    });
   }
 
   // On the tortoise host, the raw /product, /product.html and /index.html
@@ -163,6 +256,7 @@ export const onRequest: PagesFunction = async (context) => {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
+        "Content-Security-Policy": RELAXED_CSP,
         ...HSTS,
       },
     });

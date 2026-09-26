@@ -1,10 +1,12 @@
-"""#1726 Slice 1 — hosted docs index job + Document-aware quota tests (Task 9).
+"""#1726 Slice 1 / D10 — hosted docs index job + Document-aware quota tests
+(Task 9).
 
 Hosted-API level (TestClient + real SDK on a temp store): POST /v1/index/docs
 mirrors /v1/index/github (kind-scoped per-team single-flight, cross-team poll
 404), the derived-constant documents gate (402 at cap where the points gate
-would NOT fire; transcript excluded; NULL-kind docs COUNT), unset-base
-fail-closed, and the ``github_docs_indexed`` state-key registration.
+would NOT fire; transcript excluded; NULL-kind Sources NOT counted — D10).
+Under D10 a document is a :Source, so the boundary is
+``documentKind IS NOT NULL AND <> 'transcript'``.
 """
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ from tortoise.hosted_api import (
     app,
 )
 from tortoise.indexer.github_docs import GitHubDocsIndexer
-from tortoise.quota import QuotaExceededError, count_team_usage
+from tortoise.quota import QuotaExceededError, count_org_usage
 from tortoise.sdk import TortoiseSDK
 
 TEAM_A = "test-docs-team-a"
@@ -62,7 +64,7 @@ def _no_embeddings(monkeypatch):
                         lambda *a, **k: None)
 
 
-def _provision(db_path: str, *, team_id: str = TEAM_A,
+def _provision(db_path: str, *, org_id: str = TEAM_A,
                max_points: int | None = 10000) -> None:
     """Provision a Team node (mirrors hosted provision_tenant shape) with an
     encrypted GitHub token + org on the SAME temp store the TestClient
@@ -73,12 +75,12 @@ def _provision(db_path: str, *, team_id: str = TEAM_A,
         "CREATE (t:Team {id:$id, name:$name, tier:'free', "
         "max_users:1, max_graphs:1, max_api_keys:2, "
         "max_points:$mp})",
-        params={"id": team_id, "name": team_id, "mp": max_points},
+        params={"id": org_id, "name": org_id, "mp": max_points},
     )
     reg_sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) "
         "SET t.github_token_enc=$tok, t.github_org=$org",
-        params={"id": team_id,
+        params={"id": org_id,
                 "tok": encrypt_token("fake-token"), "org": "acme"},
     )
     reg_sdk.close()
@@ -91,10 +93,10 @@ def client(tmp_path):
     names verbatim)."""
     import uuid
     db_path = str(tmp_path / "docs-api.db")
-    team_id = f"test-docs-{uuid.uuid4().hex[:10]}"
+    org_id = f"test-docs-{uuid.uuid4().hex[:10]}"
 
     from types import SimpleNamespace
-    ctx = SimpleNamespace(tc=None, team_id=team_id, db_path=db_path)
+    ctx = SimpleNamespace(tc=None, org_id=org_id, db_path=db_path)
     # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
     # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
     # __init__ → deterministic anchor close → clear overrides at exit.
@@ -103,12 +105,13 @@ def client(tmp_path):
     # runs INSIDE the patched context so in-flight jobs stay bound to THIS
     # fixture's store while it is still patched.
     with patched_tortoise_sdk(db_path):
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": team_id, "tier": "free", "key_id": "k1",
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": org_id, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         _INDEX_JOBS.clear()
         with TestClient(app) as tc:
@@ -119,7 +122,7 @@ def client(tmp_path):
 
 @pytest.fixture
 def provisioned(client, tmp_path):
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     return client
 
 
@@ -154,28 +157,34 @@ def mock_github(monkeypatch, ingest_base):
 
 
 def _team_sdk(client) -> TortoiseSDK:
-    """Team-scoped SDK on the SAME temp store (namespace = team_id)."""
-    return TortoiseSDK(db_path=client.db_path, namespace=client.team_id)
+    """Team-scoped SDK on the SAME temp store (namespace = org_id)."""
+    return TortoiseSDK(db_path=client.db_path, namespace=client.org_id)
 
 
 def _seed_documents(client, n: int, *, kind: str | None = "brief") -> None:
-    """Seed n Document nodes in the team graph (NULL kind when None)."""
+    """Seed n document Sources in the team graph (NULL kind when None).
+
+    D10 (ONTOLOGY v3.15 §4.4): a document is a :Source keyed ``url``; the
+    ``:Document`` label is retired. ``kind=None`` seeds a Source with NO
+    ``documentKind`` — under D10 that is a session/connector/provenance node,
+    not a document, and must not be metered by the documents cap.
+    """
     sdk = _team_sdk(client)
     for i in range(n):
         if kind is None:
             sdk._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$title})",
+                "CREATE (s:Source {url:$id, id:$id, title:$title})",
                 params={"id": f"doc_seed_{i}", "title": f"seed {i}"})
         else:
             sdk._get_proj().g.query(
-                "CREATE (d:Document {id:$id, title:$title, documentKind:$dk})",
+                "CREATE (s:Source {url:$id, id:$id, title:$title, documentKind:$dk})",
                 params={"id": f"doc_seed_{i}", "title": f"seed {i}",
                         "dk": kind})
     sdk.close()
 
 
 def _docs_count(client) -> int:
-    return count_team_usage(client.team_id, "documents",
+    return count_org_usage(client.org_id, "documents",
                             sdk=_team_sdk(client))
 
 
@@ -279,10 +288,10 @@ def test_docs_live_progress_written_during_walk(provisioned, mock_github,
 
     orig_walk = GitHubDocsIndexer.walk_repo
 
-    async def _slow_repo2(self, team_id, repo, *, branch="main"):
+    async def _slow_repo2(self, org_id, repo, *, branch="main"):
         if repo.endswith("/repo2"):
             await _asyncio.sleep(1.0)  # loop-friendly hold on the 2nd repo
-        return await orig_walk(self, team_id, repo, branch=branch)
+        return await orig_walk(self, org_id, repo, branch=branch)
 
     monkeypatch.setattr(GitHubDocsIndexer, "walk_repo", _slow_repo2)
     r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
@@ -343,10 +352,10 @@ def test_docs_live_progress_all_branches_site(provisioned, mock_github,
 
     orig_walk = GitHubDocsIndexer.walk_repo
 
-    async def _slow_repo2(self, team_id, repo, *, branch="main"):
+    async def _slow_repo2(self, org_id, repo, *, branch="main"):
         if repo.endswith("/repo2"):
             await _asyncio.sleep(1.0)  # loop-friendly hold on the 2nd repo
-        return await orig_walk(self, team_id, repo, branch=branch)
+        return await orig_walk(self, org_id, repo, branch=branch)
 
     monkeypatch.setattr(GitHubDocsIndexer, "walk_repo", _slow_repo2)
     r = provisioned.tc.post("/v1/index/docs", json={
@@ -446,11 +455,11 @@ def test_docs_job_unresolvable_org_fails(provisioned, ingest_base,
 def test_docs_job_token_undecryptable(client, ingest_base):
     """A garbage (non-Fernet) github_token_enc fails the job fast with an
     honest error — no fetches, no writes."""
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     reg_sdk = TortoiseSDK(db_path=client.db_path, namespace="registry")
     reg_sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) SET t.github_token_enc=$tok",
-        params={"id": client.team_id,
+        params={"id": client.org_id,
                 "tok": "garbage-not-a-fernet-token"})
     reg_sdk.close()
     r = client.tc.post("/v1/index/docs", json={"org": "acme"})
@@ -462,11 +471,11 @@ def test_docs_job_token_undecryptable(client, ingest_base):
 def test_docs_job_midwalk_quota_hit(provisioned, mock_github, ingest_base,
                                     monkeypatch):
     """The per-repo DOCUMENTS gate (Fix 3) bounds the overshoot to ONE
-    repo's docs, not the whole org: the 3rd enforce_team_limit call
+    repo's docs, not the whole org: the 3rd enforce_org_limit call
     (repo2's pre-ingest check) raises → repo1's 2 docs are ingested, repo2's
     are not, quota_hit is reported honestly."""
     import tortoise.quota as quota_mod
-    real_enforce = quota_mod.enforce_team_limit
+    real_enforce = quota_mod.enforce_org_limit
     calls = {"n": 0}
 
     def _counting_enforce(limits, resource, *, sdk=None):
@@ -475,7 +484,7 @@ def test_docs_job_midwalk_quota_hit(provisioned, mock_github, ingest_base,
             raise QuotaExceededError("documents limit reached (test)")
         return real_enforce(limits, resource, sdk=sdk)
 
-    monkeypatch.setattr(quota_mod, "enforce_team_limit", _counting_enforce)
+    monkeypatch.setattr(quota_mod, "enforce_org_limit", _counting_enforce)
     r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
     body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
     assert body["quota_hit"] is True
@@ -500,7 +509,7 @@ def test_402_at_document_cap_points_gate_would_not_fire(
     the derived cap runs fine; at the documents cap the job 402s with the
     documents message (the points gate would NOT have fired — it is vacuous
     for Documents)."""
-    _provision(client.db_path, team_id=client.team_id, max_points=1)
+    _provision(client.db_path, org_id=client.org_id, max_points=1)
     entries, blobs = _mk_files("docs/README.md")
     transport = MockGitHubDocsTransport(
         repos=["acme/repo1"],
@@ -541,7 +550,7 @@ def test_transcript_not_counted_docs_cap(client, tmp_path, monkeypatch,
     """Session transcripts (documentKind='transcript') do NOT consume the
     docs cap (T2-P2a): 9 brief docs + 1 transcript = 9 counted < 10 → the
     job runs (a session-captured Document never 402s the docs gate)."""
-    _provision(client.db_path, team_id=client.team_id, max_points=1)
+    _provision(client.db_path, org_id=client.org_id, max_points=1)
     _seed_documents(client, 9, kind="brief")
     _seed_documents(client, 1, kind="transcript")
     entries, blobs = _mk_files("docs/README.md")
@@ -562,11 +571,20 @@ def test_transcript_not_counted_docs_cap(client, tmp_path, monkeypatch,
     assert _docs_count(client) == 10  # 9 brief + 1 transcript + 1 new
 
 
-def test_null_kind_doc_counts(client, tmp_path, monkeypatch, ingest_base):
-    """NULL-kind Documents COUNT toward the cap — no leak (a frontmatter-
-    less docs-endpoint doc is a NULL-kind doc and counts)."""
-    _provision(client.db_path, team_id=client.team_id, max_points=1)
+def test_null_kind_source_not_counted(client, tmp_path, monkeypatch,
+                                      ingest_base):
+    """D10 (ONTOLOGY v3.15 §4.4): only a Source with a non-NULL documentKind
+    is a document — a NULL-kind Source is a session/connector/provenance node
+    and does NOT consume the docs cap (the discriminator is ``documentKind IS
+    NOT NULL AND documentKind <> 'transcript'``, never the COALESCE-to-empty
+    form, which would meter ~2,193 never-metered Sources). The docs endpoint's
+    own docs always carry a documentKind ('brief' fallback) and DO count, so
+    the no-leak property survives."""
+    _provision(client.db_path, org_id=client.org_id, max_points=1)
     _seed_documents(client, 10, kind=None)
+    # NULL-kind Sources are not documents → the cap counts nothing here.
+    assert _docs_count(client) == 0, \
+        "NULL-kind Sources must not be metered (D10: documentKind IS NOT NULL)"
     entries, blobs = _mk_files("docs/README.md")
     transport = MockGitHubDocsTransport(
         repos=["acme/repo1"],
@@ -579,9 +597,15 @@ def test_null_kind_doc_counts(client, tmp_path, monkeypatch, ingest_base):
 
     monkeypatch.setattr(GitHubDocsIndexer, "_get_client", _fake_get_client)
     r = client.tc.post("/v1/index/docs", json={"org": "acme"})
-    body = _poll_until(client.tc, r.json()["job_id"], "failed")
-    assert "documents limit reached" in body["error"], \
-        "NULL-kind docs COUNT — the discriminator is COALESCE(documentKind,'') != 'transcript'"
+    # The 10 NULL-kind Sources do not trip the gate — the job runs.
+    body = _poll_until(client.tc, r.json()["job_id"], "completed")
+    assert body.get("quota_hit") is False
+    assert body["documents_indexed"] == 1
+    # The ingested doc Source carries documentKind ('brief' fallback) → it IS
+    # a document and IS metered (a frontmatter-less docs-endpoint doc cannot
+    # escape the cap).
+    assert _docs_count(client) == 1, \
+        "an ingested doc Source carries documentKind and IS metered"
 
 
 # ── fail-closed sandbox ──────────────────────────────────────────
@@ -590,7 +614,7 @@ def test_unset_base_fails_closed(client, tmp_path, monkeypatch):
     """TORTOISE_INGEST_BASE_DIR unset ⇒ honest job failure, NO writes
     (fail-closed — the endpoint is tenant-reachable; the ingest_dir_is_safe
     'any absolute path when unset' leniency does not apply here)."""
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     monkeypatch.delenv("TORTOISE_INGEST_BASE_DIR", raising=False)
     entries, blobs = _mk_files("docs/README.md")
     transport = MockGitHubDocsTransport(
@@ -625,19 +649,21 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
     r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
     job_id = r.json()["job_id"]
     # simulate team B: same app, different dependency-override identity
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": "some-other-team", "tier": "free", "key_id": "k2",
+    from tortoise.hosted_api import get_current_org
+    app.dependency_overrides[get_current_org] = lambda: {
+        "org_id": "some-other-team", "tier": "free", "key_id": "k2",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
+        "max_sessions": None,
     }
     rb = provisioned.tc.get(f"/v1/index/docs/{job_id}")
     assert rb.status_code == 404
     # team A still polls fine
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": provisioned.team_id, "tier": "free", "key_id": "k1",
+    app.dependency_overrides[get_current_org] = lambda: {
+        "org_id": provisioned.org_id, "tier": "free", "key_id": "k1",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
+        "max_sessions": None,
     }
     body = _poll_until(provisioned.tc, job_id, "completed")
     assert body["status"] == "completed"
@@ -649,17 +675,17 @@ def test_docs_single_flight_kind_scoped(provisioned, mock_github, ingest_base,
     NOT block a docs job (different kinds), and a second docs POST reuses
     the in-flight docs job."""
     from tortoise.hosted_api import _start_index_job
-    gh_job, gh_new = _start_index_job(provisioned.team_id, kind="github")
+    gh_job, gh_new = _start_index_job(provisioned.org_id, kind="github")
     assert gh_new is True
-    docs_job, docs_new = _start_index_job(provisioned.team_id, kind="docs")
+    docs_job, docs_new = _start_index_job(provisioned.org_id, kind="docs")
     assert docs_new is True, "a github in-flight job must not block the docs job"
     assert docs_job != gh_job
     # a second docs POST reuses the in-flight docs job
-    docs_job2, docs_new2 = _start_index_job(provisioned.team_id, kind="docs")
+    docs_job2, docs_new2 = _start_index_job(provisioned.org_id, kind="docs")
     assert docs_new2 is False
     assert docs_job2 == docs_job
     # github-reuse direction: a second github job reuses the in-flight one
-    gh_job2, gh_new2 = _start_index_job(provisioned.team_id, kind="github")
+    gh_job2, gh_new2 = _start_index_job(provisioned.org_id, kind="github")
     assert gh_new2 is False
     assert gh_job2 == gh_job
     # and the github job is untouched by the docs reuse
@@ -809,11 +835,11 @@ def test_legacy_unqualified_corpus_cleaned(provisioned, mock_github,
     the first new-layout walk — it would otherwise be ingested under the new
     branch-qualified tree, duplicating every doc (same content, two ids)."""
     from tortoise.indexer.github_docs import GitHubDocsIndexer
-    team_root = GitHubDocsIndexer.team_root(provisioned.team_id)
-    legacy_docs = team_root / "acme" / "repo1" / "docs"
+    org_root = GitHubDocsIndexer.org_root(provisioned.org_id)
+    legacy_docs = org_root / "acme" / "repo1" / "docs"
     legacy_docs.mkdir(parents=True, exist_ok=True)
     (legacy_docs / "README.md").write_text("# legacy\n")
-    legacy_manifest = team_root / ".manifest" / "acme" / "repo1.json"
+    legacy_manifest = org_root / ".manifest" / "acme" / "repo1.json"
     legacy_manifest.parent.mkdir(parents=True, exist_ok=True)
     legacy_manifest.write_text('{"tree_sha":"legacy","branch":"main"}')
 

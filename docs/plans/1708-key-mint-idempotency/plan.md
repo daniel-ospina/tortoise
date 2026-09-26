@@ -9,7 +9,7 @@
 **Team:** epistemic-team
 **Role:** product-implementer
 
-**Architecture:** No server-side behavior changes (the `agent_signup` handler is untouched — `#741(a)` stays; that's #1709's territory). Client-side: one shared config resolver in `tortoise/__main__.py` (precedence env → cwd → global) replaces the four duplicated `cwd/.tortoise` read sites; `_cmd_signup` gains reuse-before-mint (validate via existing `GET /v1/team` pattern from `_cmd_init`), writes credentials atomically to `~/.tortoise/credentials.json` (0600, dir 0700), and persists `device_id` there. Read-side: `list_api_keys` adds two additive response fields — Supabase lane via an extended `team_api_keys` select list (in-repo seam), registry lane via an extended `MATCH` `RETURN` with None-tolerant field access (registry APIKey nodes don't carry the props until #1709 writes them). Dashboard: replace the `isSessionKey` prefix-match heuristic with `created_via === 'bootstrap' || expires_at`.
+**Architecture:** No server-side behavior changes (the `agent_signup` handler is untouched — `#741(a)` stays; that's #1709's territory). Client-side: one shared config resolver in `tortoise/__main__.py` (precedence env → cwd → global) replaces the four duplicated `cwd/.tortoise` read sites; `_cmd_signup` gains reuse-before-mint (validate via existing `GET /v1/team` pattern from `_cmd_init`), writes credentials atomically to `~/.tortoise/credentials.json` (0600, dir 0700), and persists `device_id` there. Read-side: `list_api_keys` adds two additive response fields — Supabase lane via an extended `org_api_keys` select list (in-repo seam), registry lane via an extended `MATCH` `RETURN` with None-tolerant field access (registry APIKey nodes don't carry the props until #1709 writes them). Dashboard: replace the `isSessionKey` prefix-match heuristic with `created_via === 'bootstrap' || expires_at`.
 
 **Note on scope vs scope.md:** `docs/plans/1708-key-mint-idempotency/scope.md` (pre-verification revision) lists "registry lane sets these props at mint time" under B7. The **approved scope (user + controller) explicitly defers registry APIKey mint prop-writes to #1709** — this plan implements the None-tolerant RETURN only (zero changes to the `agent_signup` mint path). Precision on current state: the registry `session_key` mint (hosted_api.py:7250+, `created_via='bootstrap'/'recovery'` + 24h `expires_at` for bootstrap) **already** writes both props; the registry `create_api_key` mint (L3653) and the `agent_signup` registry mint (L6946) **do not** — those nodes return None until #1709. Test that the server mint path stays untouched: `tests/test_agent_signup.py` is **byte-for-byte unchanged**.
 
@@ -18,7 +18,7 @@
 ### Pattern Research
 
 > **Findings date:** 2026-09-02
-> **Gate skipped:** plan touches zero third-party deps — CLI changes are Python stdlib (`urllib`, `pathlib`, `json`, `os`, `uuid`) against in-repo API endpoints (`GET /v1/team` validation + `POST /v1/agent/signup`, both already tested); the Supabase lane change extends an existing in-repo seam (`supabase_control.team_api_keys` select list, exercised via `tests/fake_control_plane.py`); the dashboard change is a predicate swap in the existing React 19 app (no new library, no new usage pattern — same field reads as `k.revoked_at`/`k.created_at` already in `main.jsx`).
+> **Gate skipped:** plan touches zero third-party deps — CLI changes are Python stdlib (`urllib`, `pathlib`, `json`, `os`, `uuid`) against in-repo API endpoints (`GET /v1/team` validation + `POST /v1/agent/signup`, both already tested); the Supabase lane change extends an existing in-repo seam (`supabase_control.org_api_keys` select list, exercised via `tests/fake_control_plane.py`); the dashboard change is a predicate swap in the existing React 19 app (no new library, no new usage pattern — same field reads as `k.revoked_at`/`k.created_at` already in `main.jsx`).
 
 ---
 
@@ -26,11 +26,11 @@
 
 | # | Surface | Type | Data Flow | Test Layer | Contract | Key Failure Modes |
 |---|---------|------|-----------|-----------|----------|-------------------|
-| 1 | `~/.tortoise/credentials.json` (new global config file) | Data (file) | Write (signup) / Read (resolver) | Unit (CLI, mocked urlopen) | `{"api_key", "api_url", "team_id", "team_name", "device_id"}`; 0600 perms; `~/.tortoise` dir 0700; unique tmp name | IsADirectoryError on `~/.tortoise` dir (the bug); OSError between mint and save → orphan key (must echo key + exit 1); concurrent writers clobbering a shared tmp name → unique tmp; `./.tortoise`-is-a-dir on read path |
+| 1 | `~/.tortoise/credentials.json` (new global config file) | Data (file) | Write (signup) / Read (resolver) | Unit (CLI, mocked urlopen) | `{"api_key", "api_url", "org_id", "org_name", "device_id"}`; 0600 perms; `~/.tortoise` dir 0700; unique tmp name | IsADirectoryError on `~/.tortoise` dir (the bug); OSError between mint and save → orphan key (must echo key + exit 1); concurrent writers clobbering a shared tmp name → unique tmp; `./.tortoise`-is-a-dir on read path |
 | 2 | `TORTOISE_API_KEY` env + `TORTOISE_API_URL` env | Config | Read | Unit (CLI) | env wins over file configs; **empty/whitespace env key is skipped** | bad env key shadows a good stored key (without `--force` no escape) → warn + `--force` hint; empty-string env key → lockout (resolver must treat as unset); mint target must derive from the validated config's URL, not ambient env, when re-minting |
 | 3 | `GET /v1/team` (key validation) | External API (in-repo endpoint) | Out | Unit (CLI, mocked urlopen) | 200 = valid; 401 = invalid → re-mint; 403 SUSPENDED → fail-closed exit 1 (no mint); 403 non-suspended = invalid → re-mint; 429/5xx/URLError/200-garbage = cannot-validate → fail-closed exit 1 (no mint, no orphan) | network down (must NOT mint — that's the incident pattern); 401 on revoked stored key; 403 with `_suspended_detail()` body (suspension must not mint); 200 HTML body (captive portal) hits the JSONDecodeError leg; 401-then-429 dead end (stored key dead + budget spent → message must say both) |
-| 4 | `POST /v1/agent/signup` (mint) | External API (in-repo endpoint) | Out | Unit (CLI, mocked urlopen) | existing response shape `{key, team_id, team_name, graph_name, identity, tier}` | 429 per-IP limiter (existing handling kept); config-save failure AFTER mint (must not orphan — echo key + exit 1); re-mint host divergence (mint to the validated config's base URL) |
-| 5 | `GET /v1/team/keys` Supabase lane | External API + DB (api_keys via seam) | Out/In | Integration (`test_hosted_api.py` + FakeControlPlane; `test_supabase_control.py`) | additive fields `created_via`, `expires_at` in response; `team_api_keys` select adds both columns | `created_via`/`expires_at` absent from seeded rows (PostgREST 400 via fake `missing_columns` → seam fails closed) |
+| 4 | `POST /v1/agent/signup` (mint) | External API (in-repo endpoint) | Out | Unit (CLI, mocked urlopen) | existing response shape `{key, org_id, org_name, graph_name, identity, tier}` | 429 per-IP limiter (existing handling kept); config-save failure AFTER mint (must not orphan — echo key + exit 1); re-mint host divergence (mint to the validated config's base URL) |
+| 5 | `GET /v1/team/keys` Supabase lane | External API + DB (api_keys via seam) | Out/In | Integration (`test_hosted_api.py` + FakeControlPlane; `test_supabase_control.py`) | additive fields `created_via`, `expires_at` in response; `org_api_keys` select adds both columns | `created_via`/`expires_at` absent from seeded rows (PostgREST 400 via fake `missing_columns` → seam fails closed) |
 | 6 | `GET /v1/team/keys` registry lane | DB (FalkorDB APIKey nodes) | In | Integration (`test_hosted_api.py`, registry env) | `MATCH` `RETURN` adds `k.created_via, k.expires_at` at row idx 5/6; None-tolerant for agent_signup + create_api_key-minted nodes pre-#1709 (session_key mints already carry props) | row index drift breaking `row[0..4]` readers; None values must serialize as JSON null (additive, non-breaking); None-tolerance must be exercised by an agent_signup-minted key (create_api_key/session_key have or lack props differently); **lane must be pinned TORTOISE_CONTROL_PLANE=registry — exported Supabase creds would silently run the Supabase branch** |
 | 7 | `website/apps/dashboard/src/main.jsx` keys table | UI (React 19) | In | Unit (`node --test` on extracted pure `isSessionKey`) + build + code-review | `isSessionKey(k, activeKey)`: API-first (`created_via === 'bootstrap' \|\| expires_at`), active-key prefix fallback ONLY when `created_via` is absent (stale cache / registry pre-#1709) | stale cached responses (fields absent) must NOT enable revoke of the live session key → fallback keeps the old guard; older bootstrap keys now uniformly classified session (intended — removes the only UI cleanup path for stale session keys, expiry/sweep is the cleanup); mid-rollout window where the server doesn't send fields yet |
 | 8 | Existing CLI test determinism (HOME-dependent) | Test infra | — | Unit | CLI tests must not read the developer's real `~/.tortoise/credentials.json`; test working tree must not contain a stray `./.tortoise` file | reuse-path fires on a dev machine with a real global config → mint-path tests fail non-deterministically → HOME isolation required; a repo-root `.tortoise` file in the test CWD would flip local-mode tests (guard with tmp cwd + HOME isolation)
@@ -127,7 +127,7 @@ The scope text states "precedence env → global → cwd (cwd wins for legacy pr
 Skips reuse-before-mint **and** validation entirely → mints fresh → writes global. If `TORTOISE_API_KEY` is set, print a warning that the env key shadows the new key at read time (env wins per D1). `--force` does NOT unset or edit the env.
 
 ### D4 — Global credentials file
-Path `Path.home() / ".tortoise" / "credentials.json"`. Dir: `mkdir(parents=True, exist_ok=True)` then `os.chmod(dir, 0o700)` unconditionally (the data home already stores `tortoise.db` + audit logs; private by design). Write: create a **unique per-writer tmp** file **born at 0600** via `os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` + `os.fdopen` — `Path.write_text` would create at umask (typically 0644) with a plaintext-key window before the chmod, and a crash in that window leaves key material world-readable; `os.replace(tmp, credentials.json)` — atomic, last-writer-wins. Content: `{api_key, api_url, team_id, team_name, device_id}`.
+Path `Path.home() / ".tortoise" / "credentials.json"`. Dir: `mkdir(parents=True, exist_ok=True)` then `os.chmod(dir, 0o700)` unconditionally (the data home already stores `tortoise.db` + audit logs; private by design). Write: create a **unique per-writer tmp** file **born at 0600** via `os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` + `os.fdopen` — `Path.write_text` would create at umask (typically 0644) with a plaintext-key window before the chmod, and a crash in that window leaves key material world-readable; `os.replace(tmp, credentials.json)` — atomic, last-writer-wins. Content: `{api_key, api_url, org_id, org_name, device_id}`.
 **Stale-tmp hygiene:** on each successful write, sweep `credentials.json.tmp-*` files in `~/.tortoise` (a crashed writer leaves one behind; unbounded accumulation = key-material residue).
 **Write-failure handling (the orphan class):** wrap the mkdir/chmod/write/replace block in `try/except OSError` → on failure print to stderr: a key WAS minted but could NOT be saved to `{path}` (`{err}`); **echo the minted key** so it is not lost; tell the user to fix the path or store the key manually; exit 1. Never exit 0 with an unsaved key, never re-mint silently.
 
@@ -156,7 +156,7 @@ def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | 
 - **Explicitly NOT converted (documented):** `_cmd_init` (L248 write + already-connected read — deliberate per-project connect flow, its own semantics), `_cmd_serve_http` (L3717 reads `args.api_key or TORTOISE_API_KEY` only — no cwd config read; unchanged). MCP config writers (`_write_mcp_config_file`/`_print_mcp_configs`) receive the key explicitly from `init` — no config read of their own.
 
 ### D7 — `list_api_keys` additive fields
-- Supabase lane: extend `team_api_keys` select to `["id", "key_prefix", "created_at", "last_used_at", "revoked_at", "enabled", "created_via", "expires_at"]`; response adds `"created_via": row.get("created_via"), "expires_at": row.get("expires_at")`.
+- Supabase lane: extend `org_api_keys` select to `["id", "key_prefix", "created_at", "last_used_at", "revoked_at", "enabled", "created_via", "expires_at"]`; response adds `"created_via": row.get("created_via"), "expires_at": row.get("expires_at")`.
 - Registry lane: `RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, k.created_via, k.expires_at` → `"created_via": row[5], "expires_at": row[6]`. **None-tolerant for the registry mints that omit the props until #1709 — `agent_signup` (L6946) and `create_api_key` (L3653); the `session_key` mint (L7250+) already writes them.** Existing `row[0..4]` readers unchanged.
 - Additive only — no consumer breaks.
 
@@ -180,7 +180,7 @@ export function isActiveKey(k, activeKey) {
   return !!activeKey && !k.revoked_at && (k.key_prefix === String(activeKey).slice(0, 10))
 }
 ```
-`main.jsx`: status rendering uses `isSessionKey(k, active)`; the toggle/revoke guard (L2883) becomes `!isSessionKey(k, active) && !isActiveKey(k, active)` — the old heuristic protected the active key by prefix regardless of kind (Fix A comment: "so revoke can tell whether the active data-plane key is being revoked"); the API-first predicate alone would make a durable active key revocable (self-lockout). `teamKeysRef`/`currentTeamId` stay (used by loadAll/restore for the real key value).
+`main.jsx`: status rendering uses `isSessionKey(k, active)`; the toggle/revoke guard (L2883) becomes `!isSessionKey(k, active) && !isActiveKey(k, active)` — the old heuristic protected the active key by prefix regardless of kind (Fix A comment: "so revoke can tell whether the active data-plane key is being revoked"); the API-first predicate alone would make a durable active key revocable (self-lockout). `teamKeysRef`/`currentOrgId` stay (used by loadAll/restore for the real key value).
 
 ### D9 — Test determinism (HOME isolation)
 The reuse path reads the developer's real `$HOME/.tortoise/credentials.json`; CLI tests that exercise the mint/no-config path would break non-deterministically on machines with a real global config. Every affected CLI test class gets an autouse HOME isolation (`monkeypatch.setenv("HOME", str(tmp_path))`). This is a **test-only** change; `tests/test_agent_signup.py` stays untouched.
@@ -210,7 +210,7 @@ from unittest import mock
 import tortoise.__main__ as main
 
 GLOBAL = json.dumps({"api_key": "tt_global", "api_url": "https://api.premiselabs.co",
-                     "team_id": "team-g", "device_id": "anon-g"})
+                     "org_id": "team-g", "device_id": "anon-g"})
 
 
 def _write_global(home):  # simulate signup output
@@ -343,7 +343,7 @@ def _ok_mint(body=None):
     import json as _j
     resp = mock.MagicMock(); resp.read.return_value = _j.dumps(body or {
         "key": "tt_mint_000000000000000000000000000000000000000000",
-        "team_id": "team-mint-1", "team_name": "agent-mint", "graph_name": "team_team-mint-1",
+        "org_id": "team-mint-1", "org_name": "agent-mint", "graph_name": "team_team-mint-1",
         "identity": "anon-mint", "tier": "free"}).encode(); resp.__enter__.return_value = resp
     return resp
 
@@ -450,7 +450,7 @@ if config_path.is_file():
 device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
 config = {
     "api_key": data["key"], "api_url": api_url,
-    "team_id": data["team_id"], "team_name": data["team_name"],
+    "org_id": data["org_id"], "org_name": data["org_name"],
     "device_id": device_id,
 }
 try:
@@ -502,14 +502,14 @@ class TestReuse:
     def _valid_team(self):  # GET /v1/team 200
         import json as _j
         resp = mock.MagicMock(); resp.read.return_value = _j.dumps(
-            {"team_id": "team-g", "tier": "free"}).encode()
+            {"org_id": "team-g", "tier": "free"}).encode()
         resp.__enter__.return_value = resp
         return resp
 
     def _global_cfg(self, tmp_path, **extra):
         d = tmp_path / ".tortoise"; d.mkdir(parents=True, exist_ok=True); d.chmod(0o700)
         cfg = {"api_key": "tt_valid", "api_url": "https://api.premiselabs.co",
-               "team_id": "team-g", **extra}
+               "org_id": "team-g", **extra}
         (d / "credentials.json").write_text(json.dumps(cfg))
 
     def test_reuse_global_config_skips_mint(self, monkeypatch, tmp_path, capsys):
@@ -577,7 +577,7 @@ class TestReuse:
         monkeypatch.setenv("HOME", str(tmp_path)); monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
         (tmp_path / "proj").mkdir(); monkeypatch.chdir(tmp_path / "proj")
         (tmp_path / "proj" / ".tortoise").write_text(json.dumps(
-            {"api_key": "tt_old", "api_url": "https://api.premiselabs.co", "team_id": "team-old"}))
+            {"api_key": "tt_old", "api_url": "https://api.premiselabs.co", "org_id": "team-old"}))
         side_effects = [HTTPError("https://api.premiselabs.co/v1/team", 401, "u", {},
                                   io.BytesIO(b'{}')),
                         _ok_mint()]
@@ -841,9 +841,9 @@ Expected: PASS — this single run covers acceptance criterion 1 (reuse tests as
 > **Parallelizability note:** Tasks 4 and 5 touch files/test files entirely disjoint from Tasks 1–3 (`hosted_api.py`, `supabase_control.py`, `test_hosted_api.py`, `test_supabase_control.py` vs `__main__.py` + CLI tests). Under subagent-driven execution, Task 4 (and Task 5's code change) can be dispatched in parallel with Tasks 1–3; the sequential order in this plan is by choice (single-PR flow), not dependency. Task 5's manual behavioral check does want Task 4's server fields live.
 
 **Intent:** Give the dashboard (and API consumers) first-class session-key metadata instead of the fragile prefix heuristic; registry lane stays None-tolerant until #1709 writes the props at mint.
-**Acceptance:** `GET /v1/team/keys` includes `created_via` + `expires_at` for every key in BOTH lanes; Supabase lane reads them through `team_api_keys`; registry lane returns them None-safe; no mint-path code changes (`test_agent_signup.py` untouched).
+**Acceptance:** `GET /v1/team/keys` includes `created_via` + `expires_at` for every key in BOTH lanes; Supabase lane reads them through `org_api_keys`; registry lane returns them None-safe; no mint-path code changes (`test_agent_signup.py` untouched).
 **Files:**
-- Modify: `tortoise/supabase_control.py:1468-1479` (`team_api_keys` select), `tortoise/hosted_api.py:3700-3755` (`list_api_keys`)
+- Modify: `tortoise/supabase_control.py:1468-1479` (`org_api_keys` select), `tortoise/hosted_api.py:3700-3755` (`list_api_keys`)
 - Test: `tests/test_supabase_control.py`, `tests/test_hosted_api.py`
 
 **Step 1: Write the failing tests**
@@ -852,7 +852,7 @@ Expected: PASS — this single run covers acceptance criterion 1 (reuse tests as
 def test_team_api_keys_selects_created_via_expires_at(self, fake):
     fake.seed("api_keys", [_key_row(id="k1", created_via="bootstrap",
                                     expires_at="2026-08-02T00:00:00Z")])
-    rows = team_api_keys(fake, "team-free-001")
+    rows = org_api_keys(fake, "team-free-001")
     assert rows[0]["created_via"] == "bootstrap"
     assert rows[0]["expires_at"] == "2026-08-02T00:00:00Z"
 
@@ -860,7 +860,7 @@ def test_team_api_keys_missing_created_via_fails_closed(self, fake):
     fake.missing_columns = {"api_keys": {"expires_at"}}
     fake.seed("api_keys", [_key_row()])
     with pytest.raises(RuntimeError):
-        team_api_keys(fake, "team-free-001")
+        org_api_keys(fake, "team-free-001")
 ```
 ```python
 # tests/test_hosted_api.py (extend TestListApiKeys — registry lane; BOTH registry
@@ -877,14 +877,14 @@ def test_list_keys_has_created_via_expires_at_fields(self, client, monkeypatch):
 def test_list_keys_agent_signup_registry_none_tolerant(self, client, monkeypatch):
     """agent_signup-minted registry nodes lack the props until #1709 — the
     None-tolerant row[5]/row[6] branch must be exercised by THIS mint.
-    The client fixture overrides get_current_team → TEST_TEAM, so re-point
+    The client fixture overrides get_current_org → TEST_TEAM, so re-point
     the override at the minted team before GET (list_api_keys is team-scoped;
-    the signup key lives under its own fresh team_id)."""
+    the signup key lives under its own fresh org_id)."""
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     r = client.post("/v1/agent/signup", json={})
     assert r.status_code == 200, r.text
-    signup_team = r.json()["team_id"]
-    app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, team_id=signup_team)
+    signup_team = r.json()["org_id"]
+    app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id=signup_team)
     r = client.get("/v1/team/keys")
     keys = r.json()["keys"]
     assert keys, "signup team should have exactly one key"
@@ -908,13 +908,13 @@ class TestListApiKeysSupabase:
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-listkeys")
         fake = FakeControlPlane()
         fake.seed("api_keys", [{
-            "id": "k1", "team_id": "team-001", "key_prefix": "tt_abcdef1234",
+            "id": "k1", "org_id": "team-001", "key_prefix": "tt_abcdef1234",
             "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
             "revoked_at": None, "enabled": True,
             "created_via": "bootstrap", "expires_at": "2026-08-02T00:00:00Z",
         }])
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, team_id="team-001")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id="team-001")
         yield fake
         app.dependency_overrides.clear()
 
@@ -930,7 +930,7 @@ class TestListApiKeysSupabase:
         make reuse silently reuse a disabled key).
         IMPLEMENTER-AUTHORED, FAILING-FIRST: write the full body in the red
         phase (Step 1) using real key auth — seed an enabled=false api_keys
-        row in the fake, REMOVE the get_current_team override for this test,
+        row in the fake, REMOVE the get_current_org override for this test,
         call GET /v1/team with Authorization: Bearer <plaintext>, assert 401.
         Do NOT ship this as a comment-only stub."""
         ...
@@ -941,13 +941,13 @@ class TestListApiKeysSupabase:
         real key auth, assert GET /v1/team → 401."""
         ...
 ```
-(Implementer note for the two auth pins: they belong in the Supabase-lane class fixture — seed a disabled (`enabled=false`) and an expired (`expires_at` past) `api_keys` row, call `GET /v1/team` through the real `get_current_team` dependency (REMOVE the `get_current_team` override for these — the override bypasses auth, so the disabled/expired rejection must be observed with real key auth, e.g. `Authorization: Bearer <plaintext>` against the fake's resolve path, mirroring test_dashboard_login's auth tests). The essential pin: `enabled=false` and past-`expires_at` keys return 401 on `/v1/team`, so the CLI reuse path's 401→re-mint contract holds in both lanes. Document the #1096 fail-open degrade window as an accepted residual in the PR body.)
+(Implementer note for the two auth pins: they belong in the Supabase-lane class fixture — seed a disabled (`enabled=false`) and an expired (`expires_at` past) `api_keys` row, call `GET /v1/team` through the real `get_current_org` dependency (REMOVE the `get_current_org` override for these — the override bypasses auth, so the disabled/expired rejection must be observed with real key auth, e.g. `Authorization: Bearer <plaintext>` against the fake's resolve path, mirroring test_dashboard_login's auth tests). The essential pin: `enabled=false` and past-`expires_at` keys return 401 on `/v1/team`, so the CLI reuse path's 401→re-mint contract holds in both lanes. Document the #1096 fail-open degrade window as an accepted residual in the PR body.)
 **Step 2: Run to verify fail**
-Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_supabase_control.py tests/test_hosted_api.py -k 'created_via or expires_at or team_api_keys or none_tolerant' -v`
+Run: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_supabase_control.py tests/test_hosted_api.py -k 'created_via or expires_at or org_api_keys or none_tolerant' -v`
 Expected: FAIL — `created_via`/`expires_at` absent (the `none_tolerant` token ensures `test_list_keys_agent_signup_registry_none_tolerant` participates in the red run).
 
 **Step 3: Implement the seam + endpoint changes (D7)**
-- `supabase_control.py team_api_keys`: select → `["id", "key_prefix", "created_at", "last_used_at", "revoked_at", "enabled", "created_via", "expires_at"]`.
+- `supabase_control.py org_api_keys`: select → `["id", "key_prefix", "created_at", "last_used_at", "revoked_at", "enabled", "created_via", "expires_at"]`.
 - `hosted_api.py list_api_keys` Supabase branch: add `"created_via": row.get("created_via"), "expires_at": row.get("expires_at")` to each key dict.
 - Registry branch: `RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, k.created_via, k.expires_at`; add `"created_via": row[5], "expires_at": row[6]` (None for agent_signup-minted nodes pre-#1709; registry recovery/bootstrap mints already carry values).
 
@@ -1014,7 +1014,7 @@ Run: `cd website/apps/dashboard && node --test src/sessionKey.test.js`
 Expected: FAIL — `sessionKey.js` does not exist / module not found.
 
 **Step 3: Implement the extracted predicate + wire main.jsx (D8)**
-Create `src/sessionKey.js` exporting `isSessionKey` + `isActiveKey` (D8, pure). In `main.jsx`, import under an alias to avoid an ESM redeclaration collision (`import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'`), keep a local `function isSessionKey(k) { return isSessionKeyPredicate(k, currentTeamId ? teamKeysRef.current[currentTeamId] : null) }` for the status cell (L2882), and change the toggle/revoke guard (L2883) to `!isSessionKey(k) && !isActiveKey(k, currentTeamId ? teamKeysRef.current[currentTeamId] : null)` — a durable key that IS the live session must never be revocable from the UI (Fix A property). Update the surrounding comments to reference #1708.
+Create `src/sessionKey.js` exporting `isSessionKey` + `isActiveKey` (D8, pure). In `main.jsx`, import under an alias to avoid an ESM redeclaration collision (`import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'`), keep a local `function isSessionKey(k) { return isSessionKeyPredicate(k, currentOrgId ? teamKeysRef.current[currentOrgId] : null) }` for the status cell (L2882), and change the toggle/revoke guard (L2883) to `!isSessionKey(k) && !isActiveKey(k, currentOrgId ? teamKeysRef.current[currentOrgId] : null)` — a durable key that IS the live session must never be revocable from the UI (Fix A property). Update the surrounding comments to reference #1708.
 
 **Step 4: Run unit test + build**
 Run: `cd website/apps/dashboard && node --test src/sessionKey.test.js && npm run build`
@@ -1093,7 +1093,7 @@ CHANGELOG (Cycle 2 fixes applied inline):
 
 | # | Issue | Severity | Location | Fix Applied | Research? |
 |---|-------|----------|-----------|-------------|-----------|
-| 1 | Task 4 None-tolerant test cannot pass (get_current_team override → TEST_TEAM; signup mints a different team; k["team_id"] doesn't exist) | P1 | Task 4 | Test re-overrides `get_current_team` to the minted team; asserts `keys[0]` created_via/expires_at None | code-verified |
+| 1 | Task 4 None-tolerant test cannot pass (get_current_org override → TEST_TEAM; signup mints a different team; k["org_id"] doesn't exist) | P1 | Task 4 | Test re-overrides `get_current_org` to the minted team; asserts `keys[0]` created_via/expires_at None | code-verified |
 | 2 | Registry tests not lane-pinned → exported Supabase creds run the wrong branch | P1 | Task 4 | `TORTOISE_CONTROL_PLANE=registry` monkeypatch added to both registry tests | code-verified |
 | 3 | `_read_config` env-only → `config=None` crashes `_cmd_team_keys_list/create` (`config.get`) | P1 | D6, Task 1 | Resolver synthesizes `{"api_key", "api_url"}` for env; env-only smoke tests in Step 4b | code-verified |
 | 4 | `_ConfigError` unhandled at the 3 inline sites (context SessionStart hook would traceback) | P1 | D6, Task 1 | Per-site handling specified (create_point/session → msg+1; context → warn+local fallback); tests | no |

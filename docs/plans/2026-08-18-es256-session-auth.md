@@ -14,7 +14,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
-**Goal:** Make `verify_session_jwt` accept Supabase ES256-signed access tokens so session-plane endpoints (`/v1/teams`, `/v1/session/key`, member management, invites, MCP OAuth authorize) stop 500ing and the dashboard login completes.
+**Goal:** Make `verify_session_jwt` accept Supabase ES256-signed access tokens so session-plane endpoints (`/v1/organizations`, `/v1/session/key`, member management, invites, MCP OAuth authorize) stop 500ing and the dashboard login completes.
 
 **Team:** epistemic-team
 **Role:** (not set)
@@ -51,7 +51,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 |---------|----------|------------|---------------|
 | `verify_session_jwt` (auth boundary) | FastAPI dependency → Supabase JWKS + JWT crypto | unit (`tests/test_session_auth.py`) | wrong sig; malformed JWK (short x, oct kty, bad point, non-base64url x, wrong-typed x, OKP missing x); alg-confusion (ES256↔RSA, OKP/EdDSA, **ES384/ES512, unknown kty**); unknown alg; **alg-absent header (`{"kid": "K1"}`) → 401 (InvalidAlgorithmError path); RFC 7797 `b64: false` header → 401; unsupported `crit` list header → 401 (all via catch tuple; fetch-count 1 for the alg-absent case)**; expired (leeway boundary incl. exact `now-30`); future iat/nbf (exact `now+30` accepted); **out-of-range exp/iat/nbf (Infinity → OverflowError caught)**; missing exp/iat (require); wrong/missing/trailing-slash iss; wrong/missing/list-form aud (strict); missing/empty/non-string sub; **wrong-typed email/app_metadata (shape guards)**; oversized token (repo guard; effective HTTP cap is the server's header limit); malformed token (non-dict segments); no-kid/whitespace-kid/truthy-non-string-kid (zero fetch); kid-miss refetch; fetch-failure → 401/503 |
 | `_JWKSCache` | in-process TTL cache + failure cooldown + single-flight (kid-aware) | unit | fetch failure (stale-serve + cooldown, no evict-on-failure); first-fetch 200-empty → 401 (never 500); **200-empty records cooldown (failure semantics) — no per-request refetch storm; recovery after cooldown/TTL**; 200-empty on warm cache (stale-on-empty); duplicate-kid (first-wins); kid-less keys dropped; malformed key entry fails fetch closed; **HTTP 200 with garbage body (HTML/`[]`/`{"keys": null}) → cold 503 / warm stale-serve, no eviction**; cooldown-skipped fetch with no last-good → 503 (never None-crash); JWKS body >64KB → treated as fetch failure (stale/503); concurrent burst — one fetch per cooldown window, lock-coalesced, **success and failure paths** (kid-aware single-flight re-check after lock); first-fetch failure → 503 |
-| Direct `verify_session_jwt` call sites | `hosted_api.py:1298` (`get_current_team`), `:3254` (dashboard-login toggle), `:6332` (`/v1/claim`), `:6511` (`/v1/claim/status`), `:8614` (`/oauth/consent/preview`), `:8652` (`/oauth/consent`) + `Depends(get_current_user)` (~20 sites) | e2e | none — no signature change; return shape `{user_id, email, app_metadata}` preserved (app_metadata shape-guarded) |
+| Direct `verify_session_jwt` call sites | `hosted_api.py:1298` (`get_current_org`), `:3254` (dashboard-login toggle), `:6332` (`/v1/claim`), `:6511` (`/v1/claim/status`), `:8614` (`/oauth/consent/preview`), `:8652` (`/oauth/consent`) + `Depends(get_current_user)` (~20 sites) | e2e | none — no signature change; return shape `{user_id, email, app_metadata}` preserved (app_metadata shape-guarded) |
 | Build/deploy contract | `pyproject.toml` → `uv lock` → `uv export --frozen --no-dev --no-editable` → `requirements.txt` | CI parity gate (`deploy-hosted.yml`) | requirements.txt drift → deploy blocked; **`uv export --frozen` silently exports a stale lock** — always `uv lock` after pyproject edits |
 | E2E harness JWKS mints | `tests/e2e/hosted/conftest.py::_JWKSKeys`, `test_13_claim.py::_JWKS` | e2e | currently RSA/RS256-only — must mint EC/ES256 (the CI gap that let this ship) |
 | claim path | `app_metadata.providers` asserted on returned dict | e2e | return shape must keep `app_metadata` key; **wrong-typed app_metadata rejected at verify (401) — no downstream AttributeError** |
@@ -65,7 +65,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 
 - **Unit** (primary): full ES256 + RS256 + cache-hardening matrix in `tests/test_session_auth.py`.
 - **E2E**: harness JWKS mints converted to EC/ES256 via a shared mint helper; claim flow (`test_13_claim`) passes.
-- **Post-deploy live check**: real Supabase session token (dashboard login via GitHub OAuth) → `/v1/teams` 200 + `/v1/session/key` mints a key (dashboard login completes).
+- **Post-deploy live check**: real Supabase session token (dashboard login via GitHub OAuth) → `/v1/organizations` 200 + `/v1/session/key` mints a key (dashboard login completes).
 - Deferred (separate issues, not absorbed): ACAO-on-unhandled-500 hygiene.
 
 ---
@@ -217,7 +217,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 **Steps:**
 1. Local: `uv run pytest tests/test_session_auth.py -v` green.
 2. PR: code-review gate + CI (fast suite incl. new unit tests).
-3. Post-deploy: with a real Supabase session token (dashboard login via GitHub OAuth), confirm `/v1/teams` returns 200 and the dashboard no longer shows the login wall.
+3. Post-deploy: with a real Supabase session token (dashboard login via GitHub OAuth), confirm `/v1/organizations` returns 200 and the dashboard no longer shows the login wall.
 
 ### Rejected Alternatives
 - **A (in-place `_verify_es256`)**: bespoke raw r‖s→DER ECDSA owned in-house — the incident class; every future alg is new bespoke code.

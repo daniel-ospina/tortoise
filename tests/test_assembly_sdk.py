@@ -1,4 +1,4 @@
-"""#2165 Task 6 — ask() connected-assembly branch + ask_assembled (docker-lane).
+"""#2165 Task 6 — run_ask_lane() connected-assembly branch + run_ask_assembled (docker-lane).
 
 Golden-evidence record (R17): the EVIDENCE STRINGS below were CAPTURED from
 the deterministic flag-OFF legacy lane and the flag-ON fired lane on the
@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tortoise.ask_lane import run_ask_assembled, run_ask_lane
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability (same gate as test_assembly_fixtures) ──
@@ -298,7 +299,7 @@ def _ask(sdk, monkeypatch, q, *, flag_on=False, question_type=None,
     else:
         monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
     _install_fake(sdk, monkeypatch, reply="GOLD")
-    return sdk.ask(q, question_date=question_date,
+    return run_ask_lane(sdk, q, question_date=question_date,
                    question_type=question_type)
 
 
@@ -431,7 +432,7 @@ def test_positive_fts_paraphrase_fires(sdk, monkeypatch):
     """Docker positive: 'the couch I bought in March' resolves via name-token
     FTS (source=fts) AND the fired path assembles the state-header block."""
     ag.build_base_graph(sdk)
-    aa = sdk.ask_assembled(
+    aa = run_ask_assembled(sdk, 
         "what is the current status of the couch I bought in March?",
         question_date=Q_DATE)
     assert aa.fired is True, "paraphrase subject must route via FTS"
@@ -450,7 +451,7 @@ def test_out_of_subgraph_gold_a1_b0(sdk, monkeypatch):
     _assert_golden(legacy["evidence"], o["question"], GOLD_LEGACY_CANARY)
     assert "reading lamp" in legacy["evidence"], \
         "A≥1: legacy must admit the out-of-subgraph gold"
-    aa = sdk.ask_assembled(o["question"], question_date=Q_DATE)
+    aa = run_ask_assembled(sdk, o["question"], question_date=Q_DATE)
     assert aa.fired is True, "the canary compare must fire"
     assert "reading lamp" not in aa.evidence,         "B=0: assembled walks only the resolved subjects' subgraphs"
     assert all("bookshelf" not in (h.get("content") or "")
@@ -480,9 +481,9 @@ def test_validation_precedes_fired_branch(sdk, monkeypatch):
         "x" * 2001,
     ]:
         with pytest.raises(AskValidationError):
-            sdk.ask(bad, question_date=Q_DATE)
+            run_ask_lane(sdk, bad, question_date=Q_DATE)
     with pytest.raises(AskValidationError):
-        sdk.ask("what is the current status of the couch?",
+        run_ask_lane(sdk, "what is the current status of the couch?",
                 question_date="not-a-date")
 
 
@@ -490,7 +491,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
     """Fired path: EXACTLY ONE model call. A reader raise maps to
     AskReaderUnavailable with ZERO legacy re-run (retrieval must never fire
     again on the fired path)."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     from tortoise.exceptions import AskReaderUnavailable
     calls = {"n": 0}
     raise_on = {"n": 0}
@@ -507,7 +508,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
                             AssertionError("legacy retrieval must NOT run")))
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     ag.build_base_graph(sdk)
-    res = sdk.ask("what is the current status of the couch?",
+    res = run_ask_lane(sdk, "what is the current status of the couch?",
                   question_date=Q_DATE)
     assert calls["n"] == 1
     assert res["evidence"] == GOLD_FIRED_CURRENT
@@ -518,7 +519,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
     cache.pop(f"ask:{getattr(sdk, '_namespace', 'default')}", None)
     raise_on["n"] = 1
     with pytest.raises(AskReaderUnavailable):
-        sdk.ask("what is the current status of the couch?",
+        run_ask_lane(sdk, "what is the current status of the couch?",
                 question_date=Q_DATE)
     assert calls["n"] == 2  # no second reader attempt, no legacy re-run
 
@@ -548,7 +549,7 @@ def test_w4_both_flags_why_on_real_rows(sdk, monkeypatch):
         return out
 
     monkeypatch.setattr(why_mod, "enrich_items", _attach)
-    res = sdk.ask("what is the current status of the couch?",
+    res = run_ask_lane(sdk, "what is the current status of the couch?",
                   question_date=Q_DATE)
     assert res["evidence"] == GOLD_FIRED_CURRENT  # why keys never alter text
     why = res.get("why", [])
@@ -556,7 +557,7 @@ def test_w4_both_flags_why_on_real_rows(sdk, monkeypatch):
     # every entry's point_id belongs to a REAL evidence row (pure assembly
     # read of the same fired block — no reader); synthesized no-id lines
     # never produced an entry
-    aa = sdk.ask_assembled("what is the current status of the couch?",
+    aa = run_ask_assembled(sdk, "what is the current status of the couch?",
                            question_date=Q_DATE)
     ev_ids = {h.get("id") for h in aa.post_cap_lines if h.get("id")}
     assert all(e.get("point_id") in ev_ids for e in why), why
@@ -568,7 +569,7 @@ def test_w4_both_flags_why_on_real_rows(sdk, monkeypatch):
         raise RuntimeError("w4 exploded")
 
     monkeypatch.setattr(why_mod, "enrich_items", _boom_enrich)
-    res2 = sdk.ask("what is the current status of the couch?",
+    res2 = run_ask_lane(sdk, "what is the current status of the couch?",
                    question_date=Q_DATE)
     assert res2["evidence"] == GOLD_FIRED_CURRENT
     assert res2.get("why") == []
@@ -596,17 +597,91 @@ def test_no_successor_record_name_only_and_degraded_false(sdk, monkeypatch):
     ag.build_supersession_chain_variants(sdk)
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     _install_fake(sdk, monkeypatch, reply="GOLD")
-    res = sdk.ask("what is the current status of the orphan-src?",
+    res = run_ask_lane(sdk, "what is the current status of the orphan-src?",
                   question_date=Q_DATE)
     assert "STATE (orphan-src): superseded by successor-never-created" in \
         res["evidence"]
     assert "no successor record found" in res["evidence"]
     assert res["retrieval_degraded"] is False, res["evidence"]
-    res2 = sdk.ask("what is the current status of the torn-row?",
+    res2 = run_ask_lane(sdk, "what is the current status of the torn-row?",
                    question_date=Q_DATE)
     assert "STATE (torn-row): superseded (successor unknown)" in \
         res2["evidence"]
     assert res2["retrieval_degraded"] is False
+
+
+def test_long_successor_fold_stored_full_and_verified(sdk, monkeypatch):
+    """#5370: a >200-char successor is stored VERBATIM by the supersession
+    fold, VERIFIED by the ask-path successor probe (name-keyed on the stored
+    value), and rendered as a full supersession clause — never the false
+    "no successor record found" name-only annotation.
+
+    Pre-fix the fold stored ``supersededBy = str(successor)[:200]`` — a
+    200-char prefix that names NO Object — so ``_probe_visible_successors``
+    (``MATCH (o:Object) WHERE o.name IN $names``) matched nothing and the
+    renderer reported the successor missing while it existed and was live.
+    """
+    from tortoise.assembly import (
+        AssemblyShape,
+        AssemblySlices,
+        _probe_visible_successors,
+        docker_walker_port,
+        synthesize_hits,
+    )
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    assert len(long_name) > 200
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "long-src")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "long-src", "supersedes_by": long_name,
+          "evidence": "#5370 regression"}],
+        session_id="s5370", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    # (a) stored VERBATIM — the full successor name, not a 200-char prefix.
+    oid, status, stored = proj.g.query(
+        "MATCH (o:Object {name:'long-src'}) "
+        "RETURN o.id, o.status, o.supersededBy").result_set[0]
+    assert status == "superseded", (status, stored)
+    assert stored == long_name, (
+        f"stored supersededBy is {len(stored)} chars, expected the full "
+        f"{len(long_name)}-char successor name")
+
+    # (b) the ask-path probe verifies it and the renderer emits the verified
+    #     clause — never the false "no successor record found".
+    slices = AssemblySlices(
+        state_rows=tuple(docker_walker_port(sdk).state_rows([oid])),
+        timeline_rows=(), evidence_rows=(), admission={})
+    verified = _probe_visible_successors(sdk, slices)
+    assert long_name in verified, sorted(verified)
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           successors_verified=verified)
+    content = hits[0]["content"]
+    assert "no successor record found" not in content, content
+    assert content.startswith("STATE (long-src): superseded by "), content
+
+    # (c) the same holds on the fired ask path (the probe is WIRED in, not
+    #     merely callable) — evidence carries the verified clause. Pin
+    #     supersededAt BEFORE the question date: the live fold stamps it with
+    #     the current time, and the renderer's as-of rule would otherwise
+    #     (correctly) render the pre-supersession state.
+    proj.g.query("MATCH (o:Object {name:'long-src'}) "
+                 "SET o.supersededAt='2026-09-01T00:00:00Z'")
+    # The fleet shell carries TORTOISE_API_URL; the eval lane needs a LOCAL
+    # graph (same hermetic step as tests/test_ask_sdk.py).
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
+    _install_fake(sdk, monkeypatch, reply="GOLD")
+    res = run_ask_lane(sdk, "what is the current status of long-src?",
+                       question_date=Q_DATE)
+    assert "STATE (long-src): superseded by " in res["evidence"]
+    assert "no successor record found" not in res["evidence"], res["evidence"]
 
 
 def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
@@ -623,7 +698,7 @@ def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
     ag._link_point_about(proj, "pMalformed", ["couch"])
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     _install_fake(sdk, monkeypatch, reply="GOLD")
-    res = sdk.ask("what is the current status of the couch?",
+    res = run_ask_lane(sdk, "what is the current status of the couch?",
                   question_date=Q_DATE)
     assert "unparseable date" in res["evidence"]
     assert res["retrieval_degraded"] is False
@@ -632,10 +707,27 @@ def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
 def test_caps_bind_and_no_starvation(sdk, monkeypatch):
     """Fired caps: assemble_context item cap (40) + 8000-token + 32 KiB byte
     caps bind post-CAP lines; slice-level truncation is authoritative BEFORE
-    the item cap (admission.truncated on the hub)."""
+    the item cap (admission.truncated on the hub).
+
+    The caps are SET here to a known small shape rather than read from the
+    product defaults (#4105 raised the ask-lane defaults to 200/200/200/
+    16000/128000 bytes) - this test pins the cap-BINDING mechanism, and a
+    default change must not silently un-bind it."""
+    from tortoise.retrieval import (
+        ASK_CONTEXT_BYTE_CAP_ENV,
+        ASK_CONTEXT_ITEM_CAP_ENV,
+        ASK_CONTEXT_TOKEN_CAP_ENV,
+        ASK_POOL_SIZE_ENV,
+        ASK_RETRIEVAL_LIMIT_ENV,
+    )
+    monkeypatch.setenv(ASK_RETRIEVAL_LIMIT_ENV, "40")
+    monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, "40")
+    monkeypatch.setenv(ASK_POOL_SIZE_ENV, "120")
+    monkeypatch.setenv(ASK_CONTEXT_TOKEN_CAP_ENV, "8000")
+    monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, "32768")
     ag.build_base_graph(sdk)
     ag.build_hub_graph(sdk, n_points=60)
-    aa = sdk.ask_assembled(
+    aa = run_ask_assembled(sdk, 
         "which came first - the hub-subject or the dog bed?",
         question_date=Q_DATE)
     assert aa.fired is True
@@ -660,7 +752,7 @@ def test_no_starvation_whole_hit_skip_survivor(sdk, monkeypatch):
         id="pGiant", session_id="sess-giant", is_episodic=True,
         status="draft", createdAt="2026-08-11")
     ag._link_point_about(proj, "pGiant", ["couch"])
-    aa = sdk.ask_assembled(
+    aa = run_ask_assembled(sdk, 
         "which came first - the couch or the dog bed?", question_date=Q_DATE)
     assert aa.fired is True
     texts = [h.get("content") or "" for h in aa.post_cap_lines]
@@ -681,7 +773,7 @@ def test_assembly_answer_contract_shape(sdk, monkeypatch):
 
     from tortoise.assembly import AssemblyAnswer
     ag.build_base_graph(sdk)
-    aa = sdk.ask_assembled("what is the current status of the couch?",
+    aa = run_ask_assembled(sdk, "what is the current status of the couch?",
                            question_date=Q_DATE)
     fields = {f.name for f in dataclasses.fields(AssemblyAnswer)}
     assert fields == {"fired", "shape", "question_type", "subjects",
@@ -696,12 +788,12 @@ def test_assembly_answer_contract_shape(sdk, monkeypatch):
     # per-namespace reader cache makes the FIRST reader the model for the
     # namespace, so pin the answer against the installed fake's reply.
     _install_fake(sdk, monkeypatch, reply="READER ANSWER")
-    aa2 = sdk.ask_assembled("what is the current status of the couch?",
+    aa2 = run_ask_assembled(sdk, "what is the current status of the couch?",
                             question_date=Q_DATE,
                             _reader_factory=lambda: FakeReader(
                                 reply="READER ANSWER", tokens_out=6))
     assert aa2.answer == "READER ANSWER"
-    aa3 = sdk.ask_assembled("compare the couch and the dog bed, which "
+    aa3 = run_ask_assembled(sdk, "compare the couch and the dog bed, which "
                             "should i keep?", question_date=Q_DATE)
     assert aa3.fired is False and aa3.answer is None and aa3.evidence == ""
 
@@ -712,7 +804,7 @@ def test_hosted_delegated_client_raises(sdk, monkeypatch):
     from tortoise.exceptions import AskRetrievalUnavailable
     monkeypatch.setenv("TORTOISE_API_URL", "https://example.test")
     with pytest.raises(AskRetrievalUnavailable):
-        sdk.ask_assembled("what is the current status of the couch?")
+        run_ask_assembled(sdk, "what is the current status of the couch?")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
 
 
@@ -729,7 +821,7 @@ def test_contentless_resolved_subjects_legacy_fallback(sdk, monkeypatch):
     on = _ask(sdk, monkeypatch, q, flag_on=True)
     # fired-but-empty must fall through to legacy (no empty-block reader call)
     assert on["evidence"] == off["evidence"]
-    aa = sdk.ask_assembled(q, question_date=Q_DATE)
+    aa = run_ask_assembled(sdk, q, question_date=Q_DATE)
     assert aa.fired is False
 
 
@@ -753,14 +845,78 @@ def test_raw_object_hit_flat_superseded_by_guard(sdk, monkeypatch):
     monkeypatch.setattr(amod, "synthesize_hits", _poison)
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
     with pytest.raises(AskRetrievalUnavailable):
-        sdk.ask("what is the current status of the couch?",
+        run_ask_lane(sdk, "what is the current status of the couch?",
                 question_date=Q_DATE)
 
 
 def test_r14_drift_guard(sdk, monkeypatch):
-    """R14: _assemble_connected is referenced ONLY by ask()'s branch and
-    ask_assembled (exactly two CALL sites in sdk.py)."""
-    src = Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py"
-    text = src.read_text()
-    assert text.count("_assemble_connected(") == 2, \
-        text.count("_assemble_connected(")
+    """R14 (#3849): the connected-assembly branch is reachable from BOTH
+    eval-lane entry points. A BEHAVIOURAL guard, not a source-text grep (the
+    grep the #3849 move invalidated): with the flag ON both entry points fire
+    the assembled render, and a poisoned synthesizer raises
+    AskRetrievalUnavailable from both."""
+    import tortoise.assembly as amod
+    from tortoise.exceptions import AskRetrievalUnavailable
+    ag.build_base_graph(sdk)
+
+    # 1. both entry points reach _assemble_connected and fire the render
+    legacy = _ask(sdk, monkeypatch, "what is the current status of the couch?",
+                  flag_on=True)
+    assert legacy["evidence"] == GOLD_FIRED_CURRENT, legacy["evidence"]
+    aa = run_ask_assembled(
+        sdk, "what is the current status of the couch?", question_date=Q_DATE)
+    assert aa.fired is True, "ask_assembled must reach _assemble_connected"
+    assert aa.shape == "current-state"
+
+    # 2. an assembler-stage raise surfaces from BOTH — the drift this guards
+    # is a refactor leaving only ONE entry point wired to the branch
+    def _poison(*args, **kwargs):
+        raise RuntimeError("poisoned synthesize")
+
+    monkeypatch.setattr(amod, "synthesize_hits", _poison)
+    with pytest.raises(AskRetrievalUnavailable):
+        _ask(sdk, monkeypatch, "what is the current status of the couch?",
+             flag_on=True)
+    with pytest.raises(AskRetrievalUnavailable):
+        run_ask_assembled(
+            sdk, "what is the current status of the couch?",
+            question_date=Q_DATE)
+
+
+def test_long_successor_sdk_object_read_returns_it_verbatim(sdk):
+    """#5370 review round 3 (P2): the issue's verification table names the
+    SDK OBJECT READ (``tortoise_fts_query(entity_type='object')``) as a
+    surface where ``superseded_by`` must equal the stored FULL successor
+    name. Every other #5370 test reads the property through Cypher directly,
+    so that agent-facing contract was left unpinned.
+
+    The read path is ``sdk.py``'s ``entity_type == "object"`` branch, which
+    echoes ``n.supersededBy`` unchanged — this test exists so a future
+    truncation introduced THERE (rather than in the fold) cannot land
+    silently, which the Cypher-level tests could not catch.
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("r" * 240)
+    assert len(long_name) > 200
+    sdk.create_entity("object", "read-src")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        sdk._get_proj(), sdk,
+        [{"superseded": "read-src", "supersedes_by": long_name,
+          "evidence": "#5370 sdk object read"}],
+        session_id="s5370_read", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    hits = sdk.tortoise_fts_query("read-src", entity_type="object",
+                                  limit=25)
+    hit = next((h for h in hits if h.get("content") == "read-src"), None)
+    assert hit is not None, (
+        "the SDK object read returned no hit for the folded Object: "
+        f"{[h.get('content') for h in hits]!r}")
+    got = hit.get("superseded_by", "")
+    assert got == long_name, (
+        f"the SDK object read returned {len(got)} chars, expected the full "
+        f"{len(long_name)}-char successor name")

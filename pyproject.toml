@@ -17,6 +17,13 @@ dependencies = [
     # hosted_api.py analytics + tortoise.billing StripeClient). requirements.txt
     # is generated from this file, so the floor must live HERE (#494).
     "httpx>=0.27",
+    # httpcore is imported DIRECTLY by tortoise/cimd.py, which needs its
+    # `network_backend` seam to pin the CIMD fetch socket to a vetted address
+    # (#2847). Promoted from transitive (httpx's own dependency, same rule as
+    # redis below) so a future httpx bump cannot drop it silently. The floor
+    # matches httpx 0.28's resolved httpcore line, whose NetworkBackend / sync
+    # ConnectionPool API the pin is written against.
+    "httpcore>=1.0.9",
     "uvicorn>=0.23.0",
     "numpy>=1.24",
     "scipy>=1.10",
@@ -123,7 +130,24 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # Epic #2080 seams wave-1: the per-harness hook scripts ship with
           # the wheel — `tortoise install` resolves volunteer-turn.sh from
           # package __file__, so site-package installs need the real script.
-          "claude-hooks/*.sh", "claude-hooks/*.md"]
+          "claude-hooks/*.sh", "claude-hooks/*.md",
+          # #3818: the Codex capture seam ships too — `tortoise install codex`
+          # copies the hook out of the PACKAGE into $CODEX_HOME/hooks, so a
+          # wheel without it fails the install with "shipped capture hook not
+          # found".
+          "codex-hooks/*.sh",
+          # #3819: the Cursor capture seam ships too — `tortoise install
+          # cursor` copies the hook out of the PACKAGE into ~/.cursor/hooks,
+          # so a wheel without it fails the install with "shipped capture hook
+          # not found". (Cursor has NO config-dir env var: `CURSOR_HOME` does
+          # not exist in Cursor 3.20.21.)
+          "cursor-hooks/*.sh",
+          # #3808: the same is true of the Pi capture seam — `tortoise install
+          # pi` copies this extension out of the PACKAGE (not the repo), so a
+          # wheel without it fails the install with "shipped capture extension
+          # not found". Named exactly (not *.ts) so the behavioural test file is
+          # NOT shipped to users.
+          "pi-hooks/tortoise-capture.ts"]
 # Quoted key (TOML dot-key): ships every packs/<ns>/manifest.yaml as
 # tortoise/packs/<ns>/manifest.yaml in the wheel (recursive glob — a pack
 # added by a later slice, e.g. #1933 agent-ops, needs no pyproject change).
@@ -220,6 +244,8 @@ markers = [
     "v4_conditional: post-baseline follow-up run assertions (E6 #1538, ⛔ G3) — window-indexed restore + recall measurement, skipped in V3",
     "embedded_only: epic #1647 (D-2) — embedded-only behavior (EmbeddedStoreBusyError); skips visibly when TORTOISE_DB_URI is set",
     "live: live-API probe tests (Task 1 #1787) — excluded from the deterministic suite with -m 'not live'",
+    "integration: opt-in integration tests needing live credentials or production access (e.g. a real RESEND_API_KEY, ALLOW_PROD) — excluded from the deterministic lanes with -m 'not integration' (#4750)",
+    "blog_write: blog E2E tests that WRITE to the target (create/publish/unpublish) — excluded from the every-deploy job with -m 'not blog_write' (#4220)",
 ]
 
 [build-system]

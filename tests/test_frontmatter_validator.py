@@ -53,15 +53,17 @@ def enable_validation(monkeypatch):
 # ── required-field sets ────────────────────────────────────────────────
 
 def test_session_required_fields():
+    # D10 (ONTOLOGY v3.15 §4.4): doc_status is retired — no longer required.
     assert SESSION_REQUIRED_FIELDS == (
-        "sessionId", "topics", "summary", "eventId", "doc_status",
+        "sessionId", "topics", "summary", "eventId",
         "agent", "message_count",
     )
 
 
 def test_document_required_fields():
+    # D10 (ONTOLOGY v3.15 §4.4): doc_status is retired — no longer required.
     assert DOCUMENT_REQUIRED_FIELDS == (
-        "title", "doc_status", "topics", "summary", "sessionId",
+        "title", "topics", "summary", "sessionId",
     )
 
 
@@ -93,7 +95,6 @@ def test_missing_required_fields_return_messages():
     msgs = validate_frontmatter(fm, kind="session")
     assert msgs == [
         "missing required field: eventId",
-        "missing required field: doc_status",
         "missing required field: agent",
         "missing required field: message_count",
     ]
@@ -160,15 +161,15 @@ def test_session_id_and_event_id_must_be_nonempty_strings():
                validate_frontmatter(base))
 
 
-def test_doc_status_lenient_nonempty_string():
-    # No canonical doc_status vocabulary exists (draft/captured/extracted
-    # observed in ingest.py; POINT_STATUS_VALUES is Point status) — the check
-    # is a lenient non-empty string, so unknown-but-sane values pass.
+def test_doc_status_retired_not_validated():
+    # D10 (ONTOLOGY v3.15 §4.4): doc_status is RETIRED — it is no longer in
+    # _STRING_FIELDS, so even a non-string value produces no validation
+    # message (the field is ignored, not silently accepted as a string).
     base = dict(VALID_SESSION_FM)
     base["doc_status"] = "extracted"
     assert validate_frontmatter(base) == []
     base["doc_status"] = 7
-    assert any("invalid doc_status" in m for m in validate_frontmatter(base))
+    assert not any("doc_status" in m for m in validate_frontmatter(base))
 
 
 def test_message_count_must_be_nonnegative_integer():
@@ -199,14 +200,16 @@ def test_validation_enabled_default_off(monkeypatch):
 
 
 def test_validation_enabled_flag_on(monkeypatch):
-    monkeypatch.setenv(TORTOISE_VALIDATE_FRONTMATTER, "1")
-    assert validation_enabled() is True
+    # #4097: the gate resolves through the declared truthy contract, so every truthy
+    # spelling enables it (the pre-#4097 `== "1"` match silently ignored these).
+    for val in ("1", "true", "TRUE", "True", "yes", "on", "ON"):
+        monkeypatch.setenv(TORTOISE_VALIDATE_FRONTMATTER, val)
+        assert validation_enabled() is True, val
 
 
 def test_validation_enabled_flag_off_values(monkeypatch):
-    # Seam mirrors TORTOISE_SESSION_LLM_MOCK: ONLY "1" enables — any other
-    # value (including case variants and "true") is off.
-    for val in ("0", "", "false", "no", "off", "TRUE", "true"):
+    # #4097: the declared contract's OFF set — unset/blank/falsy/garbage.
+    for val in ("0", "", "false", "no", "off", "garbage"):
         monkeypatch.setenv(TORTOISE_VALIDATE_FRONTMATTER, val)
         assert validation_enabled() is False, val
 

@@ -50,6 +50,7 @@ import requests
 
 # #2185 seam: the canonical usage-sink fire helper (models.py is dependency-
 # free of model_adapters — this one-way import cannot cycle).
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.models import _emit_usage_sink
 
 
@@ -354,6 +355,66 @@ def _http_status(exc: BaseException) -> int | None:
     return None
 
 
+# Response-body signatures that identify a provider-KEY limit (this
+# credential's budget/quota is spent) rather than a credential/authorization
+# failure. Matched case-insensitively against the HTTP response body.
+#
+# OpenRouter is the documented case (#4860): an exhausted key budget is HTTP
+# **403** with ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``
+# — the key is VALID, its budget is spent, so rotating is correct. A wrong
+# credential is ALSO reported as 401/403; its body carries no limit signature
+# (e.g. "No auth credentials found"), so it stays FATAL and never rotates.
+#
+# Vocabulary (each string is the provider's own phrasing; anything not matched
+# stays a credential/config failure — fail-closed):
+#   * "key limit exceeded"    — OpenRouter key budget (monthly/total/free)
+#   * "insufficient_quota"    — OpenAI-compatible quota error code
+#   * "quota exceeded"        — generic quota phrasing
+#   * "credit limit exceeded" — generic credit phrasing
+#   * "limit exceeded"        — generic budget phrasing; OpenRouter's own
+#     message contains "key limit exceeded". Deliberately BROAD on a 403: it
+#     also matches "rate limit exceeded"/"organization limit exceeded"/
+#     "token limit exceeded". Those are provider-side LIMIT conditions, not
+#     credential bugs — rotation is bounded and re-raises once every leg is
+#     spent, so the worst case is a slower fatal, never a masked bad key (no
+#     credential-failure body carries this phrase).
+_KEY_LIMIT_SIGNATURES = (
+    "key limit exceeded",
+    "insufficient_quota",
+    "quota exceeded",
+    "credit limit exceeded",
+    "limit exceeded",
+)
+
+
+def _http_response_body(exc: BaseException) -> str:
+    """Best-effort lowercased response body of an HTTP exception, or "".
+
+    ``raise_for_status()`` attaches the response to ``requests.HTTPError``
+    (``err.response`` is the ``requests.Response``; ``.text`` is its body),
+    and ``urllib.error.HTTPError`` is itself file-like (``.read()``). This
+    never raises (a body-read failure must not mask the ORIGINAL provider
+    error) and never hides a real status: no recoverable body → "" — which
+    is why a signature-less 403 stays fatal."""
+    try:
+        for obj in (getattr(exc, "response", None), exc):
+            if obj is None:
+                continue
+            text = getattr(obj, "text", None)
+            if isinstance(text, str) and text.strip():
+                return text.lower()
+        read = getattr(exc, "read", None)
+        if callable(read):
+            raw = read()
+            if isinstance(raw, (bytes, bytearray)):
+                return bytes(raw).decode("utf-8", "replace").lower()
+            if isinstance(raw, str):
+                return raw.lower()
+    except Exception:  # a body-read failure must never mask the provider error
+        return ""
+    return ""
+
+
 def _is_network_oserror(exc: BaseException) -> bool:
     """OSError with a network-transport errno (connection reset/refused/route
     down/timeout/pipe) — the transient-under-load class (#1350)."""
@@ -404,18 +465,35 @@ def is_fatal(exc: BaseException) -> bool:
 
 
 def is_billing_exhausted(exc: BaseException) -> bool:
-    """True → HTTP 402 (Payment Required) — the provider's credits ran out.
+    """True → the provider's OWN budget/limit for THIS key is spent.
 
-    The one 'fatal' class that is PROVIDER-specific (a balance emptied
-    mid-run), not config-inherent: auth (401/403) means the credential is
-    wrong everywhere, config 4xx means the request shape is wrong everywhere
-    — rotation would just retry the same bug. A 402 is a runtime condition
-    of THAT provider; ``RotatingModel`` cooldowns it and rotates to an
-    alternative so the run continues (#1951). Deliberately NOT part of the
-    M2/M3 taxonomy export contract — ``is_fatal``/``classify_llm_error``
-    semantics are unchanged for the retry/abort consumers (run.py M3,
-    extractor_v2); only the rotation pool consults this hook."""
-    return _http_status(exc) == 402
+    The 'fatal' class that is PROVIDER-specific (a balance/quota emptied
+    mid-run), not config-inherent: a wrong credential (401, or a signature-
+    less 403), and a config 4xx, mean the bug is the same on every leg —
+    rotation would retry it and mask the real cause. Two statuses are
+    provider-specific and rotation-eligible:
+
+      * **HTTP 402** (Payment Required) — credits ran out (#1951).
+      * **HTTP 403 carrying a key-limit body signature** (#4860) —
+        OpenRouter reports an exhausted key budget as 403
+        ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``,
+        NOT 402. The BODY, not the status, is the discriminator
+        (``_KEY_LIMIT_SIGNATURES``); a 403 whose body carries no limit
+        signature stays FATAL (owner constraint: never blanket-treat 403).
+
+    ``RotatingModel`` cooldowns the lane and rotates to an alternative so
+    the run continues; with no alternative lane it raises loud
+    (``RotatingModel`` n==1 guard). Deliberately NOT part of the M2/M3
+    taxonomy export contract — ``is_fatal``/``classify_llm_error`` semantics
+    are unchanged for the retry/abort consumers (run.py M3, extractor_v2);
+    only the rotation pool consults this hook."""
+    status = _http_status(exc)
+    if status == 402:
+        return True
+    if status == 403:
+        body = _http_response_body(exc)
+        return any(sig in body for sig in _KEY_LIMIT_SIGNATURES)
+    return False
 
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
@@ -882,8 +960,13 @@ def _should_send_json_mode(system: str | None, user: str | None) -> bool:
 
     True only when TORTOISE_JSON_MODE is enabled (default "1", read per
     call — the toggle can flip mid-run) AND the prompt requests JSON
-    (delegated to ``_prompt_requests_json``)."""
-    return (os.environ.get("TORTOISE_JSON_MODE", "1") == "1"
+    (delegated to ``_prompt_requests_json``).
+
+    #4097: the env read goes through the declared truthy contract, so
+    ``TORTOISE_JSON_MODE=true``/``yes``/``on`` now enables it — previously the
+    exact ``== "1"`` match made those spellings silently DISABLE a default-ON
+    mode."""
+    return (is_truthy(os.environ.get("TORTOISE_JSON_MODE", "1"))
             and _prompt_requests_json(system, user))
 
 
@@ -925,6 +1008,13 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
             json_mode=json_mode)
     return OpenRouterModel(model_id, max_tokens=max_tokens,
                            temperature=temperature, json_mode=json_mode)
+
+
+# #4992: eligibility reason kinds returned by
+# ``RotatingModel._lane_ineligible_reason``. Named constants so the
+# exhaustion-message branch cannot drift from the reason text it classifies on.
+_COOLDOWN_REASON = "in cooldown"
+_DOWNED_SKIP_REASON = "session-downed (a healthy lane is preferred)"
 
 
 class RotatingModel:
@@ -1001,29 +1091,22 @@ class RotatingModel:
         return self.route or (self.providers[0].provider if self.providers else "none")
 
     def complete(self, *, system: str, user: str,
-                 max_tokens: int | None = None) -> str:
+                 max_tokens: int | None = None) -> str | None:
         import time
         now = time.time()
         n = len(self.providers)
         if n == 0:
             raise RuntimeError("RotatingModel with no providers")
         last_err: Exception | None = None
-        for _ in range(n * 3):  # bounded attempts: each provider at most ~3x per call
-            idx = self._pick()
-            p = self.providers[idx]
-            if self._cooldowns.get(p.provider, 0.0) > now:
-                continue
-            if p.provider in self._downed:
-                # #2384 option A half-open probe: a twice-stalled lane is out
-                # of rotation for the session UNLESS no healthy lane remains
-                # (its own cooldown lapsed) — then a single probe re-admits it
-                # and a probe success (below) restores it. Never burn probes
-                # against a downed lane while a healthy one is usable.
-                if any(q.provider not in self._downed
-                       and self._cooldowns.get(q.provider, 0.0) <= now
-                       for q in self.providers):
-                    continue
-                self._downed.discard(p.provider)
+
+        def _attempt(p) -> tuple[bool, str | None]:
+            """Call one admitted lane. Returns ``(True, output)`` when the lane
+            answered — ``output`` may legitimately be None (a provider can
+            return a null/empty completion) — or ``(False, None)`` after a
+            rotation-eligible failure, having recorded the lane's cooldown and
+            ``last_err``. Auth/config-4xx faults re-raise here, before any
+            cooldown write (#1951)."""
+            nonlocal last_err
             try:
                 self._in_flight = p
                 out = p.complete(system=system, user=user, max_tokens=max_tokens)
@@ -1040,7 +1123,7 @@ class RotatingModel:
                 self.last_completion_tokens = getattr(p, "last_completion_tokens", 0)
                 self.last_cost_usd = getattr(p, "last_cost_usd", None)
                 self.model = getattr(p, "id", self.model)
-                return out
+                return True, out
             except Exception as e:
                 last_err = e
                 self._in_flight = None  # no longer mid-call on this adapter
@@ -1051,8 +1134,109 @@ class RotatingModel:
                     raise  # no alternative provider — fail loud, no infinite loop
                 self._cooldowns[p.provider] = now + self.cooldown_s
                 self.errors.append(f"{p.provider}: {type(e).__name__}: {e}")
+                return False, None
+
+        # Phase 1 — weighted rotation within the bounded budget. The bound is a
+        # BUDGET, not a coverage guarantee: a draw that lands on a skipped lane
+        # spends an attempt without advancing the rotation to another lane.
+        for _ in range(n * 3):  # bounded draws: each provider ~3x per call
+            p = self.providers[self._pick()]
+            if not self._admit(p, now):
+                continue
+            ok, out = _attempt(p)
+            if ok:
+                return out
+
+        # Phase 2 — deterministic reachability pass (#4992). The random budget
+        # above has NO progress property, so it can spend every draw on a
+        # skipped lane and never reach one the eligibility test admits; the
+        # half-open-probe lane was exactly that case (measured: 6/500 seeds
+        # raised "all 2 providers in cooldown" about a lane that was NOT
+        # cooled). Walk the pool in declaration order AND re-scan after every
+        # failed attempt: eligibility is state-dependent — a lane skipped as
+        # "downed while a healthy lane exists" becomes admissible the moment
+        # that healthy lane is cooldowned — so a single forward pass can still
+        # miss it (measured 1.5% on the issue's 2-lane shape before the
+        # re-scan). ``attempted`` bounds the pass: it grows by >=1 lane per
+        # round and is capped by the pool size, so Phase 2 makes at most n real
+        # calls (Phase 1 + Phase 2 <= 4n) and never re-tries a lane WITHIN the
+        # pass. (With cooldown_s <= 0 a lane Phase 1 failed is never actually
+        # cooled, so the pass may try it once more — the 4n ceiling still holds.)
+        attempted: set[str] = set()
+        while True:
+            progressed = False
+            for p in self.providers:
+                if p.provider in attempted:
+                    continue
+                if not self._admit(p, now):
+                    continue
+                attempted.add(p.provider)
+                progressed = True
+                ok, out = _attempt(p)
+                if ok:
+                    return out
+            if not progressed:
+                break
+
+        # Nothing was served. last_err set => every eligible lane was tried and
+        # failed (re-raise that lane-specific error). last_err is None => no
+        # lane was eligible at all; the message is DERIVED from the eligibility
+        # evaluation, never asserted (#4992).
         raise last_err if last_err is not None else RuntimeError(
-            f"all {n} providers in cooldown")
+            self._no_eligible_message(now))
+
+    def _lane_ineligible_reason(self, p, now: float) -> str | None:
+        """Why ``p`` cannot serve this call, or None when it can (#4992).
+
+        The single source of truth for eligibility — shared by the weighted
+        rotation loop, the deterministic reachability pass, and the exhaustion
+        message — so the message can only state a reason this test actually
+        established. It mirrors the two skip branches: a cooled lane, and a
+        session-downed lane while a healthy alternative exists. A downed lane
+        with NO healthy alternative is eligible (the #2384 half-open probe)."""
+        if self._cooldowns.get(p.provider, 0.0) > now:
+            return _COOLDOWN_REASON
+        if p.provider in self._downed and any(
+                q.provider not in self._downed
+                and self._cooldowns.get(q.provider, 0.0) <= now
+                for q in self.providers):
+            return _DOWNED_SKIP_REASON
+        return None
+
+    def _admit(self, p, now: float) -> bool:
+        """Eligibility gate for ``complete``: False for a lane that must be
+        skipped; True for a lane to attempt — re-admitting a probe-eligible
+        downed lane (the #2384 half-open probe) as a side effect."""
+        if self._lane_ineligible_reason(p, now) is not None:
+            return False
+        if p.provider in self._downed:
+            self._downed.discard(p.provider)
+        return True
+
+    def _no_eligible_message(self, now: float) -> str:
+        """The exhaustion message (#4992), derived from the eligibility test.
+
+        "all N providers in cooldown" is claimed ONLY when every lane is
+        genuinely cooled; any lane excluded for a different reason is named as
+        such, because "wait out the cooldown" and "restore/probe the downed
+        lane" are different remedies. The pre-fix code ASSERTED cooldown in the
+        half-open-probe case, where the uncooled lane was merely one the random
+        budget never drew.
+
+        Reached from ``complete`` only when ``last_err is None`` — and the
+        reachability pass makes that exactly "every lane cooled", since any
+        uncooled lane is admissible (directly, or as the #2384 half-open probe).
+        The per-lane form below is therefore a direct-call defense: the message
+        must be able to name a non-cooldown exclusion without inventing one, and
+        it must never label a lane with a reason the eligibility test did not
+        return."""
+        reasons = [(p.provider, self._lane_ineligible_reason(p, now))
+                   for p in self.providers]
+        if all(reason == _COOLDOWN_REASON for _name, reason in reasons):
+            return f"all {len(self.providers)} providers {_COOLDOWN_REASON}"
+        detail = "; ".join(f"{name}: {reason}"
+                           for name, reason in reasons if reason is not None)
+        return f"no eligible provider to serve this call: {detail}"
 
     def _pick(self) -> int:
         """Weighted round-robin: pick the next provider by cumulative weight

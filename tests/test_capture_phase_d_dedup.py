@@ -139,6 +139,28 @@ def test_m2_distinct_claims_stay_new(sdk, monkeypatch):
     assert len(_claim_nodes(sdk._get_proj())) == len(res["points"])
 
 
+def test_m2_load_bearing_connective_swap_keeps_both_claims(sdk, monkeypatch):
+    """A swapped operator is a RIVAL, so the in-capture seam must not fold it.
+
+    `and`/`or` are frame words by their commonest role, so before the
+    pair-level connective check both claims carried one content multiset,
+    `rephrase_hit` returned a hit and the seam reached its `DETACH DELETE`
+    (#5139).  Both claims must now survive as NEW — the assertion is on the
+    node count, which is what the seam destroys.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "We ship and test the build."},
+        {"role": "assistant", "content": "We ship or test the build."},
+        {"role": "user", "content": "ok"},
+    ]
+    res = sdk.capture_session(conv)
+    verdicts = [p["dedup"] for p in res["points"]]
+    assert verdicts == [DEDUP_NEW, DEDUP_NEW], verdicts
+    claims = _claim_nodes(sdk._get_proj())
+    assert len(claims) == 2, f"the rival must not be deleted — got {len(claims)}"
+
+
 def test_m2_operator_wired_repeat_kept_distinct_with_warning(sdk, monkeypatch):
     """Honest residual (anti-gaming): a duplicate whose minted node engaged
     operator wiring is NOT folded (folding would orphan the cue-gated edge) —
@@ -162,6 +184,35 @@ def test_m2_operator_wired_repeat_kept_distinct_with_warning(sdk, monkeypatch):
     assert verdicts == [DEDUP_NEW, DEDUP_NEW], verdicts
     assert any("not deduped" in w for w in res["warnings"]), res["warnings"]
     assert len(_claim_nodes(sdk._get_proj())) == 2, "operator-wired duplicate kept — 2 claim nodes"
+
+
+def test_m2_one_sided_state_drop_keeps_both_claims(sdk, monkeypatch):
+    """A one-sided state word is a RIVAL, so the in-capture seam must not fold
+    it (#5134).
+
+    "the flag for the rollout is off" / "the flag for the rollout" carries one
+    content multiset once the state word is read as a detail added to the
+    prior, so `rephrase_hit` returned a hit and the seam then `DETACH DELETE`d
+    the folded rival — the state was destroyed.  Both claims must now survive
+    as NEW; the assertion is on the NODE COUNT, which is what the seam
+    destroys.
+
+    The m2 lane is the one that resolves through `rephrase_hit` — the v2
+    content-addressed seam folds only byte-identical content, so a v2-lane pin
+    would pass with the fix reverted and assert nothing (it was written that
+    way first, and the sabotage run caught it).
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The flag for the rollout is off."},
+        {"role": "assistant", "content": "The flag for the rollout."},
+        {"role": "user", "content": "ok"},
+    ]
+    res = sdk.capture_session(conv)
+    verdicts = [p["dedup"] for p in res["points"]]
+    assert verdicts == [DEDUP_NEW, DEDUP_NEW], (verdicts, res["points"])
+    claims = _claim_nodes(sdk._get_proj())
+    assert len(claims) == 2, f"the rival must not be deleted — got {len(claims)}"
 
 
 # ── v2 lane: content-addressed re-ingest idempotency ───────────────────────
@@ -292,6 +343,43 @@ def test_v2_noop_gate_only_surfaces_capture_provenanced_identical(sdk, monkeypat
     res2 = sdk.capture_session([{"role": "user", "content": "hello"}])
     assert res2["points"] == [], res2["points"]
     assert any("not surfaced" in w for w in res2["warnings"]), res2["warnings"]
+
+
+def test_v2_fold_lane_reports_stored_passthrough_props(sdk, monkeypatch):
+    """#2949 (review F3): a surfaced consolidation fold is a dedup HIT — the
+    same lane class as the points-loop resolution — so it reports the
+    canonical's STORED passthrough props, not a hardcoded {}. Emitting {} for
+    the SAME canonical the points loop describes with its four E3 fields was
+    the asymmetry this PR set out to remove.
+
+    MUTATION THAT REDS THIS TEST: restore ``"props": {}`` on the fold lane.
+    """
+    import tortoise.extractor_v2 as ev2
+    content = "the fold lane must report the canonical's stored props"
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _stub_extractor([content]))
+    first = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert len(first["points"]) == 1, first["points"]
+    canonical_id = first["points"][0]["id"]
+    assert canonical_id.startswith("pt_"), canonical_id
+    # The created canonical stores the stub's quote and capture provenance.
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.quote, n.eventId",
+        params={"id": canonical_id}).result_set[0]
+    assert row[0] == content[:200], row
+    assert row[1], "capture-minted canonical must carry provenance (eventId)"
+
+    # Re-capture with NO payload points and an 'identical' fold onto it.
+    fold = _stub_extractor([], noops=[
+        {"point_id": canonical_id, "reason": "identical",
+         "overlap": 1.0, "evidence": "exact"}])
+    monkeypatch.setattr(ev2, "extract_session_v2", fold)
+    second = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert len(second["points"]) == 1, second["points"]
+    entry = second["points"][0]
+    assert entry["id"] == canonical_id, entry
+    assert entry["dedup"] == DEDUP_CONTENT_HASH_HIT, entry
+    assert entry["props"] == {"quote": content[:200]}, entry
 
 
 # ── EP pass targeting (first-time calibration of folded canonicals) ─────────

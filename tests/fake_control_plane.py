@@ -6,13 +6,13 @@ the shared resolution logic (resolve_api_key, user_memberships, ...) runs
 verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 (plan Task 5 / P1-3): an adapter exposing query() over in-memory rows.
 
-Filter ops: eq | neq | is (None → IS NULL) | gt | lt | lte (all ordered
+Filter ops: eq | neq | is (None → IS NULL) | gt | gte | lt | lte (all ordered
 ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
 rows; POST appends a row (return=representation semantics); DELETE
 removes matching rows (mirrors PostgREST service-role deletes, #302).
 
 ``rpc(fn, body)`` simulates PostgREST RPC calls — ``provision_team``
-(#765 plan Task 8: the atomic teams + team_memberships + api_keys upsert,
+(#765 plan Task 8: the atomic teams + org_memberships + api_keys upsert,
 migration 0010; #1716: all-NULL key params → keyless provision, NO
 api_keys row) plus the #1709 agent-signup-token trio
 (``provision_team_with_token`` / ``resolve_signup_token`` /
@@ -32,7 +32,7 @@ from typing import Any
 # the fake raise the SAME RuntimeError surface the real query() raises, so
 # a future unsanitized call site fails CI instead of silently no-matching
 # ("CI green while prod 500s"). Extendable registry (mirrors missing_columns).
-UUID_FILTER_COLUMNS: set[tuple[str, str]] = {("team_memberships", "user_id")}
+UUID_FILTER_COLUMNS: set[tuple[str, str]] = {("org_memberships", "user_id")}
 
 
 def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | None) -> None:
@@ -65,6 +65,43 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
 _FAULT_CPS: list = []
 
 
+def _metering_period_label(period_start) -> str | None:
+    """The DERIVED ``'YYYY-MM'`` label the SQL RPC writes for a window start
+    (``to_char(period_start AT TIME ZONE 'UTC', 'YYYY-MM')``). #3825: a
+    derived label, a pure function of the key — never the row key itself."""
+    dt = _as_dt(period_start)
+    if dt is None:
+        return None
+    return f"{dt.year}-{dt.month:02d}"
+
+
+def _as_dt(value):
+    """Parse a stored metering instant for the fake's SQL-semantics
+    comparisons. ``None`` in → ``None`` out (a row with no window cannot match
+    a windowed read). An epoch int is accepted because the registry lane stores
+    whatever the Stripe webhook wrote, and a naive string is read as UTC — the
+    fake emulates a ``timestamptz`` column and every caller in this repo writes
+    UTC."""
+    from datetime import datetime
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 class FakeControlPlane:
     def __init__(self, tables: dict[str, list[dict]] | None = None,
                  *, missing_columns: dict[str, set[str]] | None = None,
@@ -91,6 +128,16 @@ class FakeControlPlane:
         # partial unique index is the READ-COMMITTED backstop; the fake must
         # be atomic under the two-tab threading test).
         self._identity_lock = threading.Lock()
+        # #4355: a conditional PATCH (the rotate CAS
+        # ``UPDATE ... WHERE id = :id AND revoked_at IS NULL``) is ONE atomic
+        # statement in Postgres — two concurrent statements serialize on the
+        # row. The in-memory check-then-write below is NOT atomic under
+        # threads (the `if _matches(...)` and the `r.update(...)` are separate
+        # bytecodes a switch can land between), so two racing claims could
+        # BOTH observe the row live and both report success — making a genuine
+        # two-thread CAS test nondeterministic instead of red. Serialize the
+        # write to model the statement the fake stands in for.
+        self._patch_lock = threading.Lock()
         # #2863: fault injectors, consumed in order (see fail_query/_take_fault).
         self._faults: list[dict] = []
 
@@ -98,15 +145,26 @@ class FakeControlPlane:
         self.tables.setdefault(table, []).extend(rows)
         return self
 
-    def _claim_migrate_created_by(self, team_id: str, user_id: str) -> None:
+    def rpc_value(self, fn: str, body: dict | None = None):
+        """Scalar-returning RPC — the read counterpart of :meth:`rpc`
+        (``SupabaseControlPlane.rpc_value``). #3825: ``metering_cohort_spend``
+        is reached through this method, so a test that asserts the aggregate
+        over a WINDOW needs it on the double; the RPC emulation in :meth:`rpc`
+        already RETURNS the scalar, so this delegates and records the call
+        exactly once in ``rpc_calls``.
+        """
+        return self.rpc(fn, body)
+
+    def _claim_migrate_created_by(self, org_id: str, user_id: str) -> None:
         """#1765: claim attributes anon-/reg- created_by keys in the team to
         the claimer (parenthesized predicate parity — team-scoped)."""
         for k in self.tables.get("api_keys", []):
             cb = str(k.get("created_by") or "")
-            if k.get("team_id") == team_id and (cb.startswith("anon-") or cb.startswith("reg-")):
+            if k.get("org_id") == org_id and (cb.startswith("anon-") or cb.startswith("reg-")):
                 k["created_by"] = str(user_id)
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         """Simulate provision_team (migration 0010) over the in-memory rows.
 
         Mirrors the real SECURITY DEFINER function's observable effects:
@@ -124,30 +182,30 @@ class FakeControlPlane:
         if fn == "abuse_suspend":
             # Mirrors the SQL: set suspended_at only when NULL; flagged_at is
             # NOT touched (the engine's flag-episode state is event-derived).
-            tid = (body or {}).get("p_team_id")
-            for t in self.tables.get("teams", []):
+            tid = (body or {}).get("p_org_id")
+            for t in self.tables.get("organizations", []):
                 if t.get("id") == tid and t.get("suspended_at") is None:
                     from datetime import datetime, timezone
                     t["suspended_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             from datetime import datetime, timezone
             self.tables.setdefault("abuse_events", []).append(
-                {"team_id": tid, "event_type": "suspend", "weight": 1,
+                {"org_id": tid, "event_type": "suspend", "weight": 1,
                  "created_at": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
             return None
         if fn == "abuse_unsuspend":
-            tid = (body or {}).get("p_team_id")
-            for t in self.tables.get("teams", []):
+            tid = (body or {}).get("p_org_id")
+            for t in self.tables.get("organizations", []):
                 if t.get("id") == tid:
                     t["suspended_at"] = None
                     t["flagged_at"] = None
             from datetime import datetime, timezone
             now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             events = self.tables.setdefault("abuse_events", [])
-            events.append({"team_id": tid, "event_type": "unsuspend",
+            events.append({"org_id": tid, "event_type": "unsuspend",
                            "weight": 1, "created_at": now_iso})
             # end every flag episode (mirrors the SQL)
             for rule in ("point_create", "key_create"):
-                events.append({"team_id": tid, "event_type": "flag_clear",
+                events.append({"org_id": tid, "event_type": "flag_clear",
                                "rule": rule, "weight": 1,
                                "created_at": now_iso})
             return None
@@ -155,31 +213,122 @@ class FakeControlPlane:
             # Emulate migration 0014's SQL function: atomic upsert + increment.
             p = body or {}
             rows = self.tables.setdefault("metering_records", [])
-            row = next((r for r in rows if r["team_id"] == p.get("p_team_id")
-                        and r["period"] == p.get("p_period")), None)
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
             n = int(p.get("p_n") or 1)
             if row:
                 row["write_ops"] = row.get("write_ops", 0) + n
             else:
-                rows.append({"team_id": p.get("p_team_id"),
-                             "period": p.get("p_period"),
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
                              "write_ops": n})
             return None  # PostgREST minimal — no echo
+        if fn == "metering_increment_ask":
+            # #1987 Task 6 / #3825: the ask lane's additive upsert on the SAME
+            # ``(org_id, period_start)`` row — the fake must model the shared
+            # row, otherwise a test cannot tell a single-window ask+capture
+            # pair from two month buckets (the defect #3825 removes).
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 1)
+            tin = int(p.get("p_tokens_in") or 0)
+            tout = int(p.get("p_tokens_out") or 0)
+            cost = float(p.get("p_cost_usd") or 0.0)
+            if row:
+                row["ask_calls"] = row.get("ask_calls", 0) + calls
+                row["ask_tokens_in"] = row.get("ask_tokens_in", 0) + tin
+                row["ask_tokens_out"] = row.get("ask_tokens_out", 0) + tout
+                row["ask_cost_usd"] = (float(row.get("ask_cost_usd") or 0.0)
+                                       + cost)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "ask_calls": calls, "ask_tokens_in": tin,
+                             "ask_tokens_out": tout, "ask_cost_usd": cost})
+            return None
+        if fn == "metering_increment_capture_cost":
+            # #3665: migration 20260917000001 — additive upsert mirroring
+            # metering_increment_capture_cost (the capture lane's twin),
+            # re-keyed onto the window start by 20260918000001 (#3825).
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 0)
+            cost = float(p.get("p_cost_usd") or 0.0)
+            if row:
+                row["capture_calls"] = row.get("capture_calls", 0) + calls
+                row["capture_cost_usd"] = (
+                    float(row.get("capture_cost_usd") or 0.0) + cost)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "capture_calls": calls,
+                             "capture_cost_usd": cost})
+            return None
+        if fn == "metering_cohort_spend":
+            # #3665/#3825: the SQL aggregate — one scalar, so no row cap can
+            # truncate it (the reason it is an RPC and not a filtered read).
+            # Mirrors the SQL's HALF-OPEN OVERLAP test
+            # (``period_start < p_period_end AND period_end > p_period_start``),
+            # not a ``period = p_period`` month equality.
+            p = body or {}
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            start = _as_dt(p.get("p_period_start"))
+            end = _as_dt(p.get("p_period_end"))
+            total = 0.0
+            for r in self.tables.get("metering_records", []):
+                if str(r.get("org_id")) not in wanted:
+                    continue
+                r_start = _as_dt(r.get("period_start"))
+                r_end = _as_dt(r.get("period_end"))
+                if r_start is None or r_end is None:
+                    continue  # no window → not addressable by a window read
+                if r_start < end and r_end > start:
+                    total += float(r.get("ask_cost_usd") or 0.0)
+                    total += float(r.get("capture_cost_usd") or 0.0)
+            return total
+        if fn == "cohort_org_ids_since":
+            # #3665: array_agg over a bounded subquery — one row/one array,
+            # so a row cap cannot truncate the org set. Mirror the SQL's
+            # ``ORDER BY created_at, id LIMIT p_limit + 1``.
+            p = body or {}
+            since = str(p.get("p_since") or "")
+            limit = int(p.get("p_limit") or 0)
+            rows = [t for t in self.tables.get("organizations", [])
+                    if t.get("id") and str(t.get("created_at") or "") > since]
+            rows.sort(key=lambda t: (str(t.get("created_at") or ""),
+                                     str(t["id"])))
+            return [str(t["id"]) for t in rows[:limit + 1]]
         if fn == "claim_membership":
             # Emulate migration 20260813000004's SQL semantics over the
             # in-memory rows (mirrors the real SECURITY DEFINER function):
             #  1. resolve team from api_keys (lookup_hash + revoked_at IS
             #     NULL; REJECT created_via='bootstrap' session keys and
             #     expired keys)
-            #  2. idempotent re-claim: owner (team_id, user_id) → noop
+            #  2. idempotent re-claim: owner (org_id, user_id) → noop
             #  3. find the NULL-user_id active owner row → 409 already_claimed
             #     when absent
-            #  4. merge/promote when a (user_id, team_id) row exists (drop
+            #  4. merge/promote when a (user_id, org_id) row exists (drop
             #     identity row first, copy key material, reactivate) else
             #     plain link (user_id set, identity NULL)
             #  5. teams.email overwrite (unconditional); cross-team collision
             #     → email_in_use (uq_teams_email parity)
-            #  6. drop leftover placeholder (team_id='')
+            #  6. drop leftover placeholder (org_id='')
             # Errors raise RuntimeError with the RPC code embedded (the real
             # RPC raises → PostgREST 400 → supabase_control.claim_membership
             # maps the code via _CLAIM_ERROR_CODES).
@@ -203,18 +352,18 @@ class FakeControlPlane:
             if exp is not None and isinstance(exp, str) \
                     and exp <= datetime.now(timezone.utc).isoformat():  # noqa: UP017
                 raise RuntimeError("claim_membership:key_expired")
-            team_id = key["team_id"]
-            mem_rows = self.tables.setdefault("team_memberships", [])
+            org_id = key["org_id"]
+            mem_rows = self.tables.setdefault("org_memberships", [])
 
             # idempotent re-claim (noop success)
-            if any(m.get("team_id") == team_id and m.get("user_id") == user_id
+            if any(m.get("org_id") == org_id and m.get("user_id") == user_id
                    and m.get("role") == "owner" and m.get("status") == "active"
                    for m in mem_rows):
-                self._claim_migrate_created_by(team_id, user_id)
+                self._claim_migrate_created_by(org_id, user_id)
                 return None
 
             owner = next((m for m in mem_rows
-                          if m.get("team_id") == team_id
+                          if m.get("org_id") == org_id
                           and m.get("role") == "owner"
                           and m.get("user_id") is None
                           and m.get("status") == "active"), None)
@@ -223,7 +372,7 @@ class FakeControlPlane:
 
             existing = next((m for m in mem_rows
                              if m.get("user_id") == user_id
-                             and m.get("team_id") == team_id), None)
+                             and m.get("org_id") == org_id), None)
             if existing is not None:
                 # merge/promote: drop identity row FIRST, then promote
                 mem_rows.remove(owner)
@@ -237,14 +386,14 @@ class FakeControlPlane:
                 owner["user_id"] = user_id
                 owner["identity"] = None
 
-            # drop leftover placeholder (team_id='') for the user
+            # drop leftover placeholder (org_id='') for the user
             mem_rows[:] = [m for m in mem_rows
                            if not (m.get("user_id") == user_id
-                                   and m.get("team_id") == "")]
+                                   and m.get("org_id") == "")]
             # #1765: created_by migration — anon-/reg- keys in the claiming
             # team are attributed to the claimer (teams.email is NEVER
             # written by claim — demotion, migration 20260827000001).
-            self._claim_migrate_created_by(team_id, user_id)
+            self._claim_migrate_created_by(org_id, user_id)
             return None
         if fn == "user_identity_inventory":
             # #1765: mirror migration 20260827000001's SECURITY DEFINER RPC —
@@ -322,10 +471,10 @@ class FakeControlPlane:
             # whole tx back on uq_agent_signup_tokens_team).
             p = body or {}
             th = p.get("p_signup_token_hash")
-            tid = p.get("p_team_id") or ""
+            tid = p.get("p_org_id") or ""
             if th:
                 tokens = self.tables.setdefault("agent_signup_tokens", [])
-                live = [t for t in tokens if t.get("team_id") == tid
+                live = [t for t in tokens if t.get("org_id") == tid
                         and t.get("revoked_at") is None]
                 if live:
                     raise RuntimeError(
@@ -336,11 +485,11 @@ class FakeControlPlane:
                     for t in self.tables.get("agent_signup_tokens", [])):
                 # ON CONFLICT (token_hash) DO NOTHING parity
                 self.tables.setdefault("agent_signup_tokens", []).append({
-                    "token_hash": th, "team_id": tid, "created_at": None,
+                    "token_hash": th, "org_id": tid, "created_at": None,
                     "last_used_at": None, "revoked_at": None})
             return None
         if fn == "resolve_signup_token":
-            # #1709: token → team_id (revocation-aware); NULL = unknown/revoked.
+            # #1709: token → org_id (revocation-aware); NULL = unknown/revoked.
             from datetime import datetime, timezone
             p = body or {}
             th = p.get("p_token_hash") or ""
@@ -350,7 +499,7 @@ class FakeControlPlane:
                         and t.get("revoked_at") is None), None)
             if row is not None:
                 row["last_used_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-                return row.get("team_id")
+                return row.get("org_id")
             return None
         if fn == "recover_team_key":
             # #1709: keyless recovery mint — atomic cap-check + insert under a
@@ -359,19 +508,19 @@ class FakeControlPlane:
             from datetime import datetime, timezone
             p = body or {}
             th = p.get("p_token_hash") or ""
-            tid = p.get("p_team_id") or ""
+            tid = p.get("p_org_id") or ""
             lookup = p.get("p_lookup_hash") or ""
             with self._recover_lock:
                 tokens = self.tables.setdefault("agent_signup_tokens", [])
                 row = next((t for t in tokens
                             if t.get("token_hash") == th
                             and t.get("revoked_at") is None
-                            and t.get("team_id") == tid), None)
+                            and t.get("org_id") == tid), None)
                 if row is None:
                     raise RuntimeError(
                         "recover_team_key: token not found or revoked")
                 if any(t.get("id") == tid and t.get("deleted_at")
-                       for t in self.tables.get("teams", [])):
+                       for t in self.tables.get("organizations", [])):
                     raise RuntimeError("recover_team_key: team deleted")
                 cap = int(p.get("p_max_api_keys") or 2)
                 key_rows = self.tables.setdefault("api_keys", [])
@@ -384,7 +533,7 @@ class FakeControlPlane:
                     # outcome-equivalent to the SQL's count-after-insert with
                     # > cap.)
                     active = [k for k in key_rows
-                              if k.get("team_id") == tid
+                              if k.get("org_id") == tid
                               and k.get("revoked_at") is None
                               and k.get("created_via") != "bootstrap"]
                     if len(active) >= cap:
@@ -392,7 +541,7 @@ class FakeControlPlane:
                         oldest["revoked_at"] = now_iso
                     key_rows.append({
                         "id": f"key_{tid}_{lookup[:12]}",
-                        "team_id": tid,
+                        "org_id": tid,
                         "lookup_hash": lookup,
                         "key_prefix": p.get("p_key_prefix") or tid[:8],
                         "created_via": "recovery",
@@ -411,16 +560,16 @@ class FakeControlPlane:
                 return tid
         if fn == "revoke_signup_token":
             # #1715 (20260826000001): user-facing revocation — team-scoped +
-            # idempotent (UPDATE ... WHERE token_hash AND team_id AND
+            # idempotent (UPDATE ... WHERE token_hash AND org_id AND
             # revoked_at IS NULL); unknown/other-team/already-revoked is a
             # zero-row no-op, never an error.
             from datetime import datetime, timezone
             p = body or {}
             th = p.get("p_token_hash") or ""
-            tid = p.get("p_team_id") or ""
+            tid = p.get("p_org_id") or ""
             row = next((t for t in self.tables.get("agent_signup_tokens", [])
                         if t.get("token_hash") == th
-                        and t.get("team_id") == tid), None)
+                        and t.get("org_id") == tid), None)
             if row is not None and row.get("revoked_at") is None:
                 row["revoked_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             return None
@@ -433,16 +582,16 @@ class FakeControlPlane:
             uid = p.get("p_user_id")
             if uid is None and identity:
                 with self._identity_lock:  # atomic check+insert (register race)
-                    mem = self.tables.setdefault("team_memberships", [])
-                    # same (identity, team_id) row is an UPSERT (in-place);
+                    mem = self.tables.setdefault("org_memberships", [])
+                    # same (identity, org_id) row is an UPSERT (in-place);
                     # only a DIFFERENT team with the same unclaimed owner
                     # identity hits uq_member_identity_active
-                    team_id = p.get("p_team_id")
+                    org_id = p.get("p_org_id")
                     if any(m.get("identity") == identity
                            and m.get("role") == "owner"
                            and m.get("status") == "active"
                            and m.get("user_id") is None
-                           and m.get("team_id") != team_id
+                           and m.get("org_id") != org_id
                            for m in mem):
                         raise RuntimeError(
                             "duplicate key value violates unique constraint "
@@ -454,13 +603,13 @@ class FakeControlPlane:
     def _provision_team_emulation(self, p: dict) -> None:
         """The provision_team RPC body (migration 0010) over the in-memory
         rows — shared by the plain RPC and the #1709 wrapper."""
-        team_id = p.get("p_team_id") or ""
-        team_name = p.get("p_team_name") or ""
+        org_id = p.get("p_org_id") or ""
+        org_name = p.get("p_org_name") or ""
         api_key = p.get("p_api_key") or ""
         lookup = p.get("p_lookup_hash")
         user_id = p.get("p_user_id")
         identity = p.get("p_identity")
-        if not team_id or not team_name:
+        if not org_id or not org_name:
             raise RuntimeError("provision_team: required parameters missing")
         # #1716 all-or-none key guard (mirrors the RPC's SQL IS NULL
         # semantics EXACTLY — Python truthiness would diverge on "" values:
@@ -479,22 +628,22 @@ class FakeControlPlane:
                 "provision_team: exactly one of p_user_id / p_identity is required")
 
         # teams upsert on id (exactly one row)
-        team_rows = self.tables.setdefault("teams", [])
-        team = next((t for t in team_rows if t.get("id") == team_id), None)
+        team_rows = self.tables.setdefault("organizations", [])
+        team = next((t for t in team_rows if t.get("id") == org_id), None)
         # #2789: unique-name parity (migration 0011 `uq_teams_name`). The real
         # RPC upserts ON CONFLICT (id) ONLY, so a name held by a DIFFERENT team
         # raises a unique violation → PostgREST 409. Without this the fake made
         # a real production failure (stranding a paying customer) invisible to
         # tests; both create lanes key on the "HTTP 409" marker.
         if team is None and any(
-                t.get("name") == team_name and t.get("id") != team_id
+                t.get("name") == org_name and t.get("id") != org_id
                 for t in team_rows):
             raise RuntimeError(
                 'HTTP 409: duplicate key value violates unique constraint '
                 '"uq_teams_name"')
         if team is None:
-            team = {"id": team_id, "name": team_name, "tier": p.get("p_tier", "free"),
-                    "graph_name": p.get("p_graph_name", f"team_{team_id}"),
+            team = {"id": org_id, "name": org_name, "tier": p.get("p_tier", "free"),
+                    "graph_name": p.get("p_graph_name", f"org_{org_id}"),
                     "max_users": p.get("p_max_users", 1),
                     "max_graphs": p.get("p_max_graphs", 1),
                     "ops_allowance": p.get("p_ops_allowance", 10000),
@@ -508,35 +657,35 @@ class FakeControlPlane:
                 team["email"] = p["p_email"]
             team_rows.append(team)
         else:
-            team["name"] = team_name
+            team["name"] = org_name
             if p.get("p_email"):
                 team["email"] = p["p_email"]
 
-        # membership: refresh in place (user_id,team_id) or (identity,team_id),
+        # membership: refresh in place (user_id,org_id) or (identity,org_id),
         # else insert exactly one row
-        mem_rows = self.tables.setdefault("team_memberships", [])
+        mem_rows = self.tables.setdefault("org_memberships", [])
         if user_id is not None:
             mem = next((m for m in mem_rows
-                        if m.get("user_id") == user_id and m.get("team_id") == team_id),
+                        if m.get("user_id") == user_id and m.get("org_id") == org_id),
                        None)
             anchor = {"user_id": user_id}
         else:
             mem = next((m for m in mem_rows
-                        if m.get("identity") == identity and m.get("team_id") == team_id),
+                        if m.get("identity") == identity and m.get("org_id") == org_id),
                        None)
             anchor = {"user_id": None, "identity": identity}
         if mem is None:
-            mem = {"id": uuid.uuid4().hex[:26], "team_id": team_id,
-                   "team_name": team_name, "api_key": api_key,
+            mem = {"id": uuid.uuid4().hex[:26], "org_id": org_id,
+                   "org_name": org_name, "api_key": api_key,
                    "key_hash": p.get("p_key_hash") or "",
                    "lookup_hash": lookup,
-                   "graph_name": p.get("p_graph_name", f"team_{team_id}"),
+                   "graph_name": p.get("p_graph_name", f"org_{org_id}"),
                    "role": "owner", "status": "active",
                    "created_at": None}
             mem.update(anchor)
             mem_rows.append(mem)
         else:
-            mem.update({"team_name": team_name, "api_key": api_key,
+            mem.update({"org_name": org_name, "api_key": api_key,
                         "key_hash": p.get("p_key_hash") or "",
                         "lookup_hash": lookup, "role": "owner",
                         "status": "active"})
@@ -551,22 +700,22 @@ class FakeControlPlane:
             key_rows = self.tables.setdefault("api_keys", [])
             if not any(k.get("lookup_hash") == lookup for k in key_rows):
                 key_rows.append({
-                    "id": f"key_{team_id}_{lookup[:12]}",
-                    "team_id": team_id,
+                    "id": f"key_{org_id}_{lookup[:12]}",
+                    "org_id": org_id,
                     "lookup_hash": lookup,
-                    "key_prefix": p.get("p_key_prefix") or team_id[:8],
+                    "key_prefix": p.get("p_key_prefix") or org_id[:8],
                     "created_via": "provisioned",
                     "created_by": str(user_id) if user_id is not None else identity,
                     "created_at": None,
                     "expires_at": None,
                     "revoked_at": None,
                 })
-                self._trigger_key_create(team_id, f"key_{team_id}_{lookup[:12]}",
+                self._trigger_key_create(org_id, f"key_{org_id}_{lookup[:12]}",
                                          "provisioned")
         return None
 
 
-    def _trigger_key_create(self, team_id: str, key_id: str,
+    def _trigger_key_create(self, org_id: str, key_id: str,
                             created_via: str | None) -> None:
         """Migration 0015 trigger emulation: AFTER INSERT on api_keys →
         key_create abuse event, EXCLUDING created_via='bootstrap'."""
@@ -574,7 +723,7 @@ class FakeControlPlane:
             return
         from datetime import datetime, timezone
         self.tables.setdefault("abuse_events", []).append(
-            {"team_id": team_id, "event_type": "key_create", "weight": 1,
+            {"org_id": org_id, "event_type": "key_create", "weight": 1,
              "key_id": key_id,
              "created_at": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
 
@@ -660,13 +809,17 @@ class FakeControlPlane:
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
             # rows ([] when nothing matched), the atomic-claim path used by
-            # OAuth single-use codes / rotation (PR #1264 review P2).
+            # OAuth single-use codes / rotation (PR #1264 review P2, and the
+            # #4355 rotate claim). `_patch_lock` makes the check-then-write
+            # atomic the way the real single UPDATE statement is (see
+            # __init__) — required for the #4355 two-thread CAS test.
             updated: list[dict] = []
-            for r in self.tables.get(table, []):
-                if _matches(r, filters or []):
-                    r.update(json_body or {})
-                    if select is not None:
-                        updated.append({k: r.get(k) for k in select})
+            with self._patch_lock:
+                for r in self.tables.get(table, []):
+                    if _matches(r, filters or []):
+                        r.update(json_body or {})
+                        if select is not None:
+                            updated.append({k: r.get(k) for k in select})
             return updated if select is not None else []
         if method == "POST":
             row = dict(json_body or {})
@@ -674,10 +827,20 @@ class FakeControlPlane:
                 # mirror the DB column default now() — window gt-filters need it
                 from datetime import datetime, timezone
                 row["created_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            if table == "oauth_codes" and row.get("id") is None:
+                # mirror `id bigint GENERATED ALWAYS AS IDENTITY` (0016). #3027
+                # records a redemption outcome BY id and links minted tokens
+                # with `code_id`, so a fake row with no id would make the
+                # durable path silently unwritable in tests. Derived from the
+                # stored rows (not a counter) so it also cannot collide with a
+                # row a test seeded by hand.
+                numeric = [r.get("id") for r in self.tables.get(table, [])
+                           if isinstance(r.get("id"), int)]
+                row["id"] = (max(numeric) + 1) if numeric else 1
             self.tables.setdefault(table, []).append(row)
             if table == "api_keys":
                 # migration 0015 trigger emulation (#308)
-                self._trigger_key_create(row.get("team_id", ""),
+                self._trigger_key_create(row.get("org_id", ""),
                                          row.get("id", ""),
                                          row.get("created_via"))
             return [row]
@@ -692,13 +855,24 @@ class FakeControlPlane:
             if op == "eq":
                 rows = [r for r in rows if r.get(col) == value]
             elif op == "neq":
-                rows = [r for r in rows if r.get(col) != value]
+                # SQL semantics: `col <> value` is NULL (not TRUE) when either
+                # side is NULL, so a NULL column (or a NULL comparison value)
+                # never matches. Python's bare `r.get(col) != value` would
+                # KEEP the NULL row — a dialect divergence that would hide an
+                # over-exemption regression (e.g. a `created_via=neq.bootstrap`
+                # filter silently exempting legacy NULL rows — #4140 T4).
+                rows = ([] if value is None else
+                        [r for r in rows
+                         if r.get(col) is not None and r.get(col) != value])
             elif op == "is":
                 rows = [r for r in rows if (r.get(col) is None) == (value is None)]
             elif op == "gt":
                 # SQL semantics: NULL never matches an ordered comparison
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) > value]
+            elif op == "gte":
+                rows = [r for r in rows
+                        if r.get(col) is not None and r.get(col) >= value]
             elif op == "lt":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) < value]
@@ -738,17 +912,28 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
         if op == "eq" and row.get(col) != value:
             return False
-        if op == "neq" and row.get(col) == value:
+        if op == "neq" and (value is None or row.get(col) is None
+                            or row.get(col) == value):
             return False
         if op == "is" and (row.get(col) is None) != (value is None):
             return False
         if op == "gt" and (row.get(col) is None or row.get(col) <= value):
+            return False
+        if op == "gte" and (row.get(col) is None or row.get(col) < value):
             return False
         if op == "lt" and (row.get(col) is None or row.get(col) >= value):
             return False
         if op == "lte" and (row.get(col) is None or row.get(col) > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
+        if op not in ("eq", "neq", "is", "gt", "gte", "lt", "lte"):
+            # #3665 review: an op this helper does not implement must RAISE,
+            # not silently no-op. Silently ignoring an op makes PATCH/DELETE
+            # match on the remaining filters — i.e. the fake mutates MORE rows
+            # than the real client would, and a test can pass against
+            # behaviour production does not have. The GET path above already
+            # raises for an unsupported op; this mirrors it.
+            raise ValueError(f"unsupported filter op {op!r}")
     return True
 
 
@@ -767,5 +952,6 @@ class ErrorControlPlane(FakeControlPlane):
     def query(self, table: str, *args: Any, **kwargs: Any) -> list[dict]:
         raise self._exc
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         raise self._exc

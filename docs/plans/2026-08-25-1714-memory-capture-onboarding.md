@@ -669,3 +669,23 @@ fingerprint_recurrence_last_cycle: null
 
 **Triage record — the intervention that produced §8.** The cycle-5 recurring register was dispositioned **13 pushed down / 4 resolved here / 1 human**, every pushed-down row carrying a comment on its owning issue recording the resolution and the new ownership: **#3512, #3513, #3514, #3515, #3516, #3517, #3540, #3551, #3552, #3553, #3554** — **23 comments across those 11 issues** (7 after the cycle-5 triage, 10 after cycle 6, 6 after cycle 7). Cycle 6's findings were dispositioned the same way.
 
+## #4620 amendment (2026-09-22) — the Pi seam's verification status, stated
+
+*Appended by `#4620`; the reviewed text above is unchanged. This revision restructured the plan and
+retired the Integration-Surface row and sequencing item the original pointers named, so the statement
+below stands alone.*
+
+Objective 1's Pi leg has two halves with different verification statuses:
+
+- **Executably verified (hermetic, CI).** The seam's handler logic — `extractTurns`, truncation,
+  payload, credential precedence, the durable spool, and the real `session_start` / `session_shutdown`
+  handlers fired against a mock `pi` with an injected `fetch` — is covered by
+  `tortoise/pi-hooks/tortoise-capture.test.ts` (51 tests), and the artifact **as installed** is loaded
+  and fired by `tests/test_pi_capture_hooks.py` (CI-selected for a `tortoise/pi-hooks/` change). The
+  claim that "nothing loads the extension's seam in a test" is false.
+- **Manual-only.** That a real `pi` process loads the installed extension and calls
+  `turn_end` / `session_shutdown` against the live API. **Canonical: `tortoise/pi-hooks/README.md`
+  § Verification** — the procedure, its precondition, its actor, the pass condition and the
+  `#4661`/`#4675`/`#3713` blocker list live there, and are not restated here. Until `#4661` /
+  `#4675` clear, the live leg yields **no verdict**, so this objective must not be read as verified
+  for Pi.

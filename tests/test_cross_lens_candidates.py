@@ -15,7 +15,11 @@ Covers the SDK method ``get_cross_lens_candidates`` and the MCP tool
 Deterministic via an injected fake embedding model (patched onto
 EmbeddingModel.get) so ``create_point`` stores reproducible embeddings; the
 discovery path (vector pull + exact cosine recompute) runs against the real
-embedded FalkorDBLite store.
+store — embedded FalkorDBLite, or a redirected server when the run carries
+``TORTOISE_DB_URI``. The fake's vectors are :data:`EMBEDDING_DIM`-wide, so the
+fixture is storable on BOTH lanes: a store that has the Point HNSW index
+refuses a vector the index cannot hold (#4194/#4280), so a narrower fixture
+silently degraded to no vector on the server lane.
 """
 from __future__ import annotations
 
@@ -28,28 +32,41 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tortoise.embeddings import EmbeddingModel  # noqa: E402, I001, RUF100
+from tortoise.embeddings import EMBEDDING_DIM, EmbeddingModel  # noqa: E402, I001, RUF100
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 from tortoise.source_credibility import SOURCE_KIND_DEFAULTS  # noqa: E402, RUF100
 
 
 # ── deterministic embedding model ────────────────────────────────────
 # Fixed vectors (same convention as tests/test_cross_lens.py): contents
-# sharing a near-vector are "similar"; orthogonal vectors are noise.
-_V = {
-    "alpha one": np.array([1.0, 0.0, 0.0]),
-    "beta two": np.array([0.9, 0.1, 0.0]),
-    "gamma three": np.array([0.0, 1.0, 0.0]),
-    "delta four": np.array([0.0, 0.0, 1.0]),
-    "theta five": np.array([0.0, 0.9, 0.1]),
+# sharing a near-vector are "similar"; orthogonal vectors are noise. The axes
+# are placed on the FIRST THREE of :data:`EMBEDDING_DIM` dimensions and zero
+# padded — so every cosine the assertions rely on is identical to the
+# 3-dim form, while the vector is storable in an INDEXED store too (#4280: on
+# the server lane the store's width guard refused a 3-dim vector, which is why
+# this file only ever passed on the embedded lane).
+_AXES = {
+    "alpha one": (1.0, 0.0, 0.0),
+    "beta two": (0.9, 0.1, 0.0),
+    "gamma three": (0.0, 1.0, 0.0),
+    "delta four": (0.0, 0.0, 1.0),
+    "theta five": (0.0, 0.9, 0.1),
 }
 
 
+def _wide(axes: tuple[float, ...]) -> np.ndarray:
+    return np.array([*axes, *([0.0] * (EMBEDDING_DIM - len(axes)))])
+
+
+_V = {k: _wide(v) for k, v in _AXES.items()}
+_NOISE = _wide((0.0, 0.1, 0.2))
+
+
 class _FakeEmbedder:
-    """Deterministic stand-in for the active embedding model (384-dim)."""
+    """Deterministic stand-in for the active embedding model (EMBEDDING_DIM)."""
 
     def encode(self, texts, batch_size=32, show_progress_bar=False):
-        return np.stack([_V.get(t, np.array([0.0, 0.1, 0.2])) for t in texts])
+        return np.stack([_V.get(t, _NOISE) for t in texts])
 
 
 @pytest.fixture
@@ -337,7 +354,7 @@ def test_mcp_handler_delegates(sdk, monkeypatch):
                 "truncated": False, "routing": kw.get("routing")}
 
     monkeypatch.setattr(sdk, "get_cross_lens_candidates", fake_sdk_method)
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates(
         threshold=0.5, max_candidates=50, routing="relevance", top_k=7)
     assert captured == {"threshold": 0.5, "max_candidates": 50,
@@ -349,7 +366,7 @@ def test_mcp_tool_integration(sdk, monkeypatch):
     """MCP tool end-to-end against the real embedded SDK (read-only)."""
     from tortoise import mcp_server
     _seed_two_streams(sdk)
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     n_before = _node_count(sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates()
     assert out["count"] == 1
@@ -363,6 +380,6 @@ def test_mcp_tool_error_surfaces(sdk, monkeypatch):
     from tortoise import mcp_server
     monkeypatch.setattr(sdk, "get_cross_lens_candidates",
                         lambda **kw: (_ for _ in ()).throw(ValueError("boom")))
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates()
     assert isinstance(out, dict) and "error" in out and "boom" in out["error"]

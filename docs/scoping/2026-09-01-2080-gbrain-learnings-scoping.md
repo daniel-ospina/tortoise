@@ -98,7 +98,8 @@ appended to the brief's `## Raw Notes` via `_research_append.sh`):**
    push precision/recall under a pointer budget, write-back fidelity +
    provenance, continuity pairs; **source-isolation gates at zero**;
    harness seams = Tortoise's REAL integration points (MCP
-   search/ask/recall, `claude-hooks/session-{start,end}.sh`,
+   search/recall, the eval-only ask lane `tortoise/ask_lane.py`,
+   `claude-hooks/session-{start,end}.sh`,
    `session_import`) with env-key stripping for hermetic runs. **ADD the
    Tortoise-original why-layer suite:** given ONLY the surfaced context for
    a state with planted conflicts (NANDs, superseded predecessors, contested
@@ -106,9 +107,9 @@ appended to the brief's `## Raw Notes` via `_research_append.sh`):**
    "where do I dig deeper?" — conflict-surfacing rate + dig-deeper
    navigation accuracy.
 4. **W4 — Why-aware recall (HEADLINE, read-side, INTEGRATED — no new
-   tool):** enrich the EXISTING recall surfaces (ask / analyze / search /
-   MCP) so any recalled state returns: (a) **why** — support chain + ledger
-   evidence + EP weight; (b) **conflict** — active NANDs, contested claims
+   tool):** enrich the EXISTING recall surfaces (ask lane (eval-only) /
+   analyze / search / MCP) so any recalled state returns: (a) **why** —
+   support chain + ledger evidence + EP weight; (b) **conflict** — active NANDs, contested claims
    (P9), supersession history (bi-temporal); (c) **trade-offs** — decision
    alternatives with EP weights + mitigations; (d) **dig-deeper** — labeled
    navigation pointers ("read supports", "read the counterargument (NAND)",
@@ -178,9 +179,11 @@ appended to the brief's `## Raw Notes` via `_research_append.sh`):**
 - **gbrain's codex-fragment seam** — skipped (no Tortoise codex
   integration); the anti-gaming lesson (preamble slugs don't count) is kept.
 - **gbrain's onboarding/UX patterns** — skipped entirely; #1976 governs.
-- **Ask-surface exposure decision (#2013)** — W4 routes through
-  search/analyze meanwhile; the ask gating decision belongs to #2013, not
-  this epic (ask-surface work is conditional on its outcome).
+- **Ask-surface exposure decision (#2013)** — **SUPERSEDED by #3849:**
+  the ask lane is EVAL-ONLY (`tortoise/ask_lane.py`) and no product ask
+  surface exists (no `/v1/ask`, no SDK method, no MCP tool, no gating
+  flag). W4 routes through search/analyze/MCP; the lane is reachable from
+  eval/test code only.
 - **Adaptive return-sizing / source-boost prefix map** (gbrain retrieval
   knobs noted in research as "cheap, useful additions") — not in the epic's
   O/I/T; defer to a later retrieval-levers issue (cf. #1657 precedent).
@@ -226,7 +229,7 @@ tolerance — see E2E-2).
 | Ontology | medium | No new entity types (NAND/IMPL/CORRECTS/P9/bi-temporal already exist), but contentiousness moves from "surfaced, never scored" to a scored signal, the why-context assembly contract is new, and §5 controlled vocabulary gains the dig-deeper/why-block labels. |
 | Research | high | The W4 contention-driven-recall thesis is novel as a shipped product feature (academic precedent exists — see Axis Research Notes — but no product precedent); the why-layer suite design is Tortoise-original (fixture generator + planted-conflict gold conventions); judge-calibration and fix-wave loops are research-shaped. |
 | Org Infra | medium | CI-gated baselines, sealed keys, receipts, comparison-systems.md publication discipline, and a 500-Q sealed LongMemEval run (embeddings cache, cost-bounded) — new standing infrastructure but well-precedented by gbrain's machinery. |
-| **Overall** | **complex** | Matches the epic label; the headline W4 claim is unverified at product level (A4), the unit mismatch in the write-path port is real (A1), and the ask surface is gated (#2013, A12) — all managed by making the evals the first ship-able increments. |
+| **Overall** | **complex** | Matches the epic label; the headline W4 claim is unverified at product level (A4), the unit mismatch in the write-path port is real (A1), and the ask lane is EVAL-ONLY (#3849; was gated by #2013, A12) — all managed by making the evals the first ship-able increments. |
 
 ## Step 4 — High-Level E2E Test Cases
 
@@ -236,7 +239,7 @@ tolerance — see E2E-2).
 ### E2E-1: Why-layer conflict-surfacing (the headline)
 **Given:** a state (Point) in the graph with active NANDs and a contested
 claim (P9) against it; a user/agent recalls it through an EXISTING recall
-surface (ask / analyze / search / MCP).
+surface (ask lane (eval-only) / analyze / search / MCP).
 **When:** the state is recalled and appears in the surfaced context.
 **Then:** the surfaced context includes the current belief AND the conflict
 structure — the active NAND/counterargument, the contestation, and the
@@ -367,8 +370,9 @@ Research high / Org Infra medium / overall **complex**.
    wizard), reflex delivery-surface build deferred to a later issue (the
    logic + why-content stay in scope, graded via harness seams), and no new
    retrieval tool.
-2. **W4 scope = existing surfaces only** — ask work is conditional on
-   #2013; search/analyze are the unblocked path. Acceptable?
+2. **W4 scope = existing surfaces only** — the ask lane is EVAL-ONLY
+   (#3849; the #2013 gating decision is closed by removal);
+   search/analyze are the unblocked path. Acceptable?
 3. **W2 targets — benchmark-first (Daniel 2026-09-01):** NO pre-set quality
    bar. Run the tests, publish the baseline, compare with competitors
    (gbrain 88.1%, Mem0 42.9%, Supermemory 41.5% — directional), then set

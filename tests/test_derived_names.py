@@ -169,6 +169,49 @@ def test_hyphenated_namespace_registry_graph_stays_guard_passing(tmp_path):
         sdk.close()
 
 
+# ── #3634 / epic CI-3 half 2: the registry name is the reaper's input ─────
+
+def _registry_name_for(tmp_path, ns, graph_name):
+    """Drive the REAL derivation: _get_registry reads proj.graph_name."""
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(str(tmp_path / "x.db"), namespace=ns)
+    try:
+        if graph_name is not None:
+            sdk._get_proj().graph_name = graph_name   # the redirect does this in a test session
+        return sdk._get_registry()._name
+    finally:
+        sdk.close()
+
+
+def test_test_derived_registry_name_carries_an_approved_prefix(tmp_path):
+    name = _registry_name_for(tmp_path, "registry", "test_docs_api_abc123def456")
+    assert name.startswith(("test_", "tortoise_test_")), name
+
+
+def test_already_compliant_registry_name_is_not_double_prefixed(tmp_path):
+    name = _registry_name_for(tmp_path, "test-hosted", "test_hosted_tortoise")
+    assert name.startswith("test_hosted_")
+    assert not name.startswith("test_test_hosted_")
+
+
+def test_shared_registry_name_is_never_prefixed(tmp_path):
+    """AC2's fail-closed direction. `namespace="registry"` makes `_get_proj`'s
+    `namespace == "registry"` branch force graph_name="registry_tortoise"
+    BEFORE our override, so this is the real shared-name path.
+
+    No separate `graph_name=None` leg: in a test session the projection
+    redirect rewrites graph_name to `test_x_<hash>` inside `_get_proj()`
+    (sdk.py), so a `None` leg asserts redirect behaviour, not the shared-name
+    invariant — and without a test session it is byte-identical to the
+    `"registry_tortoise"` leg below, which already carries that path. The
+    `does not start with` assertion below keeps the invariant fail-closed and
+    lane-independent: it reds if someone prefixes the `elif ns`/`else`
+    branches that produce the shared name."""
+    name = _registry_name_for(tmp_path, "registry", "registry_tortoise")
+    assert name == "registry_control_plane"
+    assert not name.startswith(("test_", "tortoise_test_")), name
+
+
 def test_explicit_test_prefixed_name_honored_verbatim(uri_env):
     """Cycle-2 P0-1b: an explicit test_* name is the shared opt-in — honored
     verbatim by the redirect (never derived)."""
@@ -234,6 +277,24 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_uri\)",
         r"from_uri\(_uri\(\)\)",
     ],
+    # #3902: same two shapes as #3154 above — module live-FalkorDB
+    # availability probe over candidate URIs (construct + RETURN 1 + close,
+    # never DETACHs), plus the per-test `db` fixture. SAFETY IS NOT "the URI
+    # path is test-prefixed": the fixture's ``from_uri(_uri())`` resolves to
+    # the SHARED env-URI graph (tortoise_test_b5_3902 fallback, or the job's
+    # own path when TORTOISE_DB_URI is set), NOT a _name() per-test graph
+    # (from_uri passes graph_name=, not path=, so the redirect seam cannot
+    # apply). It is safe only because neither handle is ever bulk-DETACHed:
+    # every DETACH DELETE in this file targets a `graph_name=`-qualified
+    # projection built from _name() -> test_restore3902_<stem>_<uuid> (L98
+    # via _seed_event_log, L246) or a `select_graph(_name(...))` handle (L279),
+    # and the fixture teardown deletes only the names its test registered.
+    # The regex is deliberately narrow to the two call shapes that exist
+    # today so a new one reds instead.
+    "test_restore_seq_3902.py": [
+        r"from_uri\(_uri\)",
+        r"from_uri\(_uri\(\)\)",
+    ],
     "test_session_capture_e2e.py": [r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)"],
     "test_ingest.py": [
         # module availability probe (env pre-set to a test-prefixed URI)
@@ -245,8 +306,6 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     "test_pipeline_cli.py": [r"from_uri\("],
     # invalid-scheme raise tests (raise BEFORE any connection)
     "test_projection.py": [r"from_uri\(\"postgresql://", r"from_uri\(\"localhost:6379"],
-    # __init__-stubbed parse asserts (fake_init captures kwargs, never connects)
-    "test_sdk_props_coercion.py": [r'from_uri\(\s*"rediss://', r'from_uri\(\s*"docker://'],
     # raw-client migration test — per-test tortoise_test_r2_migrate_<uuid> path
     "test_search_engine.py": [
         # module availability probe (env pre-set to a test-prefixed URI)
@@ -255,6 +314,11 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         # #1695 extraction session: FTS-lane probe via a module-level helper
         r"from_uri\(_FTS_LANE_URI\)",
     ],
+    # #4290: declared per the new-test-file registration rule. ZERO sites by
+    # construction — the finding-provenance gate opens no graph (hermetic temp
+    # git repo, subprocess git only); test_from_uri_routing_table_keys_exist
+    # pins that the module really exists.
+    "test_finding_provenance.py": [],
 }
 
 _FROM_URI_EXEMPT_FILES = {
@@ -321,6 +385,13 @@ def test_from_uri_sites_resolve_test_prefixed():
         m = re.match(r"\w+\.from_uri\(\s*\"([^\"]+)\"", block)
         if m:
             path = urllib.parse.urlparse(m.group(1)).path.lstrip("/")
+            # ⚠️ DIVERGENCE (#7795 review P2): deliberately NARROWER than
+            # tests/_embedded.py's `_SWEEP_OWNED_PREFIXES` (which also owns
+            # `team_`/`org_`). That set's input is the ownership JOURNAL; this
+            # gate accepts a literal URI path as a stand-in for "an isolated
+            # test graph", and a product-namespace path is exactly the
+            # shared/dev graph this census exists to keep tests off. Do not
+            # dedupe the two sets.
             if path.startswith(("test_", "tortoise_test")):
                 continue
         declared = _ROUTED_FROM_URI_SITES.get(fname, [])

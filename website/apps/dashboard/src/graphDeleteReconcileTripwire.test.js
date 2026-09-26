@@ -50,10 +50,10 @@ test('#2303: loadGraphs reconciles a panelGraphId dropped from the reloaded list
 
 test('#2303: the reconciliation sits in the team-guarded commit block, after the list lands', () => {
   // The guard must run only when the response belongs to the CURRENT team
-  // (same teamIdRef guard as setGraphs) and only after setGraphs(list) has
+  // (same orgIdRef guard as setGraphs) and only after setGraphs(list) has
   // committed the fresh list — not on an early-return path.
-  const commitBlockStart = loadGraphsBody.indexOf('if (teamIdRef.current === teamId) {')
-  assert.notEqual(commitBlockStart, -1, 'loadGraphs lost its teamIdRef guard')
+  const commitBlockStart = loadGraphsBody.indexOf('if (orgIdRef.current === orgId) {')
+  assert.notEqual(commitBlockStart, -1, 'loadGraphs lost its orgIdRef guard')
   const guarded = loadGraphsBody.slice(commitBlockStart)
   const setsGraphs = guarded.indexOf('setGraphs(list)')
   const guardIdx = guarded.indexOf('panelGraphId && !list.some')

@@ -1,9 +1,12 @@
 """SDK capture_session tests (#312 delta 4 + delta 5 speaker tagging, #822).
 
 #822: LLM extraction is the default (and only) capture extraction — the regex
-loop was removed as a product path and no-key fails closed. These tests run
-against the offline MockModel extractor (TORTOISE_SESSION_LLM_MOCK=1 seam) so
-no provider key or network is needed.
+loop was removed as a product path. #3892 (owner ruling 2026-09-18) changed
+what a MISSING key means: the capture itself is unconditional — the session's
+turns are always STORED (and are keylessly searchable) — and the key gates
+ONLY the LLM extraction into memory points (receipt ``extraction_mode``
+``"no-provider"``). These tests run against the offline MockModel extractor
+(TORTOISE_SESSION_LLM_MOCK=1 seam) so no provider key or network is needed.
 """
 import json
 import logging
@@ -16,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import hosted_api as _ha
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 from tortoise.sdk import TortoiseSDK
 
 # #2242 concurrency test docker-lane guard — mirrors
@@ -69,7 +72,7 @@ def llm_extraction_provider(monkeypatch):
     """Install the offline MockModel session extractor (#822) — the M2 LLM
     pipeline runs with zero network regardless of ambient provider keys
     (the dev shell has real OPENROUTER/DEEPSEEK keys). Any test that needs
-    the no-key fail-closed path clears the seam itself."""
+    the keyless path clears the seam AND the provider keys itself."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
@@ -105,6 +108,268 @@ def test_capture_session_shape(sdk):
     assert res["ok"] is True
     assert res["errors"] == []
     assert isinstance(res["warnings"], list)
+
+
+def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
+    """#2813: the four E3 fields the v2 extractor emits (quote / when /
+    search_keys / source_turn_id) must land as NODE properties — not merely
+    ride the capture response's ``props`` superset. The extractor is shared
+    with the eval lane (tools/longmem_eval/ingest_v2.py), whose writer DID
+    persist them; the SDK persistence writer was forked and silently dropped
+    them, so the reply looked correct while the node stored nothing."""
+    import tortoise.extractor_v2 as ev2
+
+    payload = {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2813_regression",
+            "content": "the auth dead-end is the top issue",
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    # Response shape is deliberately UNCHANGED: the passthrough whitelist
+    # still reports the raw payload values (search_keys stays a list there).
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+        "search_keys": ["auth", "dead-end"],
+        "source_turn_id": "turn-2813",
+    }
+    # The actual regression: the NODE carries them (search_keys flattened to
+    # the graph's space-joined string by _flatten_search_keys_prop).
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0]
+    assert row[0] == "We decided to ship serve --http first.", row
+    assert row[1] == "2026-08-01", row
+    assert row[2] == "auth dead-end", row
+    assert row[3] == "turn-2813", row
+
+
+def _passthrough_payload(content: str) -> dict:
+    """The v2 payload shape the #2813/#2949 tests drive — one point carrying
+    all four E3 passthrough fields."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2949_passthrough",
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+
+def _install_fake_extract(monkeypatch, payload: dict) -> None:
+    import tortoise.extractor_v2 as ev2
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+
+def _read_passthrough_props(sdk, pid: str) -> list:
+    return list(sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0])
+
+
+def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
+    """#2949 (review P2): the v2 seam's dedup step-2 pre-resolves the canonical
+    BEFORE calling create_point, so a dedup hit writes none of the four
+    passthrough props — yet the response used to append the payload's ``props``
+    dict. The response thus
+    advertised quote/when/search_keys/source_turn_id that were ABSENT from the
+    resolved node: the exact #2813 symptom ("the reply looked correct while the
+    node stored nothing") persisting on the dedup path. A canonical written
+    before #2813 — or by a lane that does not pass these fields — carries none
+    of them, so the seam must report the STORED state (the same principle as
+    step 2's "never report a phantom id").
+
+    MUTATION THAT REDS THIS TEST: remove the read-back
+    (``if not created_here:`` → ``if False:``) — the response then echoes the
+    payload and advertises props the node does not have. An UNCONDITIONAL
+    read-back (``→ if True:``) does NOT red this test — it still yields the
+    canonical's empty stored props here; it reds the create-path
+    ``test_capture_v2_persists_passthrough_props_on_node`` instead."""
+    content = "the auth dead-end is the top issue"
+    # Pre-existing canonical with NO passthrough props (pre-#2813 shape).
+    canonical = sdk.create_point("statement", content)
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    # Resolved to the PRE-EXISTING canonical, no new node minted.
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["dedup"] == "content_hash_hit", res["points"]
+
+    # THE PARITY: the response must not advertise props the node lacks.
+    assert res["points"][0]["props"] == {}, res["points"][0]["props"]
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+
+def test_capture_dedup_hit_reports_stored_values_over_payload(
+        sdk, monkeypatch):
+    """#2949 (review P2), second arm: when the canonical DOES carry stored
+    passthrough props, the dedup-hit response must report THOSE (read back,
+    never re-stamped) — not the payload's. Guards the vacuous alternative fix
+    of blanking ``props`` on every dedup hit: the stored state must survive.
+    ``search_keys`` is reported in its stored flat-string form
+    (``_flatten_search_keys_prop``)."""
+    content = "the auth dead-end is the top issue"
+    canonical = sdk.create_point(
+        "statement", content, quote="ORIGINAL quote", when="2020-01-01",
+        search_keys=["original", "keys"], source_turn_id="turn-0")
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["props"] == {
+        "quote": "ORIGINAL quote",
+        "when": "2020-01-01",
+        "search_keys": "original keys",
+        "source_turn_id": "turn-0",
+    }, res["points"][0]["props"]
+    # The canonical was never re-stamped (first-writer).
+    assert _read_passthrough_props(sdk, canonical["id"]) == [
+        "ORIGINAL quote", "2020-01-01", "original keys", "turn-0"]
+
+
+def test_capture_create_path_omits_unstored_passthrough_props(
+        sdk, monkeypatch):
+    """#2949 (re-review P2): the CREATE path must mirror the graph's PRESENCE,
+    not the payload's. Two payload props are never stored on the node:
+      - ``search_keys: []`` — the v2 extractor emits the list unconditionally
+        (``_clean_search_keys(None) -> []``) and create_point's
+        ``_flatten_search_keys_prop`` POPS an empty/blank list;
+      - ``source_turn_id: None`` — emitted unconditionally as ``int|None``
+        and never persisted (the graph drops null props).
+    Both must be omitted from the response; a field the node DOES hold stays
+    advertised.
+
+    MUTATION THAT REDS THIS TEST: delete the presence normalization above the
+    write (the ``if v is not None`` filter and/or the empty-search_keys pop) —
+    the response again advertises a field the node does not hold."""
+    content = "the auth dead-end is the top issue"
+    payload = _passthrough_payload(content)
+    payload["points"][0]["search_keys"] = []
+    payload["points"][0]["source_turn_id"] = None
+
+    _install_fake_extract(monkeypatch, payload)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    quote, when, sk, tid = _read_passthrough_props(sdk, pid)
+    assert sk is None, (quote, when, sk, tid)   # popped by _flatten_search_keys_prop
+    assert tid is None, (quote, when, sk, tid)  # a null prop is not stored
+    # ...so the response advertises neither.
+    assert "search_keys" not in res["points"][0]["props"], res["points"]
+    assert "source_turn_id" not in res["points"][0]["props"], res["points"]
+    # The fields the node DOES hold stay advertised.
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+    }, res["points"][0]["props"]
+
+
+def test_capture_passthrough_read_clause_covers_whitelist():
+    """#2949 (review F4): the dedup-hit read-back field list is DERIVED from
+    the single ordered declaration, so it cannot silently omit a newly
+    whitelisted E3 field — the pre-fix defect, where the create path stored by
+    whitelist membership while a hand-written inline RETURN omitted the field
+    (the #2813 class on the dedup path).
+
+    MUTATION THAT REDS THIS TEST: hand-write the read-back (drop a field from
+    ``_capture_passthrough_read_fields``) — the coverage assertion fails."""
+    from tortoise.sdk import (
+        _CAPTURE_PASSTHROUGH_ORDER,
+        _CAPTURE_PASSTHROUGH_PROPS,
+        _capture_passthrough_read_fields,
+    )
+    clause = _capture_passthrough_read_fields()
+    missing = sorted(
+        k for k in _CAPTURE_PASSTHROUGH_PROPS if f"n.{k}" not in clause)
+    assert missing == [], (
+        f"read-back {clause!r} omits whitelisted props {missing!r}")
+    assert clause.count("n.") == len(_CAPTURE_PASSTHROUGH_PROPS), clause
+    assert set(_CAPTURE_PASSTHROUGH_ORDER) == set(_CAPTURE_PASSTHROUGH_PROPS)
+    assert len(_CAPTURE_PASSTHROUGH_ORDER) == len(_CAPTURE_PASSTHROUGH_PROPS)
+
+
+def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
+    """#2949 (review F4) behavioral arm: the shared read-back helper returns
+    EVERY whitelisted field the node holds, through the SAME generated RETURN
+    clause. A runtime drop (a field missing from the derivation) REDs here.
+    ``search_keys`` is read back in its stored flat-string form."""
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+    # #5007: the probe writes EVERY whitelisted field, so the "node holds"
+    # set stays equal to the whitelist — a newly whitelisted OPTIONAL field
+    # (span_start/span_end are absent on a spanless point) would otherwise
+    # make this assertion vacuous rather than red.
+    pid = sdk.create_point(
+        "statement", "read helper probe", quote="q-2949",
+        when="2026-01-01", search_keys=["a", "b"],
+        source_turn_id="turn-2949",
+        span_start=0, span_end=5)["id"]
+    stored = sdk._read_capture_passthrough_props(sdk._get_proj(), pid)
+    assert set(stored) == set(_CAPTURE_PASSTHROUGH_PROPS), stored
+    assert stored == {
+        "quote": "q-2949",
+        "when": "2026-01-01",
+        "search_keys": "a b",
+        "source_turn_id": "turn-2949",
+        "span_start": 0,
+        "span_end": 5,
+    }, stored
 
 
 def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
@@ -314,21 +579,258 @@ def test_capture_session_idempotent(sdk):
     assert turns[0][0] == 3, "re-capture must not duplicate turn points"
 
 
-def test_capture_session_no_provider_fails_closed(sdk, monkeypatch):
-    """#822: no provider key (and no mock seam) → ValueError — the regex
-    fallback is gone, capture requires an LLM provider."""
+def test_capture_session_no_provider_stores_turns(sdk, monkeypatch):
+    """#3892 (owner ruling 2026-09-18): no provider key NO LONGER refuses the
+    capture — the key gates EXTRACTION, not storage. The full keyless write
+    behaviour is pinned by
+    ``test_keyless_capture_stores_turns_and_stays_searchable``; this test
+    keeps the PRE-WRITE contract: an EMPTY conversation stores nothing (no
+    Session stub) and is still reported through the structured #1529 empty
+    receipt (ok=False), never a raise and never a silent 0.
+
+    Supersedes the pre-#3892 ``..._fails_closed`` expectation (ValueError
+    before any write), which the owner's ruling reversed."""
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
               "GEMINI_API_KEY"):
         monkeypatch.delenv(k, raising=False)
-    with pytest.raises(ValueError, match="LLM provider key"):
-        sdk.capture_session(CONV)
-    # P1 #1529: the no-extractor check precedes the empty gate — an EMPTY
-    # conversation with no key raises the SAME ValueError (fail-closed
-    # exception, hosted 503-first precedent; never the structured empty
-    # response, which would mask a misconfigured deploy).
-    with pytest.raises(ValueError, match="LLM provider key"):
-        sdk.capture_session([])
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True
+    assert res["extraction_mode"] == "no-provider"
+    # P1 #1529: the empty/blank gate still precedes every write — an EMPTY
+    # conversation keylessly stores NOTHING (turns=0, no Session stub) and
+    # returns the structured empty receipt rather than raising.
+    empty = sdk.capture_session([])
+    assert empty["ok"] is False
+    assert empty["extraction_mode"] == "empty"
+    assert empty["turns"] == 0
+    assert empty["errors"]
+    sessions = sdk._get_proj().g.query(
+        "MATCH (s:Session) RETURN count(s)").result_set[0][0]
+    assert sessions == 1, "the empty gate must not write a Session stub"
+
+
+def test_keyless_capture_stores_turns_and_stays_searchable(sdk, monkeypatch):
+    """#3892: with ALL provider keys absent, a capture still STORES its turns
+    — the Session is merged and the mechanical turn Points (+ CONTAINS edges)
+    are written by the unchanged loop — ONLY the LLM extraction into memory
+    points is skipped, the receipt says so truthfully, and the stored turns
+    are then surfaced by a KEYLESS search.
+
+    Before #3892 this call raised ``ValueError`` BEFORE any write, so the
+    session existed nowhere but the harness JSONL and no retrieval could ever
+    return it (the local capture lane was write-only by construction).
+
+    NO LLM runs anywhere in this test: every provider key is absent AND the
+    mock seam is cleared, so any extraction attempt would fail loudly rather
+    than quietly serve a mock."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    # Guard the test's own premise: no extractor can be built at all.
+    from tortoise.sdk import _build_session_llm_extractor
+    assert _build_session_llm_extractor() is None, "keys leaked into the test"
+
+    sid = "sess-3892-keyless"
+    res = sdk.capture_session(CONV, session_id=sid)
+
+    # ── (4) the receipt is truthful ─────────────────────────────────────
+    assert res["session_id"] == sid
+    assert res["ok"] is True, res
+    assert res["turns"] == len(CONV)
+    assert res["extracted"] == 0
+    assert res["points"] == []
+    assert res["extraction_mode"] == "no-provider", res["extraction_mode"]
+    assert res["errors"] == []
+    assert res["warnings"], "a keyless capture must never be silent"
+    assert any("provider key" in w for w in res["warnings"]), res["warnings"]
+
+    proj = sdk._get_proj()
+
+    # ── (1) the Session exists and N turn Points carry the right shape ──
+    n_sessions = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN count(s)",
+        params={"sid": sid}).result_set[0][0]
+    assert n_sessions == 1
+    turns = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH $p "
+        "RETURN t.id, t.pointKind, t.is_episodic, t.status "
+        "ORDER BY t.id",
+        params={"p": f"{sid}_t"}).result_set
+    assert [r[0] for r in turns] == [f"{sid}_t{i}" for i in range(len(CONV))]
+    for pid, kind, episodic, status in turns:
+        assert kind == "event", (pid, kind)
+        assert episodic is True, (pid, episodic)
+        assert status == "draft", (pid, status)
+
+    # ── (2) N CONTAINS edges ────────────────────────────────────────────
+    edges = proj.g.query(
+        "MATCH (:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+        params={"sid": sid}).result_set[0][0]
+    assert edges == len(CONV)
+
+    # ── (3) a KEYLESS search returns them ───────────────────────────────
+    # Same shared point fetch the /v1/search payload uses. Retried: the
+    # embedded engine degrades PER STRATEGY (one leg down, the others
+    # continue), so a partial pool is the known flake class — the assertion
+    # is on the REQUIRED id, never merely on a non-empty pool.
+    want = f"{sid}_t0"
+    hits: list[dict] = []
+    for _ in range(3):
+        hits = sdk.tortoise_fts_query("auth dead-end", limit=40,
+                                      include_terminal=True)
+        if want in {str(h.get("id")) for h in hits}:
+            break
+    assert want in {str(h.get("id")) for h in hits}, \
+        f"keyless search did not surface the stored turn: {hits}"
+
+
+def test_keyless_capture_is_extraction_upgradable_with_a_key(sdk, monkeypatch):
+    """#3892/#3996: a keyless capture must NOT block the later extraction of
+    the same session once a key exists.
+
+    The keyless attempt records ``capture_ok=False`` + ``capture_extractor=
+    "none"`` — no extraction lane ran — which is exactly what the #2335
+    TRUE-retry gate consumes, so adding a key and re-capturing the same
+    ``session_id`` EXTRACTS instead of silently replaying. (Had the keyless
+    attempt recorded ``capture_ok=True`` / lane ``v2``,
+    ``retry_failed_capture`` would be False and the re-capture would report
+    ``extracted: 0`` with ``extraction_mode: "replayed"`` — leaving the stored
+    session permanently points-less.)
+
+    No network and no real provider: the "key appearing" is the offline
+    MockModel seam appearing."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-upgrade"
+    first = sdk.capture_session(CONV, session_id=sid)
+    assert first["extraction_mode"] == "no-provider"
+    assert first["extracted"] == 0
+
+    proj = sdk._get_proj()
+    prior_ok, prior_lane = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set[0]
+    assert prior_ok is False, f"a keyless capture must not record success: {prior_ok!r}"
+    assert prior_lane == "none", prior_lane
+
+    # The key appears (offline seam — still no LLM, no network).
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    second = sdk.capture_session(CONV, session_id=sid)
+    assert second["extraction_mode"] == "llm:mock", second["extraction_mode"]
+    assert second["extracted"] >= 1, second
+    # The re-attempt is convergent: the deterministic turn ids are reused,
+    # so no duplicate turn Points land (#1727/#2335 partial-write policy).
+    turns = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH $p RETURN count(t)",
+        params={"p": f"{sid}_t"}).result_set[0][0]
+    assert turns == len(CONV), turns
+
+
+def test_m2_lane_refuses_the_keyless_retry_and_says_so(sdk, monkeypatch):
+    """#3892 (review cycles 2/4/5): the #2335 retry gate's m2 exclusion is
+    KEPT for a keyless prior. M2 dedups per-capture only, and a claim minted
+    by a crashed or concurrent attempt is not yet ``:CONTAINS``-wired, so no
+    post-hoc graph read can prove a session claim-free — the safety argument
+    for admitting the m2 retry was unverifiable (review cycle 5 reproduced
+    duplicate claim nodes under it).
+
+    What must NOT happen is a silent, misleading replay: the receipt carries
+    an additive warning naming the keyless-pending state and the remedy."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-m2-refused"
+    first = sdk.capture_session(CONV, session_id=sid)
+    assert first["extraction_mode"] == "no-provider"
+    assert first["extracted"] == 0
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    second = sdk.capture_session(CONV, session_id=sid)
+    assert second["extraction_mode"] == "replayed", second["extraction_mode"]
+    assert second["extracted"] == 0
+    assert any("TORTOISE_SESSION_EXTRACTOR=m2" in w
+               for w in second["warnings"]), second["warnings"]
+    assert any("stored WITHOUT a provider key" in w
+               for w in second["warnings"]), second["warnings"]
+    # The refused retry minted no non-episodic claim.
+    claims = sdk._get_proj().g.query(
+        "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.is_episodic IS NULL OR p.is_episodic = false "
+        "RETURN count(p)", params={"sid": sid}).result_set[0][0]
+    assert claims == 0, claims
+
+
+def test_keyless_recapture_does_not_remint_the_session_event(sdk, monkeypatch):
+    """#3892 (review cycle 2, P3): a keyless RE-capture extracts nothing, so
+    there is nothing to stamp — it must NOT re-run the sessionCaptured Event
+    mint (which re-journals EventRecorded and refreshes startedAt per call).
+    The Event count stays 1 across repeated keyless captures."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-remint"
+    sdk.capture_session(CONV, session_id=sid)
+    proj = sdk._get_proj()
+    first_started = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.startedAt"
+    ).result_set[0][0]
+    sdk.capture_session(CONV, session_id=sid)
+    sdk.capture_session(CONV, session_id=sid)
+    rows = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) "
+        "RETURN count(e), collect(e.startedAt)").result_set[0]
+    assert rows[0] == 1, f"keyless re-captures re-minted the Event: {rows}"
+    assert rows[1] == [first_started], (
+        f"keyless re-capture refreshed startedAt: {rows[1]}")
+
+
+def test_keyless_recapture_never_clobbers_a_recorded_lane(sdk, monkeypatch):
+    """#3892 (review cycle 3, P2): a keyless re-capture of a session whose
+    prior KEYED attempt FAILED must record NOTHING — the prior lane is the
+    evidence the #2473 M2 exclusion reads ("live content-addressed claims a
+    non-convergent M2 re-run must not touch"). Overwriting it with "none"
+    would re-admit exactly that re-run.
+
+    No LLM runs: the keyless legs are keyless, and the final M2-lane leg is
+    the offline MockModel seam (a REPLAY, so no extraction happens at all)."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-lane-preserve"
+    sdk.capture_session(CONV, session_id=sid)
+    proj = sdk._get_proj()
+    # Simulate the prior attempt: a FAILED v2 capture (live claims, lane v2).
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) "
+        "SET s.capture_ok=false, s.capture_extractor='v2'",
+        params={"sid": sid})
+
+    # A keyless re-capture must NOT rewrite that record.
+    res = sdk.capture_session(CONV, session_id=sid)
+    assert res["extraction_mode"] == "no-provider"
+    ok, lane = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set[0]
+    assert (ok, lane) == (False, "v2"), (ok, lane)
+
+    # ... therefore the M2 exclusion still holds: a keyed M2 re-capture
+    # REPLAYS instead of re-running the non-convergent lane over the prior
+    # attempt's claims.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    again = sdk.capture_session(CONV, session_id=sid)
+    assert again["extraction_mode"] == "replayed", again["extraction_mode"]
+    assert again["extracted"] == 0
 
 
 def test_capture_session_llm_points_fresh_per_capture(sdk, monkeypatch):
@@ -1931,6 +2433,79 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
 
 
+def test_apply_supersessions_long_successor_dedup_and_legacy_prefix(sdk):
+    """#5370 (indicators 3+4): the fold stores the FULL successor name, and
+    the dedup/keep-first compare accepts EITHER the full name (rows folded
+    after the fix) or its 200-char prefix (rows folded before it).
+
+      * a same-successor re-ingest on the NEW (full) stored form is a SILENT
+        dedup — no spurious divergence;
+      * a LEGACY row (the old 200-char prefix) re-ingested with the full name
+        is still an idempotent dedup (applied=0, stored value kept) — never a
+        keep-first "conflict" — with the loud unverified-identity warning the
+        #2164 round-2 review added;
+      * a genuinely DIVERGENT successor is still keep-first (applied=0, stored
+        value untouched, loud conflict warning).
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    other_name = "other-title-" + ("z" * 240)
+    assert len(long_name) > 200 and len(other_name) > 200
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "long-target")
+    sdk.create_entity("object", long_name)
+    sdk.create_entity("object", other_name)
+    record = [{"superseded": "long-target", "supersedes_by": long_name,
+               "evidence": "#5370"}]
+    warns: list[str] = []
+
+    applied = apply_supersessions(proj, sdk, record, session_id="s5370_a",
+                                  warn=warns.append)
+    assert applied == 1 and warns == [], (applied, warns)
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name), _entity_fold_state(proj, "long-target")
+
+    # (1) NEW full form: same-successor re-ingest → SILENT dedup.
+    applied2 = apply_supersessions(proj, sdk, record, session_id="s5370_b",
+                                   warn=warns.append)
+    assert applied2 == 0, "same successor must dedup, not re-fold"
+    assert warns == [], f"full-form dedup must be silent: {warns}"
+    assert _object_superseded_events(proj) == 1
+
+    # (2) LEGACY row (pre-#5370 200-char prefix): a full-name re-ingest still
+    #     dedups — never a keep-first conflict — and says so loudly.
+    proj.g.query("MATCH (o:Object {name:'long-target'}) "
+                 "SET o.supersededBy=$p", params={"p": long_name[:200]})
+    applied3 = apply_supersessions(proj, sdk, record, session_id="s5370_c",
+                                   warn=warns.append)
+    assert applied3 == 0, "legacy prefix must dedup, not re-fold"
+    assert len(warns) == 1, warns
+    # Round 3: the warning deliberately does NOT claim the stored value is a
+    # "legacy fold" — the same arithmetic is reached by a POST-#5370 row whose
+    # successor name is exactly 200 chars (a genuine full name). Pin the
+    # neutral wording, not a legacy claim.
+    assert "identity beyond that prefix is not verified" in warns[0], warns
+    assert "legacy" not in warns[0], \
+        f"the warning must not blame a legacy fold: {warns}"
+    assert "conflict with" not in warns[0], \
+        f"legacy dedup must not read as a divergence: {warns}"
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name[:200])
+    assert _object_superseded_events(proj) == 1
+
+    # (3) genuinely DIVERGENT successor → keep-first + loud conflict warning.
+    divergent = [{"superseded": "long-target", "supersedes_by": other_name,
+                  "evidence": "#5370"}]
+    applied4 = apply_supersessions(proj, sdk, divergent, session_id="s5370_d",
+                                   warn=warns.append)
+    assert applied4 == 0, "divergent successor must never blind-overwrite"
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name[:200])
+    assert "keep-first" in warns[-1], warns
+    assert _object_superseded_events(proj) == 1
+
+
 def test_apply_supersessions_chain_converges_both_orders(sdk):
     """#2249 (O3): a same-payload chain (approach-A → approach-B →
     approach-C) must converge to the IDENTICAL end state whether emitted in
@@ -3144,21 +3719,92 @@ def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatc
         assert len(stamped) == 1, f"points of one capture share one eventId: {stamped}"
 
 
-def test_capture_session_recapture_shorter_conversation_pins_state(sdk):
-    """P1 (D3): re-capturing the same session_id with a SHORTER different
-    conversation — turn-stream MERGE is keyed {sid}_t{i}, so higher-index
-    turns from the prior capture stay CONTAINS-wired (stale residue) while
-    response turns report the new length. PIN the accepted state."""
-    res = sdk.capture_session([{"role": "user", "content": "first capture with five turns"},
-                               {"role": "assistant", "content": "second"},
-                               {"role": "user", "content": "third"}])
+def test_recapture_shorter_conversation_deletes_orphaned_turns(sdk):
+    """#1920: a shorter re-capture must DELETE the prior capture's
+    higher-index turn Points.
+
+    The turn store is keyed ``{session_id}_t{i}`` and written with MERGE, so
+    re-capturing turn 1..4 of a 10-turn session left ``_t4.._t9`` in the
+    graph, still ``CONTAINS``-wired to the Session, while ``s.turn_count``
+    was overwritten with the new length — the stored count and the
+    ``CONTAINS`` walk disagreed, and the stale turns stayed reachable from
+    the session (and, for a journaled store, were resurrected by a rebuild:
+    see ``test_recapture_shorter_does_not_resurrect_turns_on_rebuild``).
+
+    The defect is the MERGE's *absence* of a delete half, not a wrong count:
+    the invariant pinned here is that the Session's episodic ``CONTAINS``
+    members are exactly the turn window of the LAST capture.
+
+    This REVERSES the #1529 D3 pin (``..._pins_state``), which recorded the
+    residue as the accepted state; #1920 is the owner decision that it is a
+    defect, not a state to pin.
+    """
+    conv = [{"role": "user" if i % 2 == 0 else "assistant",
+             "content": f"turn number {i}"} for i in range(10)]
+    res = sdk.capture_session(conv)
     sid = res["session_id"]
+    assert res["turns"] == 10
+    proj = sdk._get_proj()
+
+    def _wired() -> set[str]:
+        return set(proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->"
+            "(t:Point {pointKind:'event'}) RETURN collect(t.id)",
+            params={"sid": sid}).result_set[0][0] or [])
+
+    assert _wired() == {f"{sid}_t{i}" for i in range(10)}
+
     sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
                         session_id=sid)
-    wired = sdk._get_proj().g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-        "RETURN collect(t.id)", params={"sid": sid}).result_set[0][0]
-    assert set(wired) == {f"{sid}_t{i}" for i in range(3)}, wired
+
+    # Indicator 1: the stored turn_count and the CONTAINS walk agree.
+    stored = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+        params={"sid": sid}).result_set[0][0]
+    assert stored == 1, stored
+    assert _wired() == {f"{sid}_t0"}, _wired()
+
+    # Indicator 2: the orphaned turns are DELETED, not merely unlinked.
+    for i in range(1, 10):
+        n = proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
+                         params={"id": f"{sid}_t{i}"}).result_set[0][0]
+        assert n == 0, f"orphaned turn {sid}_t{i} must be deleted"
+
+
+def test_recapture_prune_spares_claims_and_other_sessions(sdk):
+    """#1920 scoping: the prune removes ONLY this session's own turn Points.
+
+    The extraction lane CONTAINS-wires claim Points into the SAME :Session
+    (they are not turns), and a sibling session's turns live in the same
+    graph. A prune scoped on "everything CONTAINS-wired but not in the new
+    window" would delete both.
+    """
+    res = sdk.capture_session(CONV)
+    sid = res["session_id"]
+    other = sdk.capture_session(CONV)["session_id"]
+    proj = sdk._get_proj()
+
+    wired = set(proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "RETURN collect(p.id)",
+        params={"sid": sid}).result_set[0][0] or [])
+    turn_ids = {f"{sid}_t{i}" for i in range(3)}
+    claims = wired - turn_ids
+    assert claims, f"premise: extraction CONTAINS-wires claims: {wired}"
+    other_turns = {f"{other}_t{i}" for i in range(3)}
+
+    sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
+                        session_id=sid)
+
+    survivors = set(proj.g.query(
+        "MATCH (p:Point) WHERE p.id IN $ids RETURN collect(p.id)",
+        params={"ids": sorted(claims)}).result_set[0][0] or [])
+    assert survivors == claims, (
+        f"the prune deleted extracted claims: {sorted(claims - survivors)}")
+    for tid in sorted(other_turns):
+        assert proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
+                            params={"id": tid}).result_set[0][0] == 1, (
+            f"the prune swept a sibling session's turn {tid}")
 
 
 # ── #1532 P4: capture-path parity (window / role / quota / MITIGATES / id) ──
@@ -3290,6 +3936,16 @@ def test_capture_writes_mitigates_artifact(sdk, monkeypatch):
     assert rows[0][0] == 0.4
     assert "raise the price" in rows[0][1], \
         f"reason must be the mitigating point's content, got {rows[0][1]!r}"
+    # #4937 INVARIANT GUARD (the regression pin for the refusal itself is
+    # tests/test_sdk.py::test_mitigates_is_not_an_operator_kind): the payload
+    # spelling is a BRIDGE-ATTACK record — it attaches to the IMPL operator
+    # above and must NOT create a peer operator kind. This holds on main too,
+    # so it guards the invariant rather than the #4937 diff.
+    peer = proj.g.query(
+        "MATCH (o:Point {is_operator:true}) WHERE o.op_type = 'MITIGATES' "
+        "RETURN count(o)").result_set
+    assert peer[0][0] == 0, \
+        "MITIGATES must not materialize as a generic operator kind (#4937)"
 
 
 def test_capture_mitigates_deep_miss_dropped_not_raised(sdk, monkeypatch):
@@ -3375,18 +4031,21 @@ def test_client_commit_id_capture_parity(sdk, monkeypatch):
 
 
 _CONSENT_TEAM = {
-    "team_id": "team-1727-consent", "tier": "free", "key_id": "k-1727",
+    "org_id": "team-1727-consent", "tier": "free", "key_id": "k-1727",
     # C5 #2114: C2 owner class (legacy tt_ key) — scope-less key_id dicts
     # 403 the capture gates otherwise.
     "legacy_full_access": True, "max_points": 100000,
+    # #4010: the resolved-limits contract carries EVERY resource — sessions is
+    # unlimited (explicit None), and a MISSING key is fail-closed.
+    "max_sessions": None,
 }
 
 
-def _provision_team(team_id: str) -> None:
+def _provision_team(org_id: str) -> None:
     """Create the registry Team node (onboarding state lives on it)."""
     _ha._make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
-        params={"id": team_id, "st": "{}"},
+        params={"id": org_id, "st": "{}"},
     )
 
 
@@ -3410,34 +4069,34 @@ def consent_client(tmp_path, monkeypatch):
     # (this fixture was already #1950-canonical — pin + close present; the
     # helper is the single source of truth now).
     with patched_tortoise_sdk(str(tmp_path / "c.db")):
-        app.dependency_overrides[get_current_team] = lambda: dict(_CONSENT_TEAM)
-        _provision_team(_CONSENT_TEAM["team_id"])
+        app.dependency_overrides[get_current_org] = lambda: dict(_CONSENT_TEAM)
+        _provision_team(_CONSENT_TEAM["org_id"])
         with TestClient(app) as tc:
             yield tc
 
 
-def _opt_in(team_id: str = _CONSENT_TEAM["team_id"], enabled: bool = True):
-    _ha._update_onboarding_state(team_id, session_recording=enabled)
+def _opt_in(org_id: str = _CONSENT_TEAM["org_id"], enabled: bool = True):
+    _ha._update_onboarding_state(org_id, session_recording=enabled)
     # #1950: self-verify — read back through the same registry path the
     # consent gate uses. A silently-no-op seed would surface as a confusing
     # 403 downstream; fail loud HERE with the actual persisted state.
-    readback = _ha._get_onboarding_state(team_id)
+    readback = _ha._get_onboarding_state(org_id)
     assert readback.get("session_recording") is enabled, (
-        f"consent seed not visible to gate read (team={team_id}): {readback}"
+        f"consent seed not visible to gate read (team={org_id}): {readback}"
     )
     return readback
 
 
-def _state(team_id: str = _CONSENT_TEAM["team_id"]) -> dict:
-    return _ha._get_onboarding_state(team_id)
+def _state(org_id: str = _CONSENT_TEAM["org_id"]) -> dict:
+    return _ha._get_onboarding_state(org_id)
 
 
-def _graph(team_id: str = _CONSENT_TEAM["team_id"]):
-    return _ha._make_sdk(namespace=team_id)._get_proj()
+def _graph(org_id: str = _CONSENT_TEAM["org_id"]):
+    return _ha._make_sdk(namespace=org_id)._get_proj()
 
 
-def _session_count(team_id: str = _CONSENT_TEAM["team_id"]) -> int:
-    rows = _graph(team_id).g.query(
+def _session_count(org_id: str = _CONSENT_TEAM["org_id"]) -> int:
+    rows = _graph(org_id).g.query(
         "MATCH (s:Session) RETURN count(s)").result_set
     return int(rows[0][0])
 
@@ -3558,11 +4217,11 @@ def test_receipt_requires_durable_data(consent_client):
 
     real_update = _ha._update_onboarding_state
 
-    def failing_update(team_id, **fields):
+    def failing_update(org_id, **fields):
         if any(k.startswith("session_capture_receipt") for k in fields):
             calls["receipt_writes"] += 1
             raise RuntimeError("simulated receipt PATCH failure")
-        return real_update(team_id, **fields)
+        return real_update(org_id, **fields)
 
     import tortoise.hosted_api as ha_mod
     ha_mod._update_onboarding_state = failing_update
@@ -3587,26 +4246,24 @@ def test_receipt_requires_durable_data(consent_client):
         "bare receipt written on the converged 2xx (harness-less retry)"
 
 
-def test_receipt_2xx_only_and_last_error_lifecycle(consent_client, monkeypatch):
+def test_receipt_2xx_only_and_last_error_lifecycle(consent_client):
     """Task 11 (T1-P12 + cycle-4 P1-2): receipt set ONLY on 2xx; per-harness
-    last-error set on non-2xx and CLEARED on 2xx."""
+    last-error set on non-2xx and CLEARED on 2xx.
+
+    #4188: the non-2xx trigger is the empty-conversation 422 — the old
+    no-provider trigger is now a 2xx (the capture is STORED and only
+    extraction is skipped)."""
     _opt_in()
-    # non-2xx: no provider (mock seam off AND no real keys) → 503 →
-    # last_error set, no receipt
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    # non-2xx: empty conversation → 422 → last_error set, no receipt
     r = consent_client.post("/v1/sessions",
-                            json={"conversation": _CONV, "harness": "claude"})
-    assert r.status_code == 503, r.text
+                            json={"conversation": [], "harness": "claude"})
+    assert r.status_code == 422, r.text
     st = _state()
     assert st.get("session_capture_last_error_claude"), \
-        "503 must set session_capture_last_error_claude"
+        "non-2xx must set session_capture_last_error_claude"
     assert st.get("session_capture_receipt_claude") is None, \
         "no receipt on a non-2xx"
-    # 2xx: mock seam back on → receipt set, last_error cleared
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # 2xx: a real conversation → receipt set, last_error cleared
     r2 = consent_client.post("/v1/sessions",
                              json={"conversation": _CONV, "harness": "claude"})
     assert r2.status_code == 200, r2.text
@@ -3641,7 +4298,8 @@ def test_off_switch_keeps_existing_sessions(consent_client):
 
 def test_off_switch_409_first_before_provider_gate(consent_client, monkeypatch):
     """#1927 (review P2): the 409 opt-out check is FIRST in the gate stack —
-    a disabled team with NO provider key gets 409, not the provider 503."""
+    a disabled team with NO provider key gets 409, never the stored keyless
+    capture path."""
     _opt_in(enabled=False)
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
@@ -3825,7 +4483,7 @@ def test_session_links_resolve_after_index(consent_client):
         "no entity yet — honest no-match at capture time"
     # Index lands → entity materializes → re-link resolves.
     _object(proj, "github-issue-test/repo-99", "test/repo#99")
-    _ha._relink_sessions_after_index(_CONSENT_TEAM["team_id"])
+    _ha._relink_sessions_after_index(_CONSENT_TEAM["org_id"])
     assert _link_edges(proj, "Session", "s-link-late") == \
         {"github-issue-test/repo-99"}, "re-link on index completion must resolve"
     rows = proj.g.query(
@@ -3838,7 +4496,7 @@ def test_session_links_resolve_after_index(consent_client):
 # #1727 Slice 2 (Task 13) — tortoise_session_capture MCP tool.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
+def _mcp_team_context(tmp_path, monkeypatch, *, org_id="team-1727-mcp",
                        seed_recording: bool = True):
     """Set the MCP auth ContextVars (hosted-tenant shape) + provision the
     team, so the tool's hosted pipeline runs against the temp DB.
@@ -3850,7 +4508,7 @@ def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
 
     @contextmanager
     def _ctx():
-        from tortoise.mcp_auth import _current_team_id, _current_team_limits, _transport_mode
+        from tortoise.mcp_auth import _current_org_id, _current_org_limits, _transport_mode
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
         # #2127 wave 2: shared helper — the old enter/exit plain-clear (no
         # pin, no anchor close) is the #1950 clear-without-close gap this
@@ -3859,18 +4517,19 @@ def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
         # fixture-owned INSIDE the helper (they are per-call tokens, not SDK
         # state).
         with patched_tortoise_sdk(str(tmp_path / "mcp.db")):
-            _provision_team(team_id)
+            _provision_team(org_id)
             if seed_recording:
-                _ha._update_onboarding_state(team_id, session_recording=True)
-            tok_t = _current_team_id.set(team_id)
-            tok_l = _current_team_limits.set(
-                {"team_id": team_id, "tier": "free", "max_points": 100000})
+                _ha._update_onboarding_state(org_id, session_recording=True)
+            tok_t = _current_org_id.set(org_id)
+            tok_l = _current_org_limits.set(
+                {"org_id": org_id, "tier": "free", "max_points": 100000,
+                 "max_sessions": None})
             tok_m = _transport_mode.set("http")
             try:
-                yield team_id
+                yield org_id
             finally:
-                _current_team_id.reset(tok_t)
-                _current_team_limits.reset(tok_l)
+                _current_org_id.reset(tok_t)
+                _current_org_limits.reset(tok_l)
                 _transport_mode.reset(tok_m)
 
     return _ctx()
@@ -3917,7 +4576,7 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     """Task 13 + #1927: the MCP tool carries the SAME off-switch as the REST
     path — a team with recording disabled gets the clear 409-style error
     (stops ingestion), never a silent capture or the old 403."""
-    from tortoise.mcp_auth import _current_team_id, _current_team_limits
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
     from tortoise.mcp_server import tortoise_session_capture
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     # #2127 wave 2: shared helper (same pin + deterministic-close upgrade
@@ -3926,16 +4585,16 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
         _provision_team("team-1727-mcp-opt")
         _ha._update_onboarding_state("team-1727-mcp-opt",
                                      session_recording=False)
-        tok_t = _current_team_id.set("team-1727-mcp-opt")
-        tok_l = _current_team_limits.set(
-            {"team_id": "team-1727-mcp-opt", "tier": "free",
-             "max_points": 100000})
+        tok_t = _current_org_id.set("team-1727-mcp-opt")
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-1727-mcp-opt", "tier": "free",
+             "max_points": 100000, "max_sessions": None})
         try:
             result = tortoise_session_capture(conversation=_CONV, harness="pi")
             st = _ha._get_onboarding_state("team-1727-mcp-opt")
         finally:
-            _current_team_id.reset(tok_t)
-            _current_team_limits.reset(tok_l)
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
     assert result.get("status") == 409, result
     assert "disabled" in result.get("error", ""), result
     assert st.get("session_capture_last_error_pi"), \
@@ -3943,16 +4602,48 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     assert st.get("session_capture_receipt_pi") is None
 
 
+def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
+    """#4010: the capture bridge carries `max_sessions` only when it is
+    actually PRESENT, so a keyless limits dict reaches the sessions gate and
+    fails closed (#310 GAP-B) rather than being normalized to unlimited.
+
+    This is the degraded `mcp_auth` shape — `{"org_id": ...}` after a
+    registry resolution failure. Mutation this REDs:
+    `org["max_sessions"] = limits.get("max_sessions")`, which would turn a
+    failed resolution into a SUCCESSFUL unlimited capture — the exact
+    fail-open class #4010 removes, and it would make MCP succeed where REST
+    returns 500 for the same dict.
+    """
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with patched_tortoise_sdk(str(tmp_path / "mcp-keyshape.db")):
+        _provision_team("team-1727-keyshape")
+        tok_t = _current_org_id.set("team-1727-keyshape")
+        # `max_sessions` deliberately ABSENT — not set to None.
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-1727-keyshape", "tier": "free",
+             "max_points": 100000})
+        try:
+            result = tortoise_session_capture(
+                conversation=_CONV, harness="pi", session_id="s-keyshape")
+        finally:
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
+    assert result.get("status") == 500, result
+    assert "max_sessions" in str(result.get("error", "")), result
+
+
 def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
     """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
     mode' error — no local fallback that bypasses the gates."""
-    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+    from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     from tortoise.mcp_server import tortoise_session_capture
-    tok = _current_team_id.set(SELFHOST_TEAM_ID)
+    tok = _current_org_id.set(SELFHOST_ORG_ID)
     try:
         result = tortoise_session_capture(conversation=_CONV, harness="claude")
     finally:
-        _current_team_id.reset(tok)
+        _current_org_id.reset(tok)
     assert "error" in result, result
     assert "hosted mode" in result["error"], result
 
@@ -3969,8 +4660,8 @@ def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
 # actor from the RESOLVED team dict (registry/session branches alias it),
 # not from a test-set var.
 
-def _session_actor(team_id: str, session_id: str):
-    rows = _ha._make_sdk(namespace=team_id)._get_proj().g.query(
+def _session_actor(org_id: str, session_id: str):
+    rows = _ha._make_sdk(namespace=org_id)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
         params={"sid": session_id},
     ).result_set
@@ -4225,15 +4916,15 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
     the SAME detail text; neither writes a Session; each harness's per-harness
     last-error is recorded. Recording ON ⇒ both 2xx with ``surfaced`` marker
     data + per-harness receipts."""
-    from tortoise.hosted_api import get_current_team as _get_current_team
+    from tortoise.hosted_api import get_current_org as _get_current_team
     from tortoise.mcp_auth import (
-        _current_team_id,
-        _current_team_limits,
+        _current_org_id,
+        _current_org_limits,
         _transport_mode,
     )
     from tortoise.mcp_server import tortoise_session_capture
 
-    team_id = "team-phase-e-drift"
+    org_id = "team-phase-e-drift"
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     # m2 lane: claims are echo-derived from each conversation's OWN content,
     # so the REST and MCP captures below mint DISTINCT claims (the v2 mock is
@@ -4242,14 +4933,16 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
     # surfaced: [] and prove nothing about marker data on the MCP path).
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     with patched_tortoise_sdk(str(tmp_path / "drift.db")):
-        _provision_team(team_id)
-        _opt_in(team_id, enabled=False)  # OFF first
-        team = {"team_id": team_id, "tier": "free", "key_id": "k-1727",
-                "legacy_full_access": True, "max_points": 100000}
+        _provision_team(org_id)
+        _opt_in(org_id, enabled=False)  # OFF first
+        team = {"org_id": org_id, "tier": "free", "key_id": "k-1727",
+                "legacy_full_access": True, "max_points": 100000,
+                "max_sessions": None}
         app.dependency_overrides[_get_current_team] = lambda: dict(team)
-        tok_t = _current_team_id.set(team_id)
-        tok_l = _current_team_limits.set(
-            {"team_id": team_id, "tier": "free", "max_points": 100000})
+        tok_t = _current_org_id.set(org_id)
+        tok_l = _current_org_limits.set(
+            {"org_id": org_id, "tier": "free", "max_points": 100000,
+             "max_sessions": None})
         tok_m = _transport_mode.set("http")
         try:
             with TestClient(app) as tc:
@@ -4265,9 +4958,9 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                     "REST + MCP must surface the SAME recording-off message "
                     f"(shared impl): REST={rest_detail!r} MCP={mcp_res!r}")
                 assert "disabled" in rest_detail
-                assert _session_count(team_id) == 0, \
+                assert _session_count(org_id) == 0, \
                     "recording OFF must not write a Session on either surface"
-                st = _state(team_id)
+                st = _state(org_id)
                 assert st.get("session_capture_last_error_claude"), \
                     "REST 409 must record its per-harness last error"
                 assert st.get("session_capture_last_error_pi"), \
@@ -4279,7 +4972,7 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                 # (a same-content re-capture would be a content-hash fold and
                 # honestly report surfaced: [] — that anti-gaming is pinned in
                 # test_phase_e_surfaced_cross_session_reingest_counts_zero_added).
-                _opt_in(team_id, enabled=True)
+                _opt_in(org_id, enabled=True)
                 r2 = tc.post("/v1/sessions",
                              json={"conversation": _CONV, "harness": "claude",
                                    "session_id": "s-drift-rest"})
@@ -4291,14 +4984,14 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                 assert not mcp_res2.get("error"), mcp_res2
                 assert mcp_res2.get("surfaced"), mcp_res2
                 assert mcp_res2.get("protocol_version") == "memory_write_v1"
-                st2 = _state(team_id)
+                st2 = _state(org_id)
                 assert st2.get("session_capture_receipt_claude"), st2
                 assert st2.get("session_capture_receipt_pi"), st2
                 assert st2.get("session_capture_last_error_claude") is None
                 assert st2.get("session_capture_last_error_pi") is None
         finally:
-            _current_team_id.reset(tok_t)
-            _current_team_limits.reset(tok_l)
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
             _transport_mode.reset(tok_m)
 
 

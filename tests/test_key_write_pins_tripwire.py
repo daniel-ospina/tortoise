@@ -1,11 +1,11 @@
-"""#2299: server-side parity/tripwire for session key-write ?team_id= pins.
+"""#2299: server-side parity/tripwire for session key-write ?org_id= pins.
 
 The server counterpart of the client static tripwire
 (website/apps/dashboard/src/keyTeamPinsTripwire.test.js, #2230): that file
 guards the DASHBOARD's key-management writes (every revoke/rename/toggle/mint
-URL must append the `?team_id=` pin); this file guards the SERVER's honoring
+URL must append the `?org_id=` pin); this file guards the SERVER's honoring
 of that pin — every session-capable key-WRITE route must honor a truthy
-?team_id= in session mode, or a future key-write endpoint silently ignores
+?org_id= in session mode, or a future key-write endpoint silently ignores
 the pin again (the pre-#2230 PATCH failure mode; #2297's session gates landed
 in 1b22c56c and must stay intact).
 
@@ -15,9 +15,9 @@ Two layers:
      path contains /v1/team/keys or /v1/team/dashboard-login (the
      /v1/team/keys half matching the client tripwire's URL boundary, plus
      the server-contract dashboard-login entry the client boundary excludes)
-     must still resolve ?team_id= through
-     a recognized seam (the get_current_team_session DI, or the shared
-     _session_pinned_team / _ensure_key_in_pinned_team helpers), and every
+     must still resolve ?org_id= through
+     a recognized seam (the get_current_org_session DI, or the shared
+     _session_pinned_org / _ensure_key_in_pinned_org helpers), and every
      such route must be enumerated in KEY_WRITE_HANDLERS. NOT a whole-file
      scan: a FUTURE session key-write endpoint on a NEW prefix must
      deliberately extend KEY_WRITE_HANDLERS + the route-coverage matrix + the
@@ -33,14 +33,15 @@ Route-coverage matrix (also documented above the helpers in hosted_api.py):
 
 | Route                            | Handler               | Pin seam              |
 |----------------------------------|-----------------------|-----------------------|
-| POST   /v1/team/keys             | create_api_key        | DI (get_current_team  |
+| POST   /v1/team/keys             | create_api_key        | DI (get_current_org  |
 |                                  |                       |   _session)           |
+| POST   /v1/team/keys/{id}/rotate | rotate_api_key        | DI + fail-closed      |
 | PATCH  /v1/team/keys/{key_id}    | toggle_api_key_enabled| inline helpers        |
 | DELETE /v1/team/keys/{key_id}    | revoke_api_key        | DI + fail-closed      |
 | PATCH  /v1/team/dashboard-login  | toggle_dashboard_login| inline membership gate|
 
 The dashboard-login arm is a SERVER-CONTRACT test, not a client-mirror
-parity claim: the first-party client does NOT send ?team_id= on that route
+parity claim: the first-party client does NOT send ?org_id= on that route
 today (website/apps/dashboard/src/main.jsx toggleDashboardKeyLogin) and the
 client tripwire's WRITE_FNS boundary excludes it. Its behavioral tests assert
 the server contract — a pin, WHEN PRESENT, is honored and governs the write,
@@ -51,7 +52,7 @@ change.
 
 POST /v1/session/key (session_key) carries its team selector in the BODY
 (required when multi-membership) — a different client contract, documented in
-the helper matrix comment; it is not a ?team_id= route and is not scanned.
+the helper matrix comment; it is not a ?org_id= route and is not scanned.
 Agent signup/recover/token-revoke are token-driven (the token IS the pin).
 """
 
@@ -82,14 +83,18 @@ _SUPABASE_URL = "https://pinparity.supabase.co"
 # dashboard-login entry the client boundary excludes). Each maps to the pin
 # seam that MUST appear in its source body.
 KEY_WRITE_HANDLERS: dict[str, tuple[str, ...]] = {
-    # DI seam — get_current_team_session → _session_user_team membership-gates
+    # DI seam — get_current_org_session → _session_user_org membership-gates
     # the pin and resolves the team from it.
-    "create_api_key": ("get_current_team_session",),
+    "create_api_key": ("get_current_org_session",),
     # Inline seam — the shared helpers (membership gate + fail-closed).
-    "toggle_api_key_enabled": ("_session_pinned_team", "_ensure_key_in_pinned_team"),
-    "toggle_dashboard_login": ("_session_pinned_team", "_require_owner_admin"),
+    "toggle_api_key_enabled": ("_session_pinned_org", "_ensure_key_in_pinned_org"),
+    "toggle_dashboard_login": ("_session_pinned_org", "_require_owner_admin"),
     # DI seam + the shared fail-closed helper on the key lookup.
-    "revoke_api_key": ("get_current_team_session", "_ensure_key_in_pinned_team"),
+    "revoke_api_key": ("get_current_org_session", "_ensure_key_in_pinned_org"),
+    # #4355: the replacement-aware rotate — same seams as its DELETE sibling
+    # (the DI resolves the pinned org; the fail-closed helper proves the
+    # displaced row belongs to it BEFORE any class/liveness detail is read).
+    "rotate_api_key": ("get_current_org_session", "_ensure_key_in_pinned_org"),
 }
 # Route decorator paths that carry key-write semantics (GET list is a read and
 # is deliberately excluded — same boundary as the client tripwire's scan of
@@ -136,7 +141,7 @@ def _provision_anon(client, fake):
     r = client.post("/v1/agent/signup", json={})
     assert r.status_code == 200, r.text
     data = r.json()
-    return data["key"], data["team_id"]
+    return data["key"], data["org_id"]
 
 
 def _fake_user(user_id: str) -> dict:
@@ -158,8 +163,8 @@ def _claim(client, fake, key, user_id, email="owner@example.com"):
     sc.claim_membership(fake, lookup_hash=lookup_hash(key), user_id=user_id, email=email)
 
 
-def _keys_of(fake, team_id: str) -> list[dict]:
-    return fake.query("api_keys", select=["id"], filters=[("team_id", "eq", team_id)])
+def _keys_of(fake, org_id: str) -> list[dict]:
+    return fake.query("api_keys", select=["id"], filters=[("org_id", "eq", org_id)])
 
 
 class TestKeyWritePinsTripwireStatic:
@@ -167,7 +172,7 @@ class TestKeyWritePinsTripwireStatic:
     surface. Route-prefix+verb-scoped: the scan covers @app write-verb routes
     whose decorator path contains /v1/team/keys or /v1/team/dashboard-login
     (the same URL boundary as the client tripwire's WRITE_FNS). Each handler
-    must keep resolving ?team_id= through a recognized pin seam; dropping a
+    must keep resolving ?org_id= through a recognized pin seam; dropping a
     seam fails loudly and forces a deliberate table extension. A FUTURE
     session key-write endpoint on a NEW prefix must deliberately extend
     KEY_WRITE_HANDLERS + the route-coverage matrix + the client tripwire — a
@@ -251,13 +256,13 @@ class TestKeyWritePinsTripwireStatic:
         for method, name in found:
             assert name in KEY_WRITE_HANDLERS, (
                 f"un-enumerated session key-write route {method.upper()} "
-                f"→ {name}: must honor ?team_id= through a pin seam and be "
+                f"→ {name}: must honor ?org_id= through a pin seam and be "
                 "added to KEY_WRITE_HANDLERS"
             )
 
     def test_key_write_handlers_keep_pin_seam(self):
         """Per-handler seam check: each enumerated key-write handler must keep
-        the ?team_id= seam that enforces the pin (DI for create/revoke; the
+        the ?org_id= seam that enforces the pin (DI for create/revoke; the
         shared helpers for toggle/dashboard-login). Dropping a seam regresses
         #2230/#2248/#2297 the way the pre-#2230 PATCH did."""
         source = _hosted_api_source()
@@ -266,7 +271,7 @@ class TestKeyWritePinsTripwireStatic:
             for seam in seams:
                 assert seam in code, (
                     f"{name}: expected pin seam {seam!r} in handler CODE — "
-                    "a session key-write that drops its ?team_id= seam "
+                    "a session key-write that drops its ?org_id= seam "
                     "silently ignores the pin again (pre-#2230 PATCH mode); "
                     "a comment/docstring mention does not count"
                 )
@@ -293,9 +298,9 @@ class TestKeyWritePinsTripwireBehavior:
         _claim(client, fake, keyB, user_id, email="ownerB@example.com")
         return teamA, teamB
 
-    def _key_id(self, fake, team_id):
-        rows = _keys_of(fake, team_id)
-        assert rows, f"no api_keys row for {team_id}"
+    def _key_id(self, fake, org_id):
+        rows = _keys_of(fake, org_id)
+        assert rows, f"no api_keys row for {org_id}"
         return rows[0]["id"]
 
     # ── POST /v1/team/keys (create_api_key): the pin selects the mint team ─
@@ -307,13 +312,13 @@ class TestKeyWritePinsTripwireBehavior:
         beforeA = len(_keys_of(fake, teamA))
         beforeB = len(_keys_of(fake, teamB))
         r = client.post(
-            f"/v1/team/keys?team_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}, json={}
+            f"/v1/team/keys?org_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}, json={}
         )
         assert r.status_code == 200, r.text
         minted_id = r.json()["id"]
-        row = fake.query("api_keys", select=["team_id"], filters=[("id", "eq", minted_id)])
-        assert row and row[0]["team_id"] == teamB, (
-            "mint ignored the ?team_id= pin (landed outside team B)"
+        row = fake.query("api_keys", select=["org_id"], filters=[("id", "eq", minted_id)])
+        assert row and row[0]["org_id"] == teamB, (
+            "mint ignored the ?org_id= pin (landed outside team B)"
         )
         assert len(_keys_of(fake, teamA)) == beforeA, (
             "mint leaked into team A (pin ignored → memberships[0])"
@@ -331,7 +336,7 @@ class TestKeyWritePinsTripwireBehavior:
         _claim(client, fake, _keyA, user_id, email="ownerA@example.com")
         beforeA = len(_keys_of(fake, teamA))
         r = client.post(
-            f"/v1/team/keys?team_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}, json={}
+            f"/v1/team/keys?org_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}, json={}
         )
         assert r.status_code == 403, r.text
         assert "No membership in team" in str(r.json())
@@ -344,7 +349,7 @@ class TestKeyWritePinsTripwireBehavior:
         before_row = fake.query("api_keys", select=["enabled"], filters=[("id", "eq", kid)])
         before = before_row[0]["enabled"]
         r = client.patch(
-            f"/v1/team/keys/{kid}?team_id={teamA}",
+            f"/v1/team/keys/{kid}?org_id={teamA}",
             headers={"Authorization": "Bearer eyJ.sess"},
             json={"enabled": False},
         )
@@ -371,12 +376,61 @@ class TestKeyWritePinsTripwireBehavior:
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
         kid = self._key_id(fake, teamA)  # key lives in A (memberships[0])
         r = client.delete(
-            f"/v1/team/keys/{kid}?team_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}
+            f"/v1/team/keys/{kid}?org_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}
         )
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == "Not your API key"
         row = fake.query("api_keys", select=["revoked_at"], filters=[("id", "eq", kid)])[0]
         assert row["revoked_at"] is None  # untouched (revoke never ran)
+
+    # ── POST /v1/team/keys/{id}/rotate (#4355): pin governs the rotate ─────
+    def test_rotate_honors_pin_and_lands_in_pinned_team(self, client, fake, monkeypatch):
+        """A session rotate pinning the NON-first membership (B) must rotate
+        B's key — a pin-ignoring server resolves memberships[0] (A) and fails
+        closed (the key is not in A), so the 200 + team-B row is the
+        discriminator. Same shape as the create/revoke arms."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        kid = self._key_id(fake, teamB)
+        beforeA = len(_keys_of(fake, teamA))
+        r = client.post(
+            f"/v1/team/keys/{kid}/rotate?org_id={teamB}",
+            headers={"Authorization": "Bearer eyJ.sess"}, json={},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["replaced_key_id"] == kid
+        assert body["replaced_revoked"] is True
+        old = fake.query("api_keys", select=["revoked_at"], filters=[("id", "eq", kid)])[0]
+        assert old["revoked_at"] is not None, "the displaced row must be revoked"
+        new = fake.query("api_keys", select=["org_id"], filters=[("id", "eq", body["id"])])
+        assert new and new[0]["org_id"] == teamB, (
+            "rotate ignored the ?org_id= pin (landed outside team B)"
+        )
+        assert len(_keys_of(fake, teamA)) == beforeA, (
+            "rotate leaked into team A (pin ignored → memberships[0])"
+        )
+
+    def test_rotate_non_member_pin_403_no_write(self, client, fake, monkeypatch):
+        """A non-member pin fails closed 403 "No membership in team" via the
+        shared DI membership gate BEFORE any lookup, and nothing is written.
+        (The route carries no inline _session_pinned_org — the DI owns it —
+        which is exactly why KEY_WRITE_HANDLERS names get_current_org_session
+        as its seam.)"""
+        teamA, _teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        _keyC, teamC = _provision_anon(client, fake)
+        kid = self._key_id(fake, teamA)
+        rows_before = len(fake.query("api_keys", select=["id"]))
+        r = client.post(
+            f"/v1/team/keys/{kid}/rotate?org_id={teamC}",
+            headers={"Authorization": "Bearer eyJ.sess"}, json={},
+        )
+        assert r.status_code == 403, r.text
+        assert "No membership in team" in str(r.json())
+        old = fake.query("api_keys", select=["revoked_at"], filters=[("id", "eq", kid)])[0]
+        assert old["revoked_at"] is None, "a refused rotate must not revoke anything"
+        assert len(fake.query("api_keys", select=["id"])) == rows_before, (
+            "a refused rotate must not mint a replacement"
+        )
 
     # ── PATCH /v1/team/dashboard-login: SERVER-contract arm ────────────────
     # The first-party client does not pin this route today (module docstring),
@@ -388,16 +442,16 @@ class TestKeyWritePinsTripwireBehavior:
         instead."""
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
         r = client.patch(
-            f"/v1/team/dashboard-login?team_id={teamB}",
+            f"/v1/team/dashboard-login?org_id={teamB}",
             headers={"Authorization": "Bearer eyJ.sess"},
             json={"enabled": False},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == teamB
-        flagA = fake.query("teams", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
+        assert r.json()["org_id"] == teamB
+        flagA = fake.query("organizations", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
             0
         ]
-        flagB = fake.query("teams", select=["dashboard_key_login"], filters=[("id", "eq", teamB)])[
+        flagB = fake.query("organizations", select=["dashboard_key_login"], filters=[("id", "eq", teamB)])[
             0
         ]
         assert flagA["dashboard_key_login"] is True, (
@@ -410,7 +464,7 @@ class TestKeyWritePinsTripwireBehavior:
         never a memberships[0] fallback write on the caller's own team. The
         detail assert discriminates the membership gate from the role gate's
         independent 403 ("Requires owner or admin role in team"): dropping or
-        reordering _session_pinned_team past _require_owner_admin must fail
+        reordering _session_pinned_org past _require_owner_admin must fail
         this test, not silently pass via the role gate."""
         _keyA, teamA = _provision_anon(client, fake)
         _keyC, teamC = _provision_anon(client, fake)
@@ -418,13 +472,13 @@ class TestKeyWritePinsTripwireBehavior:
         _patch_session_user(monkeypatch, user_id)
         _claim(client, fake, _keyA, user_id, email="ownerA@example.com")
         r = client.patch(
-            f"/v1/team/dashboard-login?team_id={teamC}",
+            f"/v1/team/dashboard-login?org_id={teamC}",
             headers={"Authorization": "Bearer eyJ.sess"},
             json={"enabled": False},
         )
         assert r.status_code == 403, r.text
         assert "No membership in team" in str(r.json())
-        flagA = fake.query("teams", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
+        flagA = fake.query("organizations", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
             0
         ]
         assert flagA["dashboard_key_login"] is True  # A untouched

@@ -94,9 +94,9 @@ def test_enabled_with_dsn(monkeypatch: pytest.MonkeyPatch, fake_sentry: dict[str
 
     # exception capture forwards the exception AND tags onto the scope
     err = RuntimeError("boom")
-    tsentry.capture_exception(err, tags={"team_id": "t1"})
+    tsentry.capture_exception(err, tags={"org_id": "t1"})
     assert fake_sentry["exc"] == [
-        {"exception": err, "tags": {"team_id": "t1"}, "scope_methods": ["set_tag"]}
+        {"exception": err, "tags": {"org_id": "t1"}, "scope_methods": ["set_tag"]}
     ]
 
     # exception capture with NO tags skips the scope.set_tag loop entirely

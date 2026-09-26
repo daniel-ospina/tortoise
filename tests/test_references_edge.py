@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tortoise.api import EventAPI, provenance
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
 
@@ -95,17 +97,19 @@ def test_link_source_to_entity_rejects_invalid_label():
 
 
 def test_link_source_to_entity_document_label():
-    """label 'Document' is valid."""
+    """label 'Document' is a deprecated alias for 'Source' (D10)."""
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = sdk._get_proj()
         proj.g.query("CREATE (s:Source {url:'doc4.txt', sourceKind:'document', title:'doc4.txt', contentHash:'', ingestedAt:'2024-01-01'})")
-        proj.g.query("CREATE (d:Document {id:'doc-1', title:'Some Doc', documentKind:'report'})")
+        # D10: a document is a :Source keyed url = doc id; the deprecated
+        # "Document" alias resolves to Source and matches the entity by url.
+        proj.g.query("CREATE (d:Source {url:'doc-1', title:'Some Doc', documentKind:'report'})")
 
         sdk.link_source_to_entity("doc4.txt", "doc-1", "Document")
 
         r = proj.g.query(
-            "MATCH (s:Source {url:'doc4.txt'})-[:references]->(d:Document {id:'doc-1'}) "
+            "MATCH (s:Source {url:'doc4.txt'})-[:references]->(d:Source {url:'doc-1'}) "
             "RETURN count(*) > 0"
         ).result_set
         assert r[0][0] is True
@@ -288,36 +292,86 @@ def test_get_provenance_chain_complete():
 
 def test_provenance_chain_returns_data_for_ingested_document():
     """#205: _upsert_document → link_source_to_entity → get_provenance_chain
-    returns Source + Document for a Point extractedFrom the doc."""
+    returns corpus Source + document Source for a Point extractedFrom the doc."""
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = sdk._get_proj()
 
-        # Create Document via _upsert_document (production ingest path).
-        # This now internally calls link_source_to_entity(did, did, "Document")
-        # which MERGEs Source + references edge (#205).
+        # D10 (ONTOLOGY v3.15 §4.4): indexing a document creates TWO Sources —
+        # the corpus #205 Source (url = source_url) and the document Source
+        # (url = doc id) — and the corpus Source carries the references edge to
+        # the document Source. _upsert_document wires that via
+        # link_source_to_entity(source_url, doc_id, "Source").
+        corpus_url = "corpus://doc-ingest-1"
         proj.apply({"type": "DocumentCreated", "id": "doc-ingest-1",
-                     "title": "Ingested Document"})
+                     "title": "Ingested Document", "source_url": corpus_url})
 
-        # Create Point that was extracted from this document
+        # Create Point that was extracted from the corpus Source
         proj.g.query(
             "CREATE (p:Point {id:'pt-ingest-1', content:'A claim from the doc', "
             "context:'test', is_operator:false})"
         )
-        # Wire: Point extractedFrom Source (the Source was auto-created by
+        # Wire: Point extractedFrom the corpus Source (auto-created by
         # link_source_to_entity above)
         proj.g.query(
-            "MATCH (p:Point {id:'pt-ingest-1'}), (s:Source {url:'doc-ingest-1'}) "
-            "MERGE (p)-[:extractedFrom]->(s)"
+            "MATCH (p:Point {id:'pt-ingest-1'}), (s:Source {url:$url}) "
+            "MERGE (p)-[:extractedFrom]->(s)",
+            params={"url": corpus_url},
         )
 
         # Verify the provenance chain returns data
         chain = sdk.get_provenance_chain("pt-ingest-1")
         assert len(chain) == 1, f"Expected 1 result, got {len(chain)}"
         result = chain[0]
-        assert result["source"]["url"] == "doc-ingest-1"
+        assert result["source"]["url"] == corpus_url
         assert result["entity"]["title"] == "Ingested Document"
-        assert "Document" in result["labels"]
+        assert "Source" in result["labels"]
+    finally:
+        sdk.close()
+
+
+def test_provenance_chain_returns_document_without_source_url():
+    """#205 + D10: the LEGACY ingest path passes NO ``source_url``.
+
+    ``tortoise/ingest.py`` calls ``api.add_document(...)`` without a
+    ``source_url`` at every site (and both ``add_document`` and
+    ``create_document`` default it to ``None``), so ``_upsert_document``
+    creates ONE ``:Source {url = <doc id>}`` and mints NO ``references``
+    edge — a corpus-Source→document edge would collapse onto that single
+    node as a degenerate self-loop. The reader must still return the
+    document for a Point extracted from it: the ``extractedFrom`` target IS
+    the terminal provenance, so ``get_provenance_chain`` must not require
+    the ``references`` hop to resolve.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        log = EventLog(_tmp("events.jsonl"))
+        api = EventAPI(log, initiated_by="extractor", agent_id="test",
+                       projection=proj)
+
+        # The ACTUAL legacy path: no source_url kwarg (every ingest.py site).
+        api.add_document(doc_id="doc/legacy.md", title="Legacy")
+        prov = provenance("doc/legacy.md", [0, 6], "Legacy",
+                          extracted_by="test@0")
+        pid = api.add_point("legacy claim", prov,
+                            extractedFrom="doc/legacy.md")
+
+        # D10 invariant: the document and its Source are ONE node — the
+        # suppressed self-loop means zero outgoing references edges.
+        r = proj.g.query(
+            "MATCH (s:Source {url:'doc/legacy.md'})-[r:references]->() "
+            "RETURN count(r)"
+        ).result_set
+        assert r[0][0] == 0, "degenerate self-loop references edge minted"
+
+        chain = sdk.get_provenance_chain(pid)
+        assert len(chain) == 1, f"Expected 1 result, got {len(chain)}"
+        result = chain[0]
+        assert result["source"]["url"] == "doc/legacy.md"
+        assert result["entity"]["url"] == "doc/legacy.md"
+        assert result["entity"]["title"] == "Legacy"
+        assert "Source" in result["labels"]
     finally:
         sdk.close()
 
@@ -328,9 +382,10 @@ def test_link_source_to_entity_source_kind_passthrough():
     try:
         proj = sdk._get_proj()
 
-        # Create Document + references edge with custom source_kind
+        # Create document Source + references edge with custom source_kind
+        # (D10: the document is a :Source keyed url = doc id).
         proj.g.query(
-            "CREATE (d:Document {id:'doc-k', title:'Kind Test', documentKind:'report'})"
+            "CREATE (d:Source {url:'doc-k', title:'Kind Test', documentKind:'report'})"
         )
         sdk.link_source_to_entity("src-kind.txt", "doc-k", "Document",
                                    source_kind="github_issue")
@@ -345,7 +400,7 @@ def test_link_source_to_entity_source_kind_passthrough():
         # Verify the references edge exists
         r2 = proj.g.query(
             "MATCH (s:Source {url:'src-kind.txt'})-[:references]->"
-            "(d:Document {id:'doc-k'}) RETURN count(*) > 0"
+            "(d:Source {url:'doc-k'}) RETURN count(*) > 0"
         ).result_set
         assert r2[0][0] is True
     finally:

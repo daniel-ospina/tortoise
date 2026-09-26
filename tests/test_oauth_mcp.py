@@ -22,6 +22,8 @@ import hashlib
 import os
 import secrets
 import tempfile
+import threading
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 
@@ -52,10 +54,11 @@ from tortoise.oauth import (  # noqa: E402, RUF100
     _sha256,
     _valid_redirect_uri,
     mcp_resource_url,
-    team_resource_url,
+    org_resource_url,
+    resolve_oauth_access_token,
 )
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
 
@@ -75,8 +78,8 @@ TEAM_TEAM = {
 }
 
 
-def _member(user_id: str, team_id: str, role: str = "owner") -> dict:
-    return {"user_id": user_id, "team_id": team_id, "role": role,
+def _member(user_id: str, org_id: str, role: str = "owner") -> dict:
+    return {"user_id": user_id, "org_id": org_id, "role": role,
             "status": "active"}
 
 
@@ -84,7 +87,7 @@ def _join_second_team(api_client) -> None:
     """Seed a second active membership for _U1 (team-team-001) on the
     fixture control plane."""
     _, cp = api_client
-    cp.tables["team_memberships"].append(
+    cp.tables["org_memberships"].append(
         _member(_U1, "team-team-001", "member"))
 
 
@@ -176,8 +179,8 @@ def _exchange(tc, *, client_id: str, code: str, verifier: str,
 def supabase_cp(monkeypatch) -> FakeControlPlane:
     """Supabase mode on + fake control plane seeded with two teams."""
     cp = FakeControlPlane({
-        "teams": [dict(TEAM_FREE), dict(TEAM_TEAM)],
-        "team_memberships": [_member(_U1, "team-free-001")],
+        "organizations": [dict(TEAM_FREE), dict(TEAM_TEAM)],
+        "org_memberships": [_member(_U1, "team-free-001")],
         "api_keys": [],
     })
     _enable_supabase(monkeypatch, cp)
@@ -450,10 +453,10 @@ class TestAuthorizePage:
 
     def test_consent_html_team_picker_wiring(self, api_client):
         html = self._consent_html(api_client)
-        assert 'id="team-select"' in html
+        assert 'id="org-select"' in html
         # the Authorize POST carries the PICKER selection first, then the
         # client-declared resource (single-team flow unchanged)
-        assert "resource: teamResource || PARAMS.resource || null" in html
+        assert "resource: orgResource || PARAMS.resource || null" in html
         # options carry each membership's team-scoped resource as the value
         assert "opt.value = m.resource" in html
         assert "memberships.forEach" in html
@@ -462,10 +465,10 @@ class TestAuthorizePage:
         html = self._consent_html(api_client)
         # select present-but-hidden in the shared markup; only unhidden for
         # memberships.length > 1
-        assert 'id="team-select" style="display:none' in html
+        assert 'id="org-select" style="display:none' in html
         assert "memberships && memberships.length > 1" in html
-        assert 'id="team-line"' in html
-        assert html.count('id="team-select"') == 1
+        assert 'id="org-line"' in html
+        assert html.count('id="org-select"') == 1
 
     def test_consent_html_authorize_disabled_in_markup(self, api_client):
         html = self._consent_html(api_client)
@@ -480,11 +483,11 @@ class TestAuthorizePage:
         html = self._consent_html(api_client)
         # no silent auto-bind: a leading disabled placeholder forces an explicit
         # change event, and teamResource is set ONLY in the change handler
-        assert "Choose a team…" in html
+        assert "Choose an org…" in html
         assert "placeholder.disabled = true" in html
-        assert 'teamResource = teamSelectEl.value' in html
-        assert "teamResource = null" in html  # reset at every run entry
-        assert "if (teamResource) enableAuthorize(); else disableAuthorize();" in html
+        assert 'orgResource = orgSelectEl.value' in html
+        assert "orgResource = null" in html  # reset at every run entry
+        assert "if (orgResource) enableAuthorize(); else disableAuthorize();" in html
 
     def test_consent_html_401_recovery_refresh_first_no_signout(self, api_client):
         html = self._consent_html(api_client)
@@ -511,7 +514,7 @@ class TestAuthorizePage:
         # scratch (no duplicate rows on sequential re-runs)
         assert "let previewInFlight = false" in html
         assert "if (previewInFlight) return;" in html
-        assert "while (teamSelect.firstChild) teamSelect.removeChild" in html
+        assert "while (orgSelect.firstChild) orgSelect.removeChild" in html
         assert "onAuthStateChange" in html
         assert 'event === "INITIAL_SESSION"' in html
 
@@ -910,6 +913,161 @@ class TestRedirectUriParserDifferential:
             tc, redirect_uris=["http://localhost/callback"])["client_id"]
 
 
+class TestCursorPrivateUseRedirectScheme:
+    """#3579 — Cursor IDE's MCP OAuth DCR sends a private-use callback scheme
+    (RFC 8252 §7.1). Registration is all-or-nothing, so before this change a
+    single `cursor://` entry rejected the WHOLE request: Cursor got no
+    client_id, never reached /oauth/authorize, and a Cursor tester had no way
+    to sign in. Reproduced live against api.premiselabs.co before the fix.
+    """
+
+    CURSOR_CB = "cursor://anysphere.cursor-mcp/oauth/callback"
+
+    def test_cursor_custom_scheme_registers(self, api_client):
+        tc, _ = api_client
+        assert _valid_redirect_uri(self.CURSOR_CB) is True
+        body = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        assert body["client_id"].startswith("ct_")
+
+    def test_cursor_mixed_registration_is_accepted_whole(self, api_client):
+        """The real Cursor payload: the documented loopback + https pair AND
+        the legacy custom scheme. One invalid entry used to sink all three."""
+        tc, _ = api_client
+        uris = ["https://www.cursor.com/agents/mcp/oauth/callback",
+                "http://localhost:8787/callback",
+                self.CURSOR_CB]
+        body = _register_client(tc, redirect_uris=uris)
+        assert body["redirect_uris"] == uris
+
+    def test_cursor_documented_pair_unchanged(self, api_client):
+        """Additive: the Cursor path that already worked still works."""
+        tc, _ = api_client
+        for uri in ("https://www.cursor.com/agents/mcp/oauth/callback",
+                    "http://localhost:8787/callback"):
+            assert _valid_redirect_uri(uri) is True, uri
+        assert _register_client(
+            tc, redirect_uris=["http://localhost:8787/callback"])["client_id"]
+
+    def test_non_allowlisted_schemes_fail_closed(self):
+        """The allowlist fails closed on every scheme not explicitly reasoned
+        about — especially the browser-executed ones, which the consent page
+        would otherwise navigate to and execute in its own origin."""
+        for uri in ("javascript:alert(1)",
+                    "data:text/html,<script>x</script>",
+                    "vbscript:msgbox(1)",
+                    "file:///etc/passwd",
+                    "vscode://x/callback",
+                    "claude://x/callback",
+                    self.CURSOR_CB + "#frag",
+                    "cursor:",
+                    "http://evil.example\\@127.0.0.1/callback"):
+            assert _valid_redirect_uri(uri) is False, uri
+
+    def test_fragment_refused_for_https_and_loopback_too(self):
+        """RFC 6749 §3.1.2. The error message already promised this; the check
+        now matches it for every scheme (registration-time only, so no existing
+        registered client is affected).
+
+        The BARE trailing `#` is the case review caught: `parsed.fragment` is
+        empty for it, so a value testing only `parsed.fragment` was a false
+        PASS on this very check."""
+        assert _valid_redirect_uri("https://app.example.com/cb#frag") is False
+        assert _valid_redirect_uri("http://localhost:8787/cb#frag") is False
+        assert _valid_redirect_uri("https://app.example.com/cb#") is False
+        assert _valid_redirect_uri("http://localhost:8787/cb#") is False
+        assert _valid_redirect_uri("https://app.example.com/cb?#") is False
+        assert _valid_redirect_uri(self.CURSOR_CB + "#") is False
+        assert _valid_redirect_uri("https://app.example.com/cb") is True
+
+    def test_cursor_scheme_still_matches_exactly_at_authorize(self):
+        """The #2846 port relaxation keys on TWO loopback hosts, so a
+        private-use scheme keeps strict exact-string matching — one Cursor
+        client can never satisfy another's registration."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m(self.CURSOR_CB, self.CURSOR_CB)
+        assert not m(self.CURSOR_CB, "cursor://evil.example/oauth/callback")
+        assert not m(self.CURSOR_CB,
+                     "cursor://anysphere.cursor-mcp/oauth/other")
+        assert not m("http://localhost:8787/callback",
+                     "http://localhost:8787/callback#")
+        assert not m("http://localhost:8787/callback#frag",
+                     "http://localhost:8787/callback#other")
+        assert not m(self.CURSOR_CB,
+                     "cursor://anysphere.cursor-mcp/oauth/callback?x=1")
+
+    def test_non_allowlisted_scheme_rejected_on_the_endpoint(self, api_client):
+        tc, _ = api_client
+        r = tc.post("/register", json={
+            "client_name": "javascript-scheme",
+            "redirect_uris": ["javascript:alert(1)"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_client_metadata"
+
+    def test_cursor_scheme_drives_the_full_flow_to_a_team_scoped_token(
+            self, api_client, session_user):
+        """Drive the REAL flow, not just the boolean helper: register ->
+        GET /oauth/authorize -> POST /oauth/consent -> /oauth/token -> resolve
+        the minted access token. Cursor failed at REGISTRATION, so every later
+        leg was unreachable; asserting each one here pins the whole path, and
+        the final leg proves the token is bound to the consented team."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        assert reg["redirect_uris"] == [self.CURSOR_CB]
+        verifier, challenge = _pkce()
+
+        page = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": self.CURSOR_CB,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-cur",
+            "scope": "mcp", "resource": ""})
+        assert page.status_code == 200, page.text
+        assert "text/html" in page.headers["content-type"]
+
+        con = _consent(tc, client_id=reg["client_id"],
+                       redirect_uri=self.CURSOR_CB, challenge=challenge)
+        assert con.status_code == 200, con.text
+
+        tok = _exchange(tc, client_id=reg["client_id"],
+                        code=con.json()["code"], verifier=verifier,
+                        redirect_uri=self.CURSOR_CB,
+                        resource=mcp_resource_url(TEST_BASE))
+        assert tok.status_code == 200, tok.text
+        access = tok.json()["access_token"]
+        assert access.startswith(ACCESS_TOKEN_PREFIX)
+
+        # The token is team-scoped by construction: its row carries the team the
+        # consent chose, and the MCP boundary resolves it to THAT team only.
+        team = resolve_oauth_access_token(cp, access)
+        assert team is not None
+        assert team["org_id"] == "team-free-001"
+
+    def test_cursor_mismatch_is_refused_on_the_authorize_endpoint(
+            self, api_client, session_user):
+        """Registration accepting the scheme must NOT widen matching: a
+        different host, path or query is refused where it counts — the
+        authorize leg that would otherwise hand over a code."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        for bad in ("cursor://evil.example/oauth/callback",
+                    "cursor://anysphere.cursor-mcp/oauth/other",
+                    "https://anysphere.cursor-mcp/oauth/callback",
+                    self.CURSOR_CB + "?x=1",
+                    self.CURSOR_CB + "#frag",
+                    self.CURSOR_CB + "#"):
+            r = tc.get("/oauth/authorize", params={
+                "client_id": reg["client_id"], "redirect_uri": bad,
+                "response_type": "code", "code_challenge": "x" * 60,
+                "code_challenge_method": "S256", "state": "st",
+                "scope": "mcp", "resource": ""})
+            assert r.status_code == 400, (bad, r.status_code, r.text)
+
+
 class TestConsentPreview:
     def test_preview_resolves_default_team(self, api_client, session_user):
         tc, _ = api_client
@@ -917,23 +1075,23 @@ class TestConsentPreview:
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
-        assert r.json()["team_id"] == "team-free-001"
-        assert r.json()["team_name"] == "Free Team"
+        assert r.json()["org_id"] == "team-free-001"
+        assert r.json()["org_name"] == "Free Team"
 
     def test_preview_resolves_team_scoped_resource(self, api_client, session_user):
         tc, _ = api_client
         session_user(_U1)
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
-        assert r.json()["team_id"] == "team-free-001"
+        assert r.json()["org_id"] == "team-free-001"
 
     def test_preview_non_member_403(self, api_client, session_user):
         tc, _ = api_client
         session_user(_U1)
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-team-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-team-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
 
@@ -950,14 +1108,14 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] is None
-        assert body["team_name"] is None
+        assert body["org_id"] is None
+        assert body["org_name"] is None
         assert body["resource"] == mcp_resource_url(TEST_BASE)
-        assert [m["team_id"] for m in body["memberships"]] == [
+        assert [m["org_id"] for m in body["memberships"]] == [
             "team-free-001", "team-team-001"]  # deterministic sort
         for m in body["memberships"]:
-            assert m["resource"] == team_resource_url(TEST_BASE, m["team_id"])
-            assert m["team_name"]
+            assert m["resource"] == org_resource_url(TEST_BASE, m["org_id"])
+            assert m["org_name"]
 
     def test_preview_multi_team_origin_root_echo_returns_memberships(self, api_client, session_user):
         """An OpenAI-style origin-root resource echo is treated as no team
@@ -969,7 +1127,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] is None
+        assert body["org_id"] is None
         assert len(body["memberships"]) == 2
 
     def test_preview_single_team_origin_root_echo_binds_sole_team(self, api_client, session_user):
@@ -981,7 +1139,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
+        assert body["org_id"] == "team-free-001"
         assert "memberships" not in body
 
     def test_preview_declared_bare_mcp_resource_keeps_resource_field(self, api_client, session_user):
@@ -994,8 +1152,8 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
-        assert body["resource"] == team_resource_url(TEST_BASE, "team-free-001")
+        assert body["org_id"] == "team-free-001"
+        assert body["resource"] == org_resource_url(TEST_BASE, "team-free-001")
 
     def test_preview_memberships_exclude_suspended_teams(self, api_client, session_user):
         """2 active + 1 suspended membership → the chooser lists only the two
@@ -1003,16 +1161,16 @@ class TestConsentPreview:
         tc, cp = api_client
         session_user(_U1)
         _join_second_team(api_client)
-        cp.tables["teams"].append({
+        cp.tables["organizations"].append({
             "id": "team-suspended-001", "name": "Suspended Team",
             "tier": "free", "suspended_at": "2026-08-15T00:00:00Z"})
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-suspended-001", "member"))
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert [m["team_id"] for m in body["memberships"]] == [
+        assert [m["org_id"] for m in body["memberships"]] == [
             "team-free-001", "team-team-001"]
 
     def test_preview_one_active_one_suspended_autobinds_active(self, api_client, session_user):
@@ -1021,18 +1179,18 @@ class TestConsentPreview:
         tc, cp = api_client
         session_user(_U1)
         _join_second_team(api_client)
-        cp.tables["teams"][1]["suspended_at"] = "2026-08-15T00:00:00Z"  # team-team-001
+        cp.tables["organizations"][1]["suspended_at"] = "2026-08-15T00:00:00Z"  # team-team-001
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
+        assert body["org_id"] == "team-free-001"
         assert "memberships" not in body
 
     def test_preview_all_teams_suspended_403(self, api_client, session_user):
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
@@ -1043,9 +1201,9 @@ class TestConsentPreview:
         preview — never a code that dies at a later exchange."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_grant"
@@ -1072,12 +1230,12 @@ class TestCodeExchange:
         assert body["expires_in"] == 3600
         # token rows persist with the bound team (P4)
         acc = cp.tables["oauth_access_tokens"][0]
-        assert acc["team_id"] == "team-free-001"
+        assert acc["org_id"] == "team-free-001"
         assert acc["user_id"] == _U1
         assert acc["token_hash"] == hashlib.sha256(
             body["access_token"].encode()).hexdigest()
         ref = cp.tables["oauth_refresh_tokens"][0]
-        assert ref["team_id"] == "team-free-001"
+        assert ref["org_id"] == "team-free-001"
 
     def test_wrong_verifier_rejected(self, api_client, session_user):
         tc, cp = api_client
@@ -1125,8 +1283,15 @@ class TestCodeExchange:
 
     def test_consume_code_claim_via_fake(self, api_client, session_user):
         """The atomic claim updates in place: after a successful consume the
-        row carries used_at, and a second consume raises invalid_grant even
-        when called directly (no HTTP layer involved)."""
+        row carries used_at AND the durable 'claimed' state, and a second consume
+        cannot double-issue.
+
+        #3027: the second consume of a code whose first claim has no recorded
+        OUTCOME is terminal `invalid_grant` — the claim is consumed by an attempt
+        that may still be running, and a different request must neither re-arm it
+        (two live families) nor report it retryable (the retry can terminate).
+        The reconciler settles the residue; a code that MINTED is terminal too —
+        see `test_code_is_single_use` / `test_code_claim_is_atomic`."""
         from tortoise.oauth import OAuthError, _consume_code
         tc, cp = api_client
         session_user(_U1)
@@ -1136,6 +1301,11 @@ class TestCodeExchange:
             flow["code"].encode()).hexdigest()
         stored = cp.tables["oauth_codes"][0]
         assert stored["used_at"] is not None  # claimed in place
+        assert stored["redemption_state"] == "claimed"
+        # #3027: the second consume is TERMINAL, not retryable — the retry can
+        # terminate (the first attempt may settle `minted`), and advertising it as
+        # retryable is the untruthful signal #2863 removed. A code that actually
+        # MINTED is also terminal — see `test_code_is_single_use`.
         with pytest.raises(OAuthError) as exc:
             _consume_code(cp, flow["code"])
         assert exc.value.status == 400
@@ -1238,12 +1408,12 @@ class TestParseResource:
 
     def test_origin_root_maps_to_bare_mcp(self):
         from tortoise.oauth import parse_resource
-        canonical, team_id = parse_resource(TEST_BASE, TEST_BASE)
+        canonical, org_id = parse_resource(TEST_BASE, TEST_BASE)
         assert canonical == mcp_resource_url(TEST_BASE)
-        assert team_id is None
-        canonical2, team_id2 = parse_resource(TEST_BASE, TEST_BASE + "/")
+        assert org_id is None
+        canonical2, org_id2 = parse_resource(TEST_BASE, TEST_BASE + "/")
         assert canonical2 == mcp_resource_url(TEST_BASE)
-        assert team_id2 is None
+        assert org_id2 is None
 
     def test_origin_root_rejected_for_foreign_origin(self):
         from tortoise.oauth import OAuthError, parse_resource
@@ -1260,16 +1430,16 @@ class TestParseResource:
 
     def test_bare_mcp_trailing_slash_accepted(self):
         from tortoise.oauth import parse_resource
-        canonical, team_id = parse_resource(TEST_BASE, mcp_resource_url(TEST_BASE) + "/")
+        canonical, org_id = parse_resource(TEST_BASE, mcp_resource_url(TEST_BASE) + "/")
         assert canonical == mcp_resource_url(TEST_BASE)
-        assert team_id is None
+        assert org_id is None
 
     def test_team_scoped_still_parses(self):
         from tortoise.oauth import parse_resource
-        resource = team_resource_url(TEST_BASE, "team-free-001")
-        canonical, team_id = parse_resource(TEST_BASE, resource)
+        resource = org_resource_url(TEST_BASE, "team-free-001")
+        canonical, org_id = parse_resource(TEST_BASE, resource)
         assert canonical == resource
-        assert team_id == "team-free-001"
+        assert org_id == "team-free-001"
 
 
 class TestRfc8707Mapping:
@@ -1277,21 +1447,21 @@ class TestRfc8707Mapping:
         tc, cp = api_client
         session_user(_U1)
         # user-1 joins the second team
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-team-001", "member"))
-        resource = team_resource_url(TEST_BASE, "team-team-001")
+        resource = org_resource_url(TEST_BASE, "team-team-001")
         flow = _auth_code_flow(tc, cp, resource=resource)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"], resource=resource)
         assert r.status_code == 200, r.text
-        assert cp.tables["oauth_access_tokens"][0]["team_id"] == "team-team-001"
-        assert cp.tables["oauth_refresh_tokens"][0]["team_id"] == "team-team-001"
+        assert cp.tables["oauth_access_tokens"][0]["org_id"] == "team-team-001"
+        assert cp.tables["oauth_refresh_tokens"][0]["org_id"] == "team-team-001"
 
     def test_multi_team_default_requires_declaration(self, api_client, session_user):
         """D4 (no picker UI): a multi-team user MUST declare the resource."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-team-001", "member"))
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
@@ -1305,7 +1475,7 @@ class TestRfc8707Mapping:
     def test_resource_for_non_member_team_rejected(self, api_client, session_user):
         tc, cp = api_client  # noqa: RUF059
         session_user(_U1)
-        resource = team_resource_url(TEST_BASE, "team-team-001")  # not a member
+        resource = org_resource_url(TEST_BASE, "team-team-001")  # not a member
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -1321,7 +1491,7 @@ class TestRfc8707Mapping:
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)  # bound to team-free-001
-        other = team_resource_url(TEST_BASE, "team-team-001")
+        other = org_resource_url(TEST_BASE, "team-team-001")
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"], resource=other)
         assert r.status_code == 400
@@ -1342,7 +1512,7 @@ class TestRfc8707Mapping:
     def test_zero_team_user_rejected(self, api_client, session_user):
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["team_memberships"] = []
+        cp.tables["org_memberships"] = []
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -1417,7 +1587,7 @@ class TestRefreshRotation:
         prev_access = [t for t in cp.tables["oauth_access_tokens"]  # noqa: RUF015
                        if t["revoked_at"] is None][0]
         args = dict(client_id=flow["client_id"], user_id=_U1,
-                    team_id="team-free-001", scope="mcp", resource=None)
+                    org_id="team-free-001", scope="mcp", resource=None)
         # worker A wins the atomic claim
         out_a = _issue_tokens(cp, prev_refresh=prev,
                               prev_access_id=prev_access["id"], **args)
@@ -1491,7 +1661,7 @@ class TestSuspensionRevocation:
         session_user(_U1)
         tokens = self._granted(tc, cp)
         # suspend the team (durable suspended_at — the #308 authority)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "refresh_token": tokens["refresh_token"],
@@ -1514,13 +1684,13 @@ class TestSuspensionRevocation:
         cleanly instead of minting a code that dies at the later exchange."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
             "code_challenge": "x" * 60, "code_challenge_method": "S256",
             "scope": "mcp",
-            "resource": team_resource_url(TEST_BASE, "team-free-001")},
+            "resource": org_resource_url(TEST_BASE, "team-free-001")},
             headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_grant"
@@ -1533,7 +1703,7 @@ class TestSuspensionRevocation:
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)  # minted while active
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
         assert r.status_code == 403
@@ -1544,7 +1714,7 @@ class TestSuspensionRevocation:
         tc, cp = api_client
         session_user(_U1)
         tokens = self._granted(tc, cp)
-        cp.tables["team_memberships"] = []  # seat removed
+        cp.tables["org_memberships"] = []  # seat removed
         r = tc.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "refresh_token": tokens["refresh_token"],
@@ -1611,7 +1781,7 @@ class TestMcpBoundary:
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         mcp_tc = self._mcp(cp)
         mcp_tc.headers.update(_mcp_headers(r.json()["access_token"]))
         with mcp_tc:
@@ -2513,3 +2683,426 @@ class TestDcrCapacityPolicy:
         keys = list(_ha_mod._OAUTH_DCR_BUCKETS)
         assert keys == ["2001:db8:aaaa::/48"], keys
         assert len(_ha_mod._OAUTH_DCR_BUCKETS[keys[0]]) == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2847 — CIMD: a client obtains an identity WITHOUT POST /register
+#
+# The SSRF control set behind the fetch is covered by tests/test_cimd_ssrf.py.
+# This class is the *integration* half of the issue's indicator: the AS metadata
+# advertises a non-DCR client-identity path, and the full consent → code → token
+# flow completes with every registration entry point sabotaged.
+# ═══════════════════════════════════════════════════════════════════════════
+
+CIMD_CLIENT_ID = "https://claude.ai/.well-known/oauth-client-metadata"
+
+
+def _cimd_document(**overrides) -> dict:
+    doc = {
+        "client_id": CIMD_CLIENT_ID,
+        # Deliberately self-asserted nonsense: the AS must display the HOST.
+        "client_name": "Totally Not Claude",
+        "redirect_uris": [REDIRECT],          # loopback → same-origin exempt
+    }
+    doc.update(overrides)
+    return doc
+
+
+@pytest.fixture
+def cimd_document(monkeypatch):
+    """Serve the CIMD document from memory; the fetch itself is out of scope
+    here (see tests/test_cimd_ssrf.py)."""
+    from tortoise import cimd
+
+    cimd._cache_reset()
+    cimd._rate_limit_reset()
+    doc = _cimd_document()
+    monkeypatch.setattr(cimd, "fetch_client_metadata", lambda _client_id: doc)
+    yield doc
+    cimd._cache_reset()
+    cimd._rate_limit_reset()
+
+
+@pytest.fixture
+def register_forbidden(monkeypatch):
+    """The indicator, enforced: any registration call is a hard failure.
+
+    The DCR stores are reset here because ``conftest._reset_ip_rate_limits``
+    does NOT touch ``_OAUTH_DCR_BUCKETS`` (only the in-file ``_dcr_reset``
+    does) — without this, the "no DCR charge" assertion below would depend on
+    pytest's test order.
+    """
+    def _boom(*_a, **_k):
+        raise AssertionError("POST /register (DCR) must not be reached")
+
+    monkeypatch.setattr("tortoise.oauth.register_client", _boom)
+    monkeypatch.setattr("tortoise.hosted_api._check_oauth_dcr_rate_limit", _boom)
+    _dcr_reset()
+    return _boom
+
+
+class TestCimdClientIdentity:
+    def test_metadata_advertises_a_non_dcr_path(self, api_client):
+        """Both values, in one place: Claude selects CIMD only when the flag AND
+        `"none"` are present, otherwise it falls back to DCR."""
+        tc, _ = api_client
+        body = tc.get("/.well-known/oauth-authorization-server").json()
+        assert body["client_id_metadata_document_supported"] is True
+        assert "none" in body["token_endpoint_auth_methods_supported"]
+
+    def test_metadata_flag_follows_the_env_lever(self, api_client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_OAUTH_CIMD", "0")
+        tc, _ = api_client
+        body = tc.get("/.well-known/oauth-authorization-server").json()
+        assert body["client_id_metadata_document_supported"] is False
+
+    def test_identity_without_register(self, api_client, session_user,
+                                      cimd_document, register_forbidden):
+        """consent → code → token, with the registry path unreachable and no DCR
+        budget consumed."""
+        tc, cp = api_client
+        session_user(_U1)
+        verifier, challenge = _pkce()
+        r = _consent(tc, client_id=CIMD_CLIENT_ID, redirect_uri=REDIRECT,
+                     challenge=challenge)
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=CIMD_CLIENT_ID, code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["access_token"].startswith(ACCESS_TOKEN_PREFIX)
+        assert not _ha_mod._OAUTH_DCR_BUCKETS, "no DCR charge may be incurred"
+        # The FK on oauth_codes/oauth_access_tokens requires a client row.
+        rows = cp.tables["oauth_clients"]
+        assert [row["id"] for row in rows] == [CIMD_CLIENT_ID]
+
+    def test_provisioned_row_is_the_host_and_is_deduplicated(
+            self, api_client, session_user, cimd_document, register_forbidden):
+        """Growth bound: ONE row per distinct client_id URL — O(client
+        implementations), not DCR's O(connections)."""
+        tc, cp = api_client
+        session_user(_U1)
+        for _ in range(3):
+            verifier, challenge = _pkce()
+            r = _consent(tc, client_id=CIMD_CLIENT_ID, redirect_uri=REDIRECT,
+                         challenge=challenge)
+            assert r.status_code == 200, r.text
+            assert _exchange(tc, client_id=CIMD_CLIENT_ID,
+                             code=r.json()["code"],
+                             verifier=verifier).status_code == 200
+        rows = cp.tables["oauth_clients"]
+        assert len(rows) == 1, "three connections must not mint three clients"
+        assert rows[0]["client_name"] == "claude.ai", (
+            "the consent screen must show the client_id HOST, never the "
+            "document's self-asserted client_name")
+        assert rows[0]["token_endpoint_auth_method"] == "none"
+        assert rows[0]["client_secret_hash"] is None
+
+    def test_consent_page_shows_the_host_not_the_document_name(
+            self, api_client, cimd_document):
+        tc, _ = api_client
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 200, r.text
+        assert "claude.ai" in r.text
+        assert "Totally Not Claude" not in r.text
+
+    def test_unresolvable_document_is_an_oauth_error_not_a_5xx(
+            self, api_client, monkeypatch):
+        from tortoise import cimd
+
+        def _refuse(_client_id):
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        tc, _ = api_client
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_request"
+
+    def test_disabled_cimd_falls_back_to_unknown_client(
+            self, api_client, monkeypatch, cimd_document):
+        monkeypatch.setenv("TORTOISE_OAUTH_CIMD", "0")
+        tc, _ = api_client
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_request"
+
+    def test_registry_client_still_wins_over_cimd(
+            self, api_client, session_user, cimd_document):
+        """A DCR/operator-issued row must be untouched by the CIMD path."""
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        assert flow["client_id"].startswith("ct_")
+        assert _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                         verifier=flow["verifier"]).status_code == 200
+        assert all(row["id"].startswith("ct_")
+                   for row in cp.tables["oauth_clients"])
+
+    def test_revoked_cimd_client_is_refused(self, api_client, session_user,
+                                           cimd_document):
+        """#2847 review P1 (revocation fail-open).
+
+        `_persist_cimd_client`'s duplicate re-read uses the RAW `_client_row`,
+        so a revoked CIMD client came back non-None while the registry path
+        returned None — authorizing a revoked integration and minting
+        `oauth_codes`. The guard belongs in `resolve_client`, on the one
+        resolver both paths share.
+        """
+        tc, cp = api_client
+        session_user(_U1)
+        cp.tables.setdefault("oauth_clients", []).append({
+            "id": CIMD_CLIENT_ID, "client_secret_hash": None,
+            "client_name": "claude.ai", "redirect_uris": [REDIRECT],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none", "scope": "mcp",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "revoked_at": "2026-01-02T00:00:00+00:00"})
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_request"
+        consent = _consent(tc, client_id=CIMD_CLIENT_ID,
+                           redirect_uri=REDIRECT, challenge=challenge)
+        assert consent.status_code == 400, consent.text
+        assert not cp.tables.get("oauth_codes"), "no code may be minted"
+
+    def test_provisioning_write_failure_is_not_a_5xx(self, api_client,
+                                                     cimd_document,
+                                                     monkeypatch):
+        """#2847 review P2 — the provisioning insert sits INSIDE
+        `resolve_client`'s guard, so a control-plane write failure is an
+        unknown-client 400, never a 500 (the fetch is attacker-reachable, so
+        its failures must not become an availability oracle).
+
+        Without the guard this raises out of `/oauth/authorize` as a 500.
+        """
+        tc, cp = api_client
+        original = cp.query
+
+        def _fail_post(table, **kwargs):
+            if table == "oauth_clients" and kwargs.get("method") == "POST":
+                raise RuntimeError("control plane 500")
+            return original(table, **kwargs)
+
+        monkeypatch.setattr(cp, "query", _fail_post)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400, r.text
+        assert r.status_code < 500
+        assert r.json()["error"] == "invalid_request"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #3669 — the CIMD fetch must not occupy the event loop, and its bounds must
+#          count ALL FOUR unauthenticated front doors
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `resolve_client` is the one resolver shared by /oauth/authorize,
+# /oauth/consent, and BOTH /oauth/token grants (via `_verify_client_auth`).
+# `resolve_client_metadata` is the one place every door passes through, so the
+# in-flight cap + wall-clock budget charged there are the occupancy accounting
+# for all four. These tests are the #3669 falsifiers.
+
+
+def _authorize_params(challenge: str) -> dict:
+    return {
+        "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+        "response_type": "code", "code_challenge": challenge,
+        "code_challenge_method": "S256", "state": "st-1",
+        "scope": "mcp", "resource": "",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _clean_cimd_stores():
+    """The CIMD limiter/cache/budget are process-wide module state; reset per
+    test so ordering cannot matter (same pattern as test_cimd_ssrf)."""
+    from tortoise import cimd
+    cimd._rate_limit_reset()
+    cimd._cache_reset()
+    yield
+    cimd._rate_limit_reset()
+    cimd._cache_reset()
+
+
+class TestCimdOccupancy3669:
+    def test_cimd_fetch_runs_on_the_dedicated_oauth_worker(
+            self, api_client, monkeypatch):
+        """FALSIFIER for the offload: the CIMD fetch must run on the dedicated
+        ``oauth`` pool, not on the caller's (event-loop) thread.
+
+        Before #3669 `validate_authorize_params` ran in the coroutine, so the
+        recorded thread was the TestClient portal thread. Now the RESOLUTION is
+        offloaded and every fetch is recorded from a `tortoise-oauth-*` worker.
+        """
+        from tortoise import cimd
+        from tortoise.monitoring import CONTROL_PLANE_OAUTH_WORKER_NAME
+
+        tc, _cp = api_client
+        threads: list[str] = []
+
+        def _refuse(_client_id):
+            threads.append(threading.current_thread().name)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params=_authorize_params(challenge))
+        assert r.status_code == 400, r.text
+        assert threads, "the CIMD fetch was never attempted"
+        assert all(t.startswith(CONTROL_PLANE_OAUTH_WORKER_NAME) for t in threads), (
+            f"the CIMD fetch ran on {threads} — the OAuth resolution must be "
+            "offloaded to the dedicated oauth pool (#3669)"
+        )
+
+    def test_cimd_fetch_does_not_occupy_the_event_loop(self, monkeypatch):
+        """BEHAVIOURAL OCCUPIED-LOOP PROOF (fails without the fix).
+
+        A heartbeat coroutine ticks every 5 ms on the SAME event loop while a
+        CIMD fetch is parked for 0.4 s. With the fetch on the loop the beat
+        count stalls (~0 ticks); with the offload the loop keeps beating. This
+        drives the REAL ASGI app through an async transport, so it does not
+        depend on a thread NAME (the mutation is reverting the offload).
+        """
+        from tortoise import cimd
+
+        cp = FakeControlPlane({"organizations": [], "oauth_clients": []})
+        monkeypatch.setattr(_ha_mod, "_oauth_control_plane", lambda: (cp, True))
+
+        park_s = 2.0
+        threads: list[str] = []
+
+        def _parked_fetch(_client_id):
+            threads.append(threading.current_thread().name)
+            time.sleep(park_s)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _parked_fetch)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        params = _authorize_params(challenge)
+
+        async def _run() -> tuple[int, float]:
+            loop = asyncio.get_running_loop()
+            gaps: list[float] = []
+            last = loop.time()
+
+            async def _heartbeat():
+                nonlocal last
+                while True:
+                    now = loop.time()
+                    gaps.append(now - last)
+                    last = now
+                    await asyncio.sleep(0.005)
+
+            hb = asyncio.ensure_future(_heartbeat())
+            await asyncio.sleep(0.05)          # let the heartbeat settle
+            transport = httpx.ASGITransport(app=_ha_mod.app)
+            async with httpx.AsyncClient(
+                    transport=transport, base_url="http://testserver") as client:
+                r = await client.get("/oauth/authorize", params=params)
+            hb.cancel()
+            with __import__("contextlib").suppress(asyncio.CancelledError):
+                await hb
+            return r.status_code, max(gaps)
+
+        status, max_gap = asyncio.run(_run())
+        assert status == 400
+        # Deterministic half: the fetch ran on a worker, not the loop thread.
+        assert threads and not threads[0].startswith("MainThread"), (
+            f"the CIMD fetch ran on {threads} — the event-loop thread")
+        # Behavioural half: the loop was never stalled for anywhere near the
+        # park. A mutation that reverts the offload stalls it for the full
+        # `park_s`, so the threshold on HALF the park cleanly separates the two
+        # while tolerating the heaviest scheduler blips on a loaded box.
+        assert max_gap < park_s / 2, (
+            f"the event loop stalled {max_gap:.3f}s while a {park_s}s CIMD fetch "
+            "was in flight — the fetch is occupying the loop (#3669)")
+
+    @pytest.mark.parametrize("door", [
+        "authorize", "consent", "token_code", "token_refresh"])
+    def test_every_front_door_charges_the_shared_fetch_bound(
+            self, api_client, monkeypatch, door):
+        """All FOUR unauthenticated front doors reach the shared, bounded
+        resolver — so an occupancy bound charged in `resolve_client_metadata`
+        counts every door, and no door can escape it."""
+        from tortoise import cimd
+
+        tc, _cp = api_client
+        calls: list[str] = []
+
+        def _refuse(client_id):
+            calls.append(client_id)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        verifier, challenge = _pkce()
+        if door == "authorize":
+            r = tc.get("/oauth/authorize", params=_authorize_params(challenge))
+        elif door == "consent":
+            r = _consent(tc, client_id=CIMD_CLIENT_ID, redirect_uri=REDIRECT,
+                         challenge=challenge)
+        elif door == "token_code":
+            r = tc.post("/oauth/token", data={
+                "grant_type": "authorization_code", "code": "bogus",
+                "redirect_uri": REDIRECT, "client_id": CIMD_CLIENT_ID,
+                "code_verifier": verifier})
+        else:
+            r = tc.post("/oauth/token", data={
+                "grant_type": "refresh_token", "refresh_token": "bogus",
+                "client_id": CIMD_CLIENT_ID})
+        assert r.status_code in (400, 401), f"{door}: {r.status_code} {r.text}"
+        assert len(calls) == 1, (
+            f"door {door!r} attempted {len(calls)} CIMD fetches — every door "
+            "must reach the shared fetch accounting exactly once")
+
+    def test_failing_authorize_resolution_fetches_exactly_once(
+            self, api_client, monkeypatch):
+        """#3669 finding 2 — a FAILING /oauth/authorize resolution used to
+        re-resolve in the error handler (a second CIMD fetch + rate-limit
+        charge), halving the effective failure budget. The resolved client is
+        now stamped on the raised OAuthError.
+
+        Without the fix this records two fetch attempts; with it, exactly one.
+        """
+        from tortoise import cimd
+
+        tc, _cp = api_client
+        calls: list[str] = []
+
+        def _refuse(client_id):
+            calls.append(client_id)
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params=_authorize_params(challenge))
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_request"
+        assert len(calls) == 1, (
+            f"a failing authorize resolution cost {len(calls)} fetch attempts "
+            "— the error handler must not re-resolve (#3669 finding 2)")
+
