@@ -42,6 +42,14 @@ UNAVAILABLE EVIDENCE IS A REFUSAL, NEVER A SKIP
     read its evidence must not report success (the #1382 class), and a `cut` that cannot
     read the artifact it is about to overwrite must not silently discard the approvals
     recorded in it.
+
+THE RESET IS THE CONTROL, BUT IT IS NOT SILENT
+    `cut` writes `approval: null` for every row — CONTRIBUTING.md ("To propose an
+    addition", steps 2-4) makes that reset the control, so a changed `served_from`
+    cannot ride an old approval into `approved`. The reset is therefore NOT reversed
+    here. It is gated: the artifact is the only carrier of the owner's per-row
+    approvals, so a re-cut that would blank any of them refuses, names every row it
+    would blank, and proceeds only under an explicit `--allow-approval-reset` (#4598).
 """
 
 from __future__ import annotations
@@ -970,7 +978,54 @@ def _display(path: Path) -> str:
         return str(path)
 
 
+def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
+    """Every non-null row-level `approval` in a manifest, in file order.
+
+    `retired:` rows carry the field too — a retirement shrinks the surface and needs the
+    same human approval, and `build_doc` blanks it there as well — so both lists are
+    walked. Each entry is `(row key, approval value)`: exactly what the refusal surfaces,
+    so the owner can see which recorded act a re-cut would discard.
+    """
+    out: list[tuple[str, str]] = []
+    for row in [*(doc.get("rows") or []), *(doc.get("retired") or [])]:
+        if isinstance(row, dict) and row.get("approval"):
+            out.append((str(row.get("name", "<unnamed>")), str(row["approval"])))
+    return out
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
+    # READ THE ARTIFACT BEFORE DERIVING ANYTHING. `build_doc` cannot read it, so it emits
+    # `approval: null` for every row: this write is the one that destroys the approvals,
+    # and the artifact is their only carrier. The gate therefore lives at the write site.
+    # A MISSING artifact has no approvals to lose (the first cut, which must keep
+    # working); an UNREADABLE one is a refusal, never a silent overwrite. The absent-flag
+    # default is `False` — an unstated permission is not a permission.
+    if MANIFEST_FILE.exists():
+        try:
+            prior = _read_manifest()
+        except SurfaceEvidenceUnreadable as exc:
+            return _refuse(exc)
+        blanked = _recorded_approvals(prior)
+        if blanked and not getattr(args, "allow_approval_reset", False):
+            listed = "; ".join(f"{name} = {value!r}" for name, value in blanked)
+            return _refuse(
+                SurfaceEvidenceUnreadable(
+                    f"refusing to overwrite {_display(MANIFEST_FILE)}: the re-cut would blank "
+                    f"{len(blanked)} recorded owner approval(s) — {listed}. Re-run with "
+                    "--allow-approval-reset to perform the reset deliberately "
+                    '(CONTRIBUTING.md, "To propose an addition", steps 2-4).'
+                )
+            )
+        if blanked:
+            # The reset is authorised — but still say WHAT it costs, so a deliberate
+            # reset is as visible in the transcript as the refusal is.
+            print(
+                f"--allow-approval-reset: blanking {len(blanked)} recorded owner "
+                f"approval(s) from {_display(MANIFEST_FILE)}:"
+            )
+            for name, value in blanked:
+                print(f"    {name} = {value!r}")
+
     try:
         doc = build_doc(args.commit)
     except SurfaceEvidenceUnreadable as exc:
@@ -989,6 +1044,8 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # changed `served_from` cannot ride an old approval into `approved`. Preserving them
     # would silently reverse that decision, so the reset stays and the tool SAYS so, because
     # otherwise the next reader sees the wipe as a bug and "fixes" it back.
+    # The guard above does NOT reverse that decision — it makes it non-silent: the reset
+    # still happens, but only once `--allow-approval-reset` says so out loud.
     print(f"wrote {_display(MANIFEST_FILE)}")
     print(f"  tools={doc['counts']['tools']} sdk={doc['counts']['sdk_public_methods']} "
           f"retired={doc['counts']['retired']}")
@@ -1673,6 +1730,15 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_cut = sub.add_parser("cut", help="declare->manifest, once, by a human")
     p_cut.add_argument("--commit", help="the commit to cut the baseline at")
+    p_cut.add_argument(
+        "--allow-approval-reset",
+        action="store_true",
+        help=(
+            "perform a re-cut that blanks recorded per-row owner approvals. Without it, "
+            "`cut` refuses when the baseline it would overwrite carries any non-null "
+            "`approval`, and names every row it would blank."
+        ),
+    )
     p_cut.set_defaults(func=cmd_cut)
     sub.add_parser("render").set_defaults(func=cmd_render)
     sub.add_parser("check").set_defaults(func=cmd_check)
