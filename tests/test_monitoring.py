@@ -1227,16 +1227,32 @@ class TestRecordFunctions:
         monitoring.record_error()
         assert _counter_value(monitoring.ERROR_COUNT) == before + 2
 
-    def test_record_cost_by_team(self):
-        before_e = _counter_value(monitoring.TEAM_COST, {"team": "eldato"})
-        before_a = _counter_value(monitoring.TEAM_COST, {"team": "app-team"})
+    def test_record_cost_sets_the_allocation_idempotently(self):
+        """#4493: ``TEAM_COST`` is a Gauge and ``record_cost`` SETS.
 
-        monitoring.record_cost("eldato", 150)
-        monitoring.record_cost("eldato", 50)
-        monitoring.record_cost("app-team", 75)
+        The old contract was ``.inc`` on a Counter — cumulative, and with no
+        production caller the series could never move off 0. The per-team cost
+        figure is a recurring ALLOCATION recomputed on every refresh, so it can
+        go down at a period rollover: Prometheus' rule is "if the value can go
+        down, it is a gauge", and a set is the only shape that is idempotent
+        across refreshes (an increment would double-count on every tick).
 
-        assert _counter_value(monitoring.TEAM_COST, {"team": "eldato"}) == before_e + 200
-        assert _counter_value(monitoring.TEAM_COST, {"team": "app-team"}) == before_a + 75
+        Note ``team_cost_cents()`` reads the Gauge's BARE sample name — the
+        ``_counter_value`` helper filters ``_total`` and would read every Gauge
+        as 0, the exact dead-hook signature this metric was rescued from.
+        """
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("org-a", 150)
+            monitoring.record_cost("org-a", 50)   # replaces — never accumulates
+            monitoring.record_cost("org-b", 75)
+            monitoring.record_cost("org-c", -5)   # clamped — never a credit
+
+            assert monitoring.team_cost_cents() == {
+                "org-a": 50, "org-b": 75, "org-c": 0,
+            }
+        finally:
+            monitoring.clear_team_cost()
 
 
 class TestMetricsEndpoint:
@@ -1248,7 +1264,27 @@ class TestMetricsEndpoint:
         body = generate_latest()
         assert b"tortoise_requests_total" in body
         assert b"tortoise_errors_total" in body
-        assert b"tortoise_team_cost_cents" in body
+
+    def test_generate_latest_exposes_the_team_cost_gauge_as_a_bare_sample(self):
+        """#4493: the per-team cost family is a GAUGE, so its sample name
+        carries no ``_total`` suffix.
+
+        The previous assertion — ``b"..._cents{" in body or b"..._cents " in
+        body`` — could NEVER fail: the ``# TYPE tortoise_team_cost_cents
+        gauge`` comment line satisfies the second disjunct, and the OLD
+        Counter's ``..._cents_total`` sample satisfied it too. Record a value
+        and assert the real bare-sample line, and that no counter-shaped
+        sample exists.
+        """
+        from prometheus_client import generate_latest
+        monitoring.clear_team_cost()
+        try:
+            monitoring.record_cost("t", 7)
+            body = generate_latest()
+        finally:
+            monitoring.clear_team_cost()
+        assert b'tortoise_team_cost_cents{team="t"} 7' in body, body
+        assert b"tortoise_team_cost_cents_total" not in body
 
 
 class TestProbeWorkerNoLeak:
