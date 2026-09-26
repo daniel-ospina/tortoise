@@ -3232,12 +3232,16 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # #4314 left two red assertions behind.
 # claude 5→6 is the #3615 consent gate merged over main's 5 (the hooks changed
 # behaviour again, so an already-installed copy must read as stale).
+# claude 6→7 is the #3797 hook-run observation: the hooks changed behaviour
+# once more — `session-start.sh` now writes the local hook-run record — so an
+# already-installed copy must read as stale, or the record never reaches it.
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2, "pi": 1}
+_EXPECTED_INSTALL_CONTRACT = {"claude": 7, "codex": 2, "cursor": 2,
+                             "pi": 1}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3247,7 +3251,12 @@ def test_shipped_install_contract_generations(harness):
     3→4, codex 1→2, cursor 1→2.  #3971 then changed the claude hooks'
     BEHAVIOUR again (the CWE-427 sys.path scrub), so claude moved 4→5: an
     already-installed copy must be detected as stale, otherwise the security
-    fix never reaches it.  Those numbers are a reviewed decision, not a
+    fix never reaches it.  #3797 changed the claude hooks' BEHAVIOUR once
+    more (session-start.sh now writes the local hook-run observation that
+    lets an installed-but-unconfigured install report that it RAN), so claude
+    moved 6→7 — the bump is what carries it to already-installed hosts, whose
+    hook bytes are frozen at install time.  Those numbers are a reviewed
+    decision, not a
     detail, so they are pinned once and explicitly.
 
     `pi` (#4680) reaches the same table through the ARTIFACT half of the
