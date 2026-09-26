@@ -8,7 +8,9 @@ An expansion pack extends Tortoise's core ontology with a **domain vocabulary** 
 
 The five starter packs shipped by default: `dev`, `marketing`, `product-strategy`, `pm`, and `agent-ops` (rules-with-why). Your custom packs install alongside them.
 
-One further pack ships in the catalog **without** being a starter: `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items). It is available for a graph to install, and is deliberately not auto-installed; per-graph pack selection is #2728.
+One further pack ships in the catalog **without** being a starter: `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items). It is deliberately not auto-installed, and `docs/`-visible per-graph pack selection is #2728.
+
+> ⚠️ **Interim caveat — a shipped pack is catalog-wide today (#2714/#2728).** Shipping a pack under `packs/` puts its vocabulary into **every** graph, not only graphs that installed it: its kinds enter every graph's value brief and kind index, its `memory_granularity` enters the S1 prompt, and its chains are rendered as chain guidance. Per-graph `:PackInstall` records currently gate the pack-state introspection surfaces, **not** the classifier and not the write gate. The two pack-fit layers are separate — **approval** (which packs a graph allows, per graph) and **classification** (which approved kind an item gets, per item) — and making approval actually gate classification is #2714/#2728. Do not read "not a starter" as "not active".
 
 ## When to write a pack (vs using core kinds)
 

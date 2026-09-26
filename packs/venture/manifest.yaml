@@ -108,7 +108,6 @@ ontology:
       nearMisses:
       - program
       - fundingAgreement
-      enforcement: retry
 
     program:
       description: >-
@@ -129,7 +128,6 @@ ontology:
       nearMisses:
       - asset
       - actionItem
-      enforcement: retry
 
     asset:
       description: >-
@@ -177,7 +175,6 @@ ontology:
       nearMisses:
       - tranche
       - investment
-      enforcement: retry
 
     tranche:
       description: >-
@@ -199,7 +196,6 @@ ontology:
       nearMisses:
       - fundingAgreement
       - condition
-      enforcement: retry
 
     condition:
       description: >-
@@ -299,9 +295,11 @@ ontology:
   # ── Relations ─────────────────────────────────────────────────────────────
   # Declared relations are declaration-only at runtime today (#2766): only the
   # core structural allowlist is writable via create_edge. `semantics:` names the
-  # writable predicate each domain predicate maps onto where one exists, and is
-  # left equal to the predicate where none does yet. Every endpoint is a kind of
-  # this pack or a core entity type — no cross-pack references.
+  # structural predicate the extractor should emit for the relation where one
+  # exists, and is left equal to the predicate where none does yet. Two of the
+  # mappings are INVERSE-named (partOf → hasPart, producedBy → produces) — the
+  # same convention dev uses for decomposesInto → hasPart. Every endpoint is a
+  # kind of this pack or a core entity type — no cross-pack references.
   relations:
   - predicate: funds
     mechanism: IMPL
@@ -351,6 +349,10 @@ ontology:
     fromKind: venture:investment
     toKind: Subject
     cardinality: many_to_one
+    # Weakest-supported relation (implied by portfolio/shareholder language
+    # rather than an attested verb) — declared extractable for consistency with
+    # its siblings; gate it if #2787 wires `extractable` into enforcement.
+    extractable: true
 
   # ── Chains ────────────────────────────────────────────────────────────────
   # Kind-path chains the extractor respects when connecting entities. The
@@ -368,9 +370,6 @@ ontology:
     - condition
     - disbursement
     enforcement: warn
-    edges:
-    - funds
-    - gatedBy
   - id: venturePortfolioFlow
     name: Portfolio Flow
     description: How a stake carries work that produces assets — a programme
@@ -380,9 +379,6 @@ ontology:
     - program
     - asset
     enforcement: warn
-    edges:
-    - partOf
-    - producedBy
   - id: ventureActionLoop
     name: Action Item Lifecycle
     description: An action item is opened from a meeting and closed by a dated
@@ -408,12 +404,13 @@ extraction:
   sourceTypes: []
   enforcement:
     default: warn
-    kinds:
-      # The same word ("platform") is used for both a programme and an asset;
-      # retry instead of silently accepting the first classification.
-      asset: retry
-      # A gating requirement is easily confused with the tranche it gates.
-      condition: retry
+    # Per-kind retry lives on the kindDefs themselves — the kindDefs rung wins
+    # this map anyway, so a second declaration of the same choice would just be
+    # drift-prone. Only the two kinds whose evidence justifies a bounded
+    # classifier retry declare `retry`: `asset` (the same word names both a
+    # programme and an asset) and `condition` (a gating requirement is easily
+    # confused with the tranche it gates).
+    kinds: {}
     relations: {}
     chains: {}
 

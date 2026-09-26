@@ -323,19 +323,33 @@ class TestResolveEnforcement:
         assert resolve_enforcement(relation="x") == "warn"
         assert resolve_enforcement(chain_id="x") == "warn"
 
-    def test_index_reachable_retry_kinds_are_agent_ops_rule_and_dev_incident(self):
+    def test_index_reachable_retry_kinds_are_the_declared_set(self):
         """#2030 boundary-note-5 drift pin — compile the REAL kind index
         spec and assert which index kinds resolve retry. FIX P excludes
         point kinds from the index, so point-kind retry declarations
         (product-strategy useCase/userJourney, dev risk) stay dormant; an
         OBJECT kind with retry (dev:incident, added by the #2238 problem-
         family landing) IS index-reachable and live. RED on pre-fix code
-        (every index kind resolves warn)."""
+        (every index kind resolves warn).
+
+        #2725 adds exactly two more: `venture:asset` (the same word names both
+        a programme and an asset) and `venture:condition` (a gating requirement
+        is easily confused with the tranche it gates). Both are OBJECT kinds
+        and so index-reachable. The venture kinds that are merely
+        confusable-by-description declare no retry, keeping this set small on
+        purpose: retry is a bounded classifier retry and is catalog-wide until
+        #2714/#2728 make enforcement graph-scoped. The dual presence of the
+        earlier `extraction.enforcement.kinds` retry entries for these two was
+        removed — kindDefs is the winning rung anyway, so it was a second,
+        drift-prone declaration of the same choice."""
         from tortoise.enforcement import resolve_enforcement
         from tortoise.value_extractor import compile_kind_index_spec
         spec = compile_kind_index_spec()
         retry_kinds = {k for k in spec if resolve_enforcement(kind=k) == "retry"}
-        assert retry_kinds == {"agent-ops:rule", "dev:incident"}
+        assert retry_kinds == {
+            "agent-ops:rule", "dev:incident",
+            "venture:asset", "venture:condition",
+        }
 
     def test_warn_default(self):
         from tortoise.enforcement import resolve_enforcement

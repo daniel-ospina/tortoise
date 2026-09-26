@@ -16,7 +16,12 @@ What this file pins:
 3. **The state/supersede shape** — a later claim must SUPERSEDE an earlier one;
    a re-mention can never resurrect a superseded Object; the current-state read
    excludes superseded Objects; and claims (Points) supersede rather than
-   accumulate.
+   accumulate. This requirement is proven in two halves, deliberately: the
+   pack-SHAPE half (Objects hold state, no pointKind is declared, Events are
+   stateless) is DB-free and fails without the pack; the ENGINE half
+   (supersession resolves to the latest version, a re-mention cannot resurrect)
+   is pack-agnostic by construction — it pins the machinery the model relies on,
+   and is named as such rather than pretending to be pack-specific.
 4. **The two orthogonal pack-fit layers** — per-graph pack APPROVAL
    (`:PackInstall`) and per-item kind CLASSIFICATION (the kind index and the
    extraction master list) are separate mechanisms. Approval does not gate
@@ -217,9 +222,18 @@ class TestVentureManifest:
         # pack that declares an unregistered source type is dropped.
         assert venture.extraction["sourceTypes"] == []
         assert venture.is_active_for("conversation") is True
+        # Exactly two kinds carry a bounded classifier retry — the two the
+        # evidence justifies (see test_enforcement.py's index-reachable retry
+        # pin); every other kind inherits the pack default. Per-kind retry is
+        # declared on the kindDefs, so the `enforcement.kinds` map stays empty
+        # rather than restating the same choice on a second rung.
         assert venture.enforcement_for("asset") == "retry"
         assert venture.enforcement_for("condition") == "retry"
-        assert venture.enforcement_for("investment") == "retry"
+        for kind in ("investment", "program", "fundingAgreement", "tranche",
+                     "actionItem", "disbursement", "conditionMet",
+                     "actionItemCompleted"):
+            assert venture.enforcement_for(kind) == "warn", kind
+        assert venture.extraction["enforcement"]["kinds"] == {}
 
     def test_memory_granularity_declares_durable_and_ephemeral(self):
         # Read from the raw manifest: memory_granularity is an `ontology:` key
@@ -358,32 +372,44 @@ class TestStateSupersedeShape:
         assert "Event" in disb and "no state" in disb
 
     @requires_db
-    def test_object_supersession_leaves_only_the_latest_live(self, sdk):
-        sdk.create_object("Tranche T1", objectKind="venture:tranche",
+    def test_object_supersession_leaves_only_the_latest_state_live(self, sdk):
+        """A later STATE VERSION of one logical entity supersedes the earlier one,
+        so "what is the release position?" has exactly one answer.
+
+        Shape the engine actually implements: Objects are name-keyed, so two
+        versions of one thing cannot share a name — a state change is a NEW
+        Object linked to the old one by supersession. This test is
+        pack-agnostic by construction (it pins the engine contract the pack's
+        model rides); the pack-shape half of the requirement is pinned by the
+        DB-free tests above.
+        """
+        sdk.create_object("Tranche T2 — pending", objectKind="venture:tranche",
                           status="pending")
-        sdk.create_object("Tranche T2", objectKind="venture:tranche",
+        sdk.create_object("Tranche T2 — released", objectKind="venture:tranche",
                           status="released")
 
         warns: list[str] = []
         applied = apply_supersessions(
             sdk._get_proj(), sdk,
-            [{"superseded": "Tranche T1", "supersedes_by": "Tranche T2",
-              "evidence": "the parcel was re-planned into a second tranche"}],
+            [{"superseded": "Tranche T2 — pending",
+              "supersedes_by": "Tranche T2 — released",
+              "evidence": "the parcel was released"}],
             session_id="sess_tranche", warn=warns.append)
         assert applied == 1, warns
 
-        assert _object_state(sdk, "Tranche T1") == ["superseded", "Tranche T2"]
-        assert _object_state(sdk, "Tranche T2") == ["released", None]
+        assert _object_state(sdk, "Tranche T2 — pending") == [
+            "superseded", "Tranche T2 — released"]
+        assert _object_state(sdk, "Tranche T2 — released") == ["released", None]
 
         # The CURRENT-STATE read carries only the latest claim.
         live = sdk.recall_state(kind="venture:tranche", object_centric=True,
                                 limit=10)
-        assert "Tranche T2" in _object_names(live)
-        assert "Tranche T1" not in _object_names(live)
+        assert "Tranche T2 — released" in _object_names(live)
+        assert "Tranche T2 — pending" not in _object_names(live)
         # …and history is still reachable explicitly.
         hist = sdk.recall_state(kind="venture:tranche", object_centric=True,
                                 limit=10, include_superseded=True)
-        assert "Tranche T1" in _object_names(hist)
+        assert "Tranche T2 — pending" in _object_names(hist)
 
     @requires_db
     def test_a_re_mention_cannot_resurrect_a_superseded_object(self, sdk):
@@ -406,9 +432,11 @@ class TestStateSupersedeShape:
         assert _object_state(sdk, "Condition C1")[0] == "superseded"
 
     @requires_db
-    def test_a_claim_about_a_venture_object_supersedes_not_accumulates(self, sdk):
-        """Points are beliefs: the later claim supersedes the earlier one, so the
-        graph does not hold two competing current answers."""
+    def test_a_state_claim_supersedes_rather_than_accumulates(self, sdk):
+        """The Point half of the model: a later claim supersedes the earlier one,
+        so the graph never holds two competing current answers. The pack declares
+        NO pointKind by design — a claim about a venture Object is a core
+        `statement` — so this pins the claim layer, not a pack kind."""
         old = sdk.create_point("statement", "Tranche T2 is still pending")
         new = sdk.create_point("statement", "Tranche T2 was released")
         sdk.supersede_point(old["id"], new["id"])
@@ -465,18 +493,29 @@ class TestPackFitLayers:
             b.close()
 
     @requires_db
-    def test_approval_does_not_move_the_classification_index(
+    def test_classification_is_not_gated_by_this_graphs_approval(
             self, sdk, force_sparse_tfidf):
-        """The layers are orthogonal: approving the pack for one graph leaves the
-        classifier's kind index unchanged (it is catalog-scoped, not
-        approval-scoped). When #2714/#2728 land and classification becomes
-        graph-scoped, this assertion is the one that must change — deliberately,
-        in that change."""
-        before = compile_kind_index_spec()
-        ensure_tenant_packs(sdk, starter=["venture"])
-        after = compile_kind_index_spec()
-        assert after == before
-        assert "venture:tranche" in after
+        """The two layers stated as the coupling that ACTUALLY exists today.
+
+        Approval is per-graph (`:PackInstall`); classification is catalog-scoped.
+        A graph that never approved the venture pack therefore still classifies
+        and accepts its kinds — this is the interim behaviour of #2714/#2728,
+        pinned deliberately instead of left incidental. When per-graph approval
+        starts gating classification, this assertion MUST flip — which is the
+        point: the change becomes visible here rather than silently altering
+        behaviour. (An earlier version of this test asserted that installing the
+        pack leaves the index unchanged; that cannot fail, since the compile
+        takes no graph input at all.)
+        """
+        installs = [p["namespace"] for p in get_tenant_packs(sdk)]
+        assert "venture" not in installs, installs
+
+        assert "venture:tranche" in compile_kind_index_spec()
+
+        # …and the write path accepts the kind with no approval on this graph.
+        node = sdk.create_object("Tranche T1", objectKind="venture:tranche",
+                                 status="pending")
+        assert node["objectKind"] == "venture:tranche"
 
     def test_no_per_document_domain_detection(self):
         """Requirement: per-document 'domain detection' is parked. Classification

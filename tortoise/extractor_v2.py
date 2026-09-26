@@ -344,11 +344,12 @@ def _build_master_from_brief(brief: dict,
     """The master-list sections from a compiled value brief (#2031 refactor
     of the build_master_list loop body — the section semantics are
     byte-identical to pre-#2031). ``pack_prefixes`` is the namespace
-    allowlist for the pack_kinds section: the DEFAULT path passes the
-    starter set; the hosted tenant path passes starter + that tenant's
-    namespaces. Loop semantics preserved exactly: the memory_granularity
-    skip precedes the prefix check, and pack_kinds keeps the brief's
-    insertion order (prompt-visible)."""
+    allowlist for the pack_kinds section: the DEFAULT path passes the shipped
+    allowlist (``PACK_NS`` — the starter packs plus ``venture``); the hosted
+    tenant path passes that allowlist + the tenant's namespaces. Loop
+    semantics preserved exactly: the memory_granularity skip precedes the
+    prefix check, and pack_kinds keeps the brief's insertion order
+    (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
     for k, v in brief.items():  # noqa: B007
@@ -670,7 +671,7 @@ def _render_master_verbose(master: dict, rng=None) -> str:
     lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
     lines.append(_group("POINTS", master["points"], shuffle=True))
     lines.append(_group("EVENTS", master["events"], shuffle=True))
-    lines.append(_group("PACK KINDS (from the installed packs)",
+    lines.append(_group("PACK KINDS (from the shipped packs)",
                         master["pack_kinds"], shuffle=True))
 
     lines.append("\nCHAINS (the business logic of mapping)")
