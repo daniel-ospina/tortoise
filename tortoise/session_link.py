@@ -264,7 +264,7 @@ ENTITY_LINKED_RELS = frozenset({
     "aboutDocument", "aboutAction", "aboutSource",
 })
 ENTITY_LINKED_LABELS = frozenset({
-    "Session", "Point", "Document", "Event", "Object", "Subject",
+    "Session", "Point", "Event", "Object", "Subject",
     "Source",
 })
 
@@ -285,18 +285,18 @@ ENTITY_LINKED_LABELS = frozenset({
 # tests/test_capture_entity_attachment_3664.py::test_entity_linked_vocabulary_drift.
 ENTITY_LINKED_TRIPLES = frozenset({
     ("aboutSubject", "Point", "Subject"),
-    ("aboutSubject", "Document", "Subject"),
     ("aboutSubject", "Event", "Subject"),
     ("aboutObject", "Point", "Object"),
-    ("aboutObject", "Document", "Object"),
     ("aboutObject", "Event", "Object"),
     ("aboutObject", "Session", "Object"),
     ("aboutEvent", "Point", "Event"),
-    ("aboutEvent", "Document", "Event"),
     ("aboutPoint", "Event", "Point"),
-    ("aboutDocument", "Event", "Document"),
+    # D10 (ONTOLOGY v3.15 §3.2/§4.4): aboutDocument targets a :Source (a
+    # document is a Source). The former Document-source triples are dropped —
+    # §3.2 does not permit a Source as the source of an aboutSubject/Object/
+    # Event edge.
+    ("aboutDocument", "Event", "Source"),
     ("aboutSource", "Point", "Source"),
-    ("aboutSource", "Document", "Source"),
     ("aboutSource", "Event", "Source"),
     ("aboutAction", "Point", "Point"),
 })

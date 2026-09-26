@@ -199,6 +199,15 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     missing target. ``point_content_by_id(pid) -> str`` supplies the
     mitigation reason's content fallback when provided.
 
+    ⛔ #4937 (F1 ruling on #2552): a payload record with ``op_type ==
+    "MITIGATES"`` is a BRIDGE-ATTACK record, not a peer operator kind — the
+    ``target`` names the operator bridge it damps and ``strength`` keeps its
+    ``w_eff = w × (1 − strength)`` meaning. It is therefore routed ONLY to
+    ``mitigate_operator``; the first pass below skips it so it can never reach
+    ``create_operator``. The wire spelling stays ``MITIGATES`` inside the
+    ``operators`` array for backward compatibility with older clients and
+    extractors; the *semantics* are mitigation, never a second operator kind.
+
     ⛔ ID-SPACE PRECONDITION (#4716 P1): every ``src``/``dst`` and MITIGATES
     ``target.{src,dst}`` ref MUST be a GRAPH id by the time it reaches here. A
     caller holding a payload-id space MUST pass the refs through
@@ -568,15 +577,29 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # (post ref-side resolution) decides. Duplicate names are only
         # harmful when a candidate is the target itself; otherwise the fold
         # is deterministic (display-string-only successor).
-        # #2164 review (P2, ISSUE C): the fold stores supersededBy truncated
-        # to 200 chars (_fold_object_superseded: str(...)[:200] — mirrors the
-        # write-path name cap, sdk.py name[:200]) — the DEDUP/keep-first
-        # probe below compares against the STORED (truncated) form so a
-        # long same-successor re-ingest dedups instead of warning. The FULL
-        # name is kept for the journaled event (round-2 review, ISSUE 2 —
-        # §11: the event log is the reconstruction source; replay re-truncates
-        # identically at the fold, so journal fidelity costs nothing at
-        # storage). No truncation happens here — only at the compare and fold.
+        # #5370: the fold stores supersededBy VERBATIM (the FULL successor
+        # name) — it no longer truncates to 200 chars. That cap was the
+        # fold's OWN behaviour, never a property of the general write path
+        # (`create_entity`/`_upsert_object` store Object names verbatim), so
+        # it was LOSSY: a >200-char successor was stored as a prefix that
+        # names NO Object, so the ask-path name-keyed probe could not verify
+        # it and the renderer reported "no successor record found" (fixed
+        # here + in projection/entities.py + assembly._state_header_hit).
+        # The DEDUP/keep-first probe below compares against the STORED form;
+        # rows folded BEFORE #5370 still carry the old 200-char prefix, so
+        # the compare accepts EITHER the full name (new rows) or its
+        # 200-char prefix (legacy rows) — a same-successor re-ingest stays a
+        # dedup on both. The FULL name was always kept for the journaled
+        # event (round-2 review, ISSUE 2 — §11: the event log is the
+        # reconstruction source), so for rows folded AFTER #5370 live and
+        # replay agree byte-for-byte. A LEGACY row does not: live holds the
+        # old prefix while the journal holds the full name, so a rebuild
+        # REWRITES the prefix to the full name. That is a benign one-way
+        # healing — the journal is the reconstruction source and its value
+        # is the correct one — but it IS a real live↔replay difference on
+        # pre-fix rows, pinned by
+        # test_rebuild_all_rewrites_a_legacy_prefix_to_the_journaled_full_name.
+        # No truncation happens here — only at the compare (legacy tolerance).
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
             "RETURN o.id, o.name, o.status, o.supersededBy",
@@ -694,23 +717,43 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # fell through to the fold, clobbering e.g. archived→superseded
         # (and for retracted, reversing the #689 leak-guard direction).
         if (o_status or "") in _RECALL_OBJECT_EXCLUDED_STATUS:
-            # stored supersededBy is truncated to 200 by the fold — compare
-            # against the truncated form (round-2 ISSUE C): a long
-            # same-successor re-ingest dedups instead of spurious conflict.
-            supersedes_by_stored = supersedes_by[:200]
-            if (o_sb or "") == supersedes_by_stored:
-                if len(o_sb or "") >= 200 and len(supersedes_by) > 200:
-                    # round-2 review (ISSUE 1): the stored fold value was
-                    # ITSELF truncated — a DIVERGENT successor sharing the
-                    # same 200-char prefix is indistinguishable from an
-                    # idempotent re-ingest. Keep-first outcome is identical
-                    # (the fold never blind-overwrites), but be loud that
-                    # identity beyond the cap is unverified rather than
-                    # silently absorbing a possible divergence.
+            # #5370: the fold now stores the FULL successor name, but rows
+            # folded BEFORE the fix carry the old 200-char prefix (#2164's
+            # fold cap). Accept EITHER form so a long same-successor
+            # re-ingest stays a silent dedup on new AND legacy rows.
+            stored = o_sb or ""
+            same_successor = stored == supersedes_by or (
+                len(supersedes_by) > 200 and stored == supersedes_by[:200])
+            if same_successor:
+                if stored != supersedes_by:
+                    # Matched via the 200-char-prefix tolerance: the
+                    # stored value is a 200-char name, so a DIVERGENT
+                    # successor sharing those 200 chars is indistinguishable
+                    # from an idempotent re-ingest. Keep-first outcome is
+                    # identical (the fold never blind-overwrites), but be
+                    # loud that identity beyond the prefix is unverified
+                    # rather than silently absorbing a possible divergence.
+                    #
+                    # NB the message below deliberately does NOT call the
+                    # stored value a "legacy fold": the same arithmetic is
+                    # reached by a POST-#5370 row folded onto a successor
+                    # whose name is EXACTLY 200 chars (a genuine full name),
+                    # and the row alone cannot say which it is.
+                    #
+                    # The exact-equality branch (stored == supersedes_by)
+                    # is deliberately SILENT, and cannot be otherwise:
+                    # that equality is exactly what an idempotent
+                    # same-successor re-ingest looks like on new rows AND
+                    # on legacy rows, and a stored 200-char value that was
+                    # really a legacy prefix is indistinguishable from a
+                    # genuinely 200-char successor name. The ambiguity is
+                    # inherent to the width of the old cap, not introduced
+                    # here.
                     warn(f"supersession ref {ref!r} re-folded to a "
                          f"successor sharing a 200-char prefix with the "
-                         f"stored fold — treated as idempotent (keep-first); "
-                         f"identity beyond the name cap is not verified")
+                         f"stored fold — treated as idempotent "
+                         f"(keep-first); identity beyond that prefix "
+                         f"is not verified")
                 # same successor already folded — idempotent dedup no-op
                 continue
             warn(f"supersession ref {ref!r} already terminal "
