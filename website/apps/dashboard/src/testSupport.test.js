@@ -88,8 +88,11 @@ test('stripComments: (iv) block comments die, inline // dies, whole-file scan is
     ['40%', 'async function logout() {'],
     // ~55% — a real mid-band pin. (The token that used to sit here, 'this API
     // key', first occurs at 1.4% and has 4 copies, so it pinned nothing near
-    // 60% and could only trip if all 4 copies vanished.)
-    ['55%', 'const sub = WIZARD_STEPS[wizardStep].sub'],
+    // 60% and could only trip if all 4 copies vanished. It was then
+    // 'const sub = WIZARD_STEPS[wizardStep].sub' until #3725 moved that lede
+    // decision into wizardFlow.js's `wizardStepSub` and the local binding was
+    // renamed `headSub` — the sentinel moved with it.)
+    ['55%', 'const headSub = wizardStepSub(wizardStep, { hasOrg: welcomeHasOrg, connected: serverHarnessConnected, buildFork: isBuildFork })'],
     // ~80% — unique. (Was 'No organization', which occurs FOUR times, at
     // 73.1/73.2/74.8/75.2%.)
     ['80%', '<button className="account-menu-create" onClick={openCreateTeamDialog}>'],
