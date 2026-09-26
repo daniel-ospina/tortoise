@@ -18579,6 +18579,16 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
+        # #5482: `search_keys` must reach the graph FLAT, exactly as it does on
+        # `create_point` and `update_point` — both flatten immediately after
+        # `_sanitize_props`, and this surface did not. It wrote caller props
+        # straight through `SET n += $props`, so a list-valued `search_keys`
+        # landed as an ARRAY; FalkorDB's fulltext index does not index
+        # array-valued properties, so the Point became permanently unfindable
+        # by `queryNodes` while the write reported success. Flattening before
+        # the per-label loop also keeps the journal's `state` (the write's own
+        # keys, read back from the graph) consistent with what is stored.
+        _flatten_search_keys_prop(props)
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
         # its Point branch below writes caller props straight through
