@@ -714,6 +714,22 @@ test('#4637 wiring: each member arm RENDERS its fork’s lead-in (and never the 
       }
     }
   }
+  // …and the NOTE each fragment renders receives the same evaluated fork fact:
+  // flipping the note's own `buildFork={isBuildFork}` to `!isBuildFork` left the
+  // fragment's lead-in correct while the note read the other fork's sentence, so
+  // the attribute is asserted as an effective prop (symmetric with the owner arms).
+  const memberTags = await probeTags(mainJsxSource, {
+    tag: 'MemberEmptyStateKeyNote',
+    imports: MAIN_IMPORTS,
+    bindings: { isBuildFork: String(await forkValue("'build'")) },
+  })
+  assert.equal(memberTags.length, 3, `three member note tags expected — got ${memberTags.length}`)
+  for (const tag of memberTags) {
+    assert.equal(tag.props.buildFork, true,
+      `a member note must receive the derived fork fact — got ${JSON.stringify(tag.props)} from ${tag.source}`)
+    assert.ok(['reentry', 'graph-missing'].includes(tag.props.variant),
+      `a member note needs a card variant — got ${tag.props.variant}`)
+  }
 })
 
 test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivation’s verdict', async () => {
@@ -770,13 +786,30 @@ test('#4637 wiring: the graph-missing snippet branch opens iff the gate holds th
   // comes first), so a plain lazy match starts in the WRONG card and can read a
   // decoy branch of it. The negative lookahead forbids crossing another section
   // opener, so the match must be the card that actually contains the snippet.
-  const card = extractOne(stripComments(mainJsxSource),
+  // Two scopes, because they assert different things: `head` ends at the snippet
+  // and holds the branch decision; `card` runs to the card's own close so the arm
+  // counts below can see the gate-FALSE arm too (a region ending at the snippet
+  // made those counts tautological — an independent reviewer reintroduced the
+  // duplicate live paragraph in the false arm with them green).
+  const head = extractOne(stripComments(mainJsxSource),
     /<section className="overview empty-state graph-missing">(?:(?!<section className="overview empty-state graph-missing">)[\s\S])*?<pre className="snippet">/,
-    'the graph-missing snippet region')
+    'the graph-missing snippet head')
+  // …and the WHOLE card, so the counts below cover BOTH arms. Both cards carry the
+  // same className, so every section with it is extracted and the graph-missing
+  // one is identified by the action set it renders (the re-entry card cannot
+  // contain it).
+  const sharedClassSections = extractAll(stripComments(mainJsxSource),
+    /<section className="overview empty-state graph-missing">(?:(?!<section className="overview empty-state graph-missing">)[\s\S])*?<\/section>/,
+    'the sections with the graph-missing className')
+  assert.equal(sharedClassSections.length, 2,
+    `both empty-state cards use this className — found ${sharedClassSections.length}`)
+  const card = sharedClassSections[sharedClassSections.length - 1]
+  assert.ok(/GraphMissingEmptyStateActions/.test(card),
+    'the last such section must be the graph-missing card')
   // ONE branch decision between the card heading and the snippet: a planted decoy
   // condition would have to sit inside this region and would trip this count
   // rather than give the real (broken) guard a second chance to match.
-  assert.equal((card.match(/\?\s*\(/g) || []).length, 1,
+  assert.equal((head.match(/\?\s*\(/g) || []).length, 1,
     'exactly one branch decision governs the snippet')
   // The snippet and the live-key paragraph belong to the gate-TRUE arm only: a
   // duplicate of either in the false arm would render `Bearer ` with an empty key
@@ -786,7 +819,7 @@ test('#4637 wiring: the graph-missing snippet branch opens iff the gate holds th
     'the copyable snippet must render in exactly one arm of the card')
   assert.equal((card.match(/API key are live/g) || []).length, 1,
     'the live-key paragraph must appear in exactly one arm of the card')
-  const testMatch = card.match(/\{([^{}]+?)\s*\?\s*\(/)
+  const testMatch = head.match(/\{([^{}]+?)\s*\?\s*\(/)
   assert.ok(testMatch, 'the snippet branch truth test must be extractable')
   const truthTest = testMatch[1]
   const bindings = { snippetKey: "'stale-reveal'", keyIsLive: 'false', isBuildFork: 'true' }
