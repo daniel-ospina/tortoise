@@ -403,6 +403,10 @@ class _DictObjectPort:
             out.extend(self._objects.get(n, []))
         return out
 
+    def excluded_exact_objects(self, names):
+        # the dict stub has no exclusion concept (no status field)
+        return []
+
     def fts_objects(self, term, limit=8):
         return self._fts(term, limit)
 
@@ -470,6 +474,9 @@ def test_resolver_fts_missing_degrades_to_empty():
         def exact_objects(self, names):
             return [{"id": "obj-1", "name": "couch"}] \
                 if "couch" in names else []
+
+        def excluded_exact_objects(self, names):
+            return []
 
         def fts_objects(self, term, limit=8):
             raise RuntimeError("no fulltext index (embedded)")
@@ -562,6 +569,171 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
     assert "retracted" in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
     for st in ("superseded", "deprecated", "archived", "outdated"):
         assert st not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+
+
+# ── #4061 R1/R2/R3: the exclusion is decided where it is applied ───────────
+
+
+def test_resolver_excluded_exact_match_abstains_not_substitutes():
+    """#4061 R1: a term whose EXACT match is excluded must abstain — it must
+    not fall through to a weaker leg and surface a DIFFERENT live Object.
+
+    Models #3317's live fixture in the sparse lane: ``the couch`` names a
+    retracted Object (invisible to every leg), while the alias leg would
+    return the live ``sofa`` through the anchored point's search_keys. The
+    ladder used to substitute ``sofa``; post-#4061 the term is unresolved.
+
+    RED before the fix (candidates == [(sofa, alias)]), GREEN after.
+    """
+
+    class _ExcludedExactPort:
+        def exact_objects(self, names):
+            return []                     # #3317: excluded = invisible
+
+        def excluded_exact_objects(self, names):
+            return ([{"id": "obj-couch", "name": "couch"}]
+                    if "couch" in names else [])
+
+        def fts_objects(self, term, limit=8):
+            return []
+
+        def alias_objects(self, term, limit=8):
+            return [{"id": "obj-sofa", "name": "sofa"}]
+
+    res = resolve_subjects(_ExcludedExactPort(), ["the couch"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert res.candidates == ()
+    assert res.unresolved == ("the couch",)
+    # the abstention keeps the both-halves gate closed (the R1 signal)
+    assert res.both_halves_ok(AssemblyShape.CURRENT_STATE) is False
+
+
+def test_resolver_no_exact_match_still_falls_through_to_weaker_legs():
+    """#4061 R1 control: the abstention is specific to "a match it must not
+    surface". A term that names NOTHING (no exact match, no excluded exact
+    match) still reaches the weaker legs — the fix must not narrow recall."""
+
+    class _AliasOnlyPort:
+        def exact_objects(self, names):
+            return []
+
+        def excluded_exact_objects(self, names):
+            return []
+
+        def fts_objects(self, term, limit=8):
+            return []
+
+        def alias_objects(self, term, limit=8):
+            return ([{"id": "obj-9", "name": "projector"}]
+                    if "ikea" in term else [])
+
+    res = resolve_subjects(_AliasOnlyPort(), ["the thing from ikea"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert [(c.name, c.source) for c in res.candidates] == \
+        [("projector", "alias")]
+    assert res.unresolved == ()
+
+
+def test_resolver_excluded_probe_failure_abstains_fail_safe():
+    """#4061 R1 polarity: a probe that cannot answer must ABSTAIN, never fall
+    through. Falling through on a probe failure is the very fail-open
+    substitution this fix removes."""
+
+    class _RaisingProbePort:
+        def exact_objects(self, names):
+            return []
+
+        def excluded_exact_objects(self, names):
+            raise RuntimeError("probe unavailable")
+
+        def fts_objects(self, term, limit=8):
+            return []
+
+        def alias_objects(self, term, limit=8):
+            return [{"id": "obj-sofa", "name": "sofa"}]
+
+    res = resolve_subjects(_RaisingProbePort(), ["the couch"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert res.candidates == ()
+    assert res.unresolved == ("the couch",)
+
+
+def test_resolver_fts_window_grows_past_excluded_rows():
+    """#4061 R2: the FTS leg applies the exclusion BEFORE its own bound.
+
+    A window whose first ``limit`` rows are ALL excluded must be grown until
+    the live candidate is reached. Pre-#4061 ``fts_objects`` filtered only
+    the truncated SDK rows and returned [] wholesale.
+    """
+    ranking = [{"id": f"obj-r{i}", "content": f"widget variant {i}",
+                "status": "retracted"} for i in range(10)]
+    ranking.append({"id": "obj-live", "content": "widget",
+                    "status": "live"})
+
+    class _EmptyResult:
+        def __init__(self):
+            self.result_set: list = []
+
+    class _G:
+        def query(self, *a, **k):
+            return _EmptyResult()
+
+    class _Proj:
+        g = _G()
+
+    class _StubSDK:
+        def _get_proj(self):
+            return _Proj()
+
+        def tortoise_fts_query(self, term, *, entity_type, limit):
+            assert entity_type == "object"
+            return ranking[:limit]
+
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_StubSDK())
+    # the raw SDK window at limit=8 is fully consumed by excluded rows
+    assert all(h["status"] == "retracted"
+               for h in _StubSDK().tortoise_fts_query(
+                   "widget", entity_type="object", limit=8))
+    assert port.fts_objects("widget", 8) == [{"id": "obj-live",
+                                               "name": "widget"}]
+
+
+def test_resolver_fts_absent_status_is_not_live():
+    """#4061 R3: an FTS hit carrying NO ``status`` (the SDK batch content-fetch
+    degradation, which is indistinguishable from a status-less Object) must
+    not read as live — the stored status is re-read from the graph and the
+    excluded Object is dropped.
+
+    RED before the fix (the hit is returned), GREEN after.
+    """
+    seen_ids: list[list[str]] = []
+
+    class _G:
+        def query(self, cypher, params=None, **k):
+            seen_ids.append(list((params or {}).get("ids", [])))
+
+            class _R:
+                def __init__(self):
+                    self.result_set = [["obj-retracted"]]
+            return _R()
+
+    class _Proj:
+        g = _G()
+
+    class _StubSDK:
+        def _get_proj(self):
+            return _Proj()
+
+        def tortoise_fts_query(self, term, *, entity_type, limit):
+            # the degraded payload: no `status` key at all
+            return [{"id": "obj-retracted", "content": "couch", "kind": ""}]
+
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_StubSDK())
+    assert port.fts_objects("couch", 8) == []
+    # the re-read was scoped to exactly the status-less hit
+    assert seen_ids == [["obj-retracted"]]
 
 
 # ── docker-lane resolver legs (fixture substrate; skip when the shared
@@ -718,20 +890,25 @@ def test_resolver_docker_excludes_retracted_object(_docker_sdk,
     embedder live the hybrid FTS leg swallows the alias term before the alias
     leg is reached.
 
-    DECIDED — the ladder's fall-through is NOT short-circuited (a term whose
-    exact name matched only an unresolvable Object does not become
-    "unresolved"; the weaker legs still run). The contract this test pins is
-    that the retracted Object is gone from every leg — a DIFFERENT, live
-    Object resolving is the ladder's documented degrade, not this defect. In
-    the sparse lane that shows up as ``"the couch"`` reaching the alias leg
-    and resolving the live ``sofa`` (low confidence) through the point
-    ``pB-couch-sold`` ("sold the old couch and ordered a new sofa", whose
-    search_keys name both); with the embedder live the hybrid FTS leg is
-    broad for ANY term (the #3223 divergence), which is where an
-    "unmatched term resolves something" behaviour belongs. Stop-on-excluded-
-    match would be an abstention-semantics change to `both_halves_ok`,
-    outside this issue. The residual is owned by #4061 (which also owns the
-    FTS leg's post-truncation filter and its absent-`status` fail-open).
+    DECIDED, and SUPERSEDED BY #4061 — the ladder's fall-through WAS not
+    short-circuited here (a term whose exact name matched only an
+    unresolvable Object did not become "unresolved"; the weaker legs still
+    ran). #4061 has since ruled that falls-through a SUBSTITUTION defect: in
+    the sparse lane ``"the couch"`` reached the alias leg and resolved the
+    live ``sofa`` (low confidence) through the point ``pB-couch-sold``
+    ("sold the old couch and ordered a new sofa", whose search_keys name
+    both), i.e. ``ask()`` fired about an entity the question never named.
+    #4061's abstention now closes that (``excluded_exact_objects`` +
+    ``resolve_subjects``' short-circuit) — see
+    ``test_resolver_docker_excluded_exact_match_abstains``.
+
+    What THIS test pins (unchanged, and the reason it stays): the retracted
+    Object is gone from every leg, the exclusion is NARROW (a live match and
+    a ``deprecated`` match still resolve), and the assembled lane still
+    FIRES on a non-excluded subject — the last assertion is driven with the
+    LIVE ``dog bed`` because that is what proves the exclusion did not become
+    an over-broad abort or data filter. The couch question's own outcome is
+    now asserted to be an ABSTENTION, the #4061 contract.
     """
     _ag.build_base_graph(_docker_sdk)
     proj = _docker_sdk._get_proj()
@@ -782,16 +959,132 @@ def test_resolver_docker_excludes_retracted_object(_docker_sdk,
         shape=AssemblyShape.CURRENT_STATE)
     assert [r["status"] for r in dep_slices.state_rows] == ["deprecated"]
 
-    # the assembled payload never carries the retracted Object as a subject,
-    # and the block STILL FIRES — the latter pinned because a bare
+    # the assembled lane still FIRES — pinned because a bare
     # `couch_id not in …` of `subjects=()` would also pass under an over-broad
-    # exclusion (either a data filter or an abort) — this asserts that the
-    # decided ladder fall-through is intact.
+    # exclusion (either a data filter or an abort). #4061 moved the
+    # demonstration to a LIVE subject (the couch question now correctly
+    # abstains — asserted below), so the anti-over-broad intent is preserved
+    # without pinning the retired substitution.
     from tortoise.assembly import _assemble_connected
     block = _assemble_connected(
-        _docker_sdk, "what is the current status of the couch?")
+        _docker_sdk, "what is the current status of the dog bed?")
     assert block.fired is True
     assert couch_id not in {s["object_id"] for s in block.subjects}
+    # #4061: the excluded exact match ABSTAINS — ask() no longer fires about
+    # a subject the question did not name
+    couch_block = _assemble_connected(
+        _docker_sdk, "what is the current status of the couch?")
+    assert couch_block.fired is False
+
+
+@_docker_only
+def test_resolver_docker_excluded_exact_match_abstains(_docker_sdk):
+    """#4061 R1 (integration): with ``couch`` retracted, ``the couch`` names an
+    excluded Object — the term ABSTAINS instead of resolving the live ``sofa``
+    through a weaker leg, and ``_assemble_connected`` does not fire about a
+    subject the question never named.
+
+    Deliberately NOT embedder-pinned: the shipped configuration is exactly
+    where the substitution was observed, and the assertion holds under both
+    the sparse and hybrid FTS legs (``sofa`` is the substitute either way).
+    """
+    _ag.build_base_graph(_docker_sdk)
+    proj = _docker_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:'couch'}) SET o.status='retracted'")
+    couch_id = proj.g.query(
+        "MATCH (o:Object {name:'couch'}) RETURN o.id").result_set[0][0]
+    sofa_id = proj.g.query(
+        "MATCH (o:Object {name:'sofa'}) RETURN o.id").result_set[0][0]
+    from tortoise.assembly import _assemble_connected, docker_resolver_port, resolve_subjects
+    port = docker_resolver_port(_docker_sdk)
+
+    # the DISTINGUISHING probe sees the excluded exact match ...
+    assert couch_id in {r["id"] for r in
+                        port.excluded_exact_objects(["the couch", "couch"])}
+    # ... while the live leg does not (so the two are genuinely distinct)
+    assert couch_id not in {r["id"] for r in
+                            port.exact_objects(["the couch", "couch"])}
+
+    res = resolve_subjects(port, ["the couch"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert res.candidates == ()
+    assert res.unresolved == ("the couch",)
+    assert res.both_halves_ok(AssemblyShape.CURRENT_STATE) is False
+
+    block = _assemble_connected(
+        _docker_sdk, "what is the current status of the couch?")
+    assert block.fired is False
+    assert block.subjects == ()
+    assert sofa_id not in {s["object_id"] for s in block.subjects}
+
+    # LIVE control: an unexcluded term still resolves and fires
+    live = resolve_subjects(port, ["the dog bed"],
+                            shape=AssemblyShape.CURRENT_STATE)
+    assert [(c.name, c.source) for c in live.candidates] == \
+        [("dog bed", "exact")]
+
+
+@_docker_only
+def test_resolver_docker_fts_window_survives_retracted_crowd(
+        _docker_sdk, force_sparse_tfidf):
+    """#4061 R2 (integration): more excluded Objects than the leg's ``limit``
+    rank ahead of one live Object; the live candidate must still come back.
+
+    ``force_sparse_tfidf`` pins the FTS-owned ranking (#3095/#3223): with the
+    vector leg live the hybrid re-orders the crowd, and this fixture is about
+    the leg's WINDOW, not the leg mix.
+    """
+    proj = _docker_sdk._get_proj()
+    qid = "q4061r2"
+    for i in range(10):
+        name = f"widget variant {i}"
+        _docker_sdk.create_entity("object", name, objectKind="core:other",
+                                  lme_question_id=qid, is_episodic=True)
+        proj.g.query("MATCH (o:Object {name:$n}) SET o.status='retracted'",
+                     params={"n": name})
+    # the lone LIVE Object, created LAST so the opaque FTS order puts it
+    # behind the retracted crowd (the defect's precondition, asserted below)
+    _docker_sdk.create_entity("object", "widget", objectKind="core:other",
+                              lme_question_id=qid, is_episodic=True)
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+
+    # PRECONDITION (fails loudly if the ranking ever stops crowding): the
+    # excluded rows occupy the ENTIRE raw SDK window
+    raw = _docker_sdk.tortoise_fts_query("widget", entity_type="object",
+                                         limit=8)
+    assert raw and all((h.get("status") or "") in {"retracted"}
+                       for h in raw), [h.get("content") for h in raw]
+
+    got = port.fts_objects("widget", 8)
+    assert [r["name"] for r in got] == ["widget"]
+
+
+@_docker_only
+def test_resolver_docker_fts_absent_status_is_not_live(_docker_sdk):
+    """#4061 R3 (integration): the SDK's batch content-fetch degradation drops
+    ``status`` from every hit; a retracted Object must still be excluded — the
+    stored status is re-read from the graph (the pure test pins the decision,
+    this pins the real re-read against a live Object row)."""
+    _ag.build_base_graph(_docker_sdk)
+    proj = _docker_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:'couch'}) SET o.status='retracted'")
+    cid = proj.g.query(
+        "MATCH (o:Object {name:'couch'}) RETURN o.id").result_set[0][0]
+    from tortoise.assembly import docker_resolver_port
+    port = docker_resolver_port(_docker_sdk)
+    # emulate the degradation path: the payload has NO `status` key
+    _docker_sdk.tortoise_fts_query = (  # type: ignore[method-assign]
+        lambda *a, **k: [{"id": cid, "content": "couch", "kind": ""}])
+    assert port.fts_objects("couch", 8) == []
+    # and a genuinely status-less (live) Object is still admitted, matching
+    # the Cypher legs' `o.status IS NULL OR …` admission
+    proj.g.query("MATCH (o:Object {name:'sofa'}) REMOVE o.status")
+    sid = proj.g.query(
+        "MATCH (o:Object {name:'sofa'}) RETURN o.id").result_set[0][0]
+    _docker_sdk.tortoise_fts_query = (  # type: ignore[method-assign]
+        lambda *a, **k: [{"id": sid, "content": "sofa", "kind": ""}])
+    assert port.fts_objects("sofa", 8) == [{"id": sid, "name": "sofa"}]
 
 
 @_docker_only
