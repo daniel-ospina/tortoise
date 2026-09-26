@@ -2313,12 +2313,6 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
     }
 
 
-def _now_iso() -> str:
-    """UTC now in ISO format (module-level — shared by write paths)."""
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
-
-
 def _source_merge_lock_for(url: str) -> threading.Lock:
     with _source_merge_lock_guard:
         lock = _source_merge_locks.get(url)
@@ -22583,6 +22577,13 @@ def _summary_to_payload(summary: dict, session_id: str,
 
 
 def _now_iso() -> str:
+    """UTC now in ISO format.
+
+    One of this module's timestamp helpers, not a single shared clock: some call sites
+    here use it, while others inline ``datetime.now(timezone.utc).isoformat()``
+    directly (e.g. ``update_point``, ``invalidate_point``, ``supersede_point``) and
+    several other modules define their own ``_now_iso``.
+    """
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
