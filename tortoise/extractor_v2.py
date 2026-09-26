@@ -3185,12 +3185,16 @@ _CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
 # deleting the phrase instead would lose the `and`/`or` contrast, because
 # `as well as` against `or` would then read as one-sided and fold.
 #
-# Matched case-insensitively (over the normalised text the caller prepares) on
-# a phrase EDGE that is "not alphanumeric", so "it was well as expected" and
-# "the gas well as a fuel" are not rewritten into a coordination they are not.
-# `\b` is NOT that edge: `_` is a word character to `re`, so `\b` would leave
-# Markdown-emphasised "_as well as_" uncanonicalised — the same phrase to a
-# reader, and a MISS, which is the lossy direction.
+# Matched case-insensitively on a phrase EDGE that is "not alphanumeric", so
+# "it was well as expected" and "the gas well as a fuel" are not rewritten into
+# a coordination they are not.  `\b` is NOT that edge: `_` is a word character
+# to `re`, so `\b` would leave Markdown-emphasised "_as well as_"
+# uncanonicalised — the same phrase to a reader, and a MISS, which is the lossy
+# direction.
+#
+# The flag and the caller's `_norm` are both present because either alone
+# suffices for case; keeping both means no call path can depend on which one
+# happened.
 _COORDINATION_PHRASES = (("as well as", "and"),)
 _PHRASE_EDGE_LEFT = r"(?<![^\W_])"
 _PHRASE_EDGE_RIGHT = r"(?![^\W_])"
@@ -3670,24 +3674,26 @@ def _connective_slots(content: str) -> tuple[frozenset[str], ...]:
     """Membership in each ``_CONNECTIVE_SLOTS`` slot, one entry per slot.
 
     Read from the RAW token stream, through ``_wordlist_hits`` — and therefore
-    through ``_deaccent`` and the word-part split.  That matters: a member
-    carrying a non-composing combining mark ("a\u0338nd") is still that member.
-    Reading the FLATTENED form instead LOSES it — ``_flat_words`` turns the mark
-    into a separator, so the member is split in two before ``_deaccent`` can
-    drop it, the slot reads empty, and the guard fails OPEN.  (A member fused
-    to a separator, "and/or", survives flattening and is not the reason; the
-    raw read is what makes the marked spelling work.)
+    through the word-part split and ``_deaccent``, PER TOKEN.  That matters: a
+    member carrying a non-composing combining mark ("a\u0338nd") is still that
+    member, while a mark standing where a separator would be still SEPARATES
+    ("and\u0338the" holds `and`).  Reading the FLATTENED form instead LOSES the
+    first — ``_flat_words`` turns the mark into a separator, so the member is
+    split in two before ``_deaccent`` can drop it, the slot reads empty, and the
+    guard fails OPEN.  (A member fused to a separator, "and/or", survives
+    flattening and is not the reason; the raw read is what makes the marked
+    spelling work.)
 
     A multi-word coordination is canonicalised to its operator first
-    (``_COORDINATION_PHRASES``, matched case-INSENSITIVELY on phrase edges — a
-    capital must not skip the rewrite, because the member pass below is
-    case-insensitive and the two would then disagree about one phrase).  The
-    text is normalised the way the member lookup reads it — case-folded and
-    de-accented — so the phrase pass and the member pass read ONE vocabulary by
-    two rules.  ``_wordlist_hits`` does its own normalisation, so this is the
-    parity of the two passes, not a lookup requirement.
+    (``_COORDINATION_PHRASES``, matched case-INSENSITIVELY).  The text is
+    case-folded with ``_norm`` for that pass, and NOT de-accented as a whole:
+    ``_deaccent`` over the claim would glue a mark-separated member to its
+    neighbour ("and\u0338the" → "andthe") before ``_wordlist_hits`` could split
+    it, which is the same fail-open by another route.  The phrase pass lowercases
+    only because the member pass below it is case-insensitive too — a capital
+    must not make one pass and the other disagree about one phrase.
     """
-    text = _deaccent(_norm(content))
+    text = _norm(content)
     for pattern, operator in _COORDINATION_PHRASE_RE:
         text = pattern.sub(f" {operator} ", text)
     found = _wordlist_hits(text, _CONNECTIVE_MEMBERS)

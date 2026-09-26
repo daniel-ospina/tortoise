@@ -968,17 +968,22 @@ class TestDistinguishingDifference:
                                                 "the gas as a fuel")
         # ... and the canonicalisation is spelling-INSENSITIVE, because the
         # member pass below it is: a capital (sentence-initial or mid-sentence)
-        # and an underscore emphasis must read as the same phrase.  A raw-text
-        # pass skipped both, and the leftover `as` then filled the COMPARISON
-        # slot — which both folded a rival operator pair and refused these
-        # legitimate folds.
+        # and an underscore emphasis must read as the same phrase, and the
+        # comparison slot must be left EMPTY rather than holding a leaked `as`.
+        # The underscore miss was the old `\b` edge (`_` is a word character to
+        # `re`); the capital miss was the raw-text read.  Both are pinned here,
+        # in BOTH directions: the phrase is one operator, so it must fold
+        # against `and` AND still rival another operator.
         for spelled in ("We ship the server As well as the client",
                         "We ship the server _as well as_ the client",
                         "As well as the client, we ship the server"):
             assert v2._connective_slots(spelled)[0] == frozenset({"and"}), \
                 spelled
+            assert v2._connective_slots(spelled)[2] == frozenset(), spelled
             assert v2.fold_allowed(spelled,
                                    "We ship the server and the client.")
+            assert not v2.fold_allowed(
+                spelled, "We ship the server as well, or the client")
         assert v2.fold_allowed(
             "We ship the server _as well as_ the client",
             "We ship the server, the client")
@@ -1026,15 +1031,27 @@ class TestDistinguishingDifference:
         `_deaccent` exists for exactly this, and it can only run on a token that
         is still ONE token: the flattened read turned the mark into a separator
         and split the member first, so the slot read empty and the pair folded.
+        The same reason forbids de-accenting the WHOLE claim, which would glue a
+        mark-SEPARATED member to its neighbour — so both spellings are pinned.
+
         A pin that cannot fail on the old read is not coverage.
         """
         assert v2._connective_slots("we ship a\u0338nd test")[0] == \
             frozenset({"and"})
         assert v2._connective_slots("we ship o\u0338r test")[0] == \
             frozenset({"or"})
+        # The mark as a SEPARATOR: the member is glued to the next word, and it
+        # must still be read as the member rather than fused into one token.
+        assert v2._connective_slots("we ship the server and\u0338the client") \
+            == (frozenset({"and"}), frozenset(), frozenset(), frozenset())
+        # The mark INSIDE the phrase: still the coordination, not a stray `as`.
+        assert v2._connective_slots("we ship as\u0338well as the client") == \
+            (frozenset({"and"}), frozenset(), frozenset(), frozenset())
         for prior, candidate in (("we ship a\u0338nd test", "we ship or test"),
-                                 ("we ship and test", "we ship o\u0338r test")):
-            assert v2._connective_swap(prior, candidate)
+                                 ("we ship and test", "we ship o\u0338r test"),
+                                 ("we ship the server and\u0338the client",
+                                  "we ship the server or the client")):
+            assert v2._connective_swap(prior, candidate), (prior, candidate)
             assert v2.distinguishing_difference(prior, candidate) \
                 == "substituted_content", (prior, candidate)
             assert not v2.fold_allowed(prior, candidate)
@@ -1170,8 +1187,10 @@ class TestDistinguishingDifference:
         """
         frame = sorted(slot & v2._FRAME_STOPWORDS)
         for member in sorted(slot):
-            others = sorted(slot - {member})
-            mate = next((f for f in frame if f != member), others[0])
+            mates = [f for f in frame if f != member] or sorted(
+                slot - {member})
+            assert mates, (member, slot)
+            mate = mates[0]
             a, b = f"we ship {member} test", f"we ship {mate} test"
             assert v2._connective_swap(a, b), (member, mate)
             label = v2.distinguishing_difference(a, b)
