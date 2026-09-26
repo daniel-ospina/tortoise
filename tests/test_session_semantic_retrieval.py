@@ -219,6 +219,24 @@ def test_semantic_paraphrase_retrieves_the_captured_turn(
         f"the target was matched lexically — not a semantic hit: {target}")
     assert target.get("vector") is not None, target
 
+    # SELECTIVE, not merely PRESENT. With a 2-turn corpus and ``limit=10`` the
+    # dense leg returns every embedded point regardless of meaning, so ``in
+    # hits`` alone is satisfied by ANY query — measured: an unrelated
+    # ``"xyzzy plugh frobnicate"`` query also returns this turn (vector 0.5).
+    # Presence therefore pins that the turn was embedded and searched (the
+    # regression control below covers its absence), but it cannot detect a
+    # dense leg that matches by anything other than meaning. The acceptance
+    # must assert the paraphrase ranks the turn it MEANS above the unrelated
+    # turn.
+    assert "sess-3519_t1" in hits, (
+        f"the unrelated turn was not returned, so there is nothing to rank "
+        f"against — this assertion would be vacuous: {sorted(hits)}")
+    distractor = _scores(hits["sess-3519_t1"])
+    assert target["vector"] > distractor["vector"], (
+        "the paraphrase did not rank the turn it means above the unrelated "
+        f"turn — the dense leg is not selective by meaning: "
+        f"target={target} distractor={distractor}")
+
     # ...and the leg that carried it ran healthy with material to return.
     healthy = [e for e in _vector_legs(trace)
                if e["degraded"] is False and e["count"] >= 1]
@@ -287,6 +305,17 @@ def test_real_embedder_paraphrase_retrieves_the_captured_turn(sdk, monkeypatch):
     assert _scores(hits["sess-3519-real_t0"]).get("fts") is None, (
         f"the target was matched lexically — not a semantic hit: "
         f"{_scores(hits['sess-3519-real_t0'])}")
+    # Same selectivity requirement as the hermetic case: the shipped model must
+    # rank the turn the paraphrase MEANS above the unrelated turn, not merely
+    # return it from a corpus small enough to return everything.
+    assert "sess-3519-real_t1" in hits, (
+        f"the unrelated turn was not returned, so there is nothing to rank "
+        f"against: {sorted(hits)}")
+    real_target = _scores(hits["sess-3519-real_t0"])
+    real_distractor = _scores(hits["sess-3519-real_t1"])
+    assert real_target["vector"] > real_distractor["vector"], (
+        "the real embedder did not rank the paraphrase above the unrelated "
+        f"turn: target={real_target} distractor={real_distractor}")
     assert any(e["count"] >= 1 for e in _vector_legs(trace)), trace
 
 
