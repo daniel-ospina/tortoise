@@ -21300,10 +21300,29 @@ class TortoiseSDK:
                     # would create duplicate Objects on every run).
                     oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
+                # #3574: store the name VERBATIM — never `name[:200]`.
+                #
+                # `name` IS the Object's identity: `_upsert_object` MERGEs on
+                # it, `_fold_object_superseded` MATCHes it, and the canonical
+                # id (`_entity_name_id` → `obj-<sha26(name)>`) is derived from
+                # the FULL name. This was the only writer applying a 200-char
+                # cap, so a GitHub title > 200 chars (the session-indexing
+                # lane's stock input — titles run to 256) landed under a name
+                # no other name-keyed writer or reader could match:
+                # `create_object(same_title)` minted a second carrier and the
+                # supersession fold could never find this one — one logical
+                # issue, two divergent names by door. The cap is load-bearing
+                # nowhere (no index or uniqueness constraint wants it; it only
+                # breaks identity agreement), so it is REMOVED rather than
+                # mirrored: mirroring would make two distinct >200-char names
+                # collapse into ONE Object — the silent-merge harm the identity
+                # rule exists to prevent. Pin:
+                # tests/test_sdk_group3.py::TestConnectIssueObjectsAboutObject
+                # ::test_long_object_name_stored_verbatim_by_both_writers.
                 proj.g.query(
                     "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
                     "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
-                    params={"oid": oid, "name": name[:200], "okind": okind,
+                    params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},
                 )
                 if proj.create_about_edge(event_id, oid, "aboutObject"):
