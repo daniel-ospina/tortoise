@@ -210,12 +210,13 @@ function tagAttrs(html, from, end) {
   return out
 }
 
-// #3787: the URL parser's OWN leading/trailing trim — C0 controls and space, not
-// JS `String.prototype.trim()`, which also strips NBSP that the URL parser keeps
-// (review cycle 8). Both URL comparisons below need it: `src=" http://evil"` IS
-// fetched, off-origin, by a browser.
-function urlTrim(s) {
-  return s.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
+// #3787: the value a browser would actually FETCH for an attribute — the HTML
+// tokenizer's NUL → U+FFFD replacement, then the URL parser's OWN leading/trailing
+// trim (C0 controls and space, NOT JS `String.prototype.trim()`, which also strips
+// NBSP that the URL parser keeps). `src=" http://evil"` and `src="\u0001http://evil"`
+// ARE fetched, off-origin; `src="\u0000http://evil"` is NOT (it resolves relative).
+function urlValue(s) {
+  return s.replace(/\u0000/g, '\uFFFD').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
 }
 
 // #3787: the first pair's value for `name` (lower-cased) in a parsed attribute
@@ -726,15 +727,16 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //      BEST-EFFORT reader, not a conformant HTML parser: a browser-oracle fuzz
   //      over start-tag shapes finds spellings where it reads a different `src`.
   //      The LOCAL-reference and supabase-name consumers are backstopped (see the
-  //      `p.srcs` note); the off-origin refusal enumerates `<script` occurrences
-  //      independently of the element walk, so a desync cannot hide one — but a
-  //      MISREAD ATTRIBUTE still can, and item 9 records the direction of the
-  //      differences that remain.
-  //   9. clause 2(d) refuses a `src` the browser never FETCHES: a data block
-  //      (`type="text/template"`/`application/json`/`text/html`), a `nomodule`
-  //      script, a `<script>` inside `<template>` (inert content), and an
-  //      `<svg>`/`<math>` `<script>` (foreign content uses `href`). All fail
-  //      closed, and none of them is in the built site.
+  //      `p.srcs` note), and the off-origin refusal enumerates `<script`
+  //      occurrences independently of the element walk, so a desync cannot hide
+  //      one. That refusal reads `src`, `href` and `xlink:href`; a load channel
+  //      outside that set is not covered.
+  //   9. clause 2(d) refuses a `src`/`href` the browser never FETCHES: a data
+  //      block (`type="text/template"`/`application/json`/`text/html`), a
+  //      `nomodule` script, a `<script>` inside `<template>` (inert content), and
+  //      the foreign-namespace `src` spelling — an `<svg>`/`<math>` script loads
+  //      through `href`, so `src` there is refused only as a favour to the live
+  //      `href` vector. All fail closed, and none of them is in the built site.
   //
   // Class-B (the lane's doctrine): each message names the value that makes it
   // fail, and each context is REACHABLE — these are the scripts and pages the
@@ -816,10 +818,10 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   const dangling = []
   for (const p of pages) {
     for (const raw of p.srcs) {
-      // `urlTrim` is the URL parser's own trim: `<script src=" /consent.js ">`
+      // `urlValue` is what a browser would fetch: `<script src=" /consent.js ">`
       // LOADS that local file, and without this the guard reds it as a dangling
-      // reference (review cycles 7 and 8).
-      const ref = urlTrim(raw)
+      // reference (review cycles 7-9).
+      const ref = urlValue(raw)
       if (/^(?:https?:)?\/\//.test(ref) || ref.startsWith('data:') || ref.startsWith('blob:')) continue
       const rel = ref.replace(/^\//, '')
       const abs = join(dist, rel)
@@ -844,11 +846,12 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // the next one), and a windowed raw regex red an `<img src="https://…">` that
   // merely followed a `<script` and red an UNTERMINATED tag the browser discards.
   // Enumerating occurrences means a phantom element cannot hide a later one, a
-  // tag-bounded window cannot reach an `<img>`, and `tagEnd === -1` is inert. A
-  // `<script` literal in a comment or RCDATA is still read as a tag, a data block
-  // and a `nomodule`/`<template>`/foreign-namespace script are refused although
-  // the browser never fetches them — over-approximations that can only fail
-  // closed, the same side as the page-document prose probe (residuals 4 and 9).
+  // tag-bounded window cannot reach an `<img>`, and `tagEnd === -1` is inert. It
+  // over-approximates by design, always on the fail-closed side (residuals 4 and
+  // 9): a `<script` literal in a COMMENT, in an RCDATA/RAWTEXT/PLAINTEXT/
+  // `noscript` region, in a script's OWN data, or in an ATTRIBUTE VALUE is read
+  // as a tag, and a data block, a `nomodule` script or a script inside
+  // `<template>` is refused although the browser never fetches it.
   const OFF_ORIGIN = /^(?:https?:)?\/\//i
   const offOrigin = []
   for (const p of pages) {
@@ -857,8 +860,18 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
     while ((o = opener.exec(p.html)) !== null) {
       const end = tagEnd(p.html, opener.lastIndex)
       if (end === -1) continue // the browser emits no element for an unterminated tag
-      const raw = firstAttr(tagAttrs(p.html, opener.lastIndex, end), 'src')
-      if (raw !== null && OFF_ORIGIN.test(urlTrim(raw))) offOrigin.push(`${p.name} → ${urlTrim(raw)}`)
+      const attrs = tagAttrs(p.html, opener.lastIndex, end)
+      // Every spelling a script can LOAD through is read, and ALL of them are
+      // tested: a foreign-namespace script uses `href`/`xlink:href` and ignores
+      // `src`, so `<svg><script href="https://evil/x.js">` IS fetched while the
+      // matching `src` spelling is not — and stopping at the first PRESENT
+      // spelling let a local `src` mask a live `href` (review cycle 9,
+      // reproduced against a real fetch).
+      for (const name of ['src', 'href', 'xlink:href']) {
+        const raw = firstAttr(attrs, name)
+        if (raw === null || !OFF_ORIGIN.test(urlValue(raw))) continue
+        offOrigin.push(`${p.name} → ${name}="${urlValue(raw)}"`)
+      }
     }
   }
   assert.deepEqual(offOrigin, [],
