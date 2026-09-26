@@ -1231,6 +1231,9 @@ surfaces:
   - test_lifecycle_guards.py        # #2498: shared supersede/retract/invalidate terminal+operator guard (status x transition matrix)
   - test_provenance_extractedfrom_3263.py  # #3263: extractedFrom inferred from the write context + live==rebuild parity (docker-lane)
   - test_weights_mitigation.py
+  # #3815: a mitigation must MOVE the resolved EP weight (w_eff = w*(1-strength)),
+  # not merely exist — asserts the weight the propagation path actually consumes.
+  - test_3815_mitigation_moves_weight.py
   - test_ep_sources.py
   - test_2199_decide_calibration.py
   - test_file_human_approval.py
@@ -2330,6 +2333,7 @@ durations:
   test_website_static.py: 0.4
   test_weights.py: 0.1
   test_weights_mitigation.py: 0.2
+  test_3815_mitigation_moves_weight.py: 24.8  # unmeasured — #3815: local 3-run max (19.1/24.8/24.3); refresh from CI junit
   test_build_cohorts_2517.py: 0.1
   test_eval_reinjection_cap_resume.py: 0.5
   test_guard_measured_revision.py: 3.5
