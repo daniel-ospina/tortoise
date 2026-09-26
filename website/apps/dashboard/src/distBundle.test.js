@@ -38,14 +38,33 @@ const CANONICAL_MCP_URL = 'https://api.premiselabs.co/mcp'
 const here = dirname(fileURLToPath(import.meta.url))
 const dist = resolve(here, '..', 'dist')
 
+// #3787 (review cycle 3): every walker below starts with `readdirSync(dist)`,
+// which throws a bare ENOENT out of the test when the directory is missing —
+// losing the designed diagnosis the bundle declares everywhere else. Assert the
+// precondition once, with the message a reader needs.
+// A stat that FAILS (a dangling symlink, a race) means "not a file to scan",
+// never a thrown assertion: `statSync` throws ENOENT for a dangling `*.js`
+// symlink, which loses the designed diagnosis exactly as the EISDIR case did. A
+// dangling *reference* is still a designed fail — `dangling` catches it by name.
+function isFile(p) {
+  try { return statSync(p).isFile() } catch { return false }
+}
+function assertDistBuilt() {
+  let built = false
+  try { built = statSync(dist).isDirectory() } catch { built = false }
+  assert.ok(built,
+    'website/apps/dashboard/dist/ must exist — run `npm run build` ' +
+    '(the bundle is a build artifact since #3775)')
+}
+
 function shippedBundle() {
   const htmlPath = join(dist, 'index.html')
-  assert.ok(existsSync(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
+  assert.ok(isFile(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
   const html = readFileSync(htmlPath, 'utf8')
   const entry = html.match(/src="\/assets\/(index-[A-Za-z0-9_-]+\.js)"/)
   assert.ok(entry, 'dist/index.html must reference the built entry chunk')
   const entryPath = join(dist, 'assets', entry[1])
-  assert.ok(existsSync(entryPath),
+  assert.ok(isFile(entryPath),
     `dist/index.html references ${entry[1]}, which the build did not emit — the bundle is incomplete`)
   return { html, entryPath, entryName: entry[1], js: readFileSync(entryPath, 'utf8') }
 }
@@ -66,8 +85,9 @@ function shippedBundle() {
 // A missing reference is a hard fail (a broken/half-written build), never a
 // silently skipped file — that is the whole point of this guard.
 function shippedScripts() {
+  assertDistBuilt()
   const htmlPath = join(dist, 'index.html')
-  assert.ok(existsSync(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
+  assert.ok(isFile(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
   const html = readFileSync(htmlPath, 'utf8')
   const out = []
   const seen = new Set()
@@ -75,7 +95,7 @@ function shippedScripts() {
     if (seen.has(name)) return
     seen.add(name)
     if (text === undefined) {
-      assert.ok(existsSync(path),
+      assert.ok(isFile(path),
         `dist/${name} is referenced by the shipped bundle but the build did not emit it — the bundle is incomplete`)
       text = readFileSync(path, 'utf8')
     }
@@ -85,7 +105,12 @@ function shippedScripts() {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? `${rel}/${ent.name}` : ent.name
       if (ent.isDirectory()) walk(join(dir, ent.name), r)
-      else if (ent.name.endsWith('.js')) add(r, join(dir, ent.name))
+      // `isFile()`: a SYMLINK named `*.js` pointing at a directory is not a
+      // directory to `Dirent`, so it reached `readFileSync` and threw EISDIR,
+      // losing the designed diagnosis (review cycle 3).
+      else if (ent.name.endsWith('.js') && isFile(join(dir, ent.name))) {
+        add(r, join(dir, ent.name))
+      }
     }
   }
   walk(dist, '')
@@ -133,16 +158,33 @@ function firstAttr(attrs, name) {
 // never an inline body, and a tag whose text is discarded by that rule (a `src`
 // tag with no closing tag swallows the rest of the document as its ignored text)
 // is discarded here too, because that is what the browser does.
+// review cycle 3: the tag end is found by a QUOTE-AWARE walk, not `[^>]*`. A `>`
+// inside a quoted attribute value ended the tag early, so
+// `<script data-x=">" src="https://cdn.example.com/app.js">` parsed as an inline
+// body with NO src — the loaded script vanished from `p.srcs`, taking clause
+// 2(a) and the 2(d) off-origin refusal with it, while the comment above claimed
+// the value "the BROWSER would load".
 function scriptTags(html) {
   const out = []
-  const re = /<script\b([^>]*)>/gi
+  const open = /<script(?=[\s/>])/gi
   let m
-  while ((m = re.exec(html)) !== null) {
-    const rest = html.slice(re.lastIndex)
+  while ((m = open.exec(html)) !== null) {
+    let i = open.lastIndex
+    let quote = null
+    for (; i < html.length; i++) {
+      const ch = html[i]
+      if (quote !== null) { if (ch === quote) quote = null; continue }
+      if (ch === '"' || ch === "'") { quote = ch; continue }
+      if (ch === '>') break
+    }
+    const attrs = html.slice(open.lastIndex, i)
+    const rest = html.slice(i + 1)
     const close = rest.search(/<\/script\s*>/i)
     const body = close === -1 ? rest : rest.slice(0, close)
-    out.push({ src: firstAttr(m[1], 'src'), body })
-    re.lastIndex = m.index + m[0].length + (close === -1 ? rest.length : body.length)
+    out.push({ src: firstAttr(attrs, 'src'), body })
+    // Resume at the element's closing tag (or past the document) so a `<script`
+    // inside the body cannot be read as a second element.
+    open.lastIndex = i + 1 + (close === -1 ? rest.length : body.length)
   }
   return out
 }
@@ -154,12 +196,13 @@ function scriptTags(html) {
 // probes below are claims about. Recursive, so a nested page (or one added to
 // `public/`) cannot escape the fragment-consumer scan that uses this.
 function shippedHtmlPages() {
+  assertDistBuilt()
   const out = []
   const walk = (dir, rel) => {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? `${rel}/${ent.name}` : ent.name
       if (ent.isDirectory()) walk(join(dir, ent.name), r)
-      else if (ent.name.endsWith('.html')) {
+      else if (ent.name.endsWith('.html') && isFile(join(dir, ent.name))) {
         const html = readFileSync(join(dir, ent.name), 'utf8')
         const inlineBodies = []
         const srcs = []
@@ -175,10 +218,20 @@ function shippedHtmlPages() {
   return out
 }
 
-// #3787: the ANCHORED vendored-library pattern. The anchor is load-bearing — a
-// bare suffix match would also exempt an app-owned `assets/*supabase*.min.js`,
-// which is a false-negative path for the guard below.
-const LIBRARY_BUILD = /^vendor\/supabase[\w.-]*\.min\.js$/
+// #3787: the vendored-library exemption is an EXPLICIT allow-list naming the exact
+// reviewed build, NOT a path wildcard. `^vendor/supabase[\w.-]*\.min\.js$` was
+// inherited by ANY file dropped into the app-writable `public/vendor/` —
+// reproduced in review cycle 3: `public/vendor/supabase-probe.min.js` carrying
+// `createClient(` shipped and the guard stayed green (8/8) because the exemption
+// skipped its content entirely. Every way of REACHING such a file still reds
+// (clause 2(a) on a page `<script src>`, 2(c) on any `vendor/` mention), so the
+// wildcard exposed only an unreferenced file — but `vendor/` is not a trusted
+// prefix, and blessing a file the guard never read is the same false-negative
+// shape as the `admin/**` exemption reverted in cycle 2. Fail closed. Trade-off,
+// stated: re-vendoring the library under a new filename is a deliberate one-line
+// update here, which is exactly the change that deserves a human's eye. Whether
+// this file should ship at all is owner question Q2 on #3787.
+const LIBRARY_BUILD = /^vendor\/supabase-2\.112\.2\.min\.js$/
 // A supabase-js build specifier OR URL. Deliberately NOT a bare `supabase`
 // word probe: `dist/signup.html`'s funnel inline body names supabase.com/docs/…
 // and the retired supabase-session.js in comments, and a word probe would red a
@@ -213,27 +266,42 @@ const EXECUTABLE = /\.(?:js|mjs|cjs)$/
 // is closed by clause 2 regardless.
 const FRAGMENT_CONSUMER = /\bcreate[A-Za-z]*Client\s*\(|SupabaseClient\s*\(/
 // #3787: fold the literal-building idioms a `public/`-copied file can use to
-// hold a path its raw text never contains. Two rewrites, both applied globally
-// per pass so a chain of 2^k fragments resolves in k passes, and the loop stops
-// as soon as a pass changes nothing:
-//   * adjacent concatenation — `'/ven' + 'dor/supa' + 'base-2.min.js'`;
-//   * array-join — `['/ven','dor/supa','base-2.min.js'].join('')`, plus a static
-//     template substitution (`` `/ven${'dor/supa'}base-2.min.js` ``) folded into
-//     a plain string.
+// hold a path its raw text never contains. Applied globally per pass so a chain
+// of 2^k fragments resolves in k passes; the loop stops as soon as a pass changes
+// nothing. In pass order:
+//   * array-join — `['/ven','dor/supa','base-2.min.js'].join('')`, with any quote
+//     style for the separator and the elements;
+//   * a literal `.concat(...)` suffix is rewritten to a `+` so the next rewrite
+//     folds it — `'/ven'.concat('dor/x')` → `'/ven' + 'dor/x'` → `'/vendor/x'`;
+//   * a static template substitution (`` `/ven${'dor/supa'}base-2.min.js` ``),
+//     whose INNER literal may itself be a backtick (`` `/ven${`dor/supa`}base` ``) —
+//     a `['"]`-only inner class admitted no such form and let the nested-backtick
+//     spelling through, raw probe and fold both (VGATE run 3 reproduced it GREEN);
+//   * adjacent concatenation, any mix of quote styles —
+//     `'/ven' + "dor/supa" + 'base-2.min.js'`.
+// Every quote class in every rewrite below admits a BACKTICK — including the
+// inner class of the template substitution, for the nested case above — so a
+// backtick literal folds through these same rewrites and there is deliberately NO
+// separate backtick-normalisation pass.
 // Array-join is not hypothetical: a prior review of this file flagged it by name
 // (PR #3704's M3c, "the dist scans do not cover the array-join form"), and it
 // defeated a `+`-only fold against a real build in review cycle 2. The RAW text
-// is probed as well, so folding can only widen what the guard sees.
-const ARRAY_JOIN = /\[\s*((?:['"][^'"\n]*['"]\s*,?\s*)+)\]\s*\.\s*join\s*\(\s*['"]\s*['"]\s*\)/g
-const CONCAT_PAIR = /(['"])([^'"\n]*)\1\s*\+\s*(['"])([^'"\n]*)\3/g
+// is probed as well, so folding can only widen what the guard sees. This is a
+// best-effort fold over LITERAL spellings, not an evaluator — a path computed at
+// runtime (a `map` over a split of a decoded string) stays in the residual below.
+const ARRAY_JOIN = /\[\s*((?:['"`][^'"`\n]*['"`]\s*,?\s*)+)\]\s*\.\s*join\s*\(\s*(['"`])\s*\2\s*\)/g
+const CONCAT_SUFFIX = /\.\s*concat\s*\(\s*((?:['"`][^'"`\n]*['"`]\s*,?\s*)+)\)/g
+const CONCAT_PAIR = /(['"`])([^'"`\n]*)\1\s*\+\s*(["'`])([^'"`\n]*)\3/g
 function foldStringLiterals(text, passes = 6) {
   let out = text
   for (let i = 0; i < passes; i++) {
     const next = out
       .replace(ARRAY_JOIN, (all, list) =>
-        "'" + [...list.matchAll(/['"]([^'"\n]*)['"]/g)].map((m) => m[1]).join('') + "'")
-      .replace(/\$\{\s*(['"])([^'"\n]*)\1\s*\}/g, '$2')
-      .replace(CONCAT_PAIR, '$1$2$4$1')
+        "'" + [...list.matchAll(/['"`]([^'"`\n]*)['"`]/g)].map((m) => m[1]).join('') + "'")
+      .replace(CONCAT_SUFFIX, (all, list) =>
+        " + '" + [...list.matchAll(/['"`]([^'"`\n]*)['"`]/g)].map((m) => m[1]).join('') + "'")
+      .replace(/\$\{\s*(['"`])([^'"`\n]*)\1\s*\}/g, '$2')
+      .replace(CONCAT_PAIR, (all, q1, a, q2, b) => `'${a}${b}'`)
     if (next === out) break
     out = next
   }
@@ -326,7 +394,12 @@ test('#3428/#2937: the shipped-script scan covers every asset chunk AND every in
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? `${rel}/${ent.name}` : ent.name
       if (ent.isDirectory()) walk(join(dir, ent.name), r)
-      else if (ent.name.endsWith('.js')) onDisk.push(r)
+      // The same predicate `shippedScripts()` uses: this walk and that one are
+      // independent enumerations of ONE `.js` surface, so they must agree on what
+      // counts as a file — a symlink to a directory named `*.js` is neither
+      // executable nor scannable, and testing it here red the coverage assertion
+      // for a file the shared walk legitimately skips (review cycle 3).
+      else if (ent.name.endsWith('.js') && isFile(join(dir, ent.name))) onDisk.push(r)
     }
   }
   walk(dist, '')
@@ -475,13 +548,42 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //       may mention it (literals are folded before probing, so the
   //       split-literal evasion the file's own #3913 MUT-D note records is
   //       resolved first);
-  //   (d) an off-origin URL → refused outright by clause 2(a)'s local-only
-  //       assertion. The shipped CSP is defence-in-depth only, NOT a closure: its
-  //       `script-src` admits `'unsafe-inline'` and a general third-party CDN
-  //       (`public/_headers`), so an off-origin load is not prevented by the
-  //       header alone — which is why the artifact pin is asserted here.
+  //   (d) an off-origin URL in a PAGE's `<script src>` → refused outright by
+  //       clause 2(a)'s local-only assertion. SCOPE, stated precisely: (d) covers
+  //       STATIC page refs, not a URL assembled at runtime inside a script — that
+  //       stays in the residual below, and no blanket off-origin probe can replace
+  //       it, because the clean build legitimately loads `googletagmanager.com`
+  //       (consent.js), Turnstile and PostHog by absolute URL, so "no off-origin
+  //       .js literal in a context" would red a clean build. The shipped CSP is
+  //       defence-in-depth only, NOT a closure: its `script-src` admits
+  //       `'unsafe-inline'` and a general third-party CDN (`public/_headers`), so
+  //       an off-origin load is not prevented by the header alone — which is why
+  //       the artifact pin is asserted here.
   // Clause 1 rules on the client construction itself; clause 3 pins the scan's
   // coverage so a page or file cannot escape any of the above.
+  //
+  // RESIDUALS (not claims — stated so a later reader cannot mistake the closed
+  // form for a closed property). This guard is a best-effort artifact tripwire,
+  // not a sandbox:
+  //   1. a string COMPUTED at runtime (chunks built by a `map`/`split`/decode, or
+  //      generated obfuscation) — the fold below resolves literal spellings only.
+  //      The fold is also BOUNDED: `passes` is a finite constant, so a purely
+  //      literal spelling nested more deeply than that cap allows needs more passes
+  //      than it permits and evades both the raw probe and the fold. Raising the
+  //      cap narrows this but cannot close it — no finite pass count does.
+  //   2. an off-origin bundle loaded from an opaque runtime-built URL inside a
+  //      script (see (d));
+  //   3. the allow-listed vendored library file is exempt from the CONTENT
+  //      clauses — it must be, its own build contains `createClient(` — so what
+  //      is pinned for it is reachability (clause 2), not content. Owner question
+  //      Q2 on #3787 tracks whether that file should ship at all.
+  //   4. a page's raw text is probed WHOLE, so prose or an HTML COMMENT in a
+  //      shipped page naming a probe literal (`createClient(`, `vendor/`) reds a
+  //      build that is in fact clean. That is the deliberate fail-closed side of
+  //      the cycle-3 closure: proving a comment inert would mean re-entering the
+  //      per-syntactic-form parsing loop cycles 1-2 had already run twice, and a
+  //      text scan cannot do it. The red names the offending FILE, so it is a
+  //      false positive a reviewer can act on — recorded here as one.
   //
   // Class-B (the lane's doctrine): each message names the value that makes it
   // fail, and each context is REACHABLE — these are the scripts and pages the
@@ -490,6 +592,18 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // double-destroy. The two-outcome record (M1/M2/M3) is in the PR.
   const pages = shippedHtmlPages()
   const inline = pages.flatMap((p) => p.inlineBodies)
+  // #3787 (review cycle 3): the SAME document text also carries fragment
+  // consumers in its ATTRIBUTES, which the `<script>`-element scan above can
+  // never read: an inline event handler or a `javascript:` URL —
+  // `<img src=x onerror="import('/vendor/supabase-2.112.2.min.js').then(m=>m.createClient('u','k'))">`
+  // left this guard GREEN (8/8), naming `vendor/` and the library verbatim in an
+  // attribute. Closing that one syntactic form at a time is the loop cycles 1-2
+  // already ran twice, so the closure is STRUCTURAL: every page's whole raw
+  // document becomes a probed context. It costs nothing on a clean build — every
+  // probe is 0-hit against all five shipped pages, verified before adding this —
+  // and it covers every attribute channel (event handlers, `javascript:` URLs,
+  // `<base href>`, meta refresh, data-*) plus any future one.
+  const pageContexts = pages.map((p) => ({ name: `${p.name}#document`, js: p.html, folded: foldStringLiterals(p.html) }))
 
   // (3) COVERAGE FIRST. A scan that inspected nothing passes vacuously, and a
   // shipped file that escapes the scan is a silent hole. Every on-disk
@@ -507,8 +621,8 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? `${rel}/${ent.name}` : ent.name
       if (ent.isDirectory()) walk(join(dir, ent.name), r)
-      else if (EXECUTABLE.test(ent.name)) onDisk.js.add(r)
-      else if (ent.name.endsWith('.html')) onDisk.html.add(r)
+      else if (EXECUTABLE.test(ent.name) && isFile(join(dir, ent.name))) onDisk.js.add(r)
+      else if (ent.name.endsWith('.html') && isFile(join(dir, ent.name))) onDisk.html.add(r)
     }
   }
   walk(dist, '')
@@ -535,7 +649,7 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
       // `isFile()` matters: a page naming a DIRECTORY (`<script src="/assets">`)
       // passed `existsSync` and then threw EISDIR out of `readFileSync`, losing
       // the designed diagnosis (review cycle 2).
-      if (!existsSync(abs) || !statSync(abs).isFile()) { dangling.push(`${p.name} → ${ref}`); continue }
+      if (!isFile(abs)) { dangling.push(`${p.name} → ${ref}`); continue }
       if (!refs.has(rel)) refs.set(rel, readFileSync(abs, 'utf8'))
     }
   }
@@ -588,6 +702,7 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   const contexts = [
     ...appScripts.map(([name, js]) => ({ name, js, folded: foldStringLiterals(js) })),
     ...inline.map((b) => ({ name: b.name, js: b.js, folded: foldStringLiterals(b.js) })),
+    ...pageContexts,
   ]
 
   // (3) COVERAGE — asserted against the CONTEXTS the content clauses actually
@@ -598,6 +713,31 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // enumerated universe is the assertion that can catch a filter — which is
   // exactly the regression it exists for.
   const probed = new Set(contexts.map((c) => c.name))
+  // Anti-vacuity (review cycle 3): emptying the app's ENTRY chunk left this test
+  // GREEN — `consent.js` and the inline bodies alone satisfied
+  // `appScripts.length >= 1`, so the guard never noticed the app code was gone.
+  // Tie the scan to the entry chunk `dist/index.html` actually references.
+  const entryName = pages.find((p) => p.name === 'index.html')?.html
+    .match(/src="\/assets\/(index-[A-Za-z0-9_-]+\.js)"/)?.[1]
+  assert.ok(entryName, 'dist/index.html must reference the built entry chunk (#3787)')
+  assert.ok(probed.has(`assets/${entryName}`),
+    `the entry chunk assets/${entryName} must be probed — it is the app's whole runtime (#3787)`)
+  assert.ok(scanned.get(`assets/${entryName}`).length > 0,
+    `the entry chunk assets/${entryName} is EMPTY — the build emitted no app code (#3787)`)
+  for (const p of pages) {
+    const doc = contexts.find((c) => c.name === `${p.name}#document`)
+    assert.ok(doc,
+      `dist/${p.name} ships as a page, yet no content clause probes its document — a fragment ` +
+      'consumer in an ATTRIBUTE (an inline event handler, a `javascript:` URL) lives outside ' +
+      'every `<script>` element and would escape the scan (#3787)')
+    // CONTENT, not just the name (VGATE cycle 3): a context whose text was
+    // emptied kept the name-only coverage assertion green while an attribute
+    // consumer in that very page went undetected. Pin the probed text to the
+    // page's own document, so the context cannot be present-and-hollow.
+    assert.equal(doc.js, p.html,
+      `dist/${p.name}#document must probe the page's OWN document text — a page context that ` +
+      'is present by name but carries no text probes nothing (#3787)')
+  }
   for (const name of onDisk.js) {
     assert.ok(probed.has(name) || LIBRARY_BUILD.test(name),
       `dist/${name} ships and is executable, and is not the exempt vendored library, yet no ` +
