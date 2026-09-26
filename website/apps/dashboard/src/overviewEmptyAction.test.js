@@ -25,9 +25,20 @@ import {
   MEMORY_SOURCES_TAB,
   MEMORY_SOURCES_HREF,
   OverviewEmptyActions,
+  GraphMissingEmptyStateActions,
+  SDK_DOCS_HREF,
+  ONBOARDING_FUNNEL_HREF,
+  emptyStateActionRoute,
   resolveSectionHash,
   focusDeepLinkTarget,
 } from './overviewEmptyAction.js'
+import { stripComments } from './testSupport.js'
+import { probeTags, importsFromMain } from './jsxSourceProbe.js'
+
+// The guarded call sites live in main.jsx (the app, which a node test cannot
+// import) — the probe compiles them with the app's own JSX transform and reads
+// what React would hand the components.
+const mainJsxSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
 
 const render = (snippetKey) =>
   renderToStaticMarkup(React.createElement(OverviewEmptyActions, { snippetKey }))
@@ -83,6 +94,14 @@ test('#3890: the deep-link hash resolves to the Settings tab AND the section', (
   assert.deepEqual(resolveSectionHash('#settings-memory-heading'),
     { tab: 'settings', sectionId: 'settings-memory-heading' },
     'a section deep-link must route to the tab that holds the section')
+  // The two route literals are pinned as LITERALS: every other assertion in this
+  // file compares a render against the constant that produced it, so a typo in
+  // the extraction itself sailed through (an independent reviewer's mutation
+  // '…/welcome' -> '…/welcome2' left the whole suite green).
+  assert.equal(ONBOARDING_FUNNEL_HREF, 'https://tortoise.premiselabs.co/welcome',
+    'the self-fork route is the onboarding funnel')
+  assert.equal(SDK_DOCS_HREF, 'https://tortoise.premiselabs.co/docs',
+    'the build-fork route is the SDK documentation')
   assert.equal(MEMORY_SOURCES_HREF, '#settings-memory-heading',
     'the rendered href and the resolver must name the same section')
   assert.equal(MEMORY_SOURCES_TAB, 'settings', 'the section lives in the Settings tab')
@@ -161,4 +180,141 @@ test('#3890 wiring: the D5 empty state renders the guarded action (no inline des
   const flagIdx = handler.indexOf('if (programmaticTabChangeRef.current)')
   assert.ok(sectionIdx > -1 && flagIdx > -1 && sectionIdx < flagIdx,
     'the section deep-link branch must precede the #2528 self-trigger guard')
+})
+
+// ── #4637: the graph-missing card's action ROUTE ─────────────────────────────
+//
+// "Connect your agent →" is the AGENT-CONNECTION route. The BUILD fork renders
+// no such route (its step 2 is the SDK block), so the card was offering a
+// build-fork organization a route its branch never creates. These are EXECUTED
+// renders of the live action component — the READ direction is the fork-derived
+// route, so a source-text reformat cannot defeat them.
+//
+// ⚠️ On the self/undecided arm the label and the destination are not the same
+// claim: the label names the intent (connect an agent) and the destination is
+// the onboarding FUNNEL url, which for a SIGNED-IN user round-trips to the app
+// root rather than opening a chooser (see the test below and #3890). Do not read
+// this label as "this URL is the chooser".
+const renderActions = (buildFork, onGoToKeys = () => {}) =>
+  renderToStaticMarkup(React.createElement(GraphMissingEmptyStateActions, { buildFork, onGoToKeys }))
+
+test('#4637: a BUILD-fork organization is never offered the agent-connection route', () => {
+  const html = renderActions(true)
+  assert.ok(!/Connect your agent/.test(html),
+    `the build fork renders no agent-connection route — got ${html}`)
+  assert.ok(!html.includes(ONBOARDING_FUNNEL_HREF),
+    'the agent-connection route must not be linked on the build fork')
+  // the route it IS offered is the one its own step 2 offers
+  assert.ok(html.includes(`href="${SDK_DOCS_HREF}"`),
+    `the build fork must link the SDK route — got ${html}`)
+  assert.match(html, /SDK documentation →/)
+  // the first-party surface stays, on every fork
+  assert.match(html, /Go to API Keys →/)
+})
+
+// ⚠️ The self arm keeps the DESTINATION the card has always had — the
+// onboarding FUNNEL url — and this test pins only that fact. It is NOT the
+// harness chooser for a signed-in user: the funnel 301s to the app origin,
+// where the server sends a signed-in visitor to the app root. That dead
+// destination is pre-existing and tracked on #3890 (evidence recorded there);
+// #4637 is about the BUILD fork being offered that route at all, which is what
+// this test's negative pins.
+test('#4637: the self/undecided fork keeps the agent-connection route, and the two forks never collapse', () => {
+  for (const rawFork of [false, undefined, 'self', 'unsure', 'build', 1, 0]) {
+    const html = renderActions(rawFork)
+    assert.match(html, /Connect your agent →/,
+      `a non-boolean buildFork ${JSON.stringify(rawFork)} must take the funnel arm — got ${html}`)
+    assert.ok(html.includes(`href="${ONBOARDING_FUNNEL_HREF}"`), 'the funnel route stays on a self fork')
+  }
+  assert.ok(!/SDK documentation/.test(renderActions(false)),
+    'the SDK route is the build fork ARM, never co-rendered')
+  assert.notEqual(renderActions(true), renderActions(false),
+    'the two forks must not render the same route')
+  // the route table's build arm takes the same URL the wizard's build-fork
+  // step-2 docs link consumes (the wizard consumes the CONSTANT, not the table —
+  // this component is the table's only consumer)
+  assert.deepEqual(emptyStateActionRoute(true), { label: 'SDK documentation →', href: SDK_DOCS_HREF })
+  assert.deepEqual(emptyStateActionRoute(false), { label: 'Connect your agent →', href: ONBOARDING_FUNNEL_HREF })
+})
+
+test('#4637: the action set still drives the API Keys tab (the primary surface)', () => {
+  let calls = 0
+  const tree = GraphMissingEmptyStateActions({ buildFork: true, onGoToKeys: () => { calls += 1 } })
+  const button = React.Children.toArray(tree.props.children).find((c) => c && c.type === 'button')
+  assert.ok(button, 'the action set must contain the API Keys button')
+  assert.equal(button.props.className, 'btn-primary')
+  button.props.onClick()
+  assert.equal(calls, 1, 'the button must still open the API Keys tab')
+  const anchor = React.Children.toArray(tree.props.children).find((c) => c && c.type === 'a')
+  assert.equal(anchor.props.target, '_blank')
+  assert.equal(anchor.props.rel, 'noreferrer')
+})
+
+test('#4637 wiring: main.jsx renders the guarded action set with the derived fork', () => {
+  const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
+  // The pins below run on COMMENT-STRIPPED source (the shared, quote-aware
+  // `stripComments`): without it a trailing `//` or an inline `/* … */` carrying
+  // the pinned text satisfied the pin while the live binding said something else
+  // (`<GraphMissingEmptyStateActions /* buildFork={isBuildFork} */
+  // buildFork={wizardFork} …>` restored the defect with the suite green).
+  const mainCode = stripComments(mainJsx)
+  // PROP-SET based, not order/formatted based: extract the tag, then check the
+  // bindings (a regex anchored on the attribute ORDER or on the line break
+  // passes while the binding is wrong, or fails when it is right and a
+  // formatter reflows the tag)
+  const actionTags = mainCode.match(/<GraphMissingEmptyStateActions[\s\S]*?\/>/g) || []
+  assert.equal(actionTags.length, 1,
+    `the graph-missing card must render the guarded action set once — found ${actionTags.length}`)
+  // What the tag actually HANDS the component is asserted semantically, by the
+  // probe test below: it compiles this call site with the app's JSX transform and
+  // reads the effective props, so a spread, an alias or an extra attribute after
+  // the binding cannot satisfy the guard by resembling the pinned text. The text
+  // pin here is the locator's supplement.
+  assert.match(actionTags[0], /buildFork=\{isBuildFork\}/,
+    `the action set must take the derived fork — got ${actionTags[0]}`)
+  assert.match(actionTags[0], /onGoToKeys=\{/,
+    `the first-party API Keys handler must stay wired — got ${actionTags[0]}`)
+  // …and no inline route action may survive beside it
+  assert.ok(!mainCode.includes('Connect your agent →'),
+    'the inline agent-connection action must be gone from main.jsx')
+  assert.ok(!mainCode.includes(ONBOARDING_FUNNEL_HREF),
+    'main.jsx must not re-type the agent-connection URL — the action module owns it')
+  // the wizard's build-fork SDK links consume the SAME route constant, so the
+  // Overview action and the branch it describes cannot drift
+  const docsHrefLinks = mainCode.match(/<a[^>]*href=\{SDK_DOCS_HREF\}[^>]*>/g) || []
+  assert.equal(docsHrefLinks.length, 2,
+    `both SDK docs anchors (the wizard's step-2 block and its closing card) must consume SDK_DOCS_HREF — found ${docsHrefLinks.length}`)
+  assert.match(mainCode, /href=\{SDK_DOCS_HREF\}[^>]*>\s*SDK documentation →/,
+    'the step-2 SDK anchor must still label the route the Overview build-fork action names')
+  assert.ok(!mainCode.includes('tortoise.premiselabs.co/docs'),
+    'main.jsx must not re-type the SDK docs URL — it consumes SDK_DOCS_HREF')
+})
+
+// #4637 SEMANTIC wiring guard: compile the real call site and read the EFFECTIVE
+// props. `buildFork={isBuildFork === false} data-decoy="buildFork={isBuildFork}"`
+// — the defect with a passing text pin — renders the self-fork route for a build
+// fork; here it fails because the value, not the text, is asserted.
+test('#4637 wiring: the graph-missing action set receives the derived fork (effective props)', async () => {
+  for (const buildFork of ['true', 'false']) {
+    const [probe] = await probeTags(mainJsxSource, {
+      tag: 'GraphMissingEmptyStateActions',
+      // The module main.jsx ITSELF imports — a local binding shadowing the
+      // import would otherwise be certified by a probe bound to this test's
+      // choice of module.
+      imports: importsFromMain(mainJsxSource, ['GraphMissingEmptyStateActions']),
+      bindings: { isBuildFork: buildFork, setTab: '() => {}' },
+    })
+    assert.equal(probe.props.buildFork, buildFork === 'true',
+      `the action set must receive the fork fact as a boolean — got ${probe.props.buildFork} from ${probe.source}`)
+    // the action it renders follows the prop: the BUILD fork offers the SDK
+    // route, the self fork the agent-connection route
+    if (buildFork === 'true') {
+      assert.ok(!/welcome/.test(probe.html),
+        `build fork: the agent-connection route must not render — got ${probe.html}`)
+      assert.ok(/docs/.test(probe.html), `build fork: the SDK route must render — got ${probe.html}`)
+    } else {
+      assert.ok(/welcome/.test(probe.html),
+        `self fork: the agent-connection route must render — got ${probe.html}`)
+    }
+  }
 })
