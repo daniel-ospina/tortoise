@@ -5,6 +5,13 @@ Research path: docs/research/2026-09-24-source-versioning/research-brief.md (§2
 Scoping source: issue #5038 + its 4 comments (owner Policy B, precedence block, wording correction).
 Status: SCOPING PLAN — the CREATE-path anchor is self-contained and shippable (child issue filed);
 the SUPERSEDE/transfer semantics is deferred to owner decision O1. See §9.
+SHIPPED (2026-09-25): **Task 1** is delivered as **#5256 → PR #5288** (stacked on #5207). One
+correction the implementation forced, recorded here so §3/§4 are not read literally: the journaled
+carrier must be keyed by the **RAW `extractedFrom` ref**, NOT by `resolve_source_key`'s live-time
+resolution — keying it by a resolution LOST the anchor across `rebuild_all` for a URL-variant ref (the
+two lanes can resolve the same ref to different node urls when an unjournalled stub precedes the
+`:Source` record) and `check_consistency` could not see it. The change's own plan doc
+(`docs/plans/2026-09-25-5256-extractedfrom-source-version.md` §10) is the authority for it.
 Complexity: complex (Tier: Complex). See §7.
 -->
 
