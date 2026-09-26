@@ -708,6 +708,13 @@ surfaces:
   # selecting `['eval']` with this guard never run (#1349 class) — same
   # rationale as `test_turn_embedding_write_path_4194.py` above.
   - test_journal_embedding_5004.py
+  # #4208: live `update_point(content=…)` must re-encode the DERIVED vector (or
+  # WIPE it when the embedder is unavailable) in the same write, so the node's
+  # vector can never describe text no longer on it. Pins `tortoise/sdk.py` (a
+  # SHARED_MODULE), the `tortoise/consistency.py` journal-fold reference the
+  # fix needs to stay green, and the `encode_for_store` seam.
+  # DUAL-REGISTERED with `eval`, which owns `tortoise/embeddings.py`.
+  - test_update_point_content_embedding_4208.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
@@ -1455,6 +1462,7 @@ surfaces:
   # `tortoise/embeddings.py` (stamp_journal_embedding / embedding_identity /
   # the normalization & width guards), which this surface owns.
   - test_journal_embedding_5004.py
+  - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
   - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
@@ -2484,4 +2492,5 @@ durations:
   test_source_inheritance_own.py: 45.7  # unmeasured
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
+  test_update_point_content_embedding_4208.py: 6.0  # #4208: 7 tests, docker FalkorDB; locally measured
   test_helpers.py: 0.0  # unmeasured
