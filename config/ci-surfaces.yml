@@ -186,6 +186,11 @@ surfaces:
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
+  # #4491: egress (response bytes) per org — the network cost dimension. On
+  # `api` because the file it guards most (tortoise/hosted_api.py, where the
+  # counting middleware is installed) selects `api`; the metric it asserts lives
+  # in tortoise/monitoring.py.
+  - test_egress_bytes.py
   - test_email_integration_resend.py
   - test_email_notify.py
   - test_email_signup.py
@@ -957,6 +962,12 @@ surfaces:
   # on — a sdk.py-only PR must run it (dual-registered with battery).
   - test_battery_parity_vector_guard.py
   - test_monitoring.py
+  # #4491: dual-registered with `api` (see that surface's entry). It pins
+  # tortoise/monitoring.py — which resolves to `core`, NOT `api` — so a
+  # monitoring.py-only change (broken cap, lost clamp, reset bug) would
+  # otherwise never run this file. Verified with tools/ci_selection.py:
+  # select(["tortoise/monitoring.py"]) -> ["core"] (round-1 review, bug).
+  - test_egress_bytes.py
   - test_navigation.py
   # #5080: the D12/O4 never-across boundary. Both write-path fold sites — the
   # against-store classifier and the in-capture band — resolve it from one
