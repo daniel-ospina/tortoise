@@ -511,7 +511,17 @@ SOURCE_PATTERNS = {
             # selected NO surface and the gate never ran on the PR that can break it.
             # A docs-only hand-edit of the generated doc still skips the matrix by the
             # repo's deliberate docs-PR policy (tortoise #4454).
-            "tools/sdk_surface.py"),
+            "tools/sdk_surface.py",
+            # #5373: `tools/registry_integrity.py` is the fail-closed validator
+            # paired with `merge=union` on the two config registries, and
+            # `test_registry_integrity.py` (dual-registered in `api` AND `core`)
+            # is its proof. Same gap as the generators above: `tools/` is in
+            # NON_PYTHON_PREFIXES, so a validator-only edit selected NO surface
+            # (`surfaces: []`, `full: false`) and the fail-closed proof never ran
+            # on precisely the edit that can neuter it — the #1349/#3332/#3616
+            # silent-drop class. The registry it guards is config/, not api-owned,
+            # which is why the test is ALSO registered in `core`.
+            "tools/registry_integrity.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).

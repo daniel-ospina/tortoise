@@ -149,6 +149,11 @@ surfaces:
   # `docs/product/sdk-surface-declaration.md`, and `tools/` + `docs/` are non-python
   # prefixes, so a generator-only edit would otherwise select NO surface.
   - test_sdk_surface.py
+  # #5373: the `merge=union` registry validator's fail-closed proof. Dual-registered
+  # with `core` for the same reason as test_bridge_table.py above — `tools/registry_integrity.py`
+  # is named in SOURCE_PATTERNS["api"], so a VALIDATOR-only edit selects `api` and runs
+  # this proof; `core` is the docs/default surface for the registries it guards.
+  - test_registry_integrity.py
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py

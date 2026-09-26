@@ -156,7 +156,7 @@ the replacement that warning names. The other **82** are live.
 Listed so a reader can tell them apart from the live rows that share their destination: `tortoise_get`, `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_operator`, `tortoise_get_point`, `tortoise_health`, `tortoise_index_sessions`, `tortoise_ingest_corpus`, `tortoise_list_pointkinds`, `tortoise_list_sources`, `tortoise_list_tags`, `tortoise_paginated_query`, `tortoise_query_points_by_tag`, `tortoise_stale`, `tortoise_status`, `tortoise_taxonomy`
 
 **A `⚠️` after a destination means the sibling SDK rename table**
-**(`docs/product/sdk-rename-table.md` §C3b, and its C6 fold record) records that**
+**(`docs/product/sdk-rename-table.md` (generated on demand) §C3b, and its C6 fold record) records that**
 **destination as WRONG.** The map is owner-approved, so it is NOT edited here; §D2c states
 the documented reading and the authority for it.
 
@@ -346,7 +346,7 @@ lose the row's whole support, silently — so the generator computes the first-c
 
 #### D2c — destinations the sibling SDK rename table records as WRONG
 
-`docs/product/sdk-rename-table.md` reconciles the same surface this file maps, and its
+`docs/product/sdk-rename-table.md` (generated on demand) reconciles the same surface this file maps, and its
 §C3b finding plus its C6 fold record name a different destination for the rows below.
 **The destination map here is owner-approved, so it is reported, not edited** — the same
 rule D2 states. Each row's documented reading and the authority for it are shown, so the
