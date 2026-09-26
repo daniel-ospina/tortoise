@@ -113,6 +113,48 @@ function shippedScripts() {
   return out
 }
 
+// #3787: every HTML document the build emits, each with its INLINE <script>
+// bodies. Deliberately LOCAL to this file: `shippedScripts()`'s inline handling
+// is index.html-only by contract, and widening it would silently redefine the
+// scan set the #3428/#2937 and #3913 probes below are claims about. Recursive,
+// so a nested page (or one added to `public/`) cannot escape the
+// fragment-consumer scan that uses this.
+function shippedHtmlPages() {
+  const out = []
+  const walk = (dir, rel) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${ent.name}` : ent.name
+      if (ent.isDirectory()) walk(join(dir, ent.name), r)
+      else if (ent.name.endsWith('.html')) {
+        const html = readFileSync(join(dir, ent.name), 'utf8')
+        const inlineBodies = []
+        for (const m of html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+          inlineBodies.push({ name: `${r}#inline-${inlineBodies.length + 1}`, js: m[1] })
+        }
+        out.push({ name: r, html, inlineBodies })
+      }
+    }
+  }
+  walk(dist, '')
+  return out
+}
+
+// #3787: the ANCHORED vendored-library pattern. The anchor is load-bearing — a
+// bare suffix match would also exempt an app-owned `assets/*supabase*.min.js`,
+// which is a false-negative path for the guard below.
+const LIBRARY_BUILD = /^vendor\/supabase[\w.-]*\.min\.js$/
+// A supabase-js build specifier OR URL. Deliberately NOT a bare `supabase`
+// word probe: `dist/signup.html`'s funnel inline body names supabase.com/docs/…
+// and the retired supabase-session.js in comments, and a word probe would red a
+// clean build. Note this is why it cannot match `supabase-session.js` — the
+// pattern requires `.min.js`.
+const SUPABASE_SPECIFIER = /@supabase\/supabase-js|supabase[\w.-]*\.min\.js/
+// The #3503 P1 surface: the auth flag itself, either client constructor. The
+// flag is a probe because supabase-js DEFAULTS it to true — so its presence at
+// all means fragment ingestion unless the bundle is explicitly configured out
+// of it, and its absence-on-a-client is the defect, not a safe default.
+const FRAGMENT_CONSUMER = /detectSessionInUrl|createClient\s*\(|\bnew\s+[\w$.]*SupabaseClient\s*\(/
+
 test('#2865: the built dist ships the key-less OAuth Claude connector recipe', () => {
   const { js, entryName } = shippedBundle()
   // The canonical CONNECTOR url: no trailing slash, equal to the server's
@@ -312,4 +354,110 @@ test('#3428/#2937 (cycle 8 item 2): no shipped script writes completed_steps cli
     `${hits.map((s) => s.name).join(', ') || 'a shipped script'} writes completed_steps with a ` +
     'harness-connected value — the wizard could manufacture the connection claim with no request ' +
     'at all (#3428/#2937). Rebuild dist/ and remove the client-side write if this fires')
+})
+
+test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ingest a credential fragment', () => {
+  // The artifact is what runs, and until this guard there was NO artifact-level
+  // pin for the #3503 invariant: tests/test_session_bridge_fragment_retention.py
+  // ::test_one_fragment_consumer_per_page reads `src/` only, and the #2865
+  // probes above assert shipped *strings*, not the fragment-consumer property.
+  // #3775 then untracked `dist/`, so the *committed* bundle #3787 was filed
+  // about no longer exists (there is nothing to rebuild or byte-compare) — the
+  // residual risk is that a future rebuild re-arms a consumer with no test to
+  // notice. This is that test.
+  //
+  // The defect it pins (#3503 P1): a supabase-js client built with
+  // `detectSessionInUrl: true` calls `_getSessionFromURL()`, which assigns
+  // `window.location.hash = ''` BEFORE awaiting `_saveSession()` — destroying
+  // the fragment a second time and defeating the bridge's retention. supabase-js
+  // DEFAULTS that flag to true, so a re-introduced client with no auth override
+  // is the defect, not a safe default.
+  //
+  // Closed argument over the dist's fragment-consumer surface, in three
+  // clauses: (1) no NON-library executable context constructs such a client;
+  // (2) no non-library context references a supabase-js build and no page loads
+  // one — so the library whose own defaults are ON is unreachable; (3) the
+  // scan's coverage is pinned, so a page or chunk cannot escape it.
+  //
+  // Class-B (the lane's doctrine): each message names the value that makes it
+  // fail, and each context is REACHABLE — these are the scripts and pages the
+  // built site executes, and the vendored UMD defines `window.supabase`, whose
+  // `createClient` with no auth override performs exactly the #3503
+  // double-destroy. The two-outcome record (M1/M2/M3) is in the PR.
+  const scripts = shippedScripts()
+  const pages = shippedHtmlPages()
+  const inline = pages.flatMap((p) => p.inlineBodies)
+
+  // (3) COVERAGE FIRST. A scan that inspected nothing passes vacuously, and a
+  // shipped file that escapes the scan is a silent hole. Mirror the existing
+  // coverage test: every on-disk script AND page must be represented, and at
+  // least one app-owned script and one inline body must actually be scanned.
+  // (index.html has ZERO inline bodies, so the inline claim is a union across
+  // every page — not an index.html count; asserting an index count here would
+  // have red on a clean build.)
+  const onDisk = { js: new Set(), html: new Set() }
+  const walk = (dir, rel) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${ent.name}` : ent.name
+      if (ent.isDirectory()) walk(join(dir, ent.name), r)
+      else if (ent.name.endsWith('.js')) onDisk.js.add(r)
+      else if (ent.name.endsWith('.html')) onDisk.html.add(r)
+    }
+  }
+  walk(dist, '')
+  const scannedScripts = new Set(scripts.map((s) => s.name))
+  const scannedPages = new Set(pages.map((p) => p.name))
+  for (const name of onDisk.js) {
+    assert.ok(scannedScripts.has(name),
+      `dist/${name} ships but is not in the scan set — every shipped script must be scanned`)
+  }
+  for (const name of onDisk.html) {
+    assert.ok(scannedPages.has(name),
+      `dist/${name} ships but is not in the fragment-consumer scan — every shipped page must be scanned (#3787)`)
+  }
+  const own = scripts.filter((s) => !LIBRARY_BUILD.test(s.name))
+  assert.ok(own.length >= 1, 'the scan must include at least one app-owned script')
+  assert.ok(inline.length >= 1, 'the scan must include at least one inline <script> body')
+
+  // (1) No fragment-ingesting client construction in a non-library context.
+  for (const s of own) {
+    assert.doesNotMatch(s.js, FRAGMENT_CONSUMER,
+      `dist/${s.name} builds a supabase-js client (or sets detectSessionInUrl) again. ` +
+      'supabase-js DEFAULTS detectSessionInUrl to true, so a client here ingests ' +
+      '#access_token, clears window.location.hash before _saveSession(), and destroys ' +
+      'the fragment a second time (#3503 P1). The dashboard is BFF-migrated (#4054) — ' +
+      'keep supabase-js out of the app bundle')
+  }
+  for (const b of inline) {
+    assert.doesNotMatch(b.js, FRAGMENT_CONSUMER,
+      `dist/${b.name} builds a supabase-js client (or sets detectSessionInUrl) in an ` +
+      'inline script — the #3503 P1 double-destroy applies to every page the dist ' +
+      'serves, not only index.html')
+  }
+
+  // (2) Reachability of the library whose own defaults turn ingestion ON.
+  const loaded = []
+  for (const p of pages) {
+    // Permissive on purpose: an unquoted or single-quoted `src` must not be a
+    // way to attach the library past this clause (`shippedScripts()`'s own ref
+    // extraction is double-quote-only because its whole-dist walk covers the
+    // file anyway — this clause is the reachability claim, so it is stricter).
+    for (const m of p.html.matchAll(/<script[^>]*\ssrc\s*=\s*["']?([^"'\s>]+)/g)) {
+      if (/supabase/i.test(m[1])) loaded.push(`${p.name} → ${m[1]}`)
+    }
+  }
+  assert.deepEqual(loaded, [],
+    `${loaded.join(', ')} loads a supabase-js build — the vendored UMD's own defaults ` +
+    '({…, detectSessionInUrl:!0}) turn fragment ingestion ON, so loading it re-arms the ' +
+    '#3503 double-destroy on that page (#3787/#4054)')
+  for (const s of own) {
+    assert.doesNotMatch(s.js, SUPABASE_SPECIFIER,
+      `dist/${s.name} references a supabase-js build — a dynamic loader ` +
+      "(createElement('script')/document.write) would re-arm fragment ingestion even " +
+      'though no <script src> names it (#3787/#4054)')
+  }
+  for (const b of inline) {
+    assert.doesNotMatch(b.js, SUPABASE_SPECIFIER,
+      `dist/${b.name} references a supabase-js build from an inline script (#3787/#4054)`)
+  }
 })
