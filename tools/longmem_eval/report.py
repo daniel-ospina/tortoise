@@ -1938,11 +1938,12 @@ def build_report(
     # |                          | stage cap (TORTOISE_EXTRACTOR_MAX_TOKENS) |
     # | fatal_401_auth /         | operator key replacement / provider      |
     # | fatal_403_forbidden      | config — pre-flight (M2) should have     |
-    # |                          | caught (automatic rotation is billing-   |
-    # |                          | only, #1951; a 403 whose BODY matches a  |
-    # |                          | key-limit signature is the BILLING       |
-    # |                          | condition and lands in fatal_402_billing |
-    # |                          | instead, #4959)                          |
+    # |                          | caught (among the FATAL classes only the |
+    # |                          | billing one is rotation-eligible; these  |
+    # |                          | re-raise, #1951. A 403 whose BODY matches |
+    # |                          | a key-limit signature is the BILLING      |
+    # |                          | condition and lands in fatal_402_billing  |
+    # |                          | instead, #4959)                           |
     # ───────────────────────────────────────────────────────────────────────
 
     # ── M7 (D2): leg-mix — match_source aggregation, never re-derived ──

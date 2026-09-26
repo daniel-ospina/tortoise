@@ -509,8 +509,12 @@ def is_billing_exhausted(exc: BaseException) -> bool:
     The extractor's census classifier (``extractor_v2._classify_error``,
     #4959) consults the SAME seam to map a key-limit 403 to the census's
     billing class, so the extraction-killer gate fires on a key-limited
-    run — one seam, so the rotation decision and the census class can never
-    disagree.
+    run — one seam, so the two agree on every requests-shaped error this
+    lane produces. They agree ONLY there: the census classifier reads the
+    status from ``e.response.status_code``, so a
+    ``urllib.error.HTTPError`` (status on ``.code``, no ``.response``) is
+    the one divergence, tracked as #5525 (and the extractor's ``ImportError``
+    fallback is a second, defensive one — see ``_is_key_limit_error``).
 
     With no alternative lane ``RotatingModel`` raises loud (its n==1
     guard). Deliberately NOT part of the M2/M3 taxonomy export contract —
