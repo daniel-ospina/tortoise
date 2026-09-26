@@ -489,8 +489,12 @@ def is_billing_exhausted(exc: BaseException) -> bool:
     TWO consumers consult this hook: the rotation pool, and the extractor's
     census classifier (``extractor_v2._classify_error``, #4959), which maps
     a key-limit 403 to the census's billing class so the extraction-killer
-    gate fires on a key-limited run — one seam, so the rotation decision and
-    the census class can never disagree."""
+    gate fires on a key-limited run — one seam, so the two agree on every
+    requests-shaped error this lane produces. They agree ONLY there: the
+    census classifier reads the status from ``e.response.status_code``, so a
+    ``urllib.error.HTTPError`` (status on ``.code``, no ``.response``) is the
+    one divergence, tracked as #5525 (and the extractor's ``ImportError``
+    fallback is a second, defensive one — see ``_is_key_limit_error``)."""
     status = _http_status(exc)
     if status == 402:
         return True
