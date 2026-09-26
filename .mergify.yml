@@ -77,8 +77,9 @@ queue_rules:
 #      (same as `@mergifyio queue`)."
 #
 #   …and waited. Roughly one change sat in the queue at a time; whoever clicked,
-#   merged. #3016 ("passing changes that cannot be merged") was that, and it was
-#   a DEFAULT, not a policy: nobody chose it, and nothing recorded choosing it.
+#   merged. #3016 ("strict up-to-date + ~48min Python CI makes green PRs
+#   structurally unmergeable") is that, and it was a DEFAULT, not a policy:
+#   nobody chose it, and nothing recorded choosing it.
 #   Measured 2026-09-25: every sampled PR carried the tick-box comment while all
 #   six required checks passed, `strict` was false, and no review was required.
 #
@@ -97,15 +98,28 @@ queue_rules:
 # THE SAFETY PROPERTY, STATED BECAUSE "NO CLICK" SOUNDS LIKE "NO VALIDATION"
 #   It is not. The queue runs CI on the branch it will actually merge and
 #   re-asserts `merge_conditions` there, and branch protection applies to that
-#   branch's head. What is removed is a click that happened AFTER every gate had
-#   already passed — the click was the dominant constraint on merge throughput
-#   (#5215) and it validated nothing.
+#   branch's head. What is removed is a click that, on every sampled PR,
+#   appeared only after all six required checks were green — it was the dominant
+#   constraint on merge throughput (#5215) and it validated nothing. Note the
+#   control comment is offered as soon as a matching PR exists, so "after the
+#   gates" is what was measured, not a guarantee of the mechanism.
 #
-#   Every human gate we rely on sits UPSTREAM of this: plan and UX approval,
-#   design and Class-A judgements (e.g. #1026), and the head-bound review
-#   attestation. DORA/Accelerate agrees — trunk-based, small batches, merge
-#   early; reserve human approval for high blast radius, not every low-risk
-#   change.
+#   The human gates sit UPSTREAM of this: plan and UX approval, and design and
+#   Class-A judgements (e.g. #1026). DORA/Accelerate agrees — trunk-based, small
+#   batches, merge early; reserve human approval for high blast radius, not
+#   every low-risk change.
+#
+#   ⛔ DO NOT claim the head-bound review attestation is one of those gates.
+#   It is RECORDED but NOT ENFORCED. `scripts/record-review.sh` writes the
+#   marker; `ai-review-gate` is not among the required contexts (live:
+#   pricing-artifact, docs, test-isolation, license-surface, legal-e2e,
+#   python-ci-gate) and the rulesets API returns none. So nothing in the merge
+#   path reads it, and a PR with zero review markers merges. Auto-merge did not
+#   create that gap — it already existed — but it does remove the last human
+#   action standing near it. Tracked in #5426. If that attestation should be a
+#   real gate, make it required AND name it in `queue_conditions` per the
+#   contract at the top of this file, knowing it costs the review rail on every
+#   PR.
 merge_protections_settings:
   auto_merge_conditions: true
 
