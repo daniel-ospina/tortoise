@@ -1889,6 +1889,182 @@ def store_github_credentials(cp, org_id: str, *, token_enc: str, org: str) -> No
     )
 
 
+# ── Connector CRUD (#2636, epic #2632) ─────────────────────────────────
+# Follows the github_credentials pattern: service-role seam reads/writes
+# credential_enc; anon/authenticated cannot access the encrypted credential.
+#
+# ⛔ TENANCY IS THE WHERE CLAUSE. Every call below runs on the service-role
+# key, which BYPASSES RLS — so the filter this seam builds is the ONLY boundary
+# between org A and org B. A helper that filtered on ``id`` alone let any
+# authenticated session in ANY org read (receiving the ciphertext), mutate, or
+# DELETE another org's connector (#2642 re-review P1, cross-tenant IDOR). Every
+# per-connector helper therefore takes BOTH ``org_id`` and ``connector_id``
+# and filters on both.
+#
+# ``_CONNECTOR_PUBLIC_SELECT`` is the column allow-list returned to API clients
+# — everything EXCEPT ``credential_enc``. A ``select``-less PostgREST read
+# returns ``*``, i.e. hands the encrypted credential back and defeats the
+# column-level grants in migration 20260922000001.
+_CONNECTOR_PUBLIC_SELECT = [
+    "id", "org_id", "source_type", "config", "sync_status",
+    "sync_cursor", "last_sync_at", "last_error",
+    "created_at", "updated_at",
+]
+# The background sync sweep is the ONE intentional reader of credential_enc —
+# it decrypts the credential to authenticate against the upstream API. It is
+# not reachable from an HTTP handler and spans every org by design.
+_CONNECTOR_SYNC_SELECT = [*_CONNECTOR_PUBLIC_SELECT, "credential_enc"]
+
+
+def connector_create(cp, *, org_id: str, source_type: str,
+                     config: dict | None = None,
+                     credential_enc: str | None = None) -> dict | None:
+    """Create a connector row. Returns the row dict or None on failure.
+
+    The POST echo is column-projected too: ``return=representation`` would
+    otherwise hand back ``credential_enc`` (NULL at create — the OAuth seam
+    sets it later) and re-expose the column this module keeps out of API
+    responses."""
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        method="POST",
+        json_body={
+            "org_id": org_id,
+            "source_type": source_type,
+            "config": config or {},
+            "credential_enc": credential_enc,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def connector_by_org(cp, org_id: str) -> list[dict]:
+    """List all connectors for an org (credential_enc is NULL — only the
+    service-role seam reads it)."""
+    return cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        filters=[("org_id", "eq", org_id)],
+        order="created_at",
+    )
+
+
+def connector_by_id(cp, org_id: str, connector_id: str) -> dict | None:
+    """Read a single connector, scoped to its owning org.
+
+    Filters on ``org_id`` AND ``id``: the service-role key bypasses RLS, so
+    the WHERE clause is the tenancy boundary — an id-only read returned any
+    org's row, ``credential_enc`` included. Returns None for a connector that
+    does not exist in THIS org, so the API answers 404 instead of leaking the
+    existence of another org's id."""
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+    )
+    return rows[0] if rows else None
+
+
+def connector_update(cp, org_id: str, connector_id: str, *,
+                     config: dict | None = None,
+                     credential_enc: str | None = None,
+                     sync_status: str | None = None,
+                     sync_cursor: dict | None = None,
+                     last_sync_at: str | None = None,
+                     last_error: str | None = None) -> bool:
+    """Update connector fields, scoped to its owning org.
+
+    Returns True when a row in THIS org was updated and False when none
+    matched (foreign or absent id) — the API maps False to 404. Asking for
+    ``select=["id"]`` makes PostgREST answer ``return=representation``, which
+    is what makes the affected-row count observable; the real client and the
+    test fake both honour it.
+
+    An EMPTY body is not an error and cannot be distinguished from a miss by
+    the representation: PostgREST makes ZERO updates for an empty JSON object
+    and answers ``[]`` under ``return=representation`` regardless of whether
+    the filter matched (``spec/Feature/Query/UpdateSpec.hs``, "when patching
+    with an empty body" — ``PATCH /items?select=id`` + ``{}`` → ``[]``).
+    Inferring existence from that representation 404s the caller's own
+    connector, so existence is read FIRST here, exactly as
+    ``connector_delete`` does; the same org+id filter keeps the 404 for a
+    foreign id."""
+    body: dict = {}
+    if config is not None:
+        body["config"] = config
+    if credential_enc is not None:
+        body["credential_enc"] = credential_enc
+    if sync_status is not None:
+        body["sync_status"] = sync_status
+    if sync_cursor is not None:
+        body["sync_cursor"] = sync_cursor
+    if last_sync_at is not None:
+        body["last_sync_at"] = last_sync_at
+    if last_error is not None:
+        body["last_error"] = last_error
+    if not body:
+        return bool(cp.query(
+            "connectors",
+            select=["id"],
+            filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+        ))
+    rows = cp.query(
+        "connectors",
+        select=["id"],
+        method="PATCH",
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+        json_body=body,
+    )
+    return bool(rows)
+
+
+def connector_delete(cp, org_id: str, connector_id: str) -> bool:
+    """Delete a connector row, scoped to its owning org.
+
+    Returns True when a row in THIS org was deleted and False when none
+    exists (foreign or absent id) — the API maps False to 404. Existence is
+    read FIRST because the control-plane DELETE lane answers
+    ``Prefer: return=minimal`` (no representation), so the affected-row count
+    is otherwise unobservable; the same org+id filter is applied to the
+    DELETE itself, so no cross-org row can be reached even if one appeared
+    between the two calls."""
+    if not cp.query(
+        "connectors",
+        select=["id"],
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+    ):
+        return False
+    cp.query(
+        "connectors",
+        method="DELETE",
+        filters=[("org_id", "eq", org_id), ("id", "eq", connector_id)],
+    )
+    return True
+
+
+def connector_list_by_sync_eligible(cp) -> list[dict]:
+    """List connectors with sync_status 'idle' or 'error' (for the background
+    sync engine). Returns credential_enc for credential usage.
+
+    Deliberately NOT org-scoped: this is the system-side sweep across every
+    org (the engine holds the service-role key and iterates all tenants), not
+    a caller-scoped read. The ``in`` filter op the query dialect does not
+    implement is expressed as two ``eq`` reads instead of a nonexistent
+    operator."""
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_SYNC_SELECT,
+        filters=[("sync_status", "eq", "idle")],
+    )
+    rows += cp.query(
+        "connectors",
+        select=_CONNECTOR_SYNC_SELECT,
+        filters=[("sync_status", "eq", "error")],
+    )
+    return rows
+
+
 # ── Org deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
 #
 # Two-phase deletion: soft delete (immediate access kill + grace stamp) then

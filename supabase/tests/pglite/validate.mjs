@@ -350,6 +350,7 @@ const suites = [
   '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
   '20260906000001_graphs_deleted_at.sql',  // #2304
   '20260919000001_metering_period_end_repair.sql',  // #4216
+  '20260922000001_connectors.sql',  // #2636 connectors data model
   '20260925000001_oauth_referential_integrity.sql',  // #3036
   '20260925000002_oauth_redemption_state.sql',  // #3027
 ];

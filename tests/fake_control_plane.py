@@ -8,7 +8,8 @@ verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 
 Filter ops: eq | neq | is (None → IS NULL) | gt | gte | lt | lte (all ordered
 ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
-rows; POST appends a row (return=representation semantics); DELETE
+rows (an EMPTY body makes no updates and returns `[]`, matching PostgREST);
+POST appends a row (return=representation semantics); DELETE
 removes matching rows (mirrors PostgREST service-role deletes, #302).
 
 ``rpc(fn, body)`` simulates PostgREST RPC calls — ``provision_team``
@@ -813,6 +814,23 @@ class FakeControlPlane:
             # #4355 rotate claim). `_patch_lock` makes the check-then-write
             # atomic the way the real single UPDATE statement is (see
             # __init__) — required for the #4355 two-thread CAS test.
+            #
+            # An EMPTY JSON object updates NOTHING, so the representation is
+            # empty even when the filter matched: PostgREST "makes no
+            # updates" for a bodyless PATCH (UpdateSpec.hs, "when patching
+            # with an empty body" — `PATCH /items?select=id` + `{}` → `[]`).
+            # Returning the matched row here was the fake divergence that hid
+            # the #2642 re-review P2 empty-body 404.
+            #
+            # Validate every filter op BEFORE the empty-body return: that
+            # return scans no rows, so it would otherwise carry the query
+            # straight past _matches' unsupported-op guard (a filter the fake
+            # cannot model must raise for a bodyless PATCH too — #2642
+            # re-review P2). Validating the whole list here also makes the
+            # guard hold when an earlier filter would short-circuit the scan.
+            _validate_filter_ops(filters)
+            if not json_body:
+                return []
             updated: list[dict] = []
             with self._patch_lock:
                 for r in self.tables.get(table, []):
@@ -843,9 +861,23 @@ class FakeControlPlane:
                 self._trigger_key_create(row.get("org_id", ""),
                                          row.get("id", ""),
                                          row.get("created_via"))
+            # PostgREST honours ?select= on an INSERT with
+            # `Prefer: return=representation` too — the projection is what
+            # keeps a write path from echoing a column the read path withholds
+            # (e.g. connectors.credential_enc, #2642 re-review P1).
+            if select is not None:
+                return [{k: row.get(k) for k in select}]
             return [row]
         if method == "DELETE":
             # PostgREST row-delete semantics (used by the #302 purge).
+            #
+            # Validate every filter op BEFORE the scan: _matches only reaches
+            # its unsupported-op guard while it still has a row to test, so an
+            # EMPTY table, or an earlier filter that fails first, would skip it
+            # — an op the fake cannot model must raise for DELETE too (#2642
+            # re-review P2). Scoped to THIS branch on purpose: POST never reads
+            # ``filters`` (see _validate_filter_ops).
+            _validate_filter_ops(filters)
             self.tables[table] = [
                 r for r in self.tables.get(table, []) if not _matches(r, filters or [])
             ]
@@ -908,6 +940,35 @@ class FakeControlPlane:
         raise ValueError(f"unsupported method {method!r}")
 
 
+# Filter ops the fake implements. One module-level set so the PATCH
+# empty-body path can validate WITHOUT scanning rows (see
+# _validate_filter_ops) — the guard must not depend on a row existing.
+_SUPPORTED_FILTER_OPS = frozenset({"eq", "neq", "is", "gt", "gte", "lt", "lte"})
+
+
+def _validate_filter_ops(filters: list[tuple[str, str, object]] | None) -> None:
+    """Raise ValueError for a filter op the fake does not implement.
+
+    The fake's unsupported-op guard covers every method that APPLIES filters —
+    GET (in its own inline loop in ``_query_impl``), PATCH and DELETE (via this function) —
+    regardless of body, row count, or whether an earlier filter short-circuits
+    the scan.
+
+    POST is deliberately excluded: it does not read ``filters`` (it inserts the
+    body), so validating a POST filter list would newly reject a query whose
+    filters the fake — like the real client — never applies.
+
+    ``_matches`` raises the same error, but only while scanning rows and only
+    for the filters it actually reaches, so a bodyless PATCH (which scans no
+    rows), an empty table, or a filter list whose earlier predicate fails first
+    would otherwise skip it — and a test could then pass against a query
+    production would answer differently (#3665 / #2642 re-review P2).
+    """
+    for _col, op, _value in filters or []:
+        if op not in _SUPPORTED_FILTER_OPS:
+            raise ValueError(f"unsupported filter op {op!r}")
+
+
 def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
         if op == "eq" and row.get(col) != value:
@@ -926,13 +987,16 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
         if op == "lte" and (row.get(col) is None or row.get(col) > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
-        if op not in ("eq", "neq", "is", "gt", "gte", "lt", "lte"):
+        if op not in _SUPPORTED_FILTER_OPS:
             # #3665 review: an op this helper does not implement must RAISE,
             # not silently no-op. Silently ignoring an op makes PATCH/DELETE
             # match on the remaining filters — i.e. the fake mutates MORE rows
             # than the real client would, and a test can pass against
             # behaviour production does not have. The GET path above already
-            # raises for an unsupported op; this mirrors it.
+            # raises for an unsupported op; this mirrors it. PATCH and DELETE
+            # additionally pre-validate via ``_validate_filter_ops`` (so the
+            # guard holds even when there is no row to scan) — this raise is
+            # their row-scan backstop, not their only line of defence.
             raise ValueError(f"unsupported filter op {op!r}")
     return True
 
