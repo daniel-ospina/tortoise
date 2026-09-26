@@ -1090,6 +1090,29 @@ class TestDistinguishingDifference:
             assert not v2.fold_allowed(prior, candidate)
             assert not v2.supersede_allowed(prior, candidate)
 
+    def test_a_contraction_does_not_spell_a_phrase_word(self):
+        """The phrase's inner gap is the one a dropped MARK leaves (#5139).
+
+        A non-word interior would let a real token stand inside a phrase word:
+        `we'll` would spell `well`, so `as we'll, as` would canonicalise to
+        `and` — DELETING the comparison operators the swap guard needs to see,
+        which folds a comparison into a coordination (the claim-loss fail-open
+        this boundary exists to close, reached mark-free).  The gap therefore
+        admits only the sentinel a dropped mark produces.  Pinned beside the
+        mark spellings, because the two must hold at once.
+        """
+        for contraction in ("we ship the server as we'll, as the plan unfolds",
+                            "we ship the server as we'll as it goes"):
+            assert v2._connective_slots(contraction)[0] == frozenset({"as"}), \
+                contraction
+            assert not v2.fold_allowed(
+                contraction, "we ship the server and the plan unfolds"), \
+                contraction
+        for spelled in ("as\u0338w\u00e9ll as", "as\u0338we\u0338ll as"):
+            phrase = f"we ship the server {spelled} the client"
+            assert v2._connective_slots(phrase)[0] == frozenset({"and"}), \
+                spelled
+
     def test_a_connective_swap_between_two_slots_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5325).
 

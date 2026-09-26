@@ -3198,20 +3198,24 @@ _CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
 _COORDINATION_PHRASES = (("as well as", "and"),)
 _PHRASE_EDGE_LEFT = r"(?<![^\W_])"
 _PHRASE_EDGE_RIGHT = r"(?![^\W_])"
-# A phrase WORD is matched mark- and separator-TOLERANT between its letters
-# (``[\W_]*``), while the SEPARATOR between the phrase's words is required
-# (``[\W_]+``).  Both halves are needed because the phrase pass reads the text
-# through TWO de-accentings and neither is complete alone: one deletes a mark
-# (so an accent inside a word leaves the word intact but a mark standing where
-# a separator sits fuses two words), the other keeps that mark as a space (so
-# the separator survives but a word carrying an accent is split).  Tolerating
-# non-word characters INSIDE a word is what makes the separator-preserving read
-# see ``w e l l`` as the word it is.  The ends stay anchored, so only the
-# phrase's own skeleton is loosened.
+_PHRASE_MARK_GAP = "\x00"
+# A phrase WORD is matched mark-TOLERANT between its letters, but only for the
+# gap a DROPPED MARK leaves (``\x00*``), while the SEPARATOR between the
+# phrase's words may be any non-word run (``[\W_]+``).  Both halves are needed
+# because the phrase pass reads the text through TWO de-accentings and neither
+# is complete alone: one deletes a mark (so an accent inside a word leaves the
+# word intact but a mark standing where a separator sits fuses two words), the
+# other keeps that mark as the gap it can stand for (so the separator survives
+# but a word carrying an accent is split).  The gap is a SENTINEL rather than
+# a non-word class for a reason: ``[\W_]*`` also admits a real token inside a
+# word, so the contraction ``we'll`` would spell ``well`` and ``as we'll, as``
+# would canonicalise to ``and`` — deleting the very comparison operators this
+# guard exists to keep.  A sentinel is only ever produced by a dropped mark.
+# The ends stay anchored, so only the phrase's own skeleton is loosened.
 _COORDINATION_PHRASE_RE = tuple(
     (re.compile(_PHRASE_EDGE_LEFT
                 + r"[\W_]+".join(
-                    r"[\W_]*".join(re.escape(c) for c in w)
+                    (_PHRASE_MARK_GAP + "*").join(re.escape(c) for c in w)
                     for w in phrase.split())
                 + _PHRASE_EDGE_RIGHT, re.IGNORECASE), operator)
     for phrase, operator in _COORDINATION_PHRASES
@@ -3691,10 +3695,12 @@ def _deaccent_with_map(t: str, drop: str = "") -> tuple[str, list[int]]:
 
     ``drop`` is what a dropped mark becomes.  Empty (the default) is
     ``_deaccent``'s own read — the mark vanishes, so ``as\u0338well`` reads as
-    one token ``aswell``.  A single space keeps the SEPARATOR a mark can stand
-    for, which the phrase pattern reads as a non-word run: the variant a phrase
-    whose separator IS a mark needs.  Both reads share one ``src`` map, so a
-    match found in either splices back at the same raw span.
+    one token ``aswell``.  ``_PHRASE_MARK_GAP`` keeps the SEPARATOR a mark can
+    stand for, which the phrase pattern reads as a non-word run: the variant a
+    phrase whose separator IS a mark needs.  A sentinel rather than a space,
+    so the phrase pattern can tell a mark-derived gap from a real space and
+    never let a real token stand inside a word.  Both reads share one ``src``
+    map, so a match found in either splices back at the same raw span.
     """
     chars: list[str] = []
     src: list[int] = []
@@ -3736,7 +3742,7 @@ def _canonicalise_coordinations(text: str) -> str:
         out = pattern.sub(f" {operator} ", out)
     for pattern, operator in _COORDINATION_PHRASE_RE:
         folded, src = _deaccent_with_map(out)
-        separated, sep_src = _deaccent_with_map(out, " ")
+        separated, sep_src = _deaccent_with_map(out, _PHRASE_MARK_GAP)
         spans: list[tuple[int, int]] = []
         for variant, index_map in ((folded, src), (separated, sep_src)):
             spans.extend((index_map[m.start()], index_map[m.end() - 1] + 1)
