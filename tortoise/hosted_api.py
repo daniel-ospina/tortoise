@@ -1997,7 +1997,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                 )
 
-            bucket.append(now)
+            bucket.append((now, key_id) if on_overflow else now)
             dest = _BUCKET_OVERFLOW_KEY if on_overflow else key_id
             self._buckets[dest] = bucket
             _bucket_touch(self._buckets, dest)
@@ -5395,15 +5395,24 @@ def _normalize_mapped_ipv6(ip):
 # without a signature change); capacity counts owned keys only, so the stated
 # bound is owned <= max_entries and len(store) <= max_entries + 1.
 #
-# Sticky overflow (fail-closed, #3124 review). The overflow bucket carries no
-# per-key attribution, so a key admitted to it must NOT be given an owned
-# bucket while its overflow charges are still in-window: `_bucket_route` keeps
-# a fresh key in the overflow until the overflow has fully drained. Without
-# this, an overflow-routed key graduated to a fresh owned bucket as soon as
-# ANY slot freed and got a SECOND full budget — up to 2x its limit inside one
-# window, a fail-open regression against the pre-#3124 per-key behaviour and
-# reachable for every client-keyed store. Pinned by
-# ``test_sticky_overflow_blocks_a_second_budget``.
+# Per-key overflow attribution (fail-closed, #3124 review). A shared-overflow
+# entry is stored as ``(timestamp, key)``, so routing can tell WHICH key has
+# in-window overflow charges. That one change closes two opposite defects:
+#   * A key that exhausted its budget in the overflow cannot graduate to a
+#     fresh owned bucket while its OWN overflow charges are in-window — it
+#     stays in the overflow until they expire. Without attribution it
+#     graduated as soon as ANY slot freed and got a second full budget (up to
+#     2x its limit in one window — a fail-open regression vs. the pre-#3124
+#     per-key behaviour). Pinned by
+#     ``test_sticky_overflow_blocks_a_second_budget``.
+#   * The stickiness is PER KEY, never store-wide: a key with no overflow
+#     charges takes a free owned slot whenever one exists. A store-wide rule
+#     refused EVERY fresh key for the rest of the window (up to 86 400 s) once
+#     the overflow held any charge — a new-user denial reachable with an empty
+#     owned store. Pinned by
+#     ``test_fresh_key_below_cap_admitted_while_overflow_is_warm``.
+# The overflow still holds at most ``limit`` entries (the ``len >= limit``
+# check is unchanged) and the per-entry scan is O(limit), not O(store).
 #
 # Accepted overflow-regime properties (deliberate, both BOUNDED — a lane must
 # not "fix" either without re-opening the capacity decision):
@@ -5416,33 +5425,43 @@ def _normalize_mapped_ipv6(ip):
 #     reachable only in the genuine store-overflow regime (max_entries active
 #     keys in one window), which is a flood signature. Pinned by
 #     ``test_mixed_limit_overflow_is_fail_closed``.
-#   * ``_forget_bucket_charge`` refunds one entry, so an overflow-routed
-#     successful accept keeps "successes consume no budget" true at the cost
-#     of the shared bucket admitting up to ``limit`` + (successful accepts)
-#     untracked charges. Accepts are themselves bounded by the per-token / IP
-#     / global dimensions, so the overflow stays bounded. This is the ONE
-#     bounded fail-OPEN relaxation in this block (the mixed-limit bullet above
-#     is fail-CLOSED): the shared bucket can admit up to ``limit`` +
-#     successful-accept untracked charges. The refund is attempted only when
-#     the check could have charged — `_forget_invite_accept` mirrors the
-#     check's own opt-out predicates — so it cannot pop a FOREIGN overflow
-#     entry for a request that was never charged (#3124 review).
+#   * ``_forget_bucket_charge`` pops the caller's OWN attributed overflow entry,
+#     so a successful accept refunds exactly its own charge and a forget for a
+#     key that was never charged is a no-op — it cannot refund a FOREIGN
+#     charge. "Successes consume no budget" still holds per store. The ceiling
+#     on the shared bucket is ``limit`` entries of overflow charges shared
+#     across overflow-routed keys; because a success refunds the per-token /
+#     IP / global dimensions, those caps bound FAILED attempts only, and the
+#     real ceiling on "limit + successes" is the outstanding-invite supply (a
+#     success consumes its invite).
 _BUCKET_OVERFLOW_KEY = "\x00overflow"
+
+
+def _bucket_entry_ts(entry) -> float:
+    """Timestamp of a bucket entry. Owned buckets and the DCR stores hold bare
+    floats; the shared overflow holds ``(ts, key)`` pairs so routing can
+    attribute each charge to its key (#3124). One accessor for both layouts
+    keeps `_bucket_prune_window` / `_bucket_reclaim` single-implementation."""
+    return entry[0] if isinstance(entry, tuple) else entry
 
 
 def _bucket_prune_window(bucket: list, now: float, window_s: int) -> list:
     """In-window entries of `bucket`. The one implementation of the
-    security-relevant window boundary (``now - t < window_s``) for the
-    hosted_api limiter family: #2866's ``_dcr_prune_window`` delegates here
-    (#3124). NOT the only copy in the repo — ``tortoise/cimd.py`` keeps its
-    own prune for a different (threading) module — so the claim is scoped to
-    this family.
+    security-relevant window boundary (``now - _bucket_entry_ts(entry) <
+    window_s``) for the hosted_api limiter family: #2866's
+    ``_dcr_prune_window`` delegates here (#3124). NOT the only copy in the
+    repo — ``tortoise/cimd.py`` keeps its own prune for a different
+    (threading) module — so the claim is scoped to this family.
+
+    `_bucket_entry_ts` reads the timestamp from either layout (a bare float, or the
+    shared overflow's ``(ts, key)`` pair), so this stays the ONE boundary
+    predicate for all of them.
 
     The D10 parity test (``test_t_window_helper_parity_with_primitive``) can
     no longer be an INDEPENDENT oracle now that both sides call this function
     (#3124 review), so it asserts against a literal expected table: a mutation
     of this boundary still fails it."""
-    return [t for t in bucket if now - t < window_s]
+    return [t for t in bucket if now - _bucket_entry_ts(t) < window_s]
 
 
 def _bucket_owned_count(store) -> int:
@@ -5480,7 +5499,7 @@ def _bucket_reclaim(store, now: float, window_s: int, cap: int,
         if head_key is None:
             return
         head = store[head_key]
-        if head and now - head[-1] < window_s:
+        if head and now - _bucket_entry_ts(head[-1]) < window_s:
             return  # active head ⇒ every later key is active too
         del store[head_key]
 
@@ -5496,23 +5515,22 @@ def _bucket_route(store, key, now: float, window_s: int, cap: int):
     store entry behind, #1719). A tracked key is pruned in place. A new key
     at a full owned store is routed to the single shared overflow bucket
     instead of growing the owned key space (#2866 reject-new/overflow), so
-    the owned count can never exceed `cap`. The overflow is STICKY while it
-    holds any in-window charge: a fresh key stays in it rather than graduating
-    to an owned bucket, so it can never be handed a second full budget."""
+    the owned count can never exceed `cap`. The overflow is STICKY PER KEY:
+    a key with its OWN in-window overflow charges stays in the overflow rather
+    than being handed a second full budget, while a key with none takes a free
+    owned slot (a store-wide rule would deny every fresh key until the whole
+    overflow drained)."""
     bucket = store.get(key)
     if bucket is not None:
         bucket[:] = _bucket_prune_window(bucket, now, window_s)
         return bucket, False
     _bucket_reclaim(store, now, window_s, cap, count=_bucket_owned_count)
-    # Sticky overflow (see the policy block): while the SHARED overflow holds
-    # any in-window charge, no fresh key may take an owned slot. The overflow
-    # has no per-key attribution, so graduating an overflow-routed key would
-    # orphan those charges and hand it a SECOND full budget. Strictly more
-    # restrictive, and free when the overflow is absent or drained.
+    # Per-key sticky overflow (see the policy block): entries are (ts, key), so
+    # a key is held in the overflow ONLY while its OWN charges are in-window.
     overflow = store.get(_BUCKET_OVERFLOW_KEY)
     if overflow is not None:
         overflow[:] = _bucket_prune_window(overflow, now, window_s)
-        if overflow:
+        if any(entry[1] == key for entry in overflow):
             return overflow, True
     if _bucket_owned_count(store) >= cap:
         return (overflow if overflow is not None else []), True
@@ -5535,11 +5553,13 @@ async def _check_ip_bucket_rate_limit(
     #3124 capacity bound (policy block above the helpers): the store holds at
     most max_entries client-keyed buckets plus one shared overflow bucket. A
     new key arriving at a full store is charged to the overflow (capped at
-    `limit`/window) instead of growing the key space, and STAYS there until it
-    drains (sticky) so it can never be handed a second budget; reclaim drops
-    only fully-expired buckets and never evicts an active key; the hot path
-    does no store-wide iteration. Below the cap, behaviour — including the 429
-    boundary at `limit` — is unchanged.
+    `limit`/window) instead of growing the key space, and an overflow-routed
+    key STAYS there while its own charges are in-window (per-key sticky) so it
+    can never be handed a second budget; reclaim drops only fully-expired
+    buckets and never evicts an active key; the hot path does no store-wide
+    iteration. Below the cap, behaviour — including the 429 boundary at
+    `limit` — is unchanged (a fresh key takes a free owned slot even while the
+    overflow is warm).
 
     P1-FIX-1: bucket key is the caller-supplied `key` (required at wrappers)
     — the sensitive-op store is keyed (ip, op) composite; a bare-ip default
@@ -5574,7 +5594,9 @@ async def _check_ip_bucket_rate_limit(
             # #1081 review P4: ceil — int() floors and can understate (and
             # yield 0 for near-expiry windows); a client retrying exactly at
             # the advertised value must not get a surprise 429.
-            remaining = (math.ceil(bucket[0] + window_s - now)
+            # `_bucket_entry_ts` reads the oldest timestamp from either layout
+            # (a bare float, or the shared overflow's ``(ts, key)`` pair).
+            remaining = (math.ceil(_bucket_entry_ts(bucket[0]) + window_s - now)
                          if retry_after_s is None else retry_after_s)
             raise HTTPException(
                 status_code=429,
@@ -5586,7 +5608,7 @@ async def _check_ip_bucket_rate_limit(
             # writes NOTHING here — a 5xx never consumes budget and, unlike
             # the old defaultdict pre-insertion, leaves no empty bucket
             # behind (#1719 preserved and strengthened).
-            bucket.append(now)
+            bucket.append((now, ip) if on_overflow else now)
             dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
             buckets[dest] = bucket
             _bucket_touch(buckets, dest)
@@ -5632,7 +5654,7 @@ async def _charge_ip_bucket(
         # bucket obeys the same limit, so it cannot outgrow its cap.
         if len(bucket) >= limit:
             return
-        bucket.append(now)
+        bucket.append((now, ip) if on_overflow else now)
         dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
         buckets[dest] = bucket
         _bucket_touch(buckets, dest)
@@ -15602,16 +15624,11 @@ def _forget_bucket_charge(buckets, key) -> None:
     owned store was full of active keys) the owned key is absent, so the
     rollback removes one overflow entry instead — count-neutral, so the store
     bound and the "successful accepts consume no budget" invariant both hold.
-    The caller first mirrors `_check_ip_bucket_rate_limit`'s opt-out
-    predicates (`_forget_invite_accept`, #3124 review), so "charges exactly
-    one" is enforced by the call path rather than merely assumed — a request
-    that skipped the check cannot refund a foreign overflow entry.
-    Because the overflow entries carry no per-key attribution, the popped
-    entry may belong to another untracked key: the shared overflow's effective
-    admission is therefore ``limit`` + (successful accepts), and accepts are
-    themselves bounded by the per-token / IP / global dimensions. The existing
-    concurrent-over-removal tolerance (a simultaneous accept's newest entry
-    may be the one popped) is unchanged and documented at the caller.
+    The refund is exact: the overflow entries carry their key (``(ts, key)``),
+    so this pops the caller's OWN charge and a request that was never charged
+    is a no-op — it can never refund a FOREIGN entry (#3124 review). The
+    existing concurrent-over-removal tolerance (a simultaneous accept's newest
+    entry may be the one popped) is unchanged and documented at the caller.
     """
     bucket = buckets.get(key)
     if bucket:
@@ -15622,8 +15639,15 @@ def _forget_bucket_charge(buckets, key) -> None:
         # nothing to refund and the shared overflow must not be touched.
         return
     overflow = buckets.get(_BUCKET_OVERFLOW_KEY)
-    if overflow:
-        overflow.pop()
+    if not overflow:
+        return
+    # #3124 review: pop THIS key's attributed entry (overflow entries are
+    # ``(ts, key)``), never an arbitrary one — so a forget for a key that was
+    # never charged is a no-op and can never refund a foreign charge.
+    for i in range(len(overflow) - 1, -1, -1):
+        if overflow[i][1] == key:
+            del overflow[i]
+            return
 
 
 def _forget_invite_accept(request: Request, token: str) -> None:
@@ -15633,17 +15657,13 @@ def _forget_invite_accept(request: Request, token: str) -> None:
     simultaneous accepts the most recent entry may belong to a concurrent
     request (over-removal is bounded and conservative at invite volume).
 
-    #3124 review: mirror `_check_ip_bucket_rate_limit`'s two early returns so
-    a refund is only attempted when a charge could have been recorded. Without
-    this, an accept whose check opted out (`RATE_LIMIT_DISABLED=1`, or no
-    client host) found all three keys absent and popped an IN-WINDOW charge
-    belonging to an unrelated key from the shared overflow — a count-NEGATIVE
-    refund, not the documented count-neutral one.
+    #3124 review: with per-key overflow attribution the refund is exact —
+    `_forget_bucket_charge` pops only the caller's OWN entry — so there is no
+    predicate to mirror here: a request whose check opted out simply has no
+    entry to pop. (An earlier mirror-the-opt-out guard was removed once the
+    primitive enforced this structurally; a convention that cannot be tested
+    independently is a liability, not a safety net.)
     """
-    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
-        return
-    if not request.client or not request.client.host:
-        return
     import hashlib as _hashlib
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)

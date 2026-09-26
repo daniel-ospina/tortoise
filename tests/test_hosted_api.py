@@ -9842,11 +9842,11 @@ class TestBoundedIpBucketStore:
     def test_reclaim_never_evicts_an_active_key(self, monkeypatch):
         """An attacker flood must not reset a victim's consumed budget.
 
-        Fill the owned cap with ACTIVE keys, then admit a fresh key: it goes
-        to the overflow (never evicting an active key). Only a fully-expired
-        head is reclaimable — and while the overflow is still warm a fresh key
-        STAYS in it (sticky, see `test_sticky_overflow_blocks_a_second_budget`);
-        once the overflow drains, the freed slot admits a new key.
+        Fill the owned cap with ACTIVE keys, then admit a fresh key: it goes to
+        the overflow (never evicting an active key). Only a fully-expired head
+        is reclaimable — and the overflow-routed key is itself never handed a
+        second budget while its charge is in-window (per-key sticky), even when
+        a slot has just freed.
         """
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
 
@@ -9860,27 +9860,31 @@ class TestBoundedIpBucketStore:
             await _drive_bucket_check(store, lock, ["fresh-1"],
                                       max_entries=8, **self._KW)
             survived = [k for k in active if k in store]
+            ov = _ha_mod._BUCKET_OVERFLOW_KEY
+            assert ov in store and any(e[1] == "fresh-1" for e in store[ov]), \
+                store
             # Expire the head only; reclaim frees exactly that slot.
             head = next(iter(store))
             store[head] = [time.time() - 10_000]
-            await _drive_bucket_check(store, lock, ["fresh-2"],
-                                      max_entries=8, **self._KW)
-            graduated_while_warm = "fresh-2" in store
-            # Drain the overflow; now the freed slot admits a new key.
-            store[_ha_mod._BUCKET_OVERFLOW_KEY] = [time.time() - 10_000]
-            await _drive_bucket_check(store, lock, ["fresh-3"],
-                                      max_entries=8, **self._KW)
-            return (store, active, survived, head, graduated_while_warm)
+            # A key with NO overflow charges takes the freed slot...
+            freed = await _drive_bucket_check(store, lock, ["fresh-2"],
+                                              max_entries=8, **self._KW)
+            # ...while the overflow-routed key stays in the overflow (its own
+            # in-window charge is not orphaned into a second budget).
+            stuck = await _drive_bucket_check(store, lock, ["fresh-1"],
+                                              max_entries=8, **self._KW)
+            return store, active, survived, head, freed, stuck
 
-        (store, active, survived, head,
-         graduated_while_warm) = asyncio.run(_run())
+        store, active, survived, head, freed, stuck = asyncio.run(_run())
         assert survived == list(active), \
             f"reclaim evicted active keys: {set(active) - set(survived)}"
         assert head not in store, "an expired head must be reclaimable"
-        assert not graduated_while_warm, (
-            "a fresh key graduated to an owned bucket while the shared "
-            "overflow was still warm — that hands it a second budget")
-        assert "fresh-3" in store, "a freed slot must admit a new key"
+        assert freed == [200], freed
+        assert "fresh-2" in store, "a freed slot must admit a fresh key"
+        assert stuck == [429], (
+            "an overflow-routed key was handed a second budget after a slot "
+            f"freed: {stuck}")
+        assert "fresh-1" not in store
         assert _ha_mod._bucket_owned_count(store) <= 8
 
     def test_sticky_overflow_blocks_a_second_budget(self, monkeypatch):
@@ -9925,6 +9929,64 @@ class TestBoundedIpBucketStore:
         assert codes == (200, 200, 200, 429, 429, 429, 200), codes
         assert _ha_mod._bucket_owned_count(store) <= 1
         assert len(store) <= 2
+
+    def test_fresh_key_below_cap_admitted_while_overflow_is_warm(
+            self, monkeypatch):
+        """#3124 review P1: stickiness must be PER KEY, never store-wide.
+
+        `_bucket_route` briefly held EVERY fresh key in the shared overflow
+        while it was warm, so once a transient flood seeded the overflow a
+        legitimate new key was refused (429) for the rest of the window — even
+        with an empty owned store, i.e. up to 86 400 s of onboarding denial on
+        the signup limiter. Fails on the store-wide shape.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            import time
+            store, lock = {}, asyncio.Lock()
+            kw = dict(limit=2, window_s=3600, detail="x", max_entries=2)
+            await _drive_bucket_check(store, lock, ["k0", "k1"], **kw)
+            # A transient flood seeds the shared overflow (store at cap).
+            await _drive_bucket_check(store, lock, ["flood-a", "flood-b"],
+                                      **kw)
+            seeded = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            # Expire the owned keys so the store has room again.
+            for k in ("k0", "k1"):
+                store[k] = [time.time() - 10_000]
+            # A key with NO overflow charges must take a freed owned slot.
+            legit = await _drive_bucket_check(store, lock, ["legit-new"], **kw)
+            return store, seeded, legit
+
+        store, seeded, legit = asyncio.run(_run())
+        assert len(seeded) == 2 and all(
+            isinstance(e, tuple) and len(e) == 2 for e in seeded), seeded
+        assert legit == [200], (
+            "a fresh key with no overflow charges was refused below cap — the "
+            "stickiness leaked from per-key to store-wide")
+        assert "legit-new" in store
+        assert _ha_mod._bucket_owned_count(store) <= 2
+
+    def test_forget_refunds_only_the_callers_own_overflow_entry(self):
+        """#3124 review: the overflow refund is per-key attributed.
+
+        A forget for a key that was never charged must pop NOTHING. Before
+        attribution it popped an arbitrary in-window entry belonging to another
+        key, which re-opened that key's budget inside its own window (a
+        count-NEGATIVE refund and a per-key fail-open). Fails on the
+        `overflow.pop()` shape.
+        """
+        sentinel = _ha_mod._BUCKET_OVERFLOW_KEY
+        store = {sentinel: [(1.0, "other-key"), (2.0, "mine")]}
+        _ha_mod._forget_bucket_charge(store, "mine")
+        assert store[sentinel] == [(1.0, "other-key")], store[sentinel]
+        # A never-charged key refunds nothing.
+        _ha_mod._forget_bucket_charge(store, "never-charged")
+        assert store[sentinel] == [(1.0, "other-key")], store[sentinel]
+        # A present-but-empty owned bucket still short-circuits first.
+        store2 = {sentinel: [(1.0, "other")], "k": []}
+        _ha_mod._forget_bucket_charge(store2, "k")
+        assert store2[sentinel] == [(1.0, "other")], store2[sentinel]
 
     def test_sentinel_cannot_collide_with_a_client_key(self):
         """The reserved overflow sentinel must be unreachable from a request.
@@ -10116,9 +10178,11 @@ class TestBoundedIpBucketStore:
         """A present-but-EMPTY owned bucket means nothing was charged for the
         key, so `_forget_bucket_charge` must not touch the shared overflow
         (whose entries may belong to another key)."""
-        store = {_ha_mod._BUCKET_OVERFLOW_KEY: [1.0, 2.0], "k": []}
+        store = {_ha_mod._BUCKET_OVERFLOW_KEY: [(1.0, "other"), (2.0, "x")],
+                 "k": []}
         _ha_mod._forget_bucket_charge(store, "k")
-        assert store[_ha_mod._BUCKET_OVERFLOW_KEY] == [1.0, 2.0]
+        assert store[_ha_mod._BUCKET_OVERFLOW_KEY] == [(1.0, "other"),
+                                                       (2.0, "x")]
         assert store["k"] == []
 
     def test_singleton_global_dimension_never_overflows(self, monkeypatch):
@@ -10180,10 +10244,12 @@ class TestBoundedIpBucketStore:
             before = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
             _ha_mod._forget_bucket_charge(store, key)
             after = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
-            return before, after
+            return before, after, key
 
-        before, after = asyncio.run(_run())
+        before, after, key = asyncio.run(_run())
         assert len(before) == 1, before
+        assert before[0][1] == key, (
+            f"the overflow entry must carry the charged key: {before}")
         assert after == [], "the overflow charge was not rolled back"
 
     def test_forget_invite_accept_does_not_refund_a_skipped_check(
@@ -10191,12 +10257,11 @@ class TestBoundedIpBucketStore:
         """#3124 review: an accept whose check opted out must refund NOTHING.
 
         `_check_ip_bucket_rate_limit` returns early — charging nothing — on
-        `RATE_LIMIT_DISABLED=1` and on a missing client host. If
-        `_forget_invite_accept` still ran, all three keys would be absent and
-        `_forget_bucket_charge` would pop an IN-WINDOW overflow entry belonging
-        to an unrelated key: a count-NEGATIVE refund, not the documented
-        count-neutral one. Fails on the shape with no guard in
-        `_forget_invite_accept`.
+        `RATE_LIMIT_DISABLED=1` and on a missing client host. Because the
+        refund is per-key attributed, the absent keys match no overflow entry
+        and nothing is popped. This exercises the REAL call path (all three
+        invite stores, via `_forget_invite_accept`); it fails if the refund
+        reverts to popping an arbitrary overflow entry.
         """
         from starlette.requests import Request
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
@@ -10208,11 +10273,13 @@ class TestBoundedIpBucketStore:
         def _seed():
             for s in stores:
                 s.clear()
-                s[_ha_mod._BUCKET_OVERFLOW_KEY] = [1.0, 2.0]
+                s[_ha_mod._BUCKET_OVERFLOW_KEY] = [(1.0, "foreign"),
+                                                   (2.0, "other")]
 
         def _assert_untouched(label):
             for s in stores:
-                assert s[_ha_mod._BUCKET_OVERFLOW_KEY] == [1.0, 2.0], (
+                assert s[_ha_mod._BUCKET_OVERFLOW_KEY] == [(1.0, "foreign"),
+                                                           (2.0, "other")], (
                     f"{label}: a skipped check's forget popped a foreign "
                     f"overflow entry: {s}")
 
