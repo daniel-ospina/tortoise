@@ -257,7 +257,7 @@ def _resolve_line_total(line: LineSpec, *, observed_as_of: str) -> LineTotal:
                          line.is_estimate, None)
     text = str(raw).strip()
     if not text:
-        reason = "is present but empty"
+        reason = f"is present but empty ({raw!r})"
     else:
         try:
             value = int(text)
@@ -716,10 +716,11 @@ def _reconcile_and_log(snapshot: AllocationSnapshot) -> None:
                 if k not in (RESIDUAL_ORG, ORG_OVERFLOW)])
     # ``attempted_window`` is the window this refresh evaluated;
     # ``published_window`` is the window the values READ BACK from the metric
-    # belong to. They are equal on a successful refresh, and differ on an
-    # unavailable one (where the metric still carries the last-known-good
-    # values) — naming both means a reader can never attribute a stale figure
-    # to the attempted period.
+    # belong to. They are equal whenever the last successful publish is in the
+    # SAME window; they can differ on an unavailable refresh only when the
+    # attempt falls in a LATER window (the metric still carries the
+    # last-known-good values then). Naming both means a reader can never
+    # attribute a stale figure to the attempted period.
     attempted_start, attempted_end = snapshot.window_start, snapshot.window_end
     retained_start, retained_end = _retained_window()
     logger.info(

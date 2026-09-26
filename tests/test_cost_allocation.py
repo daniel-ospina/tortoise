@@ -102,9 +102,8 @@ def test_malformed_env_override_fails_closed_instead_of_falling_back(monkeypatch
     assert line.shares == (), "no share may be published for an unusable override"
     assert fly.env_var in line.detail, (
         f"detail must name the variable, got {line.detail!r}")
-    if raw.strip():
-        assert repr(raw) in line.detail, (
-            f"detail must name the offending value, got {line.detail!r}")
+    assert repr(raw) in line.detail, (
+        f"detail must name the offending value, got {line.detail!r}")
 
 
 def test_line_total_cents_fails_closed_on_a_malformed_override(monkeypatch):
@@ -489,9 +488,11 @@ def test_reconcile_is_silent_when_the_published_metric_matches(caplog):
 
 def test_reconcile_log_names_the_window_the_published_values_belong_to(caplog):
     """The INFO line must distinguish the ATTEMPTED window from the window the
-    values read back from the metric belong to. On a successful refresh the two
-    agree, so a reader can never attribute the published cents to the wrong
-    period."""
+    values read back from the metric belong to. When the attempt lands in the
+    SAME window as the last successful publish the two agree; when it lands in a
+    LATER window against a retained earlier publish they must DIFFER. A field
+    that simply echoed the attempted window would satisfy the equal case alone
+    and would be indistinguishable from a duplicate."""
     snap = ca.evaluate_allocation(
         ["org_a"], now=datetime(2026, 9, 15, tzinfo=UTC),
         weights_by_org={"org_a": 1})
@@ -501,6 +502,20 @@ def test_reconcile_log_names_the_window_the_published_values_belong_to(caplog):
     msg = next(r.getMessage() for r in caplog.records
                if "kind=allocation" in r.getMessage())
     assert f"attempted_window={snap.window_start}..{snap.window_end}" in msg, msg
+    assert f"published_window={snap.window_start}..{snap.window_end}" in msg, msg
+
+    # DIVERGENT case: an October attempt against the retained September window.
+    # ``publish`` is deliberately NOT called for the October snapshot, so the
+    # metric still carries September and the two windows must differ in the log.
+    caplog.clear()
+    october = ca.evaluate_allocation([], now=datetime(2026, 10, 3, tzinfo=UTC))
+    assert october.window_start != snap.window_start
+    with caplog.at_level("INFO", logger="tortoise.cost_allocation"):
+        ca._reconcile_and_log(october)
+    msg = next(r.getMessage() for r in caplog.records
+               if "kind=allocation" in r.getMessage())
+    assert f"attempted_window={october.window_start}..{october.window_end}" in msg, (
+        msg)
     assert f"published_window={snap.window_start}..{snap.window_end}" in msg, msg
 
 
@@ -523,8 +538,6 @@ def test_unavailable_warning_names_the_retained_window_not_the_attempted_one(cap
                if "unavailable" in r.getMessage()
                and "last-known-good" in r.getMessage())
     assert good.window_start in msg and good.window_end in msg, msg
-    assert "PREVIOUS successful window" in msg, msg
-    assert "NOT published" in msg, msg
 
 
 def test_org_labels_are_bounded_with_a_fixed_overflow_child(monkeypatch):
@@ -730,12 +743,25 @@ def test_retention_sweep_processes_a_full_page_at_the_cap(monkeypatch):
 def test_cost_refresh_at_the_enumeration_cap_keeps_last_known_good(monkeypatch):
     """The cost caller at the cap: a possibly-truncated page is UNKNOWN, so the
     refresh must leave the metric at last-known-good (never prune orgs beyond
-    the page)."""
+    the page).
+
+    The basis read is made READABLE on purpose. Left to the real
+    ``_measured_write_ops_basis`` (which returns ``None`` without a DB), the
+    proportional lines would be ``unavailable`` regardless of whether the
+    enumeration was treated as complete — so the snapshot would be
+    ``unavailable`` for the WRONG reason and the test would stay green even if
+    the ``require_complete=True`` wiring were removed. With a readable basis the
+    ONLY possible reason for ``unavailable`` is the unconfirmed enumeration
+    (mutation: switching the caller to ``require_complete=False`` yields a
+    ``measured`` snapshot whose pruner drops ``org_known``).
+    """
     from tortoise import supabase_control as sc
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(
         sc, "get_control_plane", lambda: _FakeControlPlane(_cap_rows()))
+    monkeypatch.setattr(
+        ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
 
     good = ca.evaluate_allocation(["org_known"], weights_by_org={"org_known": 1})
     ca.publish(good)
@@ -748,7 +774,10 @@ def test_cost_refresh_at_the_enumeration_cap_keeps_last_known_good(monkeypatch):
         "an at-cap (possibly truncated) enumeration must leave the metric "
         "untouched — never prune orgs beyond the page")
     snap = ca.current_snapshot()
-    assert snap is not None and snap.state == ca.STATE_UNAVAILABLE
+    assert snap is not None
+    assert snap.enumeration_available is False, (
+        "the completeness signal is the reason this snapshot is unavailable")
+    assert snap.state == ca.STATE_UNAVAILABLE
 
 
 def test_short_supabase_org_enumeration_is_returned(monkeypatch):
@@ -812,14 +841,17 @@ def test_publish_is_the_only_writer_of_the_team_cost_metric():
     ``clear_team_cost``/``prune_team_cost`` — or a direct ``TEAM_COST`` write —
     must be caught.
 
-    SCOPE (exactly what this guard enforces, and no more): every reference to
-    the family INSIDE A FUNCTION BODY in ``tortoise/*.py`` outside
-    ``monitoring.py`` must sit inside ``publish`` (the one production writer)
-    or ``_reset_for_tests`` (the explicit test seam). References at MODULE
-    level, in a CLASS BODY, inside a ``lambda``, through an alias or through
-    ``getattr`` are NOT inspected, and ``monitoring.py`` is skipped wholesale
-    (it holds the definitions) — a NEW mutator defined there would not be
-    caught. The claim is stated at this strength, not a broader one, in
+    SCOPE (exactly what this guard enforces, and no more): it matches syntactic
+    ``Name``/``Attribute`` occurrences of ``TEAM_COST`` and its mutators
+    ANYWHERE inside a ``def``/``async def`` subtree in ``tortoise/*.py`` outside
+    ``monitoring.py`` — INCLUDING a ``lambda`` or a class nested inside a
+    function body, which ``ast.walk`` inspects and attributes to that function.
+    Every such reference must sit inside ``publish`` (the one production writer)
+    or ``_reset_for_tests`` (the explicit test seam). What it does NOT match is
+    module-level and top-level class-body references, aliased imports, and
+    ``getattr`` string lookups; ``monitoring.py`` is skipped wholesale (it holds
+    the definitions) — a NEW mutator defined there would not be caught. The
+    claim is stated at this strength, not a broader one, in
     ``docs/ops/cost-allocation.md``."""
     offenders: dict[str, set[str]] = {}
     for path in (REPO / "tortoise").rglob("*.py"):

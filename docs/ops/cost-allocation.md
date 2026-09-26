@@ -127,6 +127,13 @@ only the still-readable lines would silently DROP every org's published total
 which reads exactly like "this org's cost fell". The distinction between the two
 shapes is logged via `enumeration_available`.
 
+That freeze is **unbounded in time**: nothing ages the retained values out,
+and the metric itself carries **no staleness or freshness signal** — no series
+reports the age of the figure. The only signal that a value is frozen is the
+refresh log line (§"How to read it"); the metric surface itself is un-scraped
+in production, so `tortoise_team_cost_cents` alone cannot distinguish a live
+figure from a frozen one.
+
 A **malformed override** is unreadable input too: a present-but-unusable
 `TORTOISE_COST_*_CENTS` value (non-integer, negative, empty/whitespace, or above
 the `MAX_LINE_CENTS` sanity ceiling) reports that line `unavailable` with a
@@ -146,10 +153,12 @@ Three read paths, no dashboard:
    published_cents=… residual_cents=… overflow_cents=…`. This is the
    production-readable path today (nothing scrapes `/metrics` in production).
    `attempted_window` is the window this refresh evaluated; `published_window`
-   is the window the values READ BACK from the metric belong to — the two agree
-   on a successful refresh and differ on an `unavailable` one (where the metric
-   still carries the last-known-good window), so a reader can never attribute a
-   stale figure to the attempted period. The `published_cents` figure is read
+   is the window the values READ BACK from the metric belong to. The two are
+   equal whenever the last successful publish is in the SAME window; they can
+   differ on an `unavailable` refresh only when the attempt falls in a LATER
+   window (the metric still carries the last-known-good window then). Naming
+   both means a reader can never attribute a stale figure to the attempted
+   period. The `published_cents` figure is read
    back from the METRIC itself (`allocation_by_org()`), not from the in-memory
    shares, so the reconciliation warning compares what was actually published
    against the declared totals and can fire.
@@ -178,8 +187,12 @@ declared total is 0 (unconfigured) or no org carries weight.
 
 * The writer runs on the existing hourly maintenance loop
   (`hosted_api._event_retention_loop`), so the metric is first populated within
-  one interval after boot. It is best-effort: a refresh failure can never
-  terminate event retention.
+  one interval after boot **provided the enumeration is confirmable**. At or
+  above the 1000-org enumeration cap, or on repeated enumeration failure, the
+  cost caller fails closed on every cycle and the metric stays last-known-good
+  (or empty if it was never populated), with no on-metric evidence that it is
+  not live. It is best-effort: a refresh failure can never terminate event
+  retention.
 * The org label is bounded (`MAX_ORG_LABELS`, default 512, with a fixed
   `__other__` overflow child), so org growth cannot blow up the metric's
   cardinality.
@@ -188,8 +201,12 @@ declared total is 0 (unconfigured) or no org carries weight.
   `monitoring.record_cost` is the setter and `monitoring.prune_team_cost` the
   pruner; both are called only from there, plus the test seams
   (`_reset_for_tests` / `clear_team_cost`). A test asserts this on the METRIC,
-  not on a function-name substring, and the assertion's scope is exactly:
-  **every reference to `TEAM_COST` and its mutators inside a FUNCTION BODY in
-  `tortoise/*.py` outside `monitoring.py`** must sit inside `publish` or the
-  test seam. Module-level, class-body, `lambda`, alias and `getattr` references
-  are outside that scope, and `monitoring.py` (the definitions) is skipped.
+  not on a function-name substring. The guard matches syntactic
+  `Name`/`Attribute` occurrences of `TEAM_COST` and its mutators **anywhere
+  inside a `def`/`async def` subtree in `tortoise/*.py` outside
+  `monitoring.py`** — including a `lambda` or a class nested inside a function
+  body, which `ast.walk` inspects and attributes to that function — and every
+  such reference must sit inside `publish` or the test seam. What it does NOT
+  match is module-level and top-level class-body references, aliased imports,
+  and `getattr` string lookups; `monitoring.py` (the definitions) is skipped
+  wholesale.
