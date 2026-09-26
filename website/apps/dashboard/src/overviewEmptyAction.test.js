@@ -33,6 +33,12 @@ import {
   focusDeepLinkTarget,
 } from './overviewEmptyAction.js'
 import { stripComments } from './testSupport.js'
+import { probeTags } from './jsxSourceProbe.js'
+
+// The guarded call sites live in main.jsx (the app, which a node test cannot
+// import) — the probe compiles them with the app's own JSX transform and reads
+// what React would hand the components.
+const mainJsxSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
 
 const render = (snippetKey) =>
   renderToStaticMarkup(React.createElement(OverviewEmptyActions, { snippetKey }))
@@ -251,15 +257,12 @@ test('#4637 wiring: main.jsx renders the guarded action set with the derived for
   const actionTags = mainCode.match(/<GraphMissingEmptyStateActions[\s\S]*?\/>/g) || []
   assert.equal(actionTags.length, 1,
     `the graph-missing card must render the guarded action set once — found ${actionTags.length}`)
-  // The binding is compared by VALUE, not matched as a substring: a presence
-  // match accepts `buildFork={isBuildFork === false} data-decoy="buildFork={isBuildFork}"`
-  // — the #4637 defect (a build fork routed through the agent-connection
-  // chooser) with the suite green. Exactly one `buildFork` binding is required,
-  // so a decoy is a failure instead of a second chance to match.
-  const forkBindings = actionTags[0].match(/(?:^|\s)buildFork=\{([^}]*)\}/g) || []
-  assert.equal(forkBindings.length, 1,
-    `the action set must carry exactly one buildFork binding — got ${forkBindings.length} in ${actionTags[0]}`)
-  assert.equal(actionTags[0].match(/(?:^|\s)buildFork=\{([^}]*)\}/)[1].trim(), 'isBuildFork',
+  // What the tag actually HANDS the component is asserted semantically, by the
+  // probe test below: it compiles this call site with the app's JSX transform and
+  // reads the effective props, so a spread, an alias or an extra attribute after
+  // the binding cannot satisfy the guard by resembling the pinned text. The text
+  // pin here is the locator's supplement.
+  assert.match(actionTags[0], /buildFork=\{isBuildFork\}/,
     `the action set must take the derived fork — got ${actionTags[0]}`)
   assert.match(actionTags[0], /onGoToKeys=\{/,
     `the first-party API Keys handler must stay wired — got ${actionTags[0]}`)
@@ -277,4 +280,30 @@ test('#4637 wiring: main.jsx renders the guarded action set with the derived for
     'the step-2 SDK anchor must still label the route the Overview build-fork action names')
   assert.ok(!mainCode.includes('tortoise.premiselabs.co/docs'),
     'main.jsx must not re-type the SDK docs URL — it consumes SDK_DOCS_HREF')
+})
+
+// #4637 SEMANTIC wiring guard: compile the real call site and read the EFFECTIVE
+// props. `buildFork={isBuildFork === false} data-decoy="buildFork={isBuildFork}"`
+// — the defect with a passing text pin — renders the self-fork route for a build
+// fork; here it fails because the value, not the text, is asserted.
+test('#4637 wiring: the graph-missing action set receives the derived fork (effective props)', async () => {
+  for (const buildFork of ['true', 'false']) {
+    const [probe] = await probeTags(mainJsxSource, {
+      tag: 'GraphMissingEmptyStateActions',
+      imports: { GraphMissingEmptyStateActions: './overviewEmptyAction.js' },
+      bindings: { isBuildFork: buildFork, setTab: '() => {}' },
+    })
+    assert.equal(probe.props.buildFork, buildFork === 'true',
+      `the action set must receive the fork fact as a boolean — got ${probe.props.buildFork} from ${probe.source}`)
+    // the action it renders follows the prop: the BUILD fork offers the SDK
+    // route, the self fork the agent-connection route
+    if (buildFork === 'true') {
+      assert.ok(!/welcome/.test(probe.html),
+        `build fork: the agent-connection route must not render — got ${probe.html}`)
+      assert.ok(/docs/.test(probe.html), `build fork: the SDK route must render — got ${probe.html}`)
+    } else {
+      assert.ok(/welcome/.test(probe.html),
+        `self fork: the agent-connection route must render — got ${probe.html}`)
+    }
+  }
 })

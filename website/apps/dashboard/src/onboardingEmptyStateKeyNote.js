@@ -242,6 +242,47 @@ export function ownerKeyLive(connectGateMode) {
   return connectGateMode === 'embed' || connectGateMode === 'existing'
 }
 
+// #4637: the two facts the Overview cards' PROPS depend on are derived HERE, in
+// the module the render tests execute. main.jsx cannot be imported by a node
+// test (it is the whole application), so a derivation left inline there can only
+// be checked by a source-text pin — and a source-text pin is satisfied by a
+// quoted decoy, a JSX spread or a line-wrapped expression while the rendered
+// card says something else (five review cycles of exactly that). These two
+// functions make the props a VALUE the tests produce and assert:
+//
+//   ownerCardProps({ variant, isBuildFork, connectGate }) — the exact prop set
+//     both owner arms spread. `keyLive` comes from `ownerKeyLive` of the gate
+//     mode: the gate is the one authority on whether a key is live. Nothing
+//     else is accepted as a live-key signal (not the in-memory `snippetKey`,
+//     which survives its own row being revoked or rotated).
+//
+//   keyTabAffordance({ snippetKey, connectGate }) — whether the re-entry card's
+//     API Keys button renders. The owner no-key clause names that tab exactly
+//     when the gate holds no usable key, so the button must be there whenever
+//     `!keyIsLive`, INCLUDING the stale-reveal case (`snippetKey` truthy, the
+//     gate says 'mint'), where the old inline `!snippetKey` gate withheld it in
+//     the same render that told the owner to go there. The `!snippetKey` half is
+//     kept so the pre-existing affordance for a key-less Organization is
+//     unchanged; it is subsumed by `!keyIsLive` in every state where
+//     `snippetKey` is truthy (a truthy `snippetKey` under a no-key gate mode is
+//     by definition stale).
+//
+// main.jsx supplies the inputs and spreads/applies the result — it holds no
+// branch of its own for either fact, so there is no second decision site to
+// drift.
+export function ownerCardProps({ variant, isBuildFork, connectGate }) {
+  return {
+    variant,
+    buildFork: isBuildFork === true,
+    connectGateMode: connectGate.mode,
+    keyLive: ownerKeyLive(connectGate.mode),
+  }
+}
+
+export function keyTabAffordance({ snippetKey, connectGate }) {
+  return !snippetKey || !ownerKeyLive(connectGate.mode)
+}
+
 // The key-live lead-in, fork-aware the same way the shared lead-ins are: the
 // build fork renders no chooser, so it is not told to "connect" through one.
 function ownerLiveLeadIn(variant, buildFork) {

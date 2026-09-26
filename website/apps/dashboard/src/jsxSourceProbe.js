@@ -1,0 +1,201 @@
+// jsxSourceProbe.js — evaluate the call sites that live in main.jsx.
+//
+// Not a test file: `node --test src/*.test.js` does not run it. It is imported
+// by the wiring guards in the note/action tests.
+//
+// WHY THIS EXISTS (#4637): main.jsx cannot be imported by a node test — it is
+// the whole application (browser globals, live session, CSS). Five review cycles
+// pinned its wiring with source-text regexes and five times the guard passed
+// while the RENDERED card said something else:
+//
+//   <Tag buildFork={x} {...{ buildFork: false }} />   ← contains the pinned text,
+//                                                      renders `false`
+//   const keyIsLive = a\s+\n  || b                    ← not the single line a
+//                                                      `(.+)$` match reads
+//   {(!snippetKey || snippetKey) && (<button …>…</button>)}  ← the flipped
+//     condition is satisfied by a quoted decoy of the pinned text elsewhere
+//
+// Text is not semantics. These probes COMPILE the extracted call site with the
+// app's own JSX transform (esbuild — a direct vite dependency, so it is present
+// wherever the dashboard is installed) and read the value React produces: the
+// EFFECTIVE props after spreads and aliases, or the evaluated expression. A
+// probe can only pass by producing the right value.
+//
+// The extraction itself is necessarily textual (main.jsx is text). Three rules
+// keep it honest:
+//   1. probes run on the SHARED quote-aware comment-stripped source
+//      (`testSupport.js`), so a commented-out site cannot satisfy one;
+//   2. `maskLiterals` blanks the CONTENTS of string and template literals (same
+//      quote rule as the shared stripper: `'`/`"` cannot span a raw newline,
+//      backticks can), and every extractor DROPS a match that starts inside one.
+//      Without this, `const s = '<Tag buildFork={false} />'` is extracted as a
+//      call site — and being first in file order, a guard reading the first
+//      match would read fabricated props (found by an independent verifier on
+//      the previous revision, which had claimed the opposite in a docstring);
+//   3. `extractOne` requires the anchor to occur EXACTLY ONCE, so a second site
+//      (or a code-position decoy) fails the guard rather than giving the real
+//      site a second chance to match.
+//
+// RESIDUAL, stated plainly because the opposite has been claimed before and was
+// false: a source-based wiring guard cannot model every construct an author
+// could write. An anchor planted inside a REGEX LITERAL body is not masked (regex
+// and division are indistinguishable without a parser), and an author who
+// replaces an anchor with hand-written logic of a different shape can still
+// satisfy a text pin. The guards here therefore catch every ordinary mutation (a
+// spread, an alias, an inverted or narrowed expression, a wrapped statement, a
+// re-typed literal, a quoted decoy of any ordinary quoting form) and the
+// SEMANTIC guard for the facts themselves is the executed module test suite (the
+// note/action render tests, which render the real components across the whole
+// fork x gate cross-product). No comment or claim in this repo asserts more.
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { pathToFileURL, fileURLToPath } from 'node:url'
+import { transformSync } from 'esbuild'
+import { stripComments } from './testSupport.js'
+
+const require = createRequire(import.meta.url)
+// Absolute specifiers, because the probe module is written to a temp directory:
+// a bare `react` would be resolved by looking for node_modules BESIDE THE FILE
+// (i.e. in the temp dir), which would fail.
+const REACT = JSON.stringify(require.resolve('react'))
+const REACT_DOM_SERVER = JSON.stringify(require.resolve('react-dom/server'))
+// A RELATIVE specifier ('./onboardingEmptyStateKeyNote.js') is resolved from
+// THIS file's directory — the dashboard's src/ — because the probe module itself
+// is written to a temp dir, where a relative import would point at nothing.
+const HERE = dirname(fileURLToPath(import.meta.url))
+const resolveSpec = (spec) => (spec.startsWith('.')
+  ? pathToFileURL(join(HERE, spec)).href
+  : spec)
+
+const MASKED = '\u0000'
+
+/**
+ * Replace the CONTENTS of string and template literals with a sentinel,
+ * preserving every offset. Quote rule matches the shared comment stripper:
+ * `'` and `"` end at the closing quote or at a raw newline (JSX prose is full of
+ * apostrophes), backticks run to the closing backtick (and their `${…}`
+ * expressions are treated as literal text — a real call site never lives there).
+ */
+export function maskLiterals(src) {
+  const out = src.split('')
+  const blank = (from, to) => { for (let j = from; j < to; j += 1) out[j] = MASKED }
+  let i = 0
+  while (i < src.length) {
+    const quote = src[i]
+    if (quote !== "'" && quote !== '"' && quote !== '`') { i += 1; continue }
+    let j = i + 1
+    while (j < src.length) {
+      if (src[j] === '\\') { j += 2; continue }
+      if (src[j] === quote) break
+      if (quote !== '`' && src[j] === '\n') break
+      j += 1
+    }
+    if (j < src.length && src[j] === quote) {
+      blank(i + 1, j)
+      i = j + 1
+    } else {
+      i = j + 1
+    }
+  }
+  return out.join('')
+}
+
+/** Is `index` inside a string/template literal body? */
+const insideLiteral = (masked, index) => masked[index] === MASKED
+
+/** The one and only match of `pattern` in `source` (or throw with the count). */
+export function extractOne(source, pattern, label) {
+  const hits = extractAll(source, pattern, label)
+  if (hits.length !== 1) {
+    throw new Error(`${label}: expected exactly one match of ${pattern} — found ${hits.length}`)
+  }
+  return hits[0]
+}
+
+/**
+ * All matches of `pattern`, or throw when there are none. A match that STARTS
+ * inside a string/template literal body is not a code site and is dropped: a
+ * quoted decoy must never satisfy — or inflate the count of — an anchor.
+ */
+export function extractAll(source, pattern, label) {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`
+  const masked = maskLiterals(source)
+  const hits = []
+  for (const m of source.matchAll(new RegExp(pattern.source, flags))) {
+    if (!insideLiteral(masked, m.index)) hits.push(m[0])
+  }
+  if (hits.length === 0) throw new Error(`${label}: no match of ${pattern}`)
+  return hits
+}
+
+async function compileAndRun({ imports, bindings, expressions }) {
+  const importLines = Object.entries(imports)
+    .map(([name, spec]) => `import { ${name} } from ${JSON.stringify(resolveSpec(spec))};`).join('\n')
+  // Bindings are JS SOURCE TEXT, not values: a test can hand the probe a real
+  // expression extracted from main.jsx (e.g. a derivation) and have it EXECUTED,
+  // which is the difference between asserting a statement's text and asserting
+  // what it computes.
+  const declarations = Object.entries(bindings)
+    .map(([name, src]) => `const ${name} = ${src};`).join('\n')
+  const probes = expressions
+    .map((expr) => `(() => { const v = (${expr}); return { value: v, html: isElement(v) ? renderToStaticMarkup(v) : null } })()`)
+    .join(',\n  ')
+  const moduleSource = `
+import React from ${REACT};
+import { renderToStaticMarkup } from ${REACT_DOM_SERVER};
+${importLines}
+${declarations}
+const isElement = (v) => v !== null && typeof v === 'object' && 'type' in v && 'props' in v;
+export const probes = [
+  ${probes}
+];
+`
+  const dir = mkdtempSync(join(tmpdir(), 'pi-jsx-probe-'))
+  const file = join(dir, `probe-${Date.now()}.mjs`)
+  try {
+    const { code } = transformSync(moduleSource, {
+      loader: 'jsx',
+      format: 'esm',
+      jsx: 'transform',
+      jsxFactory: 'React.createElement',
+      jsxFragment: 'React.Fragment',
+    })
+    writeFileSync(file, code)
+    const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`)
+    return mod.probes
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Every `<Tag … />` call site in `source`, evaluated. Returns one
+ * `{ source, props, html }` per occurrence, in file order — the props are the
+ * EFFECTIVE props (a JSX spread after a pinned attribute wins, exactly as
+ * React resolves it), and `html` is the static render of that call site with the
+ * probe's bindings. A tag planted inside a string or template literal is NOT a
+ * call site and is excluded (`maskLiterals`), so it can neither satisfy a guard
+ * nor be mistaken for the first arm.
+ */
+export async function probeTags(source, { tag, bindings = {}, imports = {} }) {
+  const tags = extractAll(stripComments(source), new RegExp(`<${tag}(?=[\\s/>])[\\s\\S]*?/>`), `probeTags(${tag})`)
+  const probes = await compileAndRun({ imports, bindings, expressions: tags })
+  return probes.map((p, i) => {
+    if (p.value === null || typeof p.value !== 'object' || !('props' in p.value)) {
+      throw new Error(`probeTags(${tag}) [#${i}]: the extracted site is not a React element: ${tags[i]}`)
+    }
+    return { source: tags[i], props: p.value.props, html: p.html }
+  })
+}
+
+/**
+ * Evaluate JS expressions against the probe's bindings. `expressions` are
+ * source text (usually extracted from main.jsx by `extractOne`). Returns the
+ * values (and a static render for element values).
+ */
+export async function evalExpressions(expressions, { bindings = {}, imports = {} } = {}) {
+  const list = Array.isArray(expressions) ? expressions : [expressions]
+  return compileAndRun({ imports, bindings, expressions: list })
+}

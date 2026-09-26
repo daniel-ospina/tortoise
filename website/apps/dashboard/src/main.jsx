@@ -42,7 +42,7 @@ import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, res
 // module — the lead-in is where the chooser route is named, so the owner arms
 // consume the same lead-in constants the member arms do instead of deciding for
 // themselves what the fork offers.
-import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote, ownerKeyLive, graphMissingCta,
+import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote, ownerCardProps, keyTabAffordance, graphMissingCta,
   REENTRY_BUILD_LEAD_IN, REENTRY_SELF_LEAD_IN, REENTRY_KEYED_LEAD_IN,
   GRAPH_MISSING_BUILD_LEAD_IN, GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
@@ -6919,18 +6919,20 @@ function claimIntentInFlight() {
   // `wizardKeyAffordance` below.
   const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
   // #4637: the Overview empty-state cards' "the Organization's key is already
-  // live" state — ONE derivation (`ownerKeyLive`, note module), read by both
-  // owner arms and by the re-entry card's API Keys affordance
-  // (`!snippetKey || !keyIsLive`). NOT by the graph-missing card's snippet
-  // branch, which reads the gate's held plaintext (`connectGate.key`) instead:
-  // `keyIsLive` is true in mode 'existing', where the gate deliberately holds no
-  // plaintext at all. The GATE is the authority either way, not `snippetKey` (welcomeKey || apiKey, below): the in-memory
-  // `welcomeKey` reveal is truthy after its row is revoked/disabled/rotated,
-  // while `durableConnectKey`'s row-truth check drops it and the gate resolves
-  // 'mint'/'existing' — so the card could claim a key was live while the connect
-  // step had none to offer. (No localStorage is involved: the legacy key slot
+  // live" state is NOT decided here. `ownerCardProps` (note module) derives it
+  // from the gate — ONE authority — and `keyTabAffordance` derives the re-entry
+  // card's API Keys affordance from the same fact, so both are values the note
+  // module's render tests execute. This file supplies the gate and the
+  // in-memory `snippetKey` (welcomeKey || apiKey, below) and holds no key-state
+  // branch of its own: `snippetKey` is NOT accepted as a live-key signal (the
+  // in-memory `welcomeKey` reveal is truthy after its row is
+  // revoked/disabled/rotated, while `durableConnectKey`'s row-truth check drops
+  // it and the gate resolves 'mint'/'existing' — so the card could claim a key
+  // was live while the connect step had none to offer). The graph-missing
+  // card's snippet branch reads the gate's held plaintext (`connectGate.key`)
+  // instead: `keyIsLive` is true in mode 'existing', where the gate deliberately
+  // holds no plaintext at all. (No localStorage is involved: the legacy key slot
   // was removed in #2246 and mintTripwire.test.js pins its absence.)
-  const keyIsLive = ownerKeyLive(connectGate.mode)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -8907,15 +8909,14 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {/* #4637: the OWNER arm's key state comes from ONE derivation —
-                  `keyIsLive`, above — and not from the branch that selects
-                  the MEMBER copy. The member's branch stays `snippetKey ||
-                  mode === 'existing'`: those two lead-ins assert nothing about
-                  which key is usable (its live arm says "You're in"), so the
-                  derivation that matters is the owner's, and it is the gate's. */}
+              {/* #4637: the OWNER arm's key state and the fork both come from
+                  `ownerCardProps` (note module) — one derivation, executed by
+                  the note module's render tests. The member arm keeps its own
+                  key-state branch to SELECT copy: its two lead-ins assert
+                  nothing about which key is usable (its live arm says "You're
+                  in"), so it never needs the owner's derivation. */}
               {isOwnerAdmin
-                ? <OwnerEmptyStateKeyNote variant="reentry" buildFork={isBuildFork}
-                    connectGateMode={connectGate.mode} keyLive={keyIsLive} />
+                ? <OwnerEmptyStateKeyNote {...ownerCardProps({ variant: 'reentry', isBuildFork, connectGate })} />
                 : (snippetKey || connectGate.mode === 'existing'
                     ? <>{isBuildFork
                         ? REENTRY_BUILD_LEAD_IN
@@ -8928,14 +8929,16 @@ function claimIntentInFlight() {
               <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
-              {(!snippetKey || !keyIsLive) && (
-                // #4637: the gate, not `snippetKey`, decides this affordance too.
-                // The owner no-key clause names the API Keys tab, and that clause
+              {keyTabAffordance({ snippetKey, connectGate }) && (
+                // #4637: the gate, not `snippetKey`, decides this affordance too
+                // — `keyTabAffordance` (note module) is the one derivation, and
+                // its truth table is executed by the note module's tests. The
+                // owner no-key clause names the API Keys tab, and that clause
                 // renders exactly when the gate holds no usable key — so the
-                // button must be there whenever `!keyIsLive`, including the stale
-                // reveal case (`snippetKey` truthy, gate says 'mint'), where the
-                // old `!snippetKey` gate withheld it in the same render that told
-                // the owner to go there. The `!snippetKey` half is kept so the
+                // button must be there whenever the gate says no key is live,
+                // including the stale reveal case (`snippetKey` truthy, gate
+                // says 'mint'), where the old `!snippetKey` gate withheld it in
+                // the same render that told the owner to go there. The `!snippetKey` half is kept so the
                 // pre-existing affordance for a key-less organization is
                 // unchanged.
                 <button type="button" className="ghost" onClick={() => setTab('keys')}>
@@ -9006,12 +9009,12 @@ function claimIntentInFlight() {
               // wizard affordance's, not this card's — the same blind spot the
               // pre-change string had. See OWNER_NO_KEY_AT_STEP in the note
               // module.
-              // #4637: the owner's key state is `keyIsLive` (the gate's), not
+              // #4637: the owner's key state comes from `ownerCardProps` (note
+              // module) — the same gate-derived fact the re-entry arm uses, not
               // this card's `snippetKey` branch.
               <p className="dim">
                 {isOwnerAdmin
-                  ? <OwnerEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork}
-                      connectGateMode={connectGate.mode} keyLive={keyIsLive} />
+                  ? <OwnerEmptyStateKeyNote {...ownerCardProps({ variant: 'graph-missing', isBuildFork, connectGate })} />
                   : <>{isBuildFork
                       ? GRAPH_MISSING_BUILD_LEAD_IN
                       : GRAPH_MISSING_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}

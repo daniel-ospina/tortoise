@@ -35,8 +35,11 @@ import {
   keylessConnectorClause,
   joinConnectorNames,
   ownerKeyLive,
+  ownerCardProps,
+  keyTabAffordance,
   graphMissingCta,
 } from './onboardingEmptyStateKeyNote.js'
+import { probeTags, evalExpressions, extractOne, extractAll } from './jsxSourceProbe.js'
 import { HARNESS_NAMES, HARNESS_OAUTH } from './harnesses.js'
 import { connectKeyGate } from './sessionKey.js'
 import { stripComments } from './testSupport.js'
@@ -366,33 +369,20 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   // satisfied by a quoted decoy — so every pin whose target is a BINDING also
   // asserts the binding's exact value (below), and each #4637 carrier carries a
   // pin on the DEFECT form as well, which a decoy can only help trip.
+  // NOTE on the source pins in this test: they are SUPPLEMENTS. A source-text
+  // guard cannot model every construct an author could write — an author who
+  // deliberately replaces an anchor with differently-shaped logic and plants a
+  // decoy that duplicates the anchor text can still satisfy one. The SEMANTIC
+  // wiring guard is the probe test below (`jsxSourceProbe.js` compiles the real
+  // call sites with the app's JSX transform and reads the effective props and
+  // the rendered copy), and the semantic guard for the facts themselves is the
+  // executed render suite earlier in this file. These pins catch the ordinary
+  // mutation shapes (a re-typed literal, an inverted expression, a missing
+  // site); nothing here claims more than that.
   const mainCode = stripComments(mainJsx)
-  // The value of an attribute in a JSX tag, as written. `buildFork={isBuildFork}`
-  // must be EXACTLY that — a presence match accepted
-  // `buildFork={isBuildFork === false} data-decoy="buildFork={isBuildFork}"`
-  // (mutation-proven green before this extraction), i.e. the #4637 defect with a
-  // passing suite. One occurrence per attribute is required, so a second
-  // (decoy) occurrence is a failure rather than a second chance to match.
-  const attrValue = (tag, name) => {
-    const hits = tag.match(new RegExp(`(?:^|\\s)${name}=\\{([^}]*)\\}`, 'g')) || []
-    assert.equal(hits.length, 1,
-      `each note/action tag must carry exactly one ${name} binding — got ${hits.length} in ${tag}`)
-    return tag.match(new RegExp(`(?:^|\\s)${name}=\\{([^}]*)\\}`))[1]
-  }
-  // ALL note sites must use the derived boolean. The pins are PROP-SET based,
-  // not layout based: a source-text regex anchored on the attribute ORDER or on
-  // the newline comes apart the moment a prop moves or a formatter reflows the
-  // tag — it would then pass while the binding is wrong, or fail while it is
-  // right. Extract each tag and check the bindings it carries — from the
-  // COMMENT-STRIPPED source, so a JSX comment quoting a tag cannot inflate the
-  // count and a commented-out real site cannot satisfy a pin.
-  const memberTags = mainCode.match(/<MemberEmptyStateKeyNote[\s\S]*?\/>/g) || []
-  assert.equal(memberTags.length, 3,
-    `all three member arms must render the note — found ${memberTags.length}`)
-  for (const tag of memberTags) {
-    assert.equal(attrValue(tag, 'buildFork').trim(), 'isBuildFork',
-      `every member site must pass the derived boolean — got ${tag}`)
-  }
+  // The member arms' lead-ins are attached to the note. This is a LIGHT pin: what
+  // each arm RENDERS is asserted semantically by the probe test below (the real
+  // fragment, compiled, with the fork bound both ways).
   assert.ok(mainCode.includes("const isBuildFork = wizardFork === 'build'"),
     'the fork predicate must stay the strict comparison to the literal build (stripped source: a commented-out predicate must not satisfy this)')
   assert.ok(!/You'll need an API key/.test(mainJsx),
@@ -464,48 +454,60 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   assert.equal(ownerTags.length, 2,
     `both owner arms must render the owner note — found ${ownerTags.length}`)
   for (const tag of ownerTags) {
-    assert.match(tag, /variant="(?:reentry|graph-missing)"/, `variant must be a card name — got ${tag}`)
-    assert.equal(attrValue(tag, 'buildFork').trim(), 'isBuildFork',
-      `buildFork must be the derived boolean — got ${tag}`)
-    assert.equal(attrValue(tag, 'connectGateMode').trim(), 'connectGate.mode',
-      `the gate mode must be passed — got ${tag}`)
-    assert.equal(attrValue(tag, 'keyLive').trim(), 'keyIsLive',
-      `keyLive must be the gate-derived boolean — got ${tag}`)
+    // Every owner arm spreads ONE derivation — `ownerCardProps` — so the props
+    // cannot be assembled per-site and cannot disagree with the gate. What the
+    // spread PRODUCES is asserted semantically by the probe test below (the
+    // effective props and the rendered copy, for every gate mode and both
+    // forks) — a spread, an alias or an extra attribute after the spread changes
+    // the effective props and fails there, not here.
+    assert.match(tag, /\{\.\.\.ownerCardProps\(\{ variant: '(?:reentry|graph-missing)', isBuildFork, connectGate \}\)\}/,
+      `owner arm must spread the one prop derivation — got ${tag}`)
   }
-  // …the derivation itself (`const keyIsLive = ownerKeyLive(connectGate.mode)`) is
-  // pinned ONCE, by `wizardConnectTripwire.test.js` — that file owns the
-  // gate-authority pin from #3783, and a second copy here would be an
-  // unowned duplicate that a fix in one file could silently weaken. This file
-  // owns what the ARMS pass, above.
-  // …and the owner arms may not go back to deciding it themselves: the values
-  // are compared as identifiers (above), so a bare `keyLive` shorthand (which is
-  // `true`) or a single-mode expression changes the extracted value and fails
-  // there. The extra pins below catch the DEFECT FORMS wherever they appear in
-  // the stripped source — a decoy string cannot disarm them, it only adds an
-  // occurrence. The `=` exclusion keeps attribute positions
-  // (`snippetKey={snippetKey}` on the D5 card, a different fact) out of scope.
-  assert.ok(!/(?<!['"`=])\{\s*\(?\s*snippetKey\b/.test(mainCode),
+  // …the derivation itself is no longer a statement in main.jsx at all: both
+  // owner arms spread `ownerCardProps` (above), whose `keyLive` comes from
+  // `ownerKeyLive` of the gate mode. The note module's own tests execute that
+  // derivation, and the probe test below renders the arms for every gate mode —
+  // so there is no second derivation site for a text pin to guard.
+  assert.ok(!/ownerKeyLive\(/.test(mainCode),
+    'main.jsx must not derive the live-key fact itself — the note module owns it')
+  // …and the owner arms may not go back to deciding it themselves: they spread
+  // the derivation (pinned above) and the probe test asserts the effective props
+  // for every mode. The pins below are SUPPLEMENTS that catch the ordinary
+  // defect shapes anywhere in the stripped source; the `=` and `(` exclusions
+  // keep non-branch positions out of scope — an attribute binding
+  // (`snippetKey={snippetKey}` on the D5 card) and the object argument of a call
+  // that DERIVES from the gate (`keyTabAffordance({ snippetKey, connectGate })`)
+  // are different facts from a card's own branch. They are not decoy-proof and
+  // do not claim to be.
+  assert.ok(!/(?<!['"`=(])\{\s*\(?\s*snippetKey\b/.test(mainCode),
     'no card branch may decide anything from `snippetKey` alone (the gate is the authority)')
   assert.ok(!/(?<!['"`=])\{!snippetKey\b/.test(mainCode),
     'no card branch may gate a surface on `snippetKey` alone')
   assert.ok(!/graphMissingCta\(false\)/.test(mainCode),
-    'the snippet-branch CTA must not be pinned to the self-fork arm')
+    'the snippet-branch CTA must not be pinned to the self-fork arm (probe: its ARGUMENT is evaluated)')
   // The graph-missing card's key-present branch is the OTHER "the key is live"
-  // surface on these two cards, and it reads the GATE's own held plaintext — one
-  // fact, not a conjunction of two (a stale reveal plus some other usable row
-  // used to pass a `snippetKey && keyIsLive` test and print a dead key as live).
-  // The presence pin is BACKED by the defect-form negatives above, which a decoy
-  // cannot disarm.
+  // surface on these two cards, and it reads the GATE's own held plaintext. The
+  // probe test below extracts this branch's truth test from the card and
+  // EVALUATES it, so the fact is asserted by what it computes; the presence pin
+  // here is only the locator's supplement.
   assert.match(mainCode, /(?<!['"`])\{connectGate\.key \?/,
     'the graph-missing snippet branch must be gated on the gate\'s own held plaintext')
-  // …and the API Keys affordance is on the same fact: the owner clause names that
-  // tab exactly when the gate holds no usable key, so the button must be there
-  // then (the old `!snippetKey` gate withheld it in the stale-reveal state)
-  assert.match(mainCode, /(?<!['"`])\{\(!snippetKey \|\| !keyIsLive\) && \(/,
-    'the API Keys affordance must appear whenever the gate holds no usable key')
+  // …and the API Keys affordance is the module's derivation, applied at the call
+  // site (the probe below EVALUATES that call for the stale-reveal, key-less and
+  // live-key states, and the region anchor keeps the real guard in view: the
+  // owner clause names the API Keys tab exactly when the gate holds no usable
+  // key, and the old inline `!snippetKey` gate withheld the button in the very
+  // render that told the owner to go there).
+  const affordanceGuard = extractOne(mainCode,
+    /\{keyTabAffordance\(\{[^}]*\}\) && \([\s\S]{0,400}?Go to API Keys →/,
+    'the re-entry API Keys affordance')
+  assert.ok(!/\{!snippetKey/.test(affordanceGuard),
+    'the affordance may not go back to an inline `!snippetKey` gate')
+  assert.equal((mainCode.match(/keyTabAffordance\(/g) || []).length, 1,
+    'the affordance derivation is applied at exactly one site')
   // the graph-missing card's key-present call to action names the same route,
   // so it consumes the same derivation instead of hard-coding ONE fork's prose
-  // (lookbehind: a quoted decoy is not the call site)
+  // (the probe below EVALUATES its argument with the fork bound both ways)
   assert.match(mainCode, /(?<!['"`])\{graphMissingCta\(isBuildFork\)\}/,
     'the snippet-branch CTA must be fork-derived through graphMissingCta')
   assert.ok(!/Connect your agent, or add a memory yourself/.test(mainCode),
@@ -518,6 +520,166 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
     'the graph-missing owner creation promise must be gone from main.jsx')
   assert.ok(!/API keys are live — connect your agent below/.test(mainJsx),
     'the owner graph-missing key-live literal must be gone from main.jsx')
+})
+
+// ── #4637 SEMANTIC wiring guards ─────────────────────────────────────────────
+// The source pins above are supplements. These tests COMPILE the real call sites
+// out of main.jsx with the app's own JSX transform (`jsxSourceProbe.js`) and read
+// what React would produce, so a JSX spread, an alias, an inverted expression or
+// a wrapped statement cannot pass by resembling the pinned text.
+const NOTE_MODULE = './onboardingEmptyStateKeyNote.js'
+const mainJsxSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
+const NOTE_IMPORTS = { OwnerEmptyStateKeyNote: NOTE_MODULE, MemberEmptyStateKeyNote: NOTE_MODULE,
+  ownerCardProps: NOTE_MODULE, keyTabAffordance: NOTE_MODULE, ownerKeyLive: NOTE_MODULE }
+
+// `snippetKey` is a truthy STALE reveal in every binding set below on purpose: if
+// anything but the gate is accepted as a live-key signal, the render claims a
+// live key over a gate that holds none, and this fails.
+const WIRING_BINDINGS = { snippetKey: "'stale-reveal'", setTab: '() => {}' }
+
+test('#4637 wiring: each owner arm’s EFFECTIVE props and rendered copy come from the real call site', async () => {
+  for (const mode of GATE_MODES) {
+    for (const buildFork of ['true', 'false']) {
+      const arms = await probeTags(mainJsxSource, {
+        tag: 'OwnerEmptyStateKeyNote',
+        imports: NOTE_IMPORTS,
+        bindings: { ...WIRING_BINDINGS, isBuildFork: buildFork, connectGate: `{ mode: '${mode}', key: null }` },
+      })
+      assert.equal(arms.length, 2, `two owner arms expected — got ${arms.length}`)
+      for (const arm of arms) {
+        const expectedLive = ownerKeyLive(mode)
+        assert.equal(arm.props.keyLive, expectedLive,
+          `${arm.props.variant}/${mode}/buildFork=${buildFork}: keyLive must be ownerKeyLive(gate.mode) — effective props were ${JSON.stringify({ buildFork: arm.props.buildFork, connectGateMode: arm.props.connectGateMode, keyLive: arm.props.keyLive })}`)
+        assert.equal(arm.props.connectGateMode, mode, 'the gate mode must reach the card unchanged')
+        assert.equal(arm.props.buildFork, buildFork === 'true', 'the fork fact must reach the card as a boolean')
+        if (!expectedLive) {
+          assert.ok(!/API key(s)? (is|are) live/.test(arm.html),
+            `${mode}: no live-key claim over a gate that holds no usable key — got ${arm.html}`)
+        }
+        if (buildFork === 'true') {
+          assert.ok(!/connect your agent/.test(arm.html),
+            `build fork: no route clause may render (its step 2 is the SDK block) — got ${arm.html}`)
+        } else {
+          assert.ok(/connect your agent/.test(arm.html),
+            `self fork: the card must name the connect route — got ${arm.html}`)
+        }
+      }
+    }
+  }
+})
+
+test('#4637 wiring: each member arm RENDERS its fork’s lead-in at the real call site', async () => {
+  const fragments = extractAll(stripComments(mainJsxSource), /<>\{isBuildFork[\s\S]*?<\/>/,
+    'the member fork fragments')
+  assert.equal(fragments.length, 3, `three member arms expected — got ${fragments.length}`)
+  for (const fragment of fragments) {
+    for (const buildFork of ['true', 'false']) {
+      const [rendered] = await evalExpressions(fragment, {
+        imports: { ...NOTE_IMPORTS, REENTRY_BUILD_LEAD_IN: NOTE_MODULE, REENTRY_SELF_LEAD_IN: NOTE_MODULE,
+          REENTRY_KEYED_LEAD_IN: NOTE_MODULE, GRAPH_MISSING_BUILD_LEAD_IN: NOTE_MODULE,
+          GRAPH_MISSING_SELF_LEAD_IN: NOTE_MODULE },
+        bindings: { isBuildFork: buildFork },
+      })
+      const html = String(rendered.html)
+      if (buildFork === 'true') {
+        assert.ok(!/connect your agent/.test(html),
+          `build fork: a member arm may not read the route clause — got ${html}`)
+      } else {
+        assert.ok(/connect your agent/.test(html),
+          `self fork: a member arm must read the route clause — got ${html}`)
+      }
+    }
+  }
+})
+
+test('#4637 wiring: the re-entry API Keys affordance is the module derivation, evaluated', async () => {
+  const call = extractOne(stripComments(mainJsxSource), /keyTabAffordance\(\{[^}]*\}\)/,
+    'the re-entry API Keys affordance call')
+  const states = [
+    { snippetKey: "'stale-reveal'", connectGate: "{ mode: 'mint' }", expected: true,
+      why: 'a stale in-memory reveal must not withhold the affordance the no-key clause names' },
+    { snippetKey: 'null', connectGate: "{ mode: 'mint' }", expected: true,
+      why: 'a key-less organization keeps the affordance' },
+    { snippetKey: "'stale-reveal'", connectGate: "{ mode: 'loading' }", expected: true,
+      why: 'an unresolved keys read must not withhold it either' },
+    { snippetKey: "'k'", connectGate: "{ mode: 'embed' }", expected: false,
+      why: 'a live key needs no keys-tab detour' },
+    { snippetKey: "'stale-reveal'", connectGate: "{ mode: 'existing' }", expected: false,
+      why: 'the Organization holds a usable key' },
+  ]
+  for (const state of states) {
+    const [result] = await evalExpressions(call, {
+      imports: { keyTabAffordance: NOTE_MODULE },
+      bindings: { snippetKey: state.snippetKey, connectGate: state.connectGate },
+    })
+    assert.equal(result.value, state.expected,
+      `${state.connectGate} + snippetKey=${state.snippetKey}: ${state.why} — got ${result.value}`)
+  }
+})
+
+test('#4637 wiring: the graph-missing snippet branch opens on the gate’s held key', async () => {
+  const card = extractOne(stripComments(mainJsxSource),
+    /<h2>Continue setting up[\s\S]*?<pre className="snippet">/, 'the graph-missing snippet region')
+  // ONE branch decision between the card heading and the snippet: a planted decoy
+  // condition would have to sit inside this region and would trip this count
+  // rather than give the real (broken) guard a second chance to match.
+  assert.equal((card.match(/\?\s*\(/g) || []).length, 1,
+    'exactly one branch decision governs the snippet')
+  const testMatch = card.match(/\{([^{}]+?)\s*\?\s*\(/)
+  assert.ok(testMatch, 'the snippet branch truth test must be extractable')
+  const truthTest = testMatch[1]
+  const bindings = { snippetKey: "'stale-reveal'", keyIsLive: 'false', isBuildFork: 'true' }
+  const [withKey] = await evalExpressions(truthTest,
+    { bindings: { ...bindings, connectGate: "{ mode: 'embed', key: 'tt_live' }" } })
+  const [withoutKey] = await evalExpressions(truthTest,
+    { bindings: { ...bindings, connectGate: '{ mode: "mint", key: null }' } })
+  assert.ok(withKey.value,
+    `the snippet branch must open when the gate holds the plaintext — ${truthTest} evaluated to ${withKey.value}`)
+  assert.ok(!withoutKey.value,
+    `the snippet branch must stay closed when the gate holds nothing — ${truthTest} evaluated to ${withoutKey.value}`)
+})
+
+test('#4637 wiring: the snippet-branch call to action is fork-derived at the call site', async () => {
+  const call = extractOne(stripComments(mainJsxSource), /graphMissingCta\(([^()]*)\)/,
+    'the snippet-branch CTA call')
+  const arg = call.match(/graphMissingCta\(([^()]*)\)/)[1]
+  // Adversarial bindings: a re-derivation such as `wizardFork === 'build'` must
+  // not pass the boolean the shared predicate would produce here.
+  const bindings = { wizardFork: "'self'", connectGate: "{ mode: 'mint', key: 'tt_live' }",
+    snippetKey: "'stale-reveal'", keyIsLive: 'false' }
+  const [asBuild] = await evalExpressions(arg, { bindings: { ...bindings, isBuildFork: 'true' } })
+  const [asSelf] = await evalExpressions(arg, { bindings: { ...bindings, isBuildFork: 'false' } })
+  assert.equal(asBuild.value, true,
+    `the CTA argument must be the fork fact — ${arg} evaluated to ${asBuild.value} on a build fork`)
+  assert.equal(asSelf.value, false,
+    `the CTA argument must be the fork fact — ${arg} evaluated to ${asSelf.value} on a self fork`)
+  const [rendered] = await evalExpressions(call,
+    { imports: { graphMissingCta: NOTE_MODULE }, bindings: { ...bindings, isBuildFork: 'true' } })
+  assert.ok(!/Connect your agent/.test(String(rendered.value)),
+    `the snippet-branch CTA on a self fork must not offer the build fork's own route — got ${rendered.value}`)
+})
+
+test('#4637: keyTabAffordance is a function of the GATE, not the in-memory reveal', () => {
+  for (const mode of ['embed', 'existing']) {
+    assert.equal(keyTabAffordance({ snippetKey: 'stale-reveal', connectGate: { mode } }), false,
+      `mode ${mode}: the gate holds a usable key, so no keys-tab detour`)
+  }
+  for (const mode of ['mint', 'loading', 'error', 'nonsense', null]) {
+    assert.equal(keyTabAffordance({ snippetKey: 'stale-reveal', connectGate: { mode } }), true,
+      `mode ${mode}: the gate holds no usable key, so the affordance must be there`)
+  }
+  assert.equal(keyTabAffordance({ snippetKey: null, connectGate: { mode: 'mint' } }), true,
+    'a key-less organization keeps the affordance')
+})
+
+test('#4637: ownerCardProps derives keyLive from the gate and nothing else', () => {
+  for (const mode of GATE_MODES) {
+    assert.deepEqual(ownerCardProps({ variant: 'reentry', isBuildFork: true, connectGate: { mode } }),
+      { variant: 'reentry', buildFork: true, connectGateMode: mode, keyLive: ownerKeyLive(mode) },
+      `mode ${mode}: the prop set is the gate derivation`)
+  }
+  assert.equal(ownerCardProps({ variant: 'x', isBuildFork: undefined, connectGate: { mode: 'mint' } }).buildFork, false,
+    'the fork prop is a boolean, never an undefined passthrough')
 })
 
 // The stripper this file's pins run on must actually close the prose hole: a
