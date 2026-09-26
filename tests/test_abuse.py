@@ -699,9 +699,9 @@ class _FaultStore:
     faults it ONCE and then delegates to the real store — which is what lets a
     test observe what a failed call LEFT BEHIND (both "toward suspension" lanes
     are about retained state, not about the one return value) and still
-    evaluate the same rule again. A permanent fault would make the follow-up
-    read fail for an unrelated reason, so the retained-state claim would pass
-    vacuously.
+    evaluate the same rule again. A permanent fault would still be firing on
+    that follow-up, so the follow-up would fail for a reason unrelated to the
+    retained state the test pins — a false RED, not a vacuous pass.
     """
 
     class _Boom(Exception):
