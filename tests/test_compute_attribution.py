@@ -211,8 +211,16 @@ class TestBoundedCardinality:
 
     def test_label_repair_makes_control_chars_and_surrogates_emittable(self):
         """Not a tautology: the RAW exposition is inspected. Deleting the
-        translation would leave a literal newline/NUL/CSI inside the ``org="``
-        value, which the scoped regex (``[^}]`` crosses a newline) still sees."""
+        translation would leave a NUL or CSI inside the ``org="`` value, which the
+        scoped regex (``[^}]`` crosses a newline) still sees.
+
+        The newline half is pinned on the STORED KEY, not the exposition, because
+        that is where it does work: ``prometheus_client`` 0.26.0 (measured) already
+        escapes a newline in the wire text, so the regex recovers the two
+        characters ``\\`` and ``n`` and a "no newline in the value" assertion on
+        the exposition can never fire — the 0x0A entry would be unguarded while the
+        suite stayed green.
+        """
         raw = "org\n\x00\x9b\ud800x"
         monitoring.record_compute(raw, "/v1/x\n", 0.1)
         from prometheus_client import generate_latest
@@ -220,11 +228,16 @@ class TestBoundedCardinality:
         org_values = set(re.findall(r'tortoise_compute_\w+\{[^}]*org="([^"]*)"', text))
         assert org_values, text[:300]
         for value in org_values:
-            assert "\n" not in value
+            # NUL and CSI genuinely survive the exposition unescaped, so these
+            # are what makes the translation load-bearing.
             assert "\x00" not in value
             assert "\u009b" not in value
             assert "\ud800" not in value
-        assert monitoring.compute_by_org(), "the repaired label is a real child"
+        keys = set(monitoring.compute_by_org())
+        assert keys, "the repaired label is a real child"
+        for key in keys:
+            assert "\n" not in key, "a line break reached the stored series key"
+            assert "\x00" not in key
 
 
 # ── the middleware ──────────────────────────────────────────────────────
