@@ -230,9 +230,21 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
     # ISSUED **during the capture**, not against a restatement of the
     # counter's own definition (``total`` is BY CONSTRUCTION
     # ``sum(by_phase)``, so that comparison moves both sides together and
-    # cannot fail). ``measured`` is exact, not a bound: within an active
-    # capture phase every guarded query is recorded, so equality is the right
-    # assertion and a double count lands on exactly 2x.
+    # cannot fail).
+    #
+    # Equality is the right assertion *for this capture*, but not because every
+    # guarded query is metered — two paths are deliberately unmetered and this
+    # capture happens to take neither:
+    #   * a refused bulk wipe is checked BEFORE the choke point
+    #     (``projection._assert_test_graph``) and is not work the capture
+    #     caused, so it is counted by the oracle and not by the meter;
+    #   * ``record_graph_op`` is fail-soft (``except Exception`` → WARNING), so
+    #     a drop is possible by design.
+    # The honest form of the claim is therefore: every guarded query that
+    # REACHES ``record_graph_op`` is recorded, and it neither drops nor doubles
+    # for this capture. If a future capture issues a refused wipe, this REDs
+    # with an under-count on a correct meter — so read the failure before
+    # assuming the meter is wrong.
     assert ops["total"] == measured, (
         f"{ops['total']} ops recorded for {measured} guarded queries issued "
         "during the capture — a double count at the choke point shows exactly "
