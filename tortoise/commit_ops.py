@@ -87,17 +87,15 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     MITIGATES target triples to the re-derived ids, else Layer-1 referential
     integrity fails", #1272).
 
-    ⚠️ Scope, stated honestly (an earlier revision of this docstring claimed
-    the hosted path was immune — it is NOT, and the claim was falsified by the
-    #4716 PR review; **#4970** carries the residual): the hosted commit (``hosted_api._execute_commit_writes`` §5/§7)
-    passes the RAW payload ``Operator`` models and creates its points with
-    ``create_point(..., dedup=True)``, whose internal re-key to an
-    existing-content node is NOT fed back into the operator refs — so a graph
-    holding the point's content under a non-``pt_`` id reproduces the identical
-    silent drop on the hosted lane. Wiring the remap there is a separate
-    change (it needs §5 to surface the resolved ids); #4716 deliberately scopes
-    this helper's CALL SITE to the capture commit, not its correctness claim to
-    the hosted lane.
+    ⚠️ Scope (updated by **#4970**): BOTH write paths now wire this remap —
+    the call site is no longer capture-only. The hosted commit
+    (``hosted_api._execute_commit_writes`` §5/§7) used to pass the RAW payload
+    ``Operator`` models while its ``create_point(..., dedup=True)`` re-keyed
+    to an existing-content node, so the refs named nothing and the edge
+    dropped silently (#4654). #4970 closed that residual: the hosted §5 point
+    loop surfaces the id ``create_point`` actually RESOLVED to (its
+    ``commit_point_id_map`` payload→graph map) and §7 passes the refs through
+    THIS helper — the same graph-id precondition the capture commit satisfies.
 
     Pure and total: only refs present in ``id_map`` are rewritten, everything
     else (graph ids, event ids, empty refs) passes through untouched — so an
@@ -106,6 +104,15 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     ``commit_schema`` Operator models; rewritten entries are copies, entries
     needing no change are returned as the original object, and the INPUTS are
     never mutated in place.
+
+    ⛔ Caller contract — the map MUST be keyed by PAYLOAD ids. The hosted §5
+    map also keys ``pr.supersede_id`` on a ``supersede`` reconcile action (the
+    server-recomputed successor id), so that action's payload id — which is
+    the PRIOR node's graph id — resolves to the SUCCESSOR. That is deliberate
+    and consistent with ``supersede_point``'s own edge transfer (an operator
+    edge on a superseded point belongs to its successor), and is pinned by
+    ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
+    test_supersede_operator_ref_follows_the_successor``.
     """
     if not id_map:
         return list(operators or [])
@@ -138,6 +145,42 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
         else:
             out.append(op.model_copy(update=updates))
     return out
+
+
+def reverse_point_id_map(id_map: dict) -> dict:
+    """Invert a payload-id → resolved-graph-id map for reason lookups.
+
+    ``apply_payload_operators`` resolves a MITIGATES reason from the SAME ref
+    it passes to ``sdk.mitigate_operator`` — but that ref has already been
+    remapped into GRAPH-id space, while the caller's content lookup is keyed
+    by PAYLOAD id. Handing the helper the naive resolver then degrades a
+    re-keyed dampener's reason to its bare graph id (#4716 review P1,
+    reproduced end-to-end). This builds the reverse lookup both write paths
+    pass as ``point_content_by_id``.
+
+    **FIRST payload id wins** when several ids resolved to one graph node
+    (``setdefault`` over the map's insertion order). The rule is stated HERE,
+    once, so the two call sites cannot drift on it — and the rule is
+    LOAD-BEARING, not cosmetic:
+
+    * On the **capture** path the fold guarantees equal normalized content
+      when two payload points resolved to one node, so either winner yields
+      the same reason TEXT.
+    * On the **hosted supersede** path the two keys are ``pr.point.id`` (a
+      payload point) and ``pr.supersede_id`` (a server-recomputed id with NO
+      entry in ``payload.points``). There the winner CHANGES the reason text:
+      if ``supersede_id`` won, ``_point_content_by_id`` would find nothing and
+      the MITIGATES reason would degrade to the bare graph id — exactly the
+      #4716 review-P1 degradation this helper exists to prevent. So the
+      hosted §5 map MUST insert ``pr.point.id`` BEFORE ``pr.supersede_id``
+      (``hosted_api.py`` §5) — pinned by
+      ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
+      test_supersede_mitigation_reason_is_the_payload_content``.
+    """
+    reverse: dict[str, str] = {}
+    for payload_id, resolved_id in (id_map or {}).items():
+        reverse.setdefault(resolved_id, payload_id)
+    return reverse
 
 
 def remap_supersession_point_refs(records: list, id_map: dict) -> list:

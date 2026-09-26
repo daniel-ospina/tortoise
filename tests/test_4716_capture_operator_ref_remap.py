@@ -11,11 +11,12 @@ graph id named nothing: ``create_operator`` raised and
 missing?)`` — the silent edge drop of #4654.
 
 The fix restores, on the v2 capture path, the invariant the v1 payload builder
-``_stream_to_payload`` already enforces (#1272). It is scoped to the capture
-commit — a scope decision made after the #4716 review **falsified** the earlier
-claim that the hosted commit was immune: the hosted lane passes the raw payload
-``Operator`` models and its ``create_point(dedup=True)`` re-key is not fed back
-into the operator refs, so it reproduces the same drop (tracked in #4970).
+``_stream_to_payload`` already enforces (#1272). The #4716 review **falsified**
+an earlier claim that the hosted commit was immune: its re-key was then not fed
+back into the operator refs, and that residual — tracked in #4970 — is now
+CLOSED. The hosted §5 point loop surfaces the resolved ids and §7 passes the
+refs through the SAME shared ``commit_ops`` helpers these tests cover, so both
+write paths satisfy the graph-id precondition.
 
 These tests drive the REAL capture commit (``sdk.capture_session`` →
 ``_extract_session_v2``) with the extractor seam monkeypatched to a fixed
