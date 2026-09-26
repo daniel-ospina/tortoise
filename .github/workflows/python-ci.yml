@@ -328,6 +328,17 @@ jobs:
         # are drift-checked; tests/e2e/ is deliberately exempt
         # (welcome-e2e-monitor + legal-e2e + ENV_BROKEN_FILES cover those 17).
         run: python3 tools/ci_selection.py --integrity
+      - name: "Registry integrity (union merge fails closed, #5373)"
+        # `config/ci-surfaces.yml` and `config/surface-manifest.yml` carry
+        # `merge=union` in .gitattributes: two lanes appending a new entry to the same
+        # anchor no longer produce a manual conflict, and union is a git BUILT-IN, so
+        # no clone needs driver config. But union is LINE-level and will just as
+        # happily emit a duplicate mapping key or a duplicate entry — and
+        # `yaml.safe_load` silently keeps the LAST duplicate, so no existing consumer
+        # can see it. This step is the validator that pairing requires: a duplicate
+        # key, a duplicate entry, or a malformed document FAILS here. Fail-closed,
+        # <1s, no dependency beyond the pyyaml installed above.
+        run: python3 tools/registry_integrity.py
 
   test:
     # #880: split into two parallel halves (matrix). The fast suite's pytest

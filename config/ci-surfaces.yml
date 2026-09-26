@@ -149,6 +149,11 @@ surfaces:
   # `docs/product/sdk-surface-declaration.md`, and `tools/` + `docs/` are non-python
   # prefixes, so a generator-only edit would otherwise select NO surface.
   - test_sdk_surface.py
+  # #5373: the `merge=union` registry validator's fail-closed proof. Dual-registered
+  # with `core` for the same reason as test_bridge_table.py above — `tools/registry_integrity.py`
+  # is named in SOURCE_PATTERNS["api"], so a VALIDATOR-only edit selects `api` and runs
+  # this proof; `core` is the docs/default surface for the registries it guards.
+  - test_registry_integrity.py
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
@@ -536,6 +541,7 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  - test_registry_integrity.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
@@ -550,12 +556,12 @@ surfaces:
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
-  # `docs/product/beta-sdk-surface.md`,
-  # `docs/product/canonical-sdk-methods.md`, or the GENERATED
-  # `docs/product/sdk-rename-table.md` selects NO surface at all (#4454), so this
-  # registration does not run for a docs-only change. A hand-edit of the GENERATED
-  # document is therefore UNGUARDED BY DESIGN (#4454); the drift gate exists only
-  # for the generator path.
+  # `docs/product/beta-sdk-surface.md` or
+  # `docs/product/canonical-sdk-methods.md` selects NO surface at all (#4454), so
+  # this registration does not run for a docs-only change — a hand-edit of those two
+  # TRACKED docs is therefore UNGUARDED BY DESIGN (#4454). The GENERATED
+  # `docs/product/sdk-rename-table.md` is a different case: NOT committed (#5373 —
+  # gitignored, generated on demand), so no hand-edited copy can appear in a PR.
   - test_sdk_rename_table.py
   # #4282 Phase 0.4 + 1.1: dual-registered with `api` for the same reason — `api` is keyed on
   # SOURCE PATTERNS, and the files this guard protects are not api-owned: `tools/sdk_surface.py`

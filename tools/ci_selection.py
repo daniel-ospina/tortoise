@@ -500,8 +500,9 @@ SOURCE_PATTERNS = {
             # (registered in `api` AND `core`) is the drift gate. Same gap as the
             # bridge table above: `tools/` is in NON_PYTHON_PREFIXES, so a
             # generator-only edit selected NO surface and the gate never ran on
-            # the PR that can break it. A docs-only hand-edit of the generated
-            # file still skips the matrix by the docs-PR policy (tortoise #4454).
+            # the PR that can break it. The generated doc is NOT committed (#5373:
+            # gitignored, generated on demand), so no hand-edited copy can appear
+            # in a PR for the docs-PR policy to skip.
             "tools/sdk_rename_table.py",
             # #4282 Phase 0.4 + 1.1: `tools/sdk_surface.py` derives the declared
             # `TortoiseSDK` public surface and GENERATES `config/sdk-surface.json` +
@@ -511,7 +512,17 @@ SOURCE_PATTERNS = {
             # selected NO surface and the gate never ran on the PR that can break it.
             # A docs-only hand-edit of the generated doc still skips the matrix by the
             # repo's deliberate docs-PR policy (tortoise #4454).
-            "tools/sdk_surface.py"),
+            "tools/sdk_surface.py",
+            # #5373: `tools/registry_integrity.py` is the fail-closed validator
+            # paired with `merge=union` on the two config registries, and
+            # `test_registry_integrity.py` (dual-registered in `api` AND `core`)
+            # is its proof. Same gap as the generators above: `tools/` is in
+            # NON_PYTHON_PREFIXES, so a validator-only edit selected NO surface
+            # (`surfaces: []`, `full: false`) and the fail-closed proof never ran
+            # on precisely the edit that can neuter it — the #1349/#3332/#3616
+            # silent-drop class. The registry it guards is config/, not api-owned,
+            # which is why the test is ALSO registered in `core`.
+            "tools/registry_integrity.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
@@ -945,13 +956,15 @@ def duplicate_entries(manifest: dict) -> list[str]:
 
     `select()` unions surfaces, so a same-surface duplicate is invisible to
     selection and to :func:`integrity` (which only asks "is it classified?").
-    Surfaced as a non-fatal `--integrity` note rather than a gate failure — the
-    duplicate is a manifest edit to clean up, and the gate must stay green while
-    it is. Cross-surface (dual) registration is deliberate; only same-surface
-    repeats are reported.
+
+    #5373: this is a GATE FAILURE, not a note. `config/ci-surfaces.yml` carries
+    `merge=union`, which keeps BOTH sides' lines for a conflicting hunk — so a
+    duplicate same-surface entry is exactly what union emits when two lanes append
+    the same registration, and a note would let it in silently. Cross-surface (dual)
+    registration is still deliberate; only same-surface repeats are reported.
 
     Each offending name is reported ONCE however many times it repeats, so the
-    note's count is a count of distinct problems.
+    count is a count of distinct problems.
     """
     dupes: list[str] = []
     for surface, files in manifest.get("surfaces", {}).items():
@@ -2227,7 +2240,7 @@ def main() -> int:
         # raise at all.)
         problems = missing + slow_file_issues(manifest) \
             + duration_issues(manifest) + leg_coverage_issues(manifest) \
-            + duration_coverage_issues(manifest)
+            + duration_coverage_issues(manifest) + duplicate_entries(manifest)
         # #1472: the matrix rows must come from the selector derivation
         # (space-joined matrix_* outputs) — when they do, the #1266
         # halves-parse tie check is
@@ -2253,10 +2266,6 @@ def main() -> int:
             sample = ", ".join(absent[:8])
             print(f"⚠️  {len(absent)} manifest fast files are in NO half "
                   f"(full-matrix coverage hole, #1266): {sample} …")
-        dupes = duplicate_entries(manifest)
-        if dupes:
-            print(f"⚠️  {len(dupes)} duplicate manifest entr(y/ies) — invisible "
-                  f"to select(), #2913: {', '.join(dupes)}")
         print("✅ integrity: all test files classified; slow_files consistent; halves consistent")
         return 0
 
