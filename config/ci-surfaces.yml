@@ -71,7 +71,12 @@ surfaces:
   - test_notify_offloop_4456.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
-  - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  - test_metering_window_admission.py  # #3981: the seven swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  # #4488: embedding-encode measurement. Dual/triple-registered with `core` and
+  # `eval`: the hook lives in tortoise/embeddings.py (an `eval`-owned module) and
+  # the writer in tortoise/metering.py, so a change to EITHER must run it — a
+  # registration in only one surface would leave the other silently unguarded.
+  - test_embed_metering.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
   # tortoise/hosted_api.py-only change would otherwise never run this file — which
@@ -604,6 +609,7 @@ surfaces:
   # (dual-registered) file, not this one.
   - test_dry_run_preview.py
   - test_cmux_dispatch.py
+  - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_embedder_provision.py
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_embedded_evidence.py
@@ -1513,6 +1519,9 @@ surfaces:
   - test_cross_lens.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  # #4488: triple-registered (api/core/eval) — this surface owns
+  # tortoise/embeddings.py, where the encode hook lives.
+  - test_embed_metering.py
   # #2517 (C4): the source-session re-injection rules + E2E — dual-registered
   # because a change to tools/longmem_eval/ selects `eval`, and the arm is
   # wired there (the hermetic rules leg also passes in the eval lane).

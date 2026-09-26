@@ -1,6 +1,6 @@
-"""#3981 — the metering-window raise is a SIGNAL; the six absorbing call sites each report an unmetered increment.
+"""#3981 — the metering-window raise is a SIGNAL; the seven absorbing call sites each report an unmetered increment.
 
-THE COVERAGE PROOF IS COMPLETENESS — SIX SITES, NOT FOUR
+THE COVERAGE PROOF IS COMPLETENESS — SEVEN SITES, NOT FOUR
 --------------------------------------------------------
 #3825 made ``metering._require_period`` raise ``QuotaCheckError`` when an org's
 metering window is unresolvable, and its docstring claimed that refusal "REFUSES
@@ -8,7 +8,7 @@ the user write". It does not: **every** production caller wraps the ``record_*``
 call in a broad ``except`` and absorbs the raise, so the request is served and
 the increment is dropped — the pre-#3825 behaviour with a louder module log.
 #3981's fix (owner ruling: proceed-and-alert) leaves the pre-spend admission gate
-untouched; the six absorbing call sites below each emit a lane-naming ERROR record
+untouched; the seven absorbing call sites below each emit a lane-naming ERROR record
 and report an unmetered increment:
 
   1. ``hosted_api._record_write_op``        → lane=write_op
@@ -17,11 +17,20 @@ and report an unmetered increment:
   4. ``hosted_api.create_subject``          → lane=subject_write_op
   5. ``mcp_server._quota_gated`` (inner)    → lane=mcp_write_op
   6. ``ask_lane.run_ask_lane`` step 7        → lane=ask_ledger
+  7. ``embed_metering._report``             → lane=embed  (#4488)
+
+Site 7 is #4488's embedding-encode measurement: its ``flush_tally`` absorbs a
+failed increment (and an unattributable non-empty tally) and reports it on the
+``embed`` lane. Its census depends on the call FORM — ``_report`` passes
+``lane=`` as a KEYWORD, because the fence below matches only that form. A
+positional call would make the lane invisible here, which is the opposite of
+the intent, so the form is load-bearing. (``ask_ledger`` is censused by the
+same regex and shares this property — the embed lane is not unique in it.)
 
 Sites 3 and 4 are the two the issue body missed. They are a *second-line*
 handler around the already-absorbing ``_record_write_op``: normal traffic
 signals as lane=write_op and reaches them only if the inner helper itself
-raises. The owner's six-site requirement counts the HANDLERS, and the
+raises. The owner's SEVEN-site requirement counts the HANDLERS, and the
 correctness proof is that no handler is a silent ``pass`` — so an uncovered
 one would be a silent drop exactly like the original defect.
 
@@ -73,8 +82,8 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_metering_period_window import _anchor, reg_org  # noqa: F401
 
-#: The six swallow sites → the lane token each must report. The inventory is
-#: asserted against source in ``test_the_six_swallow_sites_are_the_six_lanes``.
+#: The seven swallow sites → the lane token each must report. The inventory is
+#: asserted against source in ``test_the_seven_swallow_sites_are_the_seven_lanes``.
 SITE_LANES: dict[str, str] = {
     "write_op": "tortoise/hosted_api.py",
     "capture_ledger": "tortoise/hosted_api.py",
@@ -82,6 +91,14 @@ SITE_LANES: dict[str, str] = {
     "subject_write_op": "tortoise/hosted_api.py",
     "mcp_write_op": "tortoise/mcp_server.py",
     "ask_ledger": "tortoise/ask_lane.py",
+    # #4488: the embed lane's own swallow site. ``flush_tally`` reports a
+    # WINDOW-UNRESOLVABLE drop and a tally with no resolvable org here. Two
+    # drops do NOT reach this site and are NOT silent-by-this-lane: a failure
+    # of the increment RPC itself is absorbed at WARNING inside
+    # ``metering.record_embedding_usage`` (the shared #3824 residual), and a
+    # note landing after the tally was consumed is the declared
+    # capture-cancellation residual. Same ruling, seventh lane.
+    "embed": "tortoise/embed_metering.py",
 }
 
 _SUPABASE_URL = "https://n3981.test.supabase.co"
@@ -419,10 +436,10 @@ def test_capture_ledger_drop_is_signalled(caplog, monkeypatch):
 def test_create_object_drop_is_signalled(hosted, monkeypatch, caplog):
     """``create_object`` wraps ``_record_write_op`` in its own guard — one of
     the two handlers the issue body missed, and one of the owner's declared
-    six. It is a SECOND-LINE guard: ``_record_write_op`` already absorbs and
+    seven. It is a SECOND-LINE guard: ``_record_write_op`` already absorbs and
     signals its own failures, so normal production traffic is reported as
     lane=write_op and reaches this handler only if the inner helper itself
-    raises (an import fault, a future refactor). The owner's six-site proof
+    raises (an import fault, a future refactor). The owner's seven-site proof
     counts the HANDLERS, so this one must not be a silent ``pass`` either.
 
     REDs on: reverting this guard to ``except Exception: pass`` (no
@@ -557,19 +574,25 @@ def test_ask_ledger_drop_is_signalled(caplog, monkeypatch, tmp_path):
 # ── The completeness fence ─────────────────────────────────────────────────
 
 
-def test_the_six_swallow_sites_are_the_six_lanes():
+def test_the_seven_swallow_sites_are_the_seven_lanes():
     """The correctness proof for #3981 IS coverage completeness, so pin the
     inventory against the SOURCE — not against this module's own dict (a bare
-    ``len(SITE_LANES) == 6`` is tautological: it counts a literal three lines
+    ``len(SITE_LANES) == 7`` is tautological: it counts a literal three lines
     above it and cannot fail). The scan covers every lane token passed through
     the two lane-carrying helpers — ``_alert_unmetered("<lane>", ...)`` and
     ``report_unmetered_increment(lane="<lane>", ...)``; the (file, lane) pairs
-    actually emitted must equal the declared six. A seventh site routed through
+    actually emitted must equal the declared seven. A site routed through
     either helper, a renamed token, or a deleted alert turns this RED.
 
-    (A seventh silent swallow reusing an EXISTING lane token is not detectable
-    by this fence; it is caught by review, and the six lanes above are the
-    declared surface.)
+    (#4488 added the seventh lane, ``embed``, when embedding-encode
+    measurement became its own swallow site. The census matches only the
+    ``lane=`` KEYWORD form, which is why ``embed_metering._report`` calls it
+    that way: a positional call would make the new lane invisible here —
+    the opposite of the intent.)
+
+    (A silent swallow reusing an EXISTING lane token is not detectable by this
+    fence; it is caught by review, and the seven lanes above are the declared
+    surface.)
     """
     root = Path(__file__).resolve().parents[1]
     emitted: set[tuple[str, str]] = set()

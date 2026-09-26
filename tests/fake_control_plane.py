@@ -280,6 +280,68 @@ class FakeControlPlane:
                              "capture_calls": calls,
                              "capture_cost_usd": cost})
             return None
+        if fn == "metering_increment_embedding":
+            # #4488: the embed lane's additive upsert on the SAME
+            # ``(org_id, period_start)`` row (migration 20260925000003). The
+            # fake models the sticky/paired/skip-safe mixed rule EXACTLY as the
+            # SQL does, so a test can tell "the window used two encoders" from
+            # "the window used one" and from "a skip-only flush erased it".
+            p = body or {}
+            # Mirror the SQL's degenerate-window guard: the real RPC RAISES
+            # before the INSERT, so without this the fake would accept a window
+            # production refuses, and a test would pass on behaviour that cannot
+            # happen (the SQL never executes in CI — this fake is the only
+            # behavioural proxy for the lane).
+            _ps, _pe = _as_dt(p.get("p_period_start")), _as_dt(
+                p.get("p_period_end"))
+            if _ps is not None and _pe is not None and _pe <= _ps:
+                raise RuntimeError(
+                    "metering_increment_embedding: period_end must be after "
+                    "period_start")
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 0)
+            texts = int(p.get("p_texts") or 0)
+            chars = int(p.get("p_chars") or 0)
+            wall = float(p.get("p_wall_ms") or 0.0)
+            skipped = int(p.get("p_skipped") or 0)
+            model = p.get("p_model")
+            revision = p.get("p_revision")
+            if row:
+                mixed = bool(row.get("embed_identity_mixed"))
+                if p.get("p_identity_mixed"):
+                    mixed = True
+                if (row.get("embed_model") is not None and model is not None
+                        and (row.get("embed_model") != model
+                             or row.get("embed_revision") != revision)):
+                    mixed = True
+                row["embed_identity_mixed"] = mixed
+                row["embed_calls"] = row.get("embed_calls", 0) + calls
+                row["embed_texts"] = row.get("embed_texts", 0) + texts
+                row["embed_chars"] = row.get("embed_chars", 0) + chars
+                row["embed_wall_ms"] = (float(row.get("embed_wall_ms") or 0.0)
+                                       + wall)
+                row["embed_skipped"] = row.get("embed_skipped", 0) + skipped
+                # None must NOT erase the stored identity (skip-safe).
+                if model is not None:
+                    row["embed_model"] = model
+                if revision is not None:
+                    row["embed_revision"] = revision
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "embed_calls": calls, "embed_texts": texts,
+                             "embed_chars": chars, "embed_wall_ms": wall,
+                             "embed_skipped": skipped, "embed_model": model,
+                             "embed_revision": revision,
+                             "embed_identity_mixed": bool(
+                                 p.get("p_identity_mixed"))})
+            return None
         if fn == "metering_cohort_spend":
             # #3665/#3825: the SQL aggregate — one scalar, so no row cap can
             # truncate it (the reason it is an RPC and not a filtered read).

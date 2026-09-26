@@ -34,6 +34,7 @@ from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
 # ``hosted_api`` import — that import is ~1.7 s and builds the whole hosted
 # FastAPI app — and a patch of the canonical constant reaches this surface.
 from tortoise import mcp_auth as _mcp_auth
+from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 
 _log = logging.getLogger(__name__)
 
@@ -991,12 +992,32 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
-        result = fn(*args, **kwargs)
         try:
             from tortoise.mcp_auth import _current_org_id
             org_id = _current_org_id.get()
         except Exception:  # noqa: BLE001, RUF100 — no org context; metering is skipped
             org_id = None
+        # #4488: own a FRESH embedding-encode tally for this tool call, so the
+        # encodes it performs are attributed even though no HTTP middleware wraps
+        # this lane. Fresh (never inherited) → it cannot double-count the hosted
+        # capture lane's tally, and an exception still flushes what was encoded.
+        # Resolved before the write so the tally knows its org from the start.
+        #
+        # ⛔ ARMED ONLY WHEN THERE IS AN ORG. On the stdio transport
+        # ``_current_org_id`` is legitimately None (_enforce_quota says so:
+        # "stdio/operator — no org context"), and every sibling writer exempts
+        # ``not org_id`` — ``record_embedding_usage`` included. Arming a tally
+        # with no org would make the write's encodes non-empty and
+        # unattributable, so ``flush_tally`` would fire an UNMETERED_INCREMENT
+        # incident on EVERY stdio write that encodes — a permanent false alarm
+        # about attribution on a lane that has no tenant BY DESIGN. Guarding
+        # here matches the write-op metering below (`if org_id:`) and the
+        # writer's own exemption contract.
+        if org_id:
+            with _embed_metering.meted(org_id):
+                result = fn(*args, **kwargs)
+        else:
+            result = fn(*args, **kwargs)
         # Metering (#681): best-effort, after successful write
         if org_id:
             try:

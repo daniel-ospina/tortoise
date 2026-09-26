@@ -44,6 +44,7 @@ import tortoise
 # #3834: the wait-bound vocabulary's single home — read as a module attribute so
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
+from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
@@ -63,6 +64,9 @@ from tortoise.capture_receipts import (  # #3809: ONE key definition
 )
 from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
+)
+from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
+    EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
@@ -1774,6 +1778,56 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
         _DREAM_TASKS[key] = asyncio.create_task(_dream_worker(org_id, key))
 
 
+def _embed_metered(fn):
+    """Wrap a work-OWNING runner so its embedding encodes are attributed (#4488).
+
+    A DECORATOR rather than a ``with`` block at each call site on purpose: these
+    runners are reached from more than one boundary (the REST route, the MCP
+    tool, an internal call), and only the RUNNER knows the org with certainty —
+    the internal-seed lanes never populate ``scope["state"]["org_id"]``, so a
+    middleware-only attribution would drop their work into an unattributable
+    tally and fire a spurious operator alert on every tenant provisioning.
+    (The SESSION lane does populate it — ``_session_user_org`` stamps it — but
+    the runners themselves are reached directly by MCP too.)
+
+    The tally is FRESH and flushed on exit (``embed_metering.meted``): a detached
+    unit can neither double-count a request-scoped tally nor leak one. An
+    exception still flushes whatever the runner encoded before it failed, and
+    never propagates a measurement fault. Async runners get the async arm, whose
+    flush is offloaded so the blocking ledger write cannot stall the loop.
+
+    The org is pulled from the runner's own ``org_id`` parameter by signature
+    bind, so a positional or keyword call both work.
+
+    Defined BEFORE its first use (``_dream_worker``) because a decorator is
+    evaluated at import time, in file order.
+    """
+    import functools
+    import inspect
+
+    sig = inspect.signature(fn)
+
+    def _org(args, kwargs):
+        try:
+            return sig.bind_partial(*args, **kwargs).arguments.get("org_id")
+        except TypeError:  # pragma: no cover — defensive
+            return None
+
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def _async_wrapper(*args, **kwargs):
+            async with _embed_metering.meted(_org(args, kwargs)):
+                return await fn(*args, **kwargs)
+        return _async_wrapper
+
+    @functools.wraps(fn)
+    def _sync_wrapper(*args, **kwargs):
+        with _embed_metering.meted(_org(args, kwargs)):
+            return fn(*args, **kwargs)
+    return _sync_wrapper
+
+
+@_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
     C5: key carries the graph (org_id, or org_id::<graph_namespace> for a
@@ -2220,6 +2274,7 @@ class InFlightMiddleware:
             workload_exit()
 
 
+app.add_middleware(_EmbedMeteringMiddleware)
 app.add_middleware(InFlightMiddleware)
 
 
@@ -4183,6 +4238,15 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # auth_ip event or counted toward R3 read velocity). Same best-effort
     # semantics as the key lanes — abuse telemetry never breaks auth.
     await _abuse_post_auth(request, org)
+    # #4488: publish the resolved org on the ASGI scope, exactly as the key
+    # lanes do (``hosted_api.py`` get_current_org / _get_current_org_supabase).
+    # This lane resolves the org WITHOUT stamping it, so an embed tally armed by
+    # ``EmbedMeteringMiddleware`` had no org to attribute to at flush time: every
+    # SESSION-authed write that encoded (POST /v1/points, /v1/objects,
+    # /v1/subjects) was dropped AND misreported as a bookkeeping fault
+    # (UNMETERED_INCREMENT on a perfectly resolvable org). Setting it here —
+    # before the handler runs — makes the org resolvable at the boundary.
+    request.state.org_id = org["org_id"]
     return org
 
 
@@ -4448,6 +4512,24 @@ async def get_current_org_gated(request: Request) -> dict:
     override = overrides.get(get_current_org)
     if override is not None:
         org = await _invoke_override(override, request)
+        # #4488: publish the resolved org on the ASGI scope, exactly as the
+        # real lanes do (``get_current_org`` :3864, ``_get_current_org_
+        # supabase`` :3982, ``_session_user_org`` :4248). This branch resolves
+        # an org WITHOUT stamping it, and an embed tally armed by
+        # ``EmbedMeteringMiddleware`` resolves its org at FLUSH time from
+        # exactly this key — so an unattributed tally filed a SPURIOUS
+        # UNMETERED_INCREMENT operator alert ("no resolvable org … the ledger
+        # will read short") for a capture whose org was never in doubt.
+        # There are TWO such branches, not one: the same hole existed on
+        # ``get_current_org_session`` below, which guards the encoding write
+        # routes (POST /v1/objects, /v1/subjects, /v1/points) — so both are
+        # stamped. Neither is reachable in production (nothing outside tests
+        # sets ``dependency_overrides``), but a test-only hole that files real
+        # operator alerts is still a hole.
+        # ``.get`` not ``[]``: an override is test-supplied and may return a
+        # bare dict; a missing id must not turn a metering lookup into a 500.
+        if org.get("org_id"):
+            request.state.org_id = org["org_id"]
         return org
     return await get_current_org(request)
 
@@ -4629,6 +4711,14 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
     override = overrides.get(get_current_org)
     if override is not None:
         org = await _invoke_override(override, request)
+        # #4488: publish here too — see the twin note on ``get_current_org_
+        # gated`` above. This branch guards the encoding WRITE routes
+        # (POST /v1/objects, /v1/subjects, /v1/points), so leaving it
+        # unpublishing kept the tally unattributable on exactly the routes the
+        # embed meter exists to measure. Guarded with ``.get`` for the same
+        # reason: an override may return a bare dict.
+        if org.get("org_id"):
+            request.state.org_id = org["org_id"]
         return org
     # Session JWT (eyJ...) — verify + resolve the user's org.
     user = await get_current_user(request)
@@ -5078,6 +5168,24 @@ class OrgInfoResponse(BaseModel):
     ask_tokens_in: int = 0
     ask_tokens_out: int = 0
     ask_cost_usd: float = 0.0
+    # #4488: per-org LOCAL EMBEDDING-ENCODE workload for the current period.
+    # WORKLOAD, not a price — nothing here can bill, cap or throttle (the
+    # issue's explicit out-of-scope list). Additive + defaulted, so every
+    # existing consumer of this response is unaffected; a fresh org reads
+    # zeros with a None identity (the MERGE creates the row on first write).
+    # ``embed_model``/``embed_revision`` travel WITH the figure so a reading
+    # can never be attributed to an encoder that did not run; a None identity
+    # with non-zero calls means the identity was never stamped.
+    embed_calls: int = 0
+    embed_texts: int = 0
+    embed_chars: int = 0
+    embed_wall_ms: float = 0.0
+    embed_skipped: int = 0
+    embed_model: str | None = None
+    embed_revision: str | None = None
+    #: Sticky: TRUE once two different encoder identities were seen in the
+    #: window. A figure that silently averaged two models would be unusable.
+    embed_identity_mixed: bool = False
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -6608,14 +6716,26 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
                 org["org_id"], exc_info=True)
             max_nodes = None
 
-    # Metering (#681): fetch write-op usage for the current billing period.
-    from tortoise.metering import get_current_usage
-    usage = get_current_usage(org["org_id"])
+    # Metering: write-op usage for the current billing period (#681), ask usage
+    # (#1987 Task 6) and embedding-encode workload (#4488). All three are
+    # SYNCHRONOUS ledger/control-plane reads, and each was previously run
+    # straight on the event loop. #4488 added the third, which is the clearest
+    # possible reason to move the GROUP off the loop rather than add another
+    # blocking hop to a route that is also under a 10s transport bound
+    # (`mcp_auth.py`). ONE offloaded hop for all three — the figures then come
+    # from the same moment, and the route does strictly less blocking work than
+    # before this PR rather than more. Found in review.
+    #
+    # All three degrade internally to a zero view (never raising), so the
+    # best-effort contract is unchanged by where they run.
+    from tortoise.metering import get_ask_usage, get_current_usage, get_embedding_usage
 
-    # #1987 Task 6: ask usage — best-effort read; any failure degrades to
-    # the zero-usage view (never 500).
-    from tortoise.metering import get_ask_usage
-    ask_usage = get_ask_usage(org["org_id"])
+    def _read_usage():
+        oid = org["org_id"]
+        return (get_current_usage(oid), get_ask_usage(oid),
+                get_embedding_usage(oid))
+
+    usage, ask_usage, embed_usage = await asyncio.to_thread(_read_usage)
 
     return OrgInfoResponse(
         org_id=org["org_id"],
@@ -6653,6 +6773,20 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         ask_tokens_in=ask_usage.get("ask_tokens_in", 0),
         ask_tokens_out=ask_usage.get("ask_tokens_out", 0),
         ask_cost_usd=ask_usage.get("ask_cost_usd", 0.0),
+        # #4488: embedding-encode workload for the current period. The read
+        # degrades to the zero view on failure (never 500); the identity
+        # fields are renderable so a person can read WHICH encoder produced
+        # the figure, and ``embed_identity_mixed`` says when it is not one
+        # encoder at all.
+        embed_calls=embed_usage.get("embed_calls", 0),
+        embed_texts=embed_usage.get("embed_texts", 0),
+        embed_chars=embed_usage.get("embed_chars", 0),
+        embed_wall_ms=embed_usage.get("embed_wall_ms", 0.0),
+        embed_skipped=embed_usage.get("embed_skipped", 0),
+        embed_model=embed_usage.get("embed_model"),
+        embed_revision=embed_usage.get("embed_revision"),
+        embed_identity_mixed=bool(
+            embed_usage.get("embed_identity_mixed", False)),
         # #1082 (PR1): anon flag drives the dashboard claim card — the shared
         # is_anon_org predicate (Supabase mode only; registry = False).
         anon=_org_is_anon(org["org_id"]),
@@ -21987,6 +22121,7 @@ def _next_onboarding_step(org_id: str, proj) -> str | None:
     return "done"
 
 
+@_embed_metered
 def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                          person_name: str | None = None,
                          person_user_id: str | None = None,
@@ -22181,6 +22316,7 @@ async def onboarding_seed(body: OnboardingSeedRequest,
 # Subject + memberOf with a user-confirmed name. Both legs are REAL data;
 # nothing is ever invented or silently derived on the provisioning path.
 
+@_embed_metered
 def _run_starter_seed(org_id: str, *, org_name: str | None = None,
                       person_name: str | None = None,
                       person_user_id: str | None = None,
@@ -24514,6 +24650,7 @@ def _is_safe_branch(branch: object) -> bool:
     return bool(_SAFE_BRANCH_RE.match(branch))
 
 
+@_embed_metered
 async def _run_indexing(job_id: str, org_id: str, org: str,
                         repos: list[str] | None) -> None:
     """Background indexing job: GitHub issues/PRs → entities/events.
@@ -24876,6 +25013,7 @@ class DocsIndexRequest(BaseModel):
     branch: str | None = None  # default "main" (fetcher falls back to master)
 
 
+@_embed_metered
 async def _run_docs_indexing(job_id: str, org_id: str, org: str,
                              scopes: list[dict] | None) -> None:
     """Background docs-indexing job: GitHub docs/ → staged corpus →

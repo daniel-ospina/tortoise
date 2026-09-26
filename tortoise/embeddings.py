@@ -619,15 +619,64 @@ def compute_embeddings(
         return []
     model = EmbeddingModel.get()
     if model is None:
+        _note_embed_skip(len(texts))
         return [None] * len(texts)
     try:
         truncated = [_truncate_for_embedding(t, max_tokens) for t in texts]
+    except Exception:
+        return [None] * len(texts)
+    try:
+        _t0 = time.perf_counter()
         vecs = model.encode(truncated)
-        if vecs is None or len(vecs) != len(texts):
-            return [None] * len(texts)
+    except Exception:
+        # An encode that RAISED produced no model work, so it is counted as
+        # ``skipped`` rather than silently counted as neither — otherwise the
+        # figure (0 calls, 0 skipped) is indistinguishable from "no encode was
+        # ever attempted", which is exactly the ambiguity ``skipped`` exists to
+        # remove (#4488 failure-mode table).
+        _note_embed_skip(len(texts))
+        return [None] * len(texts)
+    # ⛔ The measurement call sits OUTSIDE every value-guarding ``try``: a
+    # measurement fault must never discard a batch of successfully computed
+    # vectors — the #4280 shape recorded in this function's own docstring, where
+    # a guard that raises inside the try silently NULLs the dense leg.
+    _note_embed_encode(truncated, time.perf_counter() - _t0)
+    if vecs is None or len(vecs) != len(texts):
+        return [None] * len(texts)
+    try:
         return [vec.tolist() for vec in vecs]
     except Exception:
         return [None] * len(texts)
+
+
+def _note_embed_encode(texts: list[str], elapsed_s: float) -> None:
+    """Record one real encode against the active tally (#4488). TOTAL.
+
+    Measured AROUND the encoder call only — building ``truncated`` and the
+    ``tolist`` copy are not model work, and bundling them would make the figure
+    a function of the batch shape rather than of the encode. The import is LAZY
+    so this module stays import-order-independent and the unarmed path pays one
+    function call, not a module import.
+    """
+    try:
+        from .embed_metering import note_encode
+        note_encode(texts=len(texts), chars=sum(len(t) for t in texts),
+                    wall_ms=elapsed_s * 1000.0)
+    except Exception:
+        pass
+
+
+def _note_embed_skip(n: int) -> None:
+    """Record encode attempts that ran NO model work (embedder unavailable).
+
+    Kept distinct from the counted encodes on purpose: a silently-zero figure
+    must not be readable as "the embedder ran and produced nothing" (#4488).
+    """
+    try:
+        from .embed_metering import note_skip
+        note_skip(n)
+    except Exception:
+        pass
 
 
 #: #4280: width mismatches already warned about, keyed ``(expected_dim, actual)``.
