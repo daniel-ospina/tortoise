@@ -21,14 +21,33 @@ evidence path).
 the engine's opaque fulltext scan order. The row SET is unchanged for every
 golden — only the order of the same rows moved. That claim is mechanically
 guarded, not just recorded: ``_FROZEN_CHUNKS`` holds the PRE-#3018 chunk
-multisets as an independent (never-re-captured) record for the five
-re-captured legacy goldens, and ``_assert_golden`` checks content first and
-order second so the two failure modes stay distinguishable.
+multisets as an independent content record for the five re-captured legacy
+goldens (never regenerated from the goldens; its one documented content
+update is the #3804 note below), and ``_assert_golden`` checks content first
+and order second so the two failure modes stay distinguishable.
+
+#3804: the five flag-OFF legacy goldens were RE-CAPTURED again — this time
+for a DOCUMENTED CONTENT change (identity decoration), not an order drift.
+The point fetch now names a Point's own snake ``session_id`` prop (the
+identity ``create_point(session_id=…)`` and the LongMemEval ingest write),
+so the legacy lane's ``[session ?]`` placeholder became the real session id
+(``[session sess-2026-08-10]``). The change is DECORATION ONLY — row set,
+row order and row text are unchanged — and that claim is guarded
+mechanically, not narrated: ``_PRE_3804_CHUNKS`` preserves the pre-change
+row multisets (the ``[session ?]`` literals, transcribed independently) and
+``_assert_golden`` normalizes the live session tag back to ``[session ?]``
+for a second content comparison, so a "re-capture" that also dropped,
+duplicated or re-worded a row still fails. ``_FROZEN_CHUNKS`` was updated to
+the new content under its own "documented, reviewed content change" clause;
+#3804 is that record. The FIRED/HOSTED goldens are byte-unchanged: their
+spine carries ``lme_session_index``, whose index tag still wins in
+``_render_block``.
 
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown)."""
 import contextlib
 import os
+import re
 import sys
 import uuid
 from collections import Counter
@@ -138,89 +157,100 @@ Q_DATE = "2026-09-10"
 # (``_FROZEN_CHUNKS``, header + rows, order-insensitive, duplicate-aware)
 # followed by the ORDER byte check — so a future order drift is diagnosed as
 # a re-capture, not a content regression.
+# #3804 RE-CAPTURE (R17, documented CONTENT change — identity decoration):
+# the point fetch now names a Point's own snake ``session_id`` prop, so the
+# legacy lane's ``[session ?]`` placeholder became the real session id. Row
+# set / order / text are unchanged; ``_assert_golden``'s tag-only layer
+# proves it against ``_PRE_3804_CHUNKS``. The FIRED/HOSTED goldens below are
+# untouched (their spine's ``lme_session_index`` tag still wins).
 GOLD_LEGACY_CURRENT = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] the new sofa was delivered on the first of september
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] talked about phone battery replacement shop with a friend"""
+[session sess-distract-8] talked about phone battery replacement shop with a friend"""
 GOLD_LEGACY_MISFIRE = """Current Date: 2026-09-10
 
-[session ?] the dog chewed the corner of the dog bed cushion
+[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] the new sofa was delivered on the first of september
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session ?] took the dog to the vet for the chewed cushion"""
+[session sess-2026-08-10] took the dog to the vet for the chewed cushion"""
 GOLD_LEGACY_AGO = """Current Date: 2026-09-10
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] the new sofa was delivered on the first of september
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] talked about phone battery replacement shop with a friend"""
+[session sess-distract-8] talked about phone battery replacement shop with a friend"""
 GOLD_LEGACY_COMPARE = """Current Date: 2026-09-10
 
-[session ?] the dog chewed the corner of the dog bed cushion
+[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session ?] the new sofa was delivered on the first of september
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] took the dog to the vet for the chewed cushion"""
+[session sess-2026-08-10] took the dog to the vet for the chewed cushion"""
 GOLD_LEGACY_CANARY = """Current Date: 2026-09-10
 
-[session ?] the dog chewed the corner of the dog bed cushion
+[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
-[session ?] the new sofa was delivered on the first of september
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session ?] talked about phone battery replacement shop with a friend
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session ?] took the dog to the vet for the chewed cushion
+[session sess-2026-08-10] took the dog to the vet for the chewed cushion
 
-[session ?] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month"""
+[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month"""
 CANARY_QUESTION = ("which came first - buying the couch or the "
                   "dog bed getting chewed?")
 
-# ── FROZEN row sets — the INDEPENDENT content record (#3095) ─────────────
+# ── FROZEN row sets — the INDEPENDENT content record (#3095, #3804) ─────
 # The byte-goldens above are re-captured whenever the engine's opaque
 # fulltext ORDER moves (R17). That makes them useless as a content guard: a
 # reflexive regeneration (the exact thing R17 forbids) satisfies them by
-# construction. These frozensets were transcribed from the PRE-#3018
-# capture and are NOT re-captured — they are the independent record that
-# makes "order drift" mechanically distinguishable from "content loss".
-# Update ONLY with a documented, reviewed content change (never as a
-# re-capture). Scope: the flag-OFF legacy lane's five goldens.
+# construction. These frozensets are the independent record that makes
+# "order drift" mechanically distinguishable from "content loss". Update
+# ONLY with a documented, reviewed content change (never as a re-capture).
+# Scope: the flag-OFF legacy lane's five goldens.
+#
+# #3804 (documented, reviewed CONTENT change): the rows below now carry the
+# REAL session id instead of the ``[session ?]`` placeholder. ``_PRE_3804_*``
+# preserves the pre-change literals verbatim and ``_assert_golden``
+# normalizes the live tag back to ``[session ?]`` to re-check the pre-change
+# multiset, so the "decoration only" claim is enforced, not asserted.
 _ROW_COUCH_STATUS = frozenset({
-    "[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
-    "[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
-    "[session ?] the new sofa was delivered on the first of september",
-    "[session ?] talked about phone battery replacement shop with a friend",
+    "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+    "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+    "[session sess-distract-8] talked about phone battery replacement shop with a friend",
 })
 _ROW_COUCH_DOGBED = _ROW_COUCH_STATUS | frozenset({
-    "[session ?] the dog chewed the corner of the dog bed cushion",
-    "[session ?] took the dog to the vet for the chewed cushion",
+    "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
+    "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
 })
 _ROW_CANARY = _ROW_COUCH_DOGBED | frozenset({
-    "[session ?] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+    "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
 })
 _FROZEN_ROWS = {
     "what is the current status of the couch?": _ROW_COUCH_STATUS,
@@ -228,6 +258,30 @@ _FROZEN_ROWS = {
     "what was the couch status two weeks ago?": _ROW_COUCH_STATUS,
     "which came first - the couch or the dog bed?": _ROW_COUCH_DOGBED,
     CANARY_QUESTION: _ROW_CANARY,
+}
+# PRE-#3804 literals, transcribed independently (NOT derived from the new
+# rows) so they remain a second, non-tautological content record: the same
+# five questions with the ``[session ?]`` placeholder the legacy lane used
+# before identity decoration.
+_PRE_3804_ROW_COUCH_STATUS = frozenset({
+    "[session ?] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+    "[session ?] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+    "[session ?] the new sofa was delivered on the first of september",
+    "[session ?] talked about phone battery replacement shop with a friend",
+})
+_PRE_3804_ROW_COUCH_DOGBED = _PRE_3804_ROW_COUCH_STATUS | frozenset({
+    "[session ?] the dog chewed the corner of the dog bed cushion",
+    "[session ?] took the dog to the vet for the chewed cushion",
+})
+_PRE_3804_ROW_CANARY = _PRE_3804_ROW_COUCH_DOGBED | frozenset({
+    "[session ?] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
+})
+_PRE_3804_ROWS = {
+    "what is the current status of the couch?": _PRE_3804_ROW_COUCH_STATUS,
+    "compare the couch and the dog bed, which should i keep?": _PRE_3804_ROW_COUCH_DOGBED,
+    "what was the couch status two weeks ago?": _PRE_3804_ROW_COUCH_STATUS,
+    "which came first - the couch or the dog bed?": _PRE_3804_ROW_COUCH_DOGBED,
+    CANARY_QUESTION: _PRE_3804_ROW_CANARY,
 }
 # The full frozen CHUNK multiset per question: the literal row sets above plus
 # the rendered header chunk. Built from the literals (never from the
@@ -237,6 +291,23 @@ _FROZEN_CHUNKS = {
     q: tuple(sorted(rows | {_HEADER_CHUNK}))
     for q, rows in _FROZEN_ROWS.items()
 }
+_PRE_3804_CHUNKS = {
+    q: tuple(sorted(rows | {_HEADER_CHUNK}))
+    for q, rows in _PRE_3804_ROWS.items()
+}
+
+#: A rendered row's leading session annotation, ``[session <id>]`` — the ONLY
+#: part #3804 changed.
+_SESSION_TAG_HEAD_RE = re.compile(r"^\[session [^\]]*\]")
+
+
+def _strip_session_tag(chunk: str) -> str:
+    """Normalize a row's leading ``[session <id>]`` annotation back to the
+    ``[session ?]`` placeholder (#3804), every other byte untouched — so the
+    pre-change content record can be re-checked against post-change
+    evidence and the "identity decoration only" claim is mechanically
+    enforced."""
+    return _SESSION_TAG_HEAD_RE.sub("[session ?]", chunk, count=1)
 
 
 GOLD_FIRED_CURRENT = """Current Date: 2026-09-10
@@ -317,13 +388,19 @@ def _evidence_chunks(evidence: str) -> tuple[str, ...]:
 
 
 def _assert_golden(evidence: str, question: str, gold: str) -> None:
-    """Two-layer golden gate (#3095): CONTENT then ORDER.
+    """Three-layer golden gate (#3095, #3804): CONTENT, TAG-ONLY, ORDER.
 
     Layer 1 (content) compares the full chunk multiset — header and rows,
-    order-insensitively — against ``_FROZEN_CHUNKS``, frozen from the
-    PRE-#3018 capture and never re-captured. So a reflexive regeneration of
-    the byte-golden still fails here, and a dropped, duplicated, or
-    re-rendered chunk reports as a *content regression*.
+    order-insensitively — against ``_FROZEN_CHUNKS``, the never-reflexively-
+    regenerated record. A dropped, duplicated, or re-rendered chunk reports
+    as a *content regression*.
+
+    Layer 1b (tag-only, #3804) normalizes the live session tag back to the
+    ``[session ?]`` placeholder and compares against ``_PRE_3804_CHUNKS``,
+    the pre-#3804 literals transcribed independently. So the "#3804 changed
+    only the session tag" claim is enforced rather than narrated: a
+    re-capture that ALSO dropped, duplicated or re-worded a row fails here
+    even after ``_FROZEN_CHUNKS`` was updated.
 
     Layer 2 (order) compares the re-captured byte-golden; when the engine's
     opaque fulltext sequence moves it reports as an *order drift*, which is
@@ -334,7 +411,8 @@ def _assert_golden(evidence: str, question: str, gold: str) -> None:
     indistinguishable (the trap the first cut of this fix fell into).
 
     Scope: the five flag-OFF legacy goldens. The FIRED/hosted goldens were
-    not invalidated by #3018 and remain bare byte-equality."""
+    not invalidated by #3018 (and not by #3804 — their ``lme_session_index``
+    tag wins in ``_render_block``) and remain bare byte-equality."""
     live = _evidence_chunks(evidence)
     frozen = _FROZEN_CHUNKS[question]
     assert live == frozen, (
@@ -347,6 +425,18 @@ def _assert_golden(evidence: str, question: str, gold: str) -> None:
         # multiset comparison exists to catch.
         f"Missing: {sorted((Counter(frozen) - Counter(live)).elements())}; "
         f"unexpected: {sorted((Counter(live) - Counter(frozen)).elements())}")
+    normalized = tuple(sorted(_strip_session_tag(c)
+                              for c in ag.evidence_chunks(evidence)))
+    pre = _PRE_3804_CHUNKS[question]
+    assert normalized == pre, (
+        f"CONTENT regression BENEATH the #3804 session-tag decoration on "
+        f"{question!r}: normalizing the live ``[session <id>]`` tags back to "
+        "``[session ?]`` no longer recovers the pre-#3804 row multiset, so "
+        "the change was NOT tag-only — a row was dropped, duplicated, "
+        "re-worded or re-bounded. Do NOT re-capture ``_PRE_3804_CHUNKS``; "
+        "investigate the pipeline. "
+        f"Missing: {sorted((Counter(pre) - Counter(normalized)).elements())}; "
+        f"unexpected: {sorted((Counter(normalized) - Counter(pre)).elements())}")
     assert evidence == gold, (
         f"ROW ORDER drifted on {question!r}: the chunk multiset is intact, "
         "so this is the engine's opaque fulltext sequence moving, not a "
