@@ -32,9 +32,19 @@ self-heals on the next request).
 Everything here is best-effort on the request path: recording/evaluation
 failures are logged and swallowed — abuse telemetry must never break the
 write path. Kill-switch: ``TORTOISE_ABUSE_DISABLED=1``.
+
+The failure handling is NOT uniform (#4872): the six swallow sites on the
+enforcement DECISION/ACTION path (``window_sum``, ``clean_window_episode_end``,
+``latest_flag_at``, ``rule_event_between``, ``suspend_org``, ``flag_org``) report
+to the OPERATOR — an ERROR record plus a platform-scoped operator incident,
+because a failed evaluation or a failed suspension is otherwise
+indistinguishable from "the engine decided not to enforce". The remaining
+telemetry / notification / durability swallows stay debug-only;
+``DECISION_FAULT_LANES`` declares the boundary and why.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -83,6 +93,89 @@ def suspended_message() -> str:
         "This organization has been suspended due to unusual activity. "
         f"Appeal: {appeal_url()}"
     )
+
+
+# ── #4872: the enforcement decision path's failure lanes ────────────────────
+#
+#: The DECLARED inventory of failure lanes on the abuse enforcement decision
+#: path (#4872): swallow site -> ``(incident kind, fallback)``. ``fallback`` is
+#: what the handler DID when the store call failed, i.e. the enforcement
+#: CONSEQUENCE — and it is NOT recoverable from the lane name, which is why the
+#: incident carries it: ``rule_event_between`` fails TOWARD a suspension
+#: (``continuity_true``), the opposite direction from ``window_sum`` /
+#: ``suspend_org``. This map is the single source of truth for both values, so
+#: the token and the code cannot drift as a pair, and it is pinned against the
+#: source by ``tests/test_abuse.py`` (a new swallow site or a renamed token is
+#: RED, not silent).
+#:
+#: ``clean_window_episode_end`` names the clean-window episode-END LEG (its
+#: guard read OR its clear write), NOT the ``latest_flag_at`` method: H2 and H3
+#: both involve ``latest_flag_at`` and take opposite enforcement directions, so
+#: the lane is the leg.
+#:
+#: DELIBERATELY EXCLUDED (declared so the boundary is not re-discovered next
+#: incident): ``record_event`` in :meth:`AbuseEngine.record_point_create` (a
+#: recording-leg drop — folding it into ``UNMETERED_INCREMENT`` would break
+#: ``tests/test_metering_window_admission.py::test_mcp_abuse_failure_is_not_
+#: reported_as_a_dropped_increment``), ``_notify`` (the notification leg, and
+#: the sweep-gated sibling of #4778), ``MemoryAbuseStore._durable``, and the
+#: R3/R8/geo trackers — all different defect classes from "the enforcement
+#: decision could not complete".
+DECISION_FAULT_LANES: dict[str, tuple[str, str]] = {
+    "window_sum": ("ABUSE_DECISION_FAULT", "return_none"),
+    "clean_window_episode_end": ("ABUSE_DECISION_FAULT", "return_none"),
+    "latest_flag_at": ("ABUSE_DECISION_FAULT", "reflag"),
+    "rule_event_between": ("ABUSE_DECISION_FAULT", "continuity_true"),
+    "suspend_org": ("ABUSE_ENFORCEMENT_FAULT", "return_breach"),
+    "flag_org": ("ABUSE_ENFORCEMENT_FAULT", "return_flag"),
+}
+
+#: Defensive default only: every lane is declared above, so this is unreachable
+#: in practice and the source-scan fence REDs if an undeclared lane is emitted.
+#: It is NOT a third real kind — an undeclared lane must not silently disappear,
+#: so it reports as the decision kind with ``fallback="unknown"``.
+_UNKNOWN_LANE_KIND = "ABUSE_DECISION_FAULT"
+
+
+def report_abuse_decision_fault(lane: str, org_id: str,
+                                rule: str | None = None,
+                                error: BaseException | None = None) -> None:
+    """Operator alert: a store call on the abuse DECISION path FAILED (#4872).
+
+    Mirrors ``metering.report_unmetered_increment``: the failure is absorbed by
+    us (the request is served and the decision path keeps its documented
+    fallback) and announced to the OPERATOR — never silently, and never to the
+    user. Without this, a broken enforcement path is indistinguishable from
+    "the engine decided not to enforce": ``_evaluate`` returns ``"breach"`` on
+    a failed suspend, exactly as it does while still inside the staging window,
+    and the exception that would name the cause (``supabase_control.rpc``
+    carries the PostgREST ``message``) is what the old ``logger.debug`` threw
+    away.
+
+    The alert is PLATFORM-SCOPED (one shared substrate cause, one incident) and
+    the local ERROR record carries ``exc_info`` — the PostgREST message is the
+    durable diagnosis. For a deployment with no alert channel configured the
+    ERROR record is the residual (the ``UNMETERED_INCREMENT`` contract).
+
+    Never raises: the alert must not become a new failure path on an enforcement
+    path (a signal that can raise is a bypass by another name). The retained
+    state is NOT repaired by this call — this makes the fault VISIBLE; arming
+    or repairing the suspend is a separate, owner-held decision.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        kind, fallback = DECISION_FAULT_LANES.get(lane, (_UNKNOWN_LANE_KIND, "unknown"))
+        logger.error(
+            "ABUSE DECISION FAULT (#4872): lane=%s org=%s rule=%s "
+            "error=%s: %s — the abuse enforcement decision could not complete; "
+            "the retained state is the handler's fallback (%s), which may point "
+            "TOWARD or AWAY from a suspension",
+            lane, org_id or "<none>", rule or "<none>",
+            type(error).__name__, error, fallback,
+            exc_info=error,
+        )
+        from tortoise.operator_alert import alert_abuse_fault
+
+        alert_abuse_fault(kind, lane, org_id, error, rule=rule, fallback=fallback)
 
 
 # ── Suspended signal set (delta 14) ─────────────────────────────────────────
@@ -519,8 +612,8 @@ class AbuseEngine:
                   window_s: int, now: datetime) -> str | None:
         try:
             total = self.store.window_sum(org_id, rule, window_s, now)
-        except Exception:
-            logger.debug("abuse window_sum failed for %s/%s", org_id, rule)
+        except Exception as e:
+            report_abuse_decision_fault("window_sum", org_id, rule, e)
             return None
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
@@ -528,14 +621,16 @@ class AbuseEngine:
             try:
                 if self.store.latest_flag_at(org_id, rule) is not None:
                     self.store.flag_clear(org_id, rule, now=now)
-            except Exception:
-                logger.debug("abuse flag_clear failed for %s/%s", org_id, rule)
+            except Exception as e:
+                report_abuse_decision_fault(
+                    "clean_window_episode_end", org_id, rule, e)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
         try:
             flagged_at = self.store.latest_flag_at(org_id, rule)
-        except Exception:
+        except Exception as e:
+            report_abuse_decision_fault("latest_flag_at", org_id, rule, e)
             flagged_at = None
         if flagged_at is None:
             return self._flag(org_id, rule, details, now)
@@ -551,14 +646,16 @@ class AbuseEngine:
             continuity = self.store.rule_event_between(
                 org_id, rule, flagged_at,
                 now - timedelta(seconds=window_s))
-        except Exception:
+        except Exception as e:
+            report_abuse_decision_fault(
+                "rule_event_between", org_id, rule, e)
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
             return self._flag(org_id, rule, details, now)
         try:
             self.store.suspend_org(org_id, details, now=now)
-        except Exception:
-            logger.debug("abuse suspend_team failed for %s", org_id)
+        except Exception as e:
+            report_abuse_decision_fault("suspend_org", org_id, rule, e)
             return "breach"
         mark_suspended(org_id)
         self._notify("abuse_suspended", org_id, details)
@@ -568,8 +665,8 @@ class AbuseEngine:
               now: datetime) -> str:
         try:
             self.store.flag_org(org_id, rule, details, now=now)
-        except Exception:
-            logger.debug("abuse flag_team failed for %s", org_id)
+        except Exception as e:
+            report_abuse_decision_fault("flag_org", org_id, rule, e)
         self._notify("abuse_flag", org_id, details)
         return "flag"
 

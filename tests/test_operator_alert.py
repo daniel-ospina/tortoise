@@ -861,7 +861,8 @@ def test_kind_constants_match_the_runbook():
             for ln in runbook.splitlines() if ln.startswith("| ")
             and ln.count("|") >= 3}
     kinds = (oa.UNMETERED_INCREMENT_KIND, cc.UNENFORCEABLE_INCIDENT_KIND,
-             cc.INCIDENT_KIND)
+             cc.INCIDENT_KIND, oa.ABUSE_DECISION_FAULT_KIND,
+             oa.ABUSE_ENFORCEMENT_FAULT_KIND)
     for kind in kinds:
         assert kind in rows, f"no runbook triage row for {kind}"
         row = rows[kind]
@@ -870,6 +871,16 @@ def test_kind_constants_match_the_runbook():
     assert cc.UNENFORCEABLE_INCIDENT_KIND != cc.INCIDENT_KIND
     assert cc.INCIDENT_KIND not in cc.UNENFORCEABLE_INCIDENT_KIND
     assert cc.UNENFORCEABLE_INCIDENT_KIND not in cc.INCIDENT_KIND
+    # #4872: the abuse kinds must be their own, not aliases of the metering one
+    # — the R2-unreachable adoption path resolves an incident by GitHub search
+    # on the subject suffix, so a superstring relation would cross-adopt.
+    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
+    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
+    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.ABUSE_ENFORCEMENT_FAULT_KIND
+    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.ABUSE_DECISION_FAULT_KIND
+    for kind in (oa.ABUSE_DECISION_FAULT_KIND, oa.ABUSE_ENFORCEMENT_FAULT_KIND):
+        assert kind not in cc.INCIDENT_KIND
+        assert kind not in cc.UNENFORCEABLE_INCIDENT_KIND
 
 
 def test_alert_unmetered_increment_helper_dispatches(monkeypatch):
