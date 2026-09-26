@@ -626,7 +626,7 @@ export function preferredSurface(family, current) {
 // instructions URL. The block below embeds the workflows prompt; the page hands
 // over the onboarding document. Only this block's `chatgpt` copy must omit
 // `tortoise_health` — it verifies in the chat instead (pinned in
-// harnesses.test.js); every other command below keeps the name.
+// harnesses.test.js).
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the

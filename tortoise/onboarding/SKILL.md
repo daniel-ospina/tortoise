@@ -471,8 +471,8 @@ Guide the human through:
      with Continue/Skip, but nothing there connects you; the server writes
      `harness-connected` itself on your first successful graph write. Verify
      with the ADVERTISED `tortoise_overview(section="health")` — the legacy
-     `tortoise_health` name in step 1 is retired, so it is absent from
-     `tools/list` and will not appear in your tool grant (#3883). This
+     `tortoise_health` name is retired, so it is absent from `tools/list` and
+     will not appear in this connector's tool grant (#3883). This
      document is your live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —
