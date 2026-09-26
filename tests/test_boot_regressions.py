@@ -530,10 +530,39 @@ def test_watcher_non_start_reason_is_gated_on_being_hosted():
     assert any(
         isinstance(node, ast.Name) and node.id == "_watcher_expected" for node in ast.walk(lifespan)
     ), "no `_watcher_expected` marker is computed in _lifespan"
+    # #4498/#3124 review: the derivation now lives in the shared helper
+    # `_watcher_expected_on_this_host` so the boot warning and `/health` can
+    # never disagree. Follow the delegation rather than pinning the literal to
+    # THIS function: assert the call site here AND that the helper itself
+    # derives from FLY_APP_NAME — the invariant the pin exists to protect.
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_watcher_expected_on_this_host"
+        for node in ast.walk(lifespan)
+    ), (
+        "`_watcher_expected` must be derived from the shared "
+        "`_watcher_expected_on_this_host` helper"
+    )
+    hosted_tree = ast.parse((TORTOISE_PKG / "hosted_api.py").read_text(),
+                            filename="hosted_api.py")
+    helper = next(
+        (
+            node
+            for node in ast.walk(hosted_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_watcher_expected_on_this_host"
+        ),
+        None,
+    )
+    assert helper is not None, (
+        "hosted_api.py has no `_watcher_expected_on_this_host` helper — if it "
+        "was renamed, relocate this #2922 pin with it"
+    )
     assert any(
         isinstance(node, ast.Constant) and node.value == "FLY_APP_NAME"
-        for node in ast.walk(lifespan)
-    ), "`_watcher_expected` must derive from FLY_APP_NAME (the hosted marker)"
+        for node in ast.walk(helper)
+    ), "`_watcher_expected_on_this_host` must derive from FLY_APP_NAME (the hosted marker)"
 
     gated = [
         node

@@ -172,7 +172,8 @@ def test_health_ok_when_watcher_running(monkeypatch):
     body = _health_with_db_ok(monkeypatch)
 
     assert body["status"] == "ok"
-    assert body["backup_watcher"] == {"state": "running", "ok": True, "error": None}
+    assert body["backup_watcher"] == {"state": "running", "ok": True,
+                                     "error": None, "expected": False}
 
 
 def test_health_degraded_when_watcher_never_started(monkeypatch):
@@ -218,7 +219,8 @@ def test_health_stays_ok_when_watcher_is_legitimately_disabled(monkeypatch):
     body = _health_with_db_ok(monkeypatch)
 
     assert body["status"] == "ok"
-    assert body["backup_watcher"] == {"state": "disabled", "ok": True, "error": None}
+    assert body["backup_watcher"] == {"state": "disabled", "ok": True,
+                                     "error": None, "expected": False}
 
 
 def test_health_never_raises_on_watcher_failure(monkeypatch):
@@ -238,3 +240,93 @@ def test_health_never_raises_on_watcher_failure(monkeypatch):
     assert body["status"] == "degraded"
     assert body["backup_watcher"]["state"] == "unknown"
     assert body["backup_watcher"]["ok"] is False
+
+
+# ── (c) #4498: `expected` distinguishes "wanted but off" from "off" ──────────
+
+
+def _watcher_states():
+    """(name, set-state callable, expected status, expected ok) for all five
+    `backup_watcher` states (running / stopped / failed / disabled / unknown)."""
+    def _running():
+        hosted_api._WATCHER = _FakeWatcher(alive=True)
+        hosted_api._WATCHER_START_ERROR = None
+
+    def _stopped():
+        hosted_api._WATCHER = _FakeWatcher(alive=False)
+        hosted_api._WATCHER_START_ERROR = None
+
+    def _failed():
+        hosted_api._WATCHER = None
+        hosted_api._WATCHER_START_ERROR = "start raised"
+
+    def _disabled():
+        hosted_api._WATCHER = None
+        hosted_api._WATCHER_START_ERROR = None
+
+    def _unknown():
+        class _Boom:
+            @property
+            def _thread(self):
+                raise RuntimeError("metadata unreadable")
+
+        hosted_api._WATCHER = _Boom()
+        hosted_api._WATCHER_START_ERROR = None
+
+    return (
+        ("running", _running, "ok", True),
+        ("stopped", _stopped, "degraded", False),
+        ("failed", _failed, "degraded", False),
+        ("disabled", _disabled, "ok", True),
+        ("unknown", _unknown, "degraded", False),
+    )
+
+
+def test_expected_is_present_in_all_five_states_and_mirrors_fly_app_name(
+        monkeypatch):
+    """#4498 DECIDED (option 2): every state carries `expected`, read exactly
+    as `_lifespan` reads it (`bool(os.environ.get("FLY_APP_NAME"))`), and the
+    `status` verdict is UNCHANGED by it — `disabled` stays `ok` (#4470).
+
+    This is the acceptance that a reader can tell "expected and absent" from
+    "deliberately not configured" from `/health` alone.
+    """
+    for hosted in (True, False):
+        if hosted:
+            monkeypatch.setenv("FLY_APP_NAME", "tortoise-hosted")
+        else:
+            monkeypatch.delenv("FLY_APP_NAME", raising=False)
+        for name, set_state, want_status, want_ok in _watcher_states():
+            set_state()
+            body = _health_with_db_ok(monkeypatch)
+            block = body["backup_watcher"]
+            assert block["state"] == name, (name, block)
+            assert block["expected"] is hosted, (
+                f"state {name!r} with FLY_APP_NAME={'set' if hosted else 'unset'} "
+                f"must report expected={hosted}: {block}")
+            assert block["ok"] is want_ok, (name, block)
+            assert body["status"] == want_status, (name, block, body["status"])
+
+
+def test_health_never_raises_when_the_expected_helper_raises(monkeypatch):
+    """#3124 review: `expected` must not sit OUTSIDE the never-raise guard.
+
+    The block's contract is "never raises and never 5xxes" (#338) and
+    `health()` calls it outside any try. Deriving `expected` above the guard
+    narrowed that promise to whatever the helper happens not to raise today.
+    Fails on the shape that had `expected = _watcher_expected_on_this_host()`
+    above the `try`.
+    """
+    monkeypatch.setenv("FLY_APP_NAME", "tortoise-hosted")
+
+    def _boom() -> bool:
+        raise RuntimeError("marker unreadable")
+
+    monkeypatch.setattr(hosted_api, "_watcher_expected_on_this_host", _boom)
+    hosted_api._WATCHER = _FakeWatcher(alive=True)
+    hosted_api._WATCHER_START_ERROR = None
+
+    block = _health_with_db_ok(monkeypatch)["backup_watcher"]
+    assert block["state"] == "running", block
+    assert block["expected"] is False, (
+        f"a helper failure must fall back to expected=False, not raise: {block}")
