@@ -10573,16 +10573,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # leaving the join unreached). Stamp exactly the operator ids
                 # this capture CREATED, surfaced on the extraction meta by
                 # ``sdk._extract_session_v2`` (the apply_payload_operators
-                # return). Same guards: draft only, no eventId (never clobber
-                # a prior capture's provenance). The join is kept — it is the
-                # only surface covering operators created outside
-                # apply_payload_operators (the M2 projection path).
+                # return). ``eventId IS NULL`` is the no-clobber guard; the
+                # join's ``draft`` guard is deliberately NOT repeated (these
+                # ids are Points this call created — draft at creation — so a
+                # concurrent promotion flipping one to 'live' must not defeat
+                # the stamp). The join is kept — it is the only surface
+                # covering operators created outside apply_payload_operators
+                # (the M2 projection path).
                 operator_ids = list(meta.get("operator_ids") or [])
                 if operator_ids:
                     proj.g.query(
                         "MATCH (o:Point {is_operator:true}) "
                         "WHERE o.id IN $ids "
-                        "AND (o.status IS NULL OR o.status = 'draft') "
                         "AND o.eventId IS NULL "
                         "SET o.eventId=$eid, o.source_session=$sid, "
                         "    o.source_harness=$harness, "

@@ -4281,19 +4281,22 @@ class TortoiseSDK:
                     # Stamp exactly the operator ids THIS capture created
                     # (meta["operator_ids"], the apply_payload_operators
                     # return) — the topology's own provenance handle, whereas
-                    # the minted join has none. Same guards as the join: draft
-                    # only (never re-provenance a LIVE operator) and no
-                    # eventId (never clobber a prior capture's provenance).
-                    # The join is KEPT because it is the only surface covering
-                    # operators created outside apply_payload_operators (the
-                    # M2 projection path — test_capture_session_stamps_
-                    # operator_event_ids).
+                    # the minted join has none. ``eventId IS NULL`` is the
+                    # no-clobber guard. The minted join's ``draft`` guard is
+                    # deliberately NOT repeated: these ids are Points created
+                    # by THIS call (fresh ULIDs, draft at creation), so
+                    # re-checking status only adds a race — a concurrent
+                    # capture's ``_apply_capture_ingest_ep`` promotion can
+                    # flip one to 'live' before this stamp runs, and the stamp
+                    # must still land. The join is KEPT because it is the only
+                    # surface covering operators created outside
+                    # apply_payload_operators (the M2 projection path —
+                    # test_capture_session_stamps_operator_event_ids).
                     operator_ids = list(meta.get("operator_ids") or [])
                     if operator_ids:
                         proj.g.query(
                             "MATCH (o:Point {is_operator:true}) "
                             "WHERE o.id IN $ids "
-                            "AND (o.status IS NULL OR o.status = 'draft') "
                             "AND o.eventId IS NULL "
                             "SET o.eventId=$eid, o.source_session=$sid, "
                             "    o.source_harness=$harness, "

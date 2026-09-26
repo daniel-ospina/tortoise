@@ -699,3 +699,61 @@ def test_fold_lane_commit_leg_rekey_stamps_the_operators_it_created(
     assert snap["operators_total"] == impl_nand, (
         f"{snap['operators_total']}/{impl_nand} operator nodes retrievable")
     assert snap["operators_provenanced"] == impl_nand, snap
+
+
+def test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats(
+        _deterministic_lane, monkeypatch):
+    """#4936 (code-review P1): two payload operator records that resolve onto
+    the SAME ``(src, dst, op_type)`` triple each create their own node —
+    ``sdk.create_operator`` mints unconditionally, with no idempotency guard
+    (#4971) — so the capture's provenance set must be the CREATION LIST, not
+    the MITIGATES lookup dict. Building it from ``target_op_ids.values()``
+    collapses the duplicate and silently drops the earlier node's id: that
+    node stays ``eventId IS NULL`` and invisible to the eventId-keyed layer,
+    re-introducing the exact #4936 defect the fix removes.
+
+    A duplicate triple is reachable two ways, both real: two identical
+    emitted records (``extractor_v2`` guards MITIGATES against
+    ``emitted_edges`` but appends IMPL/NAND unconditionally), and two
+    DISTINCT payload records that re-key onto one graph pair (the #4716 remap
+    is not injective). Both create two nodes; both must be stamped.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    lane = _deterministic_lane
+    sdk = lane["sdk"]
+    proj = sdk._get_proj()
+    sid = "wp01_quarry_debug"
+    payload = _fold_payloads(ev2)[sid]
+    # Duplicate one IMPL/NAND record verbatim — after the remap the two
+    # records collapse onto the same graph triple.
+    dup = next(o for o in payload["operators"]
+               if o["op_type"] in ("IMPL", "NAND"))
+    payload = {**payload,
+               "operators": [*payload["operators"], dict(dup)]}
+    impl_nand, _mitigates = _expected_operator_counts(payload)
+    assert impl_nand == 3, impl_nand   # 2 distinct + the duplicate
+
+    anchors = sorted({str(pt["content"]).strip()[:1000]
+                      for pt in payload["points"]})
+    for anchor in anchors:
+        sdk.create_point("statement", anchor)
+
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _fold_commit_extractor({sid: payload}))
+    fixture = corpus.load_fixture(sid)
+    conv = runner.parse_roundtrip(
+        sid, fixture["conversation"], fixture["harness"],
+        workdir=lane["workdir"])
+    cap = sdk.capture_session(
+        conv, session_id=sid, harness=fixture["harness"])
+    assert cap.get("ok") is True, cap
+
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true}) RETURN o.id, o.eventId"
+    ).result_set
+    assert len(rows) == impl_nand, (
+        f"{len(rows)}/{impl_nand} operator nodes created")
+    unstamped = [r[0] for r in rows if not r[1]]
+    assert not unstamped, (
+        f"duplicate-triple operator nodes left unstamped: {unstamped}")
