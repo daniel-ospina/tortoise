@@ -85,10 +85,12 @@ queue_rules:
     # on the tree being merged, not on a stale head.
     #
     # Only the critical-path check is named here, deliberately. A condition here
-    # must be a check that actually *reports on the queue branch*; the remaining
-    # five required checks are enforced by branch protection on the queue-branch
-    # head instead. Adding a check that the queue branch never reports on would
-    # block the merge forever — the deadlock this file's contract warns about.
+    # must be a check that actually *reports on the queue branch*; the five cheap
+    # checks are strictly enforced at ENTRY by `queue_conditions` above, and at
+    # merge only weakly — by the injected branch-protection conditions, which
+    # accept neutral/skipped (contract point 3). Adding a check that the queue
+    # branch never reports on would block the merge forever — the deadlock this
+    # file's contract warns about.
     #
     # ⛔ THE LINE THAT MAKES ENTRY CHEAP IS THIS ONE, NOT THE LIST ABOVE.
     # `queue` (the default) injects every required context as a condition for
@@ -110,11 +112,13 @@ queue_rules:
     #     `test_dashboard_client_paths_resolve.py::…` and
     #     `test_oauth_token_fault.py::…` — a COMPOSITION failure, the thing a queue
     #     exists to catch;
-    #   * #5293's base was NOT green: main's push run at 6c48cf561 failed test (b)
-    #     on `tests/test_kind_eval_set.py` (g-015 'core:document', the stale
-    #     fixture #5308 later fixed), and its batch failed different cases again.
-    # So one is a composition failure and the other a red base. Neither is evidence
-    # that a larger batch is safe, which is why this stops at 4.
+    #   * #5293's base was ALSO red — main's push run at 6c48cf561 failed test (b)
+    #     on `tests/test_kind_eval_set.py` (g-015 'core:document', the fixture
+    #     #5308 later fixed) — yet its batch failed the SAME test-(a) dashboard
+    #     case as #5335's, plus a different test-(b) case. That base had test (a)
+    #     GREEN, so its test-(a) failure is base-unexplained too.
+    # Both batches therefore carry a failure the base does NOT explain. Neither is
+    # evidence that a larger batch is safe, which is why this stops at 4.
     #
     # Sizing: a full CI cycle is ~37 min measured on recent green runs (`test (a)`
     # 36.4 and 37.2 min; `python-ci-gate` ~36.8 min after `changes`), so batch 4
