@@ -206,10 +206,14 @@ declared total is 0 (unconfigured) or no org carries weight.
   (`_reset_for_tests` / `clear_team_cost`). A test asserts this on the METRIC,
   not on a function-name substring. The guard matches syntactic
   `Name`/`Attribute` occurrences of `TEAM_COST` and its mutators **anywhere
-  inside a `def`/`async def` subtree in `tortoise/**/*.py` outside every file
-  named `monitoring.py`** — including a `lambda` or a class nested inside a
+  inside a `def`/`async def` subtree in `tortoise/**/*.py` outside
+  `tortoise/monitoring.py`** — including a `lambda` or a class nested inside a
   function body, which `ast.walk` inspects and attributes to that function —
   and every such reference must sit inside `publish` or the test seam. What it
   does NOT match is module-level and top-level class-body references, aliased
-  imports, and `getattr` string lookups; every file named `monitoring.py` (it
-  holds the definitions) is skipped wholesale.
+  imports, and `getattr` string lookups. The skip is implemented by file NAME,
+  not by path: `tortoise/monitoring.py` holds the definitions and must be
+  skipped, and any OTHER file named `monitoring.py` is exempt for that same
+  name-based reason — e.g. `tortoise/shared_state/monitoring.py`, which holds
+  no team-cost definitions at all. That is a disclosed hole: a new mutator
+  added to any other `monitoring.py` would not be caught.

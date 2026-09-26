@@ -2092,7 +2092,7 @@ durations:
   test_joint_index_ingest.py: 0.5
   test_mcp_telemetry.py: 0.4
   test_monitoring.py: 24.3
-  test_cost_allocation.py: 12.0
+  test_cost_allocation.py: 20.3
   test_operator_source_search.py: 0.6
   test_pack_shipping.py: 0.7
   test_query_suggestions.py: 0.4
