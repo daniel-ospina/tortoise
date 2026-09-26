@@ -536,6 +536,15 @@ COMPUTE_OVERFLOW = "__other__"
 #: collides with this child and make routine folding indistinguishable from a
 #: real route class.
 COMPUTE_UNROUTED = "__unrouted__"
+# PAIR SPACE: the two caps multiply — the emitted children are
+# ``labels(org=…, path=…)``, so the worst case is ``COMPUTE_MAX_ORGS`` x
+# (declared paths + ``COMPUTE_MAX_PATHS`` + 2 sentinels) children per counter. The
+# ORG axis is generously sized because org attribution IS the measurement #4490
+# asks for, and it is NOT traffic-reachable: every unauthenticated request shares
+# the ``""`` child, and a new org label costs a real, auth-resolved org id. The
+# PATH axis is code-literal, so its real cardinality is the app's route table
+# (measured: 135 routes / 121 distinct paths), not the 512 safety cap. Stated so
+# the bound is the PAIR, not either axis alone.
 
 #: Request count per org and route class — the denominator for wall/CPU seconds.
 COMPUTE_REQUESTS = Counter(
@@ -722,10 +731,14 @@ def _reset_compute() -> None:
     with _COMPUTE_LOCK:
         _COMPUTE_ORGS.clear()
         _COMPUTE_PATHS.clear()
-    COMPUTE_REQUESTS.clear()
-    COMPUTE_WALL_SECONDS.clear()
-    COMPUTE_CPU_SECONDS.clear()
-    COMPUTE_REQUEST_SECONDS.clear()
+        # Clear the children INSIDE the lock too: a concurrent ``record_compute``
+        # that re-admitted a label between the registry clear and the metric clear
+        # would leave a registry entry for a child that no longer exists — the
+        # exact drift this seam must not produce.
+        COMPUTE_REQUESTS.clear()
+        COMPUTE_WALL_SECONDS.clear()
+        COMPUTE_CPU_SECONDS.clear()
+        COMPUTE_REQUEST_SECONDS.clear()
 
 
 def register(sdk) -> None:

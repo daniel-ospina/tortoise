@@ -2277,10 +2277,15 @@ def _compute_route_class(scope, entry_path: str) -> str:
     path = entry_path or ""
     if path in _COMPUTE_DECLARED_PATHS:
         return path
-    if "." not in path:
-        for prefix in _COMPUTE_DECLARED_PREFIXES:
-            if path == prefix or path.startswith(prefix + "/"):
-                return prefix
+    for prefix in _COMPUTE_DECLARED_PREFIXES:
+        # Boundary-aware, and NO dot-gate: ``/mcpfoo`` is not the ``/mcp`` class
+        # (the boundary check handles that), while a DOTTED sub-path
+        # (``/mcp/tools.json``) stays ``/mcp`` rather than silently folding to
+        # ``__unrouted__``. A traversal shape (``/mcp/../x``) also lands on the
+        # ``/mcp`` literal, which is bounded and not request-derived — an
+        # acceptable price for not losing a legitimate dotted sub-route.
+        if path == prefix or path.startswith(prefix + "/"):
+            return prefix
     route = scope.get("route")
     template = getattr(route, "path", None)
     if (isinstance(template, str) and template

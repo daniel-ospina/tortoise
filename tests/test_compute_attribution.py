@@ -20,15 +20,8 @@ from fastapi.testclient import TestClient
 from starlette.routing import Mount, Route
 
 from tortoise import monitoring
-from tortoise.hosted_api import (
-    ComputeAttributionMiddleware,
-    _compute_route_class,
-    _new_org_org_id,
-    _short_id,
-)
-from tortoise.hosted_api import (
-    app as real_app,
-)
+from tortoise.hosted_api import ComputeAttributionMiddleware, _compute_route_class
+from tortoise.hosted_api import app as real_app
 
 
 @pytest.fixture(autouse=True)
@@ -170,14 +163,24 @@ class TestBoundedCardinality:
         monitoring.record_compute("org-new", "/v1/x", 0.001)
         assert monitoring.compute_by_org()["org-new"]["requests"] == 1.0
 
+    def test_histogram_records_the_observed_wall_seconds(self):
+        """The distribution is a MEASUREMENT, not just a registered object:
+        deleting the ``observe`` call must red this."""
+        monitoring.record_compute("org-a", "/v1/h", 0.2)
+        monitoring.record_compute("org-a", "/v1/h", 0.8)
+        sums = {s.name: s.value for fam in monitoring.COMPUTE_REQUEST_SECONDS.collect()
+                for s in fam.samples if s.name.endswith(("_sum", "_count"))}
+        assert sums["tortoise_compute_request_seconds_count"] == 2.0
+        assert sums["tortoise_compute_request_seconds_sum"] == pytest.approx(1.0)
+
     def test_overflow_sentinels_are_not_org_id_shaped(self):
         """A generator change that made org ids collide with either sentinel would
-        make routine folding indistinguishable from a real org/path — pin it."""
+        make routine folding indistinguishable from a real org/path. Pins the
+        sentinels against the org-id SHAPE only — deliberately NOT coupled to the
+        unrelated id generator (a widened id format must not red this)."""
         org_shape = re.compile(r"[0-9a-f]{26}")
         for sentinel in (monitoring.COMPUTE_OVERFLOW, monitoring.COMPUTE_UNROUTED):
             assert not org_shape.fullmatch(sentinel)
-        assert org_shape.fullmatch(_short_id())
-        assert org_shape.fullmatch(_new_org_org_id())
 
     def test_histogram_carries_no_org_label(self):
         """The cardinality decision: the distribution is route-class only, so the
@@ -201,14 +204,21 @@ class TestBoundedCardinality:
         assert all('org="' not in ln for ln in hist_lines), hist_lines
 
     def test_label_repair_makes_control_chars_and_surrogates_emittable(self):
+        """Not a tautology: the RAW exposition is inspected. Deleting the
+        translation would leave a literal newline/NUL/CSI inside the ``org="``
+        value, which the scoped regex (``[^}]`` crosses a newline) still sees."""
         raw = "org\n\x00\x9b\ud800x"
         monitoring.record_compute(raw, "/v1/x\n", 0.1)
         from prometheus_client import generate_latest
         text = generate_latest().decode()
-        # the repaired label must not introduce a physical line break
-        assert all("\n" not in ln.split('org="', 1)[1].split('"')[0]
-                   for ln in text.splitlines() if 'org="' in ln)
-        assert monitoring.compute_by_org()  # some (repaired) child exists
+        org_values = set(re.findall(r'tortoise_compute_\w+\{[^}]*org="([^"]*)"', text))
+        assert org_values, text[:300]
+        for value in org_values:
+            assert "\n" not in value
+            assert "\x00" not in value
+            assert "\u009b" not in value
+            assert "\ud800" not in value
+        assert monitoring.compute_by_org(), "the repaired label is a real child"
 
 
 # ── the middleware ──────────────────────────────────────────────────────
@@ -238,6 +248,27 @@ class TestMiddleware:
 
     def test_declared_plain_route_stays_off_the_fallback(self):
         assert _compute_route_class(_scope("/openapi.json"), "/openapi.json") == "/openapi.json"
+
+    def test_dotted_subpath_under_a_declared_mount_stays_the_mount(self):
+        """No dot-gate: a legitimate dotted sub-route must not fold to
+        ``__unrouted__`` (the boundary check alone already excludes ``/mcpfoo``)."""
+        assert _compute_route_class(
+            _scope("/mcp/tools.json"), "/mcp/tools.json") == "/mcp"
+
+    def test_route_without_a_pattern_falls_back_to_the_constant(self):
+        class _Bare:
+            path = "/v1/bare"
+            path_regex = None
+
+        assert _compute_route_class(
+            _scope("/v1/bare", route=_Bare()), "/v1/bare") == "/v1/bare"
+        assert _compute_route_class(
+            _scope("/nope", route=_Bare()), "/nope") == monitoring.COMPUTE_UNROUTED
+
+    def test_empty_path_folds_to_unrouted(self):
+        monitoring.record_compute("org-a", "", 0.1)
+        (_o, path), = _compute_label_values("")
+        assert path == monitoring.COMPUTE_UNROUTED
 
     def test_a_mount_is_never_the_serving_template(self):
         mount = Mount("/weird", app=lambda *a, **k: None)
@@ -297,9 +328,32 @@ class TestMiddleware:
         """The placement rationale: the wait bound DROPS a late response, but the
         CPU was burned — compute (unlike egress) must still be recorded."""
         monitoring._reset_compute()
-        asyncio.run(_drive(ComputeAttributionMiddleware, _scope("/v1/x", org="org-a"),
-                           drop_response=True))
-        assert monitoring.compute_by_org()["org-a"]["requests"] == 1.0
+        sent = asyncio.run(_drive(ComputeAttributionMiddleware, _scope("/v1/x", org="org-a"),
+                                  drop_response=True))
+        assert sent == [], "the harness must actually drop every message"
+        snap = monitoring.compute_by_org()["org-a"]
+        assert snap["requests"] == 1.0
+        assert snap["wall_seconds"] > 0.0, "the burned wall time must be recorded"
+
+    def test_a_client_header_or_query_cannot_set_the_org(self):
+        """Attribution is auth-only: a header/query must never become the org key."""
+        scope = _scope("/v1/x")
+        scope["headers"] = [(b"x-org-id", b"evil"), (b"x-org", b"evil")]
+        scope["query_string"] = b"org_id=evil&org=evil"
+        asyncio.run(_drive(ComputeAttributionMiddleware, scope))
+        snap = monitoring.compute_by_org()
+        assert "evil" not in snap
+        assert snap[""]["requests"] == 1.0
+
+    def test_recording_compute_does_not_touch_the_write_ops_meter(self, monkeypatch):
+        """Indicator 4: this adds a dimension, it does not reach the billed unit."""
+        import tortoise.metering as metering
+
+        def boom(*_a, **_k):
+            raise AssertionError("a compute record must not touch record_write_ops")
+
+        monkeypatch.setattr(metering, "record_write_ops", boom)
+        monitoring.record_compute("org-a", "/v1/x", 0.1, 0.01)  # must not raise
 
 
 # ── production wiring (no dead hook) ────────────────────────────────────
