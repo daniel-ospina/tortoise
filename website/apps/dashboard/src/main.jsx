@@ -38,7 +38,7 @@ import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, res
 // CONDITIONAL plus the chooser-reachable key-less route, extracted as a
 // createElement component so the suite RENDERS it (react-dom/server) instead
 // of grepping the two inline strings (onboardingEmptyStateKeyNote.test.js).
-// #4637: the OWNER note and the four empty-state lead-ins live in the same
+// #4637: the OWNER note and the five empty-state lead-ins live in the same
 // module — the lead-in is where the chooser route is named, so the owner arms
 // consume the same lead-in constants the member arms do instead of deciding for
 // themselves what the fork offers.
@@ -6888,7 +6888,7 @@ function claimIntentInFlight() {
   // The build-fork re-entry lead-in is used by BOTH re-entry arms (existing-key
   // and no-key) — one literal, so they cannot drift. #4637: it now lives in
   // `onboardingEmptyStateKeyNote.js` beside the notes (and the owner arms) that
-  // consume it, together with the other three lead-ins.
+  // consume it, together with the other four lead-ins.
   // #1831 P2-1 / #2246: the wizard's setup commands embed the user's key —
   // never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
@@ -6920,8 +6920,11 @@ function claimIntentInFlight() {
   const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
   // #4637: the Overview empty-state cards' "the Organization's key is already
   // live" state — ONE derivation (`ownerKeyLive`, note module), read by both
-  // owner arms and by the graph-missing card's snippet branch. The GATE is the
-  // authority, not `snippetKey` (welcomeKey || apiKey, below): the in-memory
+  // owner arms and by the re-entry card's API Keys affordance
+  // (`!snippetKey || !keyIsLive`). NOT by the graph-missing card's snippet
+  // branch, which reads the gate's held plaintext (`connectGate.key`) instead:
+  // `keyIsLive` is true in mode 'existing', where the gate deliberately holds no
+  // plaintext at all. The GATE is the authority either way, not `snippetKey` (welcomeKey || apiKey, below): the in-memory
   // `welcomeKey` reveal is truthy after its row is revoked/disabled/rotated,
   // while `durableConnectKey`'s row-truth check drops it and the gate resolves
   // 'mint'/'existing' — so the card could claim a key was live while the connect
@@ -8967,12 +8970,6 @@ function claimIntentInFlight() {
               // holds no plaintext at all, so any truthy `snippetKey` is stale.
               // If the gate holds no plaintext the card renders the note below,
               // which takes its own live/no-key arm from the same gate mode.
-              // #4637: BOTH halves are required. `snippetKey` alone is an
-              // in-memory reveal that survives its own row being revoked, so
-              // the card would print "Your Organization and API key are live"
-              // over a snippet whose key the API now rejects; `keyIsLive` is
-              // the gate's answer, and the card falls through to the note (in
-              // its no-key arm) exactly when the gate says nothing is usable.
               // The reveal path itself: `welcomeKey` truthy ⇒ the gate resolves
               // 'embed' while the rows are unloaded, so the snippet is not
               // flickered away while the keys GET is in flight.

@@ -295,8 +295,9 @@ test('#4637: the key-LIVE owner arms derive their sentence from the gate mode, p
     + `(if your setup needs an API key, ${OWNER_LIVE_EMBED}).`)
   assert.equal(renderOwner('reentry', { buildFork: true, connectGateMode: 'embed', keyLive: true }),
     `Your Organization's API key is live — finish the setup below (${OWNER_LIVE_EMBED}).`)
-  // the sentence is a function of the MODE, not of the card: the two cards say
-  // the same thing about the same state
+  // the two clauses the note derives from the GATE MODE alone state the same
+  // KEY FACT on both cards (their lead-ins differ by design — each card names
+  // its own action), so the clause cannot be re-worded per card.
   for (const buildFork of [false, true]) {
     for (const connectGateMode of ['embed', 'existing']) {
       const reentry = renderOwner('reentry', { buildFork, connectGateMode, keyLive: true })
@@ -355,13 +356,16 @@ test('#4637: the CTA prose and the action route take the same arm for every fork
 test('#3729 wiring: main.jsx renders the guarded note at all three member arms with the derived boolean', () => {
   const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
   // Props/branches are checked on COMMENT-STRIPPED source, so a comment between
-  // the branch test and the tag cannot defeat a pin (and a pin cannot be
-  // satisfied by prose). The stripper is the SHARED, quote-aware one
-  // (`testSupport.js`, used by 11 other suites) — a home-made stripper that only
-  // removed JSX comments left trailing `//` and inline `/* … */` able to satisfy
-  // a pin: `x // const keyIsLive = ownerKeyLive(connectGate.mode)` kept the
-  // gate-authority pin green. That hole is asserted closed at the end of this
-  // file (the `stripComments` regression test).
+  // the branch test and the tag cannot defeat a pin. The stripper is the SHARED,
+  // quote-aware one (`testSupport.js`, used by 11 other suites) — a home-made
+  // stripper that only removed JSX comments left trailing `//` and inline
+  // `/* … */` able to satisfy a pin: `x // const keyIsLive =
+  // ownerKeyLive(connectGate.mode)` kept the gate-authority pin green. That hole
+  // is asserted closed at the end of this file. ⚠️ Residue: a STRING or template
+  // literal is code, so a pin phrased as bare text presence can still be
+  // satisfied by a quoted decoy — the pins that guard a #4637 CARRIER therefore
+  // assert the expression inside a JSX expression position (quote-excluding
+  // lookbehind), not a bare substring.
   const mainCode = stripComments(mainJsx)
   // ALL note sites must use the derived boolean. The pins are PROP-SET based,
   // not layout based: a source-text regex anchored on the attribute ORDER or on
@@ -398,19 +402,31 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
     'the existing-key member lead-in must not be re-typed inline in main.jsx')
   assert.ok(!mainJsx.includes('paste the key an owner or admin shared with you'),
     'the old key-only member sentence is gone')
-  // the re-entry BUILD lead-in is ONE literal (now imported from the note
-  // module), referenced by both member re-entry arms — the import is one of the
-  // three occurrences
-  assert.equal((mainJsx.match(/REENTRY_BUILD_LEAD_IN/g) || []).length, 3,
+  // Each member arm SELECTS a lead-in by fork: the build fork gets the plain
+  // org fact and the self fork gets the route clause. The pins below assert the
+  // whole ternary per arm, not the presence of an identifier — a use-site
+  // composition (`REENTRY_BUILD_LEAD_IN + ' to connect your agent. '`) is the
+  // #4637 defect itself and a bare `match(/REENTRY_BUILD_LEAD_IN/g)` count let
+  // it through (mutation-proven: the concatenation kept the suite green).
+  assert.match(mainCode,
+    /\?\s*REENTRY_BUILD_LEAD_IN\s*:\s*REENTRY_KEYED_LEAD_IN\}/,
+    'the re-entry existing-key member arm must select between exactly the two constant names')
+  assert.match(mainCode,
+    /\?\s*REENTRY_BUILD_LEAD_IN\s*:\s*REENTRY_SELF_LEAD_IN\}/,
+    'the re-entry no-key member arm must select between exactly the two constant names')
+  assert.match(mainCode,
+    /\?\s*GRAPH_MISSING_BUILD_LEAD_IN\s*:\s*GRAPH_MISSING_SELF_LEAD_IN\}/,
+    'the graph-missing member arm must select between exactly the two constant names')
+  assert.equal((mainCode.match(/REENTRY_BUILD_LEAD_IN/g) || []).length, 3,
     'the build lead-in must be imported once and referenced by both re-entry arms')
-  assert.ok(!/const REENTRY_BUILD_LEAD_IN/.test(mainJsx),
+  assert.ok(!/const REENTRY_BUILD_LEAD_IN/.test(mainCode),
     'the lead-in literals live in the note module, never re-declared in main.jsx')
   // the graph-missing BUILD lead-in carries no locative: that card renders no
   // SDK setup below it (its actions are the API Keys tab and, on a self fork,
   // the chooser route)
-  assert.ok(mainJsx.includes('? GRAPH_MISSING_BUILD_LEAD_IN'),
+  assert.ok(mainCode.includes('? GRAPH_MISSING_BUILD_LEAD_IN'),
     'the graph-missing build-fork lead-in states only the org fact')
-  assert.ok(!/set up the Tortoise SDK below/.test(mainJsx),
+  assert.ok(!/set up the Tortoise SDK below/.test(mainCode),
     'the graph-missing card must not point "below" at an SDK setup it does not render')
   // ROLE GATE — a member must never be shown the owner note (it claims an
   // Organization key state) and an owner must never be shown the member note
@@ -462,18 +478,22 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   // surface on these two cards, and it reads the GATE's own held plaintext — one
   // fact, not a conjunction of two (a stale reveal plus some other usable row
   // used to pass a `snippetKey && keyIsLive` test and print a dead key as live).
-  assert.match(mainCode, /\{connectGate\.key \?/,
+  // The lookbehind keeps the pinned EXPRESSION out of a string/template literal:
+  // a decoy `'{connectGate.key ?'` must not satisfy a pin (the comment-stripper
+  // cannot help here — strings are code by design).
+  assert.match(mainCode, /(?<!['"`])\{connectGate\.key \?/,
     'the graph-missing snippet branch must be gated on the gate\'s own held plaintext')
   assert.ok(!/\{snippetKey \?/.test(mainCode),
     'no branch may render the snippet from `snippetKey` alone')
   // …and the API Keys affordance is on the same fact: the owner clause names that
   // tab exactly when the gate holds no usable key, so the button must be there
   // then (the old `!snippetKey` gate withheld it in the stale-reveal state)
-  assert.match(mainCode, /\{\(!snippetKey \|\| !keyIsLive\) && \(/,
+  assert.match(mainCode, /(?<!['"`])\{\(!snippetKey \|\| !keyIsLive\) && \(/,
     'the API Keys affordance must appear whenever the gate holds no usable key')
   // the graph-missing card's key-present call to action names the same route,
   // so it consumes the same derivation instead of hard-coding ONE fork's prose
-  assert.ok(mainCode.includes('{graphMissingCta(isBuildFork)}'),
+  // (lookbehind: a quoted decoy is not the call site)
+  assert.match(mainCode, /(?<!['"`])\{graphMissingCta\(isBuildFork\)\}/,
     'the snippet-branch CTA must be fork-derived through graphMissingCta')
   assert.ok(!/Connect your agent, or add a memory yourself/.test(mainCode),
     'the un-forked CTA literal must be gone from main.jsx')
