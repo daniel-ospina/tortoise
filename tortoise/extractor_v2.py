@@ -3271,6 +3271,80 @@ _CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS
 # content, the two are one-sided against each other and the substitution rule
 # sees them.
 _CONTENT_STOPWORDS = _CONTENT_STOPWORDS - {"on"}
+
+# A state word is load-bearing the same way a load-bearing connective is, and
+# it fails the same way: `off` in "the flag is off" asserts a property, while
+# the very same `off` can be a particle and `on` a preposition, so
+# `_CONTENT_STOPWORDS` holds the token by its commonest role and the role
+# cannot be read from the token.  PR #5320 (issue #5139, still open) adds the
+# analogous guard for the connective and refuses a SWAP — both sides fill one
+# slot, so each side owns a member the other LACKS.  A state word inverts a
+# claim on a ONE-SIDED DROP instead: "the flag is off" folded into "the
+# flag", and the in-capture seam then `DETACH DELETE`d the rival (#5134).
+#
+# The vocabulary is a flat declared set of antonym PAIRS, and `_polarity_drop`
+# reads it over the PAIR: a member present on ONE side is refused only when it
+# is the ENTIRE distinguishing content of that side's copula predicate and the
+# other side is silent.  So the two sides of the fold are the same claim minus
+# a state rather than a claim plus a detail.  The allowance for a one-sided
+# token is load-bearing (it is what keeps "the team meets weekly in main
+# office" folding into "the team meets weekly", #4652), so the pair and the
+# predicate — never a token list — decide.
+#
+# A flat set, not a table of slots like the connective rule's (#5320),
+# because a DROP has no second side to match a slot against — the rival is the
+# member's ABSENCE, not another member — so a partition would be structure no
+# rule reads.  The members above are the vocabulary's declaration, and the
+# union is what the pair predicate consults.
+#
+# The predicate condition is what separates the state `on` from the
+# prepositional one, and it is why `on` can stay a single member: "we ship on
+# friday" is a preposition whose object is a DATE token, so "we ship on
+# friday"/"we ship friday" carries one one-sided `on` and looks exactly like a
+# state drop until the predicate is read; "the focus is on quality" carries
+# `quality` as a second content token and reads the same way.  Both stay
+# foldable (pinned in the suite).
+#
+# The vocabulary is deliberately a small declared set, not an enumeration of
+# the language: a state word outside it (`shut`, `down`, `broken`) reaches no
+# dimension and is the documented residual, and so is a state term with an
+# adverb, a non-be linking verb, a passive/particle form, an inverted or fused
+# predicate, or an ATTRIBUTIVE (pre-nominal) position beside it ("seems off",
+# "was turned off", "currently off", "is the flag off", "the invalid token").
+# Each is a residual FAIL-OPEN in this guard: the pair folds, so in one
+# capture order the state-bearing claim can still be dropped.  All are pinned
+# in `tests/test_never_across_fold_5080.py` so they cannot go silent.
+_POLARITY_MEMBERS = frozenset({
+    "on", "off",
+    "enabled", "disabled",
+    "open", "closed",
+    "active", "inactive",
+    "available", "unavailable",
+    "locked", "unlocked",
+    "muted", "unmuted",
+    "online", "offline",
+    "valid", "invalid",
+    "present", "absent",
+})
+# Frame-class tokens a state predicate's complement may carry without making
+# the complement anything but the state.  The date words that are ALSO frame
+# stopwords (`today`, `yesterday`) are removed deliberately: as frame they
+# would be ignored in the tail, so "the release is on today" would read as the
+# state `on` with an empty complement and the legitimate prepositional fold
+# would be refused.  A date word that is NOT frame (`friday`, `monday`) blocks
+# the tail on its own, so the subtraction is not what keeps it — only the
+# today/yesterday pair is load-bearing, and that is the pair pinned in the
+# suite.
+_TAIL_IGNORABLE = _CONTENT_STOPWORDS - _DATE_WORDS
+# The copulas a state term completes.  `do`/`does`/`did` are auxiliaries, not
+# copulas — they carry no predicate complement — so they are excluded; a
+# non-be linking verb (`seems`, `remains`, `stays`) is a pinned residual: it is
+# a content token, so the two sides stop being one claim minus a state.  `am`
+# is the first-person be-form and is NOT a `_FRAME_STOPWORDS` member — it is a
+# `_CLOCK_UNITS` member, so `_content_tokens` drops it as a clock suffix and
+# the copula must be declared here or "i am offline" folds into "i am".
+_COPULAS = frozenset({"am", "is", "are", "was", "were", "be", "been",
+                      "being"})
 _UNREADABLE = frozenset({"unreadable"})
 
 # Token edges stripped before comparison.  `_norm` lowercases and collapses
@@ -3950,6 +4024,101 @@ def _content_tokens(content: str) -> set[str]:
     return out
 
 
+def _state_predicate(content: str, targets: frozenset[str] | set[str]) -> bool:
+    """True when a copula's complement is ONLY polarity members AND a target.
+
+    Read from the ORDERED token stream, because the reading is about the
+    predicate's shape and not a token's membership: the state term must be the
+    whole complement of some copula on its side ("the flag is off", "the
+    feature is disabled").  That is the pair-level signal a token lookup does
+    not have — it is what tells the state `on` from the prepositional `on`
+    whose object is a second token ("the focus is on quality"), and it is what
+    keeps a DATE object from reading as an absent one: ``_TAIL_IGNORABLE``
+    deliberately does not drop date words, so "the release is on friday" keeps
+    `friday` as a blocker and the pair stays foldable.  (`_content_tokens`
+    drops dates and numbers — correct for the skeleton, wrong here.)
+
+    ``targets`` is what the pair actually DROPS (``_polarity_drop``'s
+    distinguishing set), and the complement must INTERSECT it.  Without that,
+    a copula anywhere in the claim whose polarity complement is a member the
+    two sides SHARE would license a refusal: appending the same trailing
+    clause to both sides ("we ship on friday and the flag is off" against
+    "we ship friday and the flag is off") would then refuse a legitimate fold
+    on the strength of the shared trailing `off`, not the dropped
+    prepositional `on`.
+
+    A tail of frame words only does not qualify: a copula with no predicate
+    complement asserts nothing, and a marker-only tail (`not`, a condition) is
+    owned by those dimensions.  A second content token — an adverb, a value, a
+    modifier — disqualifies the complement, because the state is then not the
+    whole of what is being dropped.  That is a declared residual and it is a
+    FAIL-OPEN in this guard: the pair folds, so in one capture order the
+    state-bearing claim can still be dropped (the wrong-drop direction the
+    boundary exists to prevent).  It cannot be closed from the ordered token
+    stream without over-blocking the prepositional `on` whose object is a
+    second content token.
+    """
+    seq = _guard_token_seq(content)
+    for i, token in enumerate(seq):
+        if _apostrophe_free(_deaccent(token)) not in _COPULAS:
+            continue
+        tail = {key for t in seq[i + 1:]
+                if (key := _apostrophe_free(_deaccent(t)))
+                and key not in _TAIL_IGNORABLE}
+        if tail and tail <= _POLARITY_MEMBERS and tail & targets:
+            return True
+    return False
+
+
+def _polarity_drop(a: str, b: str,
+                   content_a: set[str] | None = None,
+                   content_b: set[str] | None = None) -> frozenset[str]:
+    """The state members on ONE side that are the pair's ONLY difference.
+
+    Empty unless exactly one side's DISTINGUISHING content is a set of
+    polarity members (the other side is silent), and a dropped member is the
+    whole complement of some copula there.  Reading the DISTINGUISHING
+    members rather than every member is what catches a one-sided state beside
+    a member the two sides SHARE ("the flag is off and the gate is on"
+    against "\u2026 the gate is off"): subtracting every member from one side
+    would fail the equality and miss it.  A one-sided token that is NOT a state
+    predicate is the documented broadening case ("the team meets weekly in
+    main office").
+
+    A pair that differs by a PERMUTATION of the same polarity members ("the
+    flag is on and the gate is off" against "the flag is off and the gate is
+    on") is not refused here: the skeleton is a SET, so both sides compare
+    equal and this predicate sees no difference at all.  That is the
+    set-level / attachment blind spot of the whole boundary (#5139 / #5131),
+    pre-existing and not specific to polarity.
+
+    A non-empty result is a substituted-content difference — dropping a state
+    substitutes the claim, it does not broaden it — so `fold_allowed`,
+    `supersede_allowed`, `classify_consolidation` and
+    `dedup_classify.rephrase_hit` all refuse from the one boundary.
+
+    ``content_a``/``content_b`` are the caller's already-computed skeletons
+    (``_identity_differences`` holds them); they are recomputed only when this
+    is called standalone.
+    """
+    if content_a is None or content_b is None:
+        content_a, content_b = _content_tokens(a), _content_tokens(b)
+    if not content_a or not content_b:
+        return frozenset()
+    # The DISTINGUISHING members, not every member: a member shared with the
+    # other side must not be subtracted from this side's skeleton, or a
+    # one-sided state beside a shared state is missed.  `only_a` all-polarity
+    # with `only_b` empty is exactly "a is b plus a state".
+    only_a, only_b = content_a - content_b, content_b - content_a
+    if only_a and not only_b and only_a <= _POLARITY_MEMBERS \
+            and _state_predicate(a, only_a):
+        return frozenset(only_a)
+    if only_b and not only_a and only_b <= _POLARITY_MEMBERS \
+            and _state_predicate(b, only_b):
+        return frozenset(only_b)
+    return frozenset()
+
+
 def _possessives(content: str) -> frozenset[str]:
     """Possessive owners ("bob's", "the team's"), in canonical spelling.
 
@@ -4076,6 +4245,14 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     # See `_CONNECTIVE_SLOTS` for the one-sided, synonym and cross-slot cases
     # that must keep folding.
     if _connective_swap(a, b):
+        out.add("substituted_content")
+    # A one-sided STATE word (#5134).  Read from the PAIR, not the token: the
+    # state word is refused only when it is the whole distinguishing content of
+    # a copula predicate, which is the same pair-read shape the connective guard
+    # above uses (#5139).  A one-sided token that is not that remains the
+    # documented broadening case.  See `_POLARITY_MEMBERS` for why a token list
+    # cannot decide and which residuals are pinned.
+    if _polarity_drop(a, b, content_a, content_b):
         out.add("substituted_content")
     # Negation and condition are SCOPE-bearing, and a set cannot express that:
     # "the cache is not the problem, the lock is" and "the cache is the
