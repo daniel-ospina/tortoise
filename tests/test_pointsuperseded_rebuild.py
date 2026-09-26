@@ -600,12 +600,14 @@ def test_multi_target_same_rel_not_collapsed_by_descriptor_id(sup):
 # ── aboutDocument-title keyed resolution ──
 
 def test_about_document_title_keyed_resolution(sup):
-    """Documents store their display name in `title` (#211): the descriptor
-    key is coalesce(title, name) and replay resolution matches by title (or
-    name). X-[:aboutDocument]->(Document title-only) follows the successor.
-    create_document does NOT journal DocumentCreated (the #2296 durability
-    audit tracks that surface) — the fixture journals the line the way the
-    document-index path does, so the rebuild can re-create the Document."""
+    """A document stores its display name in `title` (#211) and its identity
+    in `url` (D10, ONTOLOGY v3.15 §4.4): live auto-detect matches a
+    document-bearing Source by url OR title, while the replay descriptor is
+    keyed `url`. X-[:aboutDocument]->(Source title-only) follows the
+    successor. create_document does NOT journal DocumentCreated (the #2296
+    durability audit tracks that surface) — the fixture journals the line the
+    way the document-index path does, so the rebuild can re-create the
+    document :Source."""
     import datetime
     import json
     _, events, sdk = sup
@@ -630,12 +632,12 @@ def test_about_document_title_keyed_resolution(sup):
     _rebuild(sdk, events)
     assert _struct_edges(proj, succ) == {("aboutDocument", "DocTitleOnly")}
     assert not _struct_edges(proj, x)
-    # the edge lands on the DOCUMENT node (label-scoped), resolved by title
+    # the edge lands on the document :Source (label-scoped), matched by title
     n = proj.g.query(
-        "MATCH (p:Point {id:$id})-[r:aboutDocument]->(d:Document) "
+        "MATCH (p:Point {id:$id})-[r:aboutDocument]->(d:Source) "
         "WHERE d.title = $title RETURN count(r)",
         params={"id": succ, "title": "DocTitleOnly"}).result_set[0][0]
-    assert n == 1, f"aboutDocument should terminate on the Document: {n}"
+    assert n == 1, f"aboutDocument should terminate on the document Source: {n}"
 
 
 # ── Unresolvable-key skips at emission (zero regression) ──

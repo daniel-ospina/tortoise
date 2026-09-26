@@ -1,5 +1,5 @@
 // keyRotateEmptyRevealExec.test.js — #4342 (the #4330 defect class on the
-// ROTATE surface).
+// ROTATE surface), extended by #4355 (the single-call rotate primitive).
 //
 // WHY THIS FILE EXISTS. `regenerateKey` mints the replacement, revokes the OLD
 // key, and then latches the reveal with
@@ -12,6 +12,16 @@
 // blank replacement. Both sibling mint sites refuse this response
 // (`mintGraphKey` throws; #4330 hardened `createKey`); this is the one mint
 // site with no guard.
+//
+// #4355 changed the SHAPE the guard sits on. Rotate used to be two calls
+// (`mintKey` then `revokeKey`) against the capped mint endpoint, which is why a
+// team at `max_api_keys` could not rotate at all; it is now ONE call to
+// `POST /v1/team/keys/{id}/rotate`, which creates the replacement and revokes
+// the displaced row cap-neutrally. The plaintext guard, the refresh ordering,
+// the stale-team guard, and the copy seam below are UNCHANGED in intent and
+// re-pinned against the new call. What is new: the response's
+// `replaced_revoked` / `warning` partial-state disclosure, and the single
+// pinned URL/body shape.
 //
 // WHY EXECUTION, NOT A TEXT SCAN. The exit claim is a BEHAVIOUR — "a
 // plaintext-less rotate never latches the reveal, and no falsy value reaches
@@ -106,8 +116,15 @@ function build(deps, decls) {
 }
 
 // ── regenerateKey ───────────────────────────────────────────────────────────
-function rotateEnv({ mintKey, loadAll, orgIdRef } = {}) {
-  const calls = { rotatedKey: [], error: [], capNotice: [], loadAll: 0, revoke: [], order: [] }
+// #4355: rotate is ONE call now (`POST /v1/team/keys/{id}/rotate`), so the
+// harness stubs `api` instead of `mintKey`+`revokeKey`. `response` is the
+// rotate 2xx body; `reject` is the error object `api` throws (its `.status`
+// drives the 402 branch).
+function rotateEnv({ response, reject, loadAll, orgIdRef, apiImpl, lifetimeDays } = {}) {
+  const calls = {
+    rotatedKey: [], rotateNotice: [], error: [], capNotice: [], loadAll: 0,
+    api: [], order: [], welcomeKeys: [], wizardKeys: [],
+  }
   const rows = [
     { id: 'k-old', key_id: 'k-old', name: 'residue row', key_prefix: 'tt_live_re',
       created_at: '2026-08-01T00:00:00.000Z' },
@@ -118,28 +135,41 @@ function rotateEnv({ mintKey, loadAll, orgIdRef } = {}) {
     keys: rows,
     currentOrgId: 'org-A',
     orgIdRef: orgIdRef || { current: 'org-A' },
+    sessionTokenRef: { current: 'jwt' },
+    welcomeKey: '',
+    wizardDurableKey: '',
     team: { tier: 'free' },
     _MS_PER_DAY: 86400000,
     // Pure helpers — irrelevant to the plaintext guard; stubs keep the file
     // free of their own dependencies.
-    lifetimeDaysFromRow: () => null,
+    lifetimeDaysFromRow: () => (lifetimeDays === undefined ? null : lifetimeDays),
     fmtExpiryDate: (iso) => String(iso).slice(0, 10),
     keyRowDisclosure: () => 'residue row · tt_live_re · 2026-08-01',
     confirm: () => true,
     rotateCapNoticeFrom: (m) => `rotate cap: ${m}`,
-    mintKey: async (...args) => {
-      calls.order.push('mint')
-      return mintKey(...args)
+    // #4335: the rotate notice takes the same hasUpgrade flag as the create
+    // path, so the rotate handler now calls this. `{tier:'free'}` has a higher
+    // tier available → true (the stub only has to be callable here; the
+    // copy itself is stubbed above).
+    teamHasUpgrade: () => true,
+    api: async (url, opts) => {
+      calls.order.push('rotate')
+      calls.api.push([url, opts])
+      if (apiImpl) return apiImpl(url, opts)
+      if (reject) throw reject
+      return response
     },
-    revokeKey: async (id, opts) => {
-      calls.order.push('delete')
-      calls.revoke.push([id, opts])
-    },
-    loadAll: async () => { calls.loadAll++; if (loadAll) await loadAll(calls) },
+    // The stub RETURNS the rows the refresh landed, because #4355's ambiguous
+    // failure branch decides its disclosure from the reloaded state (undefined
+    // models a refresh that failed or went stale).
+    loadAll: async () => { calls.loadAll++; return loadAll ? await loadAll(calls) : undefined },
     setCapNotice: (v) => calls.capNotice.push(v),
     setError: (v) => calls.error.push(v),
     setBusy: () => {},
     setRotatedKey: (v) => calls.rotatedKey.push(v),
+    setRotateNotice: (v) => calls.rotateNotice.push(v),
+    setWelcomeKey: (v) => calls.welcomeKeys.push(v),
+    setWizardDurableKey: (v) => calls.wizardKeys.push(v),
   }
   return { deps, calls, regenerateKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function regenerateKey']).regenerateKey }
 }
@@ -148,13 +178,13 @@ test('#4342: a plaintext-less rotate 2xx latches NO reveal and states the old ke
   // The reported mechanism: a 2xx mint carrying only a row id — the secret is
   // unrecoverable. Pre-fix this reached `setRotatedKey({ plaintext: '', … })`.
   const { calls, regenerateKey } = rotateEnv({
-    mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
+    response: { id: 'k-new', key_prefix: 'tt_rot_new', replaced_revoked: true },
   })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey, [],
     'a plaintext-less mint must never latch `rotatedKey` (the empty `.key-value` box)')
-  assert.deepEqual(calls.order, ['mint', 'delete'],
-    'the old key IS revoked on this path — the message must say so')
+  assert.deepEqual(calls.order, ['rotate'],
+    'the single rotate call revokes the old key server-side — the message must say so')
   assert.equal(calls.loadAll, 1,
     'the replacement row exists server-side — the table must be refreshed')
   const msg = calls.error.filter(Boolean).at(-1) || ''
@@ -167,7 +197,7 @@ test('#4342: a plaintext-less rotate 2xx latches NO reveal and states the old ke
 })
 
 test('#4342: a mint returning nothing at all is refused the same way', async () => {
-  const { calls, regenerateKey } = rotateEnv({ mintKey: async () => undefined })
+  const { calls, regenerateKey } = rotateEnv({ response: undefined })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey, [], 'a missing response must not latch a reveal')
   assert.match(calls.error.filter(Boolean).at(-1) || '', /cannot be shown/)
@@ -178,7 +208,7 @@ test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused
   // `mk.key = '   '` are both NON-falsy, so the reveal rendered a value the
   // user could not use (a blank box, or a copied blank) with no error surfaced.
   for (const value of [42, {}, [], '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad', '\u061c', '\u180e', '\ufe0f']) {
-    const { calls, regenerateKey } = rotateEnv({ mintKey: async () => ({ key: value }) })
+    const { calls, regenerateKey } = rotateEnv({ response: { key: value } })
     await regenerateKey('k-old')
     assert.deepEqual(calls.rotatedKey, [],
       `a mint carrying ${JSON.stringify(value)} must not latch the reveal`)
@@ -191,11 +221,11 @@ test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused
 test('#4342: a failing refresh cannot overwrite the already-revoked message', async () => {
   // `loadAll` owns the same `error` slot and overwrites it from its own catch
   // (main.jsx). If the refusal message were set FIRST, a compound failure (the
-  // rotate legs succeeded, the follow-up read did not) would replace the one
+  // rotate succeeded, the follow-up read did not) would replace the one
   // message that tells the user their old key is gone. The refusal must be
   // surfaced AFTER the refresh — pinned here behaviourally.
   const { calls, regenerateKey } = rotateEnv({
-    mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
+    response: { id: 'k-new', key_prefix: 'tt_rot_new' },
     loadAll: (c) => { c.error.push('Failed to fetch') },
   })
   await regenerateKey('k-old')
@@ -210,12 +240,14 @@ test('#4342: a successful rotate still latches the plaintext and its expiry echo
   // Positive control: the guard must not swallow the working path (#2426 must
   // keep riding `rotatedKey`).
   const { calls, regenerateKey } = rotateEnv({
-    mintKey: async () => ({ key: 'tt_ok', expires_at: '2026-10-20T00:00:00+00:00' }),
+    response: { key: 'tt_ok', expires_at: '2026-10-20T00:00:00+00:00', replaced_revoked: true },
   })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey,
     [{ plaintext: 'tt_ok', expiresAt: '2026-10-20T00:00:00+00:00' }])
   assert.deepEqual(calls.error, [''], 'the open-time clear is the only error write')
+  assert.deepEqual(calls.rotateNotice, [''],
+    'a clean rotate clears any previous partial-state notice')
   assert.equal(calls.loadAll, 1)
 })
 
@@ -226,13 +258,184 @@ test('#4342/#4359: a team switch during the rotate refusal refresh suppresses th
   const orgIdRef = { current: 'org-A' }
   const { calls, regenerateKey } = rotateEnv({
     orgIdRef,
-    mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
+    response: { id: 'k-new', key_prefix: 'tt_rot_new' },
     loadAll: async () => { orgIdRef.current = 'org-B' },
   })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey, [], 'still no reveal')
   assert.deepEqual(calls.error.filter(Boolean), [],
     'a refusal whose team changed mid-refresh must not be surfaced under the new team')
+})
+
+// ── #4355: the single call, the pin, and the partial-state disclosure ────
+
+test('#4355: rotate is ONE pinned session call — never a mint-then-revoke pair', async () => {
+  const { calls, regenerateKey } = rotateEnv({
+    response: { key: 'tt_ok', replaced_revoked: true },
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.api.length, 1, 'exactly one server call per rotate')
+  const [url, opts] = calls.api[0]
+  assert.equal(url, '/v1/team/keys/k-old/rotate?org_id=org-A',
+    'the rotate route, pinned to the SELECTED team (#2230/#2167 rule 4)')
+  assert.equal(opts.method, 'POST')
+  assert.equal(opts.useSession, true, 'management write → session JWT')
+  // The body must never carry a privilege class — the server 422s scopes/
+  // graph_id, and the replacement inherits the displaced row's class.
+  const body = JSON.parse(opts.body)
+  assert.deepEqual(Object.keys(body).sort(), ['name'],
+    'only the inherited label (no scopes/graph_id — the server owns the class)')
+  assert.equal(body.scopes, undefined, 'the body must never set scopes')
+  assert.equal(body.graph_id, undefined, 'the body must never set a graph binding')
+})
+
+test('#4355: the replacement body carries only the label + the lifetime span', async () => {
+  // #2229/#2426 carry-over rides the SAME single call: the row label and the
+  // re-applied lifetime span, and NOTHING that could set privilege class
+  // (the server 422s scopes/graph_id and inherits both from the displaced row).
+  const { calls, regenerateKey } = rotateEnv({
+    response: { key: 'tt_ok', replaced_revoked: true },
+    lifetimeDays: 30,
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(JSON.parse(calls.api[0][1].body),
+    { name: 'residue row', expires_in: 30 },
+    'the label + lifetime span carry over; no scopes/graph_id is ever sent')
+  const body = JSON.parse(calls.api[0][1].body)
+  assert.equal(body.scopes, undefined, 'the body must never set scopes')
+  assert.equal(body.graph_id, undefined, 'the body must never set a graph binding')
+})
+
+test('#4355: replaced_revoked:false surfaces the partial-state notice AND the live replacement', async () => {
+  // The worst case is stated by the server, not swallowed: the replacement was
+  // created, the displaced row could NOT be revoked, and the rollback failed —
+  // BOTH keys are live. The response still carries the replacement's plaintext
+  // (never lose a live secret), and the warning must reach the user as its own
+  // persistent notice rather than riding the transient `error` slot.
+  const warning = 'The replacement was created, but the previous key could not be revoked and the rollback failed — both are currently active.'
+  const { calls, regenerateKey } = rotateEnv({
+    response: { key: 'tt_ok', replaced_revoked: false, warning },
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.rotatedKey, [{ plaintext: 'tt_ok', expiresAt: null }],
+    'the live replacement is still revealed — the alternative is losing a live secret')
+  assert.deepEqual(calls.rotateNotice, [warning],
+    'the partial state is disclosed, verbatim from the server')
+  assert.deepEqual(calls.error, [''], 'it is NOT an error — the call succeeded')
+})
+
+// ── #4355: the AMBIGUOUS non-402 failure (lost/timed-out response) ───────
+//
+// The single rotate call creates the replacement AND revokes the displaced row
+// server-side. A dropped or timed-out reply therefore leaves the client
+// holding no plaintext for a live replacement it cannot know about, while the
+// table still renders the old row active — a state the pre-#4355 two-call
+// shape could not reach from a lost MINT response (the revoke was a separate
+// call it never made). Reporting only `e.message` is therefore not merely
+// unhelpful, it can be false. The catch must re-read the true state FIRST and
+// disclose only what the table shows.
+
+test('#4355: a lost non-402 rotate response re-reads state and discloses a COMPLETED rotate', async () => {
+  // The reloaded row is revoked → the server DID complete the rotate: the
+  // replacement exists and its value cannot be shown.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error('Network request failed'), { status: 0 }),
+    loadAll: () => [{ id: 'k-old', key_id: 'k-old', revoked_at: '2026-09-21T00:00:00.000Z' }],
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1,
+    'the true state must be re-read BEFORE the message is chosen')
+  assert.deepEqual(calls.rotatedKey, [],
+    'a lost response can never latch a reveal — it carried no plaintext')
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /may have completed/,
+    'the ambiguous failure must say the request may have completed')
+  assert.match(msg, /shows as revoked/,
+    'the reloaded state is the evidence, and it must be stated')
+  assert.match(msg, /cannot be shown/,
+    'a replacement exists whose value cannot be shown')
+  assert.match(msg, /create a new key/, 'and name the remedy')
+  assert.doesNotMatch(msg, /^Network request failed$/, 'never just the transport error')
+})
+
+test('#4355: a lost non-402 rotate response whose row is still live states the UNKNOWN outcome', async () => {
+  // The reloaded row is still active → the rotate may not have run, but a
+  // replacement may still exist. Claiming the row is gone would be a false
+  // disclosure; claiming nothing would hide the ambiguity.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error('Gateway timeout'), { status: 504 }),
+    loadAll: () => [{ id: 'k-old', key_id: 'k-old', revoked_at: null }],
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1)
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /could not be confirmed/,
+    'the outcome is unknown and must be presented as such')
+  assert.match(msg, /still listed as active/,
+    'the reloaded state is stated — the row is NOT reported revoked')
+  assert.match(msg, /may have been created/,
+    'a replacement may exist even though the row is still live')
+  assert.match(msg, /Gateway timeout/, 'the underlying failure is still named')
+  assert.doesNotMatch(msg, /shows as revoked/, 'never a false completed-rotate claim')
+})
+
+test('#4355: a refresh that cannot report state still discloses the ambiguity', async () => {
+  // `loadAll` returning nothing (the refresh failed, or the team went stale)
+  // must not collapse to `e.message`: the client still cannot know whether the
+  // rotate ran. Fail toward the reader, not toward a false all-clear.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error('Network request failed'), { status: 0 }),
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1)
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /could not be confirmed/)
+  assert.doesNotMatch(msg, /shows as revoked/)
+})
+
+test('#4355: a team switch during the ambiguous-failure refresh suppresses the disclosure', async () => {
+  // Same stale-response rule as the plaintext-less branch: the disclosure names
+  // THIS team's row, so it must not land under the new team's header.
+  const orgIdRef = { current: 'org-A' }
+  const { calls, regenerateKey } = rotateEnv({
+    orgIdRef,
+    reject: Object.assign(new Error('Network request failed'), { status: 0 }),
+    loadAll: async () => { orgIdRef.current = 'org-B' },
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1, 'the state is still re-read')
+  assert.deepEqual(calls.error.filter(Boolean), [],
+    'a disclosure whose team changed mid-refresh must not be surfaced')
+  assert.deepEqual(calls.rotatedKey, [])
+})
+
+test('#4355: a rotate 402 is the OVER-cap case and uses the over-cap copy', async () => {
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error('Team api_keys limit reached (2). Upgrade your plan to increase it.'),
+      { status: 402 }),
+  })
+  await regenerateKey('k-old')
+  const notice = calls.capNotice.at(-1) || ''
+  assert.match(notice, /rotate cap: /, 'the 402 routes to the rotate-specific notice')
+  assert.match(notice, /Team api_keys limit reached/)
+  assert.deepEqual(calls.error, ['', ''], 'the cap notice owns the message slot (no raw error)')
+})
+
+test('#4355: rotating a row whose prefix we hold clears the held plaintext (row truth)', async () => {
+  // #2246: the old path reached this clear through `revokeKey`; the single
+  // /rotate call revokes server-side, so `regenerateKey` must do it itself or
+  // the welcome/connect surfaces keep embedding a credential this rotate just
+  // killed.
+  const env = rotateEnv({ response: { key: 'tt_ok', replaced_revoked: true } })
+  env.deps.welcomeKey = 'tt_live_re_abc'
+  env.deps.wizardDurableKey = 'tt_other'
+  const fn = build(env.deps,
+    ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function regenerateKey']).regenerateKey
+  await fn('k-old')
+  assert.deepEqual(env.calls.welcomeKeys, [''],
+    'the welcome plaintext belonging to the rotated row is cleared')
+  assert.deepEqual(env.calls.wizardKeys, [],
+    'an unrelated held plaintext is untouched')
 })
 
 // ── copyRotatedKey ──────────────────────────────────────────────────────────

@@ -259,6 +259,9 @@ def test_real_transcript_parses_and_imports_through_the_real_cli(tmp_path, monke
     # 2. The REAL CLI path, with only the network transport stubbed (a receipt
     # is a 2xx server fact; `_cmd_sessions_import` builds the request for real).
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not consent.
+    # This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))

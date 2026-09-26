@@ -5,12 +5,24 @@ import './index.css'
 // #4336: TIER_LABELS is the display-name map; its parity against
 // product.html's `labels` map is pinned by tests/test_website_static.py.
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+// #4639: paid-tier suppression for the header and the narrowed upgrade-nudge
+// gate for the error banner — pure, node --test unit-tested (upsellGate.test.js).
+import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } from './upsellGate.js'
+// #4331: node usage vs the plan's ENFORCED node allowance — the server's
+// nodes_used/max_nodes pair and its display derivations (the Billing Nodes
+// card, the usage bar, and the at/near-limit nudge). Pure, node --test
+// unit-tested (nodeUsage.test.js).
+import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+// #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
+// assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
+// it as source is the mechanism that produced five false greens.
+import { WIZARD_CAPTIONS, wizardPromptText, wizardWorkflowsText } from './wizardPrompts.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, captureClaimForHarness, lastErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, captureStatusLabelForHarness, harnessAttributionForHarness, captureErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
@@ -29,10 +41,10 @@ import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from '.
 import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
-import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
+import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
 // #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
 // unit-tested). #2166 + #2426: isManagedKey selects the durable product keys
 // the API Keys page shows — bootstrap session credentials excluded, expiring
@@ -48,6 +60,9 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
+// #4335: the billing CTA's honest-unavailable derivation — one pure source so
+// the three render sites cannot drift (see billingCta.js).
+import { COMPARE_PLANS_URL, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -910,55 +925,37 @@ function WizardBlock({ step, title, children }) {
   )
 }
 
-function wizardPromptText(harness, step, key, mode) {
-  // #2865: the keyed URL comes from harnesses.js — a third hardcoded copy
-  // here would re-create exactly the drift the MCP_URL/CANONICAL_MCP_URL
-  // split exists to prevent.
-  const url = MCP_URL
-  const docs = 'Docs: https://tortoise.premiselabs.co/docs'
-  const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
-  const twoStepNote = 'Tell me when to restart'
-  const step2Text = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\n${docs}`
-
-  // #2827: every body starts at its first actionable instruction. The step
-  // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
-  // caption above the card — the SINGLE place that sentence may appear.
-  if (harness === 'pi') {
-    // #3218: MCP config → skills install → restart. The restart note used to
-    // sit BEFORE the skills line, so an agent following the prompt in order
-    // would restart Pi (loading the skills directory) and only then install
-    // the skills — requiring a second reload for them to appear.
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Pi.\n${docs}`
-    if (step === 2) return step2Text
+// #4335: the checkout CTA for the billing surfaces in this issue's scope
+// (Billing plan cards, welcome plan chooser, API-keys cap notice). A missing
+// server price id renders a DISABLED Upgrade control + the honest reason; it
+// never becomes a marketing link. The caller may add the secondary
+// "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
+// Graphs-tab upgrade buttons) are out of scope here.
+function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false, anyConfigured = false }) {
+  const reasonId = React.useId()
+  const cta = checkoutCtaFor(priceId, { anyConfigured })
+  if (cta.disabled) {
+    // #4335 review: native `disabled` already conveys the state (a redundant
+    // aria-disabled would contradict it), and the reason is visible AND tied
+    // to the control via aria-describedby. The wrapper stacks button-over-
+    // reason so a two-element fragment cannot wedge the reason between the
+    // controls of a single-row flex container (.cap-notice). `block` makes the
+    // disabled button fill a .plan-card exactly like the enabled one (which is
+    // a stretched direct child); the cap-notice stays content-width.
+    return (
+      <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: block ? 'stretch' : 'flex-start', gap: 4, width: block ? '100%' : undefined }}>
+        <button className={className} disabled title={cta.reason} aria-describedby={reasonId}>
+          {cta.label}
+        </button>
+        <span id={reasonId} className="dim small" style={{ textAlign: 'left' }}>{cta.reason}</span>
+      </span>
+    )
   }
-  if (harness === 'cursor') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Cursor.\n${docs}`
-    if (step === 2) return step2Text
-  }
-  if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
-  }
-  if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
-  }
-  // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
-  // verify/file step in the conversation; the workflows body rides
-  // wizardWorkflowsText below.
-  if (harness === 'claude-desktop' || harness === 'claude-web') {
-    if (step === 2) return step2Text
-  }
-  return ''
-}
-
-// #2827: the skills-as-prompt body a filesystem-less harness needs (Claude
-// Desktop and Claude Web keep no local skills, so the Tortoise workflows have
-// to arrive in the conversation). It ends with the same verify/file step every
-// other tab gets — without it a Claude Desktop/Web user never calls
-// tortoise_health/tortoise_create_point, so onboarding never auto-completes.
-// Rendered via WizardPromptCard so it is COPYABLE (it used to be a bare <pre>
-// with no copy affordance).
-function wizardWorkflowsText(key, mode) {
-  return `${WORKFLOWS_PROMPT}\n\n${wizardPromptText('claude-web', 2, key, mode)}`
+  return (
+    <button className={className} onClick={onUpgrade} disabled={pending}>
+      {pending ? 'Opening checkout…' : cta.label}
+    </button>
+  )
 }
 
 // #4330: ONE cap notice, TWO surfaces — the API Keys tab and the create-key
@@ -966,19 +963,43 @@ function wizardWorkflowsText(key, mode) {
 // carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
 // stage (an empty `.key-value` box, and a clipboard write of the literal
 // "null") while the notice sat on the tab BEHIND the modal, invisible.
-function CapNotice({ text, team, checkoutPending, onUpgrade }) {
+function CapNotice({ text, team, route, checkoutPending, billingPending, onUpgrade, onManage }) {
+  // A cap-notice "Upgrade" must be a REAL upgrade: the next configured paid
+  // tier strictly above the org's current tier. When a higher tier exists but
+  // the catalog is entirely down, show the honest DISABLED control (never the
+  // marketing link as the substitute CTA); when the deployment sells no higher
+  // tier, render no CTA at all — never a current/downgrade plan.
+  // #4639: a PAYING team gets the portal instead (checkout 409s on an active
+  // subscription), so `route` decides which control renders.
+  const { target, outage } = capNoticeUpgrade(team, planOptions().map((p) => p.tier))
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
-      {team?.checkout_price_id ? (
-        <button className="ghost small" onClick={onUpgrade} disabled={checkoutPending}>
-          {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+      {/* #4335: never a marketing link as the CTA — a real checkout control
+          when a higher tier is offered, an honest DISABLED control during a
+          catalog outage, and nothing when the deployment sells no higher tier.
+          #4639: a PAYING team gets the portal instead (checkout 409s on an
+          active subscription), so `route` decides which control renders. */}
+      {route === 'portal' ? (
+        <button className="ghost small" onClick={onManage} disabled={billingPending}>
+          {billingPending ? 'Opening portal…' : 'Manage subscription'}
         </button>
-      ) : (
-        <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
-      )}
+      ) : target ? (
+        <UpgradeCta priceId={target.priceId} onUpgrade={() => onUpgrade(target.priceId)} pending={checkoutPending} className="ghost small" />
+      ) : outage ? (
+        <UpgradeCta priceId="" onUpgrade={onUpgrade} pending={checkoutPending} className="ghost small" />
+      ) : null}
+      <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
     </div>
   )
+}
+
+// #4335: whether the cap-notice copy's "or upgrade to add more" is truthful
+// for this org (a real offered upgrade, or one temporarily unavailable due to
+// a catalog outage) — false for the top tier or a deployment selling no higher
+// tier.
+function teamHasUpgrade(team) {
+  return capNoticeUpgrade(team, planOptions().map((p) => p.tier)).hasUpgrade
 }
 
 function App() {
@@ -1138,6 +1159,14 @@ function claimIntentInFlight() {
   // class "a click must not destroy the one-time secret"). Cleared on the
   // reveal's own Copy & done and on logout/team switch.
   const [rotatedKey, setRotatedKey] = React.useState(null)
+  // #4355: the rotate partial-state disclosure. `POST /v1/team/keys/{id}/rotate`
+  // creates the replacement FIRST and then CLAIM-revokes the old row; when the
+  // destructive leg could not be completed AND its rollback also failed, the
+  // response carries `replaced_revoked:false` + a `warning` and BOTH keys are
+  // live. That is a state the user has to act on (the "what is live" surfaces
+  // and the count are now one too high), so it gets its own persistent notice
+  // rather than riding the transient `error` slot that `loadAll` overwrites.
+  const [rotateNotice, setRotateNotice] = React.useState('')
   // key-create modal state
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
@@ -1253,6 +1282,13 @@ function claimIntentInFlight() {
   const [memoryErrors, setMemoryErrors] = React.useState({})      // per-ROW errors (role=alert) — never the global banner
   const indexPollRef = React.useRef(null)
   const docsPollRef = React.useRef(null)
+  // #1926: the id of the LIVE index/docs job whose poll callbacks may apply.
+  // A superseded job's late tick — or a completion that lands AFTER the
+  // source was toggled off — compares its own id against this and drops out.
+  // Clearing `indexJob`/`docsJob` alone could not stop a callback already in
+  // flight; this is the identity the guard reads.
+  const indexJobIdRef = React.useRef(null)
+  const docsJobIdRef = React.useRef(null)
   // #1845: source-scope selector state (shared by the docs + issues rows).
   // reposList = SHORT repo names from GET /v1/onboarding/github/repos (loaded
   // once when connected); branchLists[repo] = branches for a repo (lazy-loaded
@@ -1424,6 +1460,12 @@ function claimIntentInFlight() {
   // here so the derivation is a plain value (unit-testable without a React
   // harness, which this repo does not have).
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
+  // #3700: the PLAIN per-harness status word (the attribution is rendered
+  // separately by `harnessAttribution` below) — the done screen's
+  // `install-pending` sentence reads it through the shared label helper. (The
+  // Settings pill calls the helper directly; the `present` / `future`
+  // sentences are literal prose that names no harness.)
+  const harnessCaptureStatusLabel = captureStatusLabelForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
   const onboardingRefreshedAtDoneRef = React.useRef(false)
@@ -1694,7 +1736,8 @@ function claimIntentInFlight() {
   // .expires_at (when present) for the expiry echo.
   async function mintKey(activeKey, name, expiresInDays) {
     // #2167 rule 4: session-mode durable-key CREATE (shared by createKey +
-    // #2211's wizardMintDurableKey + regenerateKey's rotate mint) rides the
+    // #2211's wizardMintDurableKey — #4355 moved rotate OFF this path, onto
+    // the cap-neutral POST /v1/team/keys/{id}/rotate) rides the
     // session JWT + pins ?org_id=<selected> (multi-membership correctness —
     // server honors it membership-checked with a suspension 403, zero server
     // changes) and NEVER merges a key-preference header (a held key must not
@@ -2603,12 +2646,38 @@ function claimIntentInFlight() {
     const first = newOrgPlanOptions(t)[0]
     return first ? t.checkout_price_ids[first.tier] : ''
   }
+  // #4815: the plan the paid-new-org purchase dialog has selected (its default
+  // is set when the dialog opens). The dialog renders THIS plan's metered-tier
+  // disclosure, derived from the same planOptions()/pricing.json source as the
+  // Billing grid — never a second copy of the price string.
+  const newOrgSelectedPlan = newOrgPlanOptions(team).find(
+    (p) => team?.checkout_price_ids?.[p.tier] === createTeamPlan)
   const hasActiveSubscription = team && ACTIVE_STATUSES.includes(team.subscription_status)
   // #1623 (review P2): canceled/unpaid teams still have a Stripe customer —
-  // the portal gives invoice history + cancel management. Upgrade stays for
-  // re-subscription.
+  // the portal gives invoice history + cancel management.
+  // #4639: the header no longer offers an Upgrade to a paid/lapsed team (and
+  // no longer carries the portal button). Plan management and re-subscription
+  // Upgrade live on the Billing plan grid, which still gates on this set.
   const PORTAL_STATUSES = [...ACTIVE_STATUSES, 'canceled', 'unpaid']
   const canManageSubscription = team && PORTAL_STATUSES.includes(team.subscription_status)
+  // #4639: where the banner's limit nudge may send the user — checkout for a
+  // free/anon team with a price, the portal for a team that already has a
+  // Stripe customer, null (no nudge) otherwise. Never a dead control.
+  const limitNudgeRoute = nudgeRoute(team)
+
+  // #4331: node usage vs the plan's ENFORCED node allowance, as /v1/team
+  // states both fields (never computed here). `nodeState` is null when the
+  // server has not supplied both numbers OR the tenant graph could not be
+  // read (`graph_ready === false`) — a failed read must never render as a
+  // confident "0 / N (0%)". `nodeHint` is the at/near-limit nudge (Billing
+  // card only); `nodeNext` is the next plan this deployment can actually
+  // check out (the nudge's checkout target).
+  const nodeState = team && team.graph_ready !== false ? nodeUsage(team) : null
+  const nodeNext = nextUpgradePlan(planOptions(), team)
+  // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher
+  // allowance" promise when no plan above the current one is purchasable
+  // (top tier, or an empty catalog).
+  const nodeHint = nodeNudge(team, Boolean(nodeNext))
 
   // #1623: parameterized upgrade — the header Upgrade button uses the
   // server-resolved default (team.checkout_price_id); the Billing page and
@@ -2638,7 +2707,7 @@ function claimIntentInFlight() {
         checkoutResetTimerRef.current = window.setTimeout(() => setCheckoutPending(false), 90000)
       }
     } catch (err) {
-      setError(err.message)
+      setError(err)
       setCheckoutPending(false)
     }
   }
@@ -2658,7 +2727,7 @@ function claimIntentInFlight() {
         setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
       }
     } catch (err) {
-      setError(err.message)
+      setError(err)
     } finally {
       setBillingPending(false)
     }
@@ -2913,10 +2982,13 @@ function claimIntentInFlight() {
   // WIZARD_STEPS (wizardFlow.js) — 4 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
   // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
-  // stays byte-identical for the A0 gate's rollback path (partial revert
-  // restores it); it is NEVER rendered by the live wizard. Flipping this
-  // back to true + re-enabling the welcomeOriented gate restores the
-  // legacy surface (rollback drill, epic §8).
+  // is the A0 gate's rollback surface (partial revert restores it); it is
+  // NEVER rendered by the live wizard. #4335 intentionally edited its welcome
+  // plan-chooser fallback (marketing "See pricing" link → honest disabled CTA)
+  // so a rollback cannot resurrect the marketing link — the block is therefore
+  // no longer byte-identical end-to-end (see the overview.test.js line-count
+  // canary, kept in sync). Flipping this back to true + re-enabling the
+  // welcomeOriented gate restores the legacy surface (rollback drill, epic §8).
   const LEGACY_WIZARD_ARCHIVED = false
   // #1997 (W1): org-create + fork-card state for the 5-step wizard.
   const [wizardOrgName, setWizardOrgName] = React.useState('')
@@ -3048,25 +3120,45 @@ function claimIntentInFlight() {
   // tries + terminal-status short-circuit; the handle lives in a ref
   // (cleared on success + unmount); per-team staleness guard. Deliberately
   // does NOT copy the old github connect poll's dangling-timer anti-pattern.
-  function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone }) {
-    if (ref.current) { clearInterval(ref.current); ref.current = null }
+  //
+  // #1926: the poll releases only its OWN interval handle (`releaseOwn`), so a
+  // tick already in flight when the source is toggled off — or one superseded
+  // by a NEW poll for the same ref — can never clear the handle that replaced
+  // it. A stale tick also applies NO onStatus/onDone, so a completion that
+  // lands after the toggle-off never surfaces (the caller owns the identity
+  // via `isStale`; a caller that omits it keeps the pre-#1926 behavior).
+  function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone, isStale }) {
+    stopBoundedPoll(ref)
     const teamAtStart = orgIdRef.current
+    const stale = () => typeof isStale === 'function' && isStale()
+    let handle = null
+    const releaseOwn = () => {
+      const mine = handle
+      handle = null
+      if (mine != null) clearInterval(mine)
+      // only clear the shared ref when it still points at OUR handle
+      if (ref.current === mine) ref.current = null
+    }
     let tries = 0
     const tick = async () => {
       tries += 1
-      if (orgIdRef.current !== teamAtStart) { stopBoundedPoll(ref); return }  // per-team staleness guard
+      if (orgIdRef.current !== teamAtStart) { releaseOwn(); return }  // per-team staleness guard
+      if (stale()) { releaseOwn(); return }
       try {
         const job = await api(url, { useSession: true })
+        if (stale()) { releaseOwn(); return }
         if (onStatus) onStatus(job)
-        if (job && isTerminal(job)) { stopBoundedPoll(ref); if (onDone) onDone(job); return }
+        if (job && isTerminal(job)) { releaseOwn(); if (onDone) onDone(job); return }
       } catch (e) {
+        if (stale()) { releaseOwn(); return }
         // 404 = the in-memory job was evicted (1h TTL) — a TERMINAL state
         // the UI renders honestly ("status expired — re-check"), not a retry loop.
-        if (e && e.status === 404) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'expired', error: e.message }); return }
+        if (e && e.status === 404) { releaseOwn(); if (onDone) onDone({ status: 'expired', error: e.message }); return }
       }
-      if (tries >= maxTries) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'timeout' }) }
+      if (tries >= maxTries) { releaseOwn(); if (onDone) onDone({ status: 'timeout' }) }
     }
-    ref.current = setInterval(tick, interval)
+    handle = setInterval(tick, interval)
+    ref.current = handle
   }
   function stopBoundedPoll(ref) {
     if (ref.current) { clearInterval(ref.current); ref.current = null }
@@ -3231,24 +3323,53 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1924: one PATCH helper for the per-source ENABLE intents — the four call
+  // sites (2 sources × on/off) differ only in key, value and error copy. It
+  // writes the ENABLE flag only; the GitHub CONNECTION (github_connected) is
+  // never touched here, which is the whole point of #1924.
+  async function setSourceEnabled(key, enabled, row, message) {
+    setMemoryBusy(row)
+    setRowError(row, '')
+    try {
+      await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+        body: JSON.stringify({ [key]: enabled }) })
+      await refreshOnboarding()
+      return true
+    } catch (e) {
+      setRowError(row, (e && e.message) || message)
+      return false
+    } finally {
+      setMemoryBusy('')
+    }
+  }
+
+  // #1924: the off-toggle writes the per-source ENABLE intent
+  // (`issues_enabled`) — NEVER `github_connected`. Flipping the connection
+  // flag was a full GitHub disconnect: it also killed the docs source, and
+  // re-enabling forced a fresh OAuth round-trip just to hide issues.
   async function toggleIssues(next) {
     if (memoryBusy) return
     if (!next) {
-      // off: PATCH the display flag (no server-side disconnect exists —
-      // re-enabling re-runs the OAuth connect).
-      setMemoryBusy('issues')
-      setRowError('issues', '')
+      // #1926: stop the in-flight re-index FIRST and invalidate its callbacks
+      // (an interval tick already past its await would otherwise still apply),
+      // then clear the job — so no "Indexing complete" can render for a source
+      // the user just turned off.
+      indexJobIdRef.current = null
+      stopBoundedPoll(indexPollRef)
+      setIndexJob(null)
       setIssuesWantOn(false)
-      try {
-        await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-          body: JSON.stringify({ github_connected: false }) })
-        await refreshOnboarding()
-      } catch (e) {
-        setRowError('issues', (e && e.message) || 'Could not update GitHub issues — try again.')
-      } finally {
-        setMemoryBusy('')
-      }
-    } else if (onboarding && onboarding.github_connected) {
+      await setSourceEnabled('issues_enabled', false, 'issues',
+        'Could not update GitHub issues — try again.')
+      return
+    }
+    // ON: clear any persisted off-intent first, so the switch, the row and the
+    // server never disagree about what the user asked for.
+    if (onboarding && onboarding.issues_enabled === false) {
+      const ok = await setSourceEnabled('issues_enabled', true, 'issues',
+        'Could not update GitHub issues — try again.')
+      if (!ok) return
+    }
+    if (onboarding && onboarding.github_connected) {
       // already connected → re-poll the diff (in-flight single-flight reuse)
       reindexGithub()
     } else {
@@ -3257,15 +3378,31 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1924: docs is an independent source — its own enable intent, and an off
+  // path that did not exist before this change (the switch was terminal once
+  // indexed, so docs could never be turned off).
   async function toggleDocs(next) {
     if (memoryBusy) return
-    setDocsWantOn(next)
-    setRowError('docs', '')
-    if (next && onboarding && onboarding.github_connected && !(onboarding.github_docs_indexed)) {
-      // toggle-on reveals the explicit Index-docs action (T1-P7) — the user
-      // presses it to run the job (auto-running would surprise); the row
-      // already shows the action button when docsWantOn.
+    if (!next) {
+      // #1926 (sibling of the issues fix): stop the in-flight docs index poll
+      // and invalidate its callbacks so no stale completion report renders.
+      docsJobIdRef.current = null
+      stopBoundedPoll(docsPollRef)
+      setDocsJob(null)
+      setDocsWantOn(false)
+      await setSourceEnabled('docs_enabled', false, 'docs',
+        'Could not update GitHub docs — try again.')
+      return
     }
+    if (onboarding && onboarding.docs_enabled === false) {
+      const ok = await setSourceEnabled('docs_enabled', true, 'docs',
+        'Could not update GitHub docs — try again.')
+      if (!ok) return
+    }
+    // #1835/#1894: toggle-on reveals the explicit Index-docs action (T1-P7) —
+    // the user presses it to run the job (auto-running would surprise); the
+    // row already shows the action button when docsWantOn.
+    setDocsWantOn(true)
   }
 
   async function reindexGithub() {
@@ -3283,9 +3420,17 @@ function claimIntentInFlight() {
       const jobId = res && res.job_id
       if (!jobId) throw new Error('index job did not return a job id')
       setIndexJob({ status: 'started', job_id: jobId })
+      // #1926: bind the LIVE job id before the poll starts. A tick from a
+      // superseded job — or one that lands after the off-toggle nulled this —
+      // reads it and drops out instead of reporting a completion.
+      indexJobIdRef.current = jobId
       startBoundedPoll(indexPollRef, {
         url: `/v1/index/github/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        // #1926: the poll's single stale guard — all of its onStatus/onDone
+        // paths check this, so a superseded job (and a completion that lands
+        // after the off-toggle) applies nothing.
+        isStale: () => indexJobIdRef.current !== jobId,
         onStatus: setIndexJob,
         // #1894: refresh onboarding state on terminal so the newly-stamped
         // github_indexed_at appears WITHOUT a manual reload.
@@ -3324,9 +3469,13 @@ function claimIntentInFlight() {
       const jobId = res && res.job_id
       if (!jobId) throw new Error('docs job did not return a job id')
       setDocsJob({ status: 'started', job_id: jobId })
+      // #1926: same live-id guard as the github re-poll (see reindexGithub).
+      docsJobIdRef.current = jobId
       startBoundedPoll(docsPollRef, {
         url: `/v1/index/docs/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        // #1926: same single stale guard as the github re-poll.
+        isStale: () => docsJobIdRef.current !== jobId,
         onStatus: setDocsJob,
         // #1894: refresh onboarding state on terminal so the newly-stamped
         // github_docs_indexed_at appears WITHOUT a manual reload.
@@ -3375,8 +3524,11 @@ function claimIntentInFlight() {
           setWizardGithub((g) => ({ ...g, busy: false }))
           if (st && st.connected) {
             setIssuesWantOn(true)
+            // #1924: connecting from the Issues row is an explicit "bring
+            // issues in" — clear any stale off-intent in the same write so the
+            // source cannot come back up disabled.
             api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-              body: JSON.stringify({ github_connected: true }) }).catch(() => {})
+              body: JSON.stringify({ github_connected: true, issues_enabled: true }) }).catch(() => {})
             refreshOnboarding().catch(() => {})
             // connected+indexing: the OAuth callback auto-enqueues the
             // first run — surface it via the re-poll (single-flight reuse
@@ -4308,6 +4460,7 @@ function claimIntentInFlight() {
     // #4330 (review cycle 2, P2): the dialog's cap notice is per-session data.
     setKeyModalCapNotice('')
     setRotatedKey(null) // #2735: the rotate reveal is one-time plaintext — never survives logout
+    setRotateNotice('') // #4355: the rotate partial-state notice belongs to the old user's keys
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
     setClaimKey('')
@@ -4414,10 +4567,16 @@ function claimIntentInFlight() {
       // managedKeys (isManagedKey render filter) + durableConnectKey's
       // rows-resolution keep working off the full payload.
       setSessions(Array.isArray(s) ? s : s.sessions || [])
+      // #4355: return the loaded rows so a caller that must decide something
+      // from the TRUE state (the rotate catch's ambiguous-failure branch) reads
+      // the same payload this call landed in `keys` — state updates are async,
+      // so the closure's `keys` is still the pre-refresh snapshot here.
+      // undefined when the read failed or the team went stale mid-refresh.
+      return Array.isArray(k) ? k : k.keys || []
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
       if (orgIdRef.current === _teamAtCall) {
-        setError(e.message)
+        setError(e)
         // #3783 (review P2): Promise.all rejects both reads together, so a
         // failure here means the keys payload never landed. Record it, so the
         // connect gate resolves 'error' (retryable) instead of waiting on a
@@ -4768,7 +4927,7 @@ function claimIntentInFlight() {
   // running.
   //
   // There is now exactly ONE writer class — server-observed:
-  //   - the agent-side tortoise-onboarding skill checkpoints it after
+  //   - the agent-side onboarding instructions drive the checkpoint after
   //     tortoise_health passes (CLI harnesses, via REST), and
   //   - `_maybe_onboarding_auto_complete()` flips it server-side on the
   //     harness's first successful graph write — which is what covers Claude
@@ -4993,6 +5152,7 @@ function claimIntentInFlight() {
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
     setRotatedKey(null)    // #2735: the rotate reveal is one-time plaintext — never survives a team switch
+    setRotateNotice('')    // #4355: a partial-state warning is about THIS team's keys — never the new team's
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setNewKeyExpiryDate('') // #2426: a picked Custom date must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
@@ -5097,7 +5257,7 @@ function claimIntentInFlight() {
           // otherwise keys/sessions/backups stay wiped until reload.
           await Promise.all([loadAll(''), loadBackups('')]).catch(() => {})
         }
-        setError(e.message)
+        setError(e)
       }
     }
   }
@@ -5165,7 +5325,9 @@ function claimIntentInFlight() {
       const b = await res.json().catch(() => ({}))
       if (!res.ok) {
         if (res.status === 402) {
-          setError('Graph limit reached for this tier — upgrade to add more graphs.')
+          // #4639: carry the STRUCTURED status so the banner's nudge gate
+          // reads the 402 rather than guessing from the copy.
+          setError({ message: 'Graph limit reached for this tier — upgrade to add more graphs.', status: res.status })
           return
         }
         if (res.status === 409) {
@@ -5173,7 +5335,7 @@ function claimIntentInFlight() {
           // OR API-key cap (the create mints the graph's first key; a full
           // key table rolls the graph back with a 409). The detail is
           // authoritative (plan §6.2 contract).
-          setError(b.detail || 'Graph limit reached — delete a graph or upgrade.')
+          setError({ message: b.detail || 'Graph limit reached — delete a graph or upgrade.', status: res.status })
           return
         }
         throw new Error(b.detail || `HTTP ${res.status}`)
@@ -5195,7 +5357,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5552,7 +5714,8 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.')
+          // #4639: carry the structured 402 for the banner's nudge gate.
+          setError({ message: typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.', status: res.status })
           setBusy(false)
           return
         }
@@ -5565,7 +5728,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5593,7 +5756,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-19: stale DELETE error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5622,7 +5785,7 @@ function claimIntentInFlight() {
 
     } catch (e) {
       // Round-19: stale PATCH error must not land under the new team
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e)
     } finally {
       setBusy(false)
     }
@@ -5898,12 +6061,12 @@ function claimIntentInFlight() {
         // learns the reason without dismissing it; the tab banner still shows
         // after a dismiss.
         if (e.status === 402) {
-          const notice = upgradeNoticeFrom(e.message, team)
+          const notice = upgradeNoticeFrom(e.message, team, teamHasUpgrade(team))
           setCapNotice(notice)
           setKeyModalCapNotice(notice)
           setError('')
         } else {
-          setError(e.message)
+          setError(e)
         }
       }
       return null
@@ -6018,17 +6181,26 @@ function claimIntentInFlight() {
   }
 
   async function regenerateKey(keyId) {
-    // #1147/#2229: rotate = mint the REPLACEMENT first (the old key still
-    // authorizes the request), then revoke the old — a single mint (no
-    // bootstrap-pool growth), session-authed. The old row's label carries
-    // into the replacement mint so an in-place rotate keeps the row's
-    // identity. Available on every tier: regenerating does not grow the key
-    // count.
-    // #2246 (ADR-010): rotate is now available on EVERY durable row (uniform
-    // table actions) and NEVER installs the replacement into the browser — no
-    // localStorage/teamKeysRef/apiKey write. The replacement is shown once
-    // (setRotatedKey) for the user to configure into their agent; the old key
-    // is revoked.
+    // #4355: rotate is ONE server call — `POST /v1/team/keys/{id}/rotate`.
+    //
+    // Why the two-call shape is gone. It used to `mintKey()` then
+    // `revokeKey(keyId, {skipConfirm:true})` — both against the SAME capped
+    // `POST /v1/team/keys` / `DELETE` pair. The mint leg therefore ran while
+    // the old row still held its slot, so a team AT `max_api_keys` had its
+    // replacement refused 402 and the rotate simply failed — the issue this
+    // endpoint closes. The single call is CAP-NEUTRAL BY CONSTRUCTION: the
+    // replacement consumes the slot the displaced row releases (the server
+    // proves the old row is one the count actually charged, then admits the
+    // mint against the post-release count). `POST /v1/team/keys` itself is
+    // unchanged and still 402s at the cap — rotate is not an exemption.
+    //
+    // The server owns the ordering that used to live here (create first, then
+    // revoke), so the client no longer has a window between the two legs. What
+    // it keeps is the stale-response rule below: a team switch during the RTT
+    // must not land this team's reveal (or its warning) under the new team's
+    // header. The replacement is still never installed into the browser (no
+    // localStorage/teamKeysRef/apiKey write) — it is shown once via
+    // `setRotatedKey`, and the old key is revoked by the same call (#2246).
     if (busy) return
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row0 && row0.name) || 'this API key'
@@ -6038,6 +6210,9 @@ function claimIntentInFlight() {
     // #2426: the confirm ALSO states the replacement's expiry — the old
     // key's lifetime span is re-applied from mint-time with a fresh clock
     // (Cloudflare 'resets relative to now' semantics); Never stays Never.
+    // The span still rides the body as `expires_in`; a null span sends no
+    // expiry at all, and the SERVER then inherits the displaced row's exact
+    // `expires_at` (never widening an expiring key to a Never one).
     const rowLifetime = lifetimeDaysFromRow(row0)
     const replacementExpiry = rowLifetime
       ? `The replacement expires ${fmtExpiryDate(new Date(Date.now() + rowLifetime * _MS_PER_DAY).toISOString())} (the same ${rowLifetime}-day lifetime as this key).`
@@ -6046,26 +6221,41 @@ function claimIntentInFlight() {
     setCapNotice('')
     setError('')
     setBusy(true)
+    // Round-20 (P2)/#4355: capture the team at call — the request is a mutate
+    // that revokes a row, and a mid-flight switch must neither land this
+    // team's reveal/warning under the new team's header nor publish its error
+    // there. Declared OUTSIDE the try so the catch's stale-response guard
+    // reads the same value.
+    const _teamAtCall = currentOrgId
     try {
-      const _teamAtCall = currentOrgId
-      // #2229: label carry-over — the row may leave the closure list mid-
-      // flight (switch/refresh) — degrade to an unlabeled mint.
+      // #2229/#4355: label carry-over — the row may leave the closure list
+      // mid-flight (switch/refresh) — degrade to an unlabeled rotate. The
+      // expiry re-application (#2426) rides the SAME body.
       const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
-      // #2426: rotate re-applies the old row's lifetime span (expires_in
-      // days from expires_at − created_at; Never → null → no param).
-      const mk = await mintKey('', (oldRow && oldRow.name) || undefined,
-                               lifetimeDaysFromRow(oldRow))
-      // Round-29 (review P1): NEVER revoke without a confirmed target — if
-      // the team moved during the mint RTT, bail BEFORE the destructive leg
-      // (the old row may not belong to the now-selected team). The minted
-      // replacement stays as a visible team-A durable (same accepted orphan
-      // semantics as createKey's identity guard).
+      // #2230/#2167 rule 4: pin the SELECTED team — without it the server
+      // resolves the session team from memberships[0] and a multi-membership
+      // owner rotates against the wrong team's key set (mirrors the revoke
+      // DELETE + the toggle/rename PATCH pins).
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const rbody = {}
+      const carryName = (oldRow && oldRow.name) || undefined
+      if (carryName) rbody.name = carryName
+      const carryDays = lifetimeDaysFromRow(oldRow)
+      if (carryDays != null && !Number.isNaN(carryDays)) rbody.expires_in = carryDays
+      const mk = await api(`/v1/team/keys/${keyId}/rotate${q}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true,
+        body: JSON.stringify(rbody),
+      })
+      // #4342/#4355: the single call has already revoked the old key AND (when
+      // it could) revoked the displaced row — so a team switch across this RTT
+      // must not land the reveal or the partial-state notice under the new
+      // team's header. Bail after reloading the true state instead.
       if (orgIdRef.current !== _teamAtCall) return
-      await revokeKey(keyId, { skipConfirm: true })
-      if (orgIdRef.current !== _teamAtCall) return
-      // #4342: a 2xx mint that carries no revealable plaintext is NOT a
-      // reveal. The secret is unrecoverable at this point AND the OLD key was
-      // revoked on the line above, so the only honest outcome is to say so —
+      // #4342: a 2xx rotate that carries no revealable plaintext is NOT a
+      // reveal. The secret is unrecoverable at this point AND the old key was
+      // revoked by the call above, so the only honest outcome is to say so —
       // never to latch `rotatedKey` with a falsy (or non-string, or blank)
       // plaintext, which rendered an empty `.key-value` box whose copy wrote
       // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
@@ -6076,15 +6266,34 @@ function claimIntentInFlight() {
       if (!plaintext) {
         // Refresh FIRST, then surface the reason: `loadAll` owns the same
         // `error` slot and overwrites it from its own catch, so a compound
-        // failure (the rotate legs succeeded, the refresh did not) would
-        // otherwise replace the one message that tells the user their old key
-        // is gone and which row to clean up. The identity guard mirrors the
+        // failure (the rotate succeeded, the refresh did not) would otherwise
+        // replace the one message that tells the user their old key is gone
+        // and which row to clean up. The identity guard mirrors the
         // stale-response rule — a switch during the refresh must not carry this
         // team's error under the new team's header.
         await loadAll('')
         if (orgIdRef.current !== _teamAtCall) return
         setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
+      }
+      // #4355: the server states whether the displaced row was actually
+      // revoked. When the destructive leg could not be completed AND its
+      // rollback also failed, BOTH keys are live — the server still returns
+      // the live replacement's plaintext (the only alternative is losing a
+      // live secret) and a warning. Surface it as its own persistent notice:
+      // this is a state the user has to clean up, and it is exactly what the
+      // other "what is live" surfaces now over-count by one.
+      setRotateNotice(mk && mk.warning ? String(mk.warning) : '')
+      // #2246 (review, P2)/#4355: the SAME row-truth prefix clear `revokeKey`
+      // performs. The server revoked the displaced row inside this call, so an
+      // in-memory welcome/connect plaintext belonging to THAT row must not
+      // outlive it — otherwise the overview "live" claim and the connect
+      // snippet keep embedding a credential this rotate just killed. (The
+      // rotate replacement itself is shown once via setRotatedKey and is never
+      // installed into the browser, so nothing else needs clearing.)
+      if (row0 && row0.key_prefix) {
+        if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
+        if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
       }
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable. #2735: its OWN reveal state
@@ -6094,13 +6303,45 @@ function claimIntentInFlight() {
       setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {
-      if (orgIdRef.current === currentOrgId) {
-        if (e.status === 402) {
-          // #2229: rotate-specific cap copy — see rotateCapNoticeFrom.
-          setCapNotice(rotateCapNoticeFrom(e.message, team))
-          setError('')
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — not our state, not our error
+      // #4355: a rotate 402 means the org is OVER its limit (a 1-for-1
+      // rotation is admitted BY construction, so the notice's copy describes
+      // the over-cap state, not the old mint-then-revoke mechanism).
+      // #4335: the "or upgrade" tail is only truthful when an upgrade path
+      // exists, so the notice takes the same hasUpgrade flag as the create path.
+      if (e.status === 402) {
+        setCapNotice(rotateCapNoticeFrom(e.message, team, teamHasUpgrade(team)))
+        setError('')
+      } else {
+        // #4355: any other failure may be a LOST RESPONSE, not a lost
+        // request. The server creates the replacement and then revokes the
+        // displaced row in ONE call, so a dropped/timed-out reply can leave
+        // the old key revoked server-side, the replacement secret already
+        // gone (reveal-once), and the table still rendering the row active —
+        // while `e.message` would assert an outcome the client cannot know.
+        // The two-call shape could not reach that state from a lost MINT
+        // response (the revoke was a separate call it never made), so this is
+        // a regression the single call introduces and the client must disclose.
+        // Re-read the true state FIRST (the refresh owns the same `error`
+        // slot, so it must run before the message is set), then say only what
+        // the table shows. The identity guard mirrors the other stale-response
+        // rules: a switch across this reload must not land under the new team.
+        let rowsAfter = null
+        try {
+          rowsAfter = await loadAll('')
+        } catch { /* loadAll owns its own error slot */ }
+        if (orgIdRef.current !== _teamAtCall) return
+        const after = Array.isArray(rowsAfter)
+          ? rowsAfter.find((k) => (k.id || k.key_id) === keyId)
+          : null
+        if (after && after.revoked_at) {
+          // The rotate DID complete: the row is revoked and the replacement's
+          // plaintext was never delivered, so it cannot be shown.
+          setError(`The rotate request did not return a usable response, and it may have completed: ${rowName} now shows as revoked, so a replacement key exists whose value cannot be shown. Revoke the unused replacement row and create a new key.`)
         } else {
-          setError(e.message)
+          // The row is still listed active (or the refresh itself failed):
+          // the outcome is genuinely unknown and a replacement may still exist.
+          setError(`The rotate request failed (${e.message}), and its outcome could not be confirmed — ${rowName} is still listed as active, but a replacement may have been created. Refresh the key list before relying on this key.`)
         }
       }
     } finally {
@@ -6251,10 +6492,11 @@ function claimIntentInFlight() {
       // welcomeKey/wizardDurableKey alive past their row's death: the
       // overview "live" claims and the connect step keep embedding the
       // REVOKED key (an empty-tail the effect cannot see). The direct
-      // prefix clear closes it. Also covers regenerateKey's rotate (it
-      // revokes the old row via revokeKey skipConfirm) — the replacement
-      // is shown via setRotatedKey, and the welcome plaintext must not
-      // survive its own row's rotation.
+      // prefix clear closes it. #4355 note: rotate no longer reaches here (it
+      // is ONE call to /rotate, which revokes the displaced row server-side),
+      // so `regenerateKey` performs this SAME prefix clear itself — the
+      // replacement is shown via setRotatedKey, and the welcome plaintext must
+      // not survive its own row's rotation.
       if (row0 && row0.key_prefix) {
         if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
         if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
@@ -6262,7 +6504,7 @@ function claimIntentInFlight() {
       await loadAll()
     } catch (e) {
       // Round-18/20: a stale revoke's error must not land under the new team
-      if (!_teamAtCall || orgIdRef.current === _teamAtCall) setError(e.message)
+      if (!_teamAtCall || orgIdRef.current === _teamAtCall) setError(e)
     }
   }
 
@@ -6713,6 +6955,7 @@ function claimIntentInFlight() {
     ? (knownHarnessName(wizardHarness) || 'your agent')
     : 'your agent'
   const doneCaptureClaim = harnessPickEstablished ? harnessCaptureClaim : 'none'
+  const doneCaptureStatusLabel = harnessPickEstablished ? harnessCaptureStatusLabel : ''
   // #3428/#2937 (lane B3, review cycle 2 P2-4 / cycle 3 P1-D + P2-7): the
   // not-connected body's remedy clause is DERIVED, the same way the capture
   // claim is. "(running it creates a fresh key)" is true only where the user
@@ -7038,8 +7281,14 @@ function claimIntentInFlight() {
                     // over from here." beneath a "Not connected yet" <h1> — the
                     // #2364/#2912 heading-vs-body contradiction, reassembled. It
                     // is now keyed on the same derived flag the <h1> uses.
-                    if (wizardStep === 0 && welcomeHasOrg) return null
-                    if (wizardStep === 3 && !serverHarnessConnected) return null
+                    //
+                    // #3725: the arm is now the pure `wizardStepSub` helper
+                    // (wizardFlow.js, unit-tested) — the build fork's step 3
+                    // carries a connection but never hands over to an agent, so
+                    // its lede is suppressed rather than contradicting its own
+                    // "Keep calling the SDK from your app." body.
+                    const headSub = wizardStepSub(wizardStep, { hasOrg: welcomeHasOrg, connected: serverHarnessConnected, buildFork: isBuildFork })
+                    if (headSub === null) return null
                     // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
                     // pick's copy, but step 2 has THREE bodies — only the
                     // owner/self branch is a harness pick.
@@ -7087,8 +7336,7 @@ function claimIntentInFlight() {
                       }
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
-                    const sub = WIZARD_STEPS[wizardStep].sub
-                    return <p className="welcome-lede">{sub}</p>
+                    return <p className="welcome-lede">{headSub}</p>
                   })()}
                 </div>
                 <span className="sr-only" role="status" aria-live="polite">
@@ -7373,15 +7621,15 @@ function claimIntentInFlight() {
                       if (agentDriven2Step.includes(wizardHarness)) {
                         procedure = (
                           <>
-                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy the connect prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.connectLabel} />
                           </>
                         )
                         procedureTailTitle = `Restart ${HARNESS_NAMES[wizardHarness]} and verify`
                         procedureTail = (
                           <>
-                            <p className="wizard-caption">Then give it this prompt to verify the connection and file your first memory:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy the verify prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.verify}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.verifyLabel} />
                           </>
                         )
                       } else if (agentDriven1Step.includes(wizardHarness)) {
@@ -7395,8 +7643,8 @@ function claimIntentInFlight() {
                           </>
                         ) : (
                           <>
-                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
-                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.connect}</p>
+                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label={WIZARD_CAPTIONS.promptLabel} />
                           </>
                         )
                       } else if (wizardKeyless) {
@@ -7443,10 +7691,10 @@ function claimIntentInFlight() {
                         procedureTailTitle = 'Give Claude the Tortoise workflows'
                         procedureTail = (
                           <>
-                            <p className="wizard-caption">Start a new chat and paste this prompt:</p>
+                            <p className="wizard-caption">{WIZARD_CAPTIONS.workflows}</p>
                             {/* #2865: composed KEY-LESS — a connector surface
                                 never carries a key. */}
-                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label="Copy the workflows prompt" />
+                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label={WIZARD_CAPTIONS.workflowsLabel} />
                           </>
                         )
                       }
@@ -7518,7 +7766,7 @@ function claimIntentInFlight() {
                                       the only unrecoverable-key cue this surface
                                       had — nothing else on it says the key is
                                       unrecoverable after you leave. */}
-                                  <p className="wizard-caption">Your API key is inside the block below — keep it private.</p>
+                                  <p className="wizard-caption">{WIZARD_CAPTIONS.keyPrivate}</p>
                                   {/* #3218: same visibility + recovery statement
                                       as the shared key row (this surface has no
                                       row — its key IS the config block). */}
@@ -7704,10 +7952,17 @@ function claimIntentInFlight() {
                                     corrected in cycle 4 (item 8), and #3782: the
                                     sentence printed follows the server's
                                     OBSERVATION, not the capability flag.
-                                    'present' prints only on an observed
-                                    per-harness RECEIPT; 'future' only once an
-                                    install PROBE was observed (the install is
-                                    confirmed server-side, capture has not fired);
+                                    'present' prints only on a per-harness
+                                    capture RECEIPT — and that receipt proves
+                                    the CAPTURE, not the harness: the harness in
+                                    the key is the caller's declaration (#3700),
+                                    so this sentence may claim the capture and
+                                    nothing more. 'future' only once an
+                                    install PROBE was observed (an install
+                                    signal arrived server-side, capture has not
+                                    fired) — and, #3700, the probe's harness is
+                                    likewise caller-declared, so this sentence
+                                    claims the install signal, not the harness;
                                     'install-pending' — recording on, nothing
                                     observed for this harness — prints the SAME
                                     "not installed yet" string Settings renders
@@ -7717,13 +7972,15 @@ function claimIntentInFlight() {
                                     said "not installed yet"). The capability
                                     flag still decides whether ANY sentence may
                                     print ('none' for no install path, recording
-                                    off, or NO HARNESS PICKER offered). A true
-                                    flag with no installed seam (#3575, lane B1)
-                                    is still a separate defect this screen cannot
-                                    detect. */}
+                                    off, or NO HARNESS PICKER offered). #3575 was
+                                    resolved by the in-repo Pi capture seam, so
+                                    the capability flag is derived from a real
+                                    install step; the general "flag true with no
+                                    installed seam" class is pinned by the
+                                    harness registry's tests, not here. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
                                 {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
-                                {doneCaptureClaim === 'install-pending' && `Session capture is ${HARNESS_CAPTURE_STATUS_LABEL['install-pending']}. `}
+                                {doneCaptureClaim === 'install-pending' && `Session capture is ${doneCaptureStatusLabel}. `}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
                               {/* The redirect is PROSE, not a control: we cannot open
@@ -7807,7 +8064,10 @@ function claimIntentInFlight() {
                     A0 gate's rollback path restores it by re-enabling this
                     gate + the welcomeOriented pre-card (epic §8). DE2E-1: the
                     archived-not-deleted assertion greps this marker + the
-                    legacy wizardSteps labels. */}
+                    legacy wizardSteps labels. #4335 intentionally updated the
+                    welcome plan-chooser CTA here (honest disabled state), so
+                    the block is no longer byte-identical end-to-end; the
+                    line-count canary in overview.test.js is kept in sync. */}
                 {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (
                 <div className="wizard">
                   <div className="wizard-progress">
@@ -8069,12 +8329,11 @@ function claimIntentInFlight() {
                                     >
                                       Start free
                                     </button>
-                                  ) : hasPrice ? (
-                                    <button className="ghost" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
-                                      {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                                    </button>
                                   ) : (
-                                    <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                                    <>
+                                      <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} anyConfigured={Object.keys(team.checkout_price_ids || {}).length > 0} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} block />
+                                      <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
+                                    </>
                                   )}
                                 </div>
                               )
@@ -8247,8 +8506,8 @@ function claimIntentInFlight() {
                     cap 402 puts its message on `capNotice` (not `error`), and
                     the tab-level notice sits behind this dialog — so without
                     this the user saw a silent form → empty reveal. */}
-                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
-                {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
+                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgradeToPrice} onManage={manageBilling} />}
+                {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{errorMessage(error)}</p>}
               </>
             )}
             {/* #4330: the reveal renders the live key only — `newKeyReveal` is
@@ -8466,6 +8725,11 @@ function claimIntentInFlight() {
                         </button>
                       ))}
                   </div>
+                  {/* #4815: metered-tier disclosure for the SELECTED plan, from
+                      the same pricing.json source the Billing grid reads. */}
+                  {newOrgSelectedPlan?.overageLine && (
+                    <p className="dim small" style={{ marginTop: 6 }}>{newOrgSelectedPlan.overageLine}</p>
+                  )}
                   {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
                     <button className="btn-primary" onClick={startNewOrgCheckout} disabled={createTeamBusy}>
@@ -8499,23 +8763,24 @@ function claimIntentInFlight() {
             </div>
           </div>
         )}
-        {team && team.tier !== 'team' && (
-          <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier · Upgrade
-          </a>
-        )}
-        {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
-            for teams with an existing Stripe customer (#310 backend exists). */}
-        {team && canManageSubscription && (
-          <button className="tier-badge tier-manage" onClick={manageBilling} disabled={billingPending}>
-            {billingPending ? 'Opening portal…' : 'Manage subscription'}
+        {/* #4639: the header tier badge never SELLS to a paid tier. Free/anon
+            still get an upgrade path — a real checkout control, never the
+            marketing pricing page (a link there is a dead end, and it was the
+            upsell the owner hit on Solo). A paid tier shows its name only.
+            The redundant header plan-management button (#1290) is REMOVED —
+            the Billing tab owns that. An absent checkout price id shows the
+            plain badge rather than a dead control. */}
+        {team && headerUpgradeEligible(team) && team.checkout_price_id ? (
+          <button className="tier-badge" onClick={upgrade} disabled={checkoutPending}>
+            {checkoutPending ? 'Opening checkout…' : `${TIER_LABELS[team.tier] || team.tier || 'free'} tier · Upgrade`}
           </button>
-        )}
+        ) : team ? (
+          <span className={`tier-badge${team.tier === 'team' ? ' tier-team' : ''}`}>
+            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier
+          </span>
+        ) : null}
         {team && team.status === 'flagged' && (
           <span className="tier-badge" title="Suspicious activity detected — see security alerts">⚠ flagged</span>
-        )}
-        {team && team.tier === 'team' && (
-          <span className="tier-badge tier-team">Team tier</span>
         )}
       </header>
 
@@ -8544,10 +8809,23 @@ function claimIntentInFlight() {
         )}
         {error && (
           <div className="error banner">
-            {error}
-            {/402|upgrade|quota|limit|checkout|billing/i.test(error) && (
+            {errorMessage(error)}
+            {/* #4639: a genuine limit refusal offers the route that WORKS for
+                this team — checkout for a free/anon buyer, the portal for an
+                existing Stripe customer (checkout 409s on an active
+                subscription). No route → no nudge, never a dead control. */}
+            {shouldNudgeUpgrade(error) && limitNudgeRoute === 'checkout' && (
               <span>
-                {' '}— <button className="ghost" onClick={upgrade}>Upgrade plan</button>
+                {' '}— <button className="ghost" onClick={upgrade} disabled={checkoutPending}>
+                  {checkoutPending ? 'Opening checkout…' : 'Upgrade plan'}
+                </button>
+              </span>
+            )}
+            {shouldNudgeUpgrade(error) && limitNudgeRoute === 'portal' && (
+              <span>
+                {' '}— <button className="ghost" onClick={manageBilling} disabled={billingPending}>
+                  {billingPending ? 'Opening portal…' : 'Manage subscription'}
+                </button>
               </span>
             )}
           </div>
@@ -8906,7 +9184,20 @@ function claimIntentInFlight() {
             )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {/* #4330: the SAME notice component the create-key modal renders. */}
-            {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
+            {capNotice && <CapNotice text={capNotice} team={team} route={nudgeRoute(team)} checkoutPending={checkoutPending} billingPending={billingPending} onUpgrade={upgradeToPrice} onManage={manageBilling} />}
+
+            {/* #4355: the rotate partial-state disclosure. `replaced_revoked:false`
+                means the replacement was created but the displaced row could not
+                be revoked AND its rollback failed — BOTH keys are live, so the
+                count is one over what the user intended and the table lists a
+                key they meant to retire. Rendered as its own persistent notice
+                (not the transient `error` slot, which `loadAll` overwrites). */}
+            {rotateNotice && (
+              <p className="small" role="alert" data-rotate-notice
+                 style={{ margin: '0 0 1rem', color: 'var(--warn, #b45309)' }}>
+                {rotateNotice}
+              </p>
+            )}
 
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone
@@ -9620,7 +9911,16 @@ function claimIntentInFlight() {
               </div>
               <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
-                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
+                {/* #4331: the ENFORCED node count vs the plan's node allowance
+                    (server fields — NOT point_count, which is :Point-only and
+                    demo-excluded). Both the value and the denominator come
+                    from nodeState, so an absent field / unreadable graph shows
+                    "—" rather than a fabricated 0. */}
+                <div className="card"><div className="card-val">{nodeState ? nodeState.used.toLocaleString() : '—'}</div><div className="card-label">Nodes used{nodeState && nodeState.max > 0 ? ` / ${nodeState.max.toLocaleString()}` : ''}</div></div>
+                {/* The sibling graph-derived count: a broken graph reads
+                    `graph_ready=false` with `point_count=0`, so mirror the
+                    node card's honesty instead of showing a fabricated 0. */}
+                <div className="card"><div className="card-val">{team.graph_ready === false ? '—' : (team.point_count ?? 0)}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
               </div>
@@ -9635,8 +9935,60 @@ function claimIntentInFlight() {
                   </div>
                   <p className="dim small" style={{ marginTop: 6 }}>
                     {Math.round(((team.write_ops_used ?? 0) / team.write_ops_limit) * 100)}% of monthly write ops
-                    {team.overage_eligible && team.overage_cost_usd ? ` · overage after limit at $${team.overage_cost_usd}/10k ops` : ''}
+                    {team.overage_eligible && team.overage_cost_usd ? ` · overage so far this period: $${team.overage_cost_usd.toFixed(2)}` : ''}
                   </p>
+                </div>
+              )}
+              {/* #4331: node usage bar + at/near-limit nudge. Same track and
+                  geometry as the write-ops bar, but graduated by level —
+                  accent < 80%, amber ≥ 80%, red at 100% (the write-ops bar
+                  stays accent at every level) — plus the upgrade nudge
+                  (Free: keep writing; paid: a higher allowance). The nudge
+                  deliberately promises no
+                  chargeable node overage: the owner DECIDED it (option B,
+                  ~$2/10k nodes/mo above cap on Solo/pro/Team, 2026-09-20)
+                  but it is NOT implemented in this lane. */}
+              {nodeState && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ background: 'var(--surface-hover, rgba(255,255,255,0.06))', borderRadius: 6, height: 8, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${nodeState.pct}%`,
+                      background: nodeBarColor(nodeState.level),
+                      height: '100%',
+                    }} />
+                  </div>
+                  <p className="dim small" style={{ marginTop: 6 }}>
+                    {nodeUsageText(nodeState)}
+                  </p>
+                  {nodeHint && (
+                    <p className="dim small" style={{ marginTop: 4 }}>
+                      {nodeHint}{' '}
+                      {/* Same remedy routing as the Billing plans grid below: an
+                          existing Stripe customer (active/trialing/past_due/
+                          canceled/unpaid) manages through the portal —
+                          checkout 409s on an active subscription — while
+                          everyone else gets the next purchasable plan. */}
+                      {canManageSubscription ? (
+                        <button
+                          type="button"
+                          className="ghost small"
+                          onClick={manageBilling}
+                          disabled={billingPending}
+                        >
+                          {billingPending ? 'Opening portal…' : 'Manage subscription'}
+                        </button>
+                      ) : nodeNext ? (
+                        <button
+                          type="button"
+                          className="ghost small"
+                          onClick={() => upgradeToPrice(team.checkout_price_ids[nodeNext.tier])}
+                          disabled={checkoutPending}
+                        >
+                          {checkoutPending ? 'Opening checkout…' : `Upgrade to ${nodeNext.label}`}
+                        </button>
+                      ) : null}
+                    </p>
+                  )}
                 </div>
               )}
               {hasActiveSubscription && (
@@ -9678,18 +10030,26 @@ function claimIntentInFlight() {
                     <ul className="plan-limits">
                       {p.limits.map((l) => <li key={l}>{l}</li>)}
                     </ul>
+                    {/* #4815: metered-tier disclosure on the upgrade card (solo was the
+                        first tier where omitting it could mislead a buyer). */}
+                    {p.overageLine && (
+                      <p className="dim small" style={{ marginTop: 6 }}>{p.overageLine}</p>
+                    )}
                     {current ? (
                       <button className="ghost" disabled title="You're on this plan">Current plan</button>
                     ) : canManageSubscription ? (
                       <button className="ghost" onClick={manageBilling} disabled={billingPending}>
                         {billingPending ? 'Opening portal…' : 'Manage subscription'}
                       </button>
-                    ) : hasPrice ? (
-                      <button className="btn-primary" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
-                        {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                      </button>
+                    ) : p.tier === 'free' ? (
+                      // The $0 plan has no checkout by design — never render the
+                      // "temporarily unavailable" outage claim for it.
+                      <button className="ghost" disabled title="The free plan needs no checkout">Free — no card needed</button>
                     ) : (
-                      <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                      <>
+                        <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} anyConfigured={Object.keys(team.checkout_price_ids || {}).length > 0} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" block />
+                        <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
+                      </>
                     )}
                   </div>
                 )
@@ -9769,10 +10129,12 @@ function MemorySources(props) {
   const githubConnected = !!state.github_connected
   const sessionsOn = !!state.session_recording
   const docsIndexed = !!state.github_docs_indexed
-  // issues state machine: off → on-but-not-connected (inline Connect CTA) →
-  // connected+indexing. The switch reads connected OR the user's intent.
-  const issuesOn = githubConnected || issuesWantOn
-  const docsOn = docsWantOn || docsIndexed
+  // #1924: the Issues/Docs switches control their OWN source via a persisted
+  // ENABLE intent (issues_enabled / docs_enabled) that is INDEPENDENT of the
+  // GitHub connection. Before this, the Issues switch's off-state WAS the
+  // connection (a full disconnect that also killed docs).
+  const issuesOn = issuesSourceOn(state, issuesWantOn)
+  const docsOn = docsSourceOn(state, docsWantOn)
   // #1894: "Indexed · <relative time>" (honest — no time when the persisted
   // timestamp is absent, e.g. legacy indexed teams). Independent of
   // connectivity: the label is a historical claim about indexing.
@@ -9780,7 +10142,10 @@ function MemorySources(props) {
   const githubLastIndexed = formatRelativeTime(state.github_indexed_at, now)
 
   const status = (h) => captureStatusForHarness(state, h)
-  const lastError = (h) => lastErrorForHarness(state, h)
+  const lastError = (h) => captureErrorForHarness(state, h)
+  // #3700: the per-row harness attribution — rendered beside the harness name.
+  // Never inside the `role="alert"` failure sentence (see captureStatus.js).
+  const harnessAttribution = (h) => harnessAttributionForHarness(state, h)
 
   return (
     <div className="memory-sources">
@@ -9799,7 +10164,7 @@ function MemorySources(props) {
         <div className="toggle-body">
           <h4>GitHub issues</h4>
           <p>Issues become work items with a lifecycle record.</p>
-          {githubConnected ? (
+          {issuesOn && githubConnected ? (
             <>
               <p className="dim small" aria-live="polite">
                 {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}
@@ -9861,8 +10226,12 @@ function MemorySources(props) {
               </button>{' '}
               to bring issues in as memory sources.
             </p>
+          ) : githubConnected ? (
+            // #1924: Issues off is NOT a GitHub disconnect — say so, so the
+            // off state never reads as "your connection was torn down".
+            <p className="dim small">Issues are off. GitHub stays connected for docs — turn this back on any time; no re-authorization needed.</p>
           ) : null}
-          {indexJob && <GithubIndexStatus job={indexJob} now={now} />}
+          {issuesOn && indexJob && <GithubIndexStatus job={indexJob} now={now} />}
           {memoryErrors.issues && <p className="error" role="alert">{memoryErrors.issues}</p>}
         </div>
       </div>
@@ -9875,10 +10244,9 @@ function MemorySources(props) {
           role="switch"
           aria-checked={docsOn}
           data-on={docsOn ? 'true' : 'false'}
-          data-locked-on={docsIndexed ? 'true' : undefined}  // #1894: terminal indexed docs switch — full-opacity ON (CSS scopes on this attr; the generic disabled busy-dim stays for busy windows)
           aria-label="GitHub docs as a memory source"
           onClick={() => onToggleDocs(!docsOn)}
-          disabled={memoryBusy === 'docs' || docsIndexed}  // #1835: connect-inline like issues — not connected just reveals the CTA; review P1-1: docs indexed ⇒ the switch is terminal (re-index refreshes, never un-indexes)
+          disabled={memoryBusy === 'docs'}  // #1924: NOT terminal once indexed — docs can be turned off independently of the GitHub connection (and of issues)
         />
         <div className="toggle-body">
           <h4>GitHub docs</h4>
@@ -9893,10 +10261,14 @@ function MemorySources(props) {
           ) : !githubConnected && !docsIndexed ? (
             <p className="dim small">Connect GitHub first to index docs.</p>
           ) : null}
-          {docsIndexed && docsLabel && (
+          {docsOn && docsIndexed && docsLabel && (
             <p className="memory-source-state" aria-live="polite">{docsLabel}</p>
           )}
-          {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
+          {githubConnected && !docsOn && docsIndexed && (
+            // #1924: docs off is a source choice, not a disconnect or a delete.
+            <p className="dim small">Docs are off. Your indexed docs stay in the graph — turn this back on any time; no re-authorization needed.</p>
+          )}
+          {githubConnected && docsOn && !docsJob && (
             <>
               {/* #1845: repo + branch scope for the docs index — "All repos"
                   default; when specific repos are picked, each gets its own
@@ -9988,7 +10360,7 @@ function MemorySources(props) {
               </p>
             </>
           )}
-          {docsJob && <DocsIndexStatus job={docsJob} now={now} />}
+          {docsOn && docsJob && <DocsIndexStatus job={docsJob} now={now} />}
           {memoryErrors.docs && <p className="error" role="alert">{memoryErrors.docs}</p>}
         </div>
       </div>
@@ -10025,20 +10397,43 @@ function MemorySources(props) {
               // source-grep tripwire.
               return (
                 <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
-                  <div className="harness-status-head">
-                    <strong>{HARNESS_NAMES[h]}</strong>
-                    {/* review P2-5: aria-live lives on the PILL (the state word
-                        only) — the container-level region announced the whole
-                        multi-line snippet. review P2-3: unsupported harnesses
-                        render the REASON only, no pill (no install path exists
-                        for web/cursor — a pill would contradict it). */}
-                    {supported && <span className="capture-state" aria-live="polite">{HARNESS_CAPTURE_STATUS_LABEL[st]}</span>}
+                  {/* review P2-5: the polite live region is scoped to the HEAD
+                      — the harness name, its disclosure and the state word — so
+                      it still does not announce the whole multi-line snippet
+                      below. That is a deliberate OVERRIDE of P2-5 (PR #1830),
+                      which moved the region OFF the container and ONTO the
+                      state pill: its hazard was the multi-line snippet, and the
+                      #3700 disclosure must be announced with the state it
+                      qualifies. Moving the region to the head keeps the snippet
+                      out while covering the name and the disclosure.
+                      review P2-3: unsupported harnesses render the REASON,
+                      with no pill and no failure line (an unsupported harness
+                      has no install path, so a per-harness claim would
+                      contradict the reason). That guard is what
+                      `harnessAttributionForHarness` mirrors, so an unsupported
+                      row makes no per-harness claim and needs no disclosure.
+                      #3700: the row NAMES a harness whose value is a caller
+                      declaration, so the disclosure (`harnessAttribution`) sits
+                      in the same group as the name — one flex item, so
+                      `space-between` separates the name group from the pill —
+                      and the state word stays plain; the attribution is what
+                      keeps the row from reading as a server-observed harness. */}
+                  <div className="harness-status-head" aria-live="polite">
+                    <span className="harness-status-name" id={`harness-note-${h}`}>
+                      <strong>{HARNESS_NAMES[h]}</strong>
+                      {harnessAttribution(h) && (
+                        <span className="dim small">· {harnessAttribution(h)}</span>
+                      )}
+                    </span>
+                    {supported && <span className="capture-state">{captureStatusLabelForHarness(state, h)}</span>}
                   </div>
                   {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
                   {supported && st === 'install-pending' && sessionsOn && (
                     <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
                   )}
-                  {lastError(h) && <p className="error small" role="alert">Last attempt: {lastError(h)}</p>}
+                  {/* #3700: the alert's description is the row's name group
+                      (name + disclosure). */}
+                  {supported && lastError(h) && <p className="error small" role="alert" aria-describedby={`harness-note-${h}`}>{lastError(h)}</p>}
                 </div>
               )
             })}

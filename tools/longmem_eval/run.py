@@ -16,14 +16,21 @@ failed questions after every question; re-running with the same file resumes
 (skips completed/failed, continues the rest).
 
 Run modes:
-    --mock        fully offline (MockReader + MockJudge; CI smoke, no keys)
+    --mock        offline reader/judge (MockReader + MockJudge; CI smoke, no
+                  provider keys). The dense leg is still REQUIRED (#4718);
+                  --skip-preflight is the explicit waiver.
     default       real LLM reader + judge via provider keys (env-driven)
 
 Full run needs: the dataset (~tens of MB, auto-downloaded to
 ``~/.cache/tortoise-longmemeval`` or ``TORTOISE_LME_CACHE_DIR``) and provider
 keys (OPENROUTER_API_KEY / OPENAI_API_KEY / …) — never committed, never
 hardcoded. The committed MINI fixture + ``--mock`` exercises the whole
-pipeline in CI.
+pipeline offline; the pinned embedder is still REQUIRED (#4718), so a CI
+lane that runs these paths provisions it up front (the main test job's
+``tools/embedder_provision.py`` step, #2573) and the harness invocations
+whose subject is not the dense leg carry ``--skip-preflight`` — a cold or
+absent embedder therefore never downloads mid-suite and never turns an
+unrelated assertion red.
 """
 from __future__ import annotations
 
@@ -510,23 +517,42 @@ def _embedder_status(*, available: bool, reason: str | None,
     }
 
 
-def _preflight_embedder(*, mock: bool) -> dict:
+# #4718: the dense-leg load budget is chosen by the same predicate as the
+# gate — what the run NEEDS, not which reader/judge it uses. A required leg
+# gets the real cold-load window (600s): #1349 already raised the product
+# default from 30s to 90s because "30s caused silent TF-IDF degrade on cold
+# caches" (tortoise/embeddings.py), and the old 30s `--mock` budget
+# re-introduced exactly that for the sealed retrieval-measurement command. A
+# leg the operator explicitly waived gets the short probe, so a debugging run
+# does not stall ten minutes before continuing.
+_DENSE_LEG_LOAD_TIMEOUT_S = 600.0
+_WAIVED_DENSE_LEG_LOAD_TIMEOUT_S = 30.0
+
+
+def _dense_leg_load_timeout(*, dense_leg_required: bool) -> float:
+    """The dense-leg probe budget — follows `dense_leg_required` (#4718)."""
+    return (_DENSE_LEG_LOAD_TIMEOUT_S if dense_leg_required
+            else _WAIVED_DENSE_LEG_LOAD_TIMEOUT_S)
+
+
+def _preflight_embedder(*, dense_leg_required: bool) -> dict:
     """R3 (#1542) D2: pre-flight the dense leg — never a silent None.
 
     Verifies USABILITY, not just loadability: after ``EmbeddingModel.get()``
-    succeeds, runs one probe encode and asserts the 384-dim output. A real
-    (non-mock) run refuses to start when the embedder is missing or broken
-    (SystemExit naming the remediation commands); ``--mock`` warns and
-    continues (the status is still recorded in the report methodology).
+    succeeds, runs one probe encode and asserts the 384-dim output.
 
-    Timeouts are mode-aware: real runs probe with ``load_timeout=600`` (the
-    cold-download window for the first-ever model fetch); ``--mock`` probes
-    with ``load_timeout=30`` so an offline env without a cached model warns
-    and continues in ~30s instead of stalling 10 minutes.
+    The gate keys on whether the run REQUIRES the dense leg, never on
+    ``--mock`` (#4718). ``--mock`` selects the reader/judge; it is not an
+    authorisation to publish a degraded number — ``--retrieval-only --mock``
+    is the sealed measurement command (real retriever, real graph, only
+    reader/judge mocked out), so a failed dense leg there is a fabricated
+    result. Every run requires the dense leg except an explicit
+    ``--skip-preflight`` waiver (the documented debugging/offline escape
+    hatch).
     """
     from tortoise.embeddings import EmbeddingModel
 
-    timeout = 30.0 if mock else 600.0
+    timeout = _dense_leg_load_timeout(dense_leg_required=dense_leg_required)
     try:
         model = EmbeddingModel.get(load_timeout=timeout)
     except Exception:  # noqa: BLE001, RUF100
@@ -535,7 +561,8 @@ def _preflight_embedder(*, mock: bool) -> dict:
     if model is None:
         status = _embedder_status(available=False, reason="no_embedder",
                                   st_version=st_version)
-        return _finalize_embedder_preflight(status, mock=mock)
+        return _finalize_embedder_preflight(
+            status, dense_leg_required=dense_leg_required)
     # #1349: the loaded model id — EmbeddingModel has no model_id attr, so
     # fall back to the probe state (the ACTUAL injected candidate for
     # --model runs) before the pinned default. Without the probe check an
@@ -557,12 +584,14 @@ def _preflight_embedder(*, mock: bool) -> dict:
             status = _embedder_status(
                 available=False, reason="dim_mismatch",
                 model=model_id, st_version=st_version)
-            return _finalize_embedder_preflight(status, mock=mock)
+            return _finalize_embedder_preflight(
+                status, dense_leg_required=dense_leg_required)
     except Exception:  # noqa: BLE001, RUF100
         status = _embedder_status(
             available=False, reason="encode_failed",
             model=model_id, st_version=st_version)
-        return _finalize_embedder_preflight(status, mock=mock)
+        return _finalize_embedder_preflight(
+            status, dense_leg_required=dense_leg_required)
     status = _embedder_status(available=True, reason=None,
                               model=model_id, st_version=st_version)
     print(f"[longmem_eval] embedder pre-flight OK: {model_id} "
@@ -570,23 +599,33 @@ def _preflight_embedder(*, mock: bool) -> dict:
     return status
 
 
-def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
-    """R3 (#1542) D2 gate: real runs refuse to start with a degraded dense
-    leg (SystemExit with the exact remediation); ``--mock`` warns and
-    continues (CI smoke stays runnable offline)."""
+def _finalize_embedder_preflight(status: dict, *,
+                                 dense_leg_required: bool) -> dict:
+    """The dense-leg gate (#4718).
+
+    Required (the default for every run that has not explicitly waived the
+    leg) → ``SystemExit(1)`` naming the reason, the load budget used, and the
+    fact that no measurement was produced.
+
+    Waived (``--skip-preflight``, documented as debugging/offline only) →
+    record the status and continue. The message uses WAIVED vocabulary so
+    the line can never be mistaken for a measurement's warning, and the
+    report records ``vector_strategy: "unavailable"``.
+    """
     reason = status.get("reason")
-    if mock:
-        # Reachable under --mock (warn + continue) AND under --skip-preflight
-        # (the gate is lifted for debugging; #1626). Distinguish the two so an
-        # operator isn't told a real run was "mock".
-        print("[longmem_eval] WARNING: embedder unavailable "
-              f"(reason={reason}) — the vector/dense leg is DISABLED for "
-              "this run; install with: uv sync --group dev "
-              "--extra embeddings", file=sys.stderr)
+    if not dense_leg_required:
+        print("[longmem_eval] WARNING: dense leg WAIVED by --skip-preflight "
+              f"(embedder unavailable: reason={reason}) — this run is NOT a "
+              "measurement and its report records "
+              "vector_strategy='unavailable'. Install with: uv sync "
+              "--group dev --extra embeddings", file=sys.stderr)
         return status
+    timeout = _dense_leg_load_timeout(dense_leg_required=True)
     print("[longmem_eval] EMBEDDER PRE-FLIGHT FAILED — the dense (vector) "
-          f"leg cannot run (reason={reason}). Refusing to start: publishing "
-          "a dense-less report is worse than no report.", file=sys.stderr)
+          f"leg cannot run (reason={reason}; load_timeout={timeout:g}s) and "
+          "this run REQUIRES it, so NO measurement was produced. Refusing "
+          "to start: publishing a dense-less report is worse than no "
+          "report.", file=sys.stderr)
     print("The eval env must install the pinned embedder (R3 #1542):",
           file=sys.stderr)
     print("  uv sync --group dev --extra embeddings", file=sys.stderr)
@@ -1278,6 +1317,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C6 (#2520, #2513): the time-aware query expansion
+                       # arm — conditional presence like the sibling C-arm
+                       # knobs (an armed checkpoint resumed without the arm
+                       # is refused by the fingerprint gate).
+                       time_aware_qe: bool | None = None,
                        # C3-1 (#2519, #2567): the coverage-completeness
                        # loop arm — conditional presence (a looped
                        # checkpoint resumed without the arm is refused by
@@ -1457,6 +1501,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            ("time_aware_qe", time_aware_qe),
             ("coverage_loop", coverage_loop),
             # C4 (#2513): the resolved injection total budget — conditional
             # presence like the sibling knobs (absent for an arm-OFF run:
@@ -2691,26 +2736,35 @@ INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
 
 #: Files whose content IS the v2 extractor pipeline (the "extractor code
 #: version" dimension of the ingest fingerprint): ingest_v2.py (the
-#: eval-side pipeline + payload writer) and tortoise/extractor_v2.py (the
-#: production 5-stage extractor). A content change to either invalidates
-#: every cached per-question graph automatically — no manual cache-bust.
+#: eval-side pipeline + payload writer), tortoise/extractor_v2.py (the
+#: production 5-stage extractor), and tortoise/vet_gate.py (its S2.2 gate).
+#: A content change to any of these invalidates every cached per-question
+#: graph automatically — no manual cache-bust.
 INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
     / "tortoise" / "extractor_v2.py",
+    # #5005: the S2.2 VET gate is imported by the extractor and REMOVES
+    # candidates from the embed list, so an uncommitted edit to it changes
+    # extraction output — the dirty-tree half of the fingerprint must see it
+    # (``git_sha`` only covers committed HEAD).
+    Path(__file__).resolve().parent.parent.parent
+    / "tortoise" / "vet_gate.py",
 )
 
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
 #: + model untouched (P1 #2607-review-style gap on the seam): the prompt
 #: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
-#: later pipeline switch, and the stage token caps/truncation. ANY of them
+#: later pipeline switch, the S2.2 VET gate, and the stage token caps/
+#: truncation. ANY of them
 #: toggled between QA cycles must invalidate cached ingests — a silent
 #: reuse across modes would corrupt the very A/B this seam exists for.
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
     "TORTOISE_EXTRACTOR_PROMPT",       # compact ↔ default render
     "TORTOISE_LABEL_ORDER",            # S2/S4 shuffled kind-order renders
-    "TORTOISE_LABEL_SEED",             # the shuffle seed (with the above)
+    "TORTOISE_LABEL_ORDER_SEED",       # the shuffle seed (with the above)
     "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
+    "TORTOISE_VET",                    # S2.2 VET gate (#5005) — DISCARDs items
     "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
     "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
 )
@@ -2720,17 +2774,17 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     """sha256 (full hex) over the extractor pipeline module contents — the
     ``extractor code version`` dimension of the ingest fingerprint.
 
-    Reads the files at run start (cheap: two small modules); the digest is
+    Reads the files at run start (cheap: three small modules); the digest is
     stable within a process and identical across processes on the same
     checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
     missing module would fail the ingest itself long before). P1 (#2607-
-    review class): the two modules' IMPORT CLOSURE (chain_enforcer,
+    review class): the three modules' IMPORT CLOSURE (chain_enforcer,
     kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the
     closure) invalidates cached ingests automatically. ``git_sha`` is the
-    conservative net; ``paths`` keeps the digest sensitive to the two
+    conservative net; ``paths`` keeps the digest sensitive to the three
     hot files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()
@@ -3473,6 +3527,12 @@ def run_evaluation(
     # the methodology — an expanded checkpoint resumed without the arm is
     # refused by the fingerprint gate (same contract as evidence_boost).
     entity_key_expansion: bool | None = None,
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (explicit
+    # flag > ``TORTOISE_LME_TIME_AWARE_QE`` env > OFF, the #1745 fail-safe
+    # default). Resolved once, fingerprinted, and recorded in the
+    # methodology — an armed checkpoint resumed without the arm is refused
+    # by the fingerprint gate (same contract as entity_key_expansion).
+    time_aware_qe: bool | None = None,
     # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
     # (explicit flag > ``TORTOISE_LME_COVERAGE_LOOP`` env > OFF, the #1745
     # fail-safe default). The #2519 all-or-nothing lever (2×2 covariate
@@ -3639,6 +3699,15 @@ def run_evaluation(
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): resolve the time-aware query expansion tri-state
+    # ONCE, before the loop — same contract as the sibling C-arms: a None
+    # with the TORTOISE_LME_TIME_AWARE_QE env set must not record `false`
+    # in the methodology while the per-question retrieval armed
+    # (methodology records the knobs truthfully; fail-safe OFF: only
+    # 1/true/yes/on enables — the #1745 default decision).
+    if time_aware_qe is None:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): resolve the coverage-completeness loop tri-state
     # ONCE, before the loop — same contract as evidence_boost/entity_key_
     # expansion: a None with the TORTOISE_LME_COVERAGE_LOOP env set must
@@ -3793,6 +3862,10 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C6 (#2520, #2513): the resolved time-aware arm rides the
+        # fingerprint — an armed checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        time_aware_qe=bool(time_aware_qe),
         # C3-1 (#2519, #2567): the resolved coverage-loop arm rides the
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
@@ -4264,6 +4337,10 @@ def run_evaluation(
                             # key expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
                             entity_key_expansion=entity_key_expansion,
+                            # C6 (#2520, #2513): the time-aware query
+                            # expansion arm (resolved above; OFF by
+                            # default — the sealed A/B decides adoption).
+                            time_aware_qe=time_aware_qe,
                             # C3-1 (#2519, #2567): the coverage-completeness
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
@@ -4501,6 +4578,12 @@ def run_evaluation(
                         # reconstructs which arm each outcome ran on).
                         "entity_key_expansion": ret.get(
                             "entity_key_expansion"),
+                        # C6 (#2520, #2513): the time-aware query expansion
+                        # arm per question (the A/B arm marker + the
+                        # reorder stamps — read via ret.get so a
+                        # pre-feature checkpoint stays readable).
+                        "time_aware_qe": ret.get("time_aware_qe"),
+                        "time_aware_stats": ret.get("time_aware_stats"),
                         # C3-1 (#2519, #2567): the coverage-completeness
                         # loop arm per question — the resolved bool + the §8
                         # per-outcome markers (loop_iterations /
@@ -4957,6 +5040,10 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C6 (#2520, #2513): the time-aware query expansion arm —
+            # recorded verbatim in the methodology (published numbers carry
+            # which A/B arm produced them).
+            "time_aware_qe": bool(time_aware_qe),
             # C3-1 (#2519, #2567): the coverage-completeness loop arm —
             # recorded verbatim in the methodology (published numbers carry
             # which of the 2×2 arms produced them; the §5 gate deltas are
@@ -5159,6 +5246,10 @@ def outcomes_to_report(
                 # arm marker rides the projection (read via o.get — absent
                 # on pre-feature checkpoints).
                 "entity_key_expansion",
+                # C6 (#2520, #2513): the time-aware query expansion arm +
+                # the reorder stamps ride the projection (read via o.get —
+                # absent on pre-feature checkpoints).
+                "time_aware_qe", "time_aware_stats",
                 # C3-1 (#2519, #2567): the coverage-completeness loop arm +
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
@@ -5425,6 +5516,16 @@ def _print_summary(report: dict[str, Any]) -> None:
             print(f"  {cls:<28} {count}")
     else:
         print("error census: no errors")
+    # #2873: the extractor-warning readout — printed ONLY when the run
+    # emitted warnings, so a warning-bearing run's console summary is no
+    # longer byte-identical to a clean one (the issue's symptom). Readout
+    # only; never a gate limb (integrity.valid untouched).
+    ew = integ.get("extractor_warnings") or {}
+    if ew.get("count"):
+        print(f"extractor warnings: {ew.get('count')} across "
+              f"{ew.get('questions_with_warnings')} question(s)")
+        for w in (ew.get("sample") or []):
+            print(f"  - {w}")
     for c in integ.get("checks") or []:
         print(f"  check: {c}")
     # #1946: the extraction-health gate readout — printed BEFORE the score
@@ -5618,6 +5719,25 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C2 evidence-mark boost even when "
                          "TORTOISE_LME_EVIDENCE_BOOST is set "
                          "(tri-state: explicit flags beat the env)")
+    # C6 (#2520, #2513): time-aware query expansion — tri-state
+    # --time-aware-qe / --no-time-aware-qe (None default so the
+    # TORTOISE_LME_TIME_AWARE_QE env still applies; OFF by default in code
+    # — the sealed #2513 A/B decides adoption). The A/B switch: identical
+    # questions run once with the arm OFF (baseline) and once ON; the
+    # report's shared-question evidence_recall@k / recall_all@5 deltas gate
+    # the +recall claim.
+    ta = p.add_mutually_exclusive_group()
+    ta.add_argument("--time-aware-qe", dest="time_aware_qe",
+                    action="store_true", default=None,
+                    help="Time-aware query expansion: anchor the dense-leg "
+                         "query with the question date and reorder the "
+                         "final pool live-before-stale on a prefer-latest "
+                         "question (non-TR only). Default: OFF; "
+                         "TORTOISE_LME_TIME_AWARE_QE=1 also enables.")
+    ta.add_argument("--no-time-aware-qe", dest="time_aware_qe",
+                    action="store_false",
+                    help="Force time-aware query expansion OFF (overrides "
+                         "the env var).")
     # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
     # --entity-key-expansion / --no-entity-key-expansion (None default so
     # the TORTOISE_LME_ENTITY_KEY_EXPANSION env still applies; OFF by
@@ -5735,7 +5855,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "(env TORTOISE_LME_EVIDENCE_BOOST_SOURCE; default "
                         f"{DEFAULT_EVIDENCE_BOOST_SOURCE})")
     p.add_argument("--mock", action="store_true",
-                   help="offline mode: MockReader + MockJudge, no API keys (CI)")
+                   help="offline mode: MockReader + MockJudge, no API keys "
+                        "(CI). Does NOT waive the dense-leg gate (#4718) — "
+                        "use --skip-preflight for that")
     p.add_argument("--skip-preflight", action="store_true",
                    help="bypass the pre-flight API gate AND the dense-leg "
                         "(embedder) gate (debugging/offline only — the "
@@ -6234,6 +6356,16 @@ def _run_main(parser: argparse.ArgumentParser, args,
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (CLI flag
+    # > TORTOISE_LME_TIME_AWARE_QE env > OFF — fail-safe: only
+    # 1/true/yes/on enables). Resolved once and threaded into
+    # run_evaluation (methodology == actual; the #2513 retrieval A/B
+    # switch).
+    if args.time_aware_qe is not None:
+        time_aware_qe = args.time_aware_qe
+    else:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): coverage-completeness loop — tri-state (CLI flag
     # > TORTOISE_LME_COVERAGE_LOOP env > OFF — fail-safe: only
     # 1/true/yes/on enables, mirroring the boost gate above). Resolved once
@@ -6343,14 +6475,14 @@ def _run_main(parser: argparse.ArgumentParser, args,
                      load_timeout=args.load_timeout)
 
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
-    # the ~tens-of-MB download). Real runs refuse to start when the dense
-    # leg can't run; --mock warns and continues. The status flows into the
-    # report methodology (D5: embedder + vector_strategy always emitted).
-    # R3 (#1542) D2: the embedder gate. `--skip-preflight` must ALSO skip
-    # this gate — it's the "skip all gates" debugging flag; a real (non-mock)
-    # run without it still refuses to start dense-less (#1626).
+    # the ~tens-of-MB download). EVERY run refuses to start when the dense
+    # leg cannot run; the only waiver is an explicit --skip-preflight (#1626).
+    # `--mock` selects the reader/judge and is NOT a dense-leg authorisation
+    # (#4718: `--retrieval-only --mock` is a measurement, and a loaded host
+    # used to turn it keyword-only). The status flows into the report
+    # methodology (D5: embedder + vector_strategy always emitted).
     embedder_status = _preflight_embedder(
-        mock=args.mock or args.skip_preflight)
+        dense_leg_required=not args.skip_preflight)
 
     instances = ds.load_dataset(
         args.split, limit=args.limit, data_path=args.data,
@@ -6469,6 +6601,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # arm (tri-state resolved above; OFF by default — the
                 # sealed #2513 A/B decides adoption).
                 entity_key_expansion=entity_key_expansion,
+                # C6 (#2520, #2513): time-aware query expansion arm
+                # (tri-state resolved above; OFF by default — the sealed
+                # #2513 A/B decides adoption).
+                time_aware_qe=time_aware_qe,
                 # C3-1 (#2519, #2567): coverage-completeness loop arm
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).
