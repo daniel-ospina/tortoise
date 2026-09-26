@@ -171,9 +171,16 @@ def _redact_exc(e: BaseException,
     (``p%40ss``) form the URI carried. Both are known to the caller, so scrub
     every form explicitly (#3067). Values shorter than ``_MIN_SCRUB_LEN`` are
     skipped (see the constant above).
+
+    The scrub runs on the UNTRUNCATED message; the 200-char cap is applied
+    afterwards. ``redact_error`` cuts to ``msg[:200]`` first, and a literal
+    replace on an already-cut string can only match the WHOLE secret — so a
+    credential straddling that boundary survived as a fragment (``secretpw``
+    at offset 195 logged ``secre``), the same half-credential class this
+    function exists to prevent.
     """
-    from tortoise.security import redact_error
-    msg = redact_error(e)
+    from tortoise.security import _redact_message
+    msg = _redact_message(e)
     # LONGEST-first: a shorter secret that is a PREFIX of a longer one would
     # otherwise consume the longer secret's first occurrence (``user`` scrubbed
     # before ``userpass`` turns ``userpass`` into ``***pass``, retaining half
@@ -182,7 +189,7 @@ def _redact_exc(e: BaseException,
             {s for s in secrets if s and len(s) >= _MIN_SCRUB_LEN},
             key=len, reverse=True):
         msg = msg.replace(secret, '***')
-    return msg
+    return f"{e.__class__.__name__}: {msg[:200]}"
 
 
 def _graph_entity_keywords(content: str) -> list[str]:

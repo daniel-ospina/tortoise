@@ -243,6 +243,20 @@ _REDACT_PATTERNS = [
 ]
 
 
+def _redact_message(e: BaseException) -> str:
+    """Pattern-redacted ``str(e)``, WITHOUT the 200-char cap.
+
+    Split out of :func:`redact_error` so a caller that must scrub its own
+    literals (``session_indexer._redact_exc``) can do so BEFORE truncation.
+    Scrubbing an already-cut string can only match a WHOLE secret, so a
+    credential straddling the cut survives as a fragment (#3067).
+    """
+    msg = str(e) or e.__class__.__name__
+    for pattern, repl in _REDACT_PATTERNS:
+        msg = pattern.sub(repl, msg)
+    return msg
+
+
 def redact_error(e: BaseException) -> str:
     """Return a safe, generic error string for a caught exception.
 
@@ -251,10 +265,7 @@ def redact_error(e: BaseException) -> str:
     tracebacks. Used by analyze()'s error path so tenants never see DB/query
     internals.
     """
-    msg = str(e) or e.__class__.__name__
-    for pattern, repl in _REDACT_PATTERNS:
-        msg = pattern.sub(repl, msg)
-    return f"{e.__class__.__name__}: {msg[:200]}"
+    return f"{e.__class__.__name__}: {_redact_message(e)[:200]}"
 
 
 # ── Env helpers ────────────────────────────────────────────────────────────

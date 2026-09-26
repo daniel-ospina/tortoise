@@ -912,6 +912,25 @@ def test_redact_exc_scrubs_a_prefix_overlapping_credential():
     assert "pa%ss@wo:rd" not in mixed, mixed
 
 
+def test_redact_exc_scrubs_before_truncating():
+    """#3067 (P2): the scrub must run BEFORE the 200-char cap.
+
+    ``redact_error`` truncates to ``msg[:200]``. A literal replace on that
+    already-cut string can only match the WHOLE secret, so a credential
+    straddling the boundary survived as a fragment — ``secretpw`` starting at
+    offset 195 logged ``secre``. This is the same half-credential class the
+    prefix-overlap fix addressed, so it is pinned at every straddling offset.
+    """
+    from tortoise.session_indexer import _redact_exc
+
+    secret = "secretpw"
+    for offset in (0, 189, 190, 195, 196, 199, 200, 205):
+        out = _redact_exc(Exception("x" * offset + secret), (secret,))
+        assert secret not in out, (offset, out)
+        # No fragment may survive either — that is the whole point.
+        assert secret[:3] not in out, (offset, out)
+
+
 def test_session_indexer_warns_again_after_a_recovery(monkeypatch, caplog):
     """#3067 (P2): the outage latch RE-ARMS, so a later outage warns again.
 
