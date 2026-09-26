@@ -77,22 +77,71 @@ def _script_after(html: str, marker: str) -> str:
     return html[start + len("<script>") : end]
 
 
+def _strip_comments(html: str) -> str:
+    """Blank out HTML `<!-- -->` comments so the extractors below read CODE.
+
+    HTML comments only: a `//` or `/* */` stripper that is not quote-aware can eat
+    the rest of a line from a `//` INSIDE a JS string, which would break the
+    extracted source rather than the pin. A decoy left in a JS comment instead
+    makes the uniqueness assert below FIRE (fail-loud), which is the safe
+    direction — the node side strips JS comments because it pins a different
+    thing.
+    """
+    out = []
+    i, n = 0, len(html)
+    while i < n:
+        if html.startswith("<!--", i):
+            end = html.find("-->", i)
+            i = n if end == -1 else end + 3
+        else:
+            out.append(html[i])
+            i += 1
+    return "".join(out)
+
+
 def _function(html: str, name: str) -> str:
-    """Extract a top-level `function <name>() { ... }` by brace counting."""
-    start = html.find(f"function {name}(")
+    """Extract THE `function <name>() { ... }` by brace counting.
+
+    Comment-stripped first, and the declaration must be UNIQUE: JS hoisting makes
+    the LAST duplicate the one that runs, so on raw HTML a decoy declaration in an
+    HTML comment — or a second, later declaration — would let the harness test a
+    function the page never calls (the node side pins the same property).
+    """
+    src = _strip_comments(html)
+    count = src.count(f"function {name}(")
+    assert count == 1, f"function {name} declared {count} times in signup.html — the harness cannot tell which one runs"
+    start = src.find(f"function {name}(")
     assert start != -1, f"function {name} not found in signup.html"
-    i = html.find("{", start)
+    i = src.find("{", start)
     assert i != -1, f"no body for {name}"
     depth, j = 0, i
-    while j < len(html):
-        if html[j] == "{":
+    while j < len(src):
+        if src[j] == "{":
             depth += 1
-        elif html[j] == "}":
+        elif src[j] == "}":
             depth -= 1
             if depth == 0:
-                return html[start : j + 1]
+                return src[start : j + 1]
         j += 1
     raise AssertionError(f"unbalanced braces in {name}")
+
+
+def _page_base_src(html: str) -> str:
+    """The page's OWN base assignment statements, extracted verbatim.
+
+    `WELCOME_URL`/`DASHBOARD_URL` are computed at the top of the big script —
+    they are NOT inside any extracted helper — so a harness that injects them
+    instead is testing its own arithmetic. Substituting the real statements makes
+    a regression in the page's assignment (e.g. dropping the `dashboardBase(...)`
+    call) fail the suite.
+    """
+    src = _strip_comments(html)
+    welcome = re.search(r"const WELCOME_URL = ([^;]+);", src)
+    dash = re.search(r"const DASHBOARD_URL = ([^;]+);", src)
+    assert welcome and dash, (
+        "the page's WELCOME_URL/DASHBOARD_URL assignment shape changed — update this harness"
+    )
+    return f"const WELCOME_URL = {welcome.group(1)};\nconst DASHBOARD_URL = {dash.group(1)};"
 
 
 def _brace_block(html: str, marker: str) -> str:
@@ -132,9 +181,9 @@ def _blocks() -> dict[str, str]:
         "TS annotations remain in the extracted returnToPath — update this harness"
     )
     return {
-        # The dashboard-origin validator lives in the FIRST inline script, which
-        # both the early block and claimCardUrl call — prepend it (and the base
-        # composer) to each extracted block.
+        # The dashboard-origin validator and the base composer live in the FIRST
+        # inline script. The early block calls only `dashboardOrigin`, so only that
+        # is prepended here; `claim` gets both.
         "early": _function(html, "dashboardOrigin") + "\n" + _script_after(html, _EARLY),
         "headGate": _script_after(html, _HEAD_GATE),
         # #3501: `gotrueRedirectTarget` (a GoTrue `redirect_to`) is retired — the
@@ -145,6 +194,8 @@ def _blocks() -> dict[str, str]:
         "claim": _function(html, "dashboardOrigin")
         + "\n"
         + _function(html, "dashboardBase")
+        + "\n"
+        + _page_base_src(html)
         + "\n"
         + "\n".join(
             _function(html, name)
@@ -242,20 +293,9 @@ function runHeadGate(search, cookie, session) {
            stale: e.win.__ADMIN_STALE || false, probe: !!e.win.__SESSION_PROBE, fetched: fetched };
 }
 
-// The page sets `WELCOME_URL = dashboardBase(window.__DASHBOARD_BASE_URL)` and
-// `DASHBOARD_URL = WELCOME_URL` at the top of its main script; those statements
-// are NOT part of the extracted helpers, so the driver reproduces them here — by
-// CALLING the shipped `dashboardBase`, not by restating it. Otherwise the
-// harness would inject a value the page can never compute and the validation
-// would be untested (review cycle 4).
-function pageBase(e, rawBase) {
-  const pre = new Function(
-    'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
-    claimSrc + '\\nreturn { base: dashboardBase, origin: dashboardOrigin };',
-  );
-  const helpers = pre(e.win, e.doc, URLSearchParams, '', '');
-  return helpers.base(rawBase);
-}
+// `claimSrc` now ENDS with the page's own base assignment, extracted from
+// signup.html (`_page_base_src`), so `WELCOME_URL`/`DASHBOARD_URL` are the ones
+// the page really computes — not values the harness injects.
 
 // Mimic the async post-session bounce: whatever claimRedirectTarget() returns is
 // assigned to window.location.href, so it must be a NAVIGATION target.
@@ -266,23 +306,35 @@ function runTargets(ret, cookie, seamBase) {
   // value the page could not compute.
   const e = mkEnv('', cookie, undefined, APP);
   e.win.__ADMIN_RETURN_TO = ret || null;
-  // PRODUCTION FIDELITY (#3930 review): signup.html computes
-  //   window.__DASHBOARD_BASE_URL = <seam origin | location.origin> + ret
-  // and /auth is served on the APP origin (#4054), so the base the page reads
-  // is APP + ret. Injecting `ORIGIN + ret` pinned a host production can never
-  // produce, so a wrong-origin regression could not fail the tests below.
-  // `claimCardUrl()` reads THIS window property, so it must be set too —
-  // otherwise only its fallback branch is ever executed.
-  const rawBase = seamBase || (APP + (ret || ''));
+  // PRODUCTION FIDELITY (#3930 review): the early block composes
+  // `dashboardOrigin(seam) + ret` ONLY when it has a return-to; with no `next` it
+  // returns first and leaves the RAW seam in place. Both are modelled here — and
+  // when there is no return-to the raw seam is deliberately NOT pre-reduced,
+  // because reducing it here would mean the page's own `dashboardBase(...)`
+  // assignment is never load-bearing (the cycle-5 gate caught exactly that).
+  const rawBase = seamBase ? (ret ? seamOrigin(seamBase) + ret : seamBase) : (APP + (ret || ''));
   e.win.__DASHBOARD_BASE_URL = rawBase;
-  const DASHBOARD_URL = pageBase(e, rawBase);
-  const WELCOME_URL = DASHBOARD_URL;
   const make = new Function(
-    'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
+    'window', 'document', 'URLSearchParams',
     claimSrc + '\\nreturn { claim: claimRedirectTarget, oauth: oauthNextPath };',
   );
-  const fns = make(e.win, e.doc, URLSearchParams, DASHBOARD_URL, WELCOME_URL);
+  const fns = make(e.win, e.doc, URLSearchParams);
   return { nav: fns.claim(), oauth: fns.oauth() };
+}
+
+// The seam's ORIGIN rule, as the early block applies it, so a seam-plus-return-to
+// models the COMPOSED value rather than the raw seam (the raw seam survives only
+// when there is no `next`). Kept in step with the shipped `dashboardOrigin` by
+// the tests that assert both paths.
+function seamOrigin(raw) {
+  const own = APP;
+  if (typeof raw !== "string") return own;
+  let u;
+  try { u = new URL(raw); } catch (e) { return own; }
+  if (!u.origin || u.origin === "null") return own;
+  if (u.origin === own) return own;
+  if (u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]") return u.origin;
+  return own;
 }
 
 // #3501: the decision moved off the synchronous gate into the probe consumer.
@@ -294,18 +346,14 @@ function runConsumer(status, ret, cookie, opts) {
   e.win.__ADMIN_RETURN_TO = ret || null;
   if (opts.adminStale) e.win.__ADMIN_STALE = true;
   if (opts.oauthError) e.win.__OAUTH_ERROR = true;
-  // PRODUCTION FIDELITY (#3930 review): see runTargets — the page's
-  // __DASHBOARD_BASE_URL is `location.origin + ret` on the APP origin, and
-  // `claimCardUrl()` reads that window property.
-  const rawBase = APP + (ret || '');
-  e.win.__DASHBOARD_BASE_URL = rawBase;
-  const DASHBOARD_URL = pageBase(e, rawBase);
-  const WELCOME_URL = DASHBOARD_URL;
+  // PRODUCTION FIDELITY (#3930 review): see runTargets — the page derives
+  // DASHBOARD_URL/WELCOME_URL from `dashboardBase(__DASHBOARD_BASE_URL)`.
+  e.win.__DASHBOARD_BASE_URL = APP + (ret || '');
   const make = new Function(
-    'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
+    'window', 'document', 'URLSearchParams',
     claimSrc + '\\nreturn { claim: claimRedirectTarget };',
   );
-  const fns = make(e.win, e.doc, URLSearchParams, DASHBOARD_URL, WELCOME_URL);
+  const fns = make(e.win, e.doc, URLSearchParams);
   const errors = [];
   e.win.__SESSION_PROBE = { then: function (cb) { cb(status); } };
   new Function('window', 'claimRedirectTarget', 'showError', consumerSrc)(
@@ -1076,11 +1124,21 @@ def test_early_block_validates_and_composes_the_dashboard_base() -> None:
         ["?next=/team?session_id=abc", "", APP_ORIGIN, loopback],
         ["?next=/team", "", APP_ORIGIN, None],
         ["?next=/team", "", APP_ORIGIN, "https://app.premiselabs.co"],
+        ["?next=/team", "", APP_ORIGIN, 42],
+        ["?next=/team", "", APP_ORIGIN, []],
+        ["?next=/team", "", APP_ORIGIN, loopback + "/prior"],
     ]})["early"]
     assert rows[0]["base"] == loopback + "/team?session_id=abc", rows[0]
     assert rows[0]["ret"] == "/team?session_id=abc", rows[0]
     assert rows[1]["base"] == APP_ORIGIN + "/team", rows[1]
     assert rows[2]["base"] == APP_ORIGIN + "/team", rows[2]
+    # A non-string seam falls back to this document's origin.
+    for row in rows[3:5]:
+        assert row["base"] == APP_ORIGIN + "/team", row
+    # A seam already carrying a path keeps its ORIGIN but takes the NEW path —
+    # the prior path is replaced, never concatenated (no accretion).
+    assert rows[5]["base"] == loopback + "/team", rows[5]
+    assert loopback + "/prior" not in rows[5]["base"], rows[5]
     # Hostile bases must fall back to THIS document's origin — the value is what
     # every later navigation sink reads. `blob:` is the case an "opaque origin"
     # rule alone misses: it carries the INNER url's origin.
@@ -1094,6 +1152,9 @@ def test_early_block_validates_and_composes_the_dashboard_base() -> None:
         "https://evil.com/x",
         "https://user:pass@evil.com",
         "blob:https://evil.com/x",
+        "blob:https://app.premiselabs.co/team",   # inner origin IS this page's
+        "blob:http://127.0.0.1:8790/team",
+        "filesystem:https://evil.com/temporary/x",
         "javascript:alert(1)",
         "data:text/html,x",
         "about:blank",

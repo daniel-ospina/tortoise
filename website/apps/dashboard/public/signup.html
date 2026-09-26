@@ -25,26 +25,37 @@
     // backslash/whitespace-obfuscated host, an absolute foreign host, and a
     // `blob:`/`javascript:`/`data:` URL (whose origin is another host or the
     // opaque string "null").
+    // Provenance, precisely: the ORIGIN is page-controlled. The VALUE is not —
+    // the early block below appends the URL-derived, allowlist-checked `ret` to
+    // it — which is exactly why every read goes through these two helpers.
     function dashboardOrigin(raw) {
       var own = window.location.origin;
       if (typeof raw !== "string") return own;
+      // ABSOLUTE only: `new URL(raw, own)` would silently resolve a relative or
+      // malformed string ONTO this origin, which is not what the seam means.
       var u;
-      try { u = new URL(raw, own); } catch (e) { return own; }
+      try { u = new URL(raw); } catch (e) { return own; }
       if (!u.origin || u.origin === "null") return own;
       if (u.origin === own) return own;
       if (u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]") return u.origin;
       return own;
     }
-    // The validated base, KEEPING the path (a return-to) only when it rides the
-    // allowed origin, so a bad value cannot contribute a path either.
+    // The validated base, keeping the path (a return-to) only when it rides the
+    // allowed origin AND the base is genuinely hierarchical — a `blob:` URL whose
+    // INNER url is this origin otherwise contributes an opaque "path" and
+    // concatenation would yield two absolute URLs stuck together.
     function dashboardBase(raw) {
       var own = window.location.origin;
       var origin = dashboardOrigin(raw);
       var path = "";
-      try {
-        var u = new URL(raw, own);
-        if (u.origin === origin && u.pathname !== "/") path = u.pathname + u.search;
-      } catch (e) { path = ""; }
+      if (typeof raw === "string") {
+        try {
+          var u = new URL(raw);
+          if (u.origin === origin && u.pathname.charAt(0) === "/" && u.pathname !== "/") {
+            path = u.pathname + u.search;
+          }
+        } catch (e) { path = ""; }
+      }
       return origin + path;
     }
   </script>
@@ -113,11 +124,12 @@
         // Re-check the RESULT, not just the input: `/..//evil.example` resolves
         // same-origin (so the origin check passes) but serialises to a
         // network-path reference, which the BROWSER then re-interprets as
-        // `https://evil.example/`. NOTE: while the allowlist above is
-        // pathname-prefix based THIS LINE CANNOT FIRE — `/..//evil.example`
-        // normalises to `//evil.example`, which matches no allowlisted route and
-        // is rejected there. It is kept as belt-and-braces so the invariant
-        // survives a future loosening of the allowlist; the allowlist is the
+        // `https://evil.example/`. NOTE: THIS LINE CANNOT FIRE while the
+        // allowlist above admits only `/welcome`, `/team` and `/admin[/…]` — no
+        // routed path begins with `//`, so `ret` cannot either (`/..//evil.example`
+        // normalises to `//evil.example` first and is rejected there). It is kept
+        // as belt-and-braces so the invariant survives a future loosening of the
+        // allowlist; the allowlist is the
         // load-bearing control.
         if (ret.charAt(0) !== "/" || ret.indexOf("//") === 0) return;
         window.__ADMIN_RETURN_TO = ret;
@@ -710,7 +722,10 @@
     // wins unconditionally — appending ?claim=1 would land the user on a dead
     // route.
     function isConsoleReturnTo() {
-      return !!window.__ADMIN_RETURN_TO && window.__ADMIN_RETURN_TO.indexOf("/admin") === 0;
+      // Boundary-checked like every other /admin predicate in this fix: a bare
+      // `indexOf("/admin") === 0` also matches `/administrator`.
+      var r = window.__ADMIN_RETURN_TO;
+      return !!r && (r === "/admin" || r.indexOf("/admin/") === 0);
     }
     // #1082: claim intent in flight (non-secret marker, set by the dashboard
     // claim card on app.premiselabs.co).

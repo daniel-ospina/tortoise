@@ -39,7 +39,12 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url))
 const dashboardRoot = join(here, '..')
-const signupHtml = stripComments(readFileSync(join(dashboardRoot, 'public', 'signup.html'), 'utf8'))
+// HTML comments are stripped too: `stripComments` handles JS `//` and `/* */`,
+// but signup.html is HTML, so a decoy declaration left in a `<!-- -->` comment
+// could otherwise satisfy (or red) the pins below.
+const signupHtml = stripComments(
+  readFileSync(join(dashboardRoot, 'public', 'signup.html'), 'utf8').replace(/<!--[\s\S]*?-->/g, ''),
+)
 const mainJsx = stripComments(readFileSync(join(here, 'main.jsx'), 'utf8'))
 
 /** The `next` the bounce offers, or null when it offers none. */
