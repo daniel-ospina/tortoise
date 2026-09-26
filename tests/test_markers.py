@@ -101,6 +101,11 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # ``:Team`` node and drive the ledger through the production writer; the
     # registry store IS the coupling under test (same class as test_metering).
     "test_metering_period_window.py": {"registry": "prod-coupled"},
+    # #4488: same class as test_metering — the fixture pins TORTOISE_DB_PATH so
+    # the embedding writer resolves the SAME store the fixture seeded, and the
+    # canonical registry namespace IS that coupling. A test_* rename would seed
+    # a different graph than the writer resolves.
+    "test_embed_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
