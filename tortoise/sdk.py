@@ -18199,6 +18199,15 @@ class TortoiseSDK:
             secondary_entity_id_props,
         )
 
+        # #4649: a write can MOVE the node it addressed. `id` is refused by
+        # `_sanitize_props` above, but `url` (a :Source's identity) and
+        # `eventId` are writable — and the OR-set below matches by exactly those
+        # keys. The tail would then re-resolve by `id_val` and MISS the node
+        # this very call re-keyed, returning `{}` — the value `update()` /
+        # `get_entity` document as "nothing was written" — which is the
+        # success/no-op ambiguity #4649 removes, merely inverted. Track the
+        # address the write LEAVES BEHIND and resolve the return through it.
+        post_write_id = id_val
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             # #4649: a canonical label's identity is an OR-SET, not one key.
             # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
@@ -18364,6 +18373,11 @@ class TortoiseSDK:
                             matched_prop = match_prop
                             break
                     matched = matched_prop is not None
+                    if isinstance(props.get(matched_prop), str):
+                        # The matched key is one this write rewrote, so the node
+                        # no longer lives at `id_val` (a non-str value means the
+                        # key was cleared, leaving nothing to resolve).
+                        post_write_id = props[matched_prop]
 
                     # Journal everything the write changed EXCEPT `name`. The
                     # reason `name` is withheld — it moves the node before the
@@ -18430,6 +18444,10 @@ class TortoiseSDK:
                         break
                 if not keys or not res.result_set:
                     continue
+                if isinstance(props.get(match_prop), str):
+                    # Same re-key case as the `name` branch above: the matched
+                    # key is one this write rewrote.
+                    post_write_id = props[match_prop]
                 vals = list(res.result_set[0][0])
                 if len(vals) != len(keys):
                     # Impossible by construction — `[k IN $keys | ...]` is
@@ -18444,7 +18462,7 @@ class TortoiseSDK:
                     label, id_val, classify_entity_mutation_op(props),
                     state=dict(zip(keys, vals, strict=False)),
                 )
-        return self._get_entity(id_val)
+        return self._get_entity(post_write_id)
 
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()

@@ -2333,7 +2333,7 @@ _JOURNAL_CREATING_EVENT_TYPES = frozenset({
 # REMOVE. Replay's ``EntityMutated`` op=delete replays ``_delete_entity_by_id``
 # — #3860 SCOPED it to the record's own canonical ``label``, so a delete record
 # removes that ONE label; only a MISSING/unknown label falls back to the legacy
-# id-wide delete across all six. The live ``_delete_entity`` is the same six and
+# id-wide delete across all five. The live ``_delete_entity`` is the same five and
 # documents "Session/APIKey/Org/Tag nodes are intentionally NOT deleted".
 # ``PointsMerged`` deletes Points only. So a journaled hard delete can NEVER
 # remove a ``:Session`` node, and the staleness rule must not suppress a
@@ -2371,7 +2371,7 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
     * ``EntityMutated`` op=delete replays ``_delete_entity_by_id``, which
       #3860 scoped to the record's own canonical ``label`` — that label ALONE
       gets the seq. A missing/unknown label falls back to the legacy id-wide
-      delete across ``_HARD_DELETE_LABELS`` (all six get the seq), matching
+      delete across ``_HARD_DELETE_LABELS`` (all five get the seq), matching
       ``_delete_entity_by_id(label=None)``.
     * ``PointsMerged`` replays ``_delete`` — a ``:Point`` only
       (``_POINTS_MERGED_LABELS``), so only ``Point`` gets the seq.

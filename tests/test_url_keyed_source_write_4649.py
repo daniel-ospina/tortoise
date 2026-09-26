@@ -195,6 +195,34 @@ class TestUrlKeyedSourceIsWritable:
         assert returned, "update() must resolve a url-keyed Source, not return {}"
         assert _stub(sdk._get_proj(), url)[1] == "retired"
 
+    def test_a_rekeying_update_returns_the_node_at_its_new_address(
+            self, env, tmp_path):
+        """The return must resolve through the address the write LEAVES
+        BEHIND. `update()`/`get_entity` document `{}` as "unknown id, nothing
+        written", so returning it for a write that landed and was journalled is
+        the success/no-op ambiguity #4649 removes — merely inverted: the caller
+        cannot tell "updated and re-keyed" from "no such id".
+
+        (1) Failing value is `{}` for a write that stored `url = new`; (2)
+        reachable via the journaled corpus Source: `url` is the only identity
+        key a caller may rewrite (`id` is refused by `_sanitize_props`), and a
+        url-keyed Source is addressed BY it.
+        """
+        sdk, _ = env
+        proj = sdk._get_proj()
+        old = "https://corpus.example.com/ret-before"
+        new = "https://corpus.example.com/ret-after"
+        _corpus_source(sdk, tmp_path, old, "doc_ret")
+        assert _stub(proj, old)[0] is None, "corpus Source must be url-only"
+
+        returned = sdk.update_entity(old, url=new)
+
+        assert returned.get("url") == new, (
+            "a re-keying update returned the no-write sentinel for a write "
+            f"that landed: {returned!r}")
+        assert _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=new), (
+            "the write itself must land at the new address")
+
     def test_delete_finds_and_removes_a_url_only_source(self, env):
         """(1) The failing value is the ``False`` return + the node's
         continued existence + the absent delete record; (2) reachable through
@@ -292,10 +320,15 @@ class TestDeletePreviewAgreesWithTheWriter:
 
         (1) Failing value is `nodes_removed == 1` where the writer removes 2 —
         an UNDER-report, the dangerous direction on an irreversible op;
-        (2) reachable: `:Object:Source` is a shape the codebase itself
-        constructs (`_preview_delete_entity`'s own comment,
-        `tests/test_hosted_backup.py`), and the url-only `:Source` is the
-        `extractedFrom` stub.
+        (2) reachable in the fixture, stated honestly: the url-only `:Source`
+        is the `extractedFrom` stub (production-minted), while the multi-label
+        node is CONSTRUCTED here because this test needs a NON-Point
+        multi-label node. A `:Source` node that also carries an EARLIER
+        canonical label is a shape the codebase already handles
+        (`_preview_delete_entity`'s own `:Point:Object` example;
+        `tests/test_hosted_backup.py:223`'s `:Point:Source`), and the `:Point`
+        variant would route the dispatcher to `_preview_delete_point` rather
+        than the entity preview under test.
         """
         from tortoise.mcp_server import _preview_delete, _preview_delete_entity
 
