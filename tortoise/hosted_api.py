@@ -6618,19 +6618,26 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
                 org["org_id"], exc_info=True)
             max_nodes = None
 
-    # Metering (#681): fetch write-op usage for the current billing period.
-    from tortoise.metering import get_current_usage
-    usage = get_current_usage(org["org_id"])
+    # Metering: write-op usage for the current billing period (#681), ask usage
+    # (#1987 Task 6) and embedding-encode workload (#4488). All three are
+    # SYNCHRONOUS ledger/control-plane reads, and each was previously run
+    # straight on the event loop. #4488 added the third, which is the clearest
+    # possible reason to move the GROUP off the loop rather than add another
+    # blocking hop to a route that is also under a 10s transport bound
+    # (`mcp_auth.py`). ONE offloaded hop for all three — the figures then come
+    # from the same moment, and the route does strictly less blocking work than
+    # before this PR rather than more. Found in review.
+    #
+    # All three degrade internally to a zero view (never raising), so the
+    # best-effort contract is unchanged by where they run.
+    from tortoise.metering import get_ask_usage, get_current_usage, get_embedding_usage
 
-    # #1987 Task 6: ask usage — best-effort read; any failure degrades to
-    # the zero-usage view (never 500).
-    from tortoise.metering import get_ask_usage
-    ask_usage = get_ask_usage(org["org_id"])
+    def _read_usage():
+        oid = org["org_id"]
+        return (get_current_usage(oid), get_ask_usage(oid),
+                get_embedding_usage(oid))
 
-    # #4488: embedding-encode workload — same best-effort read; any failure
-    # degrades to the zero view (never 500), a fresh org renders zeros.
-    from tortoise.metering import get_embedding_usage
-    embed_usage = get_embedding_usage(org["org_id"])
+    usage, ask_usage, embed_usage = await asyncio.to_thread(_read_usage)
 
     return OrgInfoResponse(
         org_id=org["org_id"],

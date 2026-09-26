@@ -121,12 +121,19 @@ BEGIN
             p_model, p_revision, p_identity_mixed)
     ON CONFLICT (org_id, period_start)
     DO UPDATE SET
-        -- The mixed flag is computed FIRST, in its own assignment, from the
-        -- STORED identity — before embed_model is overwritten below. Postgres
-        -- evaluates the SET targets of an UPDATE in order, so this reads the
-        -- pre-update value. It is sticky (never reset), it is paired (the swap
-        -- term requires BOTH a stored and an incoming identity), and it is
-        -- skip-safe (a model-less flush cannot latch it).
+        -- The mixed flag is computed in its own assignment from the STORED
+        -- identity, so a mid-window swap is visible. It reads the row's value
+        -- as it was BEFORE this UPDATE — but NOT because it is written first:
+        -- PostgreSQL evaluates every `SET` expression against the OLD row
+        -- regardless of the order the assignments appear in. That rule is why
+        -- `public.metering_records.embed_model` below still means "the value
+        -- this row already had"; reordering these clauses would change nothing.
+        -- (An earlier version of this comment claimed the opposite — that the
+        -- targets are evaluated in order — which would teach a maintainer a
+        -- false model of the statement they are about to edit. Found in
+        -- review.) The flag is sticky (never reset), paired (the swap term
+        -- requires BOTH a stored and an incoming identity), and skip-safe (a
+        -- model-less flush cannot latch it).
         embed_identity_mixed =
             coalesce(public.metering_records.embed_identity_mixed, false)
             OR coalesce(p_identity_mixed, false)
