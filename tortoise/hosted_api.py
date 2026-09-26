@@ -12994,6 +12994,22 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # past. Replays already returned above: quota never gates a duplicate
     # (zero writes).
     _check_org_limit(org, "sessions")
+    # #4051 — the org points gate (the second half of step [4a]). The sessions
+    # gate above is VACUOUS since #4010 (sessions unlimited for every tier),
+    # and `_count_resource("points")` excludes the chain this lane mints —
+    # :Session, :Event and the transcript `documentKind='transcript'` :Source
+    # (D10: a document is a :Source; the :Document label is retired). Without
+    # this gate the endpoint's total node growth was bounded by nothing: even a
+    # `points: []` payload mints the three-node chain, and a caller looping
+    # with a fresh session_id grows the graph with no quota counting it. Same
+    # pre-write site as the sessions gate (after every replay return above) so
+    # an idempotent re-POST is never gated — a replay writes no nodes and must
+    # never 402 (#1727's lesson); the budget 402 below is unchanged. Same
+    # shipped machinery + structured `quota_refusal_payload` as the
+    # /v1/points-class gates (#4614), off the event loop via the #3773 seam (a
+    # full tenant-graph count on a billing hot path).
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
 
     # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
     if plan.budget.outcome == "fail":
