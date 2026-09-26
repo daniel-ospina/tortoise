@@ -449,6 +449,13 @@ class _EntityHandlers:
     # previously-handled key becomes an accidental passthrough key.
     _DOC_RETIRED: frozenset = _DOCUMENT_HANDLED | frozenset({
         "needs_extraction",
+        # #5422: the snake_case spelling of the version anchor. The fixed
+        # clause above writes `contentHash` from `ev["content_hash"]`; the
+        # raw journal spelling must therefore ALSO be denied by the
+        # passthrough, or it would persist verbatim as a second, unread
+        # `s.content_hash` property beside the camelCase the readers use
+        # (the same snake-door class as `needs_extraction` below).
+        "content_hash",
         # D10 B6: snake/camel synonyms of the retired props. ``object_kind``
         # (synonym of ``objectKind``) and ``docStatus`` (synonym of
         # ``doc_status``) are the two the write path can actually produce;
@@ -1899,6 +1906,14 @@ class _EntityHandlers:
         doc unit permanently incomplete. `content`, `doc_status` and
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
+
+        #5422: ``contentHash`` is the node's **version anchor** on the
+        extraction path (ONTOLOGY §4.6 — the hash identifies a version;
+        identity is ``url``). It is written by the fixed clause above, gated
+        so a hash-less write preserves it, and stays out of the open
+        passthrough because BOTH spellings (``contentHash`` via
+        ``_SOURCE_HANDLED``, ``content_hash`` via ``_DOC_RETIRED``) are
+        denied. ``version`` is advanced in the same clause, per §4.6.
         """
         did = ev.get("id")
         if not did:
@@ -1934,6 +1949,18 @@ class _EntityHandlers:
         # #133: needs_extraction — explicit signal for --upgrade-all discovery.
         # coalesce-null sentinel: None default so partial updates preserve.
         nx = ev.get("needs_extraction")
+        # #5422: the document's contentHash — the version anchor on the
+        # extraction path. None (absent key, or a metadata-only re-emit) is
+        # the preserve sentinel: the clause below must never clear an anchor
+        # a prior write established, so a hash-less DocumentCreated is a
+        # no-op on it (the same back-compat shape #5256's anchor reader and
+        # the corpus index path already depend on). BOTH spellings are read:
+        # the journal contract is snake_case (§4.3, matching every sibling
+        # field on this event) while hand-written JSONL and older producers
+        # may carry camelCase, and either must land on the node rather than
+        # one of them silently no-opping the anchor.
+        _ch_snake = ev.get("content_hash")
+        ch = _ch_snake if _ch_snake is not None else ev.get("contentHash")
         # _searchText computed only when the event carries meaningful text
         has_text = bool(ev.get("title") or summary or topics)
         st = (_build_search_text(ev.get("title", ""), summary, topics)
@@ -1953,6 +1980,33 @@ class _EntityHandlers:
             "MERGE (s:Source {url:$id}) " + embed_clear +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
+            # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
+            # the hash names a version, identity is `url`). Gated so a write
+            # that CARRIES no hash ($ch IS NULL) or an EMPTY one ($ch = '' —
+            # the spelling `_mint_source_stub`/`_materialize_session_source`/
+            # `hosted_api` use for "no hash") PRESERVES the stored value: a
+            # metadata-only re-emit and the #900 index path's `_doc_write`
+            # cannot un-anchor a document. An empty STORED hash (a
+            # `_mint_source_stub` stub, or a pre-#5422 document node) is
+            # COMPLETED by a real hash; a DIFFERING hash REPLACES it on the
+            # SAME node (never a second `:Source`).
+            # `version` advances with the hash exactly as §4.6 specifies
+            # ("1 at creation, +1 on each content-hash change") and exactly
+            # as `_upsert_source` does — so the pair is never half-written,
+            # and because the gate can only move the hash to a value it does
+            # not already hold, running BOTH folds over one url cannot
+            # double-bump (the second sees stored == $ch).
+            "    s.contentHash=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN s.contentHash "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch THEN $ch "
+            "        ELSE s.contentHash END, "
+            "    s.version=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN coalesce(s.version, 1) "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch "
+            "             THEN coalesce(s.version, 0) + 1 "
+            "        ELSE coalesce(s.version, 1) END, "
             # D10 B3 (adversarial): the three-argument coalesce gives a
             # document node a NON-NULL kind on CREATE. `$dk` is Cypher null
             # for an explicit `document_kind: null` (ingest's YAML `type:`
@@ -1997,6 +2051,7 @@ class _EntityHandlers:
                     "fmt": ev.get("format", "markdown"),
                     "topics": topics, "summary": summary, "sid": sid,
                     "eid": eid, "nx": nx, "st": st, "sp": sp,
+                    "ch": ch,
                     "embedding": embedding,
                     "now": _now_iso()},
         )
