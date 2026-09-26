@@ -5050,6 +5050,20 @@ class TortoiseSDK:
                 if resolved is None:
                     resolved = pid
                     created_here = True
+                    # #3945: the extractor's validated `when` is the same slot
+                    # as `validFrom` (docs/ONTOLOGY.md §4.7) — map it here, or
+                    # every capture Point is born undated and a downstream
+                    # undated supersession double-covers its predecessor
+                    # (`restore_point_at` → ambiguous). Absent `when` stays
+                    # absent — never a fabricated now. Deliberately a
+                    # create-only dict: folding `validFrom` into the RESPONSE
+                    # `props` would change the documented E3 whitelist surface
+                    # AND make the response differ between a create and a
+                    # dedup hit on the same node (the read-back reads only
+                    # ``_CAPTURE_PASSTHROUGH_PROPS``), the #2949 asymmetry.
+                    create_props = props
+                    if props.get("when") and not props.get("validFrom"):
+                        create_props = {**props, "validFrom": props["when"]}
                     self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
@@ -5061,7 +5075,7 @@ class TortoiseSDK:
                         # #2813: persist the E3 passthrough fields on the node
                         # (quote/when/search_keys/source_turn_id) — the exact
                         # fields the response whitelist below advertises.
-                        **props,
+                        **create_props,
                     )
                 pid = resolved
                 # #4716 Part 1: remember which graph id this payload id
