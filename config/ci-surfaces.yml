@@ -1052,6 +1052,13 @@ surfaces:
   # `tortoise/search_engine.py` (run_vector_query), which falls to the `core`
   # fallback — same rationale as test_turn_embedding_write_path_4194.py above.
   - test_4999_vector_mechanism.py
+  # #4997: the vector leg's served label set must come from ONE declaration in
+  # `tortoise/security.py` (read, not re-derived), and the store's vector-index
+  # set must be a measured fact. Pins the unpatterned engine modules
+  # `tortoise/search_engine.py` (run_vector_query) and `tortoise/projection/`
+  # (the inventory read), which fall to the `core` fallback — same rationale as
+  # test_4999_vector_mechanism.py above.
+  - test_4997_vector_index_parity.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   - test_search_promoted_fields.py

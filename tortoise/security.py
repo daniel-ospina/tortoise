@@ -138,6 +138,61 @@ def validate_entity_type(entity_type: str) -> str:
     return entity_type
 
 
+# ── entity_type → graph label (the Cypher label a query leg serves) ────────
+#
+# The label IS query structure (see ``validate_entity_type``), so the mapping
+# belongs beside the vocabulary rather than inside whichever leg happens to
+# interpolate it. Two exceptions to the naive ``capitalize()``:
+#
+#   * ``document`` → ``:Source`` (D10, ONTOLOGY v3.15 §4.4). A document IS a
+#     Source node — there is no ``:Document`` label, so the vector leg reads
+#     the Source label while the caller-facing ``entity_type`` stays
+#     ``"document"``.
+#   * ``operator`` → ``:Point`` (#172). Operators are Points with
+#     ``is_operator=true``, consistent with ``run_structural_query``.
+#
+# ⚠️ KNOWN DIVERGENCE (#5407): ``run_fts_query`` (search_engine.py:755) does
+# NOT apply the ``operator → Point`` exception — it emits ``Operator`` for
+# ``entity_type="operator"``. That leg keeps its own derivation until #5407
+# migrates all three query legs onto this mapping; DO NOT "unify" it here,
+# because doing so changes FTS behaviour under this issue's scope.
+ENTITY_TYPE_LABELS: dict[str, str] = {
+    "point": "Point",
+    "event": "Event",
+    "subject": "Subject",
+    "document": "Source",
+    "object": "Object",
+    "operator": "Point",
+    "source": "Source",
+}
+
+
+def entity_label(entity_type: str) -> str:
+    """The graph label a query leg serves for ``entity_type``.
+
+    Reproduces, verbatim, the derivation ``run_vector_query`` used before
+    #4997 — including its behaviour on inputs outside the vocabulary:
+
+    * a valid ``entity_type`` → the declared label;
+    * an unknown ``str`` → ``<Capitalized>`` (the historical fallback);
+    * a non-``str`` → ``AttributeError`` from ``.capitalize()``, exactly the
+      exception type callers observed before this function existed (a bare
+      ``ENTITY_TYPE_LABELS.get(...)`` would instead raise ``TypeError`` for an
+      unhashable input, silently changing the failure mode).
+
+    ``entity_type`` is deliberately NOT validated here:
+    ``validate_entity_type`` is the enforcement point (and is currently inert —
+    see #5404); this function is a *translation*, so it must keep working for
+    the legacy inputs the runners accept today.
+    """
+    if isinstance(entity_type, str):
+        label = ENTITY_TYPE_LABELS.get(entity_type)
+        if label is not None:
+            return label
+    # Unrecognised or non-str → the legacy derivation, verbatim.
+    return entity_type.capitalize()
+
+
 # ── Document id validation (event-mint Document branch) ────────────────────
 
 # ULIDs: canonical timestamp-hex + crockford uuid12 (see sdk._is_ulid).
