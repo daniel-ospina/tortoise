@@ -106,6 +106,30 @@ HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
 KIND_INSTALL_INERT = "install-inert"
 KIND_CAPTURE_FAILURE = "capture-failure"
 
+#: The ``kind`` marker on the local ``hook-runs/<harness>.json`` observation.
+#:
+#: This is a THIRD local writer, and it deliberately lives in its own file
+#: rather than as a third ``kind`` on the two-writer
+#: ``capture-errors/<harness>.json`` path above: that path's readers key on an
+#: exact marker (``session verify`` accepts it as install-inert evidence ONLY
+#: when ``kind == KIND_INSTALL_INERT``), so adding a writer there invites
+#: exactly the read/write divergence #4314 fixed.
+#:
+#: #3797: what it records is that the INSTALLED HOOK RAN.  Before it existed,
+#: a host that copied the hook but never ran ``tortoise init`` produced no
+#: observation at all — the probe is refused at the credential gate before any
+#: request is dispatched, the server route is auth-gated, and the hook
+#: discarded the exit code — so "installed and ran" was indistinguishable from
+#: "not installed".  The record is written by the HOOK (the only faithful
+#: witness: ``tortoise session probe`` is also invoked by hand and by other
+#: harnesses), it carries no credential and no content (harness, timestamp,
+#: and the probe's outcome), and it is best-effort — a failed write can never
+#: change the hook's exit-0 contract.  The read condition is the write
+#: condition: a reader accepts the record only when ``kind`` equals this
+#: marker AND the recorded ``harness`` matches the one asked about, so a
+#: foreign or corrupt file can never read as a run.
+KIND_HOOK_RUN = "hook-run"
+
 
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific
 #: (a bare word ``tortoise`` would match a foreign hook that merely mentions
@@ -422,6 +446,16 @@ class HarnessLayout:
     root_env: str | None = None
     root_home_default: str | None = None
     flat_entry: bool = False
+    #: Whether this harness's SHIPPED hooks write a local ``hook-run``
+    #: observation (``~/.tortoise/hook-runs/<harness>.json``) when they run.
+    #: Only the Claude ``session-start.sh`` seam does (#3797): the reader
+    #: (``tortoise hooks status``) must not render an absence-of-observation
+    #: for a harness whose hooks structurally never write one — that would be
+    #: the same "assert what was not observed" defect this record exists to
+    #: remove, wearing a new surface.  A harness adopts the record by adding
+    #: the write to its own hook and flipping this flag, not by the reader
+    #: guessing.
+    writes_hook_run: bool = False
 
     def hooks_root(self, root: Path) -> Path:
         return root / self.hooks_dir
@@ -453,6 +487,10 @@ def _claude_layout() -> HarnessLayout:
         harness="claude",
         hooks_dir=_CLAUDE_HOOKS_DIR,
         settings_file=".claude/settings.json",
+        # #3797: the Claude session-start hook writes the local hook-run
+        # observation, so `hooks status` MAY render it for claude — and only
+        # for claude (see HarnessLayout.writes_hook_run).
+        writes_hook_run=True,
         scripts=(
             HookScriptSpec(
                 "session-start.sh", "SessionStart", 60,

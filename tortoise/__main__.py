@@ -3317,6 +3317,16 @@ def _cmd_hooks(args) -> int:
                     print("\nRun `tortoise hooks upgrade"
                           f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
                           f" --dir {root}` to repair.")
+        # #3797: the hook-run observation — the install's OWN evidence that
+        # it ran, which is what separates "installed and ran" from "not
+        # installed" without a credential.  Human-readable branches ONLY: the
+        # `--json` document must stay a pure JSON document.  And only for a
+        # harness whose shipped hooks actually WRITE the record
+        # (`HarnessLayout.writes_hook_run`): rendering an absence of
+        # observation for a harness that structurally never writes one would
+        # assert what was never observed — the very defect this line removes.
+        if not getattr(args, "json", False) and layout.writes_hook_run:
+            _print_hook_run(args.harness, layout)
         return 1 if any(f.blocking for f in findings) else 0
 
     # upgrade (also performs a fresh install when nothing is present)
@@ -4089,6 +4099,110 @@ def _capture_error_file(harness: str) -> Path:
         "TORTOISE_IMPORT_RECEIPT_DIR",
         str(Path.home() / ".tortoise" / "import-receipts")))
     return receipt_dir.parent / "capture-errors" / f"{harness}.json"
+
+
+def _hook_run_file(harness: str) -> Path:
+    """The local ``hook-run`` observation for ``harness`` (#3797).
+
+    Mirrors :func:`_capture_error_file`'s derivation exactly — the same
+    ``TORTOISE_IMPORT_RECEIPT_DIR`` override and the same ``.parent`` —
+    because the shipped shell hook writes the record through the SAME
+    derivation (``_tortoise_state_dir`` in
+    ``tortoise/claude-hooks/session-start.sh``).  Two derivations of one path
+    is how the #4373 false-PROVEN happened, so the agreement is pinned by a
+    test rather than assumed.
+
+    NOTE the scope: this is HOME-scoped (machine-wide) local state, while
+    ``detect_install`` for Claude is project-scoped.  On a machine with two
+    projects a run in one is visible from the other, which is why the
+    rendered line says "observed on this machine" and never "this install
+    ran".
+
+    ``Path.home()`` can RAISE here when ``$HOME`` is ``~``/``~/x`` — callers
+    must treat this derivation as fallible (see :func:`_print_hook_run`).
+    """
+    import os
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    return receipt_dir.parent / "hook-runs" / f"{harness}.json"
+
+
+def _read_hook_run(harness: str) -> dict | None:
+    """The ``hook-run`` record for ``harness``, or ``None``.
+
+    The READ condition is the WRITE condition (#4314): a record is accepted
+    only when its ``kind`` marker equals
+    :data:`tortoise.hook_install.KIND_HOOK_RUN` AND its recorded ``harness``
+    is the one asked about.  A file that is absent, unreadable, malformed,
+    not an object, or of another kind is therefore indistinguishable from
+    "no observation" — which is exactly what the caller must render.  This
+    is the same rule ``session_verify._install_link`` applies to the sibling
+    ``capture-errors`` record, and it is what stops a foreign file at this
+    path from reading as "the hook ran".
+    """
+    import json as _json
+
+    from tortoise.hook_install import KIND_HOOK_RUN
+
+    try:
+        data = _json.loads(_hook_run_file(harness).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("kind") != KIND_HOOK_RUN or data.get("harness") != harness:
+        return None
+    return data
+
+
+def _print_hook_run(harness: str, layout) -> None:
+    """Render the hook-run observation for ``hooks status`` (#3797).
+
+    BEST-EFFORT and exit-code-NEUTRAL.  The status verdict and exit code are
+    already settled by the drift findings before this is called, so neither
+    an unresolvable state directory nor an unreadable record may change
+    them: this may print, or print nothing, and must never raise or return a
+    verdict.  (``tests/test_capture_install.py::test_explicit_dir_keeps_an_
+    unresolvable_home_irrelevant`` drives ``HOME=~`` through this block and
+    asserts rc 0 plus the currency line, which prints BEFORE it.)
+
+    Every rendering reports an OBSERVATION and carries the scope.  None of
+    them says "installed" — the record proves a RUN, and the drift findings
+    above are the only thing that speak to the install.
+    """
+    label = "Last hook run observed on this machine:"
+    try:
+        path = _hook_run_file(harness)
+    except MemoryError:
+        raise
+    except Exception:
+        # Cannot even resolve WHERE to look — report the observation (the
+        # read could not be made), never an absence we did not observe.
+        print(f"{label} cannot tell whether a run was recorded "
+              "(the state directory is unresolvable)")
+        return
+    try:
+        record = _read_hook_run(harness)
+    except MemoryError:
+        raise
+    except Exception:
+        return
+    if record is None:
+        print(f"{label} none — no run recorded under {path.parent}")
+        return
+    stamp = record.get("recorded_at") or "?"
+    recorded = record.get("probe_recorded")
+    rc = record.get("probe_rc")
+    if recorded is True:
+        print(f"{label} ran at {stamp} — install probe recorded (exit 0)")
+    elif recorded is False and rc is None:
+        print(f"{label} ran at {stamp} — the install was inert, so the "
+              "probe was never attempted")
+    else:
+        print(f"{label} ran at {stamp} — install probe NOT recorded "
+              f"(exit {rc}); run 'tortoise session probe --harness "
+              f"{harness}' to see why")
 
 
 def _record_capture_error(harness: str, detail: str,

@@ -3232,7 +3232,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # #4314 left two red assertions behind (#4545).
 # claude 5→6 is the #3615 consent gate merged over main's 5 (the hooks changed
 # behaviour again, so an already-installed copy must read as stale).
-_EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2}
+_EXPECTED_INSTALL_CONTRACT = {"claude": 7, "codex": 2, "cursor": 2}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3242,7 +3242,12 @@ def test_shipped_install_contract_generations(harness):
     3→4, codex 1→2, cursor 1→2.  #3971 then changed the claude hooks'
     BEHAVIOUR again (the CWE-427 sys.path scrub), so claude moved 4→5: an
     already-installed copy must be detected as stale, otherwise the security
-    fix never reaches it.  Those numbers are a reviewed decision, not a
+    fix never reaches it.  #3797 changed the claude hooks' BEHAVIOUR once
+    more (session-start.sh now writes the local hook-run observation that
+    lets an installed-but-unconfigured install report that it RAN), so claude
+    moved 6→7 — the bump is what carries it to already-installed hosts, whose
+    hook bytes are frozen at install time.  Those numbers are a reviewed
+    decision, not a
     detail, so they are pinned once and explicitly.
 
     `pi` is absent by construction: it ships a TypeScript extension rather than
