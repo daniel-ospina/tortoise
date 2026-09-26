@@ -21986,14 +21986,19 @@ class TortoiseSDK:
         reference are preferred, so a Point extracted from several sources
         keeps returning a referenced entity whenever one exists.
 
-        #5199 — among several references the one **carrying a version note** is
-        preferred, so the note on the ``source -[references]-> entity`` link is
-        readable whenever it exists. Without that preference the winner is plan
-        order: `hosted_api` gives one Source a document derivation link AND
-        external containment links, and a bare containment link winning would
-        report ``unknown`` for a chain whose note is right there. The pair
-        returned is one hop's, and its ``currency`` speaks for THAT link, never
-        for the Point (ONTOLOGY §4.6 aggregates across links).
+        #5199 — the note is readable for **every** link: one row is returned per
+        ``(source, reference)`` hop, so a source that carries several references
+        reports each one's note rather than one arbitrarily chosen hop. Rows are
+        ordered deterministically (resolved before the self-terminal fallback,
+        annotated before unannotated, then by node key and note), so neither
+        engine plan order nor insertion order decides what a caller sees. Before
+        this a bare containment link could win and report ``unknown`` for a chain
+        whose note was right there — the ordinary shape, since `hosted_api` gives
+        one Source a document derivation link AND external containment links.
+
+        Each row's pair speaks for THAT link only. A Point-level currency is an
+        aggregate over its links (ONTOLOGY §4.6), so a caller that needs a
+        Point-level verdict must aggregate these rows itself.
         """
         proj = self._get_proj()
         from .search_engine import currency_status
@@ -22002,14 +22007,20 @@ class TortoiseSDK:
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
             "OPTIONAL MATCH (src)-[ref_edge:references]->(ref) "
             "WITH src, ref_edge, ref "
+            # Deterministic order, so engine plan / insertion order can never
+            # decide what a caller sees. Deliberately NO `LIMIT`: one row per
+            # link, because a Point extracted from several sources — or a source
+            # referencing several things — must not have its remaining notes
+            # dropped, and a Point-level verdict needs every link (§4.6).
             # (1) a resolved reference beats the self-terminal fallback;
             # (2) an ANNOTATED reference beats an unannotated one — this is what
             #     makes the note reachable at all;
-            # (3) a value tie-break, so engine plan order can never decide the
-            #     answer a caller sees.
+            # (3) node key, then the note itself. `eventId` is required: a legacy
+            #     raw-Cypher Event carries no `url` and no `id`, so without it
+            #     every such candidate keyed `''` and the tie-break did nothing.
             "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
-            "coalesce(ref.url, ref.id, '') "
-            "LIMIT 1 "
+            "coalesce(ref.url, ref.id, ref.eventId, ''), "
+            "coalesce(ref_edge.sourceVersion, '') "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "
             "labels(coalesce(ref, src)) as labels, "
@@ -22028,10 +22039,11 @@ class TortoiseSDK:
                 # #5199: the version note on THIS hop, and its currency as a READ.
                 # It describes the ``source -[references]-> entity`` link — the
                 # version the RETURNED entity was read at — which is deliberately
-                # NOT the same claim as the Point's own ``extractedFrom`` version
-                # (a different link, surfaced through search provenance). ``unknown``
-                # whenever the note or the source's version is absent, so an
-                # unnoted link can never read as current.
+                # NOT a claim about the Point: the Point's own `extractedFrom`
+                # version is a different link, and a Point-level verdict has to
+                # aggregate §4.6 across all of them. ``unknown`` whenever the note
+                # or the source's version is absent, so an unnoted link can never
+                # read as current.
                 "sourceVersion": remembered,
                 "sourceCurrentVersion": current,
                 "currency": currency_status(remembered, current),

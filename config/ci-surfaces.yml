@@ -656,9 +656,9 @@ surfaces:
   # select the `core` surface, so the guard for the anchor runs with the code it
   # guards. Hermetic (embedded DB per test, no URI).
   - test_source_version_references_5199.py
-  # #5199 read half: the note is actually READABLE — the SDK provenance reader and
-  # the search hit's `provenance` block (`tortoise/search_engine.py` selects this
-  # surface too, so the wiring's guard runs with the code it guards).
+  # #5199 read half: the note is actually READABLE — the SDK provenance reader
+  # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
+  # selects this surface too, so the wiring's guard runs with the code it guards.
   - test_source_version_read_wiring_5199.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)

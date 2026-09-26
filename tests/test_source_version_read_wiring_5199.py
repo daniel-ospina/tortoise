@@ -8,8 +8,9 @@ comments only. `TortoiseSDK.get_provenance_chain` walked the very hop the note
 rides and returned the source's properties — which include the source's CURRENT
 version — but never the note, so even that reader could not compare the two.
 
-What this wiring ships: that reader now reports the note, the source's version,
-and a derived ``currency``.
+What this wiring ships: that reader reports the note, the source's current
+version, and a derived ``currency`` **per link** — one row per
+``(source, reference)`` hop, ordered deterministically.
 
 What it deliberately does NOT ship is a currency on the SEARCH hit, and the
 reason is worth keeping: a hit is a **Point**, and a Point's currency is an
@@ -79,27 +80,27 @@ def test_currency_is_derived_not_stored():
 
 # ── the SDK reader ───────────────────────────────────────────────────────────
 
-def _point_and_source(sdk, *, current):
+def _point_and_source(sdk, *, current, source="c.txt", point="pt_1"):
     proj = sdk._get_proj()
     proj.g.query(
-        "CREATE (p:Point {id:'pt_1', content:'a fact', pointKind:'fact', "
-        "status:'live', createdAt:'2024-01-01'})"
+        f"CREATE (p:Point {{id:'{point}', content:'a fact', pointKind:'fact', "
+        f"status:'live', createdAt:'2024-01-01'}})"
     )
     proj.g.query(
-        f"CREATE (s:Source {{url:'c.txt', sourceKind:'corpus', title:'c.txt', "
-        f"contentHash:'{current}', ingestedAt:'2024-01-01'}})"
+        f"CREATE (s:Source {{url:'{source}', sourceKind:'corpus', "
+        f"title:'{source}', contentHash:'{current}', ingestedAt:'2024-01-01'}})"
     )
     proj.g.query(
-        "MATCH (p:Point {id:'pt_1'}), (s:Source {url:'c.txt'}) "
-        "CREATE (p)-[:extractedFrom]->(s)"
+        f"MATCH (p:Point {{id:'{point}'}}), (s:Source {{url:'{source}'}}) "
+        f"CREATE (p)-[:extractedFrom]->(s)"
     )
     return proj
 
 
-def _annotate(proj, ref_url, version):
+def _annotate(proj, ref_url, version, source="c.txt"):
     proj.g.query(
         f"MERGE (d:Source {{url:'{ref_url}'}}) "
-        f"WITH d MATCH (s:Source {{url:'c.txt'}}) "
+        f"WITH d MATCH (s:Source {{url:'{source}'}}) "
         f"CREATE (s)-[r:references]->(d) SET r.sourceVersion = $v",
         params={"v": version},
     )
@@ -148,54 +149,121 @@ def test_provenance_chain_says_unknown_when_the_link_carries_no_note():
         sdk.close()
 
 
+def test_provenance_chain_reports_every_link_of_a_multi_source_point():
+    """REGRESSION (#5199 review P2). A Point read from two sources carries a note
+    on EACH `extractedFrom` link, and ONTOLOGY §4.6 makes the Point's currency an
+    aggregate over them — so a reader that answered with ONE row hid a note and
+    made the aggregate impossible to compute. `MIN`/`LIMIT`-style caps here are
+    not a simplification; they are data loss.
+
+    FAILS IF the reader caps its result (e.g. re-adds `LIMIT 1`): this Point has
+    two sources, each with its own annotated reference, and both must come back."""
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = _point_and_source(sdk, current="h1", source="c1.txt", point="pt_1")
+        proj.g.query(
+            "CREATE (s:Source {url:'c2.txt', sourceKind:'corpus', title:'c2.txt', "
+            "contentHash:'h2', ingestedAt:'2024-01-01'})"
+        )
+        proj.g.query(
+            "MATCH (p:Point {id:'pt_1'}), (s:Source {url:'c2.txt'}) "
+            "CREATE (p)-[:extractedFrom]->(s)"
+        )
+        _annotate(proj, "doc-1", "h1", source="c1.txt")
+        _annotate(proj, "doc-2", "hX", source="c2.txt")
+        rows = sdk.get_provenance_chain("pt_1")
+        seen = {(r["source"]["url"], r["sourceVersion"]) for r in rows}
+        assert seen == {("c1.txt", "h1"), ("c2.txt", "hX")}, (
+            f"every link must be reported; got {sorted(seen)}"
+        )
+    finally:
+        sdk.close()
+
+
 def test_provenance_chain_reads_the_note_when_a_bare_link_came_first():
     """REGRESSION (#5199 review P1). `hosted_api` gives one Source a document
     derivation link AND external containment links, so a Source routinely has
-    several `references` out-edges. With `ORDER BY ref IS NULL LIMIT 1` the
-    winner was plan order, and a bare containment link winning reported
-    `unknown` for a chain whose note was right there — the reader answered "no
-    note" precisely when a note existed.
+    several `references` out-edges. When the reader answered with one arbitrary
+    row, a bare containment link winning reported `unknown` for a chain whose
+    note was right there — it said "no note" precisely when a note existed.
 
-    FAILS IF the annotated reference is not preferred: this graph inserts the
-    UNANNOTATED link first and expects the note `h1` anyway."""
+    FAILS IF the annotated reference does not come first: this graph inserts the
+    UNANNOTATED link first and expects the note `h1` at the head of the rows."""
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _point_and_source(sdk, current="h2")
         proj.g.query("MERGE (d:Source {url:'bare-1'})")
         sdk.link_source_to_entity("c.txt", "bare-1", "Source")  # FIRST, no note
         _annotate(proj, "doc-1", "h1")                          # annotated, second
-        row = sdk.get_provenance_chain("pt_1")[0]
-        assert row["sourceVersion"] == "h1", (
+        rows = sdk.get_provenance_chain("pt_1")
+        assert rows[0]["sourceVersion"] == "h1", (
             f"the note must be readable though a bare link was inserted first; "
-            f"got {row['sourceVersion']!r} on {row['entity'].get('url')!r}"
+            f"got {rows[0]['sourceVersion']!r} on {rows[0]['entity'].get('url')!r}"
         )
-        assert row["currency"] == "stale"
+        assert [r["currency"] for r in rows] == ["stale", "unknown"], (
+            f"the annotated hop comes first and the bare hop is still reported; "
+            f"got {[(r['entity'].get('url'), r['currency']) for r in rows]}"
+        )
     finally:
         sdk.close()
 
 
-def test_provenance_chain_pick_is_insertion_order_independent():
-    """REGRESSION (#5199 review P1). Two annotated references must not let edge
-    insertion order decide what the caller sees: flip the creation order and the
-    same entity must come back."""
+def test_provenance_chain_row_order_is_insertion_order_independent():
+    """REGRESSION (#5199 review P2). Edge insertion order must not decide the
+    order a caller sees: with several annotated references the sort keys must
+    break the tie on VALUES, not on creation sequence."""
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _point_and_source(sdk, current="h2")
         _annotate(proj, "zzz", "hZ")
         _annotate(proj, "aaa", "hA")
-        first = sdk.get_provenance_chain("pt_1")[0]["entity"].get("url")
+        first = [r["entity"].get("url") for r in sdk.get_provenance_chain("pt_1")]
 
         sdk2 = TortoiseSDK(_tmp("test2.db"))
         try:
             proj2 = _point_and_source(sdk2, current="h2")
             _annotate(proj2, "aaa", "hA")   # reversed order
             _annotate(proj2, "zzz", "hZ")
-            second = sdk2.get_provenance_chain("pt_1")[0]["entity"].get("url")
-            assert first == second, f"plan order decided the pick: {first!r} vs {second!r}"
+            second = [r["entity"].get("url") for r in sdk2.get_provenance_chain("pt_1")]
+            assert first == second == ["aaa", "zzz"], (
+                f"insertion order decided the order: {first!r} vs {second!r}"
+            )
         finally:
             sdk2.close()
     finally:
         sdk.close()
+
+
+def test_provenance_chain_order_is_stable_for_event_only_targets():
+    """REGRESSION (#5199 review P2). A legacy raw-Cypher Event carries neither
+    `url` nor `id` (only `eventId`) — `link_source_to_event` and
+    `link_source_to_legacy_event` both document that. So a node-key tie-break of
+    `coalesce(ref.url, ref.id, '')` keys EVERY such candidate `''` and
+    discriminates nothing, leaving insertion order in charge.
+
+    FAILS IF the order keys ignore `eventId`: the two events below carry the SAME
+    note value, so `coalesce(ref.url, ref.id, '')` and the note both tie and only
+    `eventId` can break it — the two insertion orders would then disagree."""
+    def _events(reverse: bool):
+        sdk = TortoiseSDK(_tmp("ev.db"))
+        proj = _point_and_source(sdk, current="h2")
+        order = [("ev-zzz", "h1"), ("ev-aaa", "h1")]
+        for eid, note in (reversed(order) if reverse else order):
+            proj.g.query(
+                f"MERGE (e:Event {{eventId:'{eid}'}}) "
+                f"WITH e MATCH (s:Source {{url:'c.txt'}}) "
+                f"CREATE (s)-[r:references]->(e) SET r.sourceVersion = $v",
+                params={"v": note},
+            )
+        try:
+            return [(r["entity"].get("eventId"), r["sourceVersion"])
+                    for r in sdk.get_provenance_chain("pt_1")]
+        finally:
+            sdk.close()
+
+    assert _events(False) == _events(True), (
+        "eventId-only targets must not let insertion order decide the answer"
+    )
 
 
 # ── the deliberate cut ───────────────────────────────────────────────────────

@@ -479,10 +479,19 @@ def test_document_call_sites_express_derivation_not_containment():
     path its fixture happens to drive — and two of the three paths (the hosted commit and
     the index repair) need heavy harnesses. This reads the call sites directly.
 
-    The invariant: every literal label the document-derivation writers pass is a member
-    of ``_DERIVATION_REFERENCES_LABELS``. A genuinely caller-supplied label rides in a
-    VARIABLE (the public passthrough does exactly that and must stay untouched), so it is
-    not a literal here and is not constrained by this test.
+    The invariant, scoped exactly as enforced: **within the three files this change
+    touched**, every literal label passed at a ``link_source_to_entity`` document call
+    site is a member of ``_DERIVATION_REFERENCES_LABELS``. A genuinely caller-supplied
+    label rides in a VARIABLE (the public passthrough does exactly that and must stay
+    untouched), so it is not a literal here and is not constrained by this test.
+
+    KNOWN COVERAGE GAP (recorded, not implied away): this is a regression pin for the
+    three call sites D10 broke, not a repo-wide derivation-writer audit.
+    ``tortoise/mining.py`` passes a literal ``"Event"`` at a real derivation call site
+    and is **outside** this pin's file list; ``tortoise/connectors/github.py`` passes
+    ``"Object"`` and is correctly irrelevant (an identity/mention link is not a
+    derivation writer). Widening the file list is the way to close the gap — the
+    assertion below counts literals, so a new file must be added here deliberately.
     """
     import ast
     from pathlib import Path
