@@ -1175,7 +1175,16 @@ class CollisionPreflightTest(unittest.TestCase):
         # `other-repo` is a SIBLING of `self.repo` under the same temp root, so
         # the search finds `self.repo` while the cwd's own slug is different.
         # That is exactly the production mechanism, reproduced.
-        _git(self.repo, "checkout", "-q", "main")
+        # ⛔ THE FOUND CLONE'S BRANCH MUST NOT BE THE DEFAULT, or this test
+        # cannot fail for the reason it names. A verifier proved it: the fixture
+        # used to leave `self.repo` on `main`, and `main` is refused
+        # INDEPENDENTLY by `_default_branch_names`/`_is_default_branch` — so
+        # breaking `_standing_in` (auto-declare any found clone) left the test
+        # PASSING, its assertion satisfied by the default-branch refusal rather
+        # than by the gate under test. Non-default, and deliberately WITHOUT the
+        # issue number, so the hit comes from `closingIssuesReferences` and only
+        # the self-identity gate can suppress it.
+        _git(self.repo, "checkout", "-q", "-b", "release/hub-work")
         other = self.tmp / "other-repo"
         other.mkdir()
         _git(other, "init", "-q", "-b", "main", "--template=")
@@ -1187,12 +1196,12 @@ class CollisionPreflightTest(unittest.TestCase):
 
         self.gh_fixtures(open_prs=[{
             "number": 5199, "title": "fix: land the thing",
-            "body": "", "headRefName": "main", "state": "open",
+            "body": "", "headRefName": "release/hub-work", "state": "open",
             "closingIssuesReferences": [{"number": ISSUE}],
         }])
         rc, out = self.run_tool(repo_arg="test-owner/test-repo", cwd=other)
-        # A PR on `main` that closes the issue is REAL work; `main` was never
-        # the caller's branch, so it must not be suppressed.
+        # A PR on that branch that closes the issue is REAL work, and the found
+        # clone was never the caller's checkout, so it must not be suppressed.
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("your own PR", out)
@@ -1490,6 +1499,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # lost), so ancestry cannot detect it — the test is tip-SHA == a merged
         # PR's `headRefOid`. D1 forbids patch-id (its whitespace modes produce
         # a false ACCEPT, which is this issue's dangerous direction).
+        #
+        # ⛔ IT PINS THE "UNRESOLVED TIP STILL DEMOTES" HALF, deliberately:
+        # `refs/remotes/origin/main` is never set here, so `main_tip` is `None`.
+        # Predicate 1 is the EXACT arm (D4 / correction #2 — a merged-PR record
+        # names the branch head as GitHub computed it), so an unresolvable tip
+        # does not make the record less exact. Its partner,
+        # `test_fresh_branch_at_main_tip_matching_a_merged_pr_head_still_blocks`,
+        # covers the case where the tip IS known and equals the branch's.
         ref = f"docs/research-{ISSUE}-4333"
         _git(self.repo, "branch", ref)
         self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
@@ -1497,6 +1514,47 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("squash-merged", out)
+
+    def test_weak_advisory_hit_still_carries_the_advisory_marker(self):
+        # ⛔ The advisory marker was gated on `hit.strength != "weak"`, which
+        # excluded the case this surface USUALLY produces: a match on a CLOSED PR
+        # is `weak` whenever that PR is terminal (merged), i.e. nearly always. So
+        # the advisory row printed the bare `(weak)` tag — which is equally what a
+        # weak hit on a BLOCKING surface prints — and the comment's stated reason
+        # ("an untagged advisory hit is indistinguishable from the one that caused
+        # a refusal") was false for exactly the hits the surface produces. The
+        # exemption protected against nothing.
+        ref = f"docs/research-{ISSUE}-advisory"
+        _git(self.repo, "branch", ref)
+        self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        # `PR #` discriminates the HITS line from the ADVISORY SURFACES summary
+        # line, which also begins with the same surface label.
+        rows = [ln for ln in out.splitlines()
+                if ln.strip().startswith("[recently-closed PRs]") and "PR #" in ln]
+        self.assertTrue(rows, out)
+        for row in rows:
+            self.assertIn("(weak)", row)
+            self.assertIn("(advisory — cannot block)", row)
+
+    def test_fresh_branch_at_main_tip_matching_a_merged_pr_head_still_blocks(self):
+        # ⛔ THE P0 GUARD. The main-tip exclusion belongs on BOTH predicates.
+        # A branch created at `origin/main`'s tip with NO COMMITS OF ITS OWN has
+        # main's SHA — and when main's tip is itself a merged PR's `head.sha`
+        # (a fast-forward / rebase landing, or an empty-diff PR), the PRIMARY
+        # predicate matched it, called it "squash-merged", and returned CLEAN on
+        # a lane that had only just CLAIMED the issue by creating the branch.
+        # The two SHAs are indistinguishable, so the safe reading is to block.
+        ref = f"fix/{ISSUE}-fresh-ff"
+        _git(self.repo, "branch", ref)
+        # The tip IS known here, and equals the branch's — the whole point.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
 
     def test_same_branch_without_a_merge_record_still_blocks(self):
         # SENSITIVITY GUARD for the test above, and the mutation it is built to

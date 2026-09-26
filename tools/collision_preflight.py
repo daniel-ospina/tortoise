@@ -1493,6 +1493,35 @@ def _branch_terminal_state(
          main tip) is no longer detected and keeps blocking — the fail-closed
          direction, and this repo squash-merges anyway.
 
+         ⛔ THE SAME EXCLUSION IS ON PREDICATE 1, and it has to be. Predicate 1
+         matches the tip against the head SHAs of merged PRs, and a fresh branch
+         sitting at main's tip has main's SHA — so if main's tip is itself a
+         merged PR's head (a fast-forward or rebase landing, an empty-diff PR),
+         predicate 1 matched a branch with NO COMMITS OF ITS OWN and demoted it.
+         Restricting the exclusion to the ancestor arm left this primary arm
+         fail-open, which is the same defect the arm was added to close. Any
+         predicate that DOWNGRADES refuses the moment the tip is
+         INDISTINGUISHABLE FROM "JUST CREATED" — i.e. when it equals main's tip.
+
+         ⛔ The two predicates treat an UNRESOLVED tip DIFFERENTLY, and that
+         difference is deliberate rather than an oversight:
+
+           * Predicate 1 (tip-SHA == a merged PR's head) is the EXACT one —
+             decision D4 rests on it precisely because a merged PR record names
+             the branch head as GitHub computed it (correction #2: "the exact
+             tip-SHA test is the predicate"). An unresolvable tip does not make
+             that record any less exact, so it still demotes.
+           * Predicate 2 (tip is an ancestor of main) is the APPROXIMATE one and
+             is fed by a `--merged` walk over the same ref, so an unresolvable
+             tip means the walk failed too and it does not demote at all.
+
+         The residual that this leaves, stated rather than hidden: in a repo
+         whose `origin/main` cannot be resolved, a branch that is FRESH at
+         exactly a merged PR's head is read as landed. It needs the local
+         `origin/main` to be absent or unreadable AND the branch to be sitting
+         on a merged head, and resolving it properly is the stage-1 registry's
+         job (D1) — not a third guess here.
+
     ⛔ `main_tip` HAS NO DEFAULT, AND `None` MEANS "DO NOT APPLY PREDICATE 2".
     Both halves are load-bearing:
 
@@ -1535,7 +1564,18 @@ def _branch_terminal_state(
         # which is the fail-closed direction — and the local branch, if it still
         # exists, is judged on its own merits by this same call.
         return None
-    if sha and sha in merged_head_shas:
+    if sha and sha in merged_head_shas and sha != main_tip:
+        # ⛔ THE `sha != main_tip` EXCLUSION BELONGS ON *BOTH* PREDICATES, and
+        # leaving it off this one re-opened the whole P1-B fail-open through the
+        # PRIMARY arm. A branch created at `origin/main`'s tip with no commits of
+        # its own has exactly main's SHA — and whenever main's tip happens to be
+        # a merged PR's `head.sha` (a fast-forward / rebase landing, or an
+        # empty-diff PR), this predicate matched it and returned "squash-merged".
+        # That demoted a lane that had merely CLAIMED the issue by creating the
+        # branch: CLEAN on real in-flight work, which is the worst thing this
+        # tool can do. The two SHAs are indistinguishable, so the safe reading of
+        # "cannot tell" is to leave the ref BLOCKING — a false COLLISION costs a
+        # re-check, a false CLEAN costs a duplicated dispatch.
         return ("squash-merged — its tip SHA is a merged PR's head, so its content "
                 "already landed even though its commits are not ancestors of main")
     if (
@@ -2792,11 +2832,34 @@ def format_report(
                 # exactly what a blocking number hit prints — so an untagged
                 # advisory hit would be indistinguishable from the one that
                 # caused a refusal (review cycle 1).
-                if surface_name in advisory_names and hit.strength != "weak":
-                    tag += " (advisory — cannot block)"
+                #
+                # ⛔ APPLIED TO WEAK HITS TOO. The marker used to be gated on
+                # `hit.strength != "weak"`, which excluded the COMMON case on
+                # this surface: a match on a closed PR is weak whenever that PR
+                # is terminal (merged), i.e. almost always. So the advisory row
+                # printed the bare `(weak)` tag — which is equally what a weak
+                # hit on a BLOCKING surface prints — and the stated rationale
+                # ("distinguishable from a blocking surface's hit") was false for
+                # exactly the hits the surface usually produces. The exemption
+                # protected against nothing; drop it.
+                #
+                # Emitted as its OWN parenthesised group rather than appended to
+                # `tag`: appending produced `(number (advisory — cannot block))`,
+                # and nesting the marker inside the strength tag made a report
+                # line that is read by an agent harder to parse than the two
+                # facts deserve to be.
+                # NOT named `advisory`: that name already holds the LIST of
+                # advisory Surface objects in this function (used below for the
+                # advisory sections), and a str binding here shadowed it —
+                # `AttributeError: 'str' object has no attribute 'truncated'`.
+                # Caught by the existing strong-advisory test.
+                advisory_tag = (
+                    " (advisory — cannot block)"
+                    if surface_name in advisory_names else ""
+                )
                 lines.append(
                     f"  [{hit.surface}] {_sanitize(hit.ref)} — "
-                    f"{_sanitize(hit.detail)} ({tag})"
+                    f"{_sanitize(hit.detail)} ({tag}){advisory_tag}"
                 )
             if len(surface_hits) > MAX_HITS_SHOWN:
                 # The COUNT is complete and visible; only the detail sample is
