@@ -501,7 +501,8 @@ def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     can use it without duplicating the fail-closed handling.
 
     Supported resources: points, api_keys, sessions, users, graphs,
-    documents (#1726: the :Document count with the transcript discriminator).
+    documents (#1726: the document-bearing :Source count with the transcript
+    discriminator — D10, ONTOLOGY v3.15 §4.4).
     ``points`` counts non-episodic Points + Object/Subject nodes (#1911).
     """
     return _count_resource(org_id, resource, sdk=sdk)
@@ -527,12 +528,17 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
       all-nodes count; #947 P0)
     - users: active Membership nodes in registry
     - graphs: Graph nodes in registry
-    - documents (#1726): :Document nodes in the tenant graph with the
-      discriminator ``COALESCE(documentKind,'') != 'transcript'`` — NULL-kind
-      docs COUNT (no leak; a frontmatter-less docs-endpoint doc is NULL-kind
-      and counts), session transcripts (documentKind='transcript', the
-      /v1/sessions commit MERGE at hosted_api.py) are EXCLUDED so a captured
-      session never consumes the docs gate.
+    - documents (#1726): document-bearing :Source nodes in the tenant graph
+      with the discriminator ``documentKind IS NOT NULL AND documentKind
+      != 'transcript'``. D10 (ONTOLOGY v3.15 §4.4): a document is a :Source,
+      so the cap is RE-POINTED at :Source — never retired (that would ungate
+      /v1/index/docs) and never folded into the node cap (that would silently
+      meter ~2,193 non-document sources). A NULL documentKind is NOT a
+      document (no COALESCE-to-empty: that would meter every session/connector/
+      provenance Source, the exact #1726 price change D10 forbids); session
+      transcripts (documentKind='transcript', the /v1/sessions commit MERGE at
+      hosted_api.py) are EXCLUDED so a captured session never consumes the docs
+      gate.
     """
     try:
         # ── Registry-scoped counts (api_keys, users, graphs) ──
@@ -643,16 +649,20 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         if sdk is None:
             sdk = _make_sdk(namespace=org_id)
         if resource == "documents":
-            # #1726 Slice 1: the documents resource — :Document count with
-            # the transcript discriminator (T2-P2a). NULL-kind docs COUNT
-            # (COALESCE) — a frontmatter-less docs-endpoint doc never leaks;
-            # session transcripts (documentKind='transcript', hosted_api.py
-            # commit MERGE) are excluded so capture never consumes the docs
-            # gate (the gate fires on /v1/index/docs ONLY).
+            # #1726 Slice 1, re-pointed by D10 (ONTOLOGY v3.15 §4.4): the
+            # documents resource counts document-bearing :Source nodes with
+            # the transcript discriminator (T2-P2a). Only a non-NULL
+            # documentKind is a document — a session/connector/provenance
+            # Source has no documentKind and must NOT be metered (that is the
+            # #1726 price change D10 forbids). Session transcripts
+            # (documentKind='transcript', hosted_api.py commit MERGE) are
+            # excluded so capture never consumes the docs gate (the gate fires
+            # on /v1/index/docs ONLY).
             rows = sdk._get_proj().g.query(
-                "MATCH (d:Document) "
-                "WHERE COALESCE(d.documentKind, '') <> 'transcript' "
-                "RETURN count(d)",
+                "MATCH (s:Source) "
+                "WHERE s.documentKind IS NOT NULL "
+                "AND s.documentKind <> 'transcript' "
+                "RETURN count(s)",
             ).result_set
             return int(rows[0][0])
         if resource == "sessions":

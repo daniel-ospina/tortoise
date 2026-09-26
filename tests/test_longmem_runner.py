@@ -437,6 +437,12 @@ def test_outcomes_to_report_golden_shape():
         # marker — o.get-based projection, None on golden outcomes (absent
         # until the outcome carries it; pre-feature checkpoints render).
         "entity_key_expansion": None,
+        # C6 (#2520, #2513): the time-aware query expansion arm marker +
+        # the reorder stamps — o.get-based projection, None on golden
+        # outcomes (absent until the outcome carries them; pre-feature
+        # checkpoints render; the golden outcome ran OFF).
+        "time_aware_qe": None,
+        "time_aware_stats": None,
         # C3-1 (#2519, #2567): the coverage-completeness loop arm + the §8
         # per-outcome markers — o.get-based projection, None on golden
         # outcomes (absent until the outcome carries them; pre-feature
