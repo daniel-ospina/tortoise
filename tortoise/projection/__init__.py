@@ -6062,14 +6062,15 @@ class FalkorProjection(
         precondition below. A one-field legacy index fails the field
         requirement, so it takes the full path.
 
-        ⛔ The ``point_fts_v2`` marker is WRITE-ONLY and is deliberately NEVER
-        read here. It records "the fixup ran", which is a different claim from
-        "no fixup is owed": ``update_entity`` applies caller props with a raw
-        ``SET n += $props`` and does not flatten (#5482), so an array-valued
-        ``search_keys`` can be introduced AFTER the marker is minted, and the
-        fresh-create path can swallow a failed marker write. A probe trusting
-        the marker would certify such a graph as current while its Points
-        stayed permanently invisible to FTS.
+        ⛔ No projection read path — and in particular not this probe —
+        consults the ``point_fts_v2`` marker. The marker records only that the
+        migration was handled at MINT time, a fact a later ``update_entity``
+        (raw ``SET n += $props``, no flatten — #5482) can silently
+        invalidate, so no present-state invariant can be read off it. A probe
+        trusting it would certify such a graph as current while its Points
+        stayed permanently invisible to FTS. (The export/DR surface does read
+        the marker, as a migration watermark — see the fresh-create branch
+        below.)
 
         So the fixup's real precondition is tested directly (#5444): the legacy
         ``"already"`` branch also performs a ONE-TIME DATA FIXUP (flattening
@@ -6080,10 +6081,10 @@ class FalkorProjection(
         covers the schema half in the same branch.
 
         ⚠️ COST OF THE SOUND CHECK, measured (docker FalkorDB 4.20.4, graph
-        holding FLAT ``search_keys``): the array read is an unindexed
-        All-Node-Scan over ``:Point`` — ``EXPLAIN`` gives ``Node By Label
-        Scan``, ``CALL db.indexes()`` has no RANGE index on ``search_keys``,
-        and ``typeof()`` cannot use the FULLTEXT one — so it is LINEAR in the
+        holding FLAT ``search_keys``): the array read is an unindexed label
+        scan over ``:Point`` (``EXPLAIN`` gives ``Node By Label Scan``,
+        ``CALL db.indexes()`` has no RANGE index on ``search_keys``, and
+        ``typeof()`` cannot use the FULLTEXT one), so it is LINEAR in the
         Point count and the healthy (no-array) case must scan every row before
         it can answer "none": ≈1.4 ms at N=1k, 8.1 ms at 30k, 26.9 ms at
         120k, 66.2 ms at 300k (≈0.2 µs/point), paid on EVERY fast-path probe.
@@ -6156,7 +6157,7 @@ class FalkorProjection(
         # invisible to this probe — the #5444 defect itself, merely relocated.
         #
         # ⚠️ The array check is cap-immune (one bounded `typeof` row) but NOT
-        # cheap: it is an unindexed All-Node-Scan over `:Point`, linear in the
+        # cheap: it is an unindexed label scan over `:Point`, linear in the
         # Point count and paid on every fast-path probe (measured 1.4 ms @1k →
         # 66.2 ms @300k). See the docstring for the figures; #5444 tracks the
         # write-maintained-signal alternative that would make it O(1).

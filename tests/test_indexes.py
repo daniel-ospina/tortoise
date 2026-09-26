@@ -796,22 +796,24 @@ def test_repeat_sweep_runs_no_already_satisfied_ddl(graph_factory):
 
     # #5444: the fast path also READS the fixup's precondition (the
     # array-valued `search_keys`), which is what lets the probe tell an owed
-    # fixup from a done one. Bound it: exactly one such read, and never a
-    # write, so the check above cannot be evaded by probing via rebuilding.
-    # (The `point_fts_v2` marker is NOT read — see `_schema_is_current`.)
+    # fixup from a done one. Bound it: one such read, and no DATA write, so the
+    # check above cannot be evaded by probing via rebuilding. (The
+    # `point_fts_v2` marker is not read here; the vector-API handle probe below
+    # legitimately issues index-creation statements, budgeted separately.)
     reads = [c for c in seen if _is_fast_path_read(c)]
     assert len(reads) <= 1, (
         f"the fast path issued {len(reads)} precondition read(s): {reads} — "
         "bounded to the single cap-immune array read (#5444)")
 
     # No DESTRUCTIVE statement may run: the fixup belongs to the first sweep.
-    # `_is_destructive` matches the five verbs the fixup itself uses, so this
-    # pins "no data write", NOT "no write at all" — the vector-API handle
-    # probe below legitimately issues `CREATE VECTOR INDEX`/`createNodeIndex`
-    # and is budgeted for separately. This replaces a `" SET "`/`" MERGE "`
-    # blacklist applied to the reads only, which a reworded statement could
-    # evade; the fast-path list above is pinned to exact literals, so a
-    # reworded probe is not counted as a permitted read in the first place.
+    # `_is_destructive` is a data-write verb blacklist (DELETE / DETACH DELETE
+    # / REMOVE / SET / MERGE), so this pins "no data write", NOT "no write at
+    # all" — the vector-API handle probe below legitimately issues
+    # `CREATE VECTOR INDEX`/`createNodeIndex` and is budgeted separately. It
+    # replaces a `" SET "`/`" MERGE "` blacklist applied to the reads only,
+    # which a reworded statement could evade; the fast-path list above is
+    # pinned to exact literals, so a reworded probe is not counted as a
+    # permitted read in the first place.
     writes = [c for c in seen if _is_destructive(c)]
     assert writes == [], (
         f"a second `_ensure_indexes()` issued destructive statement(s): "
