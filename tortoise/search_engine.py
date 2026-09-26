@@ -335,6 +335,36 @@ def search_provenance_enabled() -> bool:
     return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
 
 
+def currency_status(remembered: str, current: str) -> str:
+    """#5199 — the currency of a ``sourceVersion`` note, as a **READ**.
+
+    ``current``  the note names the version the source holds NOW
+    ``stale``    it names a DIFFERENT version — the thing built from it may be
+                 out of date
+    ``unknown``  nothing was noted, or the source has no version. This is the
+                 HONEST answer and is deliberately NOT a synonym for ``current``:
+                 an absent note must never read as fresh, because "no recorded
+                 version" silently rendering as "up to date" is the precise
+                 false-current the note exists to expose.
+
+    A pure function of two strings, never a stored status field: the #5199
+    ruling keeps currency a read, so a source edit needs no backfill and no two
+    readers can disagree about the same link. The comparison is exact string
+    equality — the versions are content hashes, so there is no ordering to get
+    wrong and no "newer" to infer.
+
+    ⚠ IT COMPARES **ONE LINK'S** PAIR. A Point's own currency is an AGGREGATE
+    across its links (ONTOLOGY §4.6: stale if ANY link is behind, current only
+    when EVERY link is), so a Point-level verdict is NOT derivable from a single
+    pair — a caller that collapses several links into one call here can report
+    ``current`` for a Point another link makes stale. Aggregate per §4.6 at the
+    call site; never assume this helper speaks for the Point.
+    """
+    if not remembered or not current:
+        return "unknown"
+    return "current" if remembered == current else "stale"
+
+
 @dataclass
 class SearchResult:
     id: str

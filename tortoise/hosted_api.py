@@ -11812,7 +11812,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             contentHash=src.contentHash or "", is_episodic=True,
         )
     for url in session_urls:
-        sdk.link_source_to_entity(url, doc_id, "Source")
+        # "Document" is the RELATION's spelling (D10 retired the node label and the
+        # writer remaps the identity onto `:Source`) — it is what marks this a
+        # derivation link, so it takes the `sourceVersion` anchor. See
+        # `edges.py::_DERIVATION_REFERENCES_LABELS`.
+        sdk.link_source_to_entity(url, doc_id, "Document")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(

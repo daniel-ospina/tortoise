@@ -230,6 +230,75 @@ _VALID_EDGE_PREDICATES = frozenset({
     'aboutSource', 'aboutAction',
 })
 
+# `references` targets whose node is BUILT FROM the source's content, and therefore
+# carry the version anchor `sourceVersion` (owner-approved option A, 2026-09-25, #5199;
+# the operative record is `STORAGE-ARCHITECTURE.md` §9.6). The anchor is set at LINK
+# TIME from the source's current `contentHash`, which is why the public SDK signature
+# does not change.
+#
+# ⚠️ Source of authority: the approved scope is "the `contentHash` of the source version
+# the target was built from", and it is the CODE's writers that the set is pinned to —
+# NOT a §3.4 enumeration. ONTOLOGY §3.4 declares the `references` target list as
+# `Event|Object|Source` (noting a document is itself a `:Source`) and §4.6 still scopes
+# the anchor to `extractedFrom` (Point-level); that wording is deliberately frozen on
+# this branch, in owner review on #5199.
+#
+# `Object` is deliberately ABSENT. Every in-repo writer of a Source→Object
+# `references` link is identity/mention — a connector artifact whose Source `url`
+# IS the artifact — so a version there would be a non-answer, not a stale mark.
+# Referential-containment links (Source→Source) are written outside this method
+# and stay property-free. `references` is in NEITHER `STRUCTURAL_REL_LABELS` nor
+# `DERIVABLE_STRUCTURAL_RELS`, so this anchor adds nothing to the replay surface.
+#
+# The discriminator is the target LABEL, which is a proxy for "derived" — the only
+# signature-preserving signal available. `Document` is a member because in-repo writers
+# do mint a DOCUMENT-DERIVATION link (`projection/entities.py::_upsert_document`, the
+# session->document link in `hosted_api.py`, the doc classifier of the ingest path);
+# excluding it would leave that derivation half unanchored. If the ontology rules that
+# the connector `Event` is identity rather than derivation, only this set moves.
+#
+# !! POST-D10 the `:Document` LABEL is retired (a document is a `:Source`), so this set
+# member is reachable ONLY through the retained deprecated alias: those writers keep
+# passing `"Document"` as the RELATION's spelling, and `link_source_to_entity` reads it
+# for exactly this decision BEFORE remapping the identity onto `:Source`. Those are two
+# separate facts — the stored edge is `(Source)-[:references]->(Source)` either way,
+# while the alias is what still marks it a DERIVATION rather than containment. A
+# "tidy-up" that switches those call sites to `"Source"` therefore simplifies nothing:
+# it silently drops the anchor from every document link. That is not hypothetical — it
+# is the merge regression pinned by `test_document_derivation_through_the_production_path_anchors`.
+_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
+
+# CQL suffix stamping the derivation anchor on a `references` MERGE, `ON CREATE` only.
+#
+# `ON CREATE` is load-bearing: connectors re-poll and the `link_source_to_*` writers are
+# idempotent MERGEs, so advancing a recorded version on a re-link would erase exactly the
+# staleness the anchor exists to expose. And `''` must NOT be stamped: it is the
+# auto-created-Source placeholder (and the "no recorded hash" value on an Event), and
+# `'' = ''` compares equal to the source's current hash — a FALSE current.
+#
+# `version_expr` names the version the edge was READ at. That is ``s.contentHash`` on the
+# live writers (the Source was just written from the content the target describes), but
+# ``e.file_hash`` on the repair path — see :meth:`_EdgeHandlers.link_source_to_legacy_event`.
+#
+# ⚠️ KNOWN LIMITATION — the anchor does not advance when the TARGET is rewritten in place
+# (#5199, under owner review). ``ON CREATE`` means a target rebuilt from a NEWER version
+# through the same node id (the agent-session re-index path reuses
+# ``event_id = f"session_{session_id}"``) keeps the ORIGINAL anchor and so reads STALE
+# while the target is in fact current — the converse of the false-current guarded below,
+# and the conservative direction the model prefers (``stale != wrong``, §4.6). Advancing
+# it safely requires distinguishing a target rebuild from a source-only re-poll, which
+# the ON CREATE/ON MATCH pair alone cannot; see the question recorded on #5199.
+def _anchor_on_create(version_expr: str) -> str:
+    return (
+        "ON CREATE SET r.sourceVersion = "
+        f"CASE WHEN {version_expr} IS NULL OR {version_expr} = '' "
+        f"THEN NULL ELSE {version_expr} END"
+    )
+
+
+_DERIVATION_ANCHOR_SET = _anchor_on_create("s.contentHash")
+_BACKFILL_ANCHOR_SET = _anchor_on_create("e.file_hash")
+
 
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
@@ -488,10 +557,28 @@ class _EdgeHandlers:
                 resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
+        Anchor (#5199, owner-approved 2026-09-25): a DERIVATION link
+        (``entity_label`` in ``_DERIVATION_REFERENCES_LABELS``) records the version
+        it was read from as ``sourceVersion`` — the source's current
+        ``contentHash``, read HERE so that no caller passes it and the public SDK
+        signature is unchanged. Identity/mention links (``Object``) stay
+        property-free. Written ``ON CREATE`` only: a re-link must NOT advance the
+        recorded version, or staleness would silently read as current.
+
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
         """
+        # #5199 × D10 (merge resolution): the DERIVATION question is about the
+        # LINK's meaning, so it is answered from the label the CALLER passed,
+        # BEFORE D10's identity remap below collapses ``Document`` onto
+        # ``Source``. Reading it afterwards would make the ``Document`` member of
+        # ``_DERIVATION_REFERENCES_LABELS`` unreachable — a ``Document`` link is a
+        # derivation link and would silently stop being anchored (caught by
+        # ``test_document_link_records_the_version_read``). Anchoring by the
+        # remapped label instead would wrongly stamp every ``Source -> Source``
+        # referential-containment link, which the model keeps property-free.
+        _is_derivation = entity_label in _DERIVATION_REFERENCES_LABELS
         if entity_label == "Document":
             # D10: :Document is retired — a document is a :Source. Kept as a
             # deprecated alias so existing callers/journal replay converge on
@@ -522,10 +609,61 @@ class _EdgeHandlers:
         # D10: a document is a :Source, and a Source resolves by ``url`` (not
         # ``id``) — the same identity key the label moved with.
         key_clause = "{url:$eid}" if entity_label == "Source" else "{id:$eid}"
+        if _is_derivation:
+            self.g.query(
+                f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {key_clause}) "
+                f"MERGE (s)-[r:references]->(e) " + _DERIVATION_ANCHOR_SET,
+                params={"url": key, "eid": entity_id},
+            )
+        else:
+            self.g.query(
+                f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {key_clause}) "
+                f"MERGE (s)-[:references]->(e)",
+                params={"url": key, "eid": entity_id},
+            )
+
+    def link_source_to_event(self, source_key: str, event_id: str) -> None:
+        """MERGE ``(Source {url})-[:references]->(Event {eventId})`` — the
+        ``eventId``-keyed derivation writer, anchoring the version the SOURCE holds.
+
+        Separate from :meth:`link_source_to_entity` because legacy raw-Cypher Events
+        carry no ``id``, so that method's id-keyed MATCH would silently no-op on them.
+        Used by the connector choke point and the capture path. Every provenance
+        writer stamps, so a derivation edge cannot be anchored on one such path and
+        unanchored on another (the generic ``create_edge`` escape hatch and
+        ``graph-scripts/backfill_references.py`` are not provenance writers and are
+        not auto-anchored; see ``STORAGE-ARCHITECTURE.md`` §9.6).
+
+        ``source_key`` is passed through AS the Source key — callers pass the same
+        value they used for the Source MERGE, so this adds no new resolution step.
+
+        NOTE: on the repair path use :meth:`link_source_to_legacy_event` instead — the
+        Source there is deliberately NOT the version the Event was read from.
+        """
         self.g.query(
-            f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {key_clause}) "
-            f"MERGE (s)-[:references]->(e)",
-            params={"url": key, "eid": entity_id},
+            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
+            "MERGE (s)-[r:references]->(e) " + _DERIVATION_ANCHOR_SET,
+            params={"url": source_key, "eid": event_id},
+        )
+
+    def link_source_to_legacy_event(self, source_key: str, event_id: str) -> None:
+        """Repair-link a LEGACY ``Event`` to its ``Source``, anchoring the version
+        **the Event records it was read from** — never the Source's current hash.
+
+        Why this cannot be :meth:`link_source_to_event`: ``backfill_sources`` moves the
+        Source to the file's **CURRENT** hash while the legacy Event keeps the
+        ``file_hash`` it was captured with (W2, "file edited since capture"). The
+        Source's hash there is therefore NOT the version this Event was built from, and
+        anchoring ``s.contentHash`` would report a STALE Event as **current** — the
+        precise failure ``sourceVersion`` exists to expose. ``e.file_hash`` *is* that
+        version (it equals ``s.contentHash`` whenever the file has not changed), so it
+        is the honest anchor; an Event with no recorded hash anchors **nothing** rather
+        than guessing.
+        """
+        self.g.query(
+            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
+            "MERGE (s)-[r:references]->(e) " + _BACKFILL_ANCHOR_SET,
+            params={"url": source_key, "eid": event_id},
         )
 
     # ponytail: SDK compat alias (Phase 1b will rename caller)

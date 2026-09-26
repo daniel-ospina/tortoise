@@ -2020,7 +2020,12 @@ class _EntityHandlers:
         # its first hop), so the chain still resolves.
         ref = ev.get("source_url")
         if ref and ref != did:
-            self.link_source_to_entity(ref, did, "Source")
+            # "Document" is the RELATION's spelling, not a node label: D10 retired
+            # `:Document` and the writer remaps it onto `:Source` for identity, but it is
+            # what marks this link a DERIVATION — and only a derivation link takes the
+            # `sourceVersion` anchor (#5199, STORAGE-ARCHITECTURE.md 9.6). Switching this
+            # to "Source" keeps the edge and silently drops the anchor.
+            self.link_source_to_entity(ref, did, "Document")
         # #125 — aboutSubject edges when about_entities present (Task 1
         # self-contained: label-agnostic generalization lives in edges.py)
         about = ev.get("about_entities") or []
@@ -2354,12 +2359,9 @@ class _EntityHandlers:
             params={"url": key, "raw_url": url, "cu": canonical,
                     "sk": sk or "document", "now": _now_iso()},
         )
-        # (Source)-[:references]->(Event) — always, when the event exists.
-        self.g.query(
-            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
-            "MERGE (s)-[:references]->(e)",
-            params={"url": key, "eid": eid},
-        )
+        # (Source)-[:references]->(Event) — always, when the event exists, and
+        # anchored ON CREATE by the shared derivation writer (#5199).
+        self.link_source_to_event(key, eid)
         # #388 conf-62/conf-60: a fallback-key materialization (`slack:{channel}` /
         # `linear:{team_key}` / bare `source`) can predate the real URL (a
         # permalink becomes available later, or a later poll resolves the
