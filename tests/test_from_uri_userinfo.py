@@ -370,17 +370,21 @@ _GUARDED_DIRS = ("tortoise", "graph-scripts")
 #     assert ``registered == presented`` for a loopback redirect URI (after
 #     ``_unsafe_redirect_uri_bytes``); the values are compared, never handed to
 #     a client. Main-added; same class as the entries above.
-#   * ``tortoise/session_indexer.py`` — ``_graph_entity_keywords`` reads the raw
-#     (percent-ENCODED) userinfo ONLY to hand it to ``_redact_exc``, so a client
-#     that echoes the DSN in either form cannot leak it into a WARNING line. The
-#     DECODED pair that reaches ``FalkorDB`` still comes from
-#     ``parse_uri_userinfo`` (#3067).
+#
+# ``tortoise/session_indexer.py`` is deliberately NOT here. Its
+# ``_graph_entity_keywords`` CONSTRUCTS a ``FalkorDB`` client — the exact
+# consumer class this guard exists to protect — so exempting it (the guard's
+# ``continue`` is FILE-WIDE) blinded the guard in the one file that matters: a
+# raw ``FalkorDB(..., username=parsed.username, password=parsed.password)``
+# appended there still passed. The redactor's raw (percent-ENCODED) pair was
+# therefore moved into ``tortoise.config.raw_uri_userinfo`` — the module that
+# already owns the rule — so the file needs no exemption and stays fully
+# scanned (#3067).
 _ALLOWED = {
     "tortoise/config.py",
     "graph-scripts/connectivity_gate.py",
     "tortoise/cimd.py",
     "tortoise/oauth.py",
-    "tortoise/session_indexer.py",
 }
 
 # ``tests/`` is excluded wholesale — tests legitimately probe raw ``urlparse``
@@ -499,6 +503,27 @@ def test_no_raw_urlparse_userinfo_read_in_guarded_dirs():
         "raw urlparse userinfo read(s) found — route them through "
         "tortoise.config.parse_uri_userinfo (#3039):\n" + "\n".join(violations)
     )
+
+
+def test_guard_exemption_set_excludes_the_client_constructing_module():
+    """#3067: ``tortoise/session_indexer.py`` must NOT be exempt from the guard.
+
+    ``_graph_entity_keywords`` constructs a ``FalkorDB`` client — the exact
+    consumer class this guard protects — and the exemption is FILE-WIDE (a
+    ``continue`` per file, not per line), so an entry for it blinded the guard
+    to a raw ``FalkorDB(..., username=parsed.username, password=parsed.password)``
+    added anywhere in the file. The raw read now lives in ``tortoise.config``
+    (``raw_uri_userinfo``), which is the sanctioned exemption, so the set stays
+    at the four display/rule modules.
+    """
+    assert "tortoise/session_indexer.py" not in _ALLOWED
+    expected = {
+        "tortoise/config.py",
+        "graph-scripts/connectivity_gate.py",
+        "tortoise/cimd.py",
+        "tortoise/oauth.py",
+    }
+    assert expected == _ALLOWED
 
 
 def test_guard_detects_the_pre_fix_pattern(tmp_path):
@@ -778,6 +803,9 @@ def test_session_indexer_lookup_failure_is_logged_not_silent(monkeypatch, caplog
     uri = _uri("p@ss", user="admin")
     monkeypatch.setenv("TORTOISE_DB_URI", uri)
     monkeypatch.setattr(si, "_graph_db", None)
+    # The first failure per process is the WARNING; reset the latch so this test
+    # is independent of what ran before it in the suite (#3067 review note).
+    monkeypatch.setattr(si, "_graph_warned", False)
     # Two shapes at once: the full URI (userinfo inside a ``://…@`` span, which
     # ``redact_error`` masks) and the bare ``user:password@host`` fragment,
     # which has no ``://`` before it and so escapes that span entirely.
@@ -850,20 +878,30 @@ def test_session_indexer_failure_log_names_real_endpoint_on_cache_hit(
     monkeypatch.setenv(
         "TORTOISE_DB_URI", _uri("p@ss", user="admin", host="cache.hit.example"))
     monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(si, "_graph_warned", False)
     monkeypatch.setattr(
         falkordb, "FalkorDB",
         _fake_falkordb({}, error=redis.exceptions.ConnectionError("boom")))
 
-    with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
+    # DEBUG so the cache-HIT failure — downgraded from WARNING after the first
+    # failure per process (#3067 review note) — is still captured; the endpoint
+    # assertion below is about the message, not its level.
+    with caplog.at_level("DEBUG", logger="tortoise.session_indexer"):
         assert si._graph_entity_keywords("anything") == []   # cache MISS
         assert si._graph_db is not None                      # cache populated
         miss_log = caplog.text
+        miss_levels = {r.levelname for r in caplog.records}
         caplog.clear()
         assert si._graph_entity_keywords("anything") == []   # cache HIT
         hit_log = caplog.text
+        hit_levels = {r.levelname for r in caplog.records}
 
     assert "cache.hit.example:6379" in miss_log
     assert "cache.hit.example:6379" in hit_log, (
         "cache-hit failure log named the placeholder endpoint instead of the "
         f"real one: {hit_log!r}")
     assert "localhost:None" not in hit_log
+    # Once per process: the first failure WARNs, the next is DEBUG-only — the
+    # broken client stays cached, so a repeated WARNING is one per session file.
+    assert miss_levels == {"WARNING"}
+    assert hit_levels == {"DEBUG"}

@@ -142,6 +142,12 @@ def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
 # Cached FalkorDB connection for graph entity lookups
 _graph_db = None
 
+# Set once the first graph-lookup failure has been logged at WARNING, so a
+# PERSISTENT outage (the broken client stays cached, and this runs once per
+# session file) does not emit one identical WARNING per document (#3067 review
+# note). Subsequent failures are logged at DEBUG, still with endpoint + error.
+_graph_warned = False
+
 # A literal shorter than this cannot be scrubbed safely: the scrub is a
 # literal replace, so a 1-2 char value mangles far more diagnostic than it
 # protects (``AuthenticationError`` -> ``Auth***nticationError``, breaking the
@@ -179,6 +185,7 @@ def _graph_entity_keywords(content: str) -> list[str]:
     the URI itself is not logged because it carries credentials.
     """
     global _graph_db
+    global _graph_warned
     content_lower = content.lower()
     matches = []
     # #3067 (P2): the endpoint and the decoded credentials are resolved BEFORE
@@ -200,14 +207,20 @@ def _graph_entity_keywords(content: str) -> list[str]:
             return []
         from urllib.parse import urlparse
 
-        from tortoise.config import parse_uri_userinfo
+        from tortoise.config import parse_uri_userinfo, raw_uri_userinfo
         parsed = urlparse(uri)
         host = parsed.hostname or 'localhost'
         port = parsed.port or 16379
-        # ``parsed.username``/``.password`` are the percent-ENCODED forms;
-        # ``parse_uri_userinfo`` returns the DECODED pair. Both are credentials
-        # the caller holds, so both are handed to the redactor.
-        raw_username, raw_password = parsed.username, parsed.password
+        # The ENCODED pair is fetched through ``tortoise.config`` — the single
+        # module that owns the URI-credential rule — rather than read off
+        # ``parsed`` here: this module CONSTRUCTS a FalkorDB client, so a
+        # raw-userinfo exemption for it would blind the #3039 source guard to
+        # exactly the bug class it guards (its ``continue`` is file-wide).
+        # ``raw_uri_userinfo`` returns the percent-ENCODED forms; that is what a
+        # client echoing the DSN it was handed may print. Both forms are handed
+        # to the redactor, and the DECODED pair reaches ``FalkorDB`` via
+        # ``parse_uri_userinfo`` (#3067).
+        raw_username, raw_password = raw_uri_userinfo(uri)
         username, password = parse_uri_userinfo(uri)
         if _graph_db is None:
             from falkordb import FalkorDB
@@ -229,11 +242,20 @@ def _graph_entity_keywords(content: str) -> list[str]:
     except Exception as e:
         # #3067: observable, not silent — a misconfigured/unreachable graph
         # must be distinguishable from "the graph has no matching entities".
-        logger.warning(
-            "graph entity keyword lookup failed at %s:%s — %s; "
-            "graph entities omitted from keywords",
-            host, port,
-            _redact_exc(e, (username, password, raw_username, raw_password)))
+        # WARNING on the FIRST failure per process; DEBUG thereafter, because the
+        # broken client stays cached and this handler then runs for every session
+        # file — one identical WARNING per document is noise, not observability.
+        # Both levels name the endpoint and the redacted error.
+        msg = _redact_exc(e, (username, password, raw_username, raw_password))
+        if _graph_warned:
+            logger.debug(
+                "graph entity keyword lookup still failing at %s:%s — %s; "
+                "graph entities omitted from keywords", host, port, msg)
+        else:
+            _graph_warned = True
+            logger.warning(
+                "graph entity keyword lookup failed at %s:%s — %s; "
+                "graph entities omitted from keywords", host, port, msg)
     return matches
 
 
