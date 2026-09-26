@@ -214,7 +214,10 @@ def test_operator_route_rejects_non_event_entity_refs(sdk):
     }
     viols = sdk._validate_bundle(bundle)
     msgs = [v["message"] for v in viols]
-    assert any("must be a plain Point — got a Document item" in m
+    # D10 (#5026): a document is a :Source, so the reported graph item label
+    # is "Source" (the bundle still declares type:"document" and is still
+    # rejected — the narrowness pin is unchanged).
+    assert any("must be a plain Point — got a Source item" in m
                for m in msgs), msgs
 
 

@@ -142,17 +142,33 @@ def _s256(verifier: str) -> str:
 
 def _seed_code(cp, code="code-1", *, verifier=None, client_id=_CLIENT_ID,
                user_id=_U1, org_id="t1", redirect_uri=_REDIRECT, used_at=None,
-               expires_in=600) -> str:
+               expires_in=600, code_id=None, redemption_state=None) -> str:
     """Insert an oauth_codes row and RETURN the PKCE verifier (a code seeded without
     its verifier 400s on PKCE before ever reaching the injected fault). Uses the
-    production encoders so the hash and timestamp formats match."""
+    production encoders so the hash and timestamp formats match.
+
+    #3027: the row carries `id` and an explicit `redemption_state`, because the
+    durable claim filters on both (`redemption_state='unclaimed'`) and the
+    `code_id` link addresses the code by id. A row seeded WITH `used_at` is
+    `claimed` unless a state is named — the state the claim statement writes — so
+    `_restore_code`'s fence and a reconciler's takeover are both exercisable.
+    """
     verifier = verifier or _pkce()[0]
+    if code_id is None:
+        numeric = [r.get("id") for r in cp.tables.get("oauth_codes", [])
+                   if isinstance(r.get("id"), int)]
+        code_id = (max(numeric) + 1) if numeric else 1
     cp.tables.setdefault("oauth_codes", []).append({
+        "id": code_id,
         "code_hash": _sha256(code), "client_id": client_id, "user_id": user_id,
         "org_id": org_id, "redirect_uri": redirect_uri,
         "code_challenge": _s256(verifier), "code_challenge_method": "S256",
         "scope": "mcp", "resource": None,
         "expires_at": _expires_iso(expires_in), "used_at": used_at,
+        "redemption_state": redemption_state or (
+            "claimed" if used_at is not None else "unclaimed"),
+        "redemption_id": None, "redemption_settled_at": None,
+        "redemption_note": None,
         "created_at": _expires_iso(0)})
     return verifier
 
@@ -170,15 +186,18 @@ def _seed_refresh_token(cp, token="rt-1", **over) -> tuple[str, str]:
     return row["id"], token
 
 
-def _seed_access_token(cp, *, refresh_id: str) -> str:
+def _seed_access_token(cp, *, refresh_id: str, code_id=None) -> str:
     """Insert an oauth_access_tokens row with `refresh_token_id=refresh_id` and return
     its `id` (this is what `refresh_grant`'s prev_access SELECT matches)."""
     row_id = secrets.token_urlsafe(16)
-    cp.tables.setdefault("oauth_access_tokens", []).append({
+    row = {
         "id": row_id, "token_hash": _sha256("at-" + row_id), "client_id": _CLIENT_ID,
         "user_id": _U1, "org_id": "t1", "scope": "mcp",
         "expires_at": _expires_iso(3600), "revoked_at": None,
-        "refresh_token_id": refresh_id, "created_at": _expires_iso(0)})
+        "refresh_token_id": refresh_id, "created_at": _expires_iso(0)}
+    if code_id is not None:      # #3027: the provenance link, omitted when unused
+        row["code_id"] = code_id
+    cp.tables.setdefault("oauth_access_tokens", []).append(row)
     return row_id
 
 
@@ -339,6 +358,32 @@ def test_real_seam_maps_status_and_unparseable_body(capture_server, status, payl
     capture_server.respond = (status, payload)
     assert oauth._consume_state(cp, "c") == expected
     assert oauth._restore_code(cp, "c", "T1") is False
+
+
+def test_empty_body_patch_reads_as_zero_rows(capture_server):
+    """PIN THE SEAM #3027's `_observe_code` safety argument rests on.
+
+    A genuine zero-match `PATCH` (with `Prefer: return=representation`) answers 200
+    with the JSON array `[]` — a CONTENT-BEARING body. `SupabaseControlPlane.query`
+    also maps a 2xx with an EMPTY body to `[]`, so an intermediary that stripped a
+    committed claim's body would look exactly like "my claim matched nothing". That
+    is the documented residual on `_observe_code` (the retry is still safe — it
+    re-runs the claim CAS — but the signal is retryable for a possibly-consumed
+    code). This test records the behaviour rather than asserting it is desirable:
+    if the seam ever learns to distinguish them, this test is the place to make the
+    503 basis strictly stronger.
+    """
+    cp = SupabaseControlPlane(url=f"http://127.0.0.1:{capture_server.server_port}",
+                              service_key="svc")
+    capture_server.respond = (200, b"[]")            # genuine zero-match, WITH content
+    assert cp.query("oauth_codes", select=["id"], method="PATCH",
+                    filters=[("code_hash", "eq", "h")],
+                    json_body={"used_at": "T"}) == []
+    assert b'"used_at"' in capture_server.seen[-1][3]      # the write WAS sent
+    capture_server.respond = (200, b"")              # empty 2xx body — the residual
+    assert cp.query("oauth_codes", select=["id"], method="PATCH",
+                    filters=[("code_hash", "eq", "h")],
+                    json_body={"used_at": "T"}) == []   # ← indistinct from the above
 
 
 # ── Task 3: `_issue_tokens` — 3-lane taxonomy, structural no-leak guarantee ──
@@ -611,17 +656,37 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
 
 # ── Task 5: `refresh_grant` — wrap the pre-mint reads, map the abort, unmask ──
 
-@pytest.mark.parametrize("table,select", [
-    ("oauth_clients", None),        # FIRST read on the path — the :726 leak
-    ("oauth_refresh_tokens", None),  # the refresh-token SELECT
-    ("organizations", None),                # _assert_team_usable
-    ("org_memberships", None),     # membership_for_user_org — S4 call site #4
-    ("oauth_access_tokens", ["id"]),  # prev_access
+# #4482: each arm is scoped to the call shape the refresh path ALONE issues.
+# `FakeControlPlane._take_fault` consumes the FIRST matching fault, and the boot
+# readers — `_sweep_events`->`_iter_registered_orgs`, `_purge_deleted_orgs`,
+# `_probe_control_plane` and `_sweep_oauth_retention`, all on daemon workers off
+# the TestClient lifespan — query the same tables. A fault whose shape is not
+# unique to the refresh path is stolen by one of them, the injected failure never
+# reaches the read under test, and the endpoint answers 200 instead of 503
+# (`assert (200 == 503)`), nondeterministically. Same class as the #4464 sites in
+# this file; same remedy.
+@pytest.mark.parametrize("table,select,match", [
+    ("oauth_clients", None, None),        # FIRST read on the path — the :726 leak
+    # refresh_grant's pre-mint SELECT is the only GET of this table filtering on
+    # `token_hash` (the retention sweep filters on `expires_at`), so a shape
+    # predicate scopes it without duplicating the production column list.
+    ("oauth_refresh_tokens", None,
+     lambda t, m, sel, f: m == "GET"
+     and any(c == "token_hash" for c, _, _ in (f or []))),
+    # _assert_org_usable; the boot sweep's org readers use other select shapes.
+    ("organizations", ["suspended_at", "tier"], None),
+    ("org_memberships", None, None),     # membership_for_user_org — S4 call site #4
+    # `prev_access` and the retention sweep BOTH GET oauth_access_tokens with
+    # select=["id"]; only the filter separates them, so this arm needs a shape
+    # predicate, not a select literal.
+    ("oauth_access_tokens", None,
+     lambda t, m, sel, f: m == "GET" and list(sel or []) == ["id"]
+     and any(c == "refresh_token_id" for c, _, _ in (f or []))),
 ])
-def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):
+def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select, match):
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-pre")
-    cp.fail_query(table=table, method="GET", select=select, times=1)
+    cp.fail_query(table=table, method="GET", select=select, match=match, times=1)
     r = _post_refresh(tc, cp, rt)
     assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
     assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None    # grant untouched

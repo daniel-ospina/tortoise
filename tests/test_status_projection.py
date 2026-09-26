@@ -202,6 +202,104 @@ class TestProjectionFold:
         finally:
             sdk.close()
 
+    def test_rebuild_all_long_successor_replays_verbatim(self, tmp_path):
+        """#5370 (indicator 4): a >200-char successor survives the
+        journal→rebuild replay BYTE-FOR-BYTE. The fold stores the FULL name
+        live and on replay (the journaled ObjectSuperseded carries it
+        verbatim), so the replay lane gains no divergence and no 200-char
+        prefix. Pre-fix both lanes truncated identically to a prefix that
+        named no Object — self-consistent but wrong."""
+        from tortoise.commit_ops import apply_supersessions
+
+        long_name = "gh-issue-title-" + ("y" * 240)
+        assert len(long_name) > 200
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t5370r.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            sdk.create_entity("object", "replay-src")
+            sdk.create_entity("object", long_name)
+            warns: list[str] = []
+            applied = apply_supersessions(
+                sdk._get_proj(), sdk,
+                [{"superseded": "replay-src", "supersedes_by": long_name,
+                  "evidence": "#5370 replay"}],
+                session_id="s5370_r", warn=warns.append)
+            assert applied == 1, warns
+            live = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:'replay-src'}) "
+                "RETURN o.supersededBy").result_set[0][0]
+            assert live == long_name, len(live)
+
+            sdk._get_proj().rebuild_all(str(events))
+            status, replayed = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:'replay-src'}) "
+                "RETURN o.status, o.supersededBy").result_set[0]
+            assert status == "superseded", (status, replayed)
+            assert replayed == live == long_name, (len(replayed), len(live))
+        finally:
+            sdk.close()
+
+    def test_rebuild_all_rewrites_a_legacy_prefix_to_the_journaled_full_name(
+            self, tmp_path):
+        """#5370 review round 1 (P2): a row folded BEFORE the fix holds the
+        old 200-char prefix, while the journaled ObjectSuperseded always
+        carried the FULL name. So `rebuild_all` REWRITES the prefix to the
+        full name — a real live↔replay difference on pre-fix rows, and a
+        benign one-way healing (§11: the event log is the reconstruction
+        source, so its value is the correct one).
+
+        This is pinned rather than assumed: the sibling test above covers
+        only rows folded AFTER the fix (where live and replay already
+        agree), which is not the population a pre-fix graph actually has.
+        The legacy prefix is simulated by writing exactly the value the old
+        fold would have written — the pre-fix assertion the reproduced probe
+        used (`stored == long_name[:200]`).
+        """
+        from tortoise.commit_ops import apply_supersessions
+
+        long_name = "gh-issue-title-" + ("z" * 240)
+        legacy_prefix = long_name[:200]
+        assert len(long_name) > 200 and len(legacy_prefix) == 200
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t5370legacy.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            sdk.create_entity("object", "legacy-src")
+            sdk.create_entity("object", long_name)
+            warns: list[str] = []
+            applied = apply_supersessions(
+                sdk._get_proj(), sdk,
+                [{"superseded": "legacy-src", "supersedes_by": long_name,
+                  "evidence": "#5370 legacy replay"}],
+                session_id="s5370_l", warn=warns.append)
+            assert applied == 1, warns
+
+            # Simulate the pre-fix fold's stored value on the live row.
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {name:'legacy-src'}) "
+                "SET o.supersededBy = $p", params={"p": legacy_prefix})
+            live = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:'legacy-src'}) "
+                "RETURN o.supersededBy").result_set[0][0]
+            assert live == legacy_prefix, len(live)
+
+            sdk._get_proj().rebuild_all(str(events))
+            _status, replayed = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:'legacy-src'}) "
+                "RETURN o.status, o.supersededBy").result_set[0]
+
+            # The journal carries the FULL name, so replay heals the
+            # prefix. If this ever flips to `replayed == legacy_prefix`,
+            # the replay lane has stopped being the reconstruction source
+            # and the legacy rows would stay permanently unverifiable.
+            assert replayed == long_name, (len(replayed), len(long_name))
+            assert replayed != legacy_prefix
+        finally:
+            sdk.close()
+
     def test_rebuild_all_fold_before_registration_still_folds(self, tmp_path):
         """#2164 round-2 review (second-model ISSUE 1): the rebuild fold
         sweep must run AFTER all object-creation events, not chronologically.

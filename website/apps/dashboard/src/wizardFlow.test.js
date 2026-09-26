@@ -6,7 +6,7 @@ import {
   WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER,
   resolveBuildCatalog, orgNameError, LEGACY_LABELS, forkStepState,
   durableKeyName,
-  wizardStageLabel,
+  wizardStageLabel, wizardStepSub,
 } from './wizardFlow.js'
 
 test('EXACTLY 4 human steps in the plan order (org-create → fork → connect → done)', () => {
@@ -236,4 +236,62 @@ test('#2912 (PR-gate UX): the done-step sub does not repeat the card body verbat
   // viewport stated it twice.
   assert.ok(!/Open Settings/.test(WIZARD_STEPS[3].sub),
     'the Settings pointer belongs to the card body only')
+})
+
+// ── #3725: the header lede is a pure decision, executed here ─────────────────
+// The defect this file pins is a HEADING-vs-BODY contradiction:
+//   <h1>You're all set</h1>
+//   <p class="welcome-lede">Your agent takes over from here.</p>   ← pre-fix
+//   ...body: "Connected" / "Keep calling the SDK from your app."
+// The pre-fix lede was `WIZARD_STEPS[3].sub` rendered unconditionally once the
+// connection was observed, so two live lines in one viewport disagreed about
+// who does the work. `wizardStepSub` returns the string (or null) the header
+// renders, so the contradiction is now observable by EXECUTION rather than by
+// a grep on a render condition.
+test('#3725: the step-3 lede is suppressed on the BUILD fork (its body says keep calling the SDK)', () => {
+  // the exact regression: build fork + server-observed connection.
+  const buildForkLede = wizardStepSub(3, { connected: true, buildFork: true })
+  assert.equal(buildForkLede, null,
+    'the build fork hands over to no agent — its lede must not say one takes over')
+  // the assertion the browser shows: no lede string can name an agent there.
+  assert.ok(buildForkLede === null || !/agent/i.test(buildForkLede),
+    'no "agent" subject may render above the build-fork body')
+  // the self fork still renders the step's own sub (the suppression is
+  // fork-scoped, not a blanket delete of the step-3 lede).
+  assert.equal(wizardStepSub(3, { connected: true, buildFork: false }), WIZARD_STEPS[3].sub)
+  // and the build fork WITHOUT a connection is suppressed by the connection
+  // arm exactly as the self fork is (both are null; the body carries the state).
+  assert.equal(wizardStepSub(3, { connected: false, buildFork: true }), null)
+  assert.equal(wizardStepSub(3, { connected: false, buildFork: false }), null)
+})
+
+test('#3725: wizardStepSub carries every pre-existing head-lede arm', () => {
+  // plain case: every step renders its own sub EXCEPT the two suppressed arms.
+  assert.equal(wizardStepSub(1), WIZARD_STEPS[1].sub)
+  assert.equal(wizardStepSub(2), WIZARD_STEPS[2].sub)
+  assert.equal(wizardStepSub(0), WIZARD_STEPS[0].sub)
+  // step 0 is suppressed only for an org-holding account (read-only summary).
+  assert.equal(wizardStepSub(0, { hasOrg: true }), null)
+  assert.equal(wizardStepSub(0, { hasOrg: false }), WIZARD_STEPS[0].sub)
+  // #3428: no observed connection ⇒ no lede, on EITHER fork, and the default
+  // is the honest one (a caller that forgets `connected` understates).
+  assert.equal(wizardStepSub(3), null)
+  assert.equal(wizardStepSub(3, { connected: false }), null)
+  assert.equal(wizardStepSub(3, { connected: true }), WIZARD_STEPS[3].sub,
+    'buildFork defaults false — a self-fork caller keeps the step sub')
+  // hasOrg is a step-0-only override; connected/buildFork are step-3-only, so
+  // neither leaks into another step's lede (the #2912 leak class).
+  assert.equal(wizardStepSub(2, { connected: true, buildFork: true }), WIZARD_STEPS[2].sub)
+  assert.equal(wizardStepSub(1, { hasOrg: true }), WIZARD_STEPS[1].sub)
+})
+
+test('#3725: the build-fork suppression does not leave the step-3 lede empty without a reason', () => {
+  // The rule is "the body already says it", not "suppress on the build fork".
+  // The self-fork connected screen has no such body (its body is the capture
+  // claim + the harness hand-back), so it keeps the lede; only the build fork
+  // — whose body closes with "Keep calling the SDK from your app." — is
+  // suppressed. Pinned together so a future edit that nulls BOTH (blanking the
+  // self-fork header) or NEITHER (restoring the contradiction) reds here.
+  assert.notEqual(wizardStepSub(3, { connected: true, buildFork: false }), null)
+  assert.equal(wizardStepSub(3, { connected: true, buildFork: true }), null)
 })
