@@ -3,6 +3,7 @@ from __future__ import annotations  # noqa: I001
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
-                          _RESERVED_ACTOR_PROPS)
+                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
@@ -664,7 +665,15 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                                          run_middleware=False, task_meta=task_meta)
     org_id = _current_org_id.get() or ""
     _enforce_mcp_tool_scope(name)
-    maybe_record_mcp_read(name, org_id, _current_org_limits.get())
+    maybe_record_mcp_read(
+        name, org_id, _current_org_limits.get(),
+        # REVIEW-FIX P2 (#4057): `arguments` is the raw PRE-validation dict, and
+        # this metering runs BEFORE the dispatch. So a tool that does not
+        # declare `dry_run` — whose schema will REJECT that key — would be
+        # recorded as a READ the caller never performed. Gate on the declared
+        # preview set, not on key presence in untrusted input.
+        dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
+    )
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
@@ -846,6 +855,39 @@ from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noq
 
 WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 
+# #4057: a tool is dry-run-capable iff its SERVED HANDLER declares a `dry_run`
+# parameter — the fact this metering needs. It is deliberately NOT "the raw
+# argument dict carries a `dry_run` key": that dict is the PRE-validation
+# client input, read BEFORE the dispatch, so a caller could move the read
+# counter for a tool whose schema REJECTS the key (a READ recorded for a call
+# that is then refused). Computed from the declarations and cached (lazy — the
+# handlers are defined below this point — because it sits on the per-call
+# path). `tests/test_dry_run_preview.py::TestPreviewToolSetIsDeclared` pins it:
+# the six preview tools must be in it, a write tool without `dry_run` must not,
+# and the metering behaviour is verified through the real dispatch seam.
+_DRY_RUN_TOOLS: frozenset[str] | None = None
+
+
+def _dry_run_tool_names() -> frozenset[str]:
+    """Registry names whose served handler declares `dry_run` (computed once)."""
+    global _DRY_RUN_TOOLS
+    if _DRY_RUN_TOOLS is None:
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        names = set()
+        for entry in TOOL_REGISTRY:
+            fn = globals().get(entry.name)
+            if fn is None:
+                continue
+            try:
+                params = inspect.signature(fn).parameters
+            except (TypeError, ValueError):  # pragma: no cover - non-callable
+                continue
+            if "dry_run" in params:
+                names.add(entry.name)
+        _DRY_RUN_TOOLS = frozenset(names)
+    return _DRY_RUN_TOOLS
+
 
 # #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
 # keys back outbound calls; the rate limiter alone is not the bound).
@@ -914,6 +956,14 @@ def _alert_unmetered(lane: str, org_id: str | None,
             "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
             "(metering module unavailable)", lane, org_id or "<none>",
             type(error).__name__, error)
+        # The fallback still ALERTS — a log line on an ephemeral Fly rootfs is
+        # the #3677 loss class this lane exists to remove, and this is the one
+        # case where the ledger AND the reporter are both down. The kind
+        # constant lives in ``operator_alert``, importable when ``metering`` is not.
+        with contextlib.suppress(Exception):
+            from tortoise.operator_alert import alert_unmetered_increment
+
+            alert_unmetered_increment(lane, org_id, error)
         return
     report_unmetered_increment(lane=lane, org_id=org_id, error=error)
 
@@ -981,16 +1031,20 @@ def _abuse_off() -> bool:
         return True
 
 
-def maybe_record_mcp_read(name: str, org_id: str, limits: dict | None) -> None:
+def maybe_record_mcp_read(name: str, org_id: str, limits: dict | None,
+                          *, dry_run: bool = False) -> None:
     """#308 (R3, scoping delta 11): read-velocity counting for non-write
     tools/call. Explicit write set (WRITE_TOOL_NAMES) — writes never count
-    as reads. key_id rides the limits ContextVar (Supabase resolutions carry
-    it; registry resolutions may not → per-org counting only there).
-    Best-effort: telemetry never breaks the tool call."""
+    as reads. A ``dry_run=True`` preview of a write tool performs only READS,
+    so it is metered as a read (the alternative is an un-metered enumeration
+    channel that no read-velocity alert can see). key_id rides the limits
+    ContextVar (Supabase resolutions carry it; registry resolutions may not →
+    per-org counting only there). Best-effort: telemetry never breaks the
+    tool call."""
     try:
         if not org_id or org_id == SELFHOST_ORG_ID or _abuse_off():
             return
-        if name in WRITE_TOOL_NAMES:
+        if name in WRITE_TOOL_NAMES and not dry_run:
             return
         from tortoise import abuse as _abuse
         _abuse.record_read((limits or {}).get("key_id"), org_id)
@@ -1140,7 +1194,14 @@ ERR_INVALID = -32003
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
 _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session",
+    # #5004: the embedding's journal IDENTITY keys are server-minted. Rejected
+    # at this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    # `embedding` ITSELF is deliberately NOT here — `create_point` has a
+    # recorded decision (PR #3018 review P2) that a caller-supplied vector is
+    # stored verbatim; the writer marks it `embedding_verbatim` instead.
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+    "embedding_verbatim", "embedding_preserved"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -2017,21 +2078,34 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
                  approver_id, artifact_id, point_ids, decision_content)
 
 
-def tortoise_delete_point(id: str) -> dict:
-    """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
+def tortoise_delete_point(id: str, dry_run: bool = False) -> dict:
+    """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.
+
+    dry_run=True previews the blast radius — the point and every edge that
+    would be removed — and changes nothing; dry_run=False (default) deletes.
+    """
+    if dry_run:
+        return _safe(_preview_delete_point, _get_org_sdk(), id)
     return _safe(_get_org_sdk().delete_point_wrapped, id)
 
 
-def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
+def tortoise_invalidate(id: str, corrected_by_id: str,
+                        dry_run: bool = False) -> dict:
     """Mark a Point outdated with a CORRECTS edge from the correcting Point.
 
     The `corrected_by_id` point CORRECTS the invalidated point.
     Returns {invalidated, id, corrected_by}.
+
+    dry_run=True previews the transition (one point outdated, one CORRECTS
+    edge added) and changes nothing; dry_run=False (default) applies it.
     """
+    if dry_run:
+        return _safe(_preview_invalidate, _get_org_sdk(), id, corrected_by_id)
     return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) -> dict:
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
+                       dry_run: bool = False) -> dict:
     """Atomically replace old Point with new — CORRECTS edge + outdated flag.
 
     transfer_edges=True (default): full supersede — all edges move from old to
@@ -2039,12 +2113,18 @@ def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) ->
     CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
     Returns {invalidated, id, corrected_by} (+ edges_transferred when
     transfer_edges=True).
+
+    dry_run=True previews exactly which edges would transfer and changes
+    nothing; dry_run=False (default) applies the supersede.
     """
+    if dry_run:
+        return _safe(_preview_supersede, _get_org_sdk(),
+                     old_id, new_id, transfer_edges)
     return _safe(_quota_gated(_get_org_sdk().supersede, "points"),
                  old_id, new_id, transfer_edges=transfer_edges)
 
 
-def tortoise_retract_point(id: str) -> dict:
+def tortoise_retract_point(id: str, dry_run: bool = False) -> dict:
     """Tombstone-retract a Point — status='retracted' (point stays in graph).
 
     Terminal state transition; default query/list surfaces exclude retracted
@@ -2052,7 +2132,13 @@ def tortoise_retract_point(id: str) -> dict:
     missing, is an operator, or is already terminal (the shared terminal
     vocabulary: status in live.TERMINAL_EXCLUDED_STATUSES OR the legacy
     outdated=true flag).
+
+    dry_run=True previews the one-node status transition (and runs the same
+    guard, so a rejected input is rejected here too) and changes nothing;
+    dry_run=False (default) retracts.
     """
+    if dry_run:
+        return _safe(_preview_retract_point, _get_org_sdk(), id)
     return _safe(_quota_gated(_get_org_sdk().retract_point, "points"), id)
 
 
@@ -2570,8 +2656,15 @@ def tortoise_update(id: str, props: Any = None) -> dict:
                  id, **(props or {}))
 
 
-def tortoise_delete(id: str) -> dict:
-    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation."""
+def tortoise_delete(id: str, dry_run: bool = False) -> dict:
+    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation.
+
+    dry_run=True previews the blast radius — which node resolves, and every
+    edge that would go with it — and changes nothing; dry_run=False
+    (default) deletes.
+    """
+    if dry_run:
+        return _safe(_preview_delete, _get_org_sdk(), id)
     result = _safe(_get_org_sdk().delete, id)
     if isinstance(result, _SafeError):
         return result
@@ -2790,8 +2883,15 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
         return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
 
-def tortoise_delete_entity(id: str) -> bool:
-    """Delete any entity by ID."""
+def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
+    """Delete any entity by ID.
+
+    dry_run=True returns a preview dict naming the node(s) and every edge
+    that would be removed, and changes nothing; dry_run=False (default)
+    deletes and returns whether a node was found.
+    """
+    if dry_run:
+        return _safe(_preview_delete_entity, _get_org_sdk(), id)
     return _safe(_get_org_sdk().delete_entity, id)
 
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
@@ -4004,6 +4104,496 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 # "Can't connect to Tortoise". Importing callers (tortoise serve via
 # __main__.py, deployment.py) are unaffected: they import the module first
 # (which executes register_all), then call main().
+
+
+# ── Dry-run previews (#4057) ─────────────────────────────────────
+# `dry_run=True` answers "what would this destroy?" and changes NOTHING.
+#
+# A preview is READ-ONLY: it runs the same existence/lifecycle validations
+# the write path runs (so a bad input fails here exactly as the write would,
+# with the same message), then enumerates the nodes and edges the write
+# would touch. It never emits an event, never marks the projection dirty,
+# and never enters `_quota_gated` — that wrapper meters a WRITE, and a
+# preview performs none. It IS wrapped in `_safe`, so the same
+# auth/transport gate that protects the write protects the preview: a dry
+# run is a read, not an auth bypass.
+#
+# The flag is opt-in PREVIEW, not opt-in destruction: `dry_run` defaults to
+# `False`, which is today's behaviour byte-for-byte, so no existing caller
+# changes meaning. Flipping the default to True would make every existing
+# `tortoise_delete(id)` call a silent no-op — a breaking change to the
+# surface, not an additive off-by-default field (the #3986 carve-out).
+#
+# Every preview reports the concrete blast radius. Where the writer's
+# transfer rule is non-trivial (supersede), the preview mirrors the rule and
+# a differential test pins the preview count against the writer's OWN
+# `edges_transferred`, so a drift fails the suite instead of shipping a
+# preview that lies.
+
+_PREVIEW_NOTE = "No changes were made — re-call with dry_run=false to apply."
+
+
+def _preview_result(tool: str, would: str, **fields) -> dict:
+    return {"dry_run": True, "tool": tool, "would": would, **fields,
+            "note": _PREVIEW_NOTE}
+
+
+def _preview_delete_edges(sdk, internal_ids: list) -> list[dict]:
+    """All edges incident to ANY of the nodes, as {type, from, to}.
+
+    Set-based and deduped by INTERNAL edge id. A per-node loop would
+    double-count an edge whose BOTH endpoints are being deleted (once per
+    endpoint), and a logical-id match would return both nodes' edges for each
+    node; `ID(r)` dedup is exact in both cases. Endpoints are reported by
+    LOGICAL identity (id, else eventId/name/url), never the internal id.
+    DETACH DELETE removes each node and every incident edge, so this set IS
+    the delete's edge blast radius.
+    """
+    if not internal_ids:
+        return []
+    rows = sdk._get_proj().g.query(
+        "MATCH (a)-[r]-(b) WHERE ID(a) IN $nids OR ID(b) IN $nids "
+        "RETURN ID(r), type(r), "
+        "coalesce(startNode(r).id, startNode(r).eventId, startNode(r).name, startNode(r).url), "
+        "coalesce(endNode(r).id, endNode(r).eventId, endNode(r).name, endNode(r).url)",
+        params={"nids": internal_ids},
+    ).result_set
+    seen: set = set()
+    out: list[dict] = []
+    for rid, rtype, src, tgt in rows:
+        if rid in seen:
+            continue
+        seen.add(rid)
+        out.append({"type": rtype, "from": src, "to": tgt})
+    return out
+
+
+def _preview_orphan_tags(sdk, internal_ids: list) -> list[str]:
+    """Tags the writer's orphan-GC would delete alongside the Points.
+
+    `delete_point` runs, when the deleted point had any TAGGED edge, a
+    graph-wide `MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`. A tag is
+    removed iff it has no TAGGED edge from a SURVIVING point — which also
+    catches pre-existing orphans. (Only `delete_point` does this;
+    `_delete_entity` does not.)
+    """
+    if not internal_ids:
+        return []
+    rows = sdk._get_proj().g.query(
+        "MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q) "
+        "WITH t, [x IN collect(ID(q)) WHERE NOT x IN $nids] AS survivors "
+        "WHERE size(survivors) = 0 RETURN coalesce(t.name, t.id, t.tag)",
+        params={"nids": internal_ids},
+    ).result_set
+    return [r[0] for r in rows]
+
+
+def _preview_delete_point(sdk, id: str) -> dict:
+    # The writer's `MATCH (n:Point {id:$id}) DETACH DELETE n` deletes EVERY
+    # matching Point, so count internal ids — not a hardcoded 1.
+    proj = sdk._get_proj()
+    internals = [row[0] for row in proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN ID(n)",
+        params={"id": id},
+    ).result_set]
+    edges = _preview_delete_edges(sdk, internals)
+    # Tag GC is gated on the deleted point having a TAGGED edge.
+    has_tags = bool(proj.g.query(
+        "MATCH (n:Point {id:$id})-[:TAGGED]->() RETURN count(*) > 0",
+        params={"id": id},
+    ).result_set[0][0]) if internals else False
+    tags = _preview_orphan_tags(sdk, internals) if has_tags else []
+    return _preview_result(
+        "tortoise_delete_point", "delete",
+        found=bool(internals),
+        target={"id": id, "label": "Point"},
+        nodes_removed=len(internals),
+        edges_removed=len(edges),
+        tags_removed=len(tags),
+        nodes=[id] * len(internals),
+        edges=edges,
+        tags=tags,
+    )
+
+
+def _preview_delete_entity(sdk, id: str) -> dict:
+    # REVIEW-FIX P2 (#4057): the label→id-property table is IMPORTED, never
+    # re-hardcoded. `_delete_entity` (sdk.py) and the replay fold
+    # (`projection._delete_entity_by_id`) both read
+    # `projection._CANONICAL_ENTITY_ID_PROPS`, so a local copy here could drift
+    # — and drift makes this preview UNDER-report the blast radius (a label
+    # whose id property moved would match nothing and silently drop out of the
+    # count), which is the dangerous direction.
+    from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
+    proj = sdk._get_proj()
+    seen: set = set()
+    nodes: list[str] = []
+    for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+        # Dedup by INTERNAL node id: a node carrying two matched labels
+        # (`:Point:Object`) is deleted ONCE — the writer's first DETACH DELETE
+        # removes it and the next label matches 0. Two DISTINCT nodes sharing
+        # an id value are both deleted, and their internal ids differ, so
+        # this neither over- nor under-counts. (Matches the writer, which
+        # never dedups by logical id.)
+        for (internal,) in proj.g.query(
+            f"MATCH (n:{label} {{{prop}:$id}}) RETURN ID(n)",
+            params={"id": id},
+        ).result_set:
+            if internal in seen:
+                continue
+            seen.add(internal)
+            nodes.append(id)
+    # `_delete_entity` does NOT run the Tag GC (only `delete_point` does).
+    edges = _preview_delete_edges(sdk, sorted(seen))
+    return _preview_result(
+        "tortoise_delete_entity", "delete",
+        found=bool(nodes),
+        target={"id": id},
+        nodes_removed=len(nodes),
+        edges_removed=len(edges),
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+def _preview_delete(sdk, id: str) -> dict:
+    """Preview `tortoise_delete` — resolve the label first, exactly as
+    `TortoiseSDK.delete` does, then preview the branch it would take."""
+    resolved = sdk._get_proj()._resolve_entity(id, by_id=True, by_eventId=True)
+    if not resolved:
+        return _preview_result(
+            "tortoise_delete", "delete",
+            found=False,
+            target={"id": id, "label": None},
+            nodes_removed=0,
+            edges_removed=0,
+            nodes=[],
+            edges=[],
+        )
+    label = resolved[0]["label"]
+    out = (_preview_delete_point(sdk, id) if label == "Point"
+           else _preview_delete_entity(sdk, id))
+    out["tool"] = "tortoise_delete"
+    out["target"] = {"id": id, "label": label}
+    return out
+
+
+def _preview_retract_point(sdk, id: str) -> dict:
+    """Preview `tortoise_retract_point` — a ONE-node status flip.
+
+    The shared lifecycle guard runs first, so a missing / operator / already
+    terminal point raises exactly as the write would (no rosy preview over an
+    input the write would reject).
+    """
+    guard = sdk._assert_lifecycle_guard(id, method="retraction")
+    # The writer's CAS carries `WHERE <non-terminal>` and a duplicated id can
+    # mix a live and a terminal node — count only the rows it would stamp.
+    from tortoise.live import _terminal_excluded
+    n_affected = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) WHERE " + _terminal_excluded("n.status") +
+        " RETURN count(n)",
+        params={"id": id},
+    ).result_set[0][0]
+    return _preview_result(
+        "tortoise_retract_point", "retract",
+        found=True,
+        target={"id": id},
+        nodes_affected=n_affected,
+        nodes_removed=0,
+        edges_removed=0,
+        edges_added=0,
+        status={"id": id, "from": guard.get("status") or "live",
+                "to": "retracted", "outdated": guard.get("outdated")},
+    )
+
+
+def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
+    """Preview `tortoise_invalidate` — outdate ONE point, add ONE CORRECTS
+    edge. Both lifecycle guards AND the writer's #5358 inverted-window
+    precondition run first, mirroring the write's validation order and
+    messages.
+
+    The #5358 check reads its own clock, which precedes the writer's. The
+    guarantee is therefore ONE-WAY, in the safe direction: the preview refuses
+    whenever the write would refuse (a start inside the preview→write interval
+    may be refused here and accepted there — conservative, never a false
+    "the write will succeed"). Do NOT "fix" that asymmetry by dropping the
+    shared call: a green preview must mean the write accepts."""
+    if id == corrected_by_id:
+        raise ValueError(
+            f"invalidate_point: corrected_by cannot be the point itself ({id!r})"
+        )
+    old = sdk._assert_lifecycle_guard(
+        id, method="invalidation", role="source", missing_ok=True)
+    if old is None:
+        return _preview_result(
+            "tortoise_invalidate", "invalidate",
+            found=False, invalidated=False,
+            target={"id": id, "corrected_by": corrected_by_id},
+            nodes_affected=0, edges_removed=0, edges_added=0,
+        )
+    sdk._assert_lifecycle_guard(
+        corrected_by_id, method="invalidation", role="corrector")
+    # #5358: mirror the writer's inverted-window precondition — the SAME
+    # shared check `invalidate_point` runs — so the preview cannot report
+    # "would invalidate" for an input the write refuses (#4057's contract:
+    # a preview over an input the write would reject must reject it too).
+    # `_preview_supersede(transfer_edges=False)` reuses this function, so it
+    # inherits the check.
+    from datetime import datetime, timezone
+    sdk._assert_window_start_not_inverted(
+        id, datetime.now(timezone.utc).isoformat())  # noqa: UP017
+    # The writer is `MATCH (a:Point {id:$new}), (b:Point {id:$old}) MERGE
+    # (a)-[:CORRECTS]->(b)` — it binds EVERY matching pair, stamps EVERY
+    # matching old node, and the MERGE adds only pairs that lack the edge.
+    proj = sdk._get_proj()
+    n_old = proj.g.query("MATCH (b:Point {id:$o}) RETURN count(b)",
+                        params={"o": id}).result_set[0][0]
+    pairs_added = proj.g.query(
+        "MATCH (a:Point {id:$n}), (b:Point {id:$o}) "
+        "WHERE NOT (a)-[:CORRECTS]->(b) RETURN count(*)",
+        params={"n": corrected_by_id, "o": id},
+    ).result_set[0][0]
+    edges = [{"type": "CORRECTS", "from": corrected_by_id, "to": id}
+             for _ in range(pairs_added)]
+    return _preview_result(
+        "tortoise_invalidate", "invalidate",
+        found=True, invalidated=True,
+        target={"id": id, "corrected_by": corrected_by_id},
+        nodes_affected=n_old,
+        nodes_removed=0,
+        edges_removed=0,
+        edges_added=len(edges),
+        status={"id": id, "from": old.get("status") or "live",
+                "to": "outdated", "outdated": True},
+        edges=edges,
+    )
+
+
+def _preview_supersede(sdk, old_id: str, new_id: str,
+                       transfer_edges: bool = True) -> dict:
+    """Preview `tortoise_supersede`.
+
+    transfer_edges=False is the invalidate behaviour and reuses that preview.
+    transfer_edges=True enumerates the edges the writer repoints, leg by leg:
+      * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
+        The writer uses CREATE here, so every row becomes its own edge;
+      * 2a-DIRECT operator-less IMPL/NAND incident to old, excluding operator
+        targets. The writer MERGEs, so rows to the same target collapse;
+      * 2b the structural rels in `SUPERSEDE_STRUCTURAL_RELS` (imported from
+        the writer — sdk.py's own named constant), also MERGEs.
+    An edge whose far endpoint IS the successor is delete-only (no phantom
+    self-edge) — reported under `edges_dropped`.
+
+    `edges_transferred_from_old` is the writer's own old-side count — on any
+    graph with no direct IMPL/NAND self-loop at `old` it equals the number the
+    writer reports as `edges_transferred`, and a differential test pins the two
+    together there. It is NOT equal when BOTH of two conditions hold: `old`
+    carries a direct IMPL/NAND self-loop of type `T`, AND no edge
+    `(new)-[r:T]->(old)` of that SAME type already exists. Then the writer is the
+    one that over-counts: its out-pass repoints `(old)-[r:T]->(old)` to
+    `(new)->(old)` and MERGEs that edge into existence — and the MERGE is typed
+    by `rtype`, the self-loop's OWN type (`sdk.py`, `MERGE (new)-[nr:{rtype}]->(t)`) —
+    and its in-pass then matches the freshly created edge and delete-onlys it,
+    booking one removed edge twice — while this preview dedups the two matches
+    and counts the edge ONCE. The TYPE matters: only a same-type edge suppresses
+    the divergence, because only a same-type edge collapses that MERGE. Measured
+    across all six states (self-loop type x pre-existing edge):
+
+        no pre-existing edge   preview 2  writer 3  DIFFER
+        same type              preview 3  writer 3  agree — the MERGE collapses onto
+                                                     it and the in-pass delete-onlys
+                                                     that pre-existing edge, which this
+                                                     preview also counts, under
+                                                     `edges_dropped`
+        opposite type          preview 3  writer 4  DIFFER — nothing to collapse onto,
+                                                     so the out-pass still creates
+
+    Each condition has its own test. This
+    value is the accurate one; the self-loop is reported under `edges_dropped`
+    with the reason "self-loop on the old node". It counts every row the write
+    removes from old, INCLUDING the delete-only rows (`edges_dropped`: a
+    self-loop, or a far endpoint that is the successor / not a Point) that the
+    writer also books as "transferred" while creating nothing.
+    It is therefore NOT "the edges that arrive at the successor": those are
+    `edges_created_at_new` + `edges_already_present_at_new`.
+    `edges_remaining_at_old` is the complementary count — the edges incident to
+    old that the write neither repoints nor removes (e.g. `related`, `TAGGED`,
+    `aboutSource`, an inbound `CORRECTS`, an `alreadyDecided` operator edge via
+    `edges_kept_attached`). Without it a caller cannot read the residual blast
+    radius from any field. The `CORRECTS` edge the write ADDS is not included
+    (it does not exist yet) — see `corrects_edge`.
+    `edges_created_at_new` is the NET-NEW edge count the write creates at the
+    successor (MERGE destinations already present are excluded), and
+    `edges_already_present_at_new` names those no-ops; both are multiplied by
+    `successor_nodes` when a duplicate successor id fans the writer out.
+    """
+    if not transfer_edges:
+        out = _preview_invalidate(sdk, old_id, new_id)
+        out["tool"] = "tortoise_supersede"
+        out["would"] = "invalidate (transfer_edges=false)"
+        out["transfer_edges"] = False
+        return out
+    if old_id == new_id:
+        raise ValueError("supersede_point: old_id and new_id must differ")
+    sdk._assert_lifecycle_guard(old_id, method="supersession", role="source")
+    sdk._assert_lifecycle_guard(new_id, method="supersession", role="target")
+    proj = sdk._get_proj()
+    from tortoise.security import validate_rel_type
+    created: list[dict] = []   # 2a operator edges — CREATE, never collapse
+    merged: list[tuple] = []   # (merge_key, edge) — MERGE-backed legs
+    dropped: list[dict] = []
+    kept: list[dict] = []
+    # INTERNAL ids of every edge the write removes from old (repointed OR
+    # delete-only). Set-keyed so an edge matched by two passes is handled once;
+    # `edges_remaining_at_old` is the incident count minus this set.
+    handled_old_edge_ids: set = set()
+
+    # 2a — operator edges. The writer validates every relationship type BEFORE
+    # any mutation (a raw/imported undeclared type is an injection primitive),
+    # so the preview validates too.
+    for op_id, rtype, _idx, op_label, op_rid in proj.g.query(
+        "MATCH (op:Point {is_operator:true})-[r]->(o:Point {id:$old}) "
+        "RETURN op.id, type(r), r.idx, op.label, ID(r)",
+        params={"old": old_id},
+    ).result_set:
+        validate_rel_type(rtype)
+        if op_label == "alreadyDecided":
+            kept.append({"type": rtype, "from": op_id, "to": old_id,
+                         "reason": "alreadyDecided stays on the superseded prior"})
+        else:
+            created.append({"type": rtype, "from": op_id, "to": new_id})
+            handled_old_edge_ids.add(op_rid)
+
+    succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
+                            params={"id": new_id}).result_set
+    # 2b's self-edge guard mirrors the writer EXACTLY: `succ_rows[0][0]` is a
+    # scalar (the writer reads only the first successor row), so with a
+    # duplicate successor id the writer still transfers an old edge that ends
+    # at a LATER successor. `succ_count` models the writer's MATCH fan-out.
+    succ_first = succ_rows[0][0] if succ_rows else None
+    succ_count = max(len(succ_rows), 1)
+    # Pre-existing edges at the successor: the MERGE-backed legs collapse into
+    # an edge that is already there, so it is NOT net-new ("edges that would
+    # transfer" must not claim a delta the write will not make). SDK-reachable
+    # input: `new` already carrying an edge to the same destination.
+    pre_out = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[r]->(t) RETURN type(r), ID(t)",
+        params={"n": new_id}).result_set}
+    pre_in = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (t)-[r]->(new:Point {id:$n}) RETURN type(r), ID(t)",
+        params={"n": new_id}).result_set}
+
+    # 2a-DIRECT — operator-less IMPL/NAND, both directions. The writer's
+    # exclusion set is built from the far LOGICAL ids (a far node sharing an
+    # operator's id is excluded even if it is not itself an operator), and its
+    # repoint MERGE requires `(t:Point {id:$tid})` — a non-Point far endpoint
+    # is deleted at old and creates nothing.
+    seen_direct: set = set()
+    for direction in ("out", "in"):
+        if direction == "out":
+            dq = ("MATCH (o:Point {id:$old})-[r:IMPL|NAND]->(t) "
+                  "RETURN type(r), t.id, ID(t), labels(t), ID(r)")
+        else:
+            dq = ("MATCH (t)-[r:IMPL|NAND]->(o:Point {id:$old}) "
+                  "RETURN type(r), t.id, ID(t), labels(t), ID(r)")
+        direct_rows = proj.g.query(dq, params={"old": old_id}).result_set
+        far_ids = [row[1] for row in direct_rows]
+        op_ids = {r[0] for r in proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "AND coalesce(p.is_operator,false) = true RETURN p.id",
+            params={"ids": far_ids}).result_set} if far_ids else set()
+        for rtype, tid, t_internal, t_labels, rid in direct_rows:
+            if rid in seen_direct:
+                continue  # a self-loop is matched by BOTH passes
+            seen_direct.add(rid)
+            if tid in op_ids:
+                continue  # operator target — owned by 2a, never repointed
+            handled_old_edge_ids.add(rid)
+            if tid == old_id:
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "self-loop on the old node — its repoint is "
+                                          "undone by the writer's in-pass delete-only"})
+            elif tid == new_id:
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "far endpoint IS the successor — delete-only"})
+            elif "Point" not in (t_labels or []):
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "far endpoint is not a Point — the repoint "
+                                          "MERGE matches nothing (old edge removed)"})
+            else:
+                merged.append((
+                    (rtype, direction, t_internal),
+                    {"type": rtype,
+                     "from": new_id if direction == "out" else tid,
+                     "to": tid if direction == "out" else new_id},
+                ))
+
+    # 2b — structural rels (the writer's own constant — never a local copy).
+    for rel in SUPERSEDE_STRUCTURAL_RELS:
+        for rtype, tid, t_internal, rid in proj.g.query(
+            f"MATCH (o:Point {{id:$old}})-[r:{rel}]->(t) "
+            "RETURN type(r), coalesce(t.id,t.eventId,t.name,t.url), ID(t), ID(r)",
+            params={"old": old_id},
+        ).result_set:
+            handled_old_edge_ids.add(rid)
+            if succ_first is not None and t_internal == succ_first:
+                dropped.append({"type": rtype, "other": tid or new_id,
+                                "reason": "far endpoint IS the successor — delete-only"})
+            else:
+                merged.append(((rtype, "out", t_internal),
+                               {"type": rtype, "from": new_id, "to": tid}))
+
+    # Collapse ONLY the MERGE-backed legs, keyed on the far node's INTERNAL id
+    # (the writer MERGEs by node identity, not by logical id).
+    seen: set = set()
+    merged_final: list[tuple] = []
+    for key, edge in merged:
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_final.append((key, edge))
+    # A MERGE destination that already exists at the successor is a no-op.
+    created_edges: list[dict] = list(created)  # 2a operator CREATEs always create
+    already_present: list[dict] = []
+    for (rtype, direction, t_internal), edge in merged_final:
+        present = ((rtype, t_internal) in pre_out if direction == "out"
+                   else (rtype, t_internal) in pre_in)
+        (already_present if present else created_edges).append(edge)
+    removed_raw = len(created) + len(merged) + len(dropped)
+    # The writer's status write is a bare `MATCH (n:Point {id:$id}) SET …` — it
+    # binds EVERY matching node (no cardinality guard), which is exactly what
+    # `_preview_invalidate` already counts as `n_old`. Mirror it instead of
+    # hardcoding 1.
+    n_old = proj.g.query("MATCH (n:Point {id:$old}) RETURN count(n)",
+                         params={"old": old_id}).result_set[0][0]
+    # Every edge still incident to old after the write removes the handled set.
+    # The writer ADDS only `(new)-[:CORRECTS]->(old)` (reported separately), and
+    # that edge does not exist yet, so it is correctly absent here.
+    incident_at_old = proj.g.query(
+        "MATCH (o:Point {id:$old})-[r]-() RETURN count(r)",
+        params={"old": old_id},
+    ).result_set[0][0]
+    return _preview_result(
+        "tortoise_supersede", "supersede",
+        found=True,
+        transfer_edges=True,
+        target={"old_id": old_id, "new_id": new_id},
+        nodes_affected=n_old,
+        nodes_removed=0,
+        edges_transferred_from_old=removed_raw,
+        edges_remaining_at_old=incident_at_old - len(handled_old_edge_ids),
+        edges_created_at_new=len(created_edges) * succ_count,
+        edges_already_present_at_new=len(already_present) * succ_count,
+        successor_nodes=succ_count,
+        edges_transferred=removed_raw,
+        edges=created_edges + already_present,
+        edges_dropped=dropped,
+        edges_kept_attached=kept,
+        corrects_edge={"type": "CORRECTS", "from": new_id, "to": old_id},
+        status={"id": old_id, "to": "superseded", "outdated": True},
+    )
+
 
 # ── Tool Registry Adapter (#454) — registration (module bottom) ──
 # Executes after EVERY module-level tool function definition above, so the

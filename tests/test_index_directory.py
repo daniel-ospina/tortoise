@@ -231,17 +231,19 @@ def test_meeting_collision_suffix(corpus):
         sdk.close()
 
 
-# ── E2E-3 shape: doc → Source + Document, no Event ─────────────────────
+# ── E2E-3 shape: doc → corpus Source + document Source, no Event ──────
 
 def test_doc_unit_e2e3(corpus):
     sdk = _sdk()
     try:
         sdk.index_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
-        # GLOBAL Source count == 3 (phantom-Source guard: no url=doc_strategy.md)
+        # GLOBAL Source count == 4: 3 corpus Sources + the document Source
+        # (D10 §4.4 — a document IS a :Source keyed url=doc_strategy.md)
         rows = g.query("MATCH (s:Source) RETURN s.url ORDER BY s.url").result_set
-        assert len(rows) == 3
-        assert all("doc_strategy.md" not in r[0] for r in rows)
+        assert len(rows) == 4
+        # exactly ONE node carries the document id (phantom guard)
+        assert [r[0] for r in rows].count("doc_strategy.md") == 1
         u = f"corpus://{corpus.name}/strategy.md"
         srows = g.query(
             "MATCH (s:Source {url:$u}) RETURN s.sourceKind, s.sourceDate, s.sourcePath",
@@ -250,9 +252,9 @@ def test_doc_unit_e2e3(corpus):
         assert srows[0][0] == "document"
         assert srows[0][1] == "2026-08-01T00:00:00+00:00"  # created field
         drows = g.query(
-            "MATCH (d:Document {id:'doc_strategy.md'}) RETURN d.documentKind, "
-            "d.title, d.domain, d.authoredBy, d.doc_status, d.content, "
-            "d.source_url, d.source_path, d.embedding",
+            "MATCH (s:Source {url:'doc_strategy.md'}) RETURN s.documentKind, "
+            "s.title, s.domain, s.authoredBy, s.doc_status, s.content, "
+            "s.source_url, s.source_path, s.embedding",
         ).result_set
         assert len(drows) == 1
         dk, title, domain, ab, ds, content, su, sp, emb = drows[0]
@@ -260,20 +262,18 @@ def test_doc_unit_e2e3(corpus):
         assert title == "GTM Strategy"
         assert domain == "product"          # domain persisted (doc contract)
         assert ab is None                   # authoredBy NOT persisted
-        assert ds == "draft"
-        assert content is None
+        assert ds is None                   # doc_status RETIRED (D10 §4.4)
+        assert content is None              # content RETIRED (D10 §4.4)
         assert su is None and sp is None    # stray-prop guards
         assert emb is None                  # embedding suppression (cycle-19)
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 2
         assert g.query(
-            "MATCH (s:Source {url:$u})-[r:references]->(d:Document {id:'doc_strategy.md'}) "
-            "RETURN count(r)", params={"u": u},
+            "MATCH (s:Source {url:$u})-[r:references]->"
+            "(d:Source {url:'doc_strategy.md'}) RETURN count(r)",
+            params={"u": u},
         ).result_set[0][0] == 1
         # REQUIRED-set sweep clean
-        assert g.query(
-            "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.sourceKind IS NULL "
-            "OR s.contentHash IS NULL OR s.contentHash='' OR s.ingestedAt IS NULL "
-            "RETURN count(s)").result_set[0][0] == 0
+        assert _required_sweep(g) == 0
     finally:
         sdk.close()
 
@@ -502,7 +502,8 @@ def test_non_md_ignored(corpus):
         assert r["ignored"] == 2
         assert r["file_count"] == 3
         g = sdk._get_proj().g
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        # 3 corpus Sources + the document Source for strategy.md (D10 §4.4)
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
     finally:
         sdk.close()
 
@@ -638,7 +639,8 @@ def test_cross_entry_point_convergence(corpus, tmp_path, monkeypatch):
         # file skipped; the meeting + doc are new → indexed (one Source each)
         assert r2["skipped"] == 1 and r2["indexed"] == 2
         g = sdk._get_proj().g
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        # 3 corpus Sources + the strategy.md document Source (D10 §4.4)
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
     finally:
         sdk.close()
 
@@ -729,8 +731,9 @@ def test_concurrent_indexers_threads(corpus):
     check = TortoiseSDK(db, namespace="e2e-900")
     g = check._get_proj().g
     try:
-        # exactly one Source per file, one Event per occurrence, one edge
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        # exactly one Source per file (+ the strategy.md document Source,
+        # D10 §4.4), one Event per occurrence, one edge
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 2
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
                        ).result_set[0][0] == 3
@@ -780,10 +783,21 @@ def test_hash_pair_sweep_clean(corpus):
 
 
 def _required_sweep(g) -> int:
-    """§7 harness pin: no ontology-REQUIRED violation on any Source."""
+    """§7 harness pin: no ontology-REQUIRED violation on any Source.
+
+    D10 (ONTOLOGY v3.15 §4.4): a document is a :Source keyed ``url`` that
+    carries ``documentKind`` and NOT the corpus-source fields ``sourceKind`` /
+    ``contentHash`` (§4.6). Each family is checked against its OWN required
+    set — the corpus clause is byte-identical to the pre-D10 pin, so this is
+    a split, never a relaxation.
+    """
     return g.query(
-        "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.sourceKind IS NULL "
-        "OR s.contentHash IS NULL OR s.contentHash='' OR s.ingestedAt IS NULL "
+        "MATCH (s:Source) WHERE "
+        "  (s.documentKind IS NULL AND (s.url IS NULL OR s.url='' "
+        "   OR s.sourceKind IS NULL OR s.contentHash IS NULL "
+        "   OR s.contentHash='' OR s.ingestedAt IS NULL)) "
+        "  OR (s.documentKind IS NOT NULL AND "
+        "      (s.url IS NULL OR s.url='' OR s.ingestedAt IS NULL)) "
         "RETURN count(s)").result_set[0][0]
 
 
@@ -803,9 +817,19 @@ def test_e2e1_list_sources_flat_rows_and_by_kind(corpus):
     try:
         r = sdk.index_directory(str(corpus), extract_metadata=False)
         rows = sdk.list_sources()
+        # list_sources is the PROVENANCE/corpus registry: 3 corpus Sources.
+        # D10 (#5026): a document node is also a :Source, but it is NOT a
+        # provenance source — it carries documentKind and NO sourceKind, and
+        # its url is not a corpus:// permalink. Including it would add a
+        # sourceKind=None row and double-count the file (corpus Source + doc
+        # node), breaking the by_kind vocabulary pin below. So it is filtered
+        # out, keeping the pre-D10 row set byte-identical.
         assert len(rows) == 3
         kinds = {row["sourceKind"] for row in rows}
         assert kinds == {"agentSession", "meeting_summary", "document"}
+        # the document Source is NOT a listed provenance source
+        assert all(row["url"].startswith("corpus://") for row in rows)
+        assert not [row for row in rows if row["url"] == "doc_strategy.md"]
         assert all(row["points"] == 0 for row in rows)
         assert r["by_kind"] == {"agentSession": 1, "meeting_summary": 1,
                                 "document": 1}
@@ -970,7 +994,8 @@ def test_e2e5_sessionid_removal_old_event_preserved(corpus):
         assert len(ids) == 3
         assert ids == ["meeting_2026-08-05-team-sync", "session_abc123",
                        "session_file_s1"]
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        # 3 corpus Sources + the strategy.md document Source (D10 §4.4)
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
                        ).result_set[0][0] == 4
         # both Events keep their own file_hash (cycle-7 checkpoint: the raw
@@ -1371,8 +1396,11 @@ def test_e2e7_broken_frontmatter_degraded(tmp_path):
         r = sdk.index_directory(str(c), extract_metadata=False)
         assert r["indexed"] == 2 and r["failed"] == 0
         g = sdk._get_proj().g
+        # the FILE's corpus Source (documentKind IS NULL); the D10 document
+        # Source (url=doc_broken.md) is a distinct node with no contentHash
         rows = g.query(
             "MATCH (s:Source) WHERE s.url CONTAINS 'broken.md' "
+            "AND s.documentKind IS NULL "
             "RETURN s.title, s.contentHash").result_set
         assert len(rows) == 1
         assert rows[0][0] == "broken"      # title ← file stem
@@ -1498,7 +1526,7 @@ def test_e2e7_hardlinks_in_out_combo(tmp_path):
 def test_e2e7_malicious_frontmatter(tmp_path):
     """E2E-7(u): doc + session fixtures carrying source_path/source_url/
     evilKey/x_custom frontmatter → BOTH INDEXED with degraded metadata, NO
-    raise, NO stray props on ANY Source/Document/Event node (the whitelist
+    raise, NO stray props on ANY Source/Event node (the whitelist
     drops sanitizer-hostile keys BEFORE _sanitize_props — per-file isolation
     on a correct implementation); the meeting's whitelisted non-contract
     extras land in content_metadata (non-vacuous absorption)."""
@@ -1769,10 +1797,11 @@ def test_e2e9_stale_writer_clobber_session(corpus):
 
 def test_e2e9_stale_writer_clobber_doc(corpus):
     """E2E-9 stale-writer clobber variant parametrized over a DOC file
-    (cycle-4): doc units create NO Event and Documents carry NO file_hash —
-    the Source MERGE branch is SHARED, so the divergence class applies
-    identically; after the clobber s.contentHash == h1 (stale), version ≤ 3;
-    ONE convergence re-run → h2, updated, exactly ONE Document."""
+    (cycle-4): doc units create NO Event and the document :Source carries NO
+    file_hash — the Source MERGE branch is SHARED, so the divergence class
+    applies identically; after the clobber s.contentHash == h1 (stale),
+    version ≤ 3; ONE convergence re-run → h2, updated, exactly ONE document
+    :Source (url=doc_strategy.md; D10 §4.4)."""
     db = _db()
     sdk_a = TortoiseSDK(db, namespace="e2e-900")
     sdk_b = TortoiseSDK(db, namespace="e2e-900")
@@ -1804,7 +1833,7 @@ def test_e2e9_stale_writer_clobber_doc(corpus):
         assert r["updated"] == 1
         assert g.query("MATCH (s:Source {url:$u}) RETURN s.contentHash",
                        params={"u": u}).result_set[0][0] == h2
-        assert g.query("MATCH (d:Document {id:'doc_strategy.md'}) RETURN count(d)"
+        assert g.query("MATCH (s:Source {url:'doc_strategy.md'}) RETURN count(s)"
                        ).result_set[0][0] == 1
         sdk_c.close()
     finally:
@@ -1834,8 +1863,9 @@ def test_e2e9_symlink_pair_concurrency(corpus, lock_dir):
     check = TortoiseSDK(db, namespace="e2e-900")
     g = check._get_proj().g
     try:
-        # base corpus (3 files) + real.md = 4 units; link-a dedups
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
+        # base corpus (3 files) + the strategy.md document Source (D10 §4.4)
+        # + real.md = 5 units; link-a dedups to the realpath Source
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 5
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 3
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
                        ).result_set[0][0] == 4
@@ -1981,10 +2011,10 @@ def test_e2e10_kill_between_session_leg(corpus, monkeypatch, lock_dir):
 
 def test_e2e10_kill_between_doc_leg(corpus, monkeypatch, lock_dir):
     """E2E-10(a) DOC leg (cycle-3): kill between the Source MERGE and the
-    Document upsert — the phantom-Source guard region. Repair re-runs the doc
-    branch WITH the source_url override → Document + auto-wired edge onto the
-    REAL Source; the GLOBAL Source-count guard is re-asserted after the
-    repair (no phantom); no version bump."""
+    document Source upsert — the phantom-Source guard region. Repair re-runs
+    the doc branch WITH the source_url override → document :Source +
+    auto-wired edge onto the REAL corpus Source; the GLOBAL Source-count
+    guard is re-asserted after the repair (no phantom); no version bump."""
     import tortoise.sdk as sdkmod
     sdk = _sdk()
     orig = sdkmod.TortoiseSDK._doc_write
@@ -2004,20 +2034,22 @@ def test_e2e10_kill_between_doc_leg(corpus, monkeypatch, lock_dir):
         u = f"corpus://{corpus.name}/strategy.md"
         assert g.query("MATCH (s:Source {url:$u}) RETURN count(s)",
                        params={"u": u}).result_set[0][0] == 1
-        assert g.query("MATCH (d:Document {id:'doc_strategy.md'}) RETURN count(d)"
+        assert g.query("MATCH (s:Source {url:'doc_strategy.md'}) RETURN count(s)"
                        ).result_set[0][0] == 0
         v_before = g.query("MATCH (s:Source {url:$u}) RETURN s.version",
                            params={"u": u}).result_set[0][0]
         monkeypatch.undo()
         r2 = sdk.index_directory(str(corpus), extract_metadata=False)
         assert r2["updated"] == 1
-        assert g.query("MATCH (d:Document {id:'doc_strategy.md'}) RETURN count(d)"
+        assert g.query("MATCH (s:Source {url:'doc_strategy.md'}) RETURN count(s)"
                        ).result_set[0][0] == 1
         assert g.query(
-            "MATCH (s:Source {url:$u})-[:references]->(:Document) RETURN count(*)",
+            "MATCH (s:Source {url:$u})-[:references]->"
+            "(:Source {url:'doc_strategy.md'}) RETURN count(*)",
             params={"u": u}).result_set[0][0] == 1
-        # no phantom Source: GLOBAL count stays 3
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        # no phantom Source: GLOBAL count == 4 (3 corpus + 1 document Source;
+        # the repair added exactly one — D10 §4.4)
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         assert g.query("MATCH (s:Source {url:$u}) RETURN s.version",
                        params={"u": u}).result_set[0][0] == v_before
         assert _required_sweep(g) == 0
@@ -2638,8 +2670,8 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
     events = log.read_all()          # must NOT raise (line-tolerance)
     assert isinstance(events, list)
     assert log.torn_trailing_count <= 1
-    # rebuild_all over the events dir recovers the node set (Source/Event/
-    # Document nodes; references edges are the S13 drop — the crash-free
+    # rebuild_all over the events dir recovers the node set (Source/Event
+    # nodes; references edges are the S13 drop — the crash-free
     # structural state is the NODE set, restored by a re-index)
     proj = TortoiseSDK(os.path.join(str(tmp_path), "rebuild.db"),
                        namespace="e2e-900")._get_proj()

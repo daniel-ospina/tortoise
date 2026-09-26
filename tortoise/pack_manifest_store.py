@@ -20,7 +20,10 @@ Design (plan §4/§5, test-design #1898 surfaces 7/8):
   stays cached-global read-only; the TENANT VIEW (catalog + tenant's
   manifests) is memoized per ``(tenant_identity, pack_config_version)``
   where the version is a hash of the tenant's ``(namespace, version,
-  sha256)`` manifest tuples — invalidated on any ``:PackManifest`` write.
+  sha256)`` manifest tuples **plus the #2714 approval-set key** (the
+  graph's ``:PackInstall`` namespaces unioned with the namespaces already
+  present in its data, or ``"*"`` when there are no records) — invalidated
+  on any ``:PackManifest`` write or approval-set change.
   NEVER cached globally; the cache key includes tenant identity, so
   isolation is preserved. This also avoids the #1350 perf class (per-call
   manifest re-parse on the hosted extraction hot path).
@@ -46,6 +49,7 @@ from tortoise.pack_state import (
     _pack_install_lock,
     _resolved_graph_name,
     _target_graph,
+    graph_installed_namespaces,
 )
 
 log = logging.getLogger(__name__)
@@ -67,7 +71,10 @@ _ONTOLOGY_ONLY_KEYS = ("connectors", "tools")
 # ── Tenant-view memoization (#1154 + #1350) ────────────────────────────────
 # Key: (tenant_identity, pack_config_version) → compiled view. The shared
 # catalog is NOT in the key (it is cached-global read-only, safe to share);
-# the tenant's manifest set IS (isolation + invalidation). tenant_identity
+# the tenant's manifest set IS (isolation + invalidation), and so is the
+# #2714 approval set (rows ∪ already-in-data; see tenant_view), which the
+# reader computes BEFORE the memo lookup — so a memo hit still pays that
+# reader. tenant_identity
 # = the SDK's resolved graph name (org_{org_id}) — the #2031 consumer
 # path derives it from the tenant-scoped SDK, never from a caller-supplied
 # id (a mismatched id/identity pairing is structurally impossible).
@@ -306,13 +313,17 @@ def delete_tenant_manifest(sdk, namespace: str) -> bool:
 def tenant_view(sdk) -> dict:
     """The tenant's pack view: shared catalog + tenant manifests, memoized.
 
-    Cache key: (graph_identity, pack_config_version) where the version is a
-    hash of the tenant's (namespace, version, sha256) manifest tuples
-    (sha256 in the key since #2031 — the view is the hosted extraction
-    vocabulary source, and the hash is the only cross-process staleness
-    signal; the dirty-set is process-local). Invalidated by any
-    :PackManifest write (dirty-set). The shared catalog is read from the
-    global registry (read-only, safe to share — #1154).
+    Cache key: ``(graph_identity, pack_config_version)`` — a TWO-tuple; the
+    approval set is folded INTO ``version``. The version is a hash of the
+    tenant's ``(namespace, version, sha256)`` manifest tuples AND the
+    approval-set key (``repr(sorted(...))`` of the graph's ``:PackInstall``
+    namespaces unioned with the namespaces already present in its data, or
+    ``"*"`` when there are no records). sha256 is
+    in the key since #2031 — the view is the hosted extraction vocabulary
+    source, and the hash is the only cross-process staleness signal; the
+    dirty-set is process-local. Invalidated by any :PackManifest write
+    (dirty-set). The shared catalog is read from the global registry
+    (read-only, safe to share — #1154).
 
     The tenant identity is the SDK's resolved graph name — callers must
     pass the tenant-scoped SDK (``_make_sdk(namespace=org_id)``); there is
@@ -324,15 +335,55 @@ def tenant_view(sdk) -> dict:
     YAMLs (``yaml``) and the COMPILED value brief (``brief`` — shared
     catalog + this tenant's manifests, via ``compile_value_brief`` per the
     epic plan §4 "no parallel compile path"). ``build_master_list`` reads
-    the brief on the hosted path, so the compile happens once per
-    (graph_identity, pack_config_version) — the #1350 perf guard rides the
-    memo.
+    the brief on the hosted path, so the COMPILE happens once per
+    ``(graph_identity, pack_config_version)`` — the key that carries the
+    approval set inside its version. ⚠️ The #1350
+    perf guard no longer covers the whole call: the approval-set leg is
+    computed BEFORE the memo lookup, and on a graph that HAS
+    ``:PackInstall`` records that is the record read plus one whole-graph
+    kind scan per property (8), paid again on every memo hit. A graph with
+    NO records returns ``None`` after the single record read, so the
+    union-fallback path — every pre-#318 graph, the class indicator 3
+    protects — pays no scans. An index on the kind properties, or a
+    data-version signal in the key, is the optimization.
+
+    #2714 layer 1: the brief is narrowed to the graph's INSTALLED pack set
+    (``installed_namespaces`` on the returned view holds what was used;
+    ``None`` = no ``:PackInstall`` records, catalog union). Because
+    ``build_master_list(sdk)`` renders its ``pack_kinds`` from
+    ``view["brief"]``, narrowing the brief narrows the extractor prompt —
+    without editing ``extractor_v2.py`` (owned by lane L3, #5095). The
+    approval set is part of the memo key, so a NEW namespace appearing in
+    the graph's data recompiles. (An UNINSTALL recompiles because the
+    ``:PackManifest`` tuple changes, not because of the approval set alone:
+    ``delete_tenant_manifest`` flips the record to ``status='removed'``,
+    which this resolver deliberately KEEPS in the set.)
     """
     gid = _graph_identity(sdk)
     manifests = get_tenant_manifests(sdk)
+    # #2714 layer 1 (APPROVAL): the graph's installed pack set gates the
+    # compile. ``None`` ⇒ the graph has NO :PackInstall records ⇒ the catalog
+    # union (back-compat, indicator 3 — every pre-#318 graph).
+    #
+    # The FULL approval set (records ∪ namespaces already present in the
+    # data) is part of the memo key, not just the records. A memoized value
+    # must be a function of its key; a data union excluded from the key would
+    # let the key stay put while the value should change — an imported or
+    # restored graph, or (until #5163 lands) a commit through a write door
+    # that does not yet consult the gate. Keying on it removes that staleness
+    # by construction. Cost: the union runs one whole-graph kind scan
+    # (measured ~6 ms at 300 nodes); an index on the kind properties, or a
+    # cheap data-version signal, is the optimization — correctness first.
+    installed = graph_installed_namespaces(sdk)
+    # repr(sorted(...)) is INJECTIVE over the namespace set; a comma-joined
+    # string is not (a namespace may contain ',', and the data leg derives
+    # namespaces without charset-validating them), and "value is a function
+    # of its key" is the property that keeps this memo from serving a stale
+    # approval set.
+    _installed_key = "*" if installed is None else repr(sorted(installed))
     version = hashlib.sha1(
-        repr(sorted((m["namespace"], m["version"], m["sha256"])
-                    for m in manifests)).encode()
+        repr([*sorted((m["namespace"], m["version"], m["sha256"])
+                      for m in manifests), _installed_key]).encode()
     ).hexdigest()[:12]
     key = (gid, version)
     with _TENANT_VIEWS_GUARD:
@@ -344,9 +395,10 @@ def tenant_view(sdk) -> dict:
     catalog = reg.pack_summaries() if reg is not None else {}
     yamls = _get_tenant_manifest_yamls(sdk)
     from tortoise.value_extractor import compile_value_brief
-    brief = compile_value_brief(tenant_manifests=yamls)
+    brief = compile_value_brief(tenant_manifests=yamls,
+                               installed_namespaces=installed)
     view = {"catalog": catalog, "tenant": manifests, "yaml": yamls,
-            "brief": brief}
+            "brief": brief, "installed_namespaces": installed}
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.discard(gid)
         # #2031 review fix: evict this tenant's prior (gid, version) entries

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import time
@@ -38,6 +40,24 @@ from tortoise.capture_spool import (
 
 REPO = Path(__file__).resolve().parent.parent
 SESSION_START = REPO / "tortoise" / "claude-hooks" / "session-start.sh"
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_real_breadcrumbs(tmp_path, monkeypatch):
+    """No test in this file may READ or UNLINK the developer's real breadcrumb.
+
+    `_clear_breadcrumb_for` (tortoise/capture_spool.py) resolves the path at
+    CALL time from the ambient env and UNLINKS it when the recorded ``session_id``
+    matches. A per-test pin is one test deep: every other success-path flush in
+    this file reaches the same helper with the ambient environment and deletes
+    the real ``~/.tortoise/capture-errors/<harness>.json`` that
+    ``session verify`` reads to report INERT vs PROVEN. The env var redirects
+    BOTH the read and the unlink, so pinning it here makes the whole file
+    hermetic rather than one test.
+    """
+    monkeypatch.setenv(
+        "TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "import-receipts")
+    )
 SESSION_END = REPO / "tortoise" / "claude-hooks" / "session-end.sh"
 SESSION_TURN = REPO / "tortoise" / "claude-hooks" / "session-turn.sh"
 
@@ -246,6 +266,240 @@ def test_a_permanent_4xx_discards_with_a_reason_and_is_never_retried(tmp_path):
     assert second.attempted == 0, "a permanent rejection must never be retried"
 
 
+def _node_that_can_strip_ts() -> str:
+    """The node on PATH, or a SKIP if it cannot run a TYPELESS `.ts` driver.
+
+    Shared, because EVERY `--experimental-strip-types` driver in this file needs
+    the same floor and a floor restated per call site is one that will be
+    omitted: it was missing from two of the three invocations here, so on Node
+    20-22.6 — a host the rest of the suite supports — the driver exits on an
+    unknown flag and a test that should SKIP REDs instead (#4714 review).
+
+    22.7, not 22.6: the driver is typeless with no `package.json`, so it needs
+    ambient module-syntax DETECTION; at 22.6 the flag strips types and the
+    import still fails.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — the node-free pins still ran")
+    try:
+        version = subprocess.run(
+            [node, "--version"], capture_output=True, text=True, timeout=15
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"node could not be probed ({exc}) — the node-free pins ran")
+    match = re.match(r"v(\d+)\.(\d+)", version or "")
+    if not match or (int(match.group(1)), int(match.group(2))) < (22, 7):
+        pytest.skip(f"{version} cannot strip AND auto-detect TypeScript types")
+    return node
+
+
+def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
+    """#4714. The two capture legs classify THE SAME spool directory
+    (``~/.tortoise/capture-spool``), so transient-vs-permanent must be ONE
+    policy, not two independent ones that happen to agree today. The Pi leg is
+    TypeScript and is the one a Python-only fix forgets — leaving 402 permanent
+    there re-opens the data loss, because the next Pi drain unlinks what the
+    Python drain correctly deferred.
+
+    A runtime comparison, not a source-spelling scan: it calls the real Pi
+    `classifyFailure` and compares it to the real Python `classify_failure` over
+    a status matrix. That needs node, so `_assert_both_legs_carry_402` runs
+    unconditionally FIRST — a guard that disappears with a missing runtime is
+    not a guard.
+
+    MUTATION THAT REDS THIS: drop 402 from EITHER classifier -> the maps
+    disagree and the unrecoverable-from-one-leg case is exposed. The final 402
+    pin also catches both legs drifting the SAME way, which a pure comparison
+    cannot.
+    """
+    _assert_both_legs_carry_402()
+
+    node = _node_that_can_strip_ts()
+
+    ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    driver = tmp_path / "classifier-parity.mjs"
+    # `null`/`NaN` are passed THROUGH, not converted to `undefined`: the legs
+    # must agree on the values a real caller can produce, and the conversion
+    # hid the one genuine divergence (JS `classifyFailure(null)` was
+    # "permanent" because `null >= 300` is false).
+    driver.write_text(
+        f'import {{ classifyFailure }} from "{ext}";\n'
+        "const matrix = [null, undefined, NaN, true, false, 0, 200, 301, 400, 402, 403, 408, 409, 422, 425, 429, 500, 503];\n"
+        "const out = {};\n"
+        "for (const s of matrix) out[String(s)] = classifyFailure(s);\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", str(driver)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(REPO),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    pi_map = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # Faithful mapping, not a convenience one: Python has no `undefined`, so it
+    # corresponds to `None` (both mean "no status"); `NaN` maps to an ACTUAL
+    # nan so a non-finite status is genuinely compared. Mapping NaN onto None
+    # would assert `TS(NaN) == Python(None)` and hide the live divergence it
+    # used to cover (Python returned "permanent" for a nan).
+    python_input = {"null": None, "undefined": None, "NaN": float("nan"),
+                    "true": True, "false": False}
+    for raw, verdict in pi_map.items():
+        status = python_input[raw] if raw in python_input else int(raw)
+        assert classify_failure(status) == verdict, (
+            f"the Pi and Python classifiers disagree on status {raw}: "
+            f"pi={verdict!r} python={classify_failure(status)!r}"
+        )
+    # The matrix must actually exercise the transient 4xx family, or the parity
+    # is vacuous. This also catches both legs drifting the same way.
+    assert classify_failure(402) == pi_map["402"] == "retry"
+    # And the no-status rows, which is exactly where the legs diverged.
+    assert pi_map["null"] == pi_map["undefined"] == pi_map["NaN"] == "retry"
+    assert classify_failure(float("nan")) == "retry"
+    # The BOOLEAN rows: in Python a bool IS an int, so `math.isfinite(True)` is
+    # True and the value reached "permanent" (i.e. `_discard_entry`, i.e.
+    # deletion) where `Number.isFinite(true)` is false and the Pi leg said
+    # "retry". A real row, not a hypothetical: it is the one value in the int
+    # domain the two legs classified differently, in the destructive direction.
+    assert classify_failure(True) == pi_map["true"] == "retry"
+    assert classify_failure(False) == pi_map["false"] == "retry"
+    # An ABSOLUTE pin, not only a leg-vs-leg comparison: a same-direction drift
+    # (both legs reclassifying 403's reversible policy state, #4895) would pass a
+    # pure comparison. 403 is deliberately still permanent here.
+    assert classify_failure(403) == pi_map["403"] == "permanent"
+    assert classify_failure(422) == pi_map["422"] == "permanent"
+
+
+def _assert_both_legs_carry_402() -> None:
+    """The node-free half of the parity contract.
+
+    The PYTHON half is checked BEHAVIOURALLY — the interpreter is right here, so
+    there is nothing to forge and no source to misread. (An earlier version
+    parsed the Python source with `ast`; any unreachable `in (...)` node forged
+    it, which is exactly the silent-green failure the pin exists to prevent.)
+
+    The TypeScript half is a SOURCE pin, because without node there is no way to
+    call it: comments are stripped so a commented-out predicate cannot satisfy
+    it. That half proves membership, not behaviour — the behavioural proof is
+    the runtime parity test above and the Pi suite.
+    """
+    for code in (402, 408, 425, 429):
+        assert classify_failure(code) == "retry", (
+            f"Python leg does not treat {code} as transient"
+        )
+    # Pinned the other way too: a same-direction drift that widened the retry set
+    # (e.g. deferring the reversible suspended-org 403, #4895) must red here as
+    # well as in the runtime parity test.
+    for code in (403, 422):
+        assert classify_failure(code) == "permanent", (
+            f"Python leg no longer treats {code} as permanent"
+        )
+
+    ts_raw = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").read_text(
+        encoding="utf-8"
+    )
+    # Strip TS comments before matching: without this, a COMMENTED-OUT predicate
+    # (`// if (status === 402) return "retry";`) satisfies the pin while the real
+    # classifier has dropped the status — a spelling guard a comment can forge is
+    # worse than none. `//` (lookbehind preserves `://`) and `/* */`.
+    ts_src = re.sub(r"/\*.*?\*/", "", ts_raw, flags=re.S)
+    ts_src = re.sub(r"(?<!:)//[^\n]*", "", ts_src)
+
+    ts_codes = {
+        int(code)
+        for group in re.findall(r'if \(([^)]*)\) return "retry";', ts_src)
+        for code in re.findall(r"status === (\d+)", group)
+    }
+    assert ts_codes, "the Pi classifyFailure has no integer transient set"
+    for code in (402, 408, 425, 429):
+        assert code in ts_codes, f"Pi leg dropped {code} from its transient set"
+
+
+def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
+    """#4714. The hosted quota gate refuses a capture whose ESTIMATED point cost
+    would cross the org cap. That estimate is computed from the incoming
+    capture, so the SAME capture lands once a node is freed — the refusal is
+    transient by the definition this module uses.
+
+    Classified permanent, `_flush_one` routed it to `_discard_entry`, which
+    unlinks the turn log and meta: the spool's only copy of the user's session
+    was deleted by the drain, and the shell hooks' own advice ("run `tortoise
+    session drain` to file it") is what triggered the loss.
+
+    MUTATION THAT REDS THIS: drop 402 from the transient set in
+    `classify_failure` -> the entry is discarded, `read_spool_meta` returns
+    None, and the capture is gone.
+    """
+    # The breadcrumb redirect is file-level (`_never_touch_real_breadcrumbs`),
+    # so this test cannot read or unlink the developer's real state.
+    root = tmp_path / "spool"
+    write_spool_entry(root, _snapshot("sess-quota"))
+    quota = _Server(PostOutcome(
+        ok=False, status=402,
+        detail='{"detail":"Team points limit reached: 24956 in use + 48 '
+               'estimated for this capture exceeds 25000. Upgrade your plan."}',
+    ))
+
+    summary = flush_spool(root, quota.post, now=1000.0)
+
+    # Deferred, not discarded — and the capture is still on disk.
+    assert summary.deferred == 1, "a quota refusal must be retried, not dropped"
+    assert summary.discarded == [], "a quota refusal must never discard"
+    assert read_spool_meta(root, "sess-quota") is not None, (
+        "the spool's only copy of the session was destroyed"
+    )
+
+    # And it is genuinely retryable: once the quota allows it, the SAME entry
+    # files without a re-capture.
+    now_ok = _Server(PostOutcome(ok=True, status=200))
+    second = flush_spool(root, now_ok.post, now=10**12)
+    assert second.filed == 1, "the deferred capture must file once the quota clears"
+
+
+def test_a_new_turn_does_not_re_arm_the_retry_window(tmp_path):
+    """#4714 review. The backoff belongs to the ENTRY, not to one snapshot.
+
+    `write_spool_entry` used to hard-code attempts=0 / next_attempt_at_ms=0 into
+    every write, so a session that kept growing re-armed its OWN retry window on
+    every turn: a deferred 402 was re-POSTed at turn cadence with no backoff at
+    all. That matters because the spool is shared by every harness on the box,
+    so any OTHER session's drain fires it too — a retry storm whose rate is set
+    by how fast the user types. The "capped cadence" the module promises held
+    only for a STATIC entry, which is precisely the case a quota-bound org is
+    not in.
+
+    MUTATION THAT REDS THIS: reset attempts/next_attempt_at_ms in
+    `write_spool_entry` -> the window collapses to 0 and the entry is POSTed
+    again 1 ms later.
+    """
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-grow", TURNS[:1]))
+    refused = _Server(PostOutcome(ok=False, status=402, detail="quota"))
+    flush_spool(root, refused.post, now=1000.0)
+
+    after_refusal = read_spool_meta(root, "sess-grow")
+    assert after_refusal["attempts"] == 1
+    window = after_refusal["next_attempt_at_ms"]
+    assert window > 1000.0, "the refusal must arm a backoff window"
+
+    # ONE new turn arrives — the entry grows, and the window must survive it.
+    write_spool_entry(root, _snapshot("sess-grow", TURNS + TURNS[:1]))
+    grown = read_spool_meta(root, "sess-grow")
+    assert grown["attempts"] == 1, "a new turn reset the attempt counter"
+    assert grown["next_attempt_at_ms"] == window, "a new turn re-armed the backoff"
+
+    # A drain 1 ms later must SKIP it, not re-POST.
+    again = _Server(PostOutcome(ok=False, status=402, detail="quota"))
+    summary = flush_spool(root, again.post, now=1000.0 + 1)
+    assert summary.attempted == 0, "an entry inside its backoff window was re-POSTed"
+    assert summary.skipped == 1
+    assert again.posts == 0
+
+
 def test_the_in_flight_409_is_retryable_not_a_lost_write(tmp_path):
     """#3713. MUTATION THAT REDS THIS: treat every 409 as permanent → the entry
     is discarded and the benign in-flight race becomes a lost capture."""
@@ -273,10 +527,169 @@ def test_failure_classification():
     assert classify_failure(409, "already in flight") == "retry"
     assert classify_failure(409, "Session recording is disabled for this team.") == "retry"
     assert classify_failure(409) == "retry"
+    # 402 is TRANSIENT (#4714). The hosted quota gate refuses a capture whose
+    # ESTIMATED cost would cross the org's cap; `est` is computed from the
+    # INCOMING capture, so the identical capture succeeds once a node is freed
+    # or the tier changes. Classified permanent, `_flush_one` routed it to
+    # `_discard_entry`, which unlinked the spool's only copy of the session.
+    assert classify_failure(
+        402,
+        "Team points limit reached: 24956 in use + 48 estimated "
+        "for this capture exceeds 25000.",
+    ) == "retry"
+    # Status-only, never prose: the client ships independently of the wording.
+    assert classify_failure(402) == "retry"
     assert classify_failure(422) == "permanent"
+    # TOTAL over an unusable status — it must return a verdict, never raise.
+    # `math.isfinite(10**400)` raises OverflowError (an int too large to convert
+    # to a float) rather than returning inf, and at origin/main the same input
+    # returned "retry"; an escaping error is STRICTLY worse than either verdict,
+    # because `_spool_if_retryable` swallows it into "spool write failed" and the
+    # capture is never spooled. The Pi leg pins the same magnitude to Infinity
+    # and answers "retry", so an unguarded isfinite also broke cross-leg parity.
+    assert classify_failure(10 ** 400) == "retry"
+    assert classify_failure(float("nan")) == "retry"
+    assert classify_failure(float("inf")) == "retry"
+    assert classify_failure("500") == "retry"
+    # A bool is an `int` in Python, so `math.isfinite(True)` is True and the
+    # value reached "permanent" — i.e. `_discard_entry`, i.e. DELETION of the
+    # capture — where the Pi leg says "retry" (`Number.isFinite(true)` is false
+    # because `isFinite` requires `typeof === "number"`). `0`/`False` is the
+    # same path. Unreachable from the four real call sites, but the one value in
+    # the int domain the legs classified differently, in the DESTRUCTIVE
+    # direction.
+    assert classify_failure(True) == "retry"
+    assert classify_failure(False) == "retry"
+    # `0` is NOT a bool — `isinstance(0, bool)` is False — and BOTH legs read it
+    # as "permanent" (`Number.isFinite(0)` is true, so the Pi leg falls through
+    # too). Pinned here so the reading is deliberate rather than incidental: no
+    # caller can produce a status of 0 (`PostOutcome.status` is an HTTP code or
+    # None), and the two legs agree, which is what the parity test requires.
+    assert classify_failure(0) == "permanent"
 
 
 # ── (6) Dedup / consolidation ──────────────────────────────────────────────
+
+
+def test_the_corrupt_input_helpers_match_the_pi_policy_pins():
+    """The PINNED policy for a corrupt on-disk value — node-free, so it runs
+    even where node is absent. These are the values the Pi leg produces; the
+    runtime comparison in `test_the_corrupt_input_helpers_agree_with_the_pi_leg`
+    is what checks that the Pi leg still produces them.
+
+    The two legs share ONE spool directory, so a corrupt on-disk value must
+    produce the SAME retry cadence on both — otherwise a session refused on the
+    Pi leg waits 16 minutes while the Python leg would have tried it now.
+    The safe reading of an unusable value is "retry now" (0 attempts, window
+    0), which is what the Pi leg's `clampAttempts`/`clampWindow` do.
+
+    MUTATION THAT REDS THIS: `int(meta.get('attempts') or 0)` without the type
+    check -> a stored "5" yields attempt 5 (16 min) instead of 1; drop the
+    `<= 0` arm in `_backoff_ms` -> a negative window round-trips instead of 0.
+    """
+    from tortoise.capture_spool import _attempts, _backoff_ms
+
+    assert _attempts({}) == 0
+    assert _attempts({"attempts": None}) == 0
+    assert _attempts({"attempts": "5"}) == 0, "a numeric STRING is corrupt input"
+    assert _attempts({"attempts": True}) == 0, "a bool is an int in Python"
+    assert _attempts({"attempts": -3}) == 0
+    assert _attempts({"attempts": 3.7}) == 3, "Math.floor, like the Pi leg"
+    assert _attempts({"attempts": 10 ** 400}) == 0, (
+        "the Pi leg reads the same 401-digit bytes as Infinity -> 0 attempts; a "
+        "direct int() here meant 64 attempts, a SIX-HOUR wait")
+    assert _attempts({"attempts": 1e308}) == 64, (
+        "...but a magnitude JS still parses FINITE clamps to the bound")
+    assert _attempts({"attempts": float("nan")}) == 0
+    assert _attempts({"attempts": float("inf")}) == 0
+    assert _attempts({"attempts": 5}) == 5
+
+    assert _backoff_ms({}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": -1}) == 0.0, "clampWindow returns 0"
+    assert _backoff_ms({"next_attempt_at_ms": 0}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": float("inf")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": float("nan")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": 10 ** 400}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": 31_000}) == 31_000.0
+    # A numeric STRING is honoured by `float()` and ZEROED by `clampWindow`:
+    # a future string window made the Python drain HOLD an entry the Pi drain
+    # retried. A bool is the same class (`float(True)` is 1.0, a window of
+    # 1 ms after the epoch).
+    assert _backoff_ms({"next_attempt_at_ms": "1790000000000"}) == 0.0, (
+        "a string window is corrupt input; the Pi leg's clampWindow zeroes it")
+    assert _backoff_ms({"next_attempt_at_ms": True}) == 0.0
+
+
+def test_the_corrupt_input_helpers_agree_with_the_pi_leg(tmp_path):
+    """The RUNTIME half: the same corrupt values through the REAL
+    `clampAttempts`/`clampWindow`, compared against the Python helpers.
+
+    Without this, the policy pins above are a table of constants asserting that
+    Python equals today's Pi behaviour while nothing checks the Pi side — so
+    renaming `MAX_ATTEMPTS`, or changing `Math.floor` to `Math.round`, would
+    leave a test called "agree" green while the legs diverge on shared state.
+    That is the failure class this branch exists to close, so it is compared the
+    same way the status classifier is (a Node driver importing the real
+    module) rather than trusted.
+
+    MUTATION THAT REDS THIS: change `MAX_ATTEMPTS` in the Pi leg -> the `1e308`
+    row's attempt count diverges; drop the `value > 0` guard from `clampWindow`
+    -> the negative rows diverge; drop the `typeof value === "number"` guard
+    from either helper -> the `"5"` and bool rows diverge.
+    """
+    from tortoise.capture_spool import _attempts, _backoff_ms
+
+    node = _node_that_can_strip_ts()
+
+    ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    driver = tmp_path / "clamp-parity.mjs"
+    # NaN/Infinity/undefined are pushed in CODE, not carried in the JSON: Python
+    # emits bare `NaN`/`Infinity` which `JSON.parse` rejects, and `undefined`
+    # has no JSON spelling at all. The JSON half carries only what really can
+    # sit in a spool meta file.
+    driver.write_text(
+        f'import {{ clampAttempts, clampWindow }} from "{ext}";\n'
+        "const vals = JSON.parse(process.argv[2]);\n"
+        "const out = vals.map((v) => [clampAttempts(v), clampWindow(v)]);\n"
+        "out.push([clampAttempts(NaN), clampWindow(NaN)]);\n"
+        "out.push([clampAttempts(Infinity), clampWindow(Infinity)]);\n"
+        "out.push([clampAttempts(undefined), clampWindow(undefined)]);\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    # `10**400` is the important row: Python holds it exactly, JS `JSON.parse`
+    # reads the same bytes as Infinity — which is why `_attempts` goes through a
+    # float, so both legs land on 0 (30 s) instead of Python's 64 (6 h).
+    matrix = [None, True, False, 0, -0.0, -0.5, 3.7, 30_000, 1e308,
+              10 ** 400, "5"]
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", str(driver), json.dumps(matrix)],
+        capture_output=True, text=True, timeout=60, cwd=str(REPO),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    pi_rows = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    expected = [
+        [_attempts({"attempts": v}), _backoff_ms({"next_attempt_at_ms": v})]
+        for v in matrix
+    ]
+    expected += [
+        [_attempts({"attempts": float("nan")}),
+         _backoff_ms({"next_attempt_at_ms": float("nan")})],
+        [_attempts({"attempts": float("inf")}),
+         _backoff_ms({"next_attempt_at_ms": float("inf")})],
+        [_attempts({"attempts": None}), _backoff_ms({"next_attempt_at_ms": None})],
+    ]
+    assert pi_rows == expected, (
+        "the Pi and Python corrupt-input helpers disagree (row order: "
+        f"{[*matrix, 'NaN', 'Infinity', 'undefined']}):\n"
+        f"pi={pi_rows}\npython={expected}"
+    )
+    # An ABSOLUTE pin as well: a same-direction drift would pass a pure
+    # comparison. A magnitude JS still parses FINITE clamps to the bound; one it
+    # reads as Infinity is "retry now".
+    assert pi_rows[8] == expected[8] == [64, 1e308]
+    assert pi_rows[9] == expected[9] == [0, 0.0]
 
 
 def test_an_unchanged_snapshot_is_not_rewritten(tmp_path):
@@ -319,6 +732,11 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
     monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+    # #3615: these tests drive the TRANSMISSION paths (`session capture` /
+    # `session drain`), which now require explicit consent. The local
+    # `session spool` write stays ungated, so tests that only spool do not need
+    # this — setting it here is harmless for them.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
 
 
 def test_cli_capture_writes_the_spool_BEFORE_the_network(tmp_path, monkeypatch):
@@ -745,6 +1163,236 @@ def test_the_transport_defers_every_unwrapped_failure(monkeypatch):
 
 
 
+def test_a_refused_post_that_committed_is_not_reported_as_uncommitted(monkeypatch):
+    """#4675: the spool's terminality rule must not be "a retryable status
+    means nothing committed".
+
+    The transport bound ABANDONS its handler rather than cancelling it, so a
+    504 routinely arrives AFTER the server stored the session and its turns.
+    Reporting that as a failure parks an already-durable session in the spool
+    and `session drain` can never reach `filed N, deferred 0`.
+
+    MUTATION THAT REDS THIS: drop `_refused(...)` from the HTTPError arm — the
+    outcome stays `ok=False` and the entry defers forever.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+
+    payload = {"session_id": "s-committed", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"},
+                                {"role": "assistant", "content": "yo"}]}
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    methods: list[str] = []
+
+    def _open(req, timeout=None):
+        methods.append(req.get_method())
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 504, "refused", None,
+                            io.BytesIO(b'{"detail":"wait budget exceeded"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "extracted": 3,
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(payload["conversation"])]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+
+    assert out.ok is True, out
+    assert out.status == 200, out
+    assert methods == ["POST", "GET"], methods
+    assert out.body == {"confirmed": "filed"}, out.body
+
+
+def test_a_refused_post_whose_turns_are_absent_still_defers(monkeypatch):
+    """The mirror guard: a genuinely pre-commit refusal must keep deferring.
+
+    MUTATION THAT REDS THIS: treat a 404 from the confirming read as filed.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+
+    payload = {"session_id": "s-uncommitted", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"}]}
+
+    def _open(req, timeout=None):
+        raise HTTPError(req.full_url,
+                        504 if req.get_method() == "POST" else 404,
+                        "refused", None, io.BytesIO(b'{}'))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+    assert out.ok is False and out.status == 504, out
+
+
+def test_a_confirmed_refusal_reaches_the_drain_as_FILED(tmp_path, monkeypatch):
+    """End-to-end on the spool contract: a post-commit refusal must leave the
+    entry FILED, not deferred forever.
+
+    `_flush_one` stamps `filed_key`/`filed_at` through its own compare-and-swap
+    only on an `ok` outcome, so this is the assertion that the confirming read
+    actually converges a drain — `filed 1, deferred 0` on a session that is
+    already durable.
+
+    MUTATION THAT REDS THIS: drop `_refused(...)` from the HTTPError arm of
+    `_session_post` — the entry defers on every drain.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+    from tortoise.capture_spool import (
+        Snapshot,
+        flush_spool,
+        read_spool_meta,
+        spool_dir,
+        write_spool_entry,
+    )
+
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = spool_dir()
+    turns = [{"role": "user", "content": "hi"},
+             {"role": "assistant", "content": "yo"}]
+    entry = write_spool_entry(root, Snapshot(
+        session_id="s-drain", turns=turns, source="probe",
+        machine_id="m", model=None, harness="codex"))
+    assert entry.get("written") or entry.get("bytes"), entry
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 504, "refused", None,
+                            io.BytesIO(b'{"detail":"wait budget exceeded"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "extracted": 2,
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(turns)]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    summary = flush_spool(root, _session_post("k", "https://api.example"))
+
+    assert summary.filed == 1, summary
+    assert summary.deferred == 0, summary
+    meta = read_spool_meta(root, "s-drain")
+    assert meta["filed_key"], meta
+    assert meta["filed_at"], meta
+
+
+def test_a_503_stays_deferred_even_when_the_session_is_durable(monkeypatch):
+    """503 is `retry` to the classifier but is in the RECORDED no-receipt set,
+    and the drain applies the same exclusion as `_confirm_already_captured` so
+    the two paths cannot drift. The cost is a deferral, never a loss — the
+    entry is kept and re-posted (see #4925 for the standing question).
+
+    MUTATION THAT REDS THIS: drop `outcome.status == 503` from `_refused` —
+    the drain files a 503 it is supposed to keep deferring.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+
+    payload = {"session_id": "s-503", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"}]}
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 503, "unavailable", None,
+                            io.BytesIO(b'{"detail":"Service Unavailable"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "extracted": 2, "turn_points": [
+            {"id": f"{sid}_t{i}", "role": t["role"], "content": t["content"]}
+            for i, t in enumerate(payload["conversation"])]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+
+    assert out.ok is False and out.status == 503, out
+
+
+def test_an_unextracted_confirmation_is_reported_not_silent(monkeypatch):
+    """#4188/#1529: a confirmed capture whose memory points were never minted
+    must not print an unqualified success. The confirming outcome carries the
+    keyless-mode marker so the caller's existing disclosure fires.
+
+    MUTATION THAT REDS THIS: return `body={"confirmed": verdict}` without
+    `extraction_mode` — the information is lost before the caller sees it.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    from tortoise.__main__ import _session_post
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+
+    payload = {"session_id": "s-keyless", "harness": "codex",
+               "conversation": [{"role": "user", "content": "hi"}]}
+
+    class _Detail(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        if req.get_method() == "POST":
+            raise HTTPError(req.full_url, 504, "refused", None,
+                            io.BytesIO(b'{"detail":"wait budget exceeded"}'))
+        sid = req.full_url.rsplit("/", 1)[-1]
+        detail = {"id": sid, "extracted": 0,
+                  "turn_points": [
+                      {"id": f"{sid}_t{i}", "role": t["role"],
+                       "content": t["content"]}
+                      for i, t in enumerate(payload["conversation"])]}
+        return _Detail(json.dumps(detail).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    out = _session_post("k", "https://api.example")(payload)
+
+    assert out.ok is True, out
+    assert out.body["confirmed"] == "unextracted", out.body
+    assert out.body["extraction_mode"] == _CAPTURE_NO_PROVIDER_MODE, out.body
+
+
 def test_cli_reports_and_excludes_non_conversational_turns(tmp_path, monkeypatch, capsys):
     """`System:` lines are excluded by POLICY (the Pi leg does the same at
     capture) — and the exclusion is REPORTED. Silently posting fewer turns than
@@ -1070,6 +1718,8 @@ def test_cli_drain_accepts_exclude_session_id(tmp_path, monkeypatch, capsys):
     """
     from tortoise import __main__ as cli
 
+    # #3615: the drain TRANSMITS, so it requires explicit consent.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     write_spool_entry(tmp_path, _snapshot("live-resumed"))
     write_spool_entry(tmp_path, _snapshot("interrupted-other"))
     server = _Server()
@@ -1229,9 +1879,6 @@ def test_pi_leg_flush_survives_an_unreadable_turn_log():
     MUTATION THAT REDS THIS: restore the unguarded `readFileSync` in
     `readSpoolTurns` (or `existsSync`-only guard).
     """
-    node = subprocess.run(["node", "--version"], capture_output=True, text=True)
-    if node.returncode != 0:
-        pytest.skip("node not available")
     script = r'''
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1258,7 +1905,8 @@ const doFetch = (_url, init) => {
 await flushSpool({ apiUrl: "http://x", apiKey: "k" }, { dir, fetchImpl: doFetch });
 console.log(JSON.stringify({ posted, discards: readDiscards(dir).map(d => d.reason) }));
 '''
-    proc = subprocess.run(["node", "--experimental-strip-types", "--input-type=module",
+    node = _node_that_can_strip_ts()
+    proc = subprocess.run([node, "--experimental-strip-types", "--input-type=module",
                            "-e", script], cwd=str(REPO), capture_output=True,
                           text=True, timeout=120)
     assert proc.returncode == 0, f"flushSpool must not throw: {proc.stderr}"
@@ -1614,6 +2262,147 @@ def test_a_corrupt_typed_meta_does_not_crash_or_wedge(tmp_path):
     server = _Server()
     summary = flush_spool(tmp_path, server.post, now=1000.0)
     assert summary.filed == 1, "the entry is still filed, not wedged"
+
+
+def test_a_failure_racing_a_successful_filing_does_not_re_arm_the_window(tmp_path):
+    """#4714 cycle-7 review. `_flush_one`'s failure write-back re-reads the meta
+    but never checked whether the content it failed to POST had since been FILED
+    by a concurrent flush of the same `capture_key`. Re-arming the backoff there
+    attaches a window to content that was never refused — and because
+    `write_spool_entry` now CARRIES the window, the next turn's NEW content
+    inherits it and waits up to RETRY_MAX (6 h) with no attempt behind it. Old
+    code wrote (0, 0) here, so its reset cleared the resurrected window; this
+    propagation is the one state the carry-forward makes reachable that the
+    previous behaviour could not.
+
+    MUTATION THAT REDS THIS: drop the `filed_key` guard in the failure
+    write-back -> the resurrected window survives and the next turn inherits it.
+    """
+    from tortoise.capture_spool import _meta_path
+
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-race"))
+
+    def post_filed_underneath(payload):
+        # Simulate a CONCURRENT flush completing a 2xx for this capture_key
+        # while our own POST is still in flight.
+        on_disk = read_spool_meta(root, "sess-race")
+        on_disk["filed_key"] = on_disk["capture_key"]
+        on_disk["attempts"] = 0
+        on_disk["next_attempt_at_ms"] = 0
+        _meta_path(root, "sess-race").write_text(
+            json.dumps(on_disk), encoding="utf-8"
+        )
+        return PostOutcome(ok=False, status=402, detail="quota")
+
+    summary = flush_spool(root, post_filed_underneath, now=1000.0)
+    assert summary.attempted == 1
+    assert summary.skipped == 1, "a failure for superseded content is not a retry"
+    assert summary.deferred == 0
+
+    after = read_spool_meta(root, "sess-race")
+    assert after["attempts"] == 0, "the failure re-armed a window on filed content"
+    assert after["next_attempt_at_ms"] == 0, "a resurrected window was attached"
+
+    # And the NEXT turn must not inherit a window it never earned.
+    write_spool_entry(root, _snapshot("sess-race", TURNS + TURNS[:1]))
+    grown = read_spool_meta(root, "sess-race")
+    assert grown["next_attempt_at_ms"] == 0, (
+        "new content inherited a backoff window it never earned"
+    )
+
+
+def test_a_deferred_only_drain_is_counted_not_silent(tmp_path):
+    """#4714 review. Moving 402 from "discard" to "defer" removed the drain's
+    only signal for a quota-blocked spool: a window-held entry is neither
+    attempted nor discarded, so the summary line's trigger
+    (`attempted or discarded or probe_refusals`) was false and the drain printed
+    NOTHING while captures sat unfiled — the old behaviour at least named a
+    discard. `held_by_backoff` is that missing signal.
+
+    MUTATION THAT REDS THIS: drop the `held_by_backoff` increment.
+    """
+    root = tmp_path
+    write_spool_entry(root, _snapshot("sess-wait"))
+    flush_spool(
+        root,
+        _Server(PostOutcome(ok=False, status=402, detail="quota")).post,
+        now=1000.0,
+    )
+
+    again = _Server()
+    summary = flush_spool(root, again.post, now=1000.0 + 1)
+    assert summary.attempted == 0
+    assert summary.skipped == 1
+    assert summary.held_by_backoff == 1, (
+        "a window-held entry is invisible to the drain and to the operator"
+    )
+    assert again.posts == 0
+
+
+def test_an_absurd_finite_window_is_treated_as_corrupt_not_honoured(tmp_path):
+    """#4714 review. Non-finite was closed, but ANY finite value passed: a window
+    ~258 years out is equally not a window, and because the write path now
+    CARRIES it, it was re-written on every turn — stranding the entry forever
+    while every surface reported nothing wrong. A legitimately written window is
+    at most `written_at + RETRY_MAX`.
+
+    MUTATIONS THAT RED THIS: honour a window beyond now + RETRY_MAX; drop the
+    `_carried_window` bound.
+    """
+    from tortoise.capture_spool import _carried_window, _meta_path
+
+    assert _carried_window({"next_attempt_at_ms": 9.9e15}) == 0.0
+    assert _carried_window({"next_attempt_at_ms": 31_000.0}) == 31_000.0
+
+    write_spool_entry(tmp_path, _snapshot("sess-far"))
+    meta_path = _meta_path(tmp_path, "sess-far")
+    meta = read_spool_meta(tmp_path, "sess-far")
+    meta["next_attempt_at_ms"] = 9.9e15
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.attempted == 1, "an absurd finite window stranded the entry"
+    assert summary.filed == 1
+
+
+def test_a_non_finite_backoff_cannot_make_an_entry_unfileable(tmp_path):
+    """#4714 review. The backoff is CARRIED across turns now, so a stored
+    `inf` would be preserved on every write: `inf > now_ms` is true forever, the
+    entry would never be POSTed, and every surface would still report "will
+    retry" — a promise that can never be kept. `float(10**400)` raises
+    `OverflowError` rather than returning `inf`, and that helper runs on the
+    WRITE path, so an uncaught one would break `session spool`'s exit 0.
+
+    MUTATIONS THAT RED THIS: return the raw float from `_backoff_ms`; drop
+    `OverflowError` from either guard; use `int()` unguarded where the backoff
+    is armed.
+    """
+    from tortoise.capture_spool import _attempts, _backoff_ms, _meta_path
+
+    assert _backoff_ms({"next_attempt_at_ms": float("inf")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": float("nan")}) == 0.0
+    assert _backoff_ms({"next_attempt_at_ms": 10**400}) == 0.0
+    assert _attempts({"attempts": float("inf")}) == 0
+    assert _attempts({"attempts": 10**400}) <= 64, (
+        "an absurd attempt count must saturate, not exponentiate"
+    )
+
+    write_spool_entry(tmp_path, _snapshot("sess-inf"))
+    meta_path = _meta_path(tmp_path, "sess-inf")
+    meta = read_spool_meta(tmp_path, "sess-inf")
+    meta["next_attempt_at_ms"] = 1e400  # inf
+    meta["attempts"] = 10**400
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    # The WRITE path must not raise (session spool always exits 0)...
+    write_spool_entry(tmp_path, _snapshot("sess-inf", TURNS + TURNS[:1]))
+    # ...and the entry must still be POSTed, not skipped forever.
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.attempted == 1, "a non-finite backoff made the entry un-fileable"
+    assert summary.filed == 1
 
 
 def test_the_turn_hook_records_an_unreadable_transcript(tmp_path):

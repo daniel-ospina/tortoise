@@ -203,15 +203,22 @@ class TestHnswAutoUpdate:
         not served by the index until re-written (index is write-maintained).
         This is the known caveat: CREATE the index first, then write nodes."""
         g = _graph
-        # Node created BEFORE the index existed (simulate by using a label the
-        # index doesn't cover — Document has no vector index by default).
+        # Node created BEFORE the index existed. The label is a PROBE label,
+        # exclusive to this test, on purpose: the assertion below reads only
+        # the top-5 hits, so if the label were shared with the rest of the
+        # suite (as `:Object` is — ONTOLOGY §12.1b) the re-written node could
+        # be pushed out of the top 5 by unrelated neighbours and the test
+        # would flake on a shared graph without anything being wrong. The
+        # caveat under test is about index CREATION ORDER, not about which
+        # real node kind carries the vector. The retired `:Document` label
+        # (D10 #5026) no longer exists, so it cannot serve as that placeholder.
         g.query(
-            "CREATE (n:Document {id: $id, name: 'pre', embedding: vecf32($vec)})",
+            "CREATE (n:HnswPreIndexProbe {id: $id, name: 'pre', embedding: vecf32($vec)})",
             params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
         )
-        _ensure_vector_index(g, "Document")
+        _ensure_vector_index(g, "HnswPreIndexProbe")
         hits = g.query(
-            f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "  # noqa: F541
+            "CALL db.idx.vector.queryNodes('HnswPreIndexProbe', 'embedding', 5, vecf32($vec)) "
             "YIELD node, score RETURN node.id",
             params={"vec": _vec([(0, 0.9)])},
         ).result_set
@@ -224,11 +231,11 @@ class TestHnswAutoUpdate:
         try:
             # A re-write makes it queryable.
             g.query(
-                "MATCH (n:Document {id: $id}) SET n.embedding = vecf32($vec)",
+                "MATCH (n:HnswPreIndexProbe {id: $id}) SET n.embedding = vecf32($vec)",
                 params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
             )
             hits2 = g.query(
-                f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "  # noqa: F541
+                "CALL db.idx.vector.queryNodes('HnswPreIndexProbe', 'embedding', 5, vecf32($vec)) "
                 "YIELD node, score RETURN node.id",
                 params={"vec": _vec([(0, 0.9)])},
             ).result_set
@@ -236,5 +243,5 @@ class TestHnswAutoUpdate:
                 f"re-write should make vector queryable, got {hits2} " \
                 f"(pre-index served={pre_served})"
         finally:
-            g.query("MATCH (n:Document {id: $id}) DETACH DELETE n",
+            g.query("MATCH (n:HnswPreIndexProbe {id: $id}) DETACH DELETE n",
                     params={"id": "hnsw247_pre"})

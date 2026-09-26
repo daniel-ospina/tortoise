@@ -162,6 +162,41 @@ class TestCreateOperator:
         with pytest.raises(ValueError, match="op_type must be"):
             sdk.create_operator("FOOBAR", "x", ["y"])
 
+    def test_mitigates_is_not_an_operator_kind(self, sdk):
+        """#4937 (F1 ruling on #2552): MITIGATES left the generic operator
+        menu. The refusal must NAME mitigate_operator — a bare 'invalid
+        op_type' leaves the caller with no route to the mechanism."""
+        a, b = _make_point(sdk), _make_point(sdk)
+        with pytest.raises(ValueError) as exc:
+            sdk.create_operator("MITIGATES", a["id"], [b["id"]])
+        msg = str(exc.value)
+        assert "MITIGATES is not an operator kind" in msg
+        assert "mitigate_operator" in msg
+        # No operator node was written (the raise precedes any mutation).
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Point) WHERE o.is_operator = true RETURN count(o)"
+        ).result_set[0][0] == 0
+
+    def test_mitigates_label_is_not_a_builtin_menu_entry(self, sdk):
+        """#4937: the generic operator menu is IMPL/NAND (+ pack-declared
+        relations). Spelling MITIGATES as a label no longer silently rides
+        the built-in fallback — it is warned as undeclared (warn-not-block)."""
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="MITIGATES")
+        assert op["op_type"] == "IMPL"
+        assert any(w.get("code") == "undeclared_relation"
+                   for w in op.get("warnings", [])), op.get("warnings")
+
+    def test_ingest_mitigates_operator_is_refused_with_the_path(self, sdk):
+        """#4937: the ingest operator menu is IMPL/NAND (+ part/whole); a
+        MITIGATES connection is refused with the correct path named."""
+        violations: list[dict] = []
+        sdk._check_connection(0, {"operator": "MITIGATES", "from": "a",
+                                  "to": "b"}, violations)
+        msg = " ".join(v["message"] for v in violations)
+        assert "MITIGATES is not an operator kind" in msg, msg
+        assert "mitigate_operator" in msg, msg
+
     def test_invalid_direction_raises(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
         with pytest.raises(ValueError, match="direction must be"):
@@ -871,24 +906,25 @@ class TestSanitizeProps:
         assert "sourcePath" not in doc
 
     def test_create_document_links_extracted_from_source(self, sdk):
-        """#394: create_document wires Document → Source via extractedFrom."""
+        """#394 + D10: create_document wires the document Source → Source via
+        extractedFrom (a document is a :Source)."""
         doc = sdk.create_document(
             "Sourced", "planDoc", extractedFrom="https://docs.example.com/spec"
         )
         proj = sdk._get_proj()
         r = proj.g.query(
-            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s:Source {url:$url}) "
+            "MATCH (d:Source {url:$did})-[:extractedFrom]->(s:Source {url:$url}) "
             "RETURN count(*) > 0",
             params={"did": doc["id"], "url": "https://docs.example.com/spec"},
         ).result_set
         assert r[0][0] is True
 
     def test_create_document_no_extracted_from_no_edge(self, sdk):
-        """#394: without extractedFrom, no Document→Source edge is created."""
+        """#394 + D10: without extractedFrom, no extractedFrom edge is created."""
         doc = sdk.create_document("Unsourced", "planDoc")
         proj = sdk._get_proj()
         r = proj.g.query(
-            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s) RETURN count(s)",
+            "MATCH (d:Source {url:$did})-[:extractedFrom]->(s) RETURN count(s)",
             params={"did": doc["id"]},
         ).result_set
         assert r[0][0] == 0
@@ -915,10 +951,10 @@ class TestSanitizeProps:
             sdk.update_point(p["id"], source_path="/etc/passwd")
 
     def test_create_event_document_mint_safe_and_unsafe_ids(self, sdk):
-        # Safe basename id mints a Document
+        # Safe basename id mints a document Source (D10: a document is a :Source)
         sdk.create_event("ev1", "meeting", object="session-2026-08-07.md", objectType="Document")
         rows = sdk._get_proj().g.query(
-            "MATCH (d:Document {id:$id}) RETURN count(d)",
+            "MATCH (s:Source {url:$id}) RETURN count(s)",
             params={"id": "session-2026-08-07.md"},
         ).result_set
         assert rows[0][0] == 1
@@ -934,6 +970,24 @@ class TestSanitizeProps:
         pid = f"op-{uuid.uuid4().hex[:8]}"
         p = sdk.create_point("statement", "Explicit", id=pid)
         assert p["id"] == pid
+
+
+class TestDocumentFtsPostRetrievalFilters:
+    """D10 (#5026): ``tortoise_fts_query(entity_type='document')`` must
+    address the document :Source on EVERY post-retrieval clause. The kind
+    filter and the recency re-rank interpolate a graph label + id field into
+    Cypher; before the fix the label was still ``:Document`` (matches nothing
+    ⇒ ``kind_ids`` empty ⇒ results silently emptied) and the id field was
+    ``id`` instead of ``url``."""
+
+    def test_document_with_kind_returns_the_document(self, sdk):
+        doc = sdk.create_document("Licensing Brief", "brief")
+        hits = sdk.tortoise_fts_query("licensing", entity_type="document",
+                                      kind="brief")
+        ids = {h["id"] for h in hits}
+        assert doc["id"] in ids, \
+            f"document emptied by the post-retrieval kind filter: {hits}"
+        assert all(h.get("point_kind") == "brief" for h in hits), hits
 
 
 # ── Phase-4 promotion + draft queue (#785) ────────────────────────────

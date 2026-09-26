@@ -8,9 +8,10 @@
 
 | Type | Version | Emitted by | Payload fields | Producer surface |
 |---|---|---|---|---|
-| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt`. `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
+| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt` and — since #5004 — `embedding` plus, on a creating record, its identity keys (see the JSONL shape notes below). `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
-| `PointRetracted` | 1 | `TortoiseSDK.retract_point` | `id` | SDK |
+| `PointRetracted` | 1 | `TortoiseSDK.retract_point` (**tombstone** — `status='retracted'`, node kept; the JSONL line is what makes it durable) AND `TortoiseSDK.delete_point` / `TortoiseSDK.delete` (**hard delete** — emitted as a **`:GraphEvent`-only subscriber row**, no JSONL line; the durable record for that delete is the `EntityMutated` row below, because one event type must not carry two live end-states, #3300) | `id` | SDK |
+| `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (non-`Point` labels: `restatus` when `status` is written, else `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). Designed on #3299; the op set was extended by #3312 (unjournaled update) and #3300 (Point delete). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
 | `PointInvalidated` | 1 | `TortoiseSDK.invalidate_point` (#2488) | `id`, `corrected_by` | SDK |
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
@@ -33,8 +34,26 @@
 The table above documents the `:GraphEvent` **payload**. The JSONL rebuild
 journal that `rebuild_all` replays is a *second*, differently-shaped store:
 `_emit_event` writes the envelope (`event_id`/`ts`/`type`/`initiated_by`/
-`projection_version`) plus the record's own fields. Four folds carry props that
-the payload does not name:
+`projection_version`) plus the record's own fields. Several folds carry props
+that the payload does not name:
+
+- **The Point-snapshot folds (`PointAdded`, `PointPromoted`) and the capture
+  turn** (#5004) — the `point` snapshot now also carries the embedding, which
+  is a *node* property and stays one: `embedding` (the vector as stored, or an
+  explicit `null`), plus — on a **creating** record only — the identity the
+  vector was computed under, `embedding_model` / `embedding_revision` /
+  `embedding_text_hash`, and (turn records that preserved an older vector)
+  `embedding_preserved`. The identity keys describe the record; they are never
+  node properties (the fold's `_POINT_HANDLED` drops them). A re-emitted
+  snapshot (`PointPromoted`) carries the vector with **no** identity, and the
+  `embedding_verbatim` marker rides the snapshot — the replay SETs it as a
+  node property to reproduce the graph-only restore. **Presence is
+  ownership:** a record that owns the field writes the key (vector or explicit
+  `null`), and the replay restores / clears / leaves — it never re-encodes; a
+  record with the key ABSENT is legacy (strip-era) and recomputes. The paths
+  still outside the rule are enumerated — and must stay enumerated — in
+  `docs/durability-posture.md` → *Derived properties that are STORED, not
+  recomputed*; do not restate the list here (it has drifted once already).
 
 - **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
   **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/
@@ -54,23 +73,23 @@ the payload does not name:
   labels are validated against a frozen vocabulary (an unknown/malformed value
   is a 0-row NO-OP, never interpolated into Cypher).
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
-  live capture MERGE is a raw write). Fields: `id`, `created_at`,
-  `turn_count`, `is_episodic`, `harness`, `actor_user_id`, and (on the
-  follow-up emission) `entity_links_attempted` / `entity_links_created`, and
-  (on a third, TRAILING emission written right after the live `SET
-  s.capture_ok / s.capture_extractor`) `capture_ok` / `capture_extractor`.
-  The first emission's payload is `{id, created_at, turn_count, is_episodic}`
-  plus `harness` / `actor_user_id` when set. Folded by
+  live capture MERGE is a raw write). Four are emitted per capture, in this
+  order: (1) the opening record — `{id, created_at, turn_count, is_episodic}`
+  plus `harness` / `actor_user_id` when set; (2) a trailing record written by
+  `sdk._write_capture_turns` right after its batched turn statement, carrying
+  `capture_redactions` (#4911); (3) after the entity-linking pass, carrying
+  `entity_links_attempted` / `entity_links_created`; (4) the final, trailing
+  record written right after the live `SET s.capture_ok /
+  s.capture_extractor`, carrying `capture_ok` / `capture_extractor`.
+  Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
   `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
   `actor_user_id` (first writer wins) and taking `turn_count`, `harness`,
-  `entity_links_attempted`, `entity_links_created`, `capture_ok` and
-  `capture_extractor` from the latest record (last writer wins). The capture
-  then emits a **second** `SessionRecorded` after the entity-linking pass
-  carrying the two outcome counters, and a **third** after the
-  attempt-outcome write carrying `capture_ok` / `capture_extractor`, so all
-  of those fields are durable on the `apply()`-based engines too (the first
-  record is emitted before either result is known and cannot carry them; a
+  `capture_redactions`, `entity_links_attempted`, `entity_links_created`,
+  `capture_ok` and
+  `capture_extractor` from the latest record (last writer wins). Each later
+  record exists so a field is durable on the `apply()`-based engines too (the
+  opening record is emitted before any result is known and cannot carry them; a
   null `capture_ok` would otherwise read as the legacy "presumed captured"
   case at the #2335 retry gate).
 

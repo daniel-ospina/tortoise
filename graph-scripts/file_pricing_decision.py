@@ -1,4 +1,27 @@
-"""File the Pro + Team pricing decision to the Tortoise graph.
+"""⚠️ SUPERSEDED — THE OPTION SET BELOW IS NOT OUR PRICE LIST. Do not use this to file pricing.
+
+The decided tiers are **free $0 · solo $9 · pro $25 · team $149**, confirmed by the owner on
+2026-08-07 and recorded in ``product/pricing.json`` (``"status": "current"``,
+``"owner_confirmed": "2026-08-07"``). ``tortoise/pricing.py`` names that file the canonical source.
+
+What this script writes — ``decision:pro-49``, ``decision:team-per-seat-99`` and the $29 / $79 /
+flat-$99 / flat-$199 rejections — is a **historical worked example of the decide flow**, authored
+against an option set that was **not** adopted. It is kept as a reference implementation of
+criteria → options → findings → IMPL/NAND edges → ``compute_confidence``; the pricing points it
+would file are superseded by the canonical values above.
+
+Before running it against any graph, note that the write call is **stale, so the script files
+nothing**: ``sdk.create_point(pid, content, context=ctx)`` passes ``context``, which was **removed**
+(#49) and now raises ``TypeError``; the call's first argument also binds to ``kind``, not a ``pid``
+parameter — ``create_point`` has none, so the intended id is never used as one, and ``_validate_kind``
+only *warns* on the unregistered kind (any string is accepted; it does not reject). The ``TypeError``
+raises inside the loop's ``try/except``, which prints a ``⚠`` per entry and continues, so a run
+reports failures and creates no points — and still closes with a ``Done. Decision filed …`` line,
+which is false. It is inert, not merely superseded. To file points idempotently use
+``create_or_update_point`` (content-hash dedup); to correct an existing point use ``supersede_point``,
+which deletes nothing.
+
+Original purpose — file the Pro + Team pricing decision to the Tortoise graph.
 
 Run after verifying FalkorDB is up and TORTOISE_DB_URI is set:
   cd "$(dirname "$0")/.."

@@ -31,7 +31,8 @@ ONTOLOGY_CYPHER: dict[str, str] = {
     "episodic":  "MATCH (e:Event) RETURN e ORDER BY e.startedAt DESC LIMIT 50",
     "epistemic": "MATCH (p:Point) RETURN p ORDER BY p.createdAt DESC LIMIT 50",
     "semantic":  "MATCH (n) WHERE n:Subject OR n:Object RETURN n LIMIT 50",
-    "docIndex":  "MATCH (d:Document) RETURN d ORDER BY d.createdAt DESC LIMIT 50",
+    "docIndex":  "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+                 "RETURN s ORDER BY coalesce(s.updatedAt, s.ingestedAt) DESC LIMIT 50",
 }
 
 
@@ -290,7 +291,7 @@ def merge(
 def _inferType(ontology: str) -> str:
     """Infer entity type from ontology name (aligned with ONTOLOGY §2.2 kind tags)."""
     return {"episodic": "Event", "epistemic": "Point",
-            "semantic": "Entity", "docIndex": "Document"}.get(ontology, "unknown")
+            "semantic": "Entity", "docIndex": "Source"}.get(ontology, "unknown")
 
 
 def _entityAnchoredCypher(entityId: str, ontologies: list[str]) -> dict[str, str]:

@@ -68,6 +68,12 @@ from pathlib import Path
 import httpx
 import pytest
 
+# Shared nested-def-on-loop walkers (#4625 review) — one home for both guards,
+# so Guard A's blindness to an invoked local closure cannot drift back in.
+from tests._loop_ast import callee_name as _callee_name
+from tests._loop_ast import nested_defs_invoked_on_loop as _nested_defs_invoked_on_loop
+from tests._loop_ast import offload_boundary_eager_children as _offload_boundary_eager_children
+
 # The authenticated TestClient fixture (temp-DB SDK patching + the module-level
 # env the app needs on import). Imported for the fixture, not for the tests.
 from tests.test_hosted_api import TEST_ORG_ID
@@ -458,6 +464,12 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     "session_key", "public_demo", "github_callback", "backups_create",
     "backups_restore", "backups_sweep", "backups_purge", "backups_rebaseline",
     "backups_drill", "backups_drill_scheduled", "webhooks_stripe",
+    # #4355: the replacement-aware rotate route. Same declared residual as its
+    # siblings create_api_key / revoke_api_key — its READS are off-loaded
+    # (_rotatable_key_row, api_key_occupies_slot, _claim_key_revocation via
+    # asyncio.to_thread) but _mint_key is inline exactly as create_api_key's
+    # is, so the mint stays atomic under the same all-sync critical section.
+    "rotate_api_key",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
@@ -473,15 +485,12 @@ _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     "_rollback_restore_name_race", "_trash_name_conflict",
     "_require_owner_admin", "_require_owner", "_registry_mismatch_accept_v2",
     "_registry_accept_by_id", "_quarantine_import", "_run_indexing",
+    # #4355: the mint's #528 analytics actor resolution, extracted verbatim out
+    # of create_api_key so the rotate route shares it (one implementation). It
+    # was inline-on-the-loop before the extraction and still is — same residual,
+    # now named.
+    "_key_created_analytics",
 })
-
-
-def _callee_name(func: ast.expr) -> str | None:
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return None
 
 
 def _graph_bound_names(node: ast.AST) -> set[str]:
@@ -512,83 +521,6 @@ def _graph_bound_names(node: ast.AST) -> set[str]:
     return names
 
 
-def _offload_boundary_eager_children(call: ast.Call):
-    """Arguments of an offload-boundary call that are evaluated EAGERLY.
-
-    A callable REFERENCE (Lambda / Name / Attribute) is handed to the worker
-    and skipped — at ANY position, since the callable sits at index 0 for
-    ``to_thread`` but at index 1 for ``run_in_executor`` / ``_run_with_close``.
-    Every other argument (a Call, a comprehension, ...) is evaluated on the
-    loop, so the caller must still scan it.
-    """
-    for arg in call.args:
-        if isinstance(arg, (ast.Lambda, ast.Name, ast.Attribute)):
-            continue
-        yield arg
-    for kw in call.keywords:
-        if isinstance(kw.value, (ast.Lambda, ast.Name, ast.Attribute)):
-            continue
-        yield kw.value
-
-
-def _direct_nested_invocations(statements, nested_names: set[str],
-                               descend: set[str]) -> set[str]:
-    """Nested-def names INVOKED (``name(...)``) on the loop.
-
-    Only a bare CALL is an invocation: a callable REFERENCE handed to an
-    offload boundary (``asyncio.to_thread(_read)``) runs in the worker and is
-    not one — which is what keeps an off-loaded closure out of the scan. The
-    walk descends into the bodies of nested defs already known to run on the
-    loop (``descend``) so a chain of nested invocations is followed.
-    """
-    found: set[str] = set()
-
-    def walk(current: ast.AST) -> None:
-        if isinstance(current, ast.Call):
-            if _callee_name(current.func) in _OFFLOAD_BOUNDARY_CALLEES:
-                for child in _offload_boundary_eager_children(current):
-                    walk(child)
-                return
-            name = _callee_name(current.func)
-            if name in nested_names:
-                found.add(name)
-        for child in ast.iter_child_nodes(current):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef)):
-                if getattr(child, "name", None) in descend:
-                    for stmt in child.body:
-                        walk(stmt)
-                continue
-            walk(child)
-
-    for stmt in statements:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef)):
-            if getattr(stmt, "name", None) in descend:
-                for inner in stmt.body:
-                    walk(inner)
-            continue
-        walk(stmt)
-    return found
-
-
-def _nested_defs_invoked_on_loop(node: ast.AsyncFunctionDef,
-                                 nested_names: set[str]) -> set[str]:
-    """Nested defs of ``node`` whose body RUNS ON THE LOOP (fixpoint).
-
-    The route body runs on the loop, so a nested def it invokes by name runs
-    there too — and so do the defs that one invokes. A def reached only as a
-    callable REFERENCE to an offload boundary never enters the set.
-    """
-    on_loop: set[str] = set()
-    while True:
-        invoked = _direct_nested_invocations(node.body, nested_names, on_loop)
-        newly = invoked - on_loop
-        if not newly:
-            return on_loop
-        on_loop |= newly
-
-
 def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
     """Line numbers of sync-FalkorDB seams NOT inside an offload boundary."""
     bound = _graph_bound_names(node)
@@ -608,7 +540,8 @@ def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
         if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
         and sub is not node
     }
-    on_loop_nested = _nested_defs_invoked_on_loop(node, nested_names)
+    on_loop_nested = _nested_defs_invoked_on_loop(
+        node, nested_names, _OFFLOAD_BOUNDARY_CALLEES)
 
     def visit(current: ast.AST) -> None:
         if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef,
@@ -789,3 +722,144 @@ def test_residual_names_still_exist():
     assert not ghosts, (
         f"{ghosts} are declared residual but no longer defined in "
         f"hosted_api.py — the residual list has rotted (#3718)")
+
+
+# ── #4625 leg 62: the capture read leg, narrowed out of the residual ────────
+#
+# ``_capture_session_impl`` is a declared residual BODY
+# (``_KNOWN_INLINE_HELPER_RESIDUAL``), so ``test_graph_io_is_offloaded`` cannot
+# see a FIXED leg regress inside it — that allowlist is exactly why the capture
+# read legs could regrow with this guard green (#4625 work order §3). The pins
+# below are per-CALLEE, so they can. Leg 12 (the control-plane/onboarding
+# helper) is pinned the same way in ``test_health_ready_nonblocking.py``.
+
+
+def _async_body_named(name: str) -> ast.AsyncFunctionDef:
+    tree = ast.parse(HOSTED_API.read_text())
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+
+
+def _inline_calls_to(node: ast.AsyncFunctionDef,
+                     names: frozenset[str]) -> list[str]:
+    """Callee names from ``names`` called in ``node`` NOT behind an offload.
+
+    Same boundary semantics as ``_has_inline_graph_io``: a nested def handed to
+    an offload boundary as a callable reference runs in the worker and is
+    skipped; a nested def INVOKED on the loop is scanned.
+    """
+    nested_names = {
+        sub.name for sub in ast.walk(node)
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and sub is not node
+    }
+    on_loop_nested = _nested_defs_invoked_on_loop(
+        node, nested_names, _OFFLOAD_BOUNDARY_CALLEES)
+    found: list[str] = []
+
+    def visit(current: ast.AST) -> None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef)):
+            if getattr(current, "name", None) in on_loop_nested:
+                for stmt in current.body:
+                    visit(stmt)
+            return
+        if isinstance(current, ast.Call):
+            if _callee_name(current.func) in _OFFLOAD_BOUNDARY_CALLEES:
+                for child in _offload_boundary_eager_children(current):
+                    visit(child)
+                return
+            name = _callee_name(current.func)
+            if name in names:
+                found.append(name)
+        for child in ast.iter_child_nodes(current):
+            visit(child)
+
+    for stmt in getattr(node, "body", []):
+        visit(stmt)
+    return found
+
+
+def test_capture_session_leg62_probe_is_offloaded():
+    """#4625 leg 62: the capture's graph attach must not run inline.
+
+    * ``_get_proj`` — the projection attach must be gone from the loop (it now
+      rides the off-loop wrapper);
+    * ``_capture_session_probe_off_loop`` must be the one caller doing it;
+    * the wrapper's OWN SDK open must ride ``_data_sdk_offloaded`` (review F2:
+      reverting it to ``_data_sdk`` used to leave every test green — the
+      behavioural probe records only ``_get_proj``, and this pin scanned only
+      ``_capture_session_impl``);
+    * exactly ONE inline ``_data_sdk`` may remain: the leg-72
+      (``count_org_usage``) site, which is a DECLARED residual because the
+      required #4282 collision pre-flight returned COLLISION, so that leg is
+      skipped in this unit.
+    """
+    node = _async_body_named("_capture_session_impl")
+    callees = _inline_calls_to(node, frozenset({
+        "_data_sdk", "_get_proj", "_capture_session_probe_off_loop",
+    }))
+    assert callees.count("_capture_session_probe_off_loop") == 1, (
+        "#4625 leg 62: `_capture_session_impl` must open the SDK/projection "
+        "through `_capture_session_probe_off_loop`"
+    )
+    assert callees.count("_get_proj") == 0, (
+        "#4625 leg 62 regressed: `_capture_session_impl` attaches the "
+        "projection inline — it must ride the off-loop wrapper"
+    )
+    assert callees.count("_data_sdk") == 1, (
+        "#4625: `_capture_session_impl` has "
+        f"{callees.count('_data_sdk')} inline `_data_sdk` call(s); the leg-62 "
+        "open must use `_data_sdk_offloaded` and the ONE remaining site is the "
+        "declared leg-72 residual (count_org_usage)"
+    )
+
+    probe = _async_body_named("_capture_session_probe_off_loop")
+    probe_callees = _inline_calls_to(
+        probe, frozenset({"_data_sdk", "_data_sdk_offloaded"}))
+    assert probe_callees.count("_data_sdk_offloaded") == 1, (
+        "#4625 leg 62: `_capture_session_probe_off_loop` must open the SDK "
+        "through `_data_sdk_offloaded` — its tenancy resolver (``_make_sdk`` "
+        "+ the ownership query) blocks the loop otherwise"
+    )
+    assert probe_callees.count("_data_sdk") == 0, (
+        "#4625 leg 62 regressed: `_capture_session_probe_off_loop` opens the "
+        "SDK inline with `_data_sdk` instead of the off-loop twin"
+    )
+
+
+def test_capture_session_probe_attaches_off_the_loop(monkeypatch):
+    """#4625 leg 62: the wrapper's attach runs off the event loop.
+
+    The direct mechanism check — ``_get_proj``'s own view of the loop (a worker
+    thread has no running loop). Every ``_get_proj`` in this flow must be
+    off-loop: the SDK-open hand-off AND the probe hand-off. Reverting either
+    puts one back on ``MainThread`` and fails here.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    seen: list[str] = []
+    real_get_proj = TortoiseSDK._get_proj
+
+    def _probe(sdk_self, *args, **kwargs):
+        seen.append(threading.current_thread().name)
+        return real_get_proj(sdk_self, *args, **kwargs)
+
+    monkeypatch.setattr(TortoiseSDK, "_get_proj", _probe)
+
+    sdk, _proj, row = asyncio.run(
+        ha_mod._capture_session_probe_off_loop(
+            {"org_id": TEST_ORG_ID}, "read-loop-4625-session"))
+    try:
+        assert seen, (
+            "the projection attach was never reached — this run proves nothing "
+            "(#4625 leg 62)"
+        )
+        assert all(name != "MainThread" for name in seen), (
+            f"the capture probe attached the projection on the event loop: "
+            f"{seen} — one slow attach freezes every concurrent request "
+            f"(#4625 leg 62)"
+        )
+        assert row is not None
+    finally:
+        sdk.close()

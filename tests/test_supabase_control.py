@@ -693,6 +693,32 @@ class TestResolveApiKeyFailSoft:
                                    additive_tiers=[])
         assert row["deleted_at"] is None
 
+    def test_org_billing_state_reads_the_row_and_fails_soft(self, fake):
+        """#4640: the forward twin of org_id_for_stripe_customer — the portal
+        read and the checkout guard both consume it. Absent row → {}; a
+        pre-0012 schema degrades the additive columns to None while the 0006
+        base ``stripe_customer_id`` survives."""
+        from tortoise.supabase_control import org_billing_state
+
+        fake.tables["organizations"][0].update({
+            "stripe_customer_id": "cus_4640",
+            "subscription_status": "active",
+            "customer_email": "owner@example.com",
+        })
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] == "active"
+        assert state["customer_email"] == "owner@example.com"
+        # absent row → no customer anywhere
+        assert org_billing_state(fake, "no-such-org") == {}
+        # pre-0012 drift: the additive tier drops, the base column survives
+        fake.missing_columns = {"organizations": {
+            "subscription_status", "customer_email"}}
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] is None
+        assert state["customer_email"] is None
+
     def test_resolve_api_key_carries_suspension_state(self, fake):
         """O/I/T target 2: with the columns PRESENT, suspension state still
         resolves (enforcement is unchanged — REST 403 / MCP -32006 consume

@@ -346,6 +346,61 @@ def test_recapture_journals_the_stored_status_not_a_literal_draft(tmp_path):
         sdk.close()
 
 
+def test_recapture_shorter_does_not_resurrect_turns_on_rebuild(tmp_path):
+    """#1920 durability half: deleting the stale turns LIVE is not enough —
+    the deletion must also reach the journal, or ``rebuild`` replays the
+    first capture's ``PointAdded`` records and resurrects every orphan.
+
+    The journal is the durability surface #3947 established; a live-only
+    delete leaves a store whose rebuild silently re-creates the exact
+    residue the fix removed.
+
+    The GROW-BACK leg is the ordering pin: the deletion record is journaled by
+    the same capture that re-writes the remaining turns, so a fold that applied
+    a hard delete by id (ignoring its sequence) would erase turns a LATER
+    capture re-added.
+    """
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
+    try:
+        sdk.capture_session(CONV, session_id=SESSION_ID)  # 3 turns
+        sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
+                            session_id=SESSION_ID)        # 1 turn
+        proj = sdk._get_proj()
+        stale = [f"{SESSION_ID}_t{i}" for i in (1, 2)]
+        assert _turn_ids(proj) == [f"{SESSION_ID}_t0"]
+        for tid in stale:
+            assert proj.g.query("MATCH (t:Point {id:$id}) RETURN count(t)",
+                                params={"id": tid}).result_set[0][0] == 0
+
+        # The subscriber surface saw every turn's PointAdded, so it must see
+        # the hard delete too (the two-store split delete_point established).
+        retracted = {e["payload"].get("id")
+                     for e in sdk.events_poll(after=None)["events"]
+                     if e["type"] == "PointRetracted"}
+        assert set(stale) <= retracted, (
+            f"the deletion is invisible to the event surface: {sorted(set(stale) - retracted)}")
+
+        proj.rebuild(EventLog(log_path))
+
+        assert _turn_ids(proj) == [f"{SESSION_ID}_t0"], (
+            "a rebuild must not resurrect the turns the re-capture deleted")
+        live = set(_contains(proj))
+        assert not (set(stale) & live), (
+            f"resurrected turns are still CONTAINS-wired: {sorted(set(stale) & live)}")
+
+        # GROW BACK: the journaled delete must not suppress a turn a LATER
+        # capture re-writes under the same deterministic id.
+        sdk.capture_session(CONV, session_id=SESSION_ID)  # 3 turns again
+        assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)]
+        proj.rebuild(EventLog(log_path))
+        assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)], (
+            "the earlier hard-delete record must not suppress the re-grown "
+            "turns — the fold is sequence-ordered")
+    finally:
+        sdk.close()
+
+
 def test_forged_payload_contains_session_cannot_create_a_link(tmp_path):
     """#3947 review (security, F1): ``contains_session`` is read from the RAW
     envelope, before ``_norm`` splices the point payload over it. Without

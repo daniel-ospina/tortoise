@@ -295,8 +295,15 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
 
        The product behaviour is benign (dropping an already-dropped graph
        is idempotent) — the defect is test isolation: the assertions assume
-       exclusive ownership of a sweep production also runs. Both callers are
+       exclusive ownership of a sweep production also runs. Every caller is
        therefore quiesced here.
+
+       #3036 added a THIRD caller to both sites — `_sweep_oauth_retention`
+       (a `_run_boot_sweeps` member AND an `_event_retention_loop` call). It
+       is benign for THIS file (it touches only the fake control plane), but
+       the enumeration above is the guard that makes the next lifespan-armed
+       caller visible, so keep it complete: a new sweep reachable from either
+       entry point belongs in this list.
 
        The CALLEE is deliberately not stubbed: this file's tests call
        `ha_mod._purge_deleted_teams()` directly and resolve it off the

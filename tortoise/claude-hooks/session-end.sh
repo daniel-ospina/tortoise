@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 5
+# tortoise-hook-version: 6
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
+#
+# #3615 (generation bump 3→4): the capture step now requires the explicit
+# TORTOISE_CAPTURE=1 consent gate below. A generation-3 installed copy is a
+# DIFFERENT script under the same number, so it must read as stale —
+# `tortoise hooks status` / `tortoise doctor` then direct the user to re-copy
+# (`.claude/hooks/*.sh` are per-project copies that never self-update).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
 # for this hook (see tortoise/hook_install.py). Bump it on ANY behavioural
@@ -36,9 +42,17 @@
 #   #   { "hooks": { "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command",
 #   #       "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }
 #
-# Requires TORTOISE_API_KEY + TORTOISE_API_URL (hosted) or a local `tortoise`
-# install with hosted capture configured. For a LOCAL-only graph, replace the
-# capture step with: tortoise index --dir ~/.tortoise/docs/conversations/.
+# CAPTURE REQUIRES EXPLICIT CONSENT (#3615): TORTOISE_CAPTURE=1 (truthy:
+# 1/true/yes/on). It is INDEPENDENT of the credential — TORTOISE_API_KEY +
+# TORTOISE_API_URL are the hosted credential/endpoint used to reach the API,
+# and exporting the key for the MCP `Authorization: Bearer` header must NEVER
+# opt the machine into shipping transcripts. With the opt-in absent the capture
+# step is skipped (a notice on stderr, repeated on each session close while a
+# legacy credential is present; only the durable file is one-time) and the hook
+# still exits 0; the LOCAL reindex sweep below still runs — it never leaves the
+# machine.
+# For a LOCAL-only graph, replace the capture step with:
+#   tortoise index --dir ~/.tortoise/docs/conversations/.
 #
 # The hook ALWAYS exits 0 — Claude Code must never be blocked by memory
 # capture failing (offline, uninstalled, no transcript).
@@ -194,6 +208,64 @@ fi
 
 [ -s "$TMP" ] || exit 0  # nothing parseable — skip silently
 
+# ── Explicit capture consent (#3615) ─────────────────────────────────────
+# Consent is a separate concept from authentication: a credential is an
+# authentication artifact; capture is data-sharing with a vendor. The opt-in
+# must be explicit and CANNOT be inferred from credential presence. The truthy
+# set here MUST match tortoise/capture_consent.py::capture_consent_enabled
+# (parity pinned by tests/test_session_capture_e2e.py — the bash matrix —
+# and tests/test_capture_consent.py — the Python/CLI side). The bash/CLI
+# duplication is deliberate defense-in-depth: this gate keeps the ambient path
+# from even attempting the upload; the CLI gate stops a STALE copied hook
+# (hooks are copied per-project and never update themselves).
+CAPTURE_ENABLED=0
+# Trim leading/trailing whitespace, then lowercase — mirrors Python's
+# str(...).strip(" \t\r\n\v\f").lower() so the two implementations agree
+# EXACTLY. The explicit ASCII set is deliberate: `[[:space:]]` is locale- and
+# platform-dependent and also matches Unicode spaces (U+00A0, U+2028, U+2029,
+# U+3000, …) that Python no longer trims, which would reopen the parity-drift
+# class in the opposite direction (bash authorizes, Python refuses).
+CAPTURE_RAW="${TORTOISE_CAPTURE:-}"
+CAPTURE_RAW="${CAPTURE_RAW#"${CAPTURE_RAW%%[!$' \t\r\n\v\f']*}"}"
+CAPTURE_RAW="${CAPTURE_RAW%"${CAPTURE_RAW##*[!$' \t\r\n\v\f']}"}"
+case "$(printf '%s' "$CAPTURE_RAW" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) CAPTURE_ENABLED=1 ;;
+esac
+
+if [ "$CAPTURE_ENABLED" != "1" ]; then
+  # Non-silent MIGRATION notice for hosts that would have captured under the old
+  # contract (a resolvable credential). A capture-off host (no credential) sees
+  # nothing. Best-effort + non-blocking; never fails the hook. The marker's
+  # CONTENT is the instruction (not an empty stamp) so it is a durable channel
+  # even when hook stderr is not surfaced; the CLI primitive writes the same
+  # file, which is what reaches users whose copied hook is stale and swallows
+  # stderr. The visible stderr line is deliberately NOT gated on the marker's
+  # absence: a stale copied hook makes the CLI write that marker, so a
+  # marker-gated notice was permanently suppressed on precisely the hosts it
+  # targets (solution-verify cycle 2 P1). One quiet line per session close is
+  # the cost of not migrating a breaking change in silence.
+  LEGACY_KEY="${TORTOISE_API_KEY:-}"
+  LEGACY_KEY="${LEGACY_KEY#"${LEGACY_KEY%%[![:space:]]*}"}"
+  LEGACY_KEY="${LEGACY_KEY%"${LEGACY_KEY##*[![:space:]]}"}"
+  if [ -n "$LEGACY_KEY" ] || [ -f "$PWD/.tortoise" ] \
+      || [ -f "${HOME:-/nonexistent}/.tortoise/credentials.json" ]; then
+    NOTICE_MARKER="${HOME:-/nonexistent}/.tortoise/capture-consent-notice"
+    if [ ! -f "$NOTICE_MARKER" ]; then
+      mkdir -p "$(dirname "$NOTICE_MARKER")" 2>/dev/null || true
+      # `2>/dev/null` MUST precede `> "$NOTICE_MARKER"`: a failed redirect
+      # setup is reported to the shell's CURRENT stderr, so with the stdout
+      # redirect first a non-writable ~/.tortoise leaks a raw bash error line
+      # on every session close. Ordering stderr first suppresses the setup
+      # failure too (`|| true` only rescues the exit status).
+      printf '%s\n' \
+        "Tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." \
+        2>/dev/null > "$NOTICE_MARKER" || true
+    fi
+    printf '%s\n' \
+      "tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." >&2 || true
+  fi
+fi
+
 # Prefer a local install; fall back to the installer's recorded checkout.
 TORTOISE_BIN="$(command -v tortoise || true)"
 # A candidate module dir is accepted ONLY when it actually holds a
@@ -266,9 +338,11 @@ raise SystemExit(main(["index", "directory",
   # #1727 (Task 14): harness + the real session_id (idempotency key) pass
   # through to the capture payload — via env (the session id and every path
   # are untrusted shell input; never interpolated into the -c string).
-  TORTOISE_HOOK_SESSION_ID="$SESSION_ID" \
-  TORTOISE_CAPTURE_FILE="$TMP" \
-  "$PYTHON_BIN" -c '
+  # #3615: only when capture consent is explicit (see the gate above).
+  if [ "$CAPTURE_ENABLED" = "1" ]; then
+    TORTOISE_HOOK_SESSION_ID="$SESSION_ID" \
+    TORTOISE_CAPTURE_FILE="$TMP" \
+    "$PYTHON_BIN" -c '
 import sys
 sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 sys.path.insert(0, sys.argv[1])
@@ -280,6 +354,7 @@ if os.environ.get("TORTOISE_HOOK_SESSION_ID"):
     argv += ["--session-id", os.environ["TORTOISE_HOOK_SESSION_ID"]]
 raise SystemExit(main(argv))
 ' "$TORTOISE_MODULE" 2>/dev/null || exit 0
+  fi
 else
   # Round-10 P3: sweep first (capture failure must not disable reindexing).
   # The corpus dir is resolved via session_corpus_dir() (honors
@@ -309,7 +384,10 @@ print(session_corpus_dir())' 2>/dev/null || true)"
   fi
   # #1727 (Task 14, T1-P11): capture with harness + the real session_id
   # (idempotency key — re-POST converges to one Session, one receipt).
-  CAPTURE_ARGS=(--file "$TMP" --harness claude)
-  [ -n "$SESSION_ID" ] && CAPTURE_ARGS+=(--session-id "$SESSION_ID")
-  tortoise session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
+  # #3615: only when capture consent is explicit (see the gate above).
+  if [ "$CAPTURE_ENABLED" = "1" ]; then
+    CAPTURE_ARGS=(--file "$TMP" --harness claude)
+    [ -n "$SESSION_ID" ] && CAPTURE_ARGS+=(--session-id "$SESSION_ID")
+    tortoise session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
+  fi
 fi

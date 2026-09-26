@@ -60,7 +60,7 @@ export const onRequest: PagesFunction = async (context) => {
   // host=127.0.0.1) and *.pages.dev previews keep the pass-through so the
   // legal E2E suite can run against a dev server and previews stay
   // navigable (neither is indexed; no SEO impact). Runtime fetches (the
-  // tortoise-onboarding skill at app.premiselabs.co/skills/...) are not in the
+  // tortoise-onboarding instructions at app.premiselabs.co/skills/...) are not in the
   // set. The auth surface has its own origin split — see APP_ONLY below.
   // The auth surface moved to the APP origin (#4054): `tortoise-dashboard`
   // (app.premiselabs.co) owns the BFF and the three pages it serves

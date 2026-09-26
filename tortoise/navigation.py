@@ -19,7 +19,7 @@ from typing import Any
 #: carry id but live in the registry graph / control plane).
 _ROOT_BRANCHES = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
-    ("Document", "id"), ("Source", "id"), ("Session", "id"),
+    ("Source", "id"), ("Session", "id"),
     ("Event", "eventId"),
 )
 
@@ -128,7 +128,15 @@ def entityProfile(
         # Categorize
         if label == "point":
             result["points"].append(node)
-        elif label == "document":
+        elif label == "document" or (label == "source"
+                                     and node.get("documentKind") is not None):
+            # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source, so its graph
+            # label is "source" — keying only on the retired "document" label
+            # left this bucket permanently empty. A Source carrying a
+            # documentKind is a document; a provenance/session Source (no
+            # documentKind) keeps falling through to the `else` stash below,
+            # exactly as before. The bare "document" branch is retained for a
+            # pre-rebuild graph that still holds :Document nodes.
             result["documents"].append(node)
         elif label == "event":
             result["events"].append(node)

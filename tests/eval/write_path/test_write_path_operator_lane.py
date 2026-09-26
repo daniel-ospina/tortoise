@@ -40,6 +40,7 @@ all seven are captured here.
 from __future__ import annotations
 
 import contextlib
+import logging
 import shutil
 import sys
 from pathlib import Path
@@ -421,3 +422,338 @@ def test_fold_lane_mints_every_planted_operator_endpoint():
                     (o["src"], o["dst"], o["op_type"]) for o in payload["operators"]
                 }, f"{session_id}: MITIGATES target IMPL missing"
     assert total_expected == PLANTED_OPERATOR_EDGES - PLANTED_SUPERSEDES
+
+
+# ── The COMMIT leg (#4716 Part 4) ───────────────────────────────────────────
+#
+# The FOLD lane above stops at `execute_embed` — which is exactly why #4654
+# stayed invisible while the lane reported 22/22 wired: the commit layer can
+# drop an operator the fold kept. This leg carries the SAME fold emission all
+# the way through `execute_embed` → the REAL capture commit
+# (`sdk.capture_session`; the fold's own payload is committed verbatim, not a
+# gold-derived one) → the retrievable (eventId-keyed) memory layer.
+#
+# The endpoint points are pre-created under NON-payload (ULID) ids and are
+# DELIBERATELY absent from the fold's S3 prior set — the "S3 is a heuristic
+# candidate surface, not an authority" case that makes the commit re-key each
+# payload point to a different graph id. Without #4716 Part 1's remap the
+# operator refs name the payload ids, `create_operator` raises, and
+# `apply_payload_operators` swallows it (`operator write skipped (inputs
+# missing?)`) — every planted edge silently lost at exactly the layer this
+# lane could not see before.
+
+def _fold_commit_extractor(payloads: dict[str, dict]):
+    """The commit leg's seam: hand the REAL ``execute_embed`` payload for this
+    session to the REAL capture commit — no gold-derived payload."""
+    def _run(_model, _conversation=None, *, session_id=None, **_kw):
+        return {
+            "session_id": session_id, "story_arc": "", "embed_list": {},
+            "search": {"mode": "embedded", "degraded": True},
+            "payload": payloads[session_id], "chain_notes": [],
+            "link_before_create": [], "supersessions": [],
+            "warnings": [], "minted_kinds": [], "stats": {}, "errors": [],
+        }
+
+    return _run
+
+
+def _expected_operator_counts(payload: dict) -> tuple[int, int]:
+    """(operator nodes, mitigations) a payload should commit.
+
+    A MITIGATES payload entry does NOT create its own operator node —
+    ``apply_payload_operators`` attaches a mitigation Point to the declared
+    target IMPL instead, so the graph operator-node count is the IMPL/NAND
+    count and the dampeners are counted separately (their deep-miss drop is
+    the failure mode the count alone would hide)."""
+    ops = payload.get("operators") or []
+    impl_nand = sum(1 for o in ops if o.get("op_type") in ("IMPL", "NAND"))
+    mitigates = sum(1 for o in ops if o.get("op_type") == "MITIGATES")
+    return impl_nand, mitigates
+
+def _fold_payloads(ev2) -> dict[str, dict]:
+    """The REAL fold output per operator session (endpoints minted, no emitted
+    points) — the input to both commit-leg tests."""
+    golds = {sid: corpus.load_gold(sid) for sid in OPERATOR_SESSIONS}
+    payloads: dict[str, dict] = {}
+    for sid in OPERATOR_SESSIONS:
+        embed, _expected, _ops = _fold_emission(golds[sid])
+        payloads[sid] = ev2.execute_embed(
+            embed, {"points": []}, session_id=sid, story_arc="",
+            summary="")["payload"]
+    return payloads
+
+
+def test_fold_lane_commit_leg_keeps_every_operator_after_a_rekey(
+        _deterministic_lane, monkeypatch, caplog):
+    """#4716 Part 4, the rekey leg: the FOLD's operators survive the capture
+    commit after every endpoint re-keys to a pre-existing, NON-payload graph
+    id.
+
+    This is the leg the FOLD lane could not see before #4716: it stopped at
+    ``execute_embed``, so a fold that read 22/22 could still lose every edge
+    at the commit — and with all endpoints re-keying, it did (the #4654 silent
+    drop). The endpoints are pre-created under ULID ids and DELIBERATELY kept
+    out of the fold's S3 prior set (``_fold_emission`` passes
+    ``{"points": []}``), so the commit's content-hash resolution genuinely
+    re-keys each payload point.
+
+    Asserted at the commit layer, per operator class: every IMPL/NAND operator
+    node exists with its endpoints wired to the EXISTING graph nodes, every
+    dampener attached to its target edge, and 0 ``operator write skipped
+    (inputs missing?)`` — the pre-#4716 signature.
+
+    The no-orphan post-condition (#4654) is the count equality: the fold emits
+    no points and the mint prunes unreferenced endpoints, so the payload's
+    points ARE its operator endpoints — every operator surviving means every
+    endpoint is referenced, i.e. no orphan Point.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    lane = _deterministic_lane
+    sdk = lane["sdk"]
+    proj = sdk._get_proj()
+    sid = "wp01_quarry_debug"   # 2 IMPL/NAND + 1 MITIGATES (4 endpoints)
+    payload = _fold_payloads(ev2)[sid]
+    impl_nand, mitigates = _expected_operator_counts(payload)
+    assert (impl_nand, mitigates) == (2, 1)
+
+    # every endpoint pre-exists under a NON-payload id
+    anchors = sorted({str(pt["content"]).strip()[:1000]
+                      for pt in payload["points"]})
+    for anchor in anchors:
+        sdk.create_point("statement", anchor)
+    row = proj.g.query(
+        "MATCH (p:Point) WHERE NOT p.is_operator AND NOT p.id CONTAINS '_t' "
+        "RETURN count(p)").result_set[0][0]
+    assert row == len(anchors) == 4
+
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _fold_commit_extractor({sid: payload}))
+    fixture = corpus.load_fixture(sid)
+    conv = runner.parse_roundtrip(
+        sid, fixture["conversation"], fixture["harness"],
+        workdir=lane["workdir"])
+    with caplog.at_level(logging.WARNING, logger="tortoise.commit_ops"):
+        cap = sdk.capture_session(
+            conv, session_id=sid, harness=fixture["harness"])
+    assert cap.get("ok") is True, cap
+
+    # every fold operator committed, wired to the EXISTING (re-keyed) nodes
+    by_id = {pt["id"]: str(pt["content"]) for pt in payload["points"]}
+    expected_pairs = {
+        (by_id[o["src"]], by_id[o["dst"]])
+        for o in payload["operators"] if o["op_type"] in ("IMPL", "NAND")}
+    actual_pairs = {
+        (s, d) for s, d in proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[:IMPL {idx:0}]->(s:Point) "
+            "MATCH (o)-[:IMPL {idx:1}]->(d:Point) "
+            "RETURN s.content, d.content").result_set}
+    assert actual_pairs == expected_pairs, (actual_pairs, expected_pairs)
+    op_nodes = proj.g.query(
+        "MATCH (o:Point) WHERE o.is_operator AND o.op_type IN ['IMPL','NAND'] "
+        "RETURN count(o)").result_set[0][0]
+    assert op_nodes == impl_nand
+    # every dampener found its target edge (the deep-miss drop)
+    attached = proj.g.query(
+        "MATCH (o:Point {is_operator:true})-[:mitigated_by]->(m:Point) "
+        "RETURN count(m)").result_set[0][0]
+    assert attached == mitigates
+    # ⛔ #4716 review P1: a COUNT is not enough — the dampener's reason is
+    # resolved from the same ref the remap repointed, so a map-unaware
+    # resolver silently degraded its content to "[MITIGATION] [MITIGATION]
+    # <graph-id>". Assert the content resolves to a real endpoint, with
+    # exactly the one prefix `sdk.mitigate_operator` adds (`why.py` strips one).
+    for (content,) in proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[:mitigated_by]->(m:Point) "
+            "RETURN m.content").result_set:
+        assert "[MITIGATION] [MITIGATION]" not in content, content
+        assert content.count("[MITIGATION]") == 1, content
+        assert any(a in content for a in anchors), (content, anchors)
+    assert "operator write skipped" not in caplog.text, caplog.text
+    assert "not found — mitigation dropped" not in caplog.text, caplog.text
+
+
+def test_fold_lane_commit_leg_reaches_the_retrievable_layer(
+        _deterministic_lane, monkeypatch, caplog):
+    """#4716 Part 4, the retrievable-layer leg: with an EMPTY graph every
+    payload id is created as-is (identity map), so the commit must commit
+    exactly the fold's operators AND stamp them into the eventId-keyed memory
+    layer — the structural surface #2552 measured at 0/4.
+
+    This is the complement of the rekey leg (the remap is total: an EMPTY
+    id_map returns the operator list unchanged, so the identity case cannot be
+    perturbed)."""
+    import tortoise.extractor_v2 as ev2
+
+    lane = _deterministic_lane
+    sdk = lane["sdk"]
+    payloads = _fold_payloads(ev2)
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _fold_commit_extractor(payloads))
+    with caplog.at_level(logging.WARNING, logger="tortoise.commit_ops"):
+        for sid in OPERATOR_SESSIONS:
+            payload = payloads[sid]
+            impl_nand, mitigates = _expected_operator_counts(payload)
+            if not payload.get("operators"):
+                continue
+            fixture = corpus.load_fixture(sid)
+            conv = runner.parse_roundtrip(
+                sid, fixture["conversation"], fixture["harness"],
+                workdir=lane["workdir"])
+            cap = sdk.capture_session(
+                conv, session_id=sid, harness=fixture["harness"])
+            assert cap.get("ok") is True, cap
+            snap = runner.snapshot_session(sdk, sid)
+            assert snap["operators_total"] == impl_nand, (
+                f"{sid}: {snap['operators_total']}/{impl_nand} operator nodes")
+            # every survivor entered the retrievable (eventId) layer
+            assert snap["operators_provenanced"] == impl_nand
+            assert len(snap["mitigations"]) == mitigates, (
+                f"{sid}: {len(snap['mitigations'])}/{mitigates} mitigations")
+    assert "operator write skipped" not in caplog.text, caplog.text
+
+
+def test_fold_lane_commit_leg_rekey_stamps_the_operators_it_created(
+        _deterministic_lane, monkeypatch, caplog):
+    """#4936: the RE-KEYED commit leg must stamp the operators it CREATED
+    with the session's ``sessionCaptured`` eventId — the retrievable-layer leg
+    the rekey test above deliberately does not assert.
+
+    #4716 Part 1 made the operator EDGE survive a re-key (pre-fix every
+    operator was dropped as ``operator write skipped``), which exposed this
+    state: the operator node is created and wired correctly, but the capture's
+    provenance stamp joined on the MINTED point set and every endpoint here
+    RE-KEYED to a pre-existing graph node — so ``minted_ids`` is empty, the
+    join never runs, and the operator stays ``eventId IS NULL``. It is then
+    invisible to the eventId-keyed retrievable memory layer (the #2552
+    ``operator_counts == {}`` signature) even though the edge is in the graph.
+
+    The fix stamps exactly the operator ids ``apply_payload_operators``
+    CREATED (surfaced on the extraction meta), not a join on the minted set —
+    the topology's own provenance handle. Only RE-keyed here: the identity leg
+    above already pins the minted-endpoint path, and the fix must not
+    perturb it.
+
+    ⛔ Scope note (measured, not assumed): ``operator_counts`` /
+    ``operator_edges`` / ``mitigations`` STAY empty in this all-endpoints-
+    re-keyed scenario, before AND after the fix. That is NOT an operator
+    stamping gap: the runner's edge queries require the edge ENDPOINT to be in
+    the eventId-keyed ``seen`` set, and a re-keyed endpoint is a pre-existing
+    canonical placed OUTSIDE any capture (no prior eventId) which the fold
+    discipline forbids re-stamping (#2104 Phase D — a claim's provenance stays
+    minted-only; the issue's own proposed direction keeps it). The operator
+    NODE is the retrievable artifact this issue files, and the identity leg
+    shows the same commit populates ``operator_counts``
+    (``{'IMPL': 4, 'INPUT': 4}``) once the endpoints are minted. The
+    assertions below are therefore on the eventId-keyed NODE surface.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    lane = _deterministic_lane
+    sdk = lane["sdk"]
+    proj = sdk._get_proj()
+    sid = "wp01_quarry_debug"   # 2 IMPL/NAND + 1 MITIGATES (4 endpoints)
+    payload = _fold_payloads(ev2)[sid]
+    impl_nand, mitigates = _expected_operator_counts(payload)
+    assert (impl_nand, mitigates) == (2, 1)
+
+    # every endpoint pre-exists under a NON-payload id (the re-key)
+    anchors = sorted({str(pt["content"]).strip()[:1000]
+                      for pt in payload["points"]})
+    for anchor in anchors:
+        sdk.create_point("statement", anchor)
+
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _fold_commit_extractor({sid: payload}))
+    fixture = corpus.load_fixture(sid)
+    conv = runner.parse_roundtrip(
+        sid, fixture["conversation"], fixture["harness"],
+        workdir=lane["workdir"])
+    with caplog.at_level(logging.WARNING, logger="tortoise.commit_ops"):
+        cap = sdk.capture_session(
+            conv, session_id=sid, harness=fixture["harness"])
+    assert cap.get("ok") is True, cap
+    assert "operator write skipped" not in caplog.text, caplog.text
+
+    # the session's own sessionCaptured eventId
+    eid = proj.g.query(
+        "MATCH (src:Source {sessionId: $sid})-[:references]->"
+        "(e:Event {eventKind: 'sessionCaptured'}) "
+        "RETURN coalesce(e.eventId, e.id)",
+        params={"sid": sid},
+    ).result_set[0][0]
+    # every operator node this capture created carries it...
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true}) RETURN o.id, o.eventId"
+    ).result_set
+    assert len(rows) == impl_nand, rows
+    assert all(r[1] == eid for r in rows), rows
+    # ... and the eventId-keyed retrievable memory layer (MEMORY_ROW_QUERY /
+    # ``MATCH (p:Point) WHERE p.eventId = $eid``) admits every one of them.
+    claimed = proj.g.query(
+        "MATCH (p:Point) WHERE p.eventId = $eid AND p.is_operator = true "
+        "RETURN count(p)", params={"eid": eid},
+    ).result_set[0][0]
+    assert claimed == impl_nand, (claimed, impl_nand)
+    snap = runner.snapshot_session(sdk, sid)
+    assert snap["operators_total"] == impl_nand, (
+        f"{snap['operators_total']}/{impl_nand} operator nodes retrievable")
+    assert snap["operators_provenanced"] == impl_nand, snap
+
+
+def test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats(
+        _deterministic_lane, monkeypatch):
+    """#4936 (code-review P1): two payload operator records that resolve onto
+    the SAME ``(src, dst, op_type)`` triple each create their own node —
+    ``sdk.create_operator`` mints unconditionally, with no idempotency guard
+    (#4971) — so the capture's provenance set must be the CREATION LIST, not
+    the MITIGATES lookup dict. Building it from ``target_op_ids.values()``
+    collapses the duplicate and silently drops the earlier node's id: that
+    node stays ``eventId IS NULL`` and invisible to the eventId-keyed layer,
+    re-introducing the exact #4936 defect the fix removes.
+
+    A duplicate triple is reachable two ways, both real: two identical
+    emitted records (``extractor_v2`` guards MITIGATES against
+    ``emitted_edges`` but appends IMPL/NAND unconditionally), and two
+    DISTINCT payload records that re-key onto one graph pair (the #4716 remap
+    is not injective). Both create two nodes; both must be stamped.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    lane = _deterministic_lane
+    sdk = lane["sdk"]
+    proj = sdk._get_proj()
+    sid = "wp01_quarry_debug"
+    payload = _fold_payloads(ev2)[sid]
+    # Duplicate one IMPL/NAND record verbatim — after the remap the two
+    # records collapse onto the same graph triple.
+    dup = next(o for o in payload["operators"]
+               if o["op_type"] in ("IMPL", "NAND"))
+    payload = {**payload,
+               "operators": [*payload["operators"], dict(dup)]}
+    impl_nand, _mitigates = _expected_operator_counts(payload)
+    assert impl_nand == 3, impl_nand   # 2 distinct + the duplicate
+
+    anchors = sorted({str(pt["content"]).strip()[:1000]
+                      for pt in payload["points"]})
+    for anchor in anchors:
+        sdk.create_point("statement", anchor)
+
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _fold_commit_extractor({sid: payload}))
+    fixture = corpus.load_fixture(sid)
+    conv = runner.parse_roundtrip(
+        sid, fixture["conversation"], fixture["harness"],
+        workdir=lane["workdir"])
+    cap = sdk.capture_session(
+        conv, session_id=sid, harness=fixture["harness"])
+    assert cap.get("ok") is True, cap
+
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true}) RETURN o.id, o.eventId"
+    ).result_set
+    assert len(rows) == impl_nand, (
+        f"{len(rows)}/{impl_nand} operator nodes created")
+    unstamped = [r[0] for r in rows if not r[1]]
+    assert not unstamped, (
+        f"duplicate-triple operator nodes left unstamped: {unstamped}")

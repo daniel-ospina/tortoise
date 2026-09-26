@@ -4,7 +4,7 @@ These tests are the machine half of the acceptance criteria:
 
 * AC1  — the list is generated from the declaration and is in sync with it
 * AC11 — the baseline covers the declaration, and the gate fails closed
-* AC13 — the ordering lint's ten properties hold, including the tenth: the artifact is
+* AC13 — the ordering lint's twelve properties hold, including the twelfth: the artifact is
          verified against a fresh DERIVATION, not only against itself
 
 They are deliberately fast and dependency-free: they execute the declaration and
@@ -612,6 +612,7 @@ def test_each_declared_non_derivable_doc_key_is_actually_excluded(derived_baseli
         "approval_status",
         "approval_principal",
         "approval_pr",
+        "response_fields",
     } == sm.NON_DERIVABLE_DOC_KEYS
     for key in sorted(sm.NON_DERIVABLE_DOC_KEYS):
         mutated = dict(derived_baseline)
@@ -1049,6 +1050,10 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
     WRITE site — which is where it would live — left the suite green (review finding). So
     the previous artifact, carrying approvals, is placed AT THE PATH `cut` WRITES and the
     file it leaves behind is read back.
+
+    The reset is now gated by `--allow-approval-reset` (#4598): it still happens, but only
+    deliberately, and it names what it drops. The refusal half is
+    `test_cut_REFUSES_to_blank_recorded_approvals` below.
     """
     sm = _load_manifest_tool()
     path = tmp_path / "surface-manifest.yml"
@@ -1166,6 +1171,117 @@ def test_cut_still_cuts_when_the_baseline_does_not_exist(tmp_path, monkeypatch, 
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
     assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
     assert missing.exists(), "a cut with no prior artifact wrote nothing"
+
+
+def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):
+    """A re-cut must not be able to destroy an owner approval SILENTLY (#4598).
+
+    On 2026-09-23 a re-cut landed on `main` through PR #4043 and carried six recorded owner
+    approvals to zero. Nothing went red, because `approval` is NON_DERIVABLE: no derived
+    property compares it, so the loss is invisible to every check that exists. The reset
+    itself is still the documented control — what this pins is that it cannot happen
+    without the operator saying so and seeing which rows they are dropping.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in prior["rows"]:
+        row["approval"] = None
+    approved_row = prior["rows"][0]["name"]
+    prior["rows"][0]["approval"] = "#4173 @daniel-ospina"
+    prior["approval_status"] = "pending-owner-approval"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    # No flag -> refuse, and the artifact is left EXACTLY as it was found.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    out = capsys.readouterr().out
+    assert approved_row in out, f"the row it would drop is not named: {out}"
+    assert "#4173 @daniel-ospina" in out, f"the approval value is not shown: {out}"
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
+
+    # With the flag -> it proceeds, and STILL names every row it drops.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    out = capsys.readouterr().out
+    assert "DROPPED" in out and approved_row in out, out
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert all(r.get("approval") is None for r in written["rows"]), (
+        "the flag was passed, so the reset is deliberate and expected — but a row kept an "
+        "approval the re-cut should have cleared"
+    )
+
+
+def test_the_guard_REFUSES_an_UNREADABLE_baseline_rather_than_overwriting_it(
+    monkeypatch, tmp_path, capsys, derived_baseline
+):
+    """An unreadable artifact is REFUSED — never silently overwritten.
+
+    This flips the earlier reading. The artifact is the ONLY carrier of the owner's per-row
+    approvals, and an unreadable one may well carry approvals that cannot be enumerated, so
+    writing over it destroys them without ever naming them — the #4598 wipe again. "There is
+    nothing to refuse for" was wrong: the refusal is precisely that the set is NOT enumerable.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    broken = "this: [is not\n  a manifest\n"
+    path.write_text(broken, encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    assert path.read_text(encoding="utf-8") == broken, "the refusal WROTE the manifest"
+
+
+def test_a_MISSING_baseline_still_cuts(monkeypatch, tmp_path, derived_baseline):
+    """The first cut has no approvals to lose, and must keep working.
+
+    The pair to the refusal above: the guard distinguishes MISSING (nothing to lose) from
+    UNREADABLE (may carry something we cannot see). Conflating them would either block the
+    first cut or reopen the silent overwrite.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    assert not path.exists()
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["counts"]["tools"] >= 1
+
+
+def test_the_guard_sees_a_RETIRED_row_approval(monkeypatch, tmp_path, capsys, derived_baseline):
+    """The mutation evidence for the RETIRED half of the artifact.
+
+    `retired:` rows carry `approval` too — retiring a name shrinks the surface and needs the
+    same human approval, and `build_doc` blanks it there as well. A guard that walks only
+    `rows:` passes this case GREEN while a recorded retirement approval is destroyed, which
+    is the same silent wipe through the other door. Assert on the retired row specifically:
+    a guard reading only `rows:` fails here.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = None
+    assert prior["retired"], "fixture has no retired rows to test the retired arm with"
+    retired_row = prior["retired"][0]["name"]
+    prior["retired"][0]["approval"] = "#4598 @daniel-ospina"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1, (
+        "a recorded approval on a RETIRED row did not stop the re-cut — the guard is "
+        "reading `rows:` only"
+    )
+    out = capsys.readouterr().out
+    assert retired_row in out and "#4598 @daniel-ospina" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
 
 
 def test_cut_refuses_when_the_declaration_cannot_be_IMPORTED(monkeypatch, capsys, tmp_path):
@@ -1538,3 +1654,262 @@ def test_the_check_reds_on_a_hand_added_null_doc_key(checker, tmp_path):
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 1, "a hand-added null-valued top-level key passed the drift check"
     assert "sneaky_null_top_key" in out, out
+
+
+# ── the `response_fields` record: shape, carry-forward, and the two defences ──
+# The block records response FIELDS that are deliberately OUTSIDE the gate (the freeze is
+# on tools and endpoints). It is hand-authored, so `cut` must carry it forward and
+# `check` must defend it against both deletion and disconnection from the surface.
+
+
+def _render_scratch() -> Path:
+    """A repo-relative path `render` can write to during a test, then be removed."""
+    return ROOT / "docs" / "product" / "_test-render-scratch.md"
+
+
+def _manifest_at(sm, doc: dict, tmp_path, name: str = "manifest.yml"):
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    return path
+
+
+def test_a_malformed_response_fields_entry_is_reported_and_does_not_crash_render(tmp_path, monkeypatch):
+    """`check` must REPORT a malformed `response_fields` entry; `render` must not crash.
+
+    Both halves were real defects when the block was introduced: a non-mapping entry
+    crashed `render` with a bare AttributeError while `check` reported it cleanly, so the
+    two disagreed about the same input.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"bad_entry": True}, "not-a-mapping"]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "malformed.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    try:
+        assert sm.cmd_check(argparse.Namespace()) != 0, "a malformed entry must be reported"
+        assert sm.cmd_render(argparse.Namespace()) == 0, "render must not crash on a malformed entry"
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_a_response_field_value_cannot_break_the_generated_table(tmp_path, monkeypatch):
+    """A `|` or a newline in a recorded field must not split the generated markdown row."""
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {
+            "response": "tortoise_analyze",
+            "field": "why",
+            "emitted_when": "flag on | piped\nand multiline",
+            "unchanged_when_off": "yes",
+        }
+    ]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "piped.yml"))
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    try:
+        assert sm.cmd_render(argparse.Namespace()) == 0
+        # Match the FIELD cell, not just the response name: the tool list below also has a
+        # row beginning `| `tortoise_analyze``, so the looser filter picked up both.
+        rows = [
+            ln
+            for ln in out.read_text().splitlines()
+            if ln.startswith("| `tortoise_analyze` | `why`")
+        ]
+        assert len(rows) == 1, f"the recorded row was split across lines: {rows}"
+        assert rows[0].count("|") == 5, f"a pipe leaked into the row: {rows[0]}"
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_a_recut_carries_response_fields_forward(tmp_path, monkeypatch):
+    """`cut` must not drop the hand-authored `response_fields` block.
+
+    Those entries record response FIELDS — outside the gate, and not derivable from the
+    declaration — so a re-cut that dropped them would silently empty the table the
+    carve-out depends on, and the obligation to record a field would evaporate the first
+    time anyone regenerated the manifest.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"response": "tortoise_analyze", "field": "why", "emitted_when": "flag"}]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path))
+    assert sm._carried_response_fields() == doc["response_fields"], (
+        "a re-cut must carry `response_fields` forward, not drop the record"
+    )
+
+
+def test_a_non_list_response_fields_block_crashes_neither_command(tmp_path, monkeypatch):
+    """A `response_fields:` value that is not a list must not crash `check` or `render`.
+
+    `cut` only ever writes a list, so this shape is not reachable from the generator —
+    but iterating a scalar raised `TypeError` in both commands, which is a crash path the
+    fail-closed surface should not have for a block it merely ignores.
+    """
+    sm = _load_manifest_tool()
+    out = _render_scratch()
+    for block in (5, "ask", {"a": 1}, None, []):
+        doc = _manifest()
+        doc["response_fields"] = block
+        monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, f"block-{type(block).__name__}.yml"))
+        # `_doc=doc` BINDS the value. A bare closure over `doc` would read the
+        # variable at CALL time, which is the next loop iteration's manifest —
+        # ruff's B023, and a real aliasing hazard rather than a style nit.
+        monkeypatch.setattr(sm, "build_doc", lambda *a, _doc=doc, **k: copy.deepcopy(_doc))
+        monkeypatch.setattr(sm, "RENDERED_FILE", out)
+        try:
+            assert sm.cmd_render(argparse.Namespace()) == 0, f"render crashed on block={block!r}"
+            assert sm.cmd_check(argparse.Namespace()) in (0, 1), f"check crashed on block={block!r}"
+        finally:
+            out.unlink(missing_ok=True)
+
+
+def test_a_recut_carries_response_fields_forward_when_the_block_is_absent(tmp_path, monkeypatch):
+    """The carry-forward helper must return `[]` — not raise — when there is no record."""
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "MANIFEST_FILE", tmp_path / "does-not-exist.yml")
+    assert sm._carried_response_fields() == []
+
+    doc = _manifest()
+    doc.pop("response_fields", None)
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "no-block.yml"))
+    assert sm._carried_response_fields() == []
+
+
+def test_check_reds_when_the_recorded_fields_block_is_empty_or_missing(tmp_path, monkeypatch):
+    """The record must not be able to VANISH.
+
+    Before these properties the whole block could be deleted and `check` still said OK —
+    so the doc's promise that an off-by-default addition "cannot quietly become the way the
+    surface grows" was prose with nothing behind it.
+    """
+    sm = _load_manifest_tool()
+    for block in (None, []):
+        doc = _manifest()
+        if block is None:
+            doc.pop("response_fields", None)
+        else:
+            doc["response_fields"] = block
+        monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, f"empty-{block is None}.yml"))
+        monkeypatch.setattr(sm, "build_doc", lambda *a, _doc=doc, **k: copy.deepcopy(_doc))
+        assert sm.cmd_check(argparse.Namespace()) == 1, f"check passed with response_fields={block!r}"
+
+
+def test_check_reds_when_a_recorded_field_is_not_anchored_to_the_surface(tmp_path, monkeypatch):
+    """Every entry must name a tool or endpoint that exists in the manifest."""
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"response": "no_such_endpoint", "field": "x", "emitted_when": "never"}]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "unanchored.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    assert sm.cmd_check(argparse.Namespace()) == 1, "an unanchored entry must red check"
+
+
+def test_check_accepts_a_recorded_field_anchored_to_a_real_endpoint(tmp_path, monkeypatch):
+    """The anchor property must accept the real shape — `tortoise_analyze` is a live row."""
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {"response": "tortoise_analyze", "field": "why", "emitted_when": "truthy", "unchanged_when_off": "yes"}
+    ]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "anchored.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    assert sm.cmd_check(argparse.Namespace()) == 0, "the live `tortoise_analyze` row anchors the entry"
+
+
+def test_check_anchor_sees_an_sdk_endpoint_row_not_just_tool_rows(tmp_path, monkeypatch):
+    """An endpoint response is anchored by its `sdk:<method>` row.
+
+    `_partition_rows` — the row list the comparisons read — DROPS every `sdk:` row, so an
+    anchor check written against it could never resolve an endpoint and would reject a
+    legitimate `sdk:`-anchored entry. This pins the anchor set to the FULL `rows:` list.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {"response": "volunteer_context", "field": "x", "emitted_when": "always"}
+    ]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "sdk-anchored.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    assert sm.cmd_check(argparse.Namespace()) == 0, "an `sdk:`-anchored entry must be accepted"
+
+
+def test_a_non_mapping_document_fails_cleanly_everywhere(tmp_path, monkeypatch):
+    """A top-level YAML list must not crash any command with a bare TypeError."""
+    sm = _load_manifest_tool()
+    manifest = tmp_path / "not-a-mapping.yml"
+    manifest.write_text("- just\n- a\n- list\n")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", manifest)
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    assert sm._carried_response_fields() == []
+    assert sm.cmd_check(argparse.Namespace()) == 1, "check must fail cleanly, not raise"
+    assert sm.cmd_render(argparse.Namespace()) == 1, "render must fail cleanly, not raise"
+
+
+def test_unparseable_yaml_is_not_fatal_to_the_carry_forward(tmp_path, monkeypatch):
+    """`_carried_response_fields` must return `[]` on a YAML error, not raise."""
+    sm = _load_manifest_tool()
+    manifest = tmp_path / "broken.yml"
+    manifest.write_text("rows: [unclosed\n")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", manifest)
+    assert sm._carried_response_fields() == []
+
+
+def test_cmd_cut_is_actually_wired_to_carry_the_recorded_fields(tmp_path, monkeypatch):
+    """`_carried_response_fields` must be CALLED by `cut`, not merely defined.
+
+    The helper test alone does not pin the wiring: deleting the `response_fields:` line from
+    `build_doc` left every other test passing, so a re-cut would silently empty the table —
+    the exact way the recording obligation dies. Patch the helper with a sentinel and assert
+    the sentinel reaches the document `cut` writes.
+    """
+    sm = _load_manifest_tool()
+    sentinel = [{"response": "tortoise_analyze", "field": "why", "emitted_when": "truthy"}]
+    monkeypatch.setattr(sm, "_carried_response_fields", lambda: sentinel)
+    out = ROOT / "config" / "_scratch_recut_test.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", out)
+    monkeypatch.setattr(sm, "RENDERED_FILE", _render_scratch())
+    try:
+        assert sm.cmd_cut(argparse.Namespace(commit="test")) == 0
+        written = yaml.safe_load(out.read_text())
+    finally:
+        out.unlink(missing_ok=True)
+        _render_scratch().unlink(missing_ok=True)
+    assert written.get("response_fields") == sentinel, (
+        "cmd_cut did not carry the recorded fields into the manifest it wrote"
+    )
+
+
+def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkeypatch):
+    """The drift step must be satisfiable OFF the machine that committed the file.
+
+    The CI step is `python3 tools/surface_manifest.py render` followed by
+    `git diff --exit-code -- docs/product/mcp-sdk-surface.md`, and it runs where
+    `~/.tortoise/analytics_fallback.jsonl` does not exist. A render that reads that log
+    emits DIFFERENT bytes there, so the step could only ever pass on one laptop: measured
+    with the log absent, `_never` counted all 82 tools ("82 of 82" rather than "55 of 82")
+    and every row lost its `in use` / `never called` flag — a 166-line diff against the
+    committed document.
+
+    The render reads COMMITTED inputs only. `used_by` is the checked-in cell the document
+    already prints, so the flag is derived from it; the log keeps driving the artifact
+    through `build_doc`, which refreshes the MANIFEST and lands as a reviewed diff.
+    """
+    sm = _load_manifest_tool()
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+    try:
+        assert sm.cmd_render(argparse.Namespace()) == 0
+        assert out.read_text(encoding="utf-8") == RENDERED.read_text(encoding="utf-8"), (
+            "the render produced different bytes with no machine-local call log — the CI "
+            "drift step compares this output against the committed document, so it can "
+            "never pass on a runner"
+        )
+    finally:
+        out.unlink(missing_ok=True)

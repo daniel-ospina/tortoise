@@ -1,0 +1,26 @@
+{
+  "_comment": "Recorded accept-page exchange for the emailed invite link (#4367). Replayed by tests/test_email_integration_resend.py::test_invite_link_contract_is_hermetic so the link contract is asserted with NO network; the live half (test_invite_link_resolves) re-verifies the deployed page behind ALLOW_PROD=1 + @pytest.mark.live. Only the STABLE contract headers are recorded — Cloudflare's per-request headers (date, cf-ray, report-to, nel, alt-svc) are deliberately omitted, because recording them would make the cassette rot on every request instead of on a real contract change. Re-record when the deployed redirect chain or referrer policy actually changes.",
+  "recorded_at": "2026-09-20",
+  "recorded_with": "curl -sSL -D- 'https://tortoise.premiselabs.co/invite-accept.html?token=linkcheck'",
+  "exchanges": [
+    {
+      "request_url": "https://tortoise.premiselabs.co/invite-accept.html?token=linkcheck",
+      "status_code": 301,
+      "headers": {
+        "Location": "https://app.premiselabs.co/invite-accept?token=linkcheck",
+        "content-type": "text/plain;charset=UTF-8",
+        "x-content-type-options": "nosniff"
+      }
+    },
+    {
+      "request_url": "https://app.premiselabs.co/invite-accept?token=linkcheck",
+      "status_code": 200,
+      "headers": {
+        "content-type": "text/html; charset=utf-8",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "X-Content-Type-Options": "nosniff",
+        "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+      }
+    }
+  ]
+}

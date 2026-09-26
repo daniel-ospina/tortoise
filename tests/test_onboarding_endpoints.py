@@ -627,6 +627,12 @@ class TestRegister:
 # value is PATCHed and must round-trip (bool keys take True; timestamp keys
 # take an ISO string; scope keys take a small non-empty sample).
 _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
+    # #1924: per-source ENABLE intent. Unlike every other bool in this table —
+    # which samples True — these PATCH False on purpose: the OFF direction IS
+    # the bug the key exists to fix, so the round-trip must prove a False
+    # survives the merge (True-only coverage would never exercise off).
+    "issues_enabled": ("issues_enabled", False),
+    "docs_enabled": ("docs_enabled", False),
     # #1894: last-indexed timestamps (ISO strings, server-stamped at
     # completion — registered like every other capture/state key).
     "github_indexed_at": ("github_indexed_at", "2026-08-25T00:00:00Z"),
@@ -715,6 +721,36 @@ def test_state_keys_registered_parametrized(client):
         r = client.get("/v1/onboarding/state")
         assert r.json()["onboarding"][state_key] == patch_value, \
             f"{state_key} did not read back through GET"
+
+
+def test_issues_off_does_not_disconnect_github(client):
+    """#1924: the Issues off-toggle is an ENABLE flag, not a disconnect.
+
+    Before #1924 the dashboard's off-toggle PATCHed ``github_connected=False``
+    — a full GitHub disconnect that also killed the docs source and forced a
+    fresh OAuth round-trip just to hide issues. The dashboard now PATCHes
+    ``issues_enabled=False``; this pins the server-side invariant the fix
+    rides on: turning the Issues source off leaves the CONNECTION and the
+    sibling docs source intact (so re-enabling needs no re-authorization).
+    """
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.patch("/v1/onboarding/state", json={"github_connected": True})
+    assert r.status_code == 200, r.text
+    # the off-toggle's write: issues intent only — nothing about the connection
+    r = client.patch("/v1/onboarding/state", json={"issues_enabled": False})
+    assert r.status_code == 200, r.text
+    body = r.json()["onboarding"]
+    assert body["issues_enabled"] is False
+    assert body["github_connected"] is True, \
+        "turning the Issues source off must NOT disconnect GitHub (#1924)"
+    assert body["docs_enabled"] is True, \
+        "the sibling docs source must be untouched (#1924)"
+    st = client.get("/v1/onboarding/state").json()["onboarding"]
+    assert st["github_connected"] is True
+    assert st["issues_enabled"] is False
 
 
 def test_capture_surface_keys_shared_across_defaults():

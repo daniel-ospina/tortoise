@@ -15,12 +15,15 @@ Thresholds are model-specific — recalibrate when swapping the embedder.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 
 import numpy as np
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
+from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
+from .ids import content_hash
 
 
 def _embedder_warmup_enabled() -> bool:
@@ -52,6 +55,154 @@ EMBEDDING_DIM = 384
 # Supply-chain pin (VULN-001, security review): resolved HF commit at bake time
 # (2026-08-21). A mutable tag would silently serve tampered weights.
 EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+
+
+def embedding_identity() -> tuple[str | None, str | None]:
+    """The (model, revision) identity of the vectors the active embedder makes.
+
+    #5004: the journal stores an embedding alongside THIS identity, so a replay
+    can restore the recorded vector verbatim (R1, `docs/durability-posture.md`
+    §3/§14.1 O1: the embedding STORES, it is not regenerated) and treat a
+    model change as an explicit, recorded decision instead of a silent
+    re-encode that yields a different graph.
+
+    Resolved at CALL time, not import time, so a test (or a future operator
+    swap) that rebinds the module constants is reflected by both the writer
+    that stamps the identity and the replay that compares against it.
+    """
+    return EMBEDDING_MODEL, EMBEDDING_MODEL_REVISION
+
+
+#: Defensive bound on a journalled vector's length. The writer emits exactly
+#: `EMBEDDING_DIM`; a hand-edited/corrupt record must not make a rebuild
+#: materialise an unbounded list. Far larger than any real width.
+_MAX_JOURNALLED_VECTOR_LEN = 8192
+
+
+def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
+    """#5004: normalise and stamp a point payload's embedding + its identity.
+
+    THE single seam both journal producers use (`TortoiseSDK._emit_event`,
+    `EventAPI._point`, and the capture turn loop), so they cannot drift.
+
+    **PRESENCE IS OWNERSHIP.** A producer that owns the field sets
+    ``payload["embedding"]`` (to the vector, or to ``None`` when it genuinely
+    has none) BEFORE calling. The key being present is what tells the replay
+    "the journal owns this field for this id — do NOT recompute" — which is how
+    a re-capture made while the embedder is unavailable keeps its PRESERVED
+    vector, instead of the replay inventing a new one (round-3 review). A key
+    that is ABSENT means a legacy/foreign record, where recomputation is the
+    only available behaviour.
+
+    R1 (`docs/durability-posture.md` → *Derived properties that are
+    STORED, not recomputed*: the design source is
+    `docs/architecture/STORAGE-ARCHITECTURE.md` §3/§14.1 O1, landed via #5016)
+    is that the
+    embedding STORES —
+    it is not regenerated on replay, because a re-embed is a RE-RUN: its output
+    depends on model identity, revision and tokenizer, none of which the
+    journal used to carry. So the payload carries the vector VERBATIM plus the
+    identity it was computed under, and a replay restores it rather than
+    silently producing a different graph from the same journal.
+
+    ``creating`` gates the ATTESTATION, not the vector. `creating=True` stamps
+    `embedding_text_hash` plus the model identity, because a creating event's
+    vector was computed from the content in the same write. `creating=False`
+    (a re-emitted snapshot such as `PointPromoted`) still carries the vector —
+    without it the replay would RE-ENCODE and silently change the point's
+    vector — but stamps NO identity, because that vector may predate a model
+    change and the record cannot attest its origin. The creating record owns
+    the attestation.
+
+    Mutates and returns *payload*. A vector that cannot be normalised to a
+    finite numeric list is replaced with ``None`` (the field stays OWNED) with
+    a warning — never silently, and never allowed to reach the engine's
+    `vecf32()` after a wipe: a journal record is a FILE (hand-editable,
+    truncatable, writable by an older build), and `json` round-trips
+    `NaN`/`Infinity` and unbounded ints by default.
+    """
+    if "embedding" not in payload:
+        return payload
+    raw = payload.get("embedding")
+    vec: list[float] | None = None
+    if raw is not None:
+        # Accept ANY non-string iterable: the producers hand over a list, but a
+        # graph read-back (`t.embedding` after a `vecf32` write, #5004 round-3)
+        # can arrive as a numpy array or a driver vector type. A `dict` is not
+        # a sequence of numbers and a `str` is a sequence of CHARACTERS —
+        # both are refused rather than silently transposed.
+        if isinstance(raw, (str, bytes, dict)):
+            _drop_journalled_embedding(payload, "not a numeric sequence")
+            return payload
+        try:
+            items = list(raw)
+        except TypeError:
+            _drop_journalled_embedding(payload, "not a numeric sequence")
+            return payload
+        if not items:
+            _drop_journalled_embedding(payload, "empty")
+            return payload
+        if len(items) > _MAX_JOURNALLED_VECTOR_LEN:
+            _drop_journalled_embedding(payload, "implausibly long")
+            return payload
+        vec = []
+        for x in items:
+            try:
+                f = float(x)
+            except (TypeError, ValueError, OverflowError):
+                _drop_journalled_embedding(payload, "non-numeric element")
+                return payload
+            if not math.isfinite(f):
+                _drop_journalled_embedding(payload, "non-finite element")
+                return payload
+            vec.append(f)
+    payload["embedding"] = vec
+    if (vec is not None and creating
+            and not payload.get("embedding_verbatim")
+            # #5004 round-3: a re-capture that did NOT encode a vector (the
+            # embedder was unavailable) PRESERVES the node's existing one. The
+            # vector may have been computed by a DIFFERENT model, so attesting
+            # the ACTIVE one would record a false origin — and if the original
+            # capture record is gone (retention, a journal enabled mid-stream)
+            # the model change becomes SILENT, which is the failure R1 forbids.
+            and not payload.get("embedding_preserved")):
+        # Only a CREATING event may attest the vector's origin: its vector was
+        # computed from the content in the same write.
+        model, revision = embedding_identity()
+        payload["embedding_model"] = model
+        payload["embedding_revision"] = revision
+        content = payload.get("content")
+        if isinstance(content, str) and content:
+            payload["embedding_text_hash"] = content_hash(content)
+    else:
+        # A RE-EMITTED snapshot (PointPromoted/…) carries the node's existing
+        # vector, which may predate a model change — stamping the CURRENT
+        # identity would mis-attest it. Drop both the text-hash and the
+        # identity; the creating record owns the attestation, and the replay
+        # restores this vector verbatim without claiming an origin. With NO
+        # vector there is nothing to attest at all.
+        payload.pop("embedding_text_hash", None)
+        payload.pop("embedding_model", None)
+        payload.pop("embedding_revision", None)
+    return payload
+
+
+def _drop_journalled_embedding(payload: dict, why: str) -> None:
+    """Drop an unusable vector to an OWNED `None` and SAY SO.
+
+    The key stays present on purpose: the producer observed this field, so the
+    replay must not recompute it (see `stamp_journal_embedding` above). A
+    silent drop is indistinguishable from "there was never a vector", which is
+    exactly the divergence #5004 removes.
+    """
+    payload["embedding"] = None
+    payload.pop("embedding_text_hash", None)
+    payload.pop("embedding_model", None)
+    payload.pop("embedding_revision", None)
+    logger.warning(
+        "journal: dropping an unusable embedding on Point %s (%s) — the field "
+        "stays journal-owned as None, so the replay will NOT invent a vector "
+        "(#5004)", payload.get("id"), why)
 
 # #1349: thresholds are model-specific — recalibrated for bge-small from
 # tests/fixtures/labeled_pairs.jsonl (tools/calibrate_thresholds --model
@@ -126,6 +277,44 @@ class EmbeddingModel:
     _last_failure_kind: str | None = None
 
     @classmethod
+    def _embedder_required(cls) -> bool:
+        """``TORTOISE_EMBEDDING_MODEL_REQUIRED`` — the fail-loud opt-in (OFF).
+
+        #4861: resolved through the declared truthy contract (#4097), like every
+        other flag here, so ``0``/``false``/``no``/``off`` also opt out. UNSET →
+        :meth:`get` returns ``None`` exactly as before, so dev and hosted
+        behaviour cannot drift: the contract is off by default and reversible.
+        """
+        return env_flag("TORTOISE_EMBEDDING_MODEL_REQUIRED", False)
+
+    @classmethod
+    def _unavailable(cls, *, context: str) -> "EmbeddingModel | None":  # noqa: UP037
+        """The single exit for "no model": ``None``, or raise when REQUIRED.
+
+        #4861 — every ``None`` path in :meth:`get` returns through here, so its
+        four origins (the outer and in-lock negative caches, and the transient
+        load failure) cannot drift apart: a REQUIRED process fails by name, at
+        the point of use, instead of silently running keyword-only while a
+        green run and a runner-down run stay indistinguishable.
+
+        ``failure_kind`` is carried through unchanged so the two cases stay
+        distinguishable — ``not_installed`` (the environment never had the
+        embedder) vs ``load_failed`` / ``load_timeout`` (it had it and the load
+        broke). A REQUIRED process does not accept ``not_installed`` as an
+        excuse: "designed absence" is only designed for a process that did not
+        ask for the embedder.
+        """
+        if not cls._embedder_required():
+            return None
+        raise EmbedderUnavailableError(
+            failure_kind=cls._last_failure_kind or "model_unavailable",
+            model=EMBEDDING_MODEL,
+            revision=EMBEDDING_MODEL_REVISION,
+            last_error=cls._last_error,
+            context=context,
+        )
+
+    @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
         """Get or create the singleton. Returns None if model unavailable.
 
@@ -151,7 +340,7 @@ class EmbeddingModel:
             # None immediately instead of blocking up to 90s per request in a
             # degraded environment (offline dev, cold CI, OOM). Retry after the
             # cooldown window via the normal "retries on next get()" path.
-            return None
+            return cls._unavailable(context="negative cache, load failed within cooldown")
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -165,7 +354,8 @@ class EmbeddingModel:
                     now_locked = time.monotonic()
                     if cls._last_failed_at is not None and \
                             (now_locked - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
-                        return None
+                        return cls._unavailable(
+                            context="negative cache (in-lock), load failed within cooldown")
                     cls._instance = cls(load_timeout=timeout)
         model = cls._instance._model if (cls._instance and cls._instance._model) else None
         if model is None and cls._instance is not None:
@@ -183,6 +373,10 @@ class EmbeddingModel:
             # available=True (P2 review fix).
             cls._last_failure_kind = None
             cls._last_error = None
+        if model is None:
+            # #4861: the transient-failure exit — the last of the four origins,
+            # and the one a REQUIRED runner hits when the load itself broke.
+            return cls._unavailable(context="load failed (timeout/OOM)")
         return model
 
     @classmethod

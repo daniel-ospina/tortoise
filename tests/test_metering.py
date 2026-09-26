@@ -204,6 +204,40 @@ class TestRecordWriteOps:
 
 # ── Threshold events ────────────────────────────────────────────────────────
 
+# ── #4957: scope threshold-event capture to the METERING logger ─────────────
+#
+# These tests assert on threshold EVENTS, and only ``tortoise.metering`` emits
+# them. Filtering ``caplog.records`` by the bare word "threshold" matches ANY
+# logger's FORMATTED message, because ``caplog`` captures every logger that
+# propagates to root. pytest's ``tmp_path`` derives from the test's own name —
+# ``test_no_threshold_for_free_tier`` — so the unrelated
+# ``#4879: replay allowed for registry <path>`` WARNING emitted by
+# ``tortoise.embedded_lifecycle`` matched on its embedded path and reddened
+# main's ``test (b)`` (#4954 / #4962).
+#
+# The scope below is by LOGGER, so no other module's record can be mistaken for
+# a metering event, whatever it logs. An ABSENCE assertion is the shape
+# pollution breaks, and it is the shape used below.
+_METERING_LOGGER = "tortoise.metering"
+
+
+def _metering_records(caplog, needle: str = "threshold",
+                      levelno: int | None = None) -> list:
+    """Records the METERING logger emitted whose message contains ``needle``.
+
+    Scoped by logger NAME, not by the bare word alone (#4957): the word
+    "threshold" occurs in this test module's own tmpdir path, so an unscoped
+    filter matches another module's record and turns a real absence into a
+    failure. ``needle`` and ``levelno`` narrow WITHIN that scope.
+    """
+    return [
+        r for r in caplog.records
+        if r.name == _METERING_LOGGER
+        and (levelno is None or r.levelno == levelno)
+        and needle in r.message
+    ]
+
+
 class TestThresholdEvents:
     def test_80_percent_warning(self, reg_sdk, caplog):
         """Crossing 80% of allowed ops emits a WARNING log once."""
@@ -213,11 +247,10 @@ class TestThresholdEvents:
         eighty_pct = int(allowance * 0.80)
 
         # Jump to 80% in one increment
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             record_write_ops(tid, tier="pro", n=eighty_pct)
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
-                    and "threshold" in r.message]
+        warnings = _metering_records(caplog, levelno=logging.WARNING)
         assert len(warnings) >= 1, (
             f"Expected at least one WARNING for 80% threshold, got: "
             f"{[r.message for r in caplog.records]}"
@@ -231,11 +264,10 @@ class TestThresholdEvents:
         _reset_thresholds_for_tests()
         allowance = 50000  # pro tier
 
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.ERROR, logger=_METERING_LOGGER):
             record_write_ops(tid, tier="pro", n=allowance)
 
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR
-                  and "threshold" in r.message]
+        errors = _metering_records(caplog, levelno=logging.ERROR)
         assert len(errors) >= 1, (
             f"Expected at least one ERROR for 100% threshold, got: "
             f"{[r.message for r in caplog.records]}"
@@ -254,20 +286,22 @@ class TestThresholdEvents:
         # First, set count to just below threshold
         record_write_ops(tid, tier="pro", n=eighty_pct - 1)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             # Next op crosses 80%
             record_write_ops(tid, tier="pro")
             # Next op stays above 80% — should NOT fire again
             record_write_ops(tid, tier="pro")
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
-                    and "80%" in r.message]
+        warnings = _metering_records(
+            caplog, needle="80%", levelno=logging.WARNING)
         assert len(warnings) == 1, (
             f"Expected exactly 1 WARNING for 80% threshold, got {len(warnings)}"
         )
 
     def test_no_threshold_for_free_tier(self, reg_sdk, caplog):
-        """Free/Solo tiers never trigger threshold events (no overage)."""
+        """Free (a zero-price tier) never triggers threshold events: no
+        overage. Solo is PAID and therefore metered since #4815 — see
+        test_paid_solo_tier_triggers_threshold_events."""
         sdk, tid = reg_sdk
         _reset_thresholds_for_tests()
         # Switch team to free tier
@@ -276,15 +310,86 @@ class TestThresholdEvents:
             params={"tid": tid},
         )
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             record_write_ops(tid, tier="free", n=99999)
 
-        warnings = [r for r in caplog.records
-                    if "threshold" in r.message]
+        warnings = _metering_records(caplog)
         assert len(warnings) == 0, (
             f"Free tier should not trigger threshold events, got: {warnings}"
         )
 
+    def test_paid_solo_tier_triggers_threshold_events(self, reg_sdk, caplog):
+        """#4815: solo is a PAID tier, so overage is ON — it emits the
+        80%/100% threshold events exactly as pro/team do. This is the
+        ruling's observable metering consequence."""
+        sdk, tid = reg_sdk
+        _reset_thresholds_for_tests()
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $tid}) SET t.tier = 'solo'",
+            params={"tid": tid},
+        )
+
+        # Scoped to the METERING logger (#4957) — see _metering_records. This
+        # is a PRESENCE assertion, which is exactly the shape an unscoped
+        # caplog.records scan can false-PASS: any other module logging "80%"
+        # at WARNING would satisfy it without solo being metered at all.
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
+            record_write_ops(tid, tier="solo", n=99999)
+
+        warnings = _metering_records(
+            caplog, needle="80%", levelno=logging.WARNING)
+        errors = _metering_records(
+            caplog, needle="100%", levelno=logging.ERROR)
+        assert warnings, (
+            "Solo (paid) must fire the 80% threshold, got: "
+            f"{_metering_records(caplog)}"
+        )
+        assert errors, (
+            "Solo (paid) must fire the 100% threshold, got: "
+            f"{_metering_records(caplog)}"
+        )
+
+    def test_unrelated_logger_is_not_a_threshold_event(self, reg_sdk, caplog):
+        """#4957: another module's record must never count as a threshold event.
+
+        This is the shape that reddened main's ``test (b)``: the ``#4879``
+        replay-allowed WARNING from ``tortoise.embedded_lifecycle`` embeds the
+        embedded registry path, and pytest's ``tmp_path`` derives from the
+        test's own name (``test_no_threshold_for_free_tier``) — so a filter on
+        the bare word matched the test's OWN tmpdir.
+
+        The injected record reproduces that shape, and this test asserts through
+        the SAME helper the real absence assertion uses, so re-broadening the
+        filter fails here rather than re-arming on main.
+        """
+        sdk, tid = reg_sdk
+        _reset_thresholds_for_tests()
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $tid}) SET t.tier = 'free'",
+            params={"tid": tid},
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
+            logging.getLogger("tortoise.embedded_lifecycle").warning(
+                "#4879: replay allowed for registry %s — gate=%s%s "
+                "(this construction holds the in-flight replay claim)",
+                "/tmp/pytest-of-runner/pytest-0/test_no_threshold_for_free_tier0",
+                "allow",
+                "",
+            )
+            record_write_ops(tid, tier="free", n=99999)
+
+        # Non-vacuous the other way too: the polluted record really IS captured,
+        # so the guard under test is the LOGGER SCOPE, not the record's absence.
+        assert any(
+            r.name == "tortoise.embedded_lifecycle" and "threshold" in r.message
+            for r in caplog.records
+        ), "the injected record must be captured, or this test proves nothing"
+
+        assert _metering_records(caplog) == [], (
+            "an unrelated logger's record was counted as a metering threshold "
+            f"event: {_metering_records(caplog)}"
+        )
 
 # ── Usage query tests ───────────────────────────────────────────────────────
 
@@ -539,7 +644,12 @@ class TestPricingIntegration:
     def test_free_tier_has_no_overage(self):
         from tortoise.pricing import has_overage
         assert has_overage("free") is False
-        assert has_overage("solo") is False
+        assert has_overage("anon") is False
+
+    def test_solo_tier_has_overage(self):
+        # #4815: solo is a PAID tier → metered (no longer a hard cap).
+        from tortoise.pricing import has_overage
+        assert has_overage("solo") is True
 
     def test_pro_and_team_have_overage(self):
         from tortoise.pricing import has_overage

@@ -50,19 +50,23 @@ import pytest
 # `SeedVisibilityError` guard at `_seed_live_graph` is what makes them loud
 # instead of silent.
 #
-# The skip is therefore retained as a COVERAGE decision, not a collision
-# workaround: this path's authoritative coverage is the server-mode harness —
-# the subprocess server in #1390's parity E2E
-# (tests/e2e/hosted/test_12_selfhost_migration.py::test_parity_export_import),
-# which is the harness these cases would otherwise have to stand up here.
-# Unskipped in the in-process harness, four of the five pass; the fifth
-# (`test_import_tampered_blob_422`) fails on its own stale detail expectation
-# ("blob integrity" vs the endpoint's actual "decryption failed") — a
-# test-vs-code drift, not an embedded single-writer collision. Un-skipping or
-# repairing them is a scoped test change, not a comment change.
+# #3545 / #3547 corrected the skip's coverage claim. #1390's subprocess parity
+# E2E (tests/e2e/hosted/test_12_selfhost_migration.py::test_parity_export_import)
+# covers the HAPPY PATH ONLY — it never exercises the fail-closed chain — so
+# "redundant in-process copies, covered by the parity E2E" was true of
+# `test_import_happy_path` alone. #3545 un-skipped `test_import_tampered_blob_422`
+# (its stale "blob integrity" expectation is fixed and its sibling
+# `test_import_rehashed_blob_header_decrypt_failure_422` now pins the other
+# branch of that taxonomy). The remaining fail-closed deep cases
+# (`test_import_empty_backup_over_live_422`,
+# `test_import_dangling_edge_quarantined_422`,
+# `test_import_swap_failure_503_quarantined_live_untouched`) are DEFERRED with a
+# tracked reason in #3547 — this marker keeps them out of the default lane,
+# it does not hide them.
 _import_deep = pytest.mark.skip(
-    reason="#3505: redundant in-process copies of the deep import path — "
-           "covered by #1390's subprocess-server parity E2E"
+    reason="#3505/#3547: in-process deep-path (restore→swap) copies — the parity "
+           "E2E (#1390) covers the happy path only; the deferred fail-closed "
+           "cases are tracked in #3547"
 )
 
 from fastapi.testclient import TestClient  # noqa: E402, I001
@@ -499,15 +503,22 @@ def _build_artifact(payload: dict, key: bytes, *,
                     tamper_blob: bool = False,
                     payload_sha_override: str | None = None,
                     header: dict | None = None) -> bytes:
-    """One-line clear header + raw encrypted blob (the wire contract)."""
+    """One-line clear header + raw encrypted blob (the wire contract).
+
+    #3545: ``tamper_blob`` flips the last byte of the ENCRYPTED blob while the
+    clear header keeps the hash of the ORIGINAL blob — a corrupted blob whose
+    header was NOT rewritten, so the endpoint's sha256 integrity gate is the
+    layer that rejects it ("blob integrity check failed", asserted by
+    ``test_import_tampered_blob_422``). A header REHASHED over the tampered
+    bytes is the other branch (the AES-GCM tag rejects it, "decryption
+    failed"); build it with ``_rehash_header_over_blob`` below.
+    """
     inner = {
         "format": "tortoise-export-v1",
         "payload_sha256": payload_sha_override or hashlib.sha256(_canonical(payload)).hexdigest(),
         "payload": payload,
     }
     blob = encrypt_backup(json.dumps(inner).encode("utf-8"), key=key)
-    if tamper_blob:
-        blob = blob[:-1] + bytes([blob[-1] ^ 0xFF])
     header = header or {
         "format": "tortoise-export-v1",
         "artifact_version": 1,
@@ -517,8 +528,26 @@ def _build_artifact(payload: dict, key: bytes, *,
         "exporter_version": "1.0.0",
         "exported_at": "2026-08-17T00:00:00Z",
         "source_surface": "selfhost",
+        # Hashed BEFORE the tamper below (see the docstring) — the stale-header
+        # case that makes the sha256 gate the rejector.
         "blob_sha256": hashlib.sha256(blob).hexdigest(),
     }
+    if tamper_blob:
+        blob = blob[:-1] + bytes([blob[-1] ^ 0xFF])
+    return json.dumps(header).encode("utf-8") + b"\n" + blob
+
+
+def _rehash_header_over_blob(artifact: bytes) -> bytes:
+    """Rewrite the clear header's ``blob_sha256`` to match its blob (#3545).
+
+    Models an adversary who controls the clear header: the sha256 integrity
+    gate PASSES, so the AES-GCM authentication tag is the layer that rejects
+    the artifact — the endpoint's "decryption failed" branch. Pairs with
+    ``_build_artifact(tamper_blob=True)``, whose header deliberately stays stale.
+    """
+    header_line, blob = artifact.split(b"\n", 1)
+    header = json.loads(header_line)
+    header["blob_sha256"] = hashlib.sha256(blob).hexdigest()
     return json.dumps(header).encode("utf-8") + b"\n" + blob
 
 
@@ -671,8 +700,17 @@ class TestImportCaps:
 
 
 class TestImportValidationFailClosed:
-    @_import_deep
     def test_import_tampered_blob_422(self, sb_client, as_user, capture_audit):
+        """A corrupted blob whose clear header was NOT rewritten is rejected by
+        the sha256 integrity gate — pre-decrypt, pre-restore (#3545).
+
+        NOT behind ``@_import_deep``: the rejection is pre-restore, so the case
+        is cheap, and this is the only test pinning THIS branch's rejection
+        message together with the live-graph-untouched assertion — #1390's
+        parity E2E exercises the happy path only, and the un-skipped sibling
+        ``test_import_quarantine_stamps_ledger`` reaches the same sha256 path
+        for ledger stamping only.
+        """
         tc, fake, db_path = sb_client
         _seed_team(fake)
         _seed_live_graph(db_path, n_points=1)
@@ -685,6 +723,26 @@ class TestImportValidationFailClosed:
         # quarantine recorded
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         # live graph untouched (old content survives)
+        assert _counts(db_path)["ids"] == ["old-0"]
+
+    def test_import_rehashed_blob_header_decrypt_failure_422(
+            self, sb_client, as_user, capture_audit):
+        """The other half of #3545's taxonomy: a tampered blob whose clear
+        header WAS rehashed passes the sha256 gate, so AES-GCM authentication
+        is what rejects it ("decryption failed"). Both paths are 422 +
+        quarantine, pre-restore; only the rejecting layer differs.
+        """
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        _seed_live_graph(db_path, n_points=1)
+        as_user()
+        key = os.urandom(32)
+        artifact = _rehash_header_over_blob(
+            _build_artifact(_build_payload(), key, tamper_blob=True))
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "decryption failed" in r.json()["detail"]
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == ["old-0"]
 
     def test_import_wrong_key_422(self, sb_client, as_user, capture_audit):

@@ -468,7 +468,7 @@ def _offers_blog_entry(page: Path) -> bool:
 # leaves the public surface, that is a decision someone must take deliberately,
 # not a page that quietly disappears from coverage.
 _IN_SCOPE_AT_3950 = frozenset({
-    "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html", "index.html",
+    "aviso-privacidad.html", "contact.html", "docs.html", "dpa.html", "faq.html", "index.html",
     "license.html", "privacy.html", "product.html", "security.html",
     "self-hosted.html", "tos.html",
     # ⚠️ `signup.html` LEFT this set in #4054: the page (the `/auth` screen)
@@ -1311,7 +1311,7 @@ def test_the_declared_limit_probe_fires_on_the_construct_it_names() -> None:
 # `invite-accept.html` MOVED to `website/apps/dashboard/public/` and are still
 # covered, because `_all_website_pages()` now derives that root too.
 _ALL_WEBSITE_PAGES_AT_3436 = frozenset({
-    "404.html", "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html",
+    "404.html", "aviso-privacidad.html", "contact.html", "docs.html", "dpa.html", "faq.html",
     "index.html", "invite-accept.html", "license.html", "privacy.html",
     "product.html", "security.html", "self-hosted.html",
     "signup.html", "tos.html", "welcome.html",

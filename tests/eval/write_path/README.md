@@ -193,6 +193,71 @@ example (a duplicate-ingest batch race — the raw-notes 10:10Z gold item) in
 a freshly re-authored fictional session; ideas reimplemented carry no license
 obligation, and no corpus file or verbatim gold text is copied.
 
+## Additive banded semantic judge (issue #5085)
+
+The mechanical anchor metrics above stay **authoritative** for the gated
+`metrics` vocabulary — that is the recorded grading hierarchy
+(`runner.py`, plan R-row, gbrain Cat-35 ADOPT).  Issue #5085 adds a
+judged **knowledge-preservation** number *beside* them (never replacing
+them), because the anchor bar scores a paraphrase-only rewrite of a planted
+fact as 0 even when the fact is present in different words.
+
+```bash
+# product/llm lane only — the m2 CI lane is REFUSED (determinism)
+PYTHONPATH=$PWD TORTOISE_TEST_CARVE_OUT=1 tools/run-with-eval-keys.sh \
+  .venv/bin/python -m tests.eval.write_path.runner run \
+    --judge semantic --judge-samples 5 --out <receipt>
+```
+
+* **Blind** — the judge gets paraphrase-level probes + the stored memory
+  points; it NEVER sees the verbatim anchor.  The guard
+  (`judge.BandedSalienceJudge._guard`) is fail-closed on the PROBE block
+  (the memory block is observed data and may legitimately contain a stored
+  point's verbatim wording); a leak raises `JudgeBlindnessError` and fails
+  the run (plan §J4: blindness is load-bearing).
+* **Earned probability** — one binary preservation question, asked
+  `--judge-samples` (default 5) times per unit in EACH of the two prompt
+  orders; the unit's probability is the agreement fraction over the pooled
+  votes, and the two orders are averaged to blunt documented position bias
+  (arXiv 2406.07791).  No verbalized confidence is trusted (arXiv
+  2512.22245, 2508.06225); token logprobs, if a seam ever exposes them, are
+  recorded as a cross-check only.
+* **Bands** (owner-specified, #5085 D14): `same_fact` ≥ 0.80 · `likely`
+  ≥ 0.70 · `maybe` ≥ 0.50 · `likely_not` below.  The receipt carries the
+  per-unit band, the **band distribution**, and a **band-weighted score**
+  (mean of each band's interval midpoint) — so a reader can tell wording
+  shortfall from omission.
+* **Protocol pin** — `judge.SEMANTIC_JUDGE_PIN`
+  (`w2-semantic-banded-v1+w2-salience-paraphrase-v1`), recorded in the
+  receipt's `semantic_judge` block.  The receipt's `judge_pin` stays
+  `JUDGE_PIN_MECHANICAL`, so committed baselines remain comparable and a
+  mechanical-lane receipt is byte-identical to the pre-#5085 shape.
+* **Judge model ≠ extractor model** — the default judge is `solar-pro4`
+  (upstage), deliberately outside the deepseek extractor family
+  (self-preference bias).  The run records both and states any residual
+  overlap.
+
+## Calibration (κ/α pending human labels)
+
+```bash
+.venv/bin/python -m tests.eval.write_path.runner calibrate \
+  --receipt <receipt> --out tests/eval/write_path/calibration/<name>.json
+.venv/bin/python -m tests.eval.write_path.runner calibrate --sample <sample.json>
+```
+
+`calibration.build_calibration_sample` builds a deterministic, band-stratified
+sample (owner floor n ≥ 30, spanning all four bands) whose items carry the
+probe, the judge's band/probability and the session's memory notes, with
+`human_band: null`.  Until every item is labelled the report is
+`labels_pending: true` with `cohen_kappa: null` / `krippendorff_alpha: null`
+— **no κ is ever invented.**  Once labelled, `cohen_kappa` (judge vs human)
+and `krippendorff_alpha` (≥2 coders) are computed.
+
+**Deterministic NLI pre-screen:** NOT added — the repo has no NLI/entailment
+dependency and adding a transformer stack is a policy decision, so the
+SummaC/FactCC/AlignScore-lineage screen is a filed follow-up (see the issue
+referenced in the PR) and the judge path ships without it.
+
 ## Layer-2 operator-edge audit (issue #2514)
 
 Every completed run carries an additive `operator_audit` on the report +
@@ -236,3 +301,11 @@ metrics remain measured on the same corpus content).  A sealed llm run
 (corpus-bless + protocol-bless v1→v2, with the first comparable operator-edge
 numbers on the 15-edge denominator) is REQUIRED before the llm lane is
 comparable again — see the scoping note's "Sealed run required to activate".
+
+> ⚠️ **Start the llm lane through `tools/run-with-eval-keys.sh`** (#2718 /
+> #4860): this runner reads provider keys from the process env and never loads
+> the repo `.env`, so an ambient shell key is what gets billed. That is how the
+> 2026-09-23 sealed run billed an exhausted fleet key and 403'd 7/7 while
+> `.env` held a healthy evals key. The wrapper strips the ambient provider
+> keys, loads `.env` with override, and prints the source + fingerprint of
+> every key it set — paste that into the receipt.

@@ -288,9 +288,8 @@ def _env_chain(job_name: str, step: dict) -> tuple[dict[str, str], dict[str, str
     return literal, unevaluable
 
 
-@lru_cache(maxsize=1)
-def _stub_bin() -> Path:
-    """The stub bin dir, built once per process: both interpreter names + `timeout`."""
+def _build_stub_bin() -> Path:
+    """Create the stub bin dir: both interpreter names + `timeout`."""
     bin_dir = Path(tempfile.mkdtemp(prefix="ci-guard-stub-"))
     body = STUB.replace("__INTERPRETER__", sys.executable)
     for name in ("python3", "python"):
@@ -302,6 +301,41 @@ def _stub_bin() -> Path:
     shim.chmod(0o755)
     atexit.register(shutil.rmtree, bin_dir, ignore_errors=True)
     return bin_dir
+
+
+_stub_bin_dir: Path | None = None
+
+
+def _stub_bin() -> Path:
+    """The stub bin dir, built once per process: both interpreter names + `timeout`.
+
+    Created at MODULE scope (the eager call below), and rebuilt if it ever
+    vanishes. This is not tidiness: the suite's autouse
+    `track_tempfile_artifacts` fixture (#4069, ``tests/_tmpdir_hygiene.py``)
+    rmtrees every ``tempfile.mkdtemp`` directory created during a test's CALL
+    PHASE. A lazily-built, process-cached directory is therefore created INSIDE
+    the first test that needs it, reaped at that test's teardown, and every
+    later test in this file then resolves ``python3`` to the REAL interpreter —
+    the execution evidence these tests assert on silently stops being about the
+    stub. That is a red (this file's `test_the_sandbox_relocation…`, #5226) and
+    a worse one: the harness can pass while no stub ran at all.
+
+    ``_tmpdir_hygiene.py`` states the contract this honours — "a module-/
+    session-scoped fixture's directory is created before the (function-scoped)
+    autouse fixture installs the patch, so it is never recorded and never
+    removed under a later test's feet". Module import runs at collection, before
+    any test, so the eager call satisfies it; the existence check keeps the
+    invariant true even if a different reaper (``tools/tmpdir_sweep.py``) removes
+    the directory mid-session.
+    """
+    global _stub_bin_dir
+    if _stub_bin_dir is None or not (_stub_bin_dir / "python3").is_file():
+        _stub_bin_dir = _build_stub_bin()
+    return _stub_bin_dir
+
+
+# Eager, module-scope build (#4069 contract): never created inside a test.
+_EAGER_STUB_BIN = _stub_bin()
 
 
 def _mkdtemp(prefix: str, parent: Path | None = None) -> Path:

@@ -27,12 +27,13 @@ from tortoise.projection import FalkorProjection  # noqa: E402
 
 # ── about* edges to follow (ONTOLOGY v2.5→v3.0 migration path) ──
 # Point → Entity: aboutSubject → Subject, aboutObject → Object, aboutEvent → Event,
-# aboutDocument → Document.  We do NOT follow aboutAction (Action dissolved v3.0).
+# aboutDocument → Source.  We do NOT follow aboutAction (Action dissolved v3.0).
+# D10 (ONTOLOGY v3.15 §4.4): a document is a :Source.
 _ABOUT_EDGES = {
     "aboutSubject": "Subject",
     "aboutObject": "Object",
     "aboutEvent": "Event",
-    "aboutDocument": "Document",
+    "aboutDocument": "Source",
 }
 
 # ── Cypher fragments ──────────────────────────────────────────────────

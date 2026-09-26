@@ -248,7 +248,10 @@ def test_e2e8_main_backfill_reconciliation(tmp_path, monkeypatch):
         # ── COEXISTENCE forward run (runs LAST — cycle-3 ordering pin) ──
         fwd = sdk.index_directory(str(c), extract_metadata=False)
         assert fwd["failed"] == 0
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 5
+        # D10 (#5026): a document is a :Source, so the forward run adds one
+        # doc Source per doc file (url = "doc_<rel>") on top of the 5 corpus
+        # Sources the backfill created → 5 + 2 = 7.
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 7
         # the 2 doc Sources now hold TWO references edges each (→ legacy
         # DocumentCreated Event AND → new Document(doc_<rel>))
         for name in ("docA.md", "docB.md"):

@@ -221,7 +221,7 @@ The user-approved end state for the auth/marketing surfaces:
 `.github/workflows/deploy-pages.yml` (on push to main touching `website/**`,
 `tortoise/onboarding/**`, `product/pricing.json`, or the workflow file itself):
 
-1. **deploy** — verifies the onboarding skill mirror, syncs DNS, deploys
+1. **deploy** — verifies the onboarding instructions mirror, syncs DNS, deploys
    `website/` → Pages project `premise-labs`. `admin/` is **not** staged here: the
    middleware 302s `/admin` to the app origin before any asset is read (#4171;
    the status is 302 not 301 per `SCOPE.md` §12 — #4409).

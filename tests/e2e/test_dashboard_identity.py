@@ -254,9 +254,13 @@ def test_account_menu_identity_block_single_team(page: Page):
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
     # #4336: the badge renders the DISPLAY label, never the raw tier key.
     expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
-    # #4336: the header upgrade badge routes through the same label map
-    # (catches a re-lowercased display name).
-    expect(page.locator("header a.tier-badge")).to_have_text("Free tier · Upgrade")
+    # #4336: the header tier badge routes through the same label map
+    # (catches a re-lowercased display name). #4639: the header control is no
+    # longer a marketing <a> — it is an upgrade button, or a plain badge when
+    # the deployment has no checkout price id. Scope to the header's DIRECT
+    # child: the open account menu's org badge is a nested `.tier-badge` too
+    # (`header .tier-badge` matched two elements).
+    expect(page.locator("header > .tier-badge")).to_contain_text("Free tier")
     expect(page.locator(".account-menu").get_by_role("button", name="Profile")).to_be_visible()
     expect(page.locator(".account-menu").get_by_role("button", name="Log out")).to_be_visible()
     expect(page.locator(".account-menu").get_by_text("Switch organization")).to_have_count(0)
@@ -677,9 +681,12 @@ def test_account_menu_two_sections(page: Page):
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
     # #4336: the badge renders the DISPLAY label, never the raw tier key.
     expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
-    # #4336: the header upgrade badge routes through the same label map
-    # (catches a re-lowercased display name).
-    expect(page.locator("header a.tier-badge")).to_have_text("Free tier · Upgrade")
+    # #4336: the header tier badge routes through the same label map
+    # (catches a re-lowercased display name). #4639: see
+    # test_account_menu_identity_block_single_team — the header control is no
+    # longer a marketing <a>, and the selector is scoped to the DIRECT child
+    # (the open account menu carries a nested `.tier-badge`).
+    expect(page.locator("header > .tier-badge")).to_contain_text("Free tier")
 
 
 def test_account_menu_org_block_single_team(page: Page):

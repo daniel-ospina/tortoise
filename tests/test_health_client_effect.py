@@ -11,7 +11,8 @@ is where health truth lives.)
 
 The honest limit on "must observe 200": ``/health`` is **not** exempt from the
 outermost ``WaitBoundMiddleware`` (``_TRANSPORT_WAIT_BOUND_EXEMPT`` covers only
-``POST /v1/context``), so a request that does not complete inside its 10 s wait
+``POST /v1/context``; ``/v1/internal/`` is exempt separately, by
+``_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX`` — #4939), so a request that does not complete inside its 10 s wait
 bound (``tortoise/mcp_auth.py::_TRANSPORT_WAIT_BOUND_S``) is answered **504 +
 ``Retry-After``** instead of hanging (#4412, ``tests/test_transport_wait_bound.py``).
 That refusal is *legible*, but a no-retry client cannot act on it — so a 200

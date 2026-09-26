@@ -280,7 +280,10 @@ class TestSessionKeyRoundTrip:
         # P2-1: fail-closed — the rotation freed NO persistent slot (modern
         # bootstraps never count), so the re-check 402s (no cap+1 overshoot).
         assert r.status_code == 402, r.text
-        assert "Key limit reached" in r.json()["detail"]
+        # #4614: the refusal is a STRUCTURED detail (a dict), not a bare string.
+        detail = r.json()["detail"]
+        assert detail["code"] == "quota_exceeded", detail
+        assert "Key limit reached" in detail["message"], detail
         by_id = {row["id"]: row for row in fake.tables["api_keys"]}
         assert by_id["own-boot-1"]["revoked_at"] is not None  # oldest own bootstrap rotated
         assert by_id["own-boot-2"]["revoked_at"] is None

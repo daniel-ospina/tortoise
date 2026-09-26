@@ -234,7 +234,7 @@ APP_FOOTER_PAGES = ("/auth", "/signup")
 # the app origin, so crawling it would leave the local server for production.
 CRAWL_PAGES = (
     "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq",
+    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq", "/contact",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────
@@ -1122,7 +1122,7 @@ def test_crawl_tortoise_root_serves_product(page: Page) -> None:
 # Project-owned domains are excluded from the third-party crawl: they are the
 # crawl's own enumerated set (already asserted against BASE_URL/TORTISE_HOST),
 # a separately-deployed project (app.premiselabs.co — the dashboard, S4), or
-# covered by the welcome suite (the tortoise-onboarding skill mirror,
+# covered by the welcome suite (the tortoise-onboarding instructions mirror,
 # app.premiselabs.co/skills/... — #1998; the old onboarding-prompt.md URL is
 # archived/retired). Fetching
 # them in a local pre-merge run would hit PRODUCTION URLs (P1-3 violation).

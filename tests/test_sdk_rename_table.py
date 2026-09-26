@@ -1587,26 +1587,29 @@ def test_part_c2_reasons_and_sources_are_read() -> None:
     rows = re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| `sdk\.py:(\d+)` \| (.*) \|$",
                       section, re.M)
     parsed = {n: (int(ln), reason) for n, ln, reason in rows}
-    assert parsed == {
+    # Only the REASONS are pinned as literals. The line numbers were previously
+    # duplicated here as literals too, which asserted a value the fresh-AST-walk check
+    # below already derives — so they added no coverage, and their only possible effect
+    # was to fail as a stale-value alarm once the doc had been regenerated without them
+    # being updated. The docstring's contract (lines from the AST, reasons literal) is
+    # what the code now does.
+    assert {n: reason for n, (_ln, reason) in parsed.items()} == {
         "org_create": (
-            15580,
             "No target method creates an organisation account. The tenancy block reads "
             "one (`get_organisation_account`) and files account *closure* as a console "
-            "operation, but no row covers creation.",
+            "operation, but no row covers creation."
         ),
         "compute_reputation": (
-            20373,
             "The canonical `stabilize_beliefs` group lists it, but that group's beta "
             "target is `refresh_confidence` — “Recompute confidence after changes”. "
             "Reputation scoring is not confidence recomputation, and no other target "
-            "absorbs it.",
+            "absorbs it."
         ),
         "record_calibration": (
-            20623,
             "Same group, same mismatch: `refresh_confidence` recomputes confidence; "
-            "recording a calibration milestone is a different operation and has no target.",
+            "recording a calibration milestone is a different operation and has no target."
         ),
-    }, f"C2's rows changed:\n  {parsed}"
+    }, f"C2's reasons changed:\n  {parsed}"
     truth = public_methods_independently()
     wrong = {n: (ln, truth[n]) for n, (ln, _) in parsed.items() if ln != truth[n]}
     assert not wrong, f"C2 cites the wrong `sdk.py` line: {wrong}"

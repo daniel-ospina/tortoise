@@ -206,7 +206,19 @@ NON_DERIVABLE_ROW_KEYS = frozenset(
     {"used_by", "recommendation", "basis", "reason", "approval", "exemption"}
 )
 NON_DERIVABLE_DOC_KEYS = frozenset(
-    {"cut_at_commit", "approval_status", "approval_principal", "approval_pr"}
+    {
+        "cut_at_commit",
+        "approval_status",
+        "approval_principal",
+        "approval_pr",
+        # `response_fields` records hand-authored response FIELDS, outside the gated
+        # surface. `build_doc` carries the committed block forward (see
+        # `_carried_response_fields`), so a derivation of it is the artifact compared
+        # with itself — a no-op that LOOKS like verification. Classified here so the
+        # comparison does not pretend to check it; the block's real defences are the
+        # non-empty and anchor properties in `cmd_check`.
+        "response_fields",
+    }
 )
 
 # The sentinel for "this key is not in the document at all". `doc.get(key)` cannot express
@@ -638,6 +650,26 @@ def _component_fingerprint(fn) -> str | None:
     return f"{rel}:{_code_digest(code)}"
 
 
+def _carried_response_fields() -> list:
+    """Preserve the hand-authored `response_fields` block across a re-cut.
+
+    These entries record response FIELDS, which the gate deliberately does not compare
+    (the freeze is on tools and endpoints). They cannot be derived from the declaration,
+    so `cut` must carry them forward: a re-cut that dropped them would silently empty the
+    table the carve-out depends on, and the obligation to record a field would evaporate
+    the first time anyone regenerated the manifest.
+    """
+    try:
+        with MANIFEST_FILE.open() as fh:
+            doc = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return []
+    if not isinstance(doc, dict):
+        return []
+    fields = doc.get("response_fields")
+    return fields if isinstance(fields, list) else []
+
+
 def build_doc(commit: str | None = None) -> dict:
     """Derive the baseline from the declaration. THE single derivation.
 
@@ -951,6 +983,8 @@ def build_doc(commit: str | None = None) -> dict:
             ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
         ).stdout.strip(),
         "allowed_transforms": transform_names,
+        # Hand-authored, and deliberately NOT gated — carried forward, never re-derived.
+        "response_fields": _carried_response_fields(),
         "approval_status": "pending-owner-approval",
         "approval_principal": None,
         "approval_pr": None,
@@ -981,17 +1015,23 @@ def _display(path: Path) -> str:
 def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
     """Every non-null row-level `approval` in a manifest, in file order.
 
-    `retired:` rows carry the field too — a retirement shrinks the surface and needs the
-    same human approval, and `build_doc` blanks it there as well — so both lists are
-    walked. Each entry is `(row key, approval value)`: exactly what the refusal surfaces,
-    so the owner can see which recorded act a re-cut would discard.
-    """
-    out: list[tuple[str, str]] = []
-    for row in [*(doc.get("rows") or []), *(doc.get("retired") or [])]:
-        if isinstance(row, dict) and row.get("approval"):
-            out.append((str(row.get("name", "<unnamed>")), str(row["approval"])))
-    return out
+    `approval` is NON_DERIVABLE: it records an OWNER decision about a row, and no re-cut can
+    reproduce it. This is precisely the list a re-cut destroys.
 
+    `retired:` rows carry the field too — retiring a name shrinks the surface and needs the
+    same human approval, and `build_doc` blanks it there as well — so BOTH lists are walked.
+    Reading only `rows:` leaves the retired half of the artifact unguarded, which is the same
+    silent wipe through a different door (#4598).
+    """
+    found: list[tuple[str, str]] = []
+    for row in [*(doc.get("rows") or []), *(doc.get("retired") or [])]:
+        if not isinstance(row, dict):
+            continue
+        approval = row.get("approval")
+        if approval:
+            name = row.get("name") or row.get("key") or row.get("tool") or "<unnamed>"
+            found.append((str(name), str(approval)))
+    return found
 
 def cmd_cut(args: argparse.Namespace) -> int:
     # READ THE ARTIFACT BEFORE DERIVING ANYTHING. `build_doc` cannot read it, so it emits
@@ -1000,6 +1040,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # A MISSING artifact has no approvals to lose (the first cut, which must keep
     # working); an UNREADABLE one is a refusal, never a silent overwrite. The absent-flag
     # default is `False` — an unstated permission is not a permission.
+    blanked: list[tuple[str, str]] = []
     if MANIFEST_FILE.exists():
         try:
             prior = _read_manifest()
@@ -1052,8 +1093,38 @@ def cmd_cut(args: argparse.Namespace) -> int:
     print(f"  keyword distribution: {doc['counts']['keyword_distribution']}")
     print(f"  distinct declared bindings: "
           f"{len({r['sdk_method'] for r in doc['rows'] if r.get('sdk_method')})}")
-    print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
+    if blanked:
+        # Named, not summarised: the operator asked for this, and the rows are the loss.
+        print(f"  DROPPED {len(blanked)} recorded approval(s) (--allow-approval-reset):")
+        for name, approval in blanked:
+            print(f"    {name}: {approval}")
+    else:
+        print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
     return 0
+
+
+def observed_usage(row: dict) -> str | None:
+    """The checked-in usage label for a row: `in use` / `never called`, or None.
+
+    Read from the row's OWN `used_by`, which is COMMITTED to
+    `config/surface-manifest.yml` — the same value the `Used by` column prints.
+
+    Deliberately NOT read from `~/.tortoise/analytics_fallback.jsonl`. That log is a
+    machine-local artifact, so a render that consults it emits DIFFERENT bytes on a
+    CI runner than on the machine that committed the file. Measured with the log
+    absent (an empty `HOME`): every row lost its flag and `_never` counted all 82
+    tools, so the committed document stopped matching its own generator and
+    `render` + `git diff --exit-code` — the drift step — could only ever pass on one
+    laptop. The log still drives the artifact, through `build_doc`, which refreshes
+    the MANIFEST; that lands as a reviewed, committed diff instead of as whichever
+    machine happens to run the render.
+    """
+    first = (row.get("used_by") or "").split(",")[0].strip()
+    if first == "agents":
+        return "in use"
+    if first == "never called":
+        return "never called"
+    return None
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -1092,24 +1163,6 @@ def cmd_render(args: argparse.Namespace) -> int:
     classes: dict[str, list[dict]] = {}
     for r in sdk:
         classes.setdefault(r.get("class") or "?", []).append(r)
-
-    called_tools: set[str] = set()
-    try:
-        import json as _json
-
-        log = Path.home() / ".tortoise" / "analytics_fallback.jsonl"
-        if log.exists():
-            for line in log.read_text(errors="ignore").splitlines():
-                if '"mcp_tool_call"' in line:
-                    try:
-                        rec = _json.loads(line)
-                    except Exception:
-                        continue
-                    name = (rec.get("properties") or {}).get("tool_name") or rec.get("tool") or ""
-                    if name:
-                        called_tools.add(name)
-    except Exception:
-        called_tools = set()
 
     out: list[str] = []
     add = out.append
@@ -1186,6 +1239,80 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("")
     add("---")
     add("")
+    add("## What the gate compares — and what it does not")
+    add("")
+    add("The freeze this document serves is on **tools and endpoints**. The gate compares the live")
+    add("declaration against the approved list below. It fails on three kinds of name-level change:")
+    add("")
+    add("1. **A new tool** — an MCP tool that is not on the approved list.")
+    add("2. **A new endpoint** — a public SDK method that is not on the approved list.")
+    add("3. **An approved entry disappearing** — a tool or endpoint that is on the list and is no")
+    add("   longer offered.")
+    add("")
+    add("It also fails when the implementation behind an approved name is swapped for a different")
+    add("one, because that changes the endpoint while leaving the name intact.")
+    add("")
+    add("Those are the name-level checks. The gate **additionally** fails on several served-surface and")
+    add("evidence-integrity checks — an unapproved server transform, a moved SDK binding, a changed")
+    add("HTTP-vs-stdio serving, a registry count that no longer matches the baseline, an exemption that")
+    add("became reachable, and a missing or malformed baseline. They are listed in full in")
+    add("[`CONTRIBUTING.md`](CONTRIBUTING.md); read them there rather than inferring the gate's whole")
+    add("scope from this summary.")
+    add("")
+    add("**What is not a gate failure: an added field on an existing response.** A field that is off")
+    add("by default, and leaves the response unchanged when it is off, is neither a new tool nor a new")
+    add("endpoint, so it is not a name-level change and does not gate **as an addition**. The precedent")
+    add("is in the tree: the W4 why-layer key on the `tortoise_analyze` response is written only when")
+    add("`TORTOISE_W4_ENRICHMENT` is truthy (1/true/yes/on; unset or `0` means off) — and every")
+    add("other field stays byte-identical when it is absent (`tortoise/mcp_server.py`,")
+    add("`tortoise/why.py`). That is a different `why` key from")
+    add("the one on `volunteer_context`, which is present by default.")
+    add("")
+    add("**One qualification, because the gate also fingerprints implementations.** The gate records a")
+    add("digest of each registered tool's own code object, so a field added *inside a tool's handler*")
+    add("changes that tool's fingerprint — and, since the fingerprint covers the function's source")
+    add("position, the fingerprint of every tool defined after it — and reds the gate, correctly,")
+    add("as a changed implementation rather than a new tool. Add response fields in the SDK or")
+    add("assembly layer, not inside a tool function, and the carve-out holds.")
+    add("")
+    add("**And it must still be recorded.** Every such addition goes in the table below, so this")
+    add("document stays the single source of truth. Two of `check`'s properties defend that record: an")
+    add("empty or missing `response_fields` block is a failure, and every entry must name a tool or")
+    add("endpoint that exists in this manifest — so the record can be neither deleted nor left")
+    add("unanchored. What no check *can* see is an off-by-default field that nobody recorded at all:")
+    add("nothing inspects response bodies at runtime, so that half is a reviewing obligation and this")
+    add("document says so rather than implying the machine guarantees it. The carve-out is about what")
+    add("the gate *fails* on — not about what goes *unrecorded*.")
+    add("")
+    add("### Recorded response fields")
+    add("")
+    add("| Response | Field | Emitted when | Unchanged when off |")
+    add("|---|---|---|---|")
+    _rf_block = doc.get("response_fields")
+    for _rf in (_rf_block if isinstance(_rf_block, list) else []):
+        # `check` REPORTS a malformed block or entry; skip it here rather than crashing the
+        # renderer (the two must not disagree about the same input) or emitting a blank
+        # placeholder row for an entry that is missing `response` or `field`.
+        if not isinstance(_rf, dict) or not _rf.get("response") or not _rf.get("field"):
+            continue
+        # Normalise whitespace AND pipes in every cell: an unescaped `|` splits the markdown
+        # row, and an embedded newline (e.g. a YAML literal block) breaks it the same way.
+        _cells = [
+            " ".join(str(_rf.get(k, d) or d).split()).replace("|", "/")
+            for k, d in (
+                ("response", ""),
+                ("field", ""),
+                ("emitted_when", ""),
+                ("unchanged_when_off", "yes"),
+            )
+        ]
+        add(f"| `{_cells[0]}` | `{_cells[1]}` | {_cells[2]} | {_cells[3]} |")
+    add("")
+    add("A field belongs in that table from the moment it is added — an off-by-default field that is")
+    add("not recorded here has no approval behind it, and the carve-out does not cover it.")
+    add("")
+    add("---")
+    add("")
     add("## The MCP tools")
     add("")
 
@@ -1203,14 +1330,14 @@ def cmd_render(args: argparse.Namespace) -> int:
                 flags.append("DEPRECATED")
             if r.get("cluster"):
                 flags.append(f"group: `{r['cluster']}`" if r.get("canonical") else f"in group `{r['cluster']}`")
-            # `called_tools` holds the names the log SHOWS. The markers were inverted:
-            # the 64 tools with zero observed calls were labelled "in use" and the 35 that
-            # actually appear were labelled "never called" — contradicting both the legend
-            # and each row's own `used_by` cell.
-            if called_tools and r["name"] in called_tools:
-                flags.append("in use")
-            elif called_tools:
-                flags.append("never called")
+            # From the row's checked-in `used_by` — never from the machine-local call
+            # log, so the flag is identical on every checkout (see `observed_usage`).
+            # The markers were once inverted: the 64 tools with zero observed calls were
+            # labelled "in use" and the 35 that actually appear were labelled "never
+            # called" — contradicting both the legend and each row's own `used_by` cell.
+            usage_label = observed_usage(r)
+            if usage_label:
+                flags.append(usage_label)
             if r.get("proposed"):
                 flags.append(f"**proposed: move to `{r['recommended_family']}`**")
             reaches = r.get("sdk_method") or "handler-served"
@@ -1423,7 +1550,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("argument, both ways, with the weak parts named.")
     add("")
     add("**The case for pinning a small advertised set.** Two thirds of what we advertise has never been")
-    _never = [r for r in tools if not called_tools or r["name"] not in called_tools]
+    _never = [r for r in tools if observed_usage(r) == "never called"]
     add(f"called by anything, including us ({len(_never)} of {len(tools)}). Mainstream clients cap the tools they will show — a")
     add("reported 40 in Cursor — so a large part of our surface is not merely unused, it is invisible")
     add("anyway, and we pay context for it on every turn. Every comparable we studied pins a smaller set,")
@@ -1501,7 +1628,7 @@ def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: nine structural properties, plus a tenth derived from the code."""
+    """AC13's lint: eleven structural properties, plus a twelfth derived from the code."""
     try:
         order = load_order()
         doc = _read_manifest()
@@ -1525,6 +1652,46 @@ def cmd_check(args: argparse.Namespace) -> int:
     # non-integer `family_rank` escaped as KeyError/TypeError instead of the refusal).
     rows, malformed = _partition_rows(doc["rows"])
     problems: list[str] = list(malformed)
+
+    # The `response_fields` block is rendered by `cmd_render` and records fields that are
+    # deliberately outside the gate. Validate its shape here so a malformed entry is
+    # REPORTED rather than crashing the renderer with a bare KeyError.
+    _rf_block = doc.get("response_fields")
+    malformed_rf = [
+        rf
+        for rf in (_rf_block if isinstance(_rf_block, list) else [])
+        if not isinstance(rf, dict) or not rf.get("response") or not rf.get("field")
+    ]
+    for rf in malformed_rf:
+        problems.append(f"malformed response_fields entry (needs `response` and `field`): {rf!r}")
+    # The `response_fields` record must not be able to VANISH, and must be ANCHORED to the
+    # surface it describes. Without these two the doc's promise — that an off-by-default
+    # addition "cannot quietly become the way the surface grows" — is prose only: the block
+    # can be deleted to empty and every command in this repo stays green. Reproduced before
+    # writing this: delete the block, and `surface-guard.py` exits 0, `check` says OK, every
+    # test passes.
+    if not isinstance(_rf_block, list) or not _rf_block:
+        problems.append(
+            "the `response_fields` block is missing or empty — it is the single source of truth "
+            "for off-by-default response additions and must not be deletable"
+        )
+    else:
+        # EVERY row is a candidate anchor, not only the non-`sdk:` rows the comparisons
+        # read — an endpoint response is anchored by its `sdk:<method>` row, and
+        # `_partition_rows` drops exactly those. Reading `rows` here made the anchor
+        # property unable to see any SDK endpoint at all.
+        _row_names = {
+            str(r["name"]) for r in doc["rows"] if isinstance(r, dict) and "name" in r
+        }
+        for rf in _rf_block:
+            if not isinstance(rf, dict) or not rf.get("response"):
+                continue  # its shape is already reported above
+            _resp = str(rf["response"])
+            if _resp not in _row_names and f"sdk:{_resp}" not in _row_names:
+                problems.append(
+                    f"response_fields entry names {_resp!r}, which is not a tool or endpoint in "
+                    f"this manifest — the record must be anchored to the surface it describes"
+                )
 
     # 1. totality — every tool row carries exactly one derived keyword
     # 2. derivation agreement
@@ -1625,15 +1792,16 @@ def cmd_check(args: argparse.Namespace) -> int:
             problems.append(f"{name!r} is BOTH a surface row and a retired name")
 
     # 10. the artifact matches a fresh derivation from the CODE -------------------
-    # Properties 1-9 check the artifact against ITSELF (order, clusters, families) and
-    # against two hand-authored tables (`surface-order.yml`, `retired`). None of them
-    # compared it to the declaration, so the baseline's headline numbers and every
+    # Properties 1-11 check the artifact against ITSELF (order, clusters, families, the
+    # `response_fields` record) and against two hand-authored tables (`surface-order.yml`,
+    # `retired`). Before property 12 none of them compared it to the declaration, so the
+    # baseline's headline numbers and every
     # derived column could be edited by hand while BOTH this lint and the D2 expansion
     # gate stayed green (measured: `counts.tools: 999` plus a doctored
     # `keyword_distribution` passed both). The baseline is frozen — freezing it is what
     # `cut` did — so a hand-edit is a failure to report, not a fact to accept.
     #
-    # COST: this is the whole derivation, ~14 s CPU against ~0.4 s for properties 1-9,
+    # COST: this is the whole derivation, ~14 s CPU against ~0.4 s for properties 1-11,
     # because it imports the declaration and scans every tracked module for callers. That
     # is the price of the artifact being verified against the code at all; the CI job that
     # runs this has a 10-minute bound and the check is required.
@@ -1653,7 +1821,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
-        "ten properties hold (nine structural, one derived-from-code)"
+        "twelve properties hold (eleven structural, one derived-from-code)"
     )
     return 0
 

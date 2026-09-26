@@ -76,12 +76,39 @@ served-surface declaration: the guard must never skip a check and still report s
 identified by its name: it must be `sdk:<its method>`, so a row that renames a real method or fronts an
 existing method under a new name is a failure rather than an invisible addition.
 
+**What the gate does *not* fail on: an added field on an existing response.** A field that is off
+by default, and leaves the response unchanged when it is off, is neither a new tool nor a new
+endpoint — so it does not gate **as an addition**. The precedent is the W4 why-layer key on the
+`tortoise_analyze` response: written only when `TORTOISE_W4_ENRICHMENT` is truthy
+(1/true/yes/on; unset or `0` means off), with every other
+field byte-identical when it is absent. That is a different `why` key from the one on
+`volunteer_context`, which is present by default.
+
+**One qualification: the gate also fingerprints implementations.** It records a digest of each
+registered tool's own code object, so a field added *inside a tool's handler* changes that tool's
+fingerprint — and, since the fingerprint covers the function's source position, the fingerprint of every
+tool defined after it — and reds the gate, correctly, as a changed implementation rather than a new
+tool. Add response fields in the SDK or assembly layer, not inside a tool function.
+
+**And it must still be recorded.** Every such addition goes in the `response_fields` table in
+[`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md), which is rendered from
+`config/surface-manifest.yml`. Two of `check`'s properties defend that record: an empty or missing
+`response_fields` block is a failure, and every entry must name a tool or endpoint that exists in
+the manifest — so the record can be neither deleted nor left unanchored.
+
+**Be precise about the half the machine cannot check.** Nothing inspects response bodies at
+runtime, so a field that nobody recorded at all is **not** caught by any check. That half is a
+reviewing obligation, and it is stated as one rather than implied to be automatic. The carve-out is
+about what the guard *fails* on — not about what goes *unrecorded*. An unrecorded field has no
+approval behind it and the carve-out does not cover it.
+
 The baseline cannot be *edited* either. `tools/surface_manifest.py check` (the same required job) also
 **re-derives the whole baseline from the declaration** and reds on any difference outside the columns that
 are not a function of the code. Those columns are exactly `NON_DERIVABLE_ROW_KEYS` and
 `NON_DERIVABLE_DOC_KEYS` in the tool (the authority — read them there): `used_by`, `recommendation`,
 `basis` and `reason` (they read a machine-local call log), the human `approval` reference and `exemption`
-flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr`. One
+flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr` /
+`response_fields`. One
 consequence worth stating plainly: those columns **are** editable in a PR, so the review evidence a reader
 sees in the generated document is not gate-verified — the served surface is. So hand-editing the
 baseline's `counts:`, a row's description, its `class`, `served` or `served_from`, or any other derived

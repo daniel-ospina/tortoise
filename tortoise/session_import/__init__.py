@@ -3,8 +3,10 @@
 ``tortoise sessions import --harness codex|claude-desktop|cursor|pi`` stages a
 harness's session store into conversation turns, POSTs to hosted
 ``/v1/sessions`` with a deterministic idempotency key, and writes a LOCAL
-receipt only on 2xx (Task 15 acceptance: 403/402/503 ⇒ fail, no receipt,
-honest error; Codex + Desktop parsers idempotent on re-import).
+receipt only on 2xx (Task 15 acceptance: 403 ⇒ fail, no receipt, honest error;
+a retryable refusal — 402/408/425/429/5xx, including 503 — is SPOOLED for a
+later drain by ``_spool_if_retryable``, #4714 — the import still exits non-zero
+and writes no receipt; Codex + Desktop parsers idempotent on re-import).
 
 Each harness has its own record shape (#3667): pi's
 ``{"type": "message", "message": {"role": ..., "content": [...]}}`` is NOT

@@ -128,6 +128,16 @@ class FakeControlPlane:
         # partial unique index is the READ-COMMITTED backstop; the fake must
         # be atomic under the two-tab threading test).
         self._identity_lock = threading.Lock()
+        # #4355: a conditional PATCH (the rotate CAS
+        # ``UPDATE ... WHERE id = :id AND revoked_at IS NULL``) is ONE atomic
+        # statement in Postgres — two concurrent statements serialize on the
+        # row. The in-memory check-then-write below is NOT atomic under
+        # threads (the `if _matches(...)` and the `r.update(...)` are separate
+        # bytecodes a switch can land between), so two racing claims could
+        # BOTH observe the row live and both report success — making a genuine
+        # two-thread CAS test nondeterministic instead of red. Serialize the
+        # write to model the statement the fake stands in for.
+        self._patch_lock = threading.Lock()
         # #2863: fault injectors, consumed in order (see fail_query/_take_fault).
         self._faults: list[dict] = []
 
@@ -799,13 +809,17 @@ class FakeControlPlane:
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
             # rows ([] when nothing matched), the atomic-claim path used by
-            # OAuth single-use codes / rotation (PR #1264 review P2).
+            # OAuth single-use codes / rotation (PR #1264 review P2, and the
+            # #4355 rotate claim). `_patch_lock` makes the check-then-write
+            # atomic the way the real single UPDATE statement is (see
+            # __init__) — required for the #4355 two-thread CAS test.
             updated: list[dict] = []
-            for r in self.tables.get(table, []):
-                if _matches(r, filters or []):
-                    r.update(json_body or {})
-                    if select is not None:
-                        updated.append({k: r.get(k) for k in select})
+            with self._patch_lock:
+                for r in self.tables.get(table, []):
+                    if _matches(r, filters or []):
+                        r.update(json_body or {})
+                        if select is not None:
+                            updated.append({k: r.get(k) for k in select})
             return updated if select is not None else []
         if method == "POST":
             row = dict(json_body or {})
@@ -813,6 +827,16 @@ class FakeControlPlane:
                 # mirror the DB column default now() — window gt-filters need it
                 from datetime import datetime, timezone
                 row["created_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            if table == "oauth_codes" and row.get("id") is None:
+                # mirror `id bigint GENERATED ALWAYS AS IDENTITY` (0016). #3027
+                # records a redemption outcome BY id and links minted tokens
+                # with `code_id`, so a fake row with no id would make the
+                # durable path silently unwritable in tests. Derived from the
+                # stored rows (not a counter) so it also cannot collide with a
+                # row a test seeded by hand.
+                numeric = [r.get("id") for r in self.tables.get(table, [])
+                           if isinstance(r.get("id"), int)]
+                row["id"] = (max(numeric) + 1) if numeric else 1
             self.tables.setdefault(table, []).append(row)
             if table == "api_keys":
                 # migration 0015 trigger emulation (#308)

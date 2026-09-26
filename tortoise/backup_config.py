@@ -206,8 +206,10 @@ def load_alert_config(env: dict[str, str] | None = None) -> BackupConfig | None:
     channel. **R2 is different and IS effectively required.** The config
     carries the R2 fields so the built ``AlertStore`` can use the object store
     for per-(kind, subject) dedup, and that build goes
-    ``_analytics_alert_store`` -> ``_alert_store_from`` -> ``_backup_storage()``
-    -> ``R2Storage()``, whose ``__init__`` RAISES unless ``R2_ACCOUNT_ID`` /
+    ``_analytics_alert_store`` -> ``alert_channel.incident_alert_store`` ->
+    ``alert_channel.alert_store_from`` -> the leg's object store (the hosted leg
+    injects ``hosted_api._backup_storage``; the stdio leg builds from env) ->
+    ``R2Storage()``, whose ``__init__`` RAISES unless ``R2_ACCOUNT_ID`` /
     ``R2_ACCESS_KEY_ID`` / ``R2_SECRET_ACCESS_KEY`` / ``R2_BUCKET`` are all set
     (``TORTOISE_BACKUP_STORAGE=memory`` is the selfhost/test seam). The caller
     swallows that raise and turns the channel into ``None`` -- so a MISSING or

@@ -362,6 +362,12 @@ class SearchResult:
     valid_to: str = ""
     expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
+    # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
+    # when the whole batch resolved no subject AND the graph has no
+    # ``aboutSubject`` producer at all — so it says "this field cannot be
+    # populated here", never "these points happen to have none". Empty ⇒
+    # absent from the wire (additive, byte-identical default).
+    subject_unavailable: str = ""
     # A5 (#2070): stored evidence mark (``has_answer`` — written by the
     # eval ingest / fixture seeding; the product extractor does not write it
     # yet, so production hits are False). Carried so the ask lane's
@@ -419,6 +425,10 @@ class SearchResult:
             d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
+        # #4889: loud counterpart to the absent ``subject`` key above — only
+        # set when the Subject layer's producer is missing entirely.
+        if self.subject_unavailable:
+            d["subject_unavailable"] = self.subject_unavailable
         # A5 (#2070): additive evidence mark — emitted ONLY when known
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
@@ -456,11 +466,17 @@ def classify_query(
 
 #: R3 (#1542) D4 leg-trace entry shape (the R2 #1541 shared contract):
 #: {"leg", "ran", "degraded", "reason", "count"}. ``reason`` is never null
-#: when ``degraded`` is true (shape rule).
+#: when ``degraded`` is true (shape rule). #4999 adds one OPTIONAL key —
+#: ``mechanism`` — present only on an entry whose leg records WHICH path it
+#: took. Legs that do not pass one are byte-identical to the shared shape.
 def _trace_entry(leg: str, *, ran: bool, degraded: bool,
-                 reason: str | None, count: int) -> dict:
-    return {"leg": leg, "ran": ran, "degraded": degraded,
-            "reason": reason, "count": count}
+                 reason: str | None, count: int,
+                 mechanism: str | None = None) -> dict:
+    entry = {"leg": leg, "ran": ran, "degraded": degraded,
+             "reason": reason, "count": count}
+    if mechanism is not None:
+        entry[VECTOR_MECHANISM_KEY] = mechanism
+    return entry
 
 
 #: #4028 — leg-trace reason recorded when the vector leg RAN but the
@@ -469,6 +485,30 @@ def _trace_entry(leg: str, *, ran: bool, degraded: bool,
 #: of them was relevant", which the search surface must NOT mistake for a
 #: leg failure and answer from the TF-IDF fallback.
 BELOW_RELEVANCE_FLOOR = "below_relevance_floor"
+
+
+# ── #4999: the vector leg's MECHANISM (index vs scan) ───────────────────────
+# Both the HNSW-index path and the brute-force full scan recorded an
+# IDENTICAL leg-trace entry (``ran=True, degraded=False, reason="ok"``), so a
+# caller could not tell a 4.97 ms indexed query from a 16.96 ms full scan of
+# 7,859 Object vectors without reading this source. ``degraded`` deliberately
+# does NOT carry the signal: per #2952 it means "the vector leg contributed no
+# semantic results", and a brute-force scan DOES return semantic rows —
+# flipping it would make :func:`require_hybrid_read` refuse a valid semantic
+# read (see the #2952 tests). The path is reported additively instead.
+#:
+#: Trace-entry key carrying the mechanism (written by :func:`_trace_entry`,
+#: read by callers); the value is one of the three constants below, and the
+#: key is absent when no path was taken (e.g. ``breaker_open``).
+VECTOR_MECHANISM_KEY = "mechanism"
+#: Index-accelerated ``CALL db.idx.vector.queryNodes`` produced the rows.
+MECHANISM_INDEX = "index"
+#: Brute-force scan and NO index was attempted (embedded mode — the design).
+MECHANISM_SCAN = "scan"
+#: Brute-force scan AFTER an index attempt failed (docker mode): the silent
+#: fallback #4999 is about, now reportable on the trace rather than only in a
+#: log line.
+MECHANISM_SCAN_FALLBACK = "scan_fallback"
 
 
 # ── (C) #2952: declared degraded reads ──────────────────────────────────────
@@ -708,10 +748,14 @@ def run_fts_query(
         logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
         _record(ran=False, degraded=True, reason="breaker_open", count=0)
         return []
-    label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, so the FTS leg reads
+    # the Source label (`_searchText`) — there is no :Document index. The
+    # caller-facing entity_type stays "document".
+    # point→Point, event→Event, subject→Subject
+    label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -729,9 +773,23 @@ def run_fts_query(
         expansion_terms=expansion_terms)
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
+    # D10 (#5026): the :Source label holds BOTH the document node
+    # (documentKind non-NULL) and the corpus/provenance Source (documentKind
+    # NULL), and the fulltext index is on Source._searchText for EVERY Source.
+    # Without a discriminator, entity_type="document" retrieves non-document
+    # Sources (and entity_type="source" retrieves documents) and they occupy
+    # pool slots before LIMIT. The predicate lands in the post-YIELD WHERE —
+    # i.e. at the retrieval layer, ahead of ORDER BY/LIMIT — on the SAME axis
+    # as quota.py's `documents` meter (documentKind IS NOT NULL) and
+    # sdk.list_sources() (documentKind IS NULL). All three legs mean one
+    # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
     if label == "Point":
         status_filter = ("" if excluded_statuses == ()
                          else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+    elif entity_type == "document":
+        status_filter = "WHERE node.documentKind IS NOT NULL "
+    elif entity_type == "source":
+        status_filter = "WHERE node.documentKind IS NULL "
     else:
         status_filter = ""
     try:
@@ -807,6 +865,16 @@ def run_vector_query(
     Falls back to brute-force vec.euclideanDistance if the index is
     unavailable (embedded mode, old FalkorDB, or index creation failed).
 
+    #4999: because both paths return rows, the leg-trace entry carries a
+    ``mechanism`` key naming the path taken — ``"index"`` | ``"scan"`` |
+    ``"scan_fallback"`` (:data:`MECHANISM_INDEX` / :data:`MECHANISM_SCAN` /
+    :data:`MECHANISM_SCAN_FALLBACK`, key :data:`VECTOR_MECHANISM_KEY`). A
+    caller can therefore tell an index-accelerated query from a full table
+    scan without reading this source, and can alert on ``scan_fallback``
+    (an index was expected and was not used). ``degraded`` is intentionally
+    left untouched: a scan still returns SEMANTIC rows, and #2952 defines
+    ``degraded`` as "contributed no semantic results".
+
     vector_index_api: 'procedure' | 'cypher' | None — the API that
     succeeded at index-creation time, recorded on the projection as
     FalkorProjection._vector_index_api (#1359). When 'cypher', the
@@ -831,11 +899,12 @@ def run_vector_query(
     consecutive slow/failed queries. (#249)
     """
     def _record(*, ran: bool, degraded: bool, reason: str | None,
-                count: int) -> None:
+                count: int, mechanism: str | None = None) -> None:
         if leg_trace is not None:
             leg_trace.append(_trace_entry("vector", ran=ran,
                                           degraded=degraded,
-                                          reason=reason, count=count))
+                                          reason=reason, count=count,
+                                          mechanism=mechanism))
 
     if not query_vec:
         return []
@@ -857,22 +926,44 @@ def run_vector_query(
 
     # Operators are Points with is_operator=true — match the Point label
     # (consistent with run_fts_query / run_structural_query). (#172)
-    label = "Point" if entity_type == "operator" else entity_type.capitalize()
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source — the vector leg
+    # reads the Source label, never a Document label. The caller-facing
+    # entity_type stays "document".
+    if entity_type == "document":
+        label = "Source"
+    else:
+        label = "Point" if entity_type == "operator" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
     else:
         id_field = "id"
 
+    # #4999: did THIS call attempt an index query? Embedded mode never does
+    # (the scan is the design, not a fallback); docker mode always does, and a
+    # failure falls through to the scan below. That distinction is what makes
+    # ``scan`` and ``scan_fallback`` tellable apart.
+    index_attempted = False
+
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
+        index_attempted = True
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): the Source label holds both the document node
+        # (documentKind non-NULL) and the corpus/provenance Source
+        # (documentKind NULL); the predicate lands post-YIELD, ahead of the
+        # outer LIMIT, so a document query never fuses a non-document Source
+        # (and vice versa). Same axis on all three legs.
         if label == "Point":
             vec_status_filter = ("" if excluded_statuses == ()
                                  else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+        elif entity_type == "document":
+            vec_status_filter = "WHERE node.documentKind IS NOT NULL "
+        elif entity_type == "source":
+            vec_status_filter = "WHERE node.documentKind IS NULL "
         else:
             vec_status_filter = ""
         try:
@@ -958,10 +1049,12 @@ def run_vector_query(
                     kept = [(pid, s) for pid, s in out if s >= min_similarity]
                     if not kept:
                         _record(ran=True, degraded=False,
-                                reason=BELOW_RELEVANCE_FLOOR, count=0)
+                                reason=BELOW_RELEVANCE_FLOOR, count=0,
+                                mechanism=MECHANISM_INDEX)
                         return []
                     out = kept
-                _record(ran=True, degraded=False, reason="ok", count=len(out))
+                _record(ran=True, degraded=False, reason="ok", count=len(out),
+                        mechanism=MECHANISM_INDEX)
                 return out
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
@@ -971,7 +1064,8 @@ def run_vector_query(
             # on this branch (an engine artefact, declared in the PR: the
             # measured defect is the embedded/brute-force lane).
             total = len(rows)
-            _record(ran=True, degraded=False, reason="ok", count=total)
+            _record(ran=True, degraded=False, reason="ok", count=total,
+                    mechanism=MECHANISM_INDEX)
             return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
         except Exception as e:
             msg = str(e).lower()
@@ -987,6 +1081,10 @@ def run_vector_query(
             # one logical query counts at most once. (#249 review P1-2)
 
     # Brute-force (embedded mode or index query failed)
+    # #4999: `scan_fallback` ONLY when an index attempt actually failed on
+    # this call — an embedded scan is the design and reports plain `scan`.
+    scan_mechanism = (MECHANISM_SCAN_FALLBACK if index_attempted
+                      else MECHANISM_SCAN)
     try:
         start = time.monotonic()
         # #244: vec.euclideanDistance rejects plain-list query params
@@ -996,9 +1094,17 @@ def run_vector_query(
         # vecf32-encoded too (a single plain-list node poisons the whole
         # MATCH — see _upsert_event / session indexers).
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): discriminate the document Source from the
+        # corpus/provenance Source in the MATCH's WHERE — the brute-force
+        # retrieval layer, ahead of the ORDER BY/LIMIT. Same axis as the FTS
+        # and structural legs (documentKind IS NOT NULL ⟺ document).
         if label == "Point":
             bf_status_clause = ("" if excluded_statuses == ()
                                 else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
+        elif entity_type == "document":
+            bf_status_clause = " AND n.documentKind IS NOT NULL"
+        elif entity_type == "source":
+            bf_status_clause = " AND n.documentKind IS NULL"
         else:
             bf_status_clause = ""
         cypher = (
@@ -1029,9 +1135,11 @@ def run_vector_query(
                        if s > 0 and (1.0 / s - 1.0) <= _floor_distance]
                 if not out:
                     _record(ran=True, degraded=False,
-                            reason=BELOW_RELEVANCE_FLOOR, count=0)
+                            reason=BELOW_RELEVANCE_FLOOR, count=0,
+                            mechanism=scan_mechanism)
                     return out
-            _record(ran=True, degraded=False, reason="ok", count=len(out))
+            _record(ran=True, degraded=False, reason="ok", count=len(out),
+                    mechanism=scan_mechanism)
             return out
         # R3 (#1542) D4: the explicit zero-row guard — an all-no-embedding
         # graph returns [] WITHOUT raising (the except catch below never
@@ -1047,22 +1155,25 @@ def run_vector_query(
             embedded = 0
         _record(ran=True, degraded=(embedded == 0),
                 reason=("no_embeddings" if embedded == 0 else "empty_results"),
-                count=0)
+                count=0, mechanism=scan_mechanism)
         return []
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Vector index not available — skipping vector strategy")
             _breaker_record("vector", True)
-            _record(ran=True, degraded=True, reason="index_missing", count=0)
+            _record(ran=True, degraded=True, reason="index_missing", count=0,
+                    mechanism=scan_mechanism)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
             _breaker_record("vector", True)
-            _record(ran=True, degraded=True, reason="no_embeddings", count=0)
+            _record(ran=True, degraded=True, reason="no_embeddings", count=0,
+                    mechanism=scan_mechanism)
         else:
             logger.warning("Vector query failed: %s", e)
             _breaker_record("vector", False)
-            _record(ran=True, degraded=True, reason="query_failed", count=0)
+            _record(ran=True, degraded=True, reason="query_failed", count=0,
+                    mechanism=scan_mechanism)
         return []
 
 
@@ -1103,7 +1214,9 @@ def run_structural_query(
         label_str = "Source"
         kind_field = "sourceKind"
     elif entity_type == "document":
-        label_str = "Document"
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source. The structural
+        # leg reads the Source label with the documentKind genre filter.
+        label_str = "Source"
         kind_field = "documentKind"
     elif entity_type == "object":
         label_str = "Object"
@@ -1137,6 +1250,18 @@ def run_structural_query(
             _record(ran=True, degraded=False, reason="empty_results", count=0)
             return []
 
+        # D10 (#5026): entity_type="source" is the PROVENANCE Source — the
+        # same partition as sdk.list_sources() (documentKind IS NULL). A D10
+        # document node is a :Source too, so sourceKind alone does not
+        # separate them; the discriminator must be part of the retrieval
+        # WHERE. Placed AFTER the no-filters gate (exactly like the status
+        # clause below) so a kind-less structural call keeps main's
+        # early-return — this clause must never be the sole condition that
+        # fires a full-label scan. The document arm needs no equivalent: its
+        # kind_field IS documentKind, so `n.documentKind = $kind` already
+        # implies non-NULL. All three legs now mean one thing.
+        if entity_type == "source":
+            conditions.append("n.documentKind IS NULL")
         # #1391: terminal-status exclusion (after the no-filters gate so a
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
@@ -2150,6 +2275,90 @@ def get_relationships_bounded(
         logger.warning("Bounded relationship query failed", exc_info=True)
 
     return rels
+
+
+#: #4889 — the fail-loud reason for a structurally-empty ``SearchResult.subject``.
+#:
+#: ``subject`` is read from ``aboutSubject`` edges. When the graph has no
+#: ``aboutSubject`` producer reachable, the field is silently *absent* on every
+#: hit — indistinguishable from "this point has no subject". Measured
+#: read-only 2026-09-23: the whole edge inventory of the dogfood graph
+#: (37,535 Points) holds **0** ``aboutSubject`` edges and **1** ``:Subject``
+#: node, because the capture entity spine stores SUBJECT-kind entities as
+#: ``:Object`` (issue #4934) and the only document-path Subject writer is
+#: behind the opt-in ``--semantic-extract`` flag (issue #4938).
+#: Tracked producers: #1370, #1509. The marker self-clears as soon as any
+#: ``aboutSubject`` edge exists on the graph.
+SUBJECT_BINDING_UNAVAILABLE = (
+    "aboutSubject has no reachable producer for Points or Events on this "
+    "graph, so 'subject' is structurally empty rather than unknown: the "
+    "capture entity spine writes SUBJECT-kind entities as :Object (#4934), "
+    "and the document extractor's Subject writer is opt-in (#4938). "
+    "Tracked producers: #1370, #1509."
+)
+
+
+#: The ``aboutSubject`` shapes ``fetch_point_epistemic_state`` actually reads:
+#: a Point's own edge, or its source Event's edge (the ≤1-hop fallback). The
+#: availability probe must be scoped to these — an ``Object``-sourced
+#: ``aboutSubject`` edge (the GitHub connector writes
+#: ``(o:Object)-[:aboutSubject]->(s:Subject)``) can never resolve the advertised
+#: Point field, so an unscoped count would report "available" on a graph where
+#: every Point hit still carries no subject.
+#:
+#: Written as a UNION ALL of two label-anchored counts, NOT the single
+#: ``MATCH (n) … WHERE n:Point OR n:Event`` form: FalkorDB does not push a
+#: disjunctive label test into the scan, so that form compiles to an ``All Node
+#: Scan`` over the whole graph (~5.9 ms at 9k nodes) while this one is
+#: Subject-anchored (~0.5 ms). Each leg aggregates without a grouping key, so
+#: each yields exactly one integer row (0 when it matches nothing) and the probe
+#: SUMS them.
+_SUBJECT_SOURCE_SCOPED_PROBE = (
+    "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c "
+    "UNION ALL "
+    "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c")
+
+
+def subject_binding_available(graph) -> bool:
+    """True when this graph can carry ``aboutSubject`` edges at all (#4889).
+
+    Counts the Point- and Event-sourced ``aboutSubject`` edges
+    ``fetch_point_epistemic_state`` reads, so an Object-sourced edge (the
+    GitHub connector's shape) cannot make the marker lie (see
+    ``_SUBJECT_SOURCE_SCOPED_PROBE``). The query is label-anchored and BOUNDED
+    (``_DECORATION_TIMEOUT_MS``, the same bound the state fetch uses) — an
+    unbounded full-graph scan on the hot search path is the defect this probe
+    must not reintroduce.
+
+    **Fail-OPEN**: a probe error, an empty result, or a non-integer row
+    returns True. A broken probe must never invent an unavailability claim, so
+    the failure direction that withholds the marker is the safe one.
+    """
+    try:
+        rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE,
+                           timeout=_DECORATION_TIMEOUT_MS).result_set
+        if not rows:
+            # Each UNION ALL leg aggregates without a grouping key, so the
+            # probe always yields rows; an empty result is anomalous and must
+            # not be read as "no edges".
+            logger.warning(
+                "aboutSubject availability probe returned no rows — assuming "
+                "available")
+            return True
+        total = 0
+        for row in rows:
+            if not row or row[0] is None:
+                logger.warning(
+                    "aboutSubject availability probe returned an anomalous "
+                    "row (%r) — assuming available", row)
+                return True
+            total += int(row[0])
+        return total > 0
+    except Exception:  # fail-open, see docstring
+        logger.warning(
+            "aboutSubject availability probe failed — assuming available",
+            exc_info=True)
+        return True
 
 
 def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:

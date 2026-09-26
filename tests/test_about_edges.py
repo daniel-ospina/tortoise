@@ -86,8 +86,10 @@ class TestBackfillAboutEntities:
         assert result["scanned"] >= 1
         assert result["updated"] >= 1
         proj = sdk._get_proj()
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source — aboutDocument targets
+        # the document-bearing Source (matched on title/url, documentKind non-null).
         r = proj.g.query(
-            "MATCH (p:Point)-[:aboutDocument]->(d:Document {title:'design-doc-42'}) "
+            "MATCH (p:Point)-[:aboutDocument]->(s:Source {title:'design-doc-42'}) "
             "RETURN count(*) > 0"
         ).result_set
         assert r[0][0] is True
@@ -138,9 +140,10 @@ class TestCreateEventAboutEdges:
         ev = sdk.create_event("sync-42", "meeting",
                               aboutDocument=doc["id"])
         proj = sdk._get_proj()
+        # D10: the document is a :Source keyed url = doc id.
         r = proj.g.query(
             "MATCH (e:Event {eventId:$eid})-[a:aboutDocument]->"
-            "(d:Document {id:$did}) RETURN count(a) > 0",
+            "(s:Source {url:$did}) RETURN count(a) > 0",
             params={"eid": ev["eventId"], "did": doc["id"]},
         ).result_set
         assert r[0][0] is True

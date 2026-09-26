@@ -291,3 +291,50 @@ class HybridReadUnavailableError(RuntimeError):
             f"retrieval and must not be labelled hybrid (#2952). "
             f"marker={self.marker!r}"
         )
+
+
+class EmbedderUnavailableError(RuntimeError):
+    """(C) #4861 — a process that REQUIRED the embedder must not be handed
+    ``None``.
+
+    Raised by ``tortoise.embeddings.EmbeddingModel.get`` when
+    ``TORTOISE_EMBEDDING_MODEL_REQUIRED`` is truthy and the model cannot be
+    loaded, instead of returning ``None``. This is the **third surface of one
+    invariant**: a lane that cannot run hybrid must not run (#2985,
+    ``retrieval_preflight.require_hybrid_retrieval``), a read that could not
+    run its vector leg must not be labelled hybrid (#2952,
+    :class:`HybridReadUnavailableError`) — and this one, at the ``None``
+    itself, where neither of the other two can see it. Without it a
+    keyword-only (FTS-only) run is indistinguishable from a healthy one: the
+    degrade is invisible, which is the defect #2898 describes.
+
+    Unlike :class:`HybridReadUnavailableError` this carries no leg *trace* — a
+    load failure has no legs to report, and synthesizing a marker would make
+    that class mean two different things. It carries the **cause** instead:
+    ``failure_kind`` is ``not_installed`` (the environment never had it — a
+    runner-down or missing-extra run) or ``load_failed`` / ``load_timeout``
+    (the environment had it and the load broke — a different thing to fix).
+    ``model_unavailable`` is the fallback when no kind was recorded.
+    """
+
+    def __init__(self, *, failure_kind: str, model: str,
+                 revision: str | None = None,
+                 last_error: str | None = None,
+                 context: str | None = None):
+        self.failure_kind = failure_kind
+        self.model = model
+        self.revision = revision
+        self.last_error = last_error
+        self.context = context
+        where = f" ({context})" if context else ""
+        rev = f" @ {revision}" if revision else ""
+        err = f"; last error: {last_error}" if last_error else ""
+        super().__init__(
+            f"embedding model REQUIRED but unavailable{where}: {model}{rev} "
+            f"could not be loaded (failure_kind={failure_kind!r}){err} — this "
+            f"process set TORTOISE_EMBEDDING_MODEL_REQUIRED, so any retrieval "
+            f"result it produced would be keyword-only (FTS) while claiming to "
+            f"be the product's hybrid retrieval. Install the embedder "
+            f"(uv sync --extra embeddings) or unset the variable to allow the "
+            f"documented keyword-only degrade (#4861)."
+        )

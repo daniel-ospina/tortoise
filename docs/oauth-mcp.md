@@ -45,6 +45,18 @@ needs no client_id paste.
    `code_challenge` (PKCE, S256 only), `redirect_uri`, and an optional
    RFC 8707 `resource`.
 
+   **`redirect_uri` acceptance at registration (#3579).** An entry is accepted
+   when it is `https`, an `http` loopback URI, or a **private-use URI scheme**
+   listed in `_NATIVE_REDIRECT_SCHEMES` — currently `cursor` alone, per
+   RFC 8252 §7.1, because Cursor IDE's MCP OAuth DCR still sends
+   `cursor://anysphere.cursor-mcp/oauth/callback` on its exthost path. It is a
+   deliberate **allowlist**: registration is all-or-nothing (one rejected entry
+   costs the client its `client_id`, and with it every sign-in path), and the
+   consent page hands the code over by navigating to the raw value, so a scheme
+   a browser executes (`javascript:`, `data:`) must never be registrable. A
+   fragment is refused for every scheme (RFC 6749 §3.1.2) — tested as the raw
+   `#` delimiter, so a bare trailing `#` (an empty fragment) is refused too.
+
    **`redirect_uri` matching (#2846).** For **loopback** redirect URIs the port
    is ignored when matching the registered value (RFC 8252 §7.3 — a native
    client binds an ephemeral port at request time and cannot know it at
@@ -105,6 +117,102 @@ still rejected (RFC 8707 §2).
 - A lapsed membership revokes the presented refresh token.
 - Clients may revoke explicitly: `POST /oauth/revoke` (RFC 7009).
 
+## Authorization-code redemption state (#3027)
+
+`oauth_codes.used_at` records that a request **claimed** a code; on its own it
+cannot say what the claim *did*, so a failed or lost redemption was
+indistinguishable from a replay. Migration
+`20260925000002_oauth_redemption_state.sql` adds the durable outcome:
+
+| `redemption_state` | Meaning | Redeemable? |
+|---|---|---|
+| `unclaimed` | not claimed (mirrors `used_at IS NULL`) | yes, while unexpired |
+| `claimed` | an attempt owns the code; **outcome not yet recorded** | no — a second request is terminal, and the residue is settled by the reconciler |
+| `minted` | the pair was handed to the response | no — replay-safe terminal |
+| `burned` | terminal failure; never mints again | no |
+
+A schema CHECK pins the state to the legacy flag **in one direction** —
+`used_at IS NULL ⇒ redemption_state = 'unclaimed'`, i.e.
+`used_at IS NOT NULL OR redemption_state = 'unclaimed'`. It is deliberately NOT
+the biconditional: the pre-#3027 writer PATCHes `used_at` alone and leaves the
+`'unclaimed'` default, and because this migration must be applied **before** the
+new image ships (the fail-closed migration-drift gate), the old writer is live
+against this schema during the rollout — a biconditional rejects it and every
+authorization-code exchange then fails with `23514`. (A `NOT VALID` check does not
+help: Postgres still enforces it on new writes.) The enforced direction is the one
+the state machine relies on — a settled row always has a claim timestamp — and the
+relaxed one is the shape `_observe_code` already treats as `claimed`. The claim
+statement writes `used_at`, the state and a fresh `redemption_id` atomically,
+alongside the existing `used_at IS NULL` CAS, so every write this code makes
+satisfies the biconditional anyway.
+
+**Rollout ordering.** Apply this migration before the new app image (the drift
+gate enforces it), and apply it in a quiet window: the migration runs in one
+transaction and takes `ACCESS EXCLUSIVE` on `oauth_codes`, `oauth_access_tokens`
+and `oauth_refresh_tokens` until commit, so reads of the token tables block too.
+
+**Terminal and recovery rules.** `minted` is written just before the pair is
+returned — and **delivery is gated on winning that write**. Every **settle** is a
+CAS on the claim identity (`redemption_state='claimed'` plus `id`, and
+`redemption_id` when the settling view carries it), so only one of *{the owning
+request, a reconciler that took the claim over}* can settle a claim. (The
+`claimed → unclaimed` re-arm is a separate CAS on `code_hash`+`used_at`, made
+in-process by the request that still owns its claim.) `burned` is
+written where the residue is terminal: a pre-mint signal (bad PKCE,
+client/redirect/resource mismatch, suspended org, or an expired code), or a
+reconcile past the grace that ATTEMPTED to revoke a live orphan family (the
+revoke is best-effort — a failure is captured and the row survives inert under a
+now-`burned` code until the TTL sweep) or found none
+**at probe time**.
+
+An outcome the process could not settle stays **`claimed`**, and another
+redemption of that code is answered **terminally** (`invalid_grant`) — never
+retryably: the retry can terminate, because the sibling may still settle
+`minted`, and #2863 records an outcome-unknown write state as never retryable.
+The terminal answer also runs the lazy reconciler, which settles the residue once
+it ages past the grace window (`TORTOISE_OAUTH_REDEMPTION_GRACE_S`, default 60s):
+
+- within the grace window the claim may still be live, so **nothing is touched**
+  (`inflight`) — least of all re-armed;
+- past the grace, the reconciler first **takes the claim over with the same CAS**,
+  then acts. If it loses that CAS the owner settled `minted` first, so the family
+  is delivered and nothing is touched. If it wins and a LIVE family is linked to
+  the code, the mint committed and was never delivered, so the family is
+  soft-revoked (best-effort, and captured if the revoke fails) and the code is
+  burned; if it wins and no family is linked, the claim
+  left no live credential **at probe time** (the probe and the settle are not one
+  transaction, so a family minted between them escapes) and the code is **burned**
+  (`unresolved`) — fail safe; the client re-runs authorization;
+- if the reconciler's own read fails, nothing is written.
+
+The grace window does **not** prove the claim's owner is dead — the mutating
+grant is awaited with no wall-clock bound, so a live sibling can outlive any
+window; it bounds when a later request starts taking over. A live sibling that
+outlives it loses the CAS and its pair is compensated (an aborted grant, not a
+double grant). Resolution is **lazy**: it happens only when the code is presented
+again, so a claim that is never retried stays `claimed`, and any orphan family
+linked to it stays live until the retention sweep reaches its TTL.
+
+**There is no cross-request re-arm.** An earlier revision re-armed a stale
+no-family claim; that mints **two live families for one single-use code** when the
+stalled owner is not in fact dead (the mutating grant is awaited with no
+wall-clock bound, so no grace window proves otherwise). The verified-clean failure
+re-arms **in process only**, via `_restore_code`, where the observation and the
+write are the same request.
+
+Minted rows carry `code_id` (the authorizing `oauth_codes.id`) on both the
+access and refresh tables, and **rotation inherits it**, so "did this code
+mint a family?" is answerable across a rotation chain. `code_id` is
+`ON DELETE SET NULL` — the #3036 policy for OAuth provenance FKs (a bearer
+credential is independent of the code that minted it).
+
+**A retry never re-serves the same credential pair.** Tokens are stored hashed
+only (below), so the plaintext cannot be re-issued. A response lost after the
+`minted` write is therefore answered terminally and the client re-runs
+`/oauth/authorize`; the family left behind is inert (nobody holds its
+plaintext) and is reaped by the #3036 retention sweep. The invariant the state
+machine guarantees is that a retry **never creates a second live family**.
+
 ## Implementation notes
 
 - `tortoise/oauth.py` — protocol logic, control-plane seam (functions take
@@ -122,7 +230,25 @@ still rejected (RFC 8707 §2).
 - OAuth is hosted-only: in registry/selfhost mode the functional endpoints
   fail closed with 503; metadata endpoints still serve static JSON.
 - Env knobs: `TORTOISE_OAUTH_ACCESS_TTL` (3600s), `TORTOISE_OAUTH_REFRESH_TTL`
-  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s).
+  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s); retention grace
+  `TORTOISE_OAUTH_ACCESS_RETENTION_S` / `TORTOISE_OAUTH_REFRESH_RETENTION_S` /
+  `TORTOISE_OAUTH_CODE_RETENTION_S` (each 86400s, positive-int validated — a
+  malformed or non-positive override falls back to the default); redemption
+  reconciler grace `TORTOISE_OAUTH_REDEMPTION_GRACE_S` (60s, same validation).
+- Referential integrity + retention (#3036): `supabase/migrations/20260925000001_oauth_referential_integrity.sql`
+  adds the two FKs 0016 omitted (`refresh_token_id`, `rotated_from`, both
+  `ON DELETE SET NULL`) and `expires_at` indexes. A scheduled sweep
+  (`tortoise/oauth.py::sweep_oauth_retention`, wired into `hosted_api` boot +
+  `TORTOISE_EVENT_RETENTION_INTERVAL`) removes a row once its own `expires_at`
+  is past by the grace. These windows are credential hygiene — a different axis
+  from the user-content deletion promise; see `docs/retention-and-deletion.md`.
+- Redemption state (#3027): `supabase/migrations/20260925000002_oauth_redemption_state.sql`
+  adds `oauth_codes.redemption_state` / `redemption_id` / `redemption_settled_at`
+  / `redemption_note`, the `code_id` provenance FKs (`ON DELETE SET NULL`),
+  and the backfill that marks every already-consumed code `burned`. The
+  state machine and the reconciler live in `tortoise/oauth.py`
+  (`_settle_redemption`, `_observe_code`, `_reconcile_claimed_redemption`); the
+  design record is `docs/scoping/2026-09-25-3027-oauth-redemption-state.md`.
 
 ## Client identity: CIMD (#2847)
 

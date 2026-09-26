@@ -134,6 +134,47 @@ RETURN 'Meta' AS cls, x.key AS ident
 
 ## Per-deployment posture
 
+### Derived properties that are STORED, not recomputed
+
+The node-class map above covers *classes*. A **property** can be in the same
+position for a different reason — not because it would be lost, but because
+recomputing it does not reproduce what the graph held.
+
+**R1 — the embedding STORES: a replay restores it verbatim and never
+regenerates it.** A re-embed is a *re-run*, not a replay. `embed(text)` depends
+on the model id, its pinned revision and the tokenizer — none of which is a
+function of the journal — so re-encoding on replay turns a fold into a silent
+re-execution: the same log yields a **different** graph after a model or
+provider change. A **creating** producer (the record that computed the vector
+from the content riding with it) therefore journals the vector **and** the
+identity it was computed under (`embedding_model`, `embedding_revision`,
+`embedding_text_hash`). A **re-emitted snapshot** — `PointPromoted`,
+`OperatorPromoted`, a re-capture that preserved an older vector — carries the
+vector but **no** identity, because that vector may predate a model change and
+the record cannot attest an origin it does not know. The replay restores the
+vector verbatim either way, *recording* — never resolving — a divergence from
+the configured embedder.
+
+The rule is **presence is ownership**: a producer that owns the `embedding`
+field always writes the key (the vector, or an explicit `None` when it has
+none), and a replay restores it, clears it, or leaves it — it never recomputes.
+A key that is *absent* is a pre-#5004 record, where recomputation is the only
+behaviour available and is kept deliberately for back-compat.
+
+This is **not** a durability-authority claim — the JSONL is still not the
+durability mechanism (see *The rule*). It states what a `rebuild_all` replay of
+that log must reproduce. **Paths still outside the rule, each pinned by a test
+and filed:** `PointRevised` — the record's `embedding` (including an explicit
+`null` clear) is not read on replay (**#5046**); `_update_entity`'s Point branch
+journals no embedding line at all — so its caller vector falls back to the
+creation value on a rebuild, and the `embedding_verbatim` marker it sets is
+**live-only** (**#4094**; the marker is deliberately still set, because leaving
+the vector unmarked would trade this declared marker gap for an undeclared
+byte-level vector divergence on the LATER, journaled `promote_point` re-emit);
+a stale `PointPromoted` predating a `delete → recreate` re-applies the dead
+incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded
+#785 decision (**#5068**).
+
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
 | **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** for *entitled* graphs (`tier ≠ free` AND `backup_enabled`; `tortoise/backup_sweep.py:248-272`) *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). An **unentitled** graph has **no periodic archive** — its window is unbounded. With the sweep **off** the same holds; the Pro on-demand backup endpoint (`POST /backups`, `tortoise/hosted_api.py`) and the vendor snapshot below remain. | **Checksum + on-path restore verification; the drill is NOT yet clean.** The live restore path verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`) — that gate is what caught the incomplete dump. A **restore drill was attempted once and FAILED** (2026-09-17, `workflow_dispatch`): `Edge restore incomplete: 9687/10000 linked — dump references missing nodes` (#3894; export defect fixed by #3921, `_DUMP_REVISION = 2` — #3895 stays open tracking a successful re-drill of a real artifact). The scheduled monthly drill (`registry-drill-cron.yml`, #2317) has **not yet run**. Until a real archive restores end-to-end this row is **not drilled to success**; the sweep producing archives is covered by the freshness watcher (#2790 / #2922). |
