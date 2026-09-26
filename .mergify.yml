@@ -1,11 +1,16 @@
 # Mergify configuration — the merge queue for `main`.
 #
 # WHY THIS FILE EXISTS
-#   `strict: true` branch protection makes validation a **singleton lock** rather
-#   than a property of a tree. A green check certifies exactly one composition —
-#   `main ∪ this PR` — so every merge invalidates every other PR's certification,
-#   a landed PR must be re-updated, and N merges cost N full CI cycles. Landing
-#   becomes serialized at one PR per required-CI duration.
+#   The queue validates the composition that will actually exist — `main ∪ the
+#   queued PRs` — rather than trusting a green check on a head that may since
+#   have moved. It also removes the author's obligation to update their branch.
+#
+#   `strict` is **false** today; restoring `true` is an open decision. Under
+#   `strict: true` validation becomes a singleton lock — a green check certifies
+#   exactly one composition, so each merge invalidates every other PR's
+#   certification and N merges cost N full CI cycles — which is the base race
+#   #3016 records. Do NOT describe `strict: true` as the current setting; read
+#   the live value before quoting it. See #3016 and #4798.
 #
 #   #3016 (the base race) records Option 1: replace the lock with a queue and
 #   stop requiring authors to update their branch. #4798 records the change of
@@ -90,7 +95,8 @@ queue_rules:
 #   fix is to put the reasoning where it can be maintained and cited:
 #     · #3016 — the base race this queue exists to remove
 #     · #5215 — merge throughput, and what the click actually cost
-#     · #5426 — `ai-review-gate` is always red and not a required context
+#     · #5426 — `ai-review-gate` is red whenever no valid recorded review marker
+#       exists for the PR, and it is not a required context
 #     · #5433 — the review record is enforced only by LOCAL tooling
 #       (`review-enforcer` and `scripts/atomic-land.sh`); Mergify merges
 #       server-side, so no step on that path reads it
