@@ -282,12 +282,29 @@ _PREWIPE_SNAPSHOT_VERSION = 3
 # bump that build REFUSES the rebuild instead (its `version != 1` check).
 #
 # #4641: v3 adds `onboarding_snapshot` / `onboarding_step_links`. Same
-# reasoning one increment on: a v2 build would accept a v3 file and ignore the
-# onboarding sections while its wipe landed, so the bump is what makes a
-# downgrade REFUSE rather than destroy. A v1/v2 rescue file stays READABLE —
-# it simply carries no onboarding record (the writing build did not capture
-# the class), which the union reads as empty exactly as the loader does.
+# reasoning one increment on, stated correctly: WITHOUT a bump the writer
+# would stamp `2`, and a v2 build would accept that file and ignore the
+# onboarding sections while its wipe landed. WITH the bump that build REFUSES
+# it (its readable set is `(1, 2)`). A v1/v2 rescue file stays READABLE — it
+# carries no onboarding record (the writing build did not capture the class),
+# and the restore leg reports that as state-UNKNOWN rather than as a clean,
+# empty restore.
+#
+# #4641 review round 6 — the version is a FORMAT gate, not a SECTION-SET gate.
+# Two sibling builds can legitimately claim the same version with different
+# section sets (the open #5327 picks `3` for `event_meta`; this change picks
+# `3` for the onboarding pair), and a same-version file is then ACCEPTED, its
+# unknown section silently ignored, and its class destroyed by the wipe —
+# exactly what the bump exists to prevent. `_validate_prewipe_snapshot`
+# therefore ALSO refuses a file carrying any section key outside this build's
+# `_SNAPSHOT_SECTIONS`: a build that cannot restore a section must not wipe
+# over it, whatever the version says.
 _PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
+# Top-level keys that are METADATA, never a preserved class. The
+# unknown-section refusal below subtracts these so it cannot mistake the
+# envelope for a section.
+_PREWIPE_SNAPSHOT_META_KEYS = frozenset(
+    {"version", "created_at", "completed"})
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -710,6 +727,16 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
     endpoints are not both strings makes the capture REFUSE rather than drop
     it, so the guarantee is "carried or refused", never "silently lost".
 
+    The pair is ``(parent state org_id, step_id)`` — the step node's OWN
+    ``org_id`` is not read, and the restore re-keys the step onto its parent
+    state. That is faithful to every writer (`write_completed_step` MERGEs
+    ``s.org_id`` from the parent in the same statement) and to every reader
+    (`completed_steps` matches through the parent edge), so the re-key is a
+    no-op on any graph a writer produced. A raw/hand-edited graph whose step
+    node's own ``org_id`` DIVERGES from its parent's is re-keyed onto the
+    parent rather than carried verbatim; that divergence is the documented
+    residual in `docs/durability-posture.md` (#4641).
+
     An orphan `:OnboardingStep` node (no `COMPLETED_STEP` edge) is not
     captured: it is the ``_prune_orphan_decide_step`` cleanup's residue, it
     carries no properties beyond its `{org_id, step_id}` key, and nothing
@@ -739,13 +766,17 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
         # Failing closed here (the caller funnels the raise into the
         # `capture_failed` gate) aborts BEFORE the wipe instead, with the bad
         # node still in place to be repaired (#2943, #4641).
-        if not isinstance(props, dict) or not isinstance(props.get("org_id"),
-                                                          str):
+        # Bind the value BEFORE formatting: the non-dict arm of the guard
+        # would otherwise make the f-string raise AttributeError instead of
+        # reporting the offending node it exists to name (#4641 review
+        # round 6).
+        _org_value = props.get("org_id") if isinstance(props, dict) else None
+        if not isinstance(props, dict) or not isinstance(_org_value, str):
             raise RuntimeError(
                 f"an :{ONBOARDING_NODE_LABEL} node cannot survive a rebuild "
-                f"round-trip (org_id={props.get('org_id')!r} is not a "
-                f"string) — writing it would make the pre-wipe snapshot "
-                f"unloadable on the retry")
+                f"round-trip (org_id={_org_value!r} is not a string) — "
+                f"writing it would make the pre-wipe snapshot unloadable on "
+                f"the retry")
         for key, value in props.items():
             if not _is_snapshot_primitive(value):
                 raise RuntimeError(
@@ -976,6 +1007,27 @@ def _validate_prewipe_snapshot(data: dict, path: str) -> None:
             f"{version!r} (this build reads "
             f"{list(_PREWIPE_SNAPSHOT_READABLE_VERSIONS)}) — "
             f"refusing to wipe the graph (#2943). Migrate or delete the file."
+        )
+    # #4641 review round 6: a section this build cannot restore is a REFUSAL,
+    # whatever the version says. The version is a FORMAT gate, not a
+    # SECTION-SET gate: two sibling builds can claim the same version with
+    # different section sets, and a same-version file is then accepted while
+    # its unknown section is never read (the loop below walks only
+    # `_SNAPSHOT_SECTIONS` and the union reads only known keys) — so the wipe
+    # lands and the class that section carried is destroyed silently. That is
+    # precisely the fail-open the version bump exists to prevent, one level
+    # down.
+    unknown_sections = sorted(
+        set(data) - set(_SNAPSHOT_SECTIONS) - _PREWIPE_SNAPSHOT_META_KEYS)
+    if unknown_sections:
+        raise RuntimeError(
+            f"a pre-wipe snapshot at {path} carries section(s) "
+            f"{unknown_sections} this build cannot restore (it reads "
+            f"{list(_SNAPSHOT_SECTIONS)}) — refusing to wipe the graph "
+            f"(#2943, #4641): the wipe is unconditional and only the journal "
+            f"is replayed, so ignoring an unknown section would destroy the "
+            f"class it carries. Land the build that carries it, or delete "
+            f"the file to accept the loss."
         )
     for key in _SNAPSHOT_SECTIONS:
         section = data.get(key, [])
@@ -3955,6 +4007,19 @@ class FalkorProjection(
         onboarding_snapshot: list[dict] = []
         onboarding_step_links: list[tuple[str, str]] = []
         try:
+            # Imported HERE, PRE-wipe, and REUSED by the restore leg below.
+            # The restore leg runs after `MATCH (n) DETACH DELETE n`, so a
+            # renamed or removed symbol would raise with the store already
+            # emptied (#2943). Binding all four before the capture funnels
+            # that failure into `capture_failed`, which aborts with the graph
+            # untouched — the pre-wipe guard and the post-wipe consumer now
+            # read the SAME symbols (#4641 review round 6).
+            from tortoise.onboarding.state import (
+                COMPLETED_STEP_EDGE,
+                ONBOARDING_NODE_LABEL,
+                ONBOARDING_STEP_LABEL,
+                ONBOARDS_EDGE,
+            )
             onboarding_snapshot, onboarding_step_links = (
                 _capture_onboarding_snapshot(self.g))
         except Exception as e:
@@ -5489,13 +5554,10 @@ class FalkorProjection(
         # post-wipe raise leaves the store empty). Every failure is counted,
         # reported once below, and the post-restore check turns a resulting
         # gap into an ERROR.
-        from tortoise.onboarding.state import (
-            COMPLETED_STEP_EDGE,
-            ONBOARDING_NODE_LABEL,
-            ONBOARDING_STEP_LABEL,
-            ONBOARDS_EDGE,
-        )
-
+        # `COMPLETED_STEP_EDGE` / `ONBOARDING_NODE_LABEL` /
+        # `ONBOARDING_STEP_LABEL` / `ONBOARDS_EDGE` are bound by the PRE-wipe
+        # import in the capture block above, so a rename fails before the
+        # wipe rather than here (#4641 review round 6).
         onboarding_restore_failures = 0
         onboarding_restored_orgs: set[str] = set()
         for props in onboarding_snapshot:
@@ -5627,45 +5689,98 @@ class FalkorProjection(
                 "(%s: %s) — treating it as not restored (#4641)",
                 type(e).__name__, e,
             )
-        if onboarding_restore_failures or not onboarding_verified or \
-                onboarding_missing_orgs or onboarding_missing_links or \
-                onboarding_missing_onboards:
-            if not onboarding_verified:
-                # "Could not confirm" must not be reported as "confirmed" in
-                # EITHER direction: the missing counts are None above, so this
-                # branch must not print the expected denominators as "ABSENT"
-                # and assert the data is gone — absence was never observed.
-                logger.error(
-                    "rebuild: onboarding-state post-restore verification "
-                    "COULD NOT RUN (%d restore failure(s)) — the rebuilt "
-                    "graph's onboarding state is UNVERIFIED: not confirmed "
-                    "intact, and NOT observed gone. Re-check the %d expected "
-                    "org state(s), %d expected step edge(s) and %d expected "
-                    "`onboards` anchor edge(s) before trusting them — "
-                    "see #4641.",
-                    onboarding_restore_failures,
-                    len(onboarding_expected_orgs),
-                    len(onboarding_expected_links),
-                    len(onboarding_expected_onboards),
-                )
-            else:
-                logger.error(
-                    "rebuild: onboarding-state post-restore verification "
-                    "FAILED — %d restore failure(s); %d of %d expected org "
-                    "state(s), %d of %d expected step edge(s) and %d of %d "
-                    "expected `onboards` anchor edge(s) are ABSENT from the "
-                    "rebuilt graph. This is a TRUE POSITIVE, not a silent "
-                    "success: the wipe is unconditional and only the journal "
-                    "is replayed, so those onboarding states/edges are gone. "
-                    "Re-run onboarding for the affected org(s) — see #4641.",
-                    onboarding_restore_failures,
-                    len(onboarding_missing_orgs),
-                    len(onboarding_expected_orgs),
-                    len(onboarding_missing_links),
-                    len(onboarding_expected_links),
-                    len(onboarding_missing_onboards),
-                    len(onboarding_expected_onboards),
-                )
+        # The pre-preservation window (#4641 review round 6): a leftover
+        # sidecar with NO onboarding section key was written by a build that
+        # predates onboarding capture, so the wipe that produced it destroyed
+        # a class it never recorded. The expected sets are empty in that case,
+        # so without this signal the run reports a clean "0 of 0 restored".
+        # Mirrors #2814's `leftover_version < 2` T2 handling; keyed on the
+        # SECTION's presence rather than on a version number, so a later bump
+        # for an unrelated section cannot make the predicate go stale.
+        onboarding_unknown = (
+            leftover is not None
+            and "onboarding_snapshot" not in leftover
+            and "onboarding_step_links" not in leftover)
+
+        # ONE canonical gap count, returned to the callers so the projection,
+        # `consistency.recover_from_log` and the CLI cannot drift apart.
+        # Deliberately NOT `restore_failures + missing_*`: a failed restore
+        # lands in BOTH (its node is absent), which reported a single
+        # destroyed org as two gaps; and a restore that RAISED after the write
+        # landed (a timeout) is a failure with nothing missing, which must not
+        # read as loss.
+        onboarding_gap = (len(onboarding_missing_orgs)
+                          + len(onboarding_missing_links)
+                          + len(onboarding_missing_onboards))
+        if not onboarding_verified and (
+                onboarding_expected_orgs or onboarding_expected_links
+                or onboarding_expected_onboards):
+            # "Could not confirm" is itself a gap: the missing sets are empty
+            # because the verification READ failed, not because nothing was
+            # missing.
+            onboarding_gap = max(onboarding_gap, 1)
+        if onboarding_unknown:
+            onboarding_gap = max(onboarding_gap, 1)
+
+        if onboarding_unknown:
+            logger.error(
+                "rebuild: the leftover pre-wipe snapshot at %s predates "
+                "onboarding preservation and carries no onboarding record, "
+                "so whether the destroyed graph held any onboarding state "
+                "CANNOT be determined — this is a state-UNKNOWN signal, not "
+                "proof the state is absent. Re-run onboarding for any org "
+                "whose onboarding state is uncertain (#4641).",
+                snapshot_path,
+            )
+        if not onboarding_verified:
+            # "Could not confirm" must not be reported as "confirmed" in
+            # EITHER direction: the missing counts are None above, so this
+            # branch must not print the expected denominators as "ABSENT" and
+            # assert the data is gone — absence was never observed.
+            logger.error(
+                "rebuild: onboarding-state post-restore verification "
+                "COULD NOT RUN (%d restore failure(s)) — the rebuilt "
+                "graph's onboarding state is UNVERIFIED: not confirmed "
+                "intact, and NOT observed gone. Re-check the %d expected "
+                "org state(s), %d expected step edge(s) and %d expected "
+                "`onboards` anchor edge(s) before trusting them — "
+                "see #4641.",
+                onboarding_restore_failures,
+                len(onboarding_expected_orgs),
+                len(onboarding_expected_links),
+                len(onboarding_expected_onboards),
+            )
+        elif onboarding_gap:
+            # The MISSING SETS are the "gone" evidence. `restore_failures` is
+            # deliberately not part of that claim: a restore call can raise
+            # while the server already applied the write (a timeout or a
+            # connection blip), and calling that "gone" would be a false loss
+            # claim over intact state (see the `elif` below).
+            logger.error(
+                "rebuild: onboarding-state post-restore verification "
+                "FAILED — %d of %d expected org state(s), %d of %d expected "
+                "step edge(s) and %d of %d expected `onboards` anchor "
+                "edge(s) are ABSENT from the rebuilt graph (%d restore "
+                "attempt(s) raised). This is a TRUE POSITIVE, not a silent "
+                "success: the wipe is unconditional and only the journal is "
+                "replayed, so those onboarding states/edges are gone. "
+                "Re-run onboarding for the affected org(s) — see #4641.",
+                len(onboarding_missing_orgs),
+                len(onboarding_expected_orgs),
+                len(onboarding_missing_links),
+                len(onboarding_expected_links),
+                len(onboarding_missing_onboards),
+                len(onboarding_expected_onboards),
+                onboarding_restore_failures,
+            )
+        elif onboarding_restore_failures:
+            logger.warning(
+                "rebuild: %d onboarding restore attempt(s) raised, but the "
+                "post-restore verification confirms every expected org state "
+                "and edge is PRESENT — treated as transient (an error after "
+                "the write landed), not as loss (#4641).",
+                onboarding_restore_failures,
+            )
 
         # ── #2814: restore the authoritative configuration ──────────────
         # After pass-1a (so a `:PackInstall` is not clobbered by a later replay
@@ -6307,7 +6422,12 @@ class FalkorProjection(
                 "onboarding_missing_onboards": (
                     len(onboarding_missing_onboards)
                     if onboarding_verified else None),
-                "onboarding_restore_failures": onboarding_restore_failures}
+                "onboarding_restore_failures": onboarding_restore_failures,
+                # The single canonical gap the callers read (see above), plus
+                # the pre-preservation UNKNOWN signal — an old-build rescue
+                # file cannot say whether the class was lost or never present.
+                "onboarding_gap": onboarding_gap,
+                "onboarding_state_unknown": onboarding_unknown}
 
     def query(self, cypher: str, **params):
         # P0 guard (#99): refuse bulk graph-wipe on non-test graphs.

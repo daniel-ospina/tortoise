@@ -76,11 +76,15 @@ there is no third mechanism. Classes that can be re-derived are deliberately
 **not** preserved, because preserving them would restore a stale value as if it
 were truth.
 
-The preserved set is **declared in code**, not discovered:
-`tortoise/projection/__init__.py::_config_classes()`. It is **not** a
-completeness gate — a class nobody enrolled still recurs, and **#2296
-contributes its indicators into this subsection** rather than creating a rival
-artifact.
+The preserved set is **declared in code**, not discovered — in **two** homes,
+both bound by the doc-consistency test:
+`tortoise/projection/__init__.py::_config_classes()` for the keyed nodes
+(`:PackInstall`, `:PackManifest`, `:Meta{key:…}`), and the declared
+`_SNAPSHOT_SECTIONS` pair for a class whose identity is **composite or which
+owns edges** (`:Batch`, `:Session`, and since **#4641**
+`:OnboardingState`/`:OnboardingStep`). It is **not** a completeness gate — a
+class nobody enrolled still recurs, and **#2296 contributes its indicators
+into this subsection** rather than creating a rival artifact.
 
 <!-- config-registry:preserved -->
 | Preserved class (authoritative) | Identity property |
@@ -289,9 +293,12 @@ gate in `tests/test_durability_posture.py` fails the build if a
   node map and the leftover `onboarding_step_links` pairs, so a mutation made
   after the sidecar was written can be rolled back by the retry: a
   repaired/deleted `decide-completed` edge (#3912) can be re-added, and a
-  colliding org's node fields — `status`, `member_progress`, `fork`,
-  `compact`, `version`, `last_decide_attempt`, `fork_unsure_at` — are reverted
-  to their pre-wipe values. The node map deliberately keeps the leftover
+  colliding org's node fields — **every `:OnboardingState` property except
+  `org_subject_id`**, which includes the audit-repair stamps
+  `decide_completed_removed_at`/`_reason` and
+  `status_regressed_at`/`_from`/`_reason` (#3912), so a retry can also revert
+  the record that an org was *repaired* — are reverted to their pre-wipe
+  values. The node map deliberately keeps the leftover
   rather than field-merging — the alternative would let a self-healed default
   overwrite recovered truth, the harm #4641 removes — so this is the same
   trade already documented for a colliding config key in the **#2814
@@ -305,8 +312,37 @@ gate in `tests/test_durability_posture.py` fails the build if a
   have DIVERGED is not preserved faithfully — an edge with no matching
   property is not carried, and a property with no edge gets an edge minted.
   Every writer in `tortoise/onboarding/state.py` co-writes both, so this is a
-  raw/hand-edited graph only. The remedy is the same as for #2814: the operator
-  deletes the pending rescue file (never the retired, entry-less one).
+  raw/hand-edited graph only. One divergence of the same kind: the step pair
+  stored is `(parent state org_id, step_id)`, so the restore re-keys the
+  `:OnboardingStep` node onto its **parent**; a raw graph whose step node's own
+  `org_id` diverges from its parent's is therefore re-keyed rather than carried
+  verbatim. Every writer co-writes both in one statement
+  (`write_completed_step`) and every reader matches through the parent edge, so
+  this too is a raw/hand-edited graph only. The remedy is the same as for
+  #2814: the operator deletes the pending rescue file (never the retired,
+  entry-less one).
+- **#4641 residual (state-UNKNOWN)** — a rescue file written before onboarding
+  preservation (carrying no `onboarding_snapshot`/`onboarding_step_links` key)
+  cannot say whether the graph it describes ever had onboarding state, so the
+  restore reports **UNKNOWN, not absent** (`onboarding_state_unknown`, an ERROR
+  line, and a gap in `onboarding_gap`), mirroring #2814's
+  `legacy_sidecar_no_config_record`. Unlike the config marker this signal is
+  **not durable**: there is no on-graph onboarding-unknown marker, because the
+  onboarding state machine has no such property and adding one is a state
+  machine change owned by #5048. After the run, `:OnboardingState`'s *absence*
+  still cannot be told from *never onboarded* — only the log and the returned
+  counts carry the distinction.
+- **#4641 residual (the sidecar is caller-supplied)** — the pre-wipe sidecar is
+  read from the caller-supplied `--dir` and carries **no provenance binding**
+  (no HMAC, no ownership check), so shape validation
+  (`_validate_onboarding_entry` / `_validate_onboarding_step_link`) is not a
+  forgery boundary: a well-formed planted entry can set arbitrary
+  `:OnboardingState` property values (including `status`) and mint a
+  `COMPLETED_STEP` edge — exactly as a planted `config_snapshot` can already
+  set `:PackInstall`/`:Meta` state (#2814). This is a **declared trust model**,
+  not a new class: the sidecar's threat surface is *shape*, and the wipes it
+  guards run only on an embedded store or a test graph. Binding the file (an
+  HMAC over the payload) is the remedy if that trust model changes.
 - **#2814 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar reverts a **colliding** config key to its
   pre-wipe value, so a config deliberately deleted after the wipe can be

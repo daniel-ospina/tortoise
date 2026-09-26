@@ -86,42 +86,56 @@ def _cmd_rebuild(args):
         # "preservation was not attempted", and non-zero when the replay could
         # not close a gap (the operator-facing counterpart of the
         # `onboarding_gap` key the embedded auto-recovery path now warns on).
-        onboarding_gap = (
-            (counts.get("onboarding_restore_failures") or 0)
-            + (counts.get("onboarding_missing_orgs") or 0)
-            + (counts.get("onboarding_missing_links") or 0)
-            + (counts.get("onboarding_missing_onboards") or 0))
-        # A FAILED verification read reports the missing counts as None (so the
-        # sum above is 0) and `onboarding_verified` False. "Could not confirm"
-        # must not read as "confirmed" here either, so this must agree with
-        # `consistency.recover_from_log`'s `onboarding_gap` for the same shape
-        # (#4641 review round 4).
-        if counts.get("onboarding_verified") is False and \
-                counts.get("onboarding_expected"):
-            onboarding_gap = max(onboarding_gap, 1)
-        print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
-              f"{counts.get('onboarding_expected', 0)} org state(s) restored")
-        if onboarding_gap:
-            if counts.get("onboarding_verified") is False:
-                # "Could not confirm" must not be printed as "gone": the
-                # projection's own branch says UNVERIFIED, and the CLI must not
-                # contradict it (round 5).
-                print(
-                    "Onboarding: the post-restore verification COULD NOT RUN "
-                    "— this graph's onboarding state is UNVERIFIED: not "
-                    "confirmed intact, and NOT observed gone. Re-check it "
-                    "before trusting the organizations' onboarding state "
-                    "(#4641).",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"Onboarding: {onboarding_gap} state/edge restore "
-                    f"gap(s) — the wipe is unconditional and only the journal "
-                    f"is replayed, so those onboarding states/edges are gone. "
-                    f"Re-run onboarding for the affected org(s) (#4641).",
-                    file=sys.stderr,
-                )
+        # The projection owns the gap's definition and returns ONE canonical
+        # count; recomputing it here from the granular keys double-counted a
+        # single destroyed org and could read a transient restore failure as
+        # loss (#4641 review round 6).
+        onboarding_gap = counts.get("onboarding_gap") or 0
+        onboarding_unverified = counts.get("onboarding_verified") is False
+        onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
+        # "Could not confirm" must not be printed as a LOSS: the projection
+        # forces `onboarding_restored` to 0 for an unverified restore, so the
+        # count line would read "0 of N restored" and contradict the stderr
+        # line right below it. The unverified shape gets non-loss wording.
+        if onboarding_unverified:
+            print(f"Onboarding: restore UNVERIFIED "
+                  f"({counts.get('onboarding_expected', 0)} org state(s) "
+                  f"expected)")
+        else:
+            print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
+                  f"{counts.get('onboarding_expected', 0)} org state(s) "
+                  f"restored")
+        # Mutually exclusive: an UNVERIFIED restore, a pre-preservation
+        # UNKNOWN, and a confirmed gap must not be described as each other.
+        if onboarding_unverified:
+            # "Could not confirm" must not be printed as "gone": the
+            # projection's own branch says UNVERIFIED, and the CLI must not
+            # contradict it (round 5).
+            print(
+                "Onboarding: the post-restore verification COULD NOT RUN "
+                "— this graph's onboarding state is UNVERIFIED: not "
+                "confirmed intact, and NOT observed gone. Re-check it "
+                "before trusting the organizations' onboarding state "
+                "(#4641).",
+                file=sys.stderr,
+            )
+        elif onboarding_unknown:
+            print(
+                "Onboarding: the leftover pre-wipe snapshot predates "
+                "onboarding preservation and carries no onboarding record — "
+                "whether the destroyed graph held any onboarding state CANNOT "
+                "be determined (UNKNOWN, not absent). Re-run onboarding for "
+                "any org whose onboarding state is uncertain (#4641).",
+                file=sys.stderr,
+            )
+        elif onboarding_gap:
+            print(
+                f"Onboarding: {onboarding_gap} state/edge restore "
+                f"gap(s) — the wipe is unconditional and only the journal "
+                f"is replayed, so those onboarding states/edges are gone. "
+                f"Re-run onboarding for the affected org(s) (#4641).",
+                file=sys.stderr,
+            )
         if counts.get("config_reset"):
             if counts.get("config_reset_read_failed"):
                 # `config_reset` is fail-SAFE, so it does not prove the marker

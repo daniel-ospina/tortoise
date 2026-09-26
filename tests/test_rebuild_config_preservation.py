@@ -131,6 +131,28 @@ def _plant(path, payload: dict) -> None:
     _write_prewipe_snapshot(str(path), payload)
 
 
+def _legacy_pre_onboarding_sidecar(**overrides) -> dict:
+    """A rescue file exactly as a build BEFORE onboarding preservation wrote it.
+
+    The section set is that build's own `_SNAPSHOT_SECTIONS` — so it carries NO
+    `config_snapshot` (that arrived in v2, #2814) and NO onboarding section
+    keys. Reconstructing this shape matters: the state-UNKNOWN predicate keys
+    on the SECTION's presence, so a `_sidecar_payload()` file (which always
+    writes every section, empty or not) is NOT what an old build produced.
+    """
+    payload = {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [],
+        "batch_snapshot": [{"id": "b-legacy"}],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _sidecar_path(events_dir) -> str:
     from tortoise.projection import prewipe_snapshot_path
     return prewipe_snapshot_path(str(events_dir))
@@ -1696,7 +1718,8 @@ def test_cmd_rebuild_reports_unverified_not_gone(tmp_path, capsys,
               "onboarding_restored": 0, "onboarding_missing_orgs": None,
               "onboarding_missing_links": None,
               "onboarding_missing_onboards": None,
-              "onboarding_restore_failures": 0}
+              "onboarding_restore_failures": 0,
+              "onboarding_gap": 1, "onboarding_state_unknown": False}
     monkeypatch.setattr(FalkorProjection, "rebuild_all",
                         lambda self, _dir: dict(counts))
     sdk, events = _mk_sdk(tmp_path)
@@ -1708,7 +1731,12 @@ def test_cmd_rebuild_reports_unverified_not_gone(tmp_path, capsys,
     out = capsys.readouterr()
 
     assert rc in (None, 0)
-    assert "Onboarding: 0 of 2 org state(s) restored" in out.out, out.out
+    assert "Onboarding: restore UNVERIFIED (2 org state(s) expected)" \
+        in out.out, out.out
+    # The unverified shape must not print a LOSS-shaped count line: the
+    # projection forces `onboarding_restored` to 0, so "0 of 2 restored" would
+    # contradict the stderr line right below it (#4641 review round 6).
+    assert "0 of 2" not in out.out, out.out
     assert "UNVERIFIED" in out.err, out.err
     assert "NOT observed gone" in out.err, out.err
     assert "are gone" not in out.err, out.err
@@ -1993,3 +2021,174 @@ def test_onboarding_gap_warns_in_the_recover_or_raise_caller(graph, caplog):
                for r in caplog.records), (
         f"the recovery caller discarded the onboarding gap: "
         f"{[r.getMessage() for r in caplog.records]}")
+
+
+# ── #4641 review round 6: the fixes it produced ─────────────────────────────
+
+
+def test_foreign_section_from_a_sibling_build_is_refused_before_wipe(
+        tmp_path):
+    """The version is a FORMAT gate, not a SECTION-SET gate.
+
+    Two sibling builds can legitimately claim the same version with different
+    section sets (the open #5327 takes `3` for `event_meta`, this change takes
+    `3` for the onboarding pair). Without a section-set check the same-version
+    file is ACCEPTED, its unknown section is never read (validation walks only
+    `_SNAPSHOT_SECTIONS` and the union reads only known keys), and the class
+    that section carried is destroyed by the wipe — the fail-open the version
+    bump exists to prevent, one level down.
+    """
+    from tortoise.projection import _load_prewipe_snapshot
+
+    path = tmp_path / "sibling.json"
+    _plant(path, _sidecar_payload(event_meta=[{"last_seq": 7}]))
+    with pytest.raises(RuntimeError) as exc:
+        _load_prewipe_snapshot(str(path))
+    assert "event_meta" in str(exc.value)
+    assert "cannot restore" in str(exc.value)
+    assert path.exists(), "the sidecar must be KEPT for repair, not deleted"
+
+    # The envelope's METADATA keys are not sections and stay acceptable — the
+    # live payload (`version`, `created_at`) and the retired one (`completed`)
+    # must both keep loading. A non-empty known section keeps it non-entry-less.
+    _plant(path, _sidecar_payload(batch_snapshot=[{"id": "b1"}]))
+    assert _load_prewipe_snapshot(str(path)) is not None
+    retired = _sidecar_payload(batch_snapshot=[{"id": "b1"}])
+    retired["completed"] = True
+    _plant(path, retired)
+    assert _load_prewipe_snapshot(str(path)) is not None
+
+
+def test_same_version_sibling_section_survives_a_real_rebuild(graph):
+    """The refusal is wired into the REAL path, pre-wipe (not just the loader).
+
+    A planted same-version file carrying a section this build cannot restore
+    must abort with the graph untouched, not be accepted and wiped over.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_install(sdk, "keep-me", version="1.0.0")
+    before = _g(sdk).query("MATCH (n) RETURN count(n)").result_set[0][0]
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        event_meta=[{"last_seq": 7}], batch_snapshot=[{"id": "b1"}]))
+
+    with pytest.raises(RuntimeError) as exc:
+        sdk._get_proj().rebuild_all(str(events))
+    assert "event_meta" in str(exc.value), exc.value
+    after = _g(sdk).query("MATCH (n) RETURN count(n)").result_set[0][0]
+    assert after == before, "the graph must be untouched by a refused rebuild"
+    assert _read_install(sdk, "keep-me") is not None
+
+
+def test_pre_onboarding_leftover_reports_state_unknown(graph, caplog):
+    """An old-build rescue file cannot say "no state" — only UNKNOWN.
+
+    A v1/v2 leftover was written by a build that never captured the onboarding
+    class, so the wipe that produced it destroyed a class it did not record.
+    The expected sets are empty, so without the UNKNOWN signal the run reports
+    a clean "0 of 0 restored" — the fail-open #2814 closes for config with
+    `legacy_sidecar_no_config_record`.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    # A non-empty known section keeps this a PENDING file, not a retirement
+    # artifact (an entry-less sidecar loads as None and diverts nothing).
+    _plant(Path(_sidecar_path(events)), _legacy_pre_onboarding_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        result = sdk._get_proj().rebuild_all(str(events))
+
+    assert result["onboarding_state_unknown"] is True
+    assert result["onboarding_gap"] >= 1, (
+        "a pre-preservation rescue file is a state-UNKNOWN gap, not a clean "
+        "0-of-0 restore")
+    assert any("predates onboarding preservation" in r.getMessage()
+               for r in caplog.records), (
+        f"no UNKNOWN line was logged: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
+def test_onboards_edge_symbol_is_bound_before_the_wipe(graph, monkeypatch):
+    """A renamed `ONBOARDS_EDGE` must abort PRE-wipe, never after (#2943).
+
+    The restore leg runs after `MATCH (n) DETACH DELETE n`, so an ImportError
+    there would strand an empty store. Binding the symbol in the pre-wipe
+    capture block routes the failure into `capture_failed` instead, and the
+    test proves it by MUTATION — the symbol is deleted from the domain module,
+    so the pre-wipe import is the only thing that can fail.
+    """
+    from tortoise.onboarding import state as os_state
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-a", fork="build",
+                            steps=("harness-connected",))
+    before = _g(sdk).query("MATCH (n) RETURN count(n)").result_set[0][0]
+
+    monkeypatch.delattr(os_state, "ONBOARDS_EDGE")
+    with pytest.raises(RuntimeError) as exc:
+        sdk._get_proj().rebuild_all(str(events))
+    assert "BEFORE the graph wipe" in str(exc.value), exc.value
+    after = _g(sdk).query("MATCH (n) RETURN count(n)").result_set[0][0]
+    assert after == before, (
+        "a domain-module rename must fail with the graph untouched, not after "
+        "the wipe")
+
+
+def test_transient_restore_failure_is_not_reported_as_gone(tmp_path, capsys,
+                                                           monkeypatch):
+    """A restore that raised with nothing missing is not loss.
+
+    A write can raise AFTER the server applied it (a timeout or a connection
+    blip), which leaves `onboarding_restore_failures > 0` while every expected
+    state and edge is PRESENT. The projection's canonical `onboarding_gap`
+    therefore excludes the failure count when the verification succeeded, and
+    the CLI must not print the "gone" verdict for that shape.
+    """
+    import argparse
+
+    from tortoise.__main__ import _cmd_rebuild
+    from tortoise.projection import FalkorProjection
+
+    counts = {"nodes": 3, "edges": 1, "events": 2,
+              "onboarding_expected": 1, "onboarding_verified": True,
+              "onboarding_restored": 1, "onboarding_missing_orgs": 0,
+              "onboarding_missing_links": 0,
+              "onboarding_missing_onboards": 0,
+              "onboarding_restore_failures": 1,
+              "onboarding_gap": 0, "onboarding_state_unknown": False}
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        lambda self, _dir: dict(counts))
+    sdk, events = _mk_sdk(tmp_path)
+    sdk.close()
+    _write_journal(events, [])
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
+                                        db=str(tmp_path / "t.db")))
+    out = capsys.readouterr()
+
+    assert rc in (None, 0)
+    assert "Onboarding: 1 of 1 org state(s) restored" in out.out, out.out
+    assert "are gone" not in out.err, out.err
+
+
+def test_preservation_unknown_is_a_gap_for_recover_from_log(graph):
+    """The UNKNOWN signal reaches the automatic-recovery caller too.
+
+    `recover_from_log` reads the projection's canonical `onboarding_gap`, so
+    an old-build rescue file must surface as a gap there rather than as a
+    clean `recovered: True`.
+    """
+    from tortoise.consistency import recover_from_log
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _legacy_pre_onboarding_sidecar())
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    rec = recover_from_log(str(events), sdk._get_proj())
+    assert rec["recovered"] is True
+    assert rec.get("onboarding_gap"), (
+        "a pre-onboarding rescue file must not read as a clean recovery")
+    assert "onboarding" in rec["reason"]

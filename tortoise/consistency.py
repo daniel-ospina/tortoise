@@ -1075,20 +1075,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # purely-value-preserving change: `reason` has a suffix APPENDED below
         # for the gap case (in-repo callers only log it). `recovered` itself is
         # unchanged, exactly as the sticky config-reset marker is.
-        onboarding_gap = sum(
-            int(counts.get(k) or 0) for k in (
-                "onboarding_restore_failures",
-                "onboarding_missing_orgs",
-                "onboarding_missing_links",
-                "onboarding_missing_onboards"))
-        # "Could not confirm" must not read as "confirmed": a failed
-        # verification READ reports `onboarding_verified is False` with the
-        # missing counts `None` (so the sum above is 0), which is itself a gap
-        # — but only when there WAS onboarding state to confirm, so a graph
-        # with none never reports a phantom gap for a read failure.
-        if counts.get("onboarding_verified") is False and \
-                counts.get("onboarding_expected"):
-            onboarding_gap = max(onboarding_gap, 1)
+        # The projection returns the gap as ONE canonical count — it owns the
+        # definition. Summing the granular keys here double-counted a single
+        # destroyed org (it lands in BOTH `onboarding_restore_failures` and
+        # `onboarding_missing_orgs`) and let a transient restore failure read
+        # as loss; reading the one key also keeps this caller and the CLI from
+        # drifting apart (#4641 review round 6).
+        onboarding_gap = int(counts.get("onboarding_gap") or 0)
         result = {"recovered": True,
                   "log_points": events,
                   "db_points": nodes,
