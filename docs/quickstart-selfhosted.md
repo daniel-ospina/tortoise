@@ -215,7 +215,11 @@ Run `tortoise doctor` after upgrades.
 ### Upgrading an existing hook install
 
 Installed hooks are per-project copies (`.claude/hooks/session-start.sh`,
-`.claude/hooks/session-end.sh`) plus a merged `.claude/settings.json` fragment.
+`.claude/hooks/session-end.sh`, `.claude/hooks/session-turn.sh`) plus a merged
+`.claude/settings.json` fragment. `session-turn.sh` (#3963) is the per-turn
+cheap capture: at every user prompt it spools the conversation locally with no
+network call, so a killed or interrupted session is still filed later by the
+SessionStart drain. It needs a `UserPromptSubmit` entry with `"timeout": 30`.
 The install is **drift-checked**: each shipped script carries a canonical
 `# tortoise-hook-version: N` marker, and the settings entry each script needs
 must carry a per-hook `timeout`. A stale install is silent — the hook is
@@ -234,7 +238,8 @@ the seam live in different files:
 
 - **Scripts** — re-copied from `tortoise/claude-hooks/`; the marker then reads
 the current generation. (The previous copy is backed up to `<name>.bak`
-whenever its bytes differ, before it is restored.)
+whenever its bytes differ, before it is restored.) This includes adding the
+`session-turn.sh` entry on an install that predates #3963.
 - **`.claude/settings.json`** — the hook entry's `timeout` is **merged in**, not
 overwritten. #3754 made the `timeout` load-bearing: Claude Code cancels a
 `SessionEnd` hook at its 1.5 s default, and a pre-#3754 settings file has no
@@ -249,9 +254,11 @@ non-CLI host:
 ```bash
 cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 cp tortoise/claude-hooks/session-end.sh   .claude/hooks/session-end.sh
-chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
+cp tortoise/claude-hooks/session-turn.sh  .claude/hooks/session-turn.sh
+chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hooks/session-turn.sh
 grep '^# tortoise-hook-version:' .claude/hooks/session-*.sh   # one marker each
-# and add "timeout": 60 to each hook entry in .claude/settings.json
+# and add "timeout": 60 to the SessionStart/SessionEnd entries and
+# "timeout": 30 to the UserPromptSubmit entry in .claude/settings.json
 ```
 
 The marker is bumped on every behavioural edit, so a copy without the current
@@ -507,7 +514,8 @@ If you are on a version without the export tool, or you prefer to re-create know
 
    ```bash
    # Sessions/transcripts you captured while self-hosted
-   tortoise session capture --file transcript.txt
+   # (session capture requires explicit consent — TORTOISE_CAPTURE=1)
+   TORTOISE_CAPTURE=1 tortoise session capture --file transcript.txt
 
    # Individual claims (or bulk via REST POST /v1/points or the SDK)
    tortoise create-point "The decision was approved" --kind statement

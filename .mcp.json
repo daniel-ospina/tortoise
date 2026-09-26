@@ -1,87 +1,87 @@
 {
-    "mcpServers": {
-        "exa": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "exa-mcp-server"
-            ],
-            "env": {
-                "EXA_API_KEY": "${EXA_API_KEY}"
-            },
-            "lazy": true,
-            "idleTimeoutMs": 900000,
-            "purpose": "Semantic search (Exa) \u2014 scholarly/semantic/entity discovery",
-            "whenToLoad": "on demand \u2014 semantic/scholarly/prospect discovery only (agent-infra #419)",
-            "cost": "one light process; Perplexity is the primary source"
-        },
-        "brave-search": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "@brave/brave-search-mcp-server"
-            ],
-            "env": {
-                "BRAVE_API_KEY": "${BRAVE_API_KEY}"
-            },
-            "lazy": true,
-            "purpose": "Web search (Brave)",
-            "whenToLoad": "on demand",
-            "cost": "one npx process"
-        },
-        "playwright-browser": {
-            "command": "npx",
-            "args": [
-                "@playwright/mcp@latest"
-            ],
-            "lazy": true,
-            "idleTimeoutMs": 900000,
-            "purpose": "Browser automation (navigate/click/screenshot)",
-            "whenToLoad": "verify/UX phases only",
-            "cost": "~170MB pair while loaded"
-        },
-        "gemini": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "@houtini/gemini-mcp"
-            ],
-            "env": {
-                "GEMINI_API_KEY": "${GEMINI_API_KEY}"
-            },
-            "lazy": true,
-            "purpose": "Image generation (Gemini)",
-            "whenToLoad": "image/carousel tasks",
-            "cost": "one npx process"
-        },
-        "search-console": {
-            "_comment": "Google Search Console + Bing + GA4 + AdSense via search-console-mcp (OAuth desktop flow \u2014 NO service account needed). One-time auth: run `npx search-console-mcp setup` in a terminal \u2192 browser login \u2192 token stored in macOS Keychain. Read-only (webmasters.readonly). Tools: search_analytics (up to 25k rows; query/page/country/device/date dimensions; regex filters; quick-wins), list_sites, url_inspection. Domain-property gotcha: siteUrl = sc-domain:tortoise.premiselabs.co. See issue #1862.",
-            "command": "npx",
-            "args": [
-                "-y",
-                "search-console-mcp"
-            ],
-            "env": {},
-            "lazy": true,
-            "purpose": "Search console/analytics (GSC, Bing, GA4, AdSense)",
-            "whenToLoad": "SEO/analytics tasks",
-            "cost": "one npx process"
-        },
-        "tortoise-local": {
-            "_comment": "Local daemon MCP",
-            "type": "http",
-            "url": "http://localhost:8000/mcp",
-            "headers": {},
-            "lazy": true
-        },
-        "tortoise": {
-            "_comment": "Tortoise Cloud MCP \u2014 connects to api.premiselabs.co",
-            "type": "http",
-            "url": "https://api.premiselabs.co/mcp/",
-            "headers": {
-                "Authorization": "Bearer ${TORTOISE_API_KEY}"
-            },
-            "timeoutMs": 30000
-        }
+  "mcpServers": {
+    "exa": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "exa-mcp-server"
+      ],
+      "env": {
+        "EXA_API_KEY": "${EXA_API_KEY}"
+      },
+      "lazy": true,
+      "idleTimeoutMs": 900000,
+      "purpose": "Semantic search (Exa) — scholarly/semantic/entity discovery",
+      "whenToLoad": "on demand — semantic/scholarly/prospect discovery only (agent-infra #419)",
+      "cost": "one light process; Perplexity is the primary source"
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@brave/brave-search-mcp-server"
+      ],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      },
+      "lazy": true,
+      "purpose": "Web search (Brave)",
+      "whenToLoad": "on demand",
+      "cost": "one npx process"
+    },
+    "playwright-browser": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ],
+      "lazy": true,
+      "idleTimeoutMs": 900000,
+      "purpose": "Browser automation (navigate/click/screenshot)",
+      "whenToLoad": "verify/UX phases only",
+      "cost": "~170MB pair while loaded"
+    },
+    "gemini": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@houtini/gemini-mcp"
+      ],
+      "env": {
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+      },
+      "lazy": true,
+      "purpose": "Image generation (Gemini)",
+      "whenToLoad": "image/carousel tasks",
+      "cost": "one npx process"
+    },
+    "tortoise": {
+      "_comment": "HTTP transport - points at the HOSTED Tortoise MCP endpoint by default, so no local daemon is required; the DB target is resolved SERVER-SIDE by the hosted API (FALKORDB_CLOUD_URI). Self-host users point the url at their own daemon instead (http://localhost:8000/mcp via docker compose - see docs/quickstart-selfhosted.md and the onboarding instructions section 3a delta). Auth is env-indirect - no key is ever committed. The old stdio command+env pattern (python3 -m tortoise.mcp_server with TORTOISE_DB_URI in env) was replaced in feat/338 (commit 6ea920f). See how-to-use-tortoise skill DB URI Reality for full env precedence on the self-hosted/stdio path (its TORTOISE_DB_URI rules describe that path, not this hosted default).",
+      "type": "http",
+      "url": "https://api.premiselabs.co/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${TORTOISE_API_KEY}"
+      },
+      "timeoutMs": 30000
+    },
+    "tortoise-local": {
+      "_comment": "Local daemon MCP",
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {},
+      "lazy": true
+    },
+    "search-console": {
+      "_comment": "Google Search Console + Bing + GA4 + AdSense via search-console-mcp (OAuth desktop flow \u2014 NO service account needed). One-time auth: run `npx search-console-mcp setup` in a terminal \u2192 browser login \u2192 token stored in macOS Keychain. Read-only (webmasters.readonly). Tools: search_analytics (up to 25k rows; query/page/country/device/date dimensions; regex filters; quick-wins), list_sites, url_inspection. Domain-property gotcha: siteUrl = sc-domain:tortoise.premiselabs.co. See issue #1862.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "search-console-mcp"
+      ],
+      "env": {},
+      "lazy": true,
+      "purpose": "Search console/analytics (GSC, Bing, GA4, AdSense)",
+      "whenToLoad": "SEO/analytics tasks",
+      "cost": "one npx process"
     }
+  }
 }

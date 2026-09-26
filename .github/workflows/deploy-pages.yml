@@ -34,7 +34,7 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: website/apps/blog-admin/package-lock.json
-      - name: Onboarding skill is staged for the dashboard deploy
+      - name: Onboarding instructions are staged for the dashboard deploy
         # #1998 (W2, M8): the OLD prompt-staging pipeline (the
         # archived prompt + harness variants -> deployed .md copies via the
         # retired staging script) is ARCHIVED — never two live onboarding

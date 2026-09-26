@@ -24,7 +24,7 @@ WHAT IT EXECUTES (never a source scan):
    grid yet) makes no connection claim.
 4. ``test_overview_shows_not_connected_when_the_projection_has_no_observed_edge``
    / ``test_connection_appears_once_the_server_projection_observed_it`` — the
-   real Overview grid with/without the observed edge ("Not connected" /
+   real Overview grid with/without the observed edge ("No connection observed yet" /
    "Connected ✓"), both through ``judge``.
 5. ``test_overview_reports_unavailable_when_the_state_read_fails`` — a failed
    read renders the honest unavailable card, and ``judge`` still passes.
@@ -393,7 +393,7 @@ def test_reentry_card_never_claims_a_connection_before_the_first_memory(page: Pa
 def test_overview_shows_not_connected_when_the_projection_has_no_observed_edge(page: Page) -> None:
     """The real Overview grid (the calm 3-element card) with the server
     projection recording no `harness-connected` edge: the connection card must
-    resolve to "Not connected" and the probe must pass."""
+    resolve to "No connection observed yet" and the probe must pass."""
     _seed_ship_session(page, "u-ship-ov-neg")
     _wire_ship(page, UNOBSERVED_PROJECTION)
     _goto_local_dashboard(page)
@@ -417,7 +417,7 @@ def test_connection_appears_once_the_server_projection_observed_it(page: Page) -
 
 def test_overview_reports_unavailable_when_the_state_read_fails(page: Page) -> None:
     """A failed ``/v1/onboarding/state`` read must render the honest unavailable
-    card (never a fabricated Connected / Not connected), and the guard must
+    card (never a fabricated Connected / No connection observed yet), and the guard must
     still pass: unavailable over an unreadable server state is not a claim."""
     _seed_ship_session(page, "u-ship-ov-err")
     _wire_ship(page, None, state_status=500)
@@ -459,8 +459,12 @@ def test_client_never_asserts_harness_connected_on_the_wire(page: Page) -> None:
 # The guard must go RED on its defect and stay GREEN under a behaviour-identical
 # reformat. This mutates a COPY of the real deployed bundle (never the source)
 # and serves it, so the executed code is the real client with exactly one
-# behavioural change: the Overview's negative arm flipped to the positive one.
-_MUTATION_FROM = '"Not connected"'
+# behavioural change: the connection OBSERVATION phrase flipped to the positive
+# one. #3724 made that phrase a single shared constant (the Overview card and
+# the wizard step-3 heading read the same source), so the bundle carries it
+# ONCE — the anchor is that one literal, and flipping it flips the negative arm
+# the probe measures.
+_MUTATION_FROM = '"No connection observed yet"'
 _MUTATION_TO = '"Connected ✓"'
 
 
@@ -476,16 +480,30 @@ def _entry_bundle(dist: Path) -> Path:
 
 
 def _mutated_dist() -> Path:
-    """A copy of the real dist with the Overview's negative arm flipped — the
-    exact defect class (#3806): a client that claims a connection the server
-    did not observe."""
+    """A copy of the real dist with the connection OBSERVATION phrase flipped —
+    the exact defect class (#3806): a client that claims a connection the server
+    did not observe.
+
+    #3724 made the phrase ONE shared constant (the Overview card and the wizard
+    step-3 heading read the same source), so the anchor replaces a single bundle
+    literal. The flip is bundle-wide by construction; the MUTATION PROBE's
+    verdict is Overview-scoped (it measures the connection card only)."""
     tmp = Path(tempfile.mkdtemp(prefix="ship-test-dist-"))
     shutil.copytree(DIST_DIR, tmp, dirs_exist_ok=True)
     js = _entry_bundle(tmp)
     src = js.read_text(encoding="utf-8")
-    assert _MUTATION_FROM in src, (
-        f"the mutation anchor {_MUTATION_FROM!r} is absent from {js.name} — "
-        "the built dist has drifted; update the anchor")
+    # The anchor must be UNIQUE: if the phrase is ever duplicated — a second
+    # hand-maintained use of the same literal — `str.replace` would flip EVERY
+    # occurrence, and the probe could no longer attribute the observed change to
+    # the one connection card it measures. Fail loudly and make the
+    # anchor/strategy move with the copy.
+    n = src.count(_MUTATION_FROM)
+    assert n == 1, (
+        f"the mutation anchor {_MUTATION_FROM!r} must appear exactly once in "
+        f"{js.name} (found {n}) — n == 0 means either the shipped copy was "
+        "reworded (update the anchor to the current literal) or this dist is "
+        "stale; n > 1 means the same literal is written twice, so the flip "
+        "would land on unknown consumers")
     js.write_text(src.replace(_MUTATION_FROM, _MUTATION_TO), encoding="utf-8")
     return tmp
 

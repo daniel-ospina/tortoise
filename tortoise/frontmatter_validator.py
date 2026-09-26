@@ -6,8 +6,9 @@ The index/ingest pipeline's identity and metadata logic (``file_indexer``
 frontmatter fields per template:
 
   - **session template** — ``sessionId``, ``topics``, ``summary``, ``eventId``,
-    ``doc_status``, ``agent``, ``message_count``
-  - **document template** (corpus files) — ``title``, ``doc_status``,
+    ``agent``, ``message_count``
+  - **document template** (corpus files) — ``title`` (and the retired
+    ``doc_status`` removed by D10, ONTOLOGY v3.15 §4.4),
     ``topics``, ``summary``, ``sessionId``
 
 This module ADDS an *optional* quality gate on top of the tolerant parser:
@@ -60,15 +61,14 @@ SESSION_REQUIRED_FIELDS: tuple[str, ...] = (
     "topics",
     "summary",
     "eventId",
-    "doc_status",
     "agent",
     "message_count",
 )
 
 # Document template — the fields the corpus (document) path consumes.
+# D10 (ONTOLOGY v3.15 §4.4): `doc_status` is retired and is no longer required.
 DOCUMENT_REQUIRED_FIELDS: tuple[str, ...] = (
     "title",
-    "doc_status",
     "topics",
     "summary",
     "sessionId",
@@ -85,7 +85,7 @@ CAPTURE_REQUIRED_FIELDS: tuple[str, ...] = (
 # Fields whose only check is "a non-empty string" (beyond presence).
 # ``session_id`` is the hosted-capture synthetic identity field (#1362).
 _STRING_FIELDS = frozenset(
-    {"sessionId", "eventId", "summary", "doc_status", "agent", "title",
+    {"sessionId", "eventId", "summary", "agent", "title",
      "session_id"}
 )
 

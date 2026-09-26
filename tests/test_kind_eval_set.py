@@ -94,6 +94,34 @@ class TestGoldSetMetadata:
         with pytest.raises(ValueError, match="closed vocabulary"):
             validate_gold_metadata(bits, vocab)
 
+    def test_rejects_retired_document_gold_kind(self, vocab, tmp_path):
+        """D10 (#5013, merged #5022) retired `objectKind: document` — a
+        document is a `:Source` (§4.4), not an Object subclass — and #5236's
+        sweep removed it from the code vocabularies. This pins the retirement
+        on the gold-set gate: the token must be ABSENT from the closed vocab
+        (the direct assertion below — a D10 reversal re-adding it to
+        `master_kind_forms` fails here), and a gold bit carrying it must be
+        rejected *by that token*. The synthetic gold is otherwise valid in
+        every respect (both splits present, a pack-stratum bit present), so
+        the retired kind is the sole violation and the rejection cannot be
+        attributed to another rule. The same word on the source axis stays
+        legal (`sourceKind: document`);
+        test_pack_kinds.py::test_a_pack_cannot_re_register_the_retired_kind
+        covers that side for pack manifests."""
+        assert "core:document" not in {k.lower() for k in vocab}
+        p = tmp_path / "retired.jsonl"
+        p.write_text(
+            '{"id": "ok", "content": "the deploy runbook", "type": "entity", '
+            '"gold_kind": "dev:runbook", "split": "calibrate", '
+            '"provenance": {"source": "t", "author": "a"}}\n'
+            '{"id": "retired", "content": "the release notes", "type": "entity", '
+            '"gold_kind": "core:document", "split": "holdout", '
+            '"provenance": {"source": "t", "author": "a"}}\n'
+        )
+        bits = load_gold(p)
+        with pytest.raises(ValueError, match=r"closed vocabulary.*core:document"):
+            validate_gold_metadata(bits, vocab)
+
     def test_rejects_missing_split(self, tmp_path):
         p = tmp_path / "bad.jsonl"
         p.write_text(

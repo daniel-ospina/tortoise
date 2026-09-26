@@ -18,12 +18,13 @@ approvedBy: daniel-ospina
 they do — not pruned from the existing 150.
 
 > **Scope of this approval.** The owner settled the **target surface** on 2026-09-21, including the
-> ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26**. That
-> settlement does **not** reach every item in the surface: **four** placement questions are still
-> open in `canonical-mcp-tools.md` (`packs_list`, `pack_install`, `run_onboarding`,
-> `manage_deployment`). None of the four changes the count — they are unplaced, not undecided — but
-> approval here is approval **of the target**, not of any of them. See
-> `vision-mcp-sdk-surface.md` §"Cross-artifact tensions".
+> ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26**. The
+> **four** placement questions that were left open in `canonical-mcp-tools.md` (`packs_list`,
+> `pack_install`, `run_onboarding`, `manage_deployment`) were **settled on 2026-09-22** (recorded on
+> **#4282**) — see
+> §"The four open placements — settled". None of the four changes the count: they are all **off the
+> MCP target**, which is why the MCP stays at **26**. See `vision-mcp-sdk-surface.md`
+> §"Cross-artifact tensions".
 
 **Canonical terms:** an **organisation account** (the customer's account — the billing and
 plan boundary) owns many **memory graphs** (the unit of memory).
@@ -136,6 +137,49 @@ This also settles the split question without needing to answer it — there is n
 | **Key scoping** — what an agent's credential reaches | The builder's code | SDK / REST |
 | **Anything tenancy-related** | An agent | **Not on the MCP** |
 
+## The four open placements — settled
+
+`canonical-mcp-tools.md` carried four items marked **OPEN**. All four were resolved on
+**2026-09-22**, and none of them moves the MCP count — every one is **off the MCP target**:
+
+| Item | Placement | Why |
+|---|---|---|
+| `manage_deployment` | **Off the agent-facing MCP surface** — the tenancy block (SDK / REST / console) | Putting it on the MCP would **contradict a recorded owner ruling**: this doc states *"Tenancy is not on the MCP"*. A container that mixed organisation creation with tenant pack writes is exactly the account-tenancy shape the ruling excludes. |
+| `run_onboarding` | **Dropped**, in favour of `check_connection` | It **violates the recorded read/write principle** (`canonical-mcp-tools.md`: *reads and writes never share a tool*): as designed it absorbed two read-only tenant tools **plus** writes. |
+| `packs_list`, `pack_install` | **SDK / REST**, post-beta | No memory/KG product in the comparison set exposes pack *installation* on its agent-facing API. See §"Packs" below. |
+
+The fifth item that was open — `graph_set_recording` — was already settled on **2026-09-21** and is
+**kept**, which is the *one deliberate exception* to the rule below (an agent's only in-MCP
+recovery from the capture 409). It is on the MCP, unlike the four above.
+
+### The general rule
+
+> **Containers may be on the MCP; account tenancy is not.**
+
+A merged *container* over memory operations (`create_entity(type=)`, `list_knowledge(kind=)`) is a
+legitimate agent tool. An **account-tenancy** operation — provisioning, people, plans, keys,
+organisation lifecycle — is not: it is the builder's or an admin's code, so it lives in the SDK,
+REST or console. `manage_deployment` was the shape that blurred the two, which is why it is off the MCP.
+
+### The two reads `run_onboarding` absorbed — rehomed, not lost
+
+`run_onboarding` also absorbed two **read-only, tenant-visible** tools. Dropping it would have
+destroyed two live reads, so both are **rehomed to the tenancy block (SDK / REST)** — they are
+**tenant/account-level** reads, not memory-graph reads, and the general rule above puts account
+tenancy off the MCP:
+
+| Absorbed read | What it answers | New home |
+|---|---|---|
+| `onboarding_state` | This team's onboarding progress | Tenancy block — SDK/REST; already served at `GET /v1/onboarding/state` |
+| `onboarding_github_status` | This team's GitHub connection status | Tenancy block — SDK/REST; already served at `GET /v1/onboarding/github/status` |
+
+**What is lost, stated exactly:** the **MCP** surface loses both reads. They are *not* rehomed onto
+an MCP tool — `check_connection` is *"programmatic, returns a result — not a wizard"*, and
+onboarding-progress state is wizard state, so folding it there would contradict this doc's own
+description of the row. Both reads remain reachable at the REST endpoints above (their `rest_spec`
+is unchanged in `tortoise/tool_registry.py`), so no capability is deleted; what changes is *which
+surface* serves it.
+
 ## Provisioning: primitives, and the credential carries the tenant
 
 Two decisions, applied together.
@@ -195,6 +239,42 @@ without it a filed question is invisible unless the caller kept the id out of ba
 | **Human-gated** | `write_question` → `record_decision` → an **approval record** ⚠️ *no approval method exists — see below* |
 | **Retrospective** | `record_decision` on an already-answered question |
 
+## Packs — post-beta, with per-graph curation
+
+**`packs_list` and `pack_install` are not in beta, and not on the MCP.** No memory/KG product in
+the comparison set (Zep, Mem0, Letta, Cognee, Supertmemory, LangMem, Basic Memory, MemOS) exposes
+knowledge-pack *installation* on its **agent-facing** API. The analogues all live in a marketplace /
+CLI / content layer outside the product API: Letta's Agent Skills, Zep's plugin marketplace,
+Cognee's config-supplied ontology. Pack curation is a **user/builder** concern, not an agent tool.
+
+**But packs are not dropped, and per-graph curation is not foreclosed.** The owner's ruling:
+
+> packs curation doesn't need to be beta, but we do need to enable users to curate the packs they
+> have on each graph later on. so they can add their own packs if they want
+
+**Checked: nothing in this design forecloses per-graph pack curation.** The evidence:
+
+- **Activation is already per-graph state, not global config.** `tortoise_pack_install`
+  (*"stores the manifest in the tenant graph and activates it"*) writes the tenant graph's
+  `PackInstall` records; `tortoise_packs_list` reads *"the shared pack catalog joined with the
+  tenant graph's `PackInstall` activation records"* and masks other tenants. So "the packs on
+  **each graph**" is already the storage shape — the curation surface is a control over existing
+  per-graph state, not a new model.
+- **The tenancy block has room.** It has one partial update (`update_memory_graph`) and **no**
+  per-graph pack operation. Nothing about the frozen target precludes adding one post-beta; the
+  surface is frozen for beta, not permanently closed.
+- **The SDK/REST surface is the natural home.** The pack catalog is *content*, not agent memory, so
+  a per-graph pack operation belongs with the tenancy/pack operations (SDK + REST), not the 26 MCP
+  tools.
+
+**Where a post-beta per-graph pack operation would slot in:** an SDK/REST operation addressed to
+**one memory graph** — list / install / remove on that graph, plus authoring a user-supplied pack
+(validation of a user-authored manifest is the open design question). Whether it ever earns an MCP
+tool is tested against the recorded rule: **containers may be on MCP; account tenancy is not.**
+
+**Tracked in #4663** — "Post-beta: per-graph pack curation — users curate the packs on each graph
+and add their own".
+
 ## Named but not solved
 
 Recorded so they are not silently dropped. None is required for beta:
@@ -239,7 +319,7 @@ Recorded so they are not silently dropped. None is required for beta:
 | `supersede`, `supersede_point` | 2 | → `supersede_knowledge`. They also **disagree** — `supersede_point` carries a `valid_from` the other silently drops. |
 | `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. |
 | `withdraw_knowledge` | 1 | **Never existed** — removed from the plan. Retraction is a field on `update_knowledge`. |
-| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | 4 | Lifecycle and confidence wrangling — reachable through the canonical two. |
+| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | 4 | Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. |
 | `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` | 4 | → `link_entities`, which dispatches on the relation. |
 | `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` currently **accepts and silently ignores** `credibility` — a bug. |
 | `file_human_approval` | 1 | → `record_decision`. |

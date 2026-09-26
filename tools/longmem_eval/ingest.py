@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tortoise.domain_loader import register_kind
+from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
 from tortoise.sdk import TortoiseSDK
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,9 @@ DEFAULT_CHUNK_TURNS = 2
 # vocabulary — registration suppresses the SDK warning, mirroring the sdk's
 # own register_kind("diary") pattern). "event" is the episodic turn-point
 # kind used by TortoiseSDK.capture_session (registered here so the pack
-# vocabulary doesn't warn on every turn write).
-SESSION_TRANSCRIPT_KIND = "session-transcript"
+# vocabulary doesn't warn on every turn write). C4 (#2517): the literal is
+# re-exported from the PRODUCT constant (tortoise.retrieval) — the ingest
+# lane no longer owns a second copy.
 register_kind(SESSION_TRANSCRIPT_KIND)
 register_kind("event")
 

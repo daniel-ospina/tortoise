@@ -127,6 +127,15 @@ STALE_QUARANTINE_SUFFIX = ".reaper-stale-"
 # tortoise/embedded_lifecycle.py and imports this name lazily (no import
 # cycle: embedded_reaper deliberately stays dependency-free).
 OWNERS_DIRNAME = ".tortoise-owners"
+# #4577: the owner-hold LOCK file inside `OWNERS_DIRNAME`. The writer holds a
+# SHARED `flock(LOCK_SH)` on it for the process's lifetime; the reaper probes
+# an EXCLUSIVE non-blocking lock. A held lock is a KERNEL FACT of liveness
+# (the kernel drops it when the holder dies) and supersedes the pid+start
+# inference as the PRIMARY signal — `_owner_records` is retained as the
+# fallback for owners created before the lock existed and for lock-less
+# paths. Declared here (the reaper owns the owner-record format) so the
+# writer and reader cannot drift.
+OWNER_LOCK_NAME = ".lock"
 # #1383 security review (Issue 3): ownership marker written into a
 # quarantine at rename time — the sweep only rmtrees dirs carrying it, so a
 # same-suffix foreign dir (another tool's temp naming, a planted decoy) is
@@ -176,7 +185,7 @@ DEFAULT_BATCH_SIZE = 50
 
 # #1642 FIX 3 (#1427): a live server is only "orphan-confirmed" when its
 # 0-client CLIENT LIST state has persisted across sweeps for at least this
-# long. The cron cadence (10-15 min) makes this natural: sweep 1 records the
+# long. The cron cadence (20 min) makes this natural: sweep 1 records the
 # zero-client observation, a later sweep confirms. The wait distinguishes a
 # genuine orphan from a concurrent suite's between-tests idle server, which
 # also sits at 0 clients (#1557 — redislite servers all daemonize to ppid=1,
@@ -372,6 +381,92 @@ def _kill_provenance_refusal(record: dict) -> str | None:
             f"(pid {pid})")
 
 
+def _has_ownership_claim(dbdir_real: str,
+                         pid: int | None) -> str | None:
+    """#3767: the POSITIVE ownership claim that makes a registry-less
+    directory OURS to reap. Returns None when the claim holds, else the
+    refusal reason.
+
+    `dbdir_real` is the candidate's SOCKET directory (`_classify`'s
+    `dbdir_real`) — the same dir `record_owner` writes the
+    `.tortoise-owners` instrument into.
+
+    Containment ("under the shared tempdir") and a `tmpXXXX`/`redislite_*`
+    NAME are evidence any co-resident same-uid redislite application also
+    produces, so neither is a claim: a directory's name is not ownership.
+    Two arms are admissible, both positive:
+
+      (a) PRESENT directory — it must be owned by the invoking effective uid
+          (the one property a foreign uid cannot forge; #4136's guard,
+          applied at ADMISSION here rather than only at destruction) AND
+          carry tortoise's own per-server instrument, the
+          `.tortoise-owners` record directory written by `tortoise.FalkorDB`
+          (#3599). A registry-less redislite server with neither is
+          indistinguishable from another application's, so it is not a
+          candidate. (The redislite registry itself is written by redislite,
+          not tortoise — when it is ABSENT there is no claim to read, which
+          is exactly this branch.)
+
+      (b) ABSENT directory — the #1005 / #1642 FIX 3 socket-less residue
+          class: the LIVE process's own argv names the (now-absent)
+          directory. Unforgeable by reading files out of the candidate dir
+          (#4136's pass-1 binding), which is why it is admissible without a
+          per-directory instrument. The #1557 confirmation window still
+          gates the kill — a live server whose dir was unlinked keeps
+          serving established connections, so a missing dir is never instant
+          proof of orphanhood.
+
+    The euid arm is dir-present only: a missing path fails
+    `_dir_owned_by_euid` by construction, and arm (b) carries the argv
+    binding instead. Fail closed: a present dir whose ownership or
+    instrument cannot be established, or an absent dir with no live pid
+    naming it, is refused.
+
+    RECONCILIATION with #4577's held-lock LIVENESS signal (main `845f47f53`):
+    `_owner_lock_held()` is deliberately NOT consulted here. #4577 answers
+    "is an owner ALIVE?" (a kernel fact); this function answers "is this dir
+    OURS to reap?" (attribution) — a held lock is a liveness proof, not an
+    admission claim. The decisive reason is outcome-based: admission is
+    PERMISSIVE in effect (it makes a dir a KILL candidate), and a dir admitted
+    on a lock arm would be vetoed by `reap()`'s
+    ``_owner_lock_held(...) is True`` check — a held lock is exactly what
+    makes `reap()` skip — so the arm could never produce a kill; it would only
+    widen #3767's gate for zero reaping gain (against the #4546 requirement
+    that the gate stay narrow).
+
+    So the lock is authorised where it belongs — at DESTRUCTION, not at
+    admission — and `_owner_record_dir_present` stays consistent with it by
+    ignoring dotted names, so the new `.lock` file cannot satisfy this claim
+    (pinned by `tests/test_reaper_ownership.py::
+    test_owner_lock_file_alone_is_not_an_ownership_claim`).
+
+    CAVEAT on the adjacent claim: the writer's ordering (`record_owner` takes
+    the record before the lock; `forget_owner` releases the lock before
+    unlinking the record) does NOT make "held lock, no recognisable record"
+    unreachable — the stamp ``<pid>-<start>`` carries no socket identity, so
+    one process owning two sockets in one directory shares a record and the
+    first `forget_owner` can unlink it while the second socket's flock is
+    still held. That state is refused here, and it must be: a live lock holder
+    must never be killed.
+
+    NOTE (#3767): this decides ADMISSION only; it does NOT replace #4136's
+    action-time `_dir_owned_by_euid` re-checks (`_kill_provenance_refusal`,
+    `_cleanup_tempdir`, `_remove_stale_socket_dir` guard 5.5). A
+    discovery-time verdict is cached and therefore T4-unsafe on its own.
+    """
+    if os.path.isdir(dbdir_real):
+        if not _dir_owned_by_euid(dbdir_real):
+            return (f"dir not owned by euid {os.geteuid()} "
+                    f"(owner {_dir_owner_of(dbdir_real)})")
+        if not _owner_record_dir_present(dbdir_real):
+            return (f"no tortoise ownership record ({OWNERS_DIRNAME}) in "
+                    f"{dbdir_real}")
+        return None
+    if pid and _pid_cmdline_names_dir(pid, dbdir_real):
+        return None
+    return f"dir {dbdir_real!r} is absent and no live process names it"
+
+
 def active_suite_tokens() -> list[str]:
     """List active pytest-suite marker tokens (filenames in ACTIVE_SUITES_DIR).
 
@@ -550,6 +645,57 @@ def _read_redis_config(socket_dir: str) -> dict | None:
     return result
 
 
+def _stdout_text(out) -> str | None:
+    """The captured stdout of a completed subprocess as ``str``, else None.
+
+    Every probe in this module is documented to fail CLOSED — ``None`` or an
+    empty result meaning "undeterminable" — and each one parses captured
+    ``ps``/``lsof``/``pgrep``/``redis-cli`` stdout with ``.strip()``,
+    ``.splitlines()`` or ``re.match``. A subprocess seam that hands back
+    anything other than text therefore used to raise ``TypeError`` from a
+    helper whose contract is "or None". The common real-world source is a
+    monkeypatched ``subprocess.run`` (dozens of tests fake git detection that
+    way), but any wrapper is enough — so the type guard belongs here, at the
+    read, not at each of the callers.
+
+    ``bytes`` is decoded; anything else (including a missing attribute, since
+    the value is genuinely untyped) is ``None``.
+    """
+    raw = getattr(out, "stdout", None)
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8", "replace")
+        except Exception:  # undecodable is undeterminable — fail closed
+            return None
+    return raw if isinstance(raw, str) else None
+
+
+def _run_text(cmd: list[str], *, timeout: float,
+              env: dict[str, str] | None = None) -> str | None:
+    """Run ``cmd`` and return its stdout as text, or None when unusable.
+
+    Thin wrapper over ``subprocess.run(capture_output=True, text=True)`` that
+    swallows the timeout/OS failures the callers already handled AND applies
+    :func:`_stdout_text`, so a non-text stdout is "undeterminable" rather
+    than a ``TypeError`` escaping a fail-closed probe.
+
+    Why this is load-bearing rather than defensive tidiness (#4496): the
+    raise propagated out of ``_owner_records`` into
+    ``cotenant_holds_server``, whose deliberate fail-closed
+    ``except Exception: return True`` then reported a PHANTOM co-tenant. The
+    last of two clients therefore declined the shutdown and its embedded
+    daemon leaked — uninstrumented, directory present: exactly the
+    ``candidate / path_based=False / unattributed=True / dir_missing=False``
+    shape `test-slow (b)` reports, and the class #3767 refuses to fast-kill.
+    """
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=timeout, env=env)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return _stdout_text(out)
+
+
 def _uptime_seconds(pid: int) -> float | None:
     """Return process uptime in seconds, or None if the PID is not alive.
 
@@ -561,14 +707,10 @@ def _uptime_seconds(pid: int) -> float | None:
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None:
         return cached["etime"]
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "etime=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    etime = _run_text(["ps", "-o", "etime=", "-p", str(pid)], timeout=2)
+    if etime is None:
         return None
-    etime = out.stdout.strip()
+    etime = etime.strip()
     if not etime:
         return None
     return _parse_etime(etime)
@@ -662,15 +804,13 @@ def _process_start_time(pid: int) -> float | None:
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None and cached.get("start") is not None:
         return cached["start"]
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    raw = _run_text(
+        ["ps", "-o", "lstart=", "-p", str(pid)],
+        timeout=2, env={**os.environ, "LC_ALL": "C"},
+    )
+    if raw is None:
         return None
-    raw = out.stdout.strip()
+    raw = raw.strip()
     if not raw:
         return None
     return _parse_lstart(raw)
@@ -756,16 +896,13 @@ def _is_detached(pid: int) -> bool:
     Fail-closed: any uncertainty (ps timeout/error, pid vanished, unparseable
     ppid) returns False so the server is protected, never risked.
     """
-    import subprocess as _sp
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None and cached.get("ppid") is not None:
         return cached["ppid"] in (0, 1)
-    try:
-        r = _sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
-                    capture_output=True, text=True, timeout=5)
-    except (_sp.TimeoutExpired, OSError):
+    raw = _run_text(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5)
+    if raw is None:
         return False
-    raw = r.stdout.strip()
+    raw = raw.strip()
     if not raw:
         return False  # pid vanished mid-check -> reap() skips dead pids anyway
     try:
@@ -795,16 +932,13 @@ def _derive_real_pid(socket_path: str, pidfile_pid: int | None = None) -> int | 
 
 def _process_has_socket(pid: int, socket_path: str) -> bool:
     """True if the process has the given unix socket open (lsof)."""
-    try:
-        out = subprocess.run(
-            ["lsof", "-Fp", "-a", "-p", str(pid), "-U"],
-            capture_output=True, text=True, timeout=2,
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    text = _run_text(
+        ["lsof", "-Fp", "-a", "-p", str(pid), "-U"], timeout=2)
+    if text is None:
         return False
     # -Fp prints 'p<pid>' entries; presence means it has unix sockets open.
     # Additionally verify cmdline contains the socket path for certainty.
-    return f"p{pid}" in out.stdout
+    return f"p{pid}" in text
 
 
 def sys_platform() -> str:
@@ -841,7 +975,10 @@ def _derive_real_pid_macos(socket_path: str) -> int | None:
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
-    for line in out.stdout.splitlines():
+    text = _stdout_text(out)
+    if text is None:
+        return None
+    for line in text.splitlines():
         if not line.startswith("p"):
             continue
         try:
@@ -859,14 +996,9 @@ def _cmdline(pid: int) -> str:
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None:
         return cached["cmdline"]
-    try:
-        out = subprocess.run(
-            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2,
-        )
-        return out.stdout
-    except (subprocess.TimeoutExpired, OSError):
-        return ""
+    text = _run_text(
+        ["ps", "-ww", "-o", "command=", "-p", str(pid)], timeout=2)
+    return text if text is not None else ""
 
 
 def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
@@ -953,7 +1085,12 @@ def _client_list(socket_path: str) -> list[dict] | None:
         if out.returncode == 0:
             # rc 0 with empty stdout = zero clients (empty bulk string) —
             # a valid verdict, don't double-probe via the raw fallback.
-            return _parse_client_list(out.stdout if out.stdout else "")
+            # `_stdout_text` keeps a non-text stdout OUT of the parse: rc 0
+            # is redis-cli's own success word, so a mocked/odd stdout must
+            # read as "0 clients" only when it really was empty text.
+            text = _stdout_text(out)
+            if text is not None:
+                return _parse_client_list(text)
     except (subprocess.TimeoutExpired, OSError):
         pass
     return None
@@ -1112,17 +1249,15 @@ def _batch_process_info(pids: list[int]) -> dict[int, dict]:
     """One ps call for all pids: {pid: {cmdline, etime, ppid, start}}."""
     if not pids:
         return {}
-    try:
-        out = subprocess.run(
-            ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
-             "-p", ",".join(str(p) for p in pids)],
-            capture_output=True, text=True, timeout=10,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    text = _run_text(
+        ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
+         "-p", ",".join(str(p) for p in pids)],
+        timeout=10, env={**os.environ, "LC_ALL": "C"},
+    )
+    if text is None:
         return {}
     result: dict[int, dict] = {}
-    for line in out.stdout.splitlines():
+    for line in text.splitlines():
         parts = line.strip().split(None, 8)
         if len(parts) < 3:
             continue
@@ -1154,13 +1289,41 @@ def _pgrep_redis_servers() -> list[int]:
     thousands of stale dirs on a leaky machine). Returns [] when pgrep is
     unavailable.
     """
+    text = _run_text(
+        ["pgrep", "-f", "redislite/bin/redis-server"], timeout=5)
+    if text is None:
+        return []
+    pids: list[int] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
+def _pgrep_redis_servers_or_none() -> list[int] | None:
+    """Live redislite redis-server PIDs, or None when the PROBE failed.
+
+    `_pgrep_redis_servers` collapses a timeout, a missing pgrep, or any
+    subprocess error into `[]` — indistinguishable from "measured zero".
+    A caller that must report an unaccounted residue (#4740: the conftest
+    session-end sweep's `left`, which the CI orphan gate binds its bound to)
+    needs the difference: `[]` means measured-none, `None` means
+    not-measured. Kept alongside (not inside) `_pgrep_redis_servers` so the
+    many existing callers keep their exact `[]`-on-failure contract.
+
+    pgrep exits 0 on matches and 1 on no matches — both are successful
+    probes. Any other status, a timeout, or an OSError is a failed probe.
+    """
     try:
         out = subprocess.run(
             ["pgrep", "-f", "redislite/bin/redis-server"],
             capture_output=True, text=True, timeout=5,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return []
+        return None
+    if out.returncode not in (0, 1):
+        return None
     pids: list[int] = []
     for line in out.stdout.splitlines():
         line = line.strip()
@@ -1504,6 +1667,26 @@ def _classify_dir(dbdir: str, socket_path: str,
         # #1642 FIX 3: a path-based (user-data) server is NEVER killed
         # without orphan confirmation — reap() gates on this flag.
         "path_based": _is_path_based(registry, dbdir_real, tmpdir_real),
+        # #3767: no tortoise-written owner instrument => the server is
+        # UNATTRIBUTABLE. reap() requires the #1557/#1642 FIX 3
+        # orphan-confirmation window for it: redislite's registry is written
+        # by redislite, not tortoise, so it does not establish ownership.
+        # #4546 SCOPE: in a FULL sweep reap() exempts a `dir_missing` record
+        # from this arm (its registry data dir is already gone, so no on-disk
+        # user data remains); the `path_based` arm carries no such exemption,
+        # and under `--only-safe` the earlier live-pid gate skips first.
+        #
+        # RESIDUAL (#3767 review P2, accepted): this covers the DOMINANT route
+        # the issue names — a foreign no-path server with an INTACT registry —
+        # but only NARROWS it. Such a server is no longer fast-killed; it is
+        # still reachable through the confirmation window on a quiet host
+        # (`suites_active` False for ZERO_CLIENT_CONFIRM_MINUTES). Closing it
+        # outright means making every uninstrumented server permanently
+        # unreapable, which strands the raw-redislite test-residue class
+        # #1642 FIX 3's fallback exists for — the reaper would be inert. The
+        # issue's ordering note asks for the discriminator to be tightened
+        # first, which this does; the residual is recorded, not hidden.
+        "unattributed": not _owner_record_dir_present(dbdir_real),
         "dir_missing": dir_missing,
         "client_count": client_count,
         "uptime": uptime,
@@ -1520,10 +1703,38 @@ def _is_path_based(registry: dict | None, dbdir_real: str,
     user dbfilename, old-format .db presence). reap() refuses to kill a
     path_based server unless orphanhood is confirmed (persisted 0-client
     state — #1642 FIX 3); ephemeral test-tree servers keep the fast full-
-    sweep kill contract.
+    sweep kill contract — UNLESS they are `unattributed` (#3767), in which
+    case reap() applies the same confirmation requirement.
+
+    OVERRIDES (#3767): with NO registry record there is no signal to read, so
+    this returns True (fail CLOSED) rather than False — the registry is the
+    authoritative path-based discriminator (see _classify), and without it a
+    disposable no-path server cannot be proven. That deliberately engages the
+    every-mode orphan-confirmation requirement the pre-#3767 `return False`
+    disengaged.
+
+    #4546 SCOPE: reap()'s every-mode confirmation requirement still applies
+    to `path_based` unchanged, but in a FULL sweep its `unattributed` half
+    exempts a `dir_missing` record (the registry data dir is already gone, so
+    no on-disk user data remains — pre-#3767 behaviour). Under `--only-safe`
+    the exemption is unreachable: the earlier live-pid gate skips every
+    non-orphan-confirmed candidate first, so `--only-safe` is unchanged.
+
+    CONSEQUENCE (#3767 review P2, documented not silent): `path_based` is ALSO
+    the gate `_mark_orphan_confirmation` uses to admit the #3599 per-server
+    fast confirmation (`no_live_owner = ... and not path_based`), so a
+    registry-less but tortoise-instrumented live orphan — an instrument whose
+    redislite registry file was removed while its socket dir survived — no
+    longer takes the fleet-independent "every owner provably dead" path and
+    converges only through the #1557/#1642 FIX 3 confirmation window (which
+    `suites_active` blocks on a host with a live suite marker). That is the
+    fail-CLOSED direction: the window's blast-radius restriction to provably
+    ephemeral servers is a #1642 FIX 3 decision, and a missing registry cannot
+    prove ephemerality. It is not a kill-path regression — the class is
+    admitted and still reapable via the window.
     """
     if not registry:
-        return False
+        return True
     reg_dbdir = registry.get("dir", registry.get("dbdir", ""))
     reg_dbdir_real = os.path.realpath(reg_dbdir) if reg_dbdir else ""
     if reg_dbdir_real and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
@@ -1565,7 +1776,24 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
             logger.warning(
                 "unrecognized dir pattern, treating as protected: %s", dbdir_real)
             return "protected"
-        # auto-generated dirname, no .db file -> could be a no-path server
+        # #1642 FIX 2: a provably-DEAD pid is leftover residue (the
+        # killed-suite class). It needs no ownership claim — there is no live
+        # server to mis-identify — and must keep classifying 'stale_socket'
+        # so the walk still converges on it.
+        if pid is not None and not _pid_effectively_alive(pid):
+            return _cooldown_check(registry, pid=pid)
+        # #3767 OWNERSHIP CLAIM. The remaining admission is a LIVE server in
+        # an auto-generated-named / tempdir-contained dir: exactly the shape
+        # another same-uid redislite application, a second tortoise instance,
+        # or another tenant sharing TMPDIR also produces. Name + containment
+        # is not ownership, so require the positive claim; without it the dir
+        # is not a candidate at all (not merely deferred to a later gate).
+        refusal = _has_ownership_claim(dbdir_real, pid)
+        if refusal is not None:
+            logger.warning(
+                "no ownership claim for registry-less dir (%s), treating "
+                "as protected: %s", refusal, dbdir_real)
+            return "protected"
         return _cooldown_check(registry, pid=pid)
 
     # Signal 1: registry 'dir' is a USER dir (not auto tempdir) -> path-based.
@@ -1653,6 +1881,18 @@ def _cooldown_check(registry: dict | None,
             pid = None
     if pid is not None and not _pid_effectively_alive(pid):
         return "stale_socket"
+    # DELIBERATE (pre-existing, not a #4496 regression): an UNMEASURABLE
+    # uptime (`None` — a `ps` timeout/OSError, or a non-text stdout read as
+    # undeterminable) is NOT treated as protected. The boot cooldown is a
+    # CLOCK guard, and `"candidate"` is only admission to `reap()`'s kill
+    # path — where the live-pid / orphan-confirmation / 0-client /
+    # owner-record / held-flock / provenance gates still decide. Classifying a
+    # failed probe as `protected` instead would skip the record at `reap()`'s
+    # `classification != "candidate"` short-circuit and make the whole reaper
+    # inert whenever `ps` is slow or absent — the #3599 failure class.
+    # `_run_text` turning a bad stdout into `None` widened only WHICH inputs
+    # reach this path, not its semantics (a real `ps` timeout already produced
+    # `None` here).
     uptime = _uptime_seconds(pid) if pid else 0.0
     min_uptime = _parse_min_uptime()
     if uptime is not None and uptime < min_uptime:
@@ -1745,10 +1985,24 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         with no live suite markers (set by _mark_orphan_confirmation in
         _run_sweep).
     Path-based (user-data) servers additionally require confirmation in
-    EVERY mode (their data outlives the test tree). This preserves the
+    EVERY mode (their data outlives the test tree). In a FULL sweep
+    (`only_safe=False`) a `dir_missing` record is exempt from the
+    `unattributed` half of that requirement (#4546: its data dir — and
+    therefore all on-disk user data — is already gone); the `path_based` half
+    is NOT exempted, and under `--only-safe` the earlier live-pid gate still
+    skips every non-orphan-confirmed candidate, so `--only-safe` is unchanged.
+    This preserves the
     #1005 guarantee: a concurrent suite's between-tests idle server is
     never disturbed.
     """
+    # #4438 review P2: `jobs` reaches `ThreadPoolExecutor(max_workers=...)`
+    # below, where `min(jobs, len(...))` makes a non-positive `--jobs`
+    # (0 or -1) a hard crash (`max_workers must be greater than 0`). The
+    # documented CLI flag must be safe on its own — the same standard as
+    # `_parse_timeout` — so clamp here too, for direct callers.
+    if jobs < 1:
+        logger.warning("jobs=%r must be >= 1 — using 1", jobs)
+        jobs = 1
     acted = []
     killed = 0
     stale_removed = 0  # #1383: stale removals budgeted separately from kills
@@ -1839,9 +2093,41 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                         "orphan-confirmed under only_safe, skipping %s",
                         record.get("socket_path"))
                     continue
-                if record.get("path_based"):
+                # #3767: 'path_based' OR 'unattributed' — a server with no
+                # tortoise-written owner instrument cannot be attributed to
+                # us, so it needs the same confirmation as a user-data server
+                # in EVERY mode (not only under --only-safe). It remains
+                # reapable via the #1557/#1642 FIX 3 window.
+                #
+                # #4546 EXEMPTION — OVERRIDES: the #3767 rule that an
+                # `unattributed` server (no `.tortoise-owners` instrument)
+                # needs the #1557/#1642 FIX 3 confirmation window in EVERY
+                # mode — which itself carries #1642 FIX 3's "a directory that
+                # is gone keeps the confirmation window" stance — for a
+                # `dir_missing` record ONLY. `dir_missing` means the REGISTRY
+                # data dir (the pytest `tmp_path` tree) is already gone, so no
+                # on-disk user data remains for the window to protect, and
+                # pre-#3767 `main` fast-killed the class. This does NOT touch
+                # #1642 FIX 3's socket-dir-unlinked window: such a record has
+                # no registry, so `_is_path_based` fail-closes True and the
+                # untouched `path_based` arm still gates it. The exemption is
+                # scoped to the NEW `unattributed` signal this branch
+                # introduced; the pre-existing `path_based` arm is
+                # deliberately left intact, so a genuinely path-based
+                # (user-data) server still requires confirmation in EVERY mode
+                # exactly as before. #3767's target (unowned/foreign server,
+                # directory PRESENT, registry intact) reports
+                # `dir_missing=False` and keeps the gate.
+                #
+                # NARROWNESS (#4546): keyed on the registry-data-dir property
+                # alone. Do NOT widen to `unattributed` generally — that
+                # would admit a dir-present foreign server, which is the
+                # negative control in tests/test_reaper_ownership.py.
+                if record.get("path_based") or (
+                        record.get("unattributed")
+                        and not record.get("dir_missing")):
                     logger.info(
-                        "path-based server not orphan-confirmed, "
+                        "path-based/unattributed server not orphan-confirmed, "
                         "skipping %s", record.get("socket_path"))
                     continue
 
@@ -1900,6 +2186,17 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         # if we confirm on "no live owner", we must not kill on "a live
         # owner appeared". An uninstrumented server has no records (None ->
         # unchanged) and a socketless one cannot host a new record's dir.
+        # #4577: the same self-consistency re-check for the KERNEL lock — a
+        # live owner that attached since confirmation holds a shared flock
+        # on the owner dir's `.lock`. True -> never kill; False/None -> the
+        # record-based evidence chain below still decides (a free lock alone
+        # never authorizes a kill). Checked BEFORE `_owner_records` because
+        # it is the stronger signal and needs no pid/start parsing.
+        if _owner_lock_held(record["socket_path"]) is True:
+            logger.info(
+                "owner lock held (live owner), skipping: %s",
+                record["socket_path"])
+            continue
         owners_now = _owner_records(record["socket_path"])
         if owners_now is not None and owners_now[0] > 0:
             logger.info(
@@ -2465,19 +2762,36 @@ class _ReaperLock:
 
 
 def _parse_timeout(cli_value: str | None) -> int:
-    """Timeout resolution: CLI --timeout > TORTOISE_REAPER_TIMEOUT env > 120."""
+    """Timeout resolution: CLI --timeout > TORTOISE_REAPER_TIMEOUT env > 120.
+
+    A resolved value < 1 is refused and falls back to the default:
+    `signal.alarm(0)` CANCELS the alarm, so `--timeout 0` would run the sweep
+    unbounded while holding `_ReaperLock` — every later fire then exits
+    `already running`. (The installer guards its own `REAPER_TIMEOUT`, but the
+    documented CLI/env flag must be safe on its own.)
+    """
     if cli_value is not None:
         try:
-            return int(float(cli_value))
+            value = int(float(cli_value))
         except ValueError:
             logger.warning("invalid --timeout %r — using default", cli_value)
+        else:
+            if value >= 1:
+                return value
+            logger.warning("--timeout %r must be >= 1 — using default",
+                           cli_value)
     env = os.environ.get("TORTOISE_REAPER_TIMEOUT", "")
     if env:
         try:
-            return int(float(env))
+            value = int(float(env))
         except ValueError:
             logger.warning(
                 "TORTOISE_REAPER_TIMEOUT=%r invalid — using default", env)
+        else:
+            if value >= 1:
+                return value
+            logger.warning(
+                "TORTOISE_REAPER_TIMEOUT=%r must be >= 1 — using default", env)
     return TIMEOUT_DEFAULT
 
 
@@ -2661,8 +2975,9 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     skipped), so the suite-end sweep can never run past pytest-timeout no
     matter how large the discovered backlog is.
 
-    jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
-    cost at hundreds of leaked servers — issue #1005); kills stay serial
+    jobs>1 parallelizes the per-candidate CLIENT LIST probes (a
+    parallelizable cost at hundreds of leaked servers — issue #1005); kills
+    stay serial
     with pacing. sigterm_timeout threads into reap()/_kill(): the suite-end
     sweep (conftest) lowers it to 3.0 so a server ignoring SIGTERM gets
     SIGKILL quickly — the default 10s wait × many servers compounds past
@@ -2681,6 +2996,12 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # finished scan. The returned list is a `_ScanAwareList` carrying
     # `.complete` (False = at least one bounded scan returned a partial set).
     """
+    # #4438 review P2: a non-positive `--jobs` (0 or -1) would reach reap()'s
+    # `ThreadPoolExecutor(min(jobs, len(records)))` as 0 and crash with
+    # `max_workers must be greater than 0`. Clamp before anything uses it.
+    if jobs < 1:
+        logger.warning("jobs=%r must be >= 1 — using 1", jobs)
+        jobs = 1
     records = _as_scan_aware(discover(jobs=jobs, full_scan=full_scan))
     discovery_complete = records.complete
     # #1383: reapable classes are candidate (live orphan -> kill) and
@@ -2699,7 +3020,8 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     resolved = [phase1_probe(r) for r in reapables]
     acted = reap(resolved, dry_run=dry_run, batch_size=batch_size,
                  kill_pacing=kill_pacing, only_safe=only_safe,
-                 sigterm_timeout=sigterm_timeout, deadline=deadline)
+                 sigterm_timeout=sigterm_timeout, jobs=jobs,
+                 deadline=deadline)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
         quarantine = _sweep_quarantine_dirs(dry_run=dry_run)
@@ -2726,6 +3048,109 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     out = _ScanAwareList(acted)
     out.complete = discovery_complete
     return out
+
+
+# #4740: the field set of the session-end hygiene report the CI orphan gate
+# (`.github/scripts/orphan-bound.sh`) consumes. It lives here, with the report
+# builder, as the single source of truth: `tests/conftest.py` imports both
+# instead of redeclaring, and the orphan-bound harness reads this assignment
+# from this file's source. Order is the order the report is built in.
+_HYGIENE_REPORT_FIELDS = ("reaped", "cleared", "left", "before")
+
+
+def _hygiene_report(reaped, cleared, left, before) -> dict:
+    """Build the session-end hygiene report the CI orphan gate consumes (#4740).
+
+    ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
+    threaded through verbatim and never synthesised here. ``cleared`` is a
+    diagnostic flag that does not decide the gate's verdict at any measured
+    count: at every count it reports whether the sweep's time budget sufficed
+    — a function of runner load — not the residue.
+    Keeping the construction out of ``_sweep`` also leaves no local report
+    literal there for a dead branch or a subscript store to bypass (the
+    round-5 pin's hole).
+    """
+    values = {
+        "reaped": reaped,
+        "cleared": cleared,
+        "left": left,
+        "before": before,
+    }
+    return {f: values[f] for f in _HYGIENE_REPORT_FIELDS}
+
+
+def sweep_until_cleared(run_one, deadline, clock=time.monotonic):
+    """Drive discover->reap iterations until the backlog clears or the
+    deadline passes; return ``(total_acted, cleared)``.
+
+    ``cleared`` is the sweep's own budget/stop-condition claim, carried into
+    the report for diagnosis — not a field the CI orphan gate decides its
+    verdict on. It is True ONLY when ALL hold:
+
+    * the loop stopped on an iteration that acted on NOTHING (the backlog is
+      empty — the intended stop), not on the deadline;
+    * the deadline had NOT passed when that empty iteration returned, so the
+      empty result is a real measurement rather than ``reap()``'s
+      first-record deadline break returning a partial, possibly empty list;
+    * that iteration's discovery scan was COMPLETE (``.complete`` on the
+      scan-aware list — fail-closed False for an unknown/truncated scan). A
+      partial scan that acted on nothing proves nothing.
+
+    #4740 review 4: the previous ``cleared = not acted`` treated an
+    already-expired-deadline abort (``reap()`` returns ``[]`` because its
+    first record hit the deadline) as a CLEARED backlog, so the gate greened
+    a residue whose entire backlog had never been examined. A spent deadline
+    is not proof the backlog is clear.
+    """
+    total = 0
+    cleared = False
+    acted = []
+    while True:
+        acted = run_one()
+        total += len(acted)
+        if not acted:
+            # The one stop that can mean "cleared" — but only if the budget
+            # remained: an empty list returned BECAUSE the deadline had
+            # already expired is an unexamined backlog, not a clear one.
+            cleared = clock() < deadline
+            break
+        if clock() >= deadline:
+            # Budget exhausted while servers were still being acted on: the
+            # residue is arbitrary, so `cleared` stays False.
+            break
+    # A partial discovery scan is never "cleared", whatever it acted on.
+    cleared = cleared and bool(getattr(acted, "complete", False))
+    return total, cleared
+
+
+def live_embedded_server_count() -> int | None:
+    """Live embedded redis-server count, or None when the probe itself failed.
+
+    #4740: the number the CI orphan gate binds its bound to. `None` (the probe
+    failed) is NOT 0 (measured none) — the gate must name an unmeasured
+    residue rather than read a timeout/missing-pgrep as "nothing left". This
+    is a module-level function, not a closure in `tests/conftest.py`, so it is
+    unit-testable by monkeypatching `_pgrep_redis_servers_or_none`.
+    """
+    probe = _pgrep_redis_servers_or_none()
+    return None if probe is None else len(probe)
+
+
+def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> dict:
+    """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
+
+    Extracted from `tests/conftest.py`'s `_sweep` so the COMPOSITION — the
+    pre-sweep reading, the sweep, the post-sweep reading, and their arrangement
+    into the report — is behaviourally testable (`tests/test_reaper.py` drives
+    this function directly). `probe` is called twice: the first reading is
+    `before`, the second is `left`; `cleared` is threaded verbatim from
+    `sweep_until_cleared`, because `cleared` is a diagnostic flag that does
+    not decide the gate's verdict at any measured count.
+    """
+    before = probe()
+    reaped, cleared = sweep_until_cleared(run_one, deadline, clock)
+    left = probe()
+    return _hygiene_report(reaped, cleared, left, before)
 
 
 def _zero_client_state_read() -> dict:
@@ -2774,6 +3199,139 @@ def _owner_pid_alive(pid: int) -> bool:
     except (OSError, OverflowError, ValueError):
         return False
     # kill(0) succeeded but _pid_alive said no -> zombie (its fds are gone).
+    return False
+
+
+def _owner_lock_held(socket_path: str) -> bool | None:
+    """Does a LIVE owner hold the server's owner lock? (#4577)
+
+    The kernel-fact version of the #1557 "a live owner must never be killed"
+    guarantee. The writer (`embedded_lifecycle.record_owner`) holds a SHARED
+    ``flock`` on ``<socket_dir>/.tortoise-owners/.lock`` for the process's
+    lifetime; the kernel releases it when the holder dies, so an EXCLUSIVE
+    non-blocking lock that FAILS to acquire proves a live owner with no pid
+    or start-time inference at all (no recycled-pid, no unreadable-`ps`,
+    no copied-record failure class).
+
+    Returns:
+      - ``True``: the probe was refused (``BlockingIOError`` / ``EAGAIN``)
+        because a live owner holds the shared lock. The caller must NEVER
+        confirm or kill that server.
+      - ``False``: the lock was acquired, so no live owner holds it. This is
+        NOT by itself authorization to kill — the caller still runs the
+        existing evidence chain (0-client double probe, window/`unattributed`
+        rules, euid provenance, `_owner_records`).
+      - ``None``: the lock file is missing or unreadable (an owner built
+        before this change, a symlink planted at ``.lock``, an I/O error) —
+        UNKNOWN, so the caller falls through to today's ``_owner_records``
+        path. Backward compatibility: "no lock file" is never "orphan".
+
+    ``O_NOFOLLOW`` so a symlink at ``.lock`` is never followed (#4098
+    discipline); a planted symlink therefore reads UNKNOWN rather than
+    resolving onto (and taking a lock on) whatever it points at. The probe
+    releases the exclusive lock it takes before returning, so it can never
+    block a later owner from claiming the server. Never raises.
+    """
+    import fcntl
+
+    if not socket_path:
+        return None  # defensive: this function's contract is "never raises"
+    path = os.path.join(os.path.dirname(socket_path), OWNERS_DIRNAME,
+                        OWNER_LOCK_NAME)
+    # #4577 review, #4098 discipline (same as `_lock_holder_pid`): never
+    # BLOCK on a planted non-regular file. `open(FIFO, O_RDONLY)` with no
+    # writer parks FOREVER, and this probe runs for every candidate in
+    # `_mark_orphan_confirmation` — including the conftest end-sweep, which
+    # arms NO SIGALRM watchdog — so one planted FIFO would hang the sweep
+    # and pin every orphan on the host. `O_NONBLOCK` makes the open
+    # non-blocking; the `S_ISREG` check rejects anything that is not the
+    # regular file this module writes.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK
+                     | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None  # missing / symlink / unreadable -> UNKNOWN, fall back
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None  # planted FIFO/device -> UNKNOWN (#4098)
+        except OSError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            # EWOULDBLOCK is EAGAIN on Linux/macOS; both spellings are
+            # checked so the verdict cannot flip with an errno alias. Any
+            # OTHER OSError means we cannot trust the probe -> UNKNOWN.
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return True  # a live owner holds the shared lock
+            return None
+        # Acquired: no live owner holds the server. Release at once — the
+        # probe must never leave a server locked against a future owner.
+        try:  # noqa: SIM105
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        try:  # noqa: SIM105
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _owner_record_dir_present(socket_dir: str) -> bool:
+    """True when `socket_dir` carries tortoise's owner-record instrument
+    (#3599) with at least one recognisable record file.
+
+    A CHEAP attribution test (one `listdir`, no `ps`). #3767 uses it for two
+    things: the registry-less ownership claim (`_has_ownership_claim`), and
+    the record's `unattributed` flag — a server with no tortoise instrument
+    cannot be attributed to us, so `reap()` requires the #1557/#1642 FIX 3
+    orphan-confirmation window for it in EVERY mode, EXCEPT a `dir_missing`
+    record in a FULL sweep (#4546: its registry data dir is already gone, so
+    no on-disk user data remains; the `path_based` arm has no such exemption,
+    and under `--only-safe` the earlier live-pid gate still skips first).
+
+    Deliberately NOT `_owner_records`, whose per-record liveness resolution
+    shells out to `ps`; the orphan VERDICT still comes from `_owner_records`
+    (`_mark_orphan_confirmation` / `reap`).
+
+    Recognition matches `_owner_records`: a dotted name is ignored and an
+    unparsable/non-positive pid prefix is a foreign file. An empty dir reads
+    False, mirroring `_owner_records`' "total == 0 is no evidence at all"
+    fail-closed rule. Fail closed on OSError. (The dotted-name skip is
+    intent-documenting, NOT load-bearing: no dotted name can pass the
+    positive-pid parse anyway, since `int(".lock".partition("-")[0])` raises
+    ValueError. It is stated here so the rule reads the same as
+    `_owner_records`'.)
+
+    RESIDUAL (#3767 review P2, accepted + documented): a tortoise server
+    whose owner closed GRACEFULLY while the daemon survived loses its
+    instrument (`forget_owner` removes the record and rmdirs the dir, #3599),
+    so it reads `unattributed` and reap() no longer fast-kills it in a full
+    sweep — EXCEPT a `dir_missing` record, which #4546 exempts — otherwise it
+    converges only through the #1557/#1642 FIX 3 confirmation window. That is
+    the deliberate fail-CLOSED direction: an instrument-less
+    server is byte-for-byte indistinguishable from a foreign same-uid
+    application's (`_has_ownership_claim`), and the whole point of #3767 is
+    that we may not kill what we cannot attribute. Distinguishing "never
+    instrumented" from "instrument withdrawn" would need a tombstone the
+    writer does not leave; not doing so is the accepted cost.
+    """
+    try:
+        names = os.listdir(os.path.join(socket_dir, OWNERS_DIRNAME))
+    except OSError:
+        return False
+    for n in names:
+        if n.startswith("."):
+            continue
+        try:
+            pid = int(n.partition("-")[0])
+        except ValueError:
+            continue
+        if pid > 0:
+            return True
     return False
 
 
@@ -2887,15 +3445,23 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
     concurrent suite's between-tests idle server looks identical (#1557:
     all redislite servers daemonize to ppid=1). Orphanhood is confirmed by
     the FIRST signal that proves it, per server:
-      1. #3599: no live owner. tortoise.FalkorDB records one owner file per
-         owning process inside the server's socket dir; all owners provably
-         dead => orphan, independent of what other suites on the host are
-         doing. This is the signal that breaks the fleet deadlock: the
-         global gate below is permanently True on a host running many
+      1. #4577: no live lock HOLDER. A live owner process holds a shared BSD
+         flock on `<socket_dir>/.tortoise-owners/.lock`; the kernel drops it
+         when the holder dies, so "a live owner holds the server" is a FACT
+         rather than a pid+start reconstruction (no recycled-pid, no
+         unreadable-`ps`, no copied-record failure class). A HELD lock vetoes
+         confirmation outright, independent of anything else. A lock-less
+         owner (created before this change, or a symlinked/unreadable lock)
+         reads UNKNOWN and falls through to signal 2 — never to "orphan".
+      2. #3599: no live owner RECORD. tortoise.FalkorDB records one owner
+         file per owning process inside the server's socket dir; all owners
+         provably dead => orphan, independent of what other suites on the
+         host are doing. This is the signal that breaks the fleet deadlock:
+         the global gate below is permanently True on a host running many
          concurrent sessions, so nothing was ever confirmed and the
          only_safe cron was a no-op (#3599). Restricted to EPHEMERAL
          test-tree servers (`path_based` False).
-      2. #1642 FIX 3 fallback (uninstrumented spawns — no owner records, and
+      3. #1642 FIX 3 fallback (uninstrumented spawns — no owner records, and
          also the socket-dir-missing case): the 0-client state must have
          persisted >= ZERO_CLIENT_CONFIRM_MINUTES across sweeps AND no live
          suite markers may exist (FIX 4). A missing socket dir is NOT an
@@ -2964,6 +3530,18 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
         # (before AND after) before any _kill, EXCEPT on the socketless
         # fast path (dir gone + confirmed), which is why the dir-missing
         # signal must keep its window.
+        # #4577: the KERNEL-FACT liveness signal, checked FIRST. A live
+        # owner holds a shared flock on the owner dir's `.lock`; the kernel
+        # drops it when the process dies, so a held lock proves a live owner
+        # with none of the pid+start inference's failure classes. True ->
+        # never confirm (skip, and clear any window state). False/None ->
+        # the record-based chain below decides, UNCHANGED: a FREE lock does
+        # not by itself authorize a kill, and an owner built before this
+        # change has no lock file at all (backward compatible).
+        if _owner_lock_held(rec["socket_path"]) is True:
+            if state.pop(rec["socket_path"], None) is not None:
+                changed = True
+            continue
         owners = _owner_records(rec["socket_path"])
         if owners is not None and owners[0] > 0:
             if state.pop(rec["socket_path"], None) is not None:

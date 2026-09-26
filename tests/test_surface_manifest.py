@@ -4,7 +4,8 @@ These tests are the machine half of the acceptance criteria:
 
 * AC1  — the list is generated from the declaration and is in sync with it
 * AC11 — the baseline covers the declaration, and the gate fails closed
-* AC13 — the ordering lint's eight properties hold
+* AC13 — the ordering lint's twelve properties hold, including the twelfth: the artifact is
+         verified against a fresh DERIVATION, not only against itself
 
 They are deliberately fast and dependency-free: they execute the declaration and
 compare it to the checked-in baseline. No database, no network, no subprocess
@@ -13,11 +14,14 @@ pytest run.
 
 from __future__ import annotations
 
+import argparse
+import copy
 import pathlib
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -375,16 +379,263 @@ def test_the_guard_reds_when_a_new_retirement_is_not_approved(tmp_path):
     assert "NEW RETIRED TOOL" in result.stdout
 
 
-def test_the_order_lint_reds_on_a_retired_mismatch(tmp_path, monkeypatch):
-    """`check` owns the same contract on the generated artifact."""
+def test_the_order_lint_reds_on_a_retired_mismatch(tmp_path, monkeypatch, capsys, derived_baseline):
+    """`check` owns the same contract on the generated artifact.
+
+    Asserts the PROPERTY-9 message, not just the exit code: property 10 re-derives the same
+    input and would make this pass on its own, so an exit-code assertion alone stopped
+    isolating the retired-name contract (review finding).
+    """
     sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: derived_baseline)
     doc = _manifest()
+    removed = doc["retired"][-1]["name"]
     doc["retired"] = doc["retired"][:-1]
     path = tmp_path / "manifest.yml"
     path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
-    rc = sm.cmd_check(__import__("argparse").Namespace())
+    rc = sm.cmd_check(argparse.Namespace())
     assert rc == 1, "the order lint passed a manifest whose retired block was incomplete"
+    out = capsys.readouterr().out
+    assert f"retired name {removed!r} is declared but not in the manifest" in out, out
+
+
+# --- AC13 property 10: the artifact is verified against the CODE, not itself -----
+# The lint's first nine properties compare the baseline to itself (order, clusters,
+# families) and to two hand-authored tables. None compared it to the declaration, so the
+# baseline's headline numbers and every derived column could be hand-edited while both
+# this lint and the D2 expansion gate stayed green — measured: `counts.tools: 999` plus a
+# doctored `keyword_distribution` passed both. These tests are the mutation evidence for
+# the property that closes it.
+
+
+@pytest.fixture(scope="module")
+def derived_baseline() -> dict:
+    """The real derivation, computed ONCE for the whole module (~20s).
+
+    The mutation tests patch `build_doc` with this cache so each one costs milliseconds;
+    the unpatched, end-to-end derivation is exercised by the subprocess
+    `test_the_order_lint_passes` above, which reds the moment the committed artifact and
+    the code part company.
+    """
+    return _load_manifest_tool().build_doc()
+
+
+@pytest.fixture
+def checker(monkeypatch, derived_baseline):
+    """`check` bound to a redirected manifest, against the real derivation."""
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    return sm
+
+
+def _check(sm, doc: dict, tmp_path) -> tuple[int, str]:
+    """Run `cmd_check` with a redirected manifest, capturing stdout AND stderr.
+
+    stderr is captured because a traceback goes there: an assertion that the output carries
+    no traceback is vacuous against a stdout-only buffer (review finding). `MANIFEST_FILE`
+    is restored, so a test cannot leak the redirect into another one.
+    """
+    path = tmp_path / "manifest.yml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    previous = sm.MANIFEST_FILE
+    sm.MANIFEST_FILE = path
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            rc = sm.cmd_check(argparse.Namespace())
+    finally:
+        sm.MANIFEST_FILE = previous
+    return rc, buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda d: d["counts"].__setitem__("tools", 999), id="headline-count"),
+        pytest.param(
+            lambda d: d["counts"]["keyword_distribution"].__setitem__("fetch", 999),
+            id="keyword-distribution",
+        ),
+    ],
+)
+def test_the_check_reds_on_a_hand_edited_count(checker, tmp_path, mutate):
+    """Hand-edits the baseline exists to freeze that NO property compared.
+
+    Both are the same comparison (`counts`) on different fields, so they are one
+    parametrized case rather than two tests that exercise one code path (review finding).
+    """
+    doc = _manifest()
+    mutate(doc)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-edited count did not red the lint"
+    assert "counts" in out and "999" in out, out
+
+
+@pytest.mark.parametrize(
+    "row_name, field, value",
+    [
+        pytest.param("tool", "job", "a description no derivation produces", id="rendered-cell"),
+        pytest.param("sdk", "class", "definitely-not-derived", id="caller-scan-column"),
+    ],
+)
+def test_the_check_reds_on_a_hand_edited_derived_cell(checker, tmp_path, row_name, field, value):
+    """MEMBERSHIP is not CONTENT, for both row kinds.
+
+    Every name-only check passes while the description that renders into the document the
+    owner reviews — `job`, the cell the table is built from — says something else, and `class`
+    is derived by an AST caller scan that NO other gate reads (measured: `grep class
+    tools/surface-guard.py` finds only prose). A guard that only proves a row EXISTS does not
+    protect what the row says. (Two tests that each mutated one key and asserted the same two
+    substrings were one code path with two constants; parametrized — review finding.)
+    """
+    doc = _manifest()
+    prefix = "sdk:" if row_name == "sdk" else ""
+    row = next(r for r in doc["rows"] if str(r["name"]).startswith(prefix))
+    row[field] = value
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, f"a hand-edited `{field}` did not red the lint"
+    assert field in out and row["name"] in out, out
+
+
+def test_the_check_reds_on_an_unclassified_new_column(checker, tmp_path):
+    """A key the generator grows later is compared by DEFAULT, so it cannot escape.
+
+    The exclusion is a deny-list applied to both sides: a column that is present on one
+    side only reds until it is deliberately classified as non-derivable.
+    """
+    doc = _manifest()
+    doc["rows"][0]["sneaky_new_column"] = "x"
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "an unclassified column was accepted"
+    assert "sneaky_new_column" in out, out
+
+
+def test_the_declared_non_derivable_keys_all_exist_on_a_derived_row(derived_baseline):
+    """The exclusion set cannot rot into a list of keys nobody emits.
+
+    If a key is renamed, its exclusion must be renamed with it — otherwise the exclusion
+    silently stops excluding anything and the comparison reds (loudly, which is the point)
+    or, worse, the key it was written for is no longer covered by the reason recorded for it.
+    """
+    sm = _load_manifest_tool()
+    row_keys = {k for r in derived_baseline["rows"] for k in r}
+    assert row_keys >= sm.NON_DERIVABLE_ROW_KEYS, (
+        "these exclusions name keys no derived row carries: "
+        f"{sorted(sm.NON_DERIVABLE_ROW_KEYS - row_keys)}"
+    )
+    assert set(derived_baseline) > sm.NON_DERIVABLE_DOC_KEYS, (
+        "these doc-level exclusions name keys the derivation does not emit: "
+        f"{sorted(sm.NON_DERIVABLE_DOC_KEYS - set(derived_baseline))}"
+    )
+
+
+def test_the_check_refuses_when_the_baseline_is_missing(tmp_path, monkeypatch, capsys):
+    """A check that cannot read its evidence must REFUSE, not traceback and not pass."""
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "MANIFEST_FILE", tmp_path / "does-not-exist.yml")
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "missing" in out, out
+
+
+def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypatch, capsys):
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "ORDER_FILE", tmp_path / "no-order.yml")
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "ordering table" in out, out
+
+
+def test_the_derivation_resets_approvals_BY_DESIGN(derived_baseline):
+    """The reset is the CONTROL, not an oversight — CONTRIBUTING.md makes it so.
+
+    "To propose an addition" steps 2-4: `cut` folds the change in and marks the baseline
+    `pending-owner-approval`, and the owner then records `approval` per row. The reset is
+    what forces re-approval of the whole baseline, so a changed `served_from` cannot ride
+    an old approval into `approved`.
+
+    A carry-over of the previous approvals across a re-cut (drafted because a naive cut
+    zeroes six recorded approvals and their rationale comments, which reads like data
+    loss) was REFUSED against that documented decision rather than adopted. This test
+    exists so the behaviour is not "fixed" later by someone reading only the code.
+
+    Its SCOPE is the DERIVATION. `build_doc` cannot read the artifact, so a carry-over
+    reintroduced at the WRITE site — where it would actually live — leaves these
+    assertions green; that path is pinned separately, against the file `cut` leaves
+    behind, by `test_cut_resets_approvals_at_the_WRITE_SITE` (review finding).
+    """
+    assert derived_baseline["approval_status"] == "pending-owner-approval"
+    assert derived_baseline["approval_principal"] is None
+    assert derived_baseline["approval_pr"] is None
+    reset = [
+        r for r in [*derived_baseline["rows"], *derived_baseline["retired"]]
+        if r.get("approval") is not None
+    ]
+    assert reset == [], f"a re-cut carried approvals forward: {reset[:5]}"
+
+
+def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseline):
+    """Every key the comparison excludes must be excluded for a REASON that is tested.
+
+    The exclusion set is the only place the drift gate can be weakened without touching
+    the comparison itself: drop one key and a hand-edit to that key stops reding. So the
+    expected set is a LITERAL here — iterating `NON_DERIVABLE_ROW_KEYS` would let a dropped
+    key delete its own coverage, which is exactly the survivor this test first recorded
+    (mutation M3: `reason` dropped from the set, suite still green).
+    """
+    sm = _load_manifest_tool()
+    assert {
+        "used_by",
+        "recommendation",
+        "basis",
+        "reason",
+        "approval",
+        "exemption",
+    } == sm.NON_DERIVABLE_ROW_KEYS, "the exclusion set changed — every key must be justified where it is declared"
+    row = copy.deepcopy(derived_baseline["rows"][0])
+    for key in sorted(sm.NON_DERIVABLE_ROW_KEYS):
+        mutated = copy.deepcopy(row)
+        mutated[key] = "a value no derivation produces"
+        assert sm._derivation_problems(
+            {"rows": [mutated], "retired": []}, {"rows": [row], "retired": []}
+        ) == [], f"`{key}` is declared non-derivable but a change to it reds the check"
+
+
+def test_each_declared_non_derivable_doc_key_is_actually_excluded(derived_baseline):
+    sm = _load_manifest_tool()
+    assert {
+        "cut_at_commit",
+        "approval_status",
+        "approval_principal",
+        "approval_pr",
+        "response_fields",
+    } == sm.NON_DERIVABLE_DOC_KEYS
+    for key in sorted(sm.NON_DERIVABLE_DOC_KEYS):
+        mutated = dict(derived_baseline)
+        mutated[key] = "a value no derivation produces"
+        assert sm._derivation_problems(mutated, derived_baseline) == [], (
+            f"`{key}` is declared non-derivable but a change to it reds the check"
+        )
+
+
+def test_a_nonderivable_key_is_still_seen_when_it_is_the_ONLY_difference(derived_baseline):
+    """The exclusion must not swallow the keys around it.
+
+    `used_by` is excluded; a change to the row's NAME is not. If the comparison stripped
+    whole rows instead of named keys, this would pass silently.
+    """
+    sm = _load_manifest_tool()
+    row = copy.deepcopy(derived_baseline["rows"][0])
+    renamed = copy.deepcopy(row)
+    renamed["name"] = "tortoise_not_a_real_tool"
+    problems = sm._derivation_problems(
+        {"rows": [renamed], "retired": []}, {"rows": [row], "retired": []}
+    )
+    assert problems, "a renamed row slipped through the projection"
 
 
 def test_the_guard_reds_on_a_duplicate_registry_entry():
@@ -775,3 +1026,798 @@ def test_the_usage_markers_are_not_inverted_and_every_row_is_well_formed_markdow
         "the 'in use' marker does not match the manifest's usage evidence "
         f"(rendered-only={sorted(marked_in_use - true_in_use)[:5]})"
     )
+
+
+# --- ROUND-2 REVIEW FINDINGS: fail-open content paths, closed with mutations ---------
+# Four fresh-context reviewers ran on this change. Their P1s were both real: (1) a
+# DUPLICATE row name silently dropped content from the drift comparison AND from the D2
+# guard, reproducibly green with a doctored duplicate; (2) the approval-reset test could
+# not observe the write site it claimed to pin. The P2s were malformed evidence escaping
+# as tracebacks, an uncompared row order, and the retired-name contract no longer being
+# isolated. Every test below is the mutation evidence for one of those fixes.
+
+
+def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_baseline):
+    """The reset is the CONTROL (CONTRIBUTING.md, "To propose an addition" steps 2-4).
+
+    `cut` folds a change in and marks the baseline `pending-owner-approval`; the owner then
+    re-records `approval` per row. A carry-over of the previous approvals — drafted because
+    a naive re-cut zeroes six recorded approvals and reads like data loss — was REFUSED
+    against that documented decision, and the tool says so where it writes.
+
+    Asserting this on `build_doc` alone (as the sibling test did) is VACUOUS for this
+    contract: `build_doc` cannot read the artifact, so a carry-over reintroduced at the
+    WRITE site — which is where it would live — left the suite green (review finding). So
+    the previous artifact, carrying approvals, is placed AT THE PATH `cut` WRITES and the
+    file it leaves behind is read back.
+
+    The reset is now gated by `--allow-approval-reset` (#4598): it still happens, but only
+    deliberately, and it names what it drops. The refusal half is
+    `test_cut_REFUSES_to_blank_recorded_approvals` below.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = "PR#1 @owner"
+    prior["approval_status"] = "approved"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    ns = argparse.Namespace(commit="deadbeef", allow_approval_reset=True)
+    assert sm.cmd_cut(ns) == 0
+
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert written["approval_status"] == "pending-owner-approval"
+    carried = [
+        r["name"]
+        for r in [*written["rows"], *written["retired"]]
+        if r.get("approval") is not None
+    ]
+    assert carried == [], (
+        "the write site carried the previous approvals across the re-cut, reversing the "
+        f"control CONTRIBUTING.md steps 2-4 rely on: {carried[:5]}"
+    )
+
+
+def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):
+    """A re-cut must not be able to destroy an owner approval SILENTLY (#4598).
+
+    On 2026-09-23 a re-cut landed on `main` through PR #4043 and carried six recorded owner
+    approvals to zero. Nothing went red, because `approval` is NON_DERIVABLE: no derived
+    property compares it, so the loss is invisible to every check that exists. The reset
+    itself is still the documented control — what this pins is that it cannot happen
+    without the operator saying so and seeing which rows they are dropping.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in prior["rows"]:
+        row["approval"] = None
+    approved_row = prior["rows"][0]["name"]
+    prior["rows"][0]["approval"] = "#4173 @daniel-ospina"
+    prior["approval_status"] = "pending-owner-approval"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    # No flag -> refuse, and the artifact is left EXACTLY as it was found.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    out = capsys.readouterr().out
+    assert approved_row in out, f"the row it would drop is not named: {out}"
+    assert "#4173 @daniel-ospina" in out, f"the approval value is not shown: {out}"
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
+
+    # With the flag -> it proceeds, and STILL names every row it drops.
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    out = capsys.readouterr().out
+    assert "DROPPED" in out and approved_row in out, out
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert all(r.get("approval") is None for r in written["rows"]), (
+        "the flag was passed, so the reset is deliberate and expected — but a row kept an "
+        "approval the re-cut should have cleared"
+    )
+
+
+def test_the_guard_REFUSES_an_UNREADABLE_baseline_rather_than_overwriting_it(
+    monkeypatch, tmp_path, capsys, derived_baseline
+):
+    """An unreadable artifact is REFUSED — never silently overwritten.
+
+    This flips the earlier reading. The artifact is the ONLY carrier of the owner's per-row
+    approvals, and an unreadable one may well carry approvals that cannot be enumerated, so
+    writing over it destroys them without ever naming them — the #4598 wipe again. "There is
+    nothing to refuse for" was wrong: the refusal is precisely that the set is NOT enumerable.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    broken = "this: [is not\n  a manifest\n"
+    path.write_text(broken, encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    assert path.read_text(encoding="utf-8") == broken, "the refusal WROTE the manifest"
+
+
+def test_a_MISSING_baseline_still_cuts(monkeypatch, tmp_path, derived_baseline):
+    """The first cut has no approvals to lose, and must keep working.
+
+    The pair to the refusal above: the guard distinguishes MISSING (nothing to lose) from
+    UNREADABLE (may carry something we cannot see). Conflating them would either block the
+    first cut or reopen the silent overwrite.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    assert not path.exists()
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["counts"]["tools"] >= 1
+
+
+def test_the_guard_sees_a_RETIRED_row_approval(monkeypatch, tmp_path, capsys, derived_baseline):
+    """The mutation evidence for the RETIRED half of the artifact.
+
+    `retired:` rows carry `approval` too — retiring a name shrinks the surface and needs the
+    same human approval, and `build_doc` blanks it there as well. A guard that walks only
+    `rows:` passes this case GREEN while a recorded retirement approval is destroyed, which
+    is the same silent wipe through the other door. Assert on the retired row specifically:
+    a guard reading only `rows:` fails here.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = None
+    assert prior["retired"], "fixture has no retired rows to test the retired arm with"
+    retired_row = prior["retired"][0]["name"]
+    prior["retired"][0]["approval"] = "#4598 @daniel-ospina"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1, (
+        "a recorded approval on a RETIRED row did not stop the re-cut — the guard is "
+        "reading `rows:` only"
+    )
+    out = capsys.readouterr().out
+    assert retired_row in out and "#4598 @daniel-ospina" in out, out
+    assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
+
+
+def test_cut_refuses_when_the_declaration_cannot_be_IMPORTED(monkeypatch, capsys, tmp_path):
+    """The REAL import branch — not a stand-in for it.
+
+    The sibling test substitutes a raising `build_doc`, so the import inside it never runs.
+    Here the declaration is unimportable in the interpreter, which is the failure the
+    refusal contract was written for, and the artifact must still be left alone.
+    """
+    sm = _load_manifest_tool()
+    target = tmp_path / "surface-manifest.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", target)
+    monkeypatch.setitem(sys.modules, "tortoise.tool_registry", None)
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "could not import the surface declaration" in out, out
+    assert not target.exists(), "a refused cut wrote the baseline anyway"
+
+
+@pytest.mark.parametrize(
+    "document, needle",
+    [
+        pytest.param({"retired": []}, "rows", id="no-rows-list"),
+        pytest.param({"rows": [], "retired": "tortoise_old"}, "retired", id="retired-not-a-list"),
+    ],
+)
+def test_the_check_refuses_a_malformed_document_shape(
+    tmp_path, monkeypatch, capsys, document, needle
+):
+    sm = _load_manifest_tool()
+    path = tmp_path / "manifest.yml"
+    path.write_text(yaml.safe_dump(document))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and needle in out, out
+    assert "Traceback" not in out
+
+
+def test_the_check_refuses_an_order_table_missing_family_rank(tmp_path, monkeypatch, capsys):
+    """`family_rank` is required by the DERIVATION, not only by this lint.
+
+    Validating `keywords`/`tokens` alone let a table missing it pass the read and then
+    escape as a bare KeyError out of `build_doc` — the traceback the refusal contract
+    exists to prevent.
+    """
+    sm = _load_manifest_tool()
+    table = dict(sm.load_order())
+    table.pop("family_rank")
+    path = tmp_path / "surface-order.yml"
+    path.write_text(yaml.safe_dump(table))
+    monkeypatch.setattr(sm, "ORDER_FILE", path)
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "family_rank" in out, out
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(lambda r: r.pop("keyword"), id="missing-column"),
+        pytest.param(lambda r: r.__setitem__("family_rank", "first"), id="non-integer-rank"),
+        pytest.param(lambda r: r.__setitem__("cluster", ["a", "list"]), id="non-string-cluster"),
+    ],
+)
+def test_the_check_reports_a_malformed_row_instead_of_tracing(checker, tmp_path, damage):
+    """A row that HAS a name but lacks a column the properties index is malformed EVIDENCE.
+
+    It escaped as a bare KeyError/TypeError (`r["keyword"]`, then the family_rank sort)
+    instead of the `::error::` refusal the contract promises.
+    """
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if not str(r["name"]).startswith("sdk:"))
+    damage(row)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a malformed row did not red the check"
+    assert "malformed row" in out, out
+    assert "Traceback" not in out
+
+
+def test_the_check_refuses_a_duplicate_row_name(checker, tmp_path):
+    """ADVERSARIAL P1: a duplicated `sdk:` row made the artifact's CONTENT unverified.
+
+    `_derivation_problems` keys rows by name, so a second row reusing an existing name is
+    silently DROPPED. A doctored duplicate inserted BEFORE the true row — carrying a
+    fabricated `class` and `job` — left both the drift check and the D2 guard GREEN
+    (reproduced through the real CLI). No structural property sees `sdk:` rows at all, so
+    nothing else noticed. Content that a name-keyed comparison cannot show must be refused.
+    """
+    doc = _manifest()
+    sdk = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    doctored = dict(sdk, **{"class": "internal", "job": "fabricated by a duplicate row"})
+    doc["rows"].insert(0, doctored)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a duplicate row name did not red the check"
+    assert "duplicate" in out, out
+
+
+def test_the_guard_refuses_a_duplicate_row_name(tmp_path):
+    """The D2 expansion gate keys `baseline_sdk` / `baseline_retired_map` by name too."""
+    doc = _manifest()
+    sdk = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    doc["rows"].insert(0, dict(sdk, **{"class": "internal"}))
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a duplicate row name did not red the guard"
+    assert "duplicate" in result.stdout, result.stdout
+
+
+def test_the_guard_refuses_a_duplicate_retired_name(tmp_path):
+    doc = _manifest()
+    doc["retired"].insert(0, dict(doc["retired"][0], **{"use_instead": "fabricated"}))
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a duplicate retired name did not red the guard"
+    assert "duplicate" in result.stdout, result.stdout
+
+
+def test_the_check_reds_on_reordered_rows(checker, tmp_path):
+    """ORDER is content.
+
+    The nine structural properties pin only the NON-`sdk:` subsequence of `rows`, so moving
+    every `sdk:` row to the FRONT of the frozen artifact passed `check` reporting all ten
+    properties holding (adversarial finding). The derived order is compared like any other
+    derived value.
+    """
+    doc = _manifest()
+    sdk = [r for r in doc["rows"] if str(r["name"]).startswith("sdk:")]
+    rest = [r for r in doc["rows"] if not str(r["name"]).startswith("sdk:")]
+    assert sdk and rest, "the baseline must carry both kinds of row for this to mean anything"
+    doc["rows"] = [*sdk, *rest]
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "reordering the artifact did not red the check"
+    assert "not in the derived order" in out, out
+
+
+# --- CYCLE 2: the gate's own fail-opens, found adversarially --------------------------
+# A second review cycle attacked the D2 gate itself rather than the drift check, and found
+# the strongest defect of the whole change: `surface-guard.py` keys SDK rows by `method`
+# into a set, so a fabricated row for a brand-new public SDK method — new name, an
+# existing method, `exemption: true` — passed the gate (verified: the same method WITHOUT
+# the row was correctly refused; WITH it, exit 0). Renaming a real SDK row also passed.
+# Every test below pins one close, and each has a mutation in the battery.
+
+
+def test_the_guard_refuses_an_sdk_row_whose_name_is_not_its_method(tmp_path):
+    """The SDK-row fail-open: a set of `method`s cannot stand in for the row SET.
+
+    `baseline_sdk = {r["method"] for sdk rows}` means a row that renames the name while
+    keeping a real method contributes nothing to the comparison. Measured before the fix:
+    a fabricated `name: sdk:totally_new_and_unapproved` carrying an existing `method` and
+    `exemption: true` → `OK … 151 public SDK methods (1 exempt)`, exit 0. The derivation
+    emits `sdk:<method>` for every one of the 150 rows, so that identity is the check.
+    """
+    doc = _manifest()
+    real = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    doc["rows"].append(dict(real, name="sdk:totally_new_and_unapproved", exemption=True))
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a fabricated SDK row passed the expansion gate"
+    assert "do not identify their method" in result.stdout, result.stdout
+
+
+def test_the_guard_refuses_a_renamed_sdk_row(tmp_path):
+    """The weaker form of the same fail-open: renaming a real row, method untouched."""
+    doc = _manifest()
+    for row in doc["rows"]:
+        if str(row["name"]).startswith("sdk:"):
+            row["name"] = row["name"] + "_ghost"
+            break
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a renamed SDK row passed the expansion gate"
+    assert "do not identify their method" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(1, id="int"),
+        pytest.param(["a", "b"], id="list-unhashable"),
+    ],
+)
+def test_the_guard_refuses_a_malformed_row_name_instead_of_tracing(tmp_path, bad_name):
+    """A non-string name crashed the gate OUTSIDE its own fail-closed contract.
+
+    Measured before the fix: `name: null` → `AttributeError: 'NoneType' object has no
+    attribute 'startswith'`; `name: [a, b]` → `TypeError: unhashable type: 'list'` from
+    `{r["name"] for r in rows}`. A traceback exits 1, but it is not the refusal this gate
+    promises, and `git grep` shows no other check reads those rows.
+    """
+    doc = _manifest()
+    doc["rows"][0]["name"] = bad_name
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a malformed row name did not red the gate"
+    assert "malformed row name" in result.stdout, result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "bad_served",
+    [pytest.param(None, id="null"), pytest.param("", id="empty"), pytest.param("grpc", id="unknown")],
+)
+def test_the_guard_refuses_a_served_value_it_cannot_classify(tmp_path, bad_served):
+    """A FALSY `served` turned a check OFF and the gate still printed OK.
+
+    `if name.startswith("sdk:") or not row.get("served"): continue` skipped the
+    served-surface comparison for `served: null` / `""` — the same defect class this file
+    already fixed for a broken import — and printed `OK`. Only `http` / `stdio-only` occur
+    on tool rows and only `sdk` on SDK rows (measured over all 232 rows).
+    """
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if not str(r["name"]).startswith("sdk:"))
+    row["served"] = bad_served
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, f"`served: {bad_served!r}` skipped the check"
+    assert "cannot classify" in result.stdout or "must be `served: sdk`" in result.stdout, result.stdout
+
+
+def test_the_guard_refuses_an_sdk_row_not_served_as_sdk(tmp_path):
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    row["served"] = "http"
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "an SDK row claiming to be an HTTP tool was accepted"
+    assert "must be `served: sdk`" in result.stdout, result.stdout
+
+
+def test_the_exemption_control_is_usable_without_reding_the_drift_check(checker, tmp_path):
+    """`exemption` is a HUMAN RECORDING — excluding it is what keeps the control reachable.
+
+    `build_doc` emits `exemption: False` for every row, so while `exemption` was compared as
+    a derived value, recording one (the path `tools/surface-guard.py` reads and CONTRIBUTING
+    documents) made the REQUIRED check red with no legitimate way back — `cut` resets it to
+    False forever. Measured before the fix: guard `OK … (1 exempt)`, check
+    `FAIL row 'sdk:annotate_ask_hits' was hand-edited — exemption: recorded {True}, derived {False}`.
+    """
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    row["exemption"] = True
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 0, f"a recorded exemption is refused: {result.stdout}"
+    assert "1 exempt" in result.stdout, result.stdout
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 0, f"a recorded exemption red the drift check: {out}"
+
+
+def test_the_check_reds_on_reordered_retired_rows(checker, tmp_path):
+    """The ROW order was pinned; the `retired` order was not (surviving mutation).
+
+    Reversing `retired` in the baseline left `check` GREEN while the same edit to `rows`
+    reds — the comparison is one line with two call sites, and only one was covered.
+    """
+    doc = _manifest()
+    doc["retired"] = list(reversed(doc["retired"]))
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "reversing the retired block did not red the check"
+    assert "retired" in out and "not in the derived order" in out, out
+
+
+def test_the_check_refuses_a_duplicate_RETIRED_name(checker, tmp_path):
+    """The reader's duplicate refusal covers both lists; only `rows` was asserted."""
+    doc = _manifest()
+    doc["retired"].insert(0, dict(doc["retired"][0], use_instead="fabricated"))
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a duplicate retired name did not red the check"
+    assert "duplicate" in out and "retired" in out, out
+
+
+def test_the_check_refuses_a_baseline_with_no_cut_at_commit(checker, tmp_path):
+    """`cut_at_commit` is excluded from the drift comparison, so this is all that pins it.
+
+    It moved into `_read_manifest` because `cmd_render` slices it: a hand-edited
+    `cut_at_commit: null` was a `TypeError` in the renderer and a mere problem in the check.
+    """
+    doc = _manifest()
+    doc["cut_at_commit"] = None
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a baseline with no cut_at_commit did not red the check"
+    assert "::error::" in out and "cut_at_commit" in out, out
+
+
+def test_the_render_refuses_instead_of_tracing(tmp_path, monkeypatch, capsys):
+    """`cmd_render` indexed `family_rank` / `cut_at_commit` with no guard at all."""
+    sm = _load_manifest_tool()
+    for label, damage in (
+        ("missing-family_rank", lambda d: next(r for r in d["rows"] if not str(r["name"]).startswith("sdk:")).pop("family_rank")),
+        ("null-cut_at_commit", lambda d: d.__setitem__("cut_at_commit", None)),
+    ):
+        doc = _manifest()
+        damage(doc)
+        path = tmp_path / f"{label}.yml"
+        path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+        monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+        assert sm.cmd_render(argparse.Namespace()) == 1, label
+        out = capsys.readouterr().out
+        assert "::error::" in out, (label, out)
+        assert "Traceback" not in out, (label, out)
+
+
+@pytest.mark.parametrize(
+    "damage, needle",
+    [
+        pytest.param(lambda t: t.__setitem__("tokens", []), "tokens", id="tokens-empty-list"),
+        pytest.param(lambda t: t.__setitem__("tokens", {"fetch": "fetch"}), "LIST", id="token-scalar"),
+        pytest.param(lambda t: t.__setitem__("keywords", {}), "keywords", id="keywords-empty"),
+        pytest.param(lambda t: t.__setitem__("keywords", {"fetch": "1"}), "INTEGER", id="str-rank"),
+        pytest.param(lambda t: t.__setitem__("family_rank", {}), "family_rank", id="family-rank-empty"),
+        pytest.param(lambda t: t.__setitem__("baseline_counts", []), "baseline_counts", id="counts-deleted"),
+        pytest.param(lambda t: t.__setitem__("baseline_counts", {"fetch": 14}), "exactly one entry", id="counts-partial"),
+        pytest.param(lambda t: t.pop("baseline_counts"), "baseline_counts", id="counts-absent"),
+        pytest.param(lambda t: t.__setitem__("tokens", {**t["tokens"], "nosuchkeyword": ["x"]}), "unknown", id="unknown-keyword"),
+        pytest.param(lambda t: t["keywords"].__setitem__("fetch", 2), "1..", id="rank-collision"),
+    ],
+)
+def test_load_order_refuses_a_malformed_table(tmp_path, monkeypatch, damage, needle):
+    """KEY PRESENCE IS NOT SHAPE — each of these passed the old validation and then broke.
+
+    Measured against /tmp copies before the fix: `tokens: []` → `AttributeError: 'list'
+    object has no attribute 'items'`; `tokens: {fetch: fetch}` silently iterated the STRING's
+    characters so every real token fell through to `operate`; `keywords: {}` → `KeyError:
+    'fetch'`; string ranks → `TypeError: '<' not supported` (and lexicographic order, where
+    `'10' < '2'`); `family_rank: {}` → `KeyError` out of `build_doc`; an EMPTY
+    `baseline_counts` short-circuited property 4's `if baseline and ...`, so deleting the
+    frozen expectation turned the distribution check OFF with every gate green.
+    """
+    sm = _load_manifest_tool()
+    table = copy.deepcopy(sm.load_order())
+    damage(table)
+    path = tmp_path / "surface-order.yml"
+    path.write_text(yaml.safe_dump(table, sort_keys=False))
+    monkeypatch.setattr(sm, "ORDER_FILE", path)
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.load_order()
+    assert needle in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_check_refuses_an_unreadable_evidence_file(tmp_path, monkeypatch, capsys):
+    """The parse-failure branch: garbage bytes, not a shape the reader can classify."""
+    sm = _load_manifest_tool()
+    path = tmp_path / "manifest.yml"
+    path.write_bytes(b"\x00\x01not: [valid: yaml")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "could not read" in out, out
+
+
+def test_the_derivation_refuses_when_a_tracked_file_cannot_be_read(monkeypatch):
+    """A tracked-but-absent file escaped as `FileNotFoundError` out of the caller scan.
+
+    `git ls-files` lists INDEX entries, so `rm foo.py` (without `git rm`) leaves it listed;
+    `scan_callers` read it with only `except (SyntaxError, UnicodeDecodeError)`, so the
+    REQUIRED gate traced back. A silently OMITTED file would be worse: a missed caller
+    changes a row's derived class.
+    """
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "tracked_python", lambda: ["tortoise/definitely_absent_xyz.py"])
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.build_doc()
+    assert "could not read the tracked file" in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_check_reds_on_a_hand_added_null_doc_key(checker, tmp_path):
+    """ABSENCE and `null` are different, and `doc.get(key) != derived.get(key)` conflated them.
+
+    A hand-added top-level key whose value was `null` compared `None == None` and was
+    accepted, contradicting `_derivation_problems`' contract that an unclassified key reds by
+    DEFAULT. The sentinel makes absence itself a difference.
+    """
+    doc = _manifest()
+    doc["sneaky_null_top_key"] = None
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-added null-valued top-level key passed the drift check"
+    assert "sneaky_null_top_key" in out, out
+
+
+# ── the `response_fields` record: shape, carry-forward, and the two defences ──
+# The block records response FIELDS that are deliberately OUTSIDE the gate (the freeze is
+# on tools and endpoints). It is hand-authored, so `cut` must carry it forward and
+# `check` must defend it against both deletion and disconnection from the surface.
+
+
+def _render_scratch() -> Path:
+    """A repo-relative path `render` can write to during a test, then be removed."""
+    return ROOT / "docs" / "product" / "_test-render-scratch.md"
+
+
+def _manifest_at(sm, doc: dict, tmp_path, name: str = "manifest.yml"):
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    return path
+
+
+def test_a_malformed_response_fields_entry_is_reported_and_does_not_crash_render(tmp_path, monkeypatch):
+    """`check` must REPORT a malformed `response_fields` entry; `render` must not crash.
+
+    Both halves were real defects when the block was introduced: a non-mapping entry
+    crashed `render` with a bare AttributeError while `check` reported it cleanly, so the
+    two disagreed about the same input.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"bad_entry": True}, "not-a-mapping"]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "malformed.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    try:
+        assert sm.cmd_check(argparse.Namespace()) != 0, "a malformed entry must be reported"
+        assert sm.cmd_render(argparse.Namespace()) == 0, "render must not crash on a malformed entry"
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_a_response_field_value_cannot_break_the_generated_table(tmp_path, monkeypatch):
+    """A `|` or a newline in a recorded field must not split the generated markdown row."""
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {
+            "response": "tortoise_analyze",
+            "field": "why",
+            "emitted_when": "flag on | piped\nand multiline",
+            "unchanged_when_off": "yes",
+        }
+    ]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "piped.yml"))
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    try:
+        assert sm.cmd_render(argparse.Namespace()) == 0
+        # Match the FIELD cell, not just the response name: the tool list below also has a
+        # row beginning `| `tortoise_analyze``, so the looser filter picked up both.
+        rows = [
+            ln
+            for ln in out.read_text().splitlines()
+            if ln.startswith("| `tortoise_analyze` | `why`")
+        ]
+        assert len(rows) == 1, f"the recorded row was split across lines: {rows}"
+        assert rows[0].count("|") == 5, f"a pipe leaked into the row: {rows[0]}"
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_a_recut_carries_response_fields_forward(tmp_path, monkeypatch):
+    """`cut` must not drop the hand-authored `response_fields` block.
+
+    Those entries record response FIELDS — outside the gate, and not derivable from the
+    declaration — so a re-cut that dropped them would silently empty the table the
+    carve-out depends on, and the obligation to record a field would evaporate the first
+    time anyone regenerated the manifest.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"response": "tortoise_analyze", "field": "why", "emitted_when": "flag"}]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path))
+    assert sm._carried_response_fields() == doc["response_fields"], (
+        "a re-cut must carry `response_fields` forward, not drop the record"
+    )
+
+
+def test_a_non_list_response_fields_block_crashes_neither_command(tmp_path, monkeypatch):
+    """A `response_fields:` value that is not a list must not crash `check` or `render`.
+
+    `cut` only ever writes a list, so this shape is not reachable from the generator —
+    but iterating a scalar raised `TypeError` in both commands, which is a crash path the
+    fail-closed surface should not have for a block it merely ignores.
+    """
+    sm = _load_manifest_tool()
+    out = _render_scratch()
+    for block in (5, "ask", {"a": 1}, None, []):
+        doc = _manifest()
+        doc["response_fields"] = block
+        monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, f"block-{type(block).__name__}.yml"))
+        # `_doc=doc` BINDS the value. A bare closure over `doc` would read the
+        # variable at CALL time, which is the next loop iteration's manifest —
+        # ruff's B023, and a real aliasing hazard rather than a style nit.
+        monkeypatch.setattr(sm, "build_doc", lambda *a, _doc=doc, **k: copy.deepcopy(_doc))
+        monkeypatch.setattr(sm, "RENDERED_FILE", out)
+        try:
+            assert sm.cmd_render(argparse.Namespace()) == 0, f"render crashed on block={block!r}"
+            assert sm.cmd_check(argparse.Namespace()) in (0, 1), f"check crashed on block={block!r}"
+        finally:
+            out.unlink(missing_ok=True)
+
+
+def test_a_recut_carries_response_fields_forward_when_the_block_is_absent(tmp_path, monkeypatch):
+    """The carry-forward helper must return `[]` — not raise — when there is no record."""
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "MANIFEST_FILE", tmp_path / "does-not-exist.yml")
+    assert sm._carried_response_fields() == []
+
+    doc = _manifest()
+    doc.pop("response_fields", None)
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "no-block.yml"))
+    assert sm._carried_response_fields() == []
+
+
+def test_check_reds_when_the_recorded_fields_block_is_empty_or_missing(tmp_path, monkeypatch):
+    """The record must not be able to VANISH.
+
+    Before these properties the whole block could be deleted and `check` still said OK —
+    so the doc's promise that an off-by-default addition "cannot quietly become the way the
+    surface grows" was prose with nothing behind it.
+    """
+    sm = _load_manifest_tool()
+    for block in (None, []):
+        doc = _manifest()
+        if block is None:
+            doc.pop("response_fields", None)
+        else:
+            doc["response_fields"] = block
+        monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, f"empty-{block is None}.yml"))
+        monkeypatch.setattr(sm, "build_doc", lambda *a, _doc=doc, **k: copy.deepcopy(_doc))
+        assert sm.cmd_check(argparse.Namespace()) == 1, f"check passed with response_fields={block!r}"
+
+
+def test_check_reds_when_a_recorded_field_is_not_anchored_to_the_surface(tmp_path, monkeypatch):
+    """Every entry must name a tool or endpoint that exists in the manifest."""
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"response": "no_such_endpoint", "field": "x", "emitted_when": "never"}]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "unanchored.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    assert sm.cmd_check(argparse.Namespace()) == 1, "an unanchored entry must red check"
+
+
+def test_check_accepts_a_recorded_field_anchored_to_a_real_endpoint(tmp_path, monkeypatch):
+    """The anchor property must accept the real shape — `tortoise_analyze` is a live row."""
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {"response": "tortoise_analyze", "field": "why", "emitted_when": "truthy", "unchanged_when_off": "yes"}
+    ]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "anchored.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    assert sm.cmd_check(argparse.Namespace()) == 0, "the live `tortoise_analyze` row anchors the entry"
+
+
+def test_check_anchor_sees_an_sdk_endpoint_row_not_just_tool_rows(tmp_path, monkeypatch):
+    """An endpoint response is anchored by its `sdk:<method>` row.
+
+    `_partition_rows` — the row list the comparisons read — DROPS every `sdk:` row, so an
+    anchor check written against it could never resolve an endpoint and would reject a
+    legitimate `sdk:`-anchored entry. This pins the anchor set to the FULL `rows:` list.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {"response": "volunteer_context", "field": "x", "emitted_when": "always"}
+    ]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "sdk-anchored.yml"))
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
+    assert sm.cmd_check(argparse.Namespace()) == 0, "an `sdk:`-anchored entry must be accepted"
+
+
+def test_a_non_mapping_document_fails_cleanly_everywhere(tmp_path, monkeypatch):
+    """A top-level YAML list must not crash any command with a bare TypeError."""
+    sm = _load_manifest_tool()
+    manifest = tmp_path / "not-a-mapping.yml"
+    manifest.write_text("- just\n- a\n- list\n")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", manifest)
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    assert sm._carried_response_fields() == []
+    assert sm.cmd_check(argparse.Namespace()) == 1, "check must fail cleanly, not raise"
+    assert sm.cmd_render(argparse.Namespace()) == 1, "render must fail cleanly, not raise"
+
+
+def test_unparseable_yaml_is_not_fatal_to_the_carry_forward(tmp_path, monkeypatch):
+    """`_carried_response_fields` must return `[]` on a YAML error, not raise."""
+    sm = _load_manifest_tool()
+    manifest = tmp_path / "broken.yml"
+    manifest.write_text("rows: [unclosed\n")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", manifest)
+    assert sm._carried_response_fields() == []
+
+
+def test_cmd_cut_is_actually_wired_to_carry_the_recorded_fields(tmp_path, monkeypatch):
+    """`_carried_response_fields` must be CALLED by `cut`, not merely defined.
+
+    The helper test alone does not pin the wiring: deleting the `response_fields:` line from
+    `build_doc` left every other test passing, so a re-cut would silently empty the table —
+    the exact way the recording obligation dies. Patch the helper with a sentinel and assert
+    the sentinel reaches the document `cut` writes.
+    """
+    sm = _load_manifest_tool()
+    sentinel = [{"response": "tortoise_analyze", "field": "why", "emitted_when": "truthy"}]
+    monkeypatch.setattr(sm, "_carried_response_fields", lambda: sentinel)
+    out = ROOT / "config" / "_scratch_recut_test.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", out)
+    monkeypatch.setattr(sm, "RENDERED_FILE", _render_scratch())
+    try:
+        assert sm.cmd_cut(argparse.Namespace(commit="test")) == 0
+        written = yaml.safe_load(out.read_text())
+    finally:
+        out.unlink(missing_ok=True)
+        _render_scratch().unlink(missing_ok=True)
+    assert written.get("response_fields") == sentinel, (
+        "cmd_cut did not carry the recorded fields into the manifest it wrote"
+    )
+
+
+def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkeypatch):
+    """The drift step must be satisfiable OFF the machine that committed the file.
+
+    The CI step is `python3 tools/surface_manifest.py render` followed by
+    `git diff --exit-code -- docs/product/mcp-sdk-surface.md`, and it runs where
+    `~/.tortoise/analytics_fallback.jsonl` does not exist. A render that reads that log
+    emits DIFFERENT bytes there, so the step could only ever pass on one laptop: measured
+    with the log absent, `_never` counted all 82 tools ("82 of 82" rather than "55 of 82")
+    and every row lost its `in use` / `never called` flag — a 166-line diff against the
+    committed document.
+
+    The render reads COMMITTED inputs only. `used_by` is the checked-in cell the document
+    already prints, so the flag is derived from it; the log keeps driving the artifact
+    through `build_doc`, which refreshes the MANIFEST and lands as a reviewed diff.
+    """
+    sm = _load_manifest_tool()
+    out = _render_scratch()
+    monkeypatch.setattr(sm, "RENDERED_FILE", out)
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+    try:
+        assert sm.cmd_render(argparse.Namespace()) == 0
+        assert out.read_text(encoding="utf-8") == RENDERED.read_text(encoding="utf-8"), (
+            "the render produced different bytes with no machine-local call log — the CI "
+            "drift step compares this output against the committed document, so it can "
+            "never pass on a runner"
+        )
+    finally:
+        out.unlink(missing_ok=True)

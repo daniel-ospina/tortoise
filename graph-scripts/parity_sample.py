@@ -49,11 +49,15 @@ class _LightProj:
 def _parse_uri(uri: str) -> dict:
     """Parse docker:// URI into components."""
     from urllib.parse import urlparse
+
+    from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
+    # #3039: decode userinfo through the single shared rule.
+    _username, password = parse_uri_userinfo(uri)
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 16379,
-        "password": parsed.password or "",
+        "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
 

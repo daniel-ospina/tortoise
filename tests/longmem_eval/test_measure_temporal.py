@@ -270,11 +270,18 @@ def test_arm_argv_distinct_workdirs_and_knobs(tmp_path):
 def test_run_one_arm_precreates_work_dir_and_runs_mock(tmp_path):
     """run_one_arm mkdir -p's the arm dir (runbook 1987: _ensure_work_dir
     has ZERO call sites — a missing dir fails every embedded question) and
-    runs through committed run_main in-process."""
+    runs through committed run_main in-process.
+
+    ``--skip-preflight`` rides in via ``base_argv`` (#4718): ``--mock``
+    selects the reader/judge and is not a dense-leg waiver, and this test's
+    subject is the DRIVER's directory/checkpoint contract, not the dense
+    leg — so it must not need sentence-transformers or the cached model.
+    """
     arm_dir = tmp_path / "arms" / "A-default"
     report = mt.run_one_arm(
         _arm("A-default"), data=MINI, arm_dir=arm_dir,
-        output=tmp_path / "reports", split="s", limit=2, mock=True)
+        output=tmp_path / "reports", split="s", limit=2, mock=True,
+        base_argv=("--skip-preflight",))
     assert arm_dir.is_dir()
     assert (arm_dir / "checkpoint.json").is_file()
     assert (tmp_path / "reports" / "A-default.json").is_file()
@@ -287,16 +294,22 @@ def test_run_one_arm_precreates_work_dir_and_runs_mock(tmp_path):
 def test_run_one_arm_propagates_stale_checkpoint(tmp_path):
     """The driver NEVER swallows CheckpointStaleError — a fingerprint-
     mismatched resume (Task-1 tr_top_k gate) must fail loudly (a silent
-    denominator blend across arms is the exact gap the measurement closes)."""
+    denominator blend across arms is the exact gap the measurement closes).
+
+    ``--skip-preflight`` via ``base_argv`` (#4718) for the same reason as the
+    test above: without it the FIRST call aborts at the dense-leg gate and
+    the ``CheckpointStaleError`` this test exists to pin is never reached.
+    """
     from tools.longmem_eval.run import CheckpointStaleError
     arm_dir = tmp_path / "arms"
     mt.run_one_arm(_arm("A-default"), data=MINI, arm_dir=arm_dir,
-                   output=tmp_path / "r1", split="s", limit=2, mock=True)
+                   output=tmp_path / "r1", split="s", limit=2, mock=True,
+                   base_argv=("--skip-preflight",))
     # resume the SAME checkpoint with tr_top_k 16 -> fingerprint mismatch
     with pytest.raises(CheckpointStaleError, match="tr_top_k"):
         mt.run_one_arm(_arm("tr_top_k16"), data=MINI, arm_dir=arm_dir,
                        output=tmp_path / "r2", split="s", limit=2,
-                       mock=True)
+                       mock=True, base_argv=("--skip-preflight",))
 
 
 # ── Task 3: verdict classification (2×2) ───────────────────────────────────

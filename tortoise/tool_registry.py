@@ -2,6 +2,21 @@
 
 One ToolDefinition per SDK operation. Both MCP and REST surfaces derive their
 registrations from this registry. HTTP_ALLOWED is derived — zero manual sync.
+
+⛔ SURFACE APPROVAL MANDATE (#4282, owner ruling)
+    This registry IS the MCP tool surface. You may NOT add, remove, or rename an
+    entry without human approval. The surface is the contract every agent and
+    customer integration is built on, so changing it materially affects customer
+    outcomes. GET APPROVAL FROM DANIEL FIRST — repo `AGENTS.md` → "USER QUESTIONS"
+    / "DECISION RELAY" — and record it on the row's `approval` in
+    `config/surface-manifest.yml` before the PR. The full procedure is in
+    `CONTRIBUTING.md` ("The MCP tool surface and public SDK methods cannot grow by
+    accident").
+
+    `tools/surface-guard.py` is a DRIFT control, NOT an approval gate: an expansion
+    that updates this registry and `config/surface-manifest.yml` consistently
+    PASSES it. It cannot tell an approved addition from an unapproved one —
+    Daniel's review is what carries the approval.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -221,7 +236,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "masking — another tenant's packs are never observable).",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="get_tenant_packs",  # pack_state helper, not an SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_state.get_tenant_packs)
     ),
     ToolDefinition(
         name="tortoise_pack_install",
@@ -235,7 +250,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "filesystem packs dir + tortoise pack CLI).",
         annotations=_rw(),  # C5 #2114 (re-review P2): MERGEs manifests/installs — a write
         http_policy=True,
-        sdk_method="upsert_tenant_manifest",  # pack_manifest_store helper
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_manifest_store.upsert_tenant_manifest)
         group="admin",
         hosted_only=True,
     ),
@@ -534,7 +549,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_delete_point",
         id="surface.delete_point",
         writes=True,
-        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.",
+        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. "
+                    "dry_run=True previews the blast radius (the point and every edge that "
+                    "would be removed) and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_point_wrapped",
@@ -543,7 +560,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_invalidate",
         id="surface.invalidate",
         writes=True,
-        description="Mark a Point outdated with a CORRECTS edge from the correcting Point.",
+        description="Mark a Point outdated with a CORRECTS edge from the correcting Point. "
+                    "dry_run=True previews the one-point transition + one edge and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="invalidate_point",
@@ -555,7 +573,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
                     "transfer_edges=True (default): full supersede — all edges move from "
                     "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer.",
+                    "+ CORRECTS edge only, no edge transfer. "
+                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="supersede",
@@ -579,7 +598,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         writes=True,
         description="Tombstone-retract a Point — status='retracted' (point stays "
                     "in graph, excluded from default surfaces). Terminal; cannot "
-                    "retract operators or already-terminal points.",
+                    "retract operators or already-terminal points. "
+                    "dry_run=True previews the status transition and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="retract_point",
@@ -593,7 +613,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "entity analysis; for a fast neighbor list use tortoise_list_topics.",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="entity_profile",  # navigation.entityProfile — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls navigation.entityProfile)
     ),
     ToolDefinition(
         name="tortoise_traverse",
@@ -795,7 +815,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Ask things like: 'where is the disagreement?' 'what supports claim X?'",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="analyze",  # analyze.analyze — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls analyze.analyze)
     ),
     # ── P1-3: Staleness Detection ─────────────────────────────────
     ToolDefinition(
@@ -1018,7 +1038,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_delete_entity",
         id="surface.delete_entity",
         writes=True,
-        description="Delete any entity by ID.",
+        description="Delete any entity by ID. DESTRUCTIVE — cannot be undone. "
+                    "dry_run=True previews the node(s) and every edge that would be "
+                    "removed and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_entity",
@@ -1051,7 +1073,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.delete",
         writes=True,
         description="Delete a Point or entity by id. DESTRUCTIVE — requires human "
-                    "confirmation. Cannot be undone.",
+                    "confirmation. Cannot be undone. dry_run=True previews the blast "
+                    "radius (which node resolves, and every edge that would go) and "
+                    "changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete",

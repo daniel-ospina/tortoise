@@ -61,8 +61,8 @@ API_HOST = "https://api.premiselabs.co"
 # ── #3501/#4054 BFF session seam ────────────────────────────────────────────
 # The dashboard's session is an OPAQUE handle in the HttpOnly `__Host-session`
 # cookie, validated SERVER-SIDE by `/api/session` against the D1 `sessions`
-# table. The retired JS-readable `sb-tortoise-auth-token` is ignored by the gate
-# (the app no longer reads any client-held token), so seeding it alone made the
+# table. The legacy JS-readable `sb-tortoise-auth-token` is ignored by the gate
+# (the dashboard gate no longer reads any client-held token), so seeding it alone made the
 # app answer 401 and bounce every suite to /auth. These specs therefore seed the
 # row the gate actually reads, in the D1 the `:8790` preview serves.
 SESSION_COOKIE = "__Host-session"
@@ -337,7 +337,7 @@ def _seed_local_session_cookie(page: Page, user_id: str,
     into the preview's local D1 and adds the cookie, so `/api/session` answers
     200 and the shell renders.
 
-    The retired JS-readable `sb-tortoise-auth-token` is STILL seeded on purpose:
+    The legacy JS-readable `sb-tortoise-auth-token` is STILL seeded on purpose:
     the app must ignore it, and several specs assert the legacy residue has no
     effect. Seeding it is what keeps those assertions meaningful.
 

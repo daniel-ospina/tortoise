@@ -608,7 +608,7 @@ def test_part_b_columns_are_not_unchecked() -> None:
     that flatly contradicts its own headline count and its destination table --
     left the suite green.
     """
-    from tools.bridge_table import DESTINATION, _registry_rows
+    from tools.bridge_table import CONTESTED_DESTINATION, DESTINATION, _registry_rows
 
     rows = {r["name"]: r for r in _registry_rows()}
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
@@ -651,15 +651,71 @@ def test_part_b_columns_are_not_unchecked() -> None:
             f"Part B says {name} binds {binding.strip()!r}, the registry says {want_bind!r}"
         )
         expected_dest = DESTINATION[name]
-        # EXACT, not a substring: the generator emits no marker, so appending one
-        # to every cell was green while the doc claimed things the map does not.
-        assert dest_cell == f"`{expected_dest}`", (
-            f"Part B says {name} -> {dest_cell!r}, the map says `{expected_dest}` exactly"
+        marker = " ⚠️" if name in CONTESTED_DESTINATION else ""
+        # EXACT, not a substring: the generator emits the marker for exactly the rows
+        # §D2c names and no others, so appending one to every cell is a red.
+        assert dest_cell == f"`{expected_dest}`{marker}", (
+            f"Part B says {name} -> {dest_cell!r}, the map plus §D2c says "
+            f"`{expected_dest}`{marker!r} exactly"
         )
         if expected_dest == "REMOVED":
             assert "does not resolve" not in dest_cell, (
                 f"Part B marks {name} as not resolving, but it is simply REMOVED"
             )
+
+
+def test_the_d2c_disclosure_names_the_sibling_wrong_destinations() -> None:
+    """§D2c must disclose the rows the sibling table records as WRONG — without editing them.
+
+    The destination map is owner-approved, so the generator may DISCLOSE a disagreement but
+    never change a value. This pins both halves: the rendered D2c rows equal the generator's
+    authored disclosure, the `⚠️` marker appears on exactly those Part B rows, and the map's
+    own value for them is unchanged (`refresh_confidence`) — so a "fix" that silently
+    re-pointed the map would red here even though the sibling would then agree.
+    """
+    from tools.bridge_table import CONTESTED_DESTINATION, DESTINATION
+
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    d2c = _section(doc, "#### D2c —")
+
+    listed = re.findall(r"^- \*\*`([a-z_]+)`\*\* — map says `([a-z_]+)`; the documented "
+                       r"reading is `([a-z_]+)`$", d2c, re.M)
+    parsed = {t: (d, r) for t, d, r in listed}
+    assert set(parsed) == set(CONTESTED_DESTINATION), (
+        "§D2c does not list exactly the disclosed rows: "
+        f"{sorted(set(parsed) ^ set(CONTESTED_DESTINATION))}"
+    )
+    for tool, (reading, _authority) in CONTESTED_DESTINATION.items():
+        # INDEPENDENTLY pinned: the reading must be the documented `update_knowledge` and
+        # must DIFFER from the map's value. Without this, setting the reading equal to the
+        # map value renders a self-contradictory "wrong destination" row green.
+        assert reading == "update_knowledge" and reading != DESTINATION[tool], (
+            f"the documented reading for {tool} must be `update_knowledge` and must differ "
+            f"from the map's {DESTINATION[tool]!r} — otherwise the disclosure is vacuous"
+        )
+        dest, rendered_reading = parsed[tool]
+        assert dest == DESTINATION[tool], (
+            f"§D2c says the map carries {dest} for {tool}; the map says {DESTINATION[tool]} "
+            "— the disclosure must not misquote the map it reports"
+        )
+        assert rendered_reading == reading, (
+            f"§D2c's documented reading for {tool} is {rendered_reading}, authored as {reading}"
+        )
+        # The map is owner-approved: the value must be the ORIGINAL one, not the reading.
+        assert DESTINATION[tool] == "refresh_confidence", (
+            f"the owner-approved destination for {tool} was MOVED to "
+            f"{DESTINATION[tool]!r} — the disagreement must be disclosed, never edited"
+        )
+    assert "owner-approved, so it is reported, not edited" in d2c, (
+        "§D2c's not-an-edit caveat is missing"
+    )
+
+    part_b = doc.split("## Part B")[1].split("## Part C")[0]
+    marked = set(re.findall(r"^\| \d+ \| `([a-z_]+)` \| [^\n]* ⚠️ \|$", part_b, re.M))
+    assert marked == set(CONTESTED_DESTINATION), (
+        "the `⚠️` marker does not appear on exactly the §D2c rows: "
+        f"{sorted(marked ^ set(CONTESTED_DESTINATION))}"
+    )
 
 
 def test_check_exits_nonzero_on_drift() -> None:

@@ -5,13 +5,15 @@ re-index repair oracle — rebuild_all (wipe + journal replay) DROPS
 session/meeting ``references`` edges (created indexer-side, never journaled)
 while DOC-UNIT edges SURVIVE (the journaled DocumentCreated event carries the
 ``source_url`` override → replay's #205 auto-wire re-creates the edge onto the
-real Source); no phantom Sources; Source/Event/Document nodes survive replay;
+real Source); no phantom Sources; Source nodes (including the D10 document
+Source) and Event nodes survive replay;
 a re-index run restores the dropped session/meeting edges (repair carve-out →
 ``updated``). The wipe-after-parse + line-tolerance ordering pins: parse ALL
 .jsonl into memory (torn TRAILING line skipped+warned, never raised) BEFORE
 the wipe — a torn tail rebuilds to the crash-free structural state. Restore
 drill: backup (corpus + events dir + db) → wipe → rebuild_all (line-tolerant)
-→ re-index → count(Source)==file_count, zero duplicate urls. Forward-only
+→ re-index → the full Source count (provenance Sources + D10 document
+Sources), zero duplicate urls. Forward-only
 release commitment: the old binary + new journal = silent record loss
 (documented; the old logic skips unknown record types).
 
@@ -92,9 +94,18 @@ Doc body.
 
 
 def _required_sweep(g) -> int:
+    """Durability sweep over ``:Source`` under the D10 model.
+
+    D10 (ONTOLOGY v3.15 §4.4): a document is a ``:Source`` carrying
+    ``documentKind`` and NEVER ``sourceKind``/``contentHash``, so the
+    ``contentHash`` completeness clause applies only to provenance Sources
+    (``sourceKind IS NOT NULL``). Every Source — provenance or document —
+    must still hold a non-empty url and an ingestedAt.
+    """
     return g.query(
-        "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.sourceKind IS NULL "
-        "OR s.contentHash IS NULL OR s.contentHash='' OR s.ingestedAt IS NULL "
+        "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.ingestedAt IS NULL "
+        "OR (s.sourceKind IS NOT NULL AND (s.contentHash IS NULL "
+        "    OR s.contentHash='')) "
         "RETURN count(s)").result_set[0][0]
 
 
@@ -122,8 +133,8 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
     SESSION + MEETING references edges are DROPPED (created indexer-side,
     never journaled), the DOC-UNIT references edge SURVIVES (the journaled
     DocumentCreated event's source_url override → replay's #205 auto-wire);
-    Source/Event/Document nodes all survive; no phantom Sources; REQUIRED
-    sweep clean."""
+    Source nodes (including the D10 document Source) all survive; no phantom
+    Sources; REQUIRED sweep clean."""
     events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     events = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
@@ -139,21 +150,31 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
         assert len(log.read_all()) >= 3
         proj = sdk._get_proj()
         counts = proj.rebuild_all(str(events_dir))  # noqa: F841
-        # node survival: 3 Sources, 2 Events (session+meeting), 1 Document
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        # node survival: 4 Sources (3 provenance corpus Sources + the D10
+        # document Source), 2 Events (session+meeting), 1 document Source
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 2
-        assert g.query("MATCH (d:Document) RETURN count(d)").result_set[0][0] == 1
+        # D10: the one document node is a :Source carrying documentKind
+        assert g.query(
+            "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+            "RETURN count(s)").result_set[0][0] == 1
         # the SPLIT: session+meeting references DROPPED (2), doc edge SURVIVES
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
                        ).result_set[0][0] == 1
         doc_edge = g.query(
-            "MATCH (s:Source)-[:references]->(d:Document) RETURN count(*)"
+            "MATCH (s:Source)-[:references]->(d:Source) "
+            "WHERE d.documentKind IS NOT NULL RETURN count(*)"
         ).result_set[0][0]
         assert doc_edge == 1
-        # no phantom Sources (url=doc_<rel> would be a phantom)
+        # no phantom Sources: every Source is EITHER a provenance Source
+        # (sourceKind) OR the D10 document Source (documentKind); a bare
+        # url=doc_<rel> node with neither role would be a phantom
         urls = [x[0] for x in g.query("MATCH (s:Source) RETURN s.url").result_set]
-        assert len(urls) == 3 and len(set(urls)) == 3
-        assert not any("doc_" in u.split("/")[-1] for u in urls)
+        assert len(urls) == 4 and len(set(urls)) == 4
+        assert g.query(
+            "MATCH (s:Source) WHERE s.sourceKind IS NULL "
+            "AND s.documentKind IS NULL RETURN count(s)"
+        ).result_set[0][0] == 0
         assert _required_sweep(g) == 0
         # re-index restores the dropped session/meeting edges (repair
         # carve-out → updated) — the re-index repair oracle
@@ -261,8 +282,8 @@ def test_s15_restore_drill_end_to_end(tmp_path):
     """T12 cycle-21 restore drill: index fixture → back up (1) the corpus
     files (source of truth), (2) the FULL events/ JSONL directory (sole
     replay source), (3) the db file → fresh graph → restore via rebuild_all
-    (line-tolerant) → re-index → count(Source)==file_count, zero duplicate
-    urls, edges restored."""
+    (line-tolerant) → re-index → the full Source count (3 provenance
+    Sources + the D10 document Source), zero duplicate urls, edges restored."""
     events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
@@ -285,17 +306,20 @@ def test_s15_restore_drill_end_to_end(tmp_path):
         proj = sdk2._get_proj()
         counts = proj.rebuild_all(str(backup / "events"))  # noqa: F841
         g = sdk2._get_proj().g
-        # nodes survive; session/meeting edges dropped per S13
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
-        assert g.query("MATCH (d:Document) RETURN count(d)").result_set[0][0] == 1
+        # nodes survive; session/meeting edges dropped per S13. D10: the
+        # 3-file corpus yields 3 provenance Sources + 1 document Source.
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
+        assert g.query(
+            "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+            "RETURN count(s)").result_set[0][0] == 1
         # re-index restores edges → convergence
         r2 = sdk2.index_directory(str(backup / "corpus"), extract_metadata=False)
         assert r2["updated"] >= 2, r2
         assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
                        ).result_set[0][0] == 3
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         urls = [x[0] for x in g.query("MATCH (s:Source) RETURN s.url").result_set]
-        assert len(urls) == len(set(urls)) == 3   # zero duplicate urls
+        assert len(urls) == len(set(urls)) == 4   # zero duplicate urls
         assert _required_sweep(g) == 0
     finally:
         sdk2.close()
@@ -362,8 +386,9 @@ def test_t12_old_logic_skips_unknown_record_types(tmp_path):
         proj = sdk._get_proj()
         counts = proj.rebuild_all(str(events_dir))   # must NOT raise  # noqa: F841
         g = sdk._get_proj().g
-        # known kinds replayed; the unknown kind skipped silently
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
+        # known kinds replayed; the unknown kind skipped silently. D10: the
+        # 3-file corpus yields 3 provenance Sources + 1 document Source.
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
         assert _required_sweep(g) == 0
     finally:
         sdk.close()

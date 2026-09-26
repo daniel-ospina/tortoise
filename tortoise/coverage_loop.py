@@ -300,14 +300,18 @@ def facet_census(proj: Any, query: str, *,
 
 
 def _session_of(hit: dict, session_key: Callable[[dict], str] | None = None) -> str:
-    """A hit's session identity — mirrors ``retrieval.dedup_pool``'s bucket
-    key (session_id when present, else the lme_session_index) so the loop's
-    window census and the pool's dedup never disagree on what a session is.
+    """A hit's session identity — delegates to the pool's AUTHORITY
+    (``retrieval.session_key_of``: ``session_id`` when present, else the
+    ``idx:{lme_session_index}`` bucket) so the loop's window census and the
+    pool's dedup never disagree on what a session is. The import is
+    FUNCTION-LOCAL: ``coverage_loop`` stays a stdlib-only leaf at import
+    time and the ``retrieval → coverage_loop`` dependency stays one-way
+    (no cycle under either import order).
     """
     if session_key is not None:
         return session_key(hit)
-    return (hit.get("session_id")
-            or f"idx:{hit.get('lme_session_index', -1)}")
+    from tortoise.retrieval import session_key_of
+    return session_key_of(hit)
 
 
 def coverage_gap(facets: list[LoopFacet], pool: list[dict], *,

@@ -40,6 +40,7 @@
 
 import { type Env, SESSION_COOKIE, getSession, readCookie } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns, getAccessTokenForSession } from "../_shared/auth/token";
+import { ADMIN_CSP } from "../_shared/security-headers";
 
 const AUTH_PATH = "/auth";
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
@@ -173,7 +174,17 @@ async function serveShell(env: Env, request: Request): Promise<Response> {
   // `/admin/`. Returning that verbatim makes the canonical console URL a hop;
   // fall through and serve the shell directly instead.
   const assetRes = await env.ASSETS.fetch(request);
-  if (assetRes.ok) return assetRes;
+  if (assetRes.ok) {
+    // #3525: this is still a FUNCTION response, so `_headers` does not apply to
+    // it. Only the HTML shell asset needs the policy; bundle/asset responses
+    // (JS, CSS) ignore CSP.
+    if ((assetRes.headers.get("content-type") ?? "").includes("text/html")) {
+      const assetHeaders = new Headers(assetRes.headers);
+      assetHeaders.set("Content-Security-Policy", ADMIN_CSP);
+      return new Response(assetRes.body, { status: assetRes.status, headers: assetHeaders });
+    }
+    return assetRes;
+  }
 
   // Client route → serve the shell. #1864: every admin-shell response carries
   // X-Robots-Tag: noindex, nofollow (the built SPA index.html also has
@@ -184,7 +195,7 @@ async function serveShell(env: Env, request: Request): Promise<Response> {
   if (res.status === 200 && (res.headers.get("content-type") ?? "").includes("text/html")) {
     return new Response(res.body, {
       status: 200,
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...NOINDEX, ...HSTS },
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": ADMIN_CSP, ...NOINDEX, ...HSTS },
     });
   }
   // The SPA build did not ship. Say so (503), never serve an empty 200 shell —
@@ -244,7 +255,7 @@ a{color:#06b6d4}</style></head>
 <p><a href="https://tortoise.premiselabs.co/blog">← Back to the blog</a></p></div></body></html>`;
   return new Response(shell, {
     status: 403,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...HSTS },
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": ADMIN_CSP, ...HSTS },
   });
 }
 

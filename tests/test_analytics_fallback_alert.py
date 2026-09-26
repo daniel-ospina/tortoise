@@ -1249,8 +1249,17 @@ def test_t23_a_transient_resolve_failure_does_not_spend_the_probe(
     assert closed == [], closed
 
     # ── the next delivered write RETRIES and resolves the stale issue ──
+    before_retry = calls["n"]
     assert ha._track_analytics_event("org-23", "e") == "supabase"
-    assert calls["n"] == 2, calls
+    # Alias-aware resolve (#2844): the incident is platform-scoped, so BOTH
+    # spellings of its sentinel (`_.json` and the driver's legacy
+    # `global.json`) are read, and the SURVIVOR is then re-read for the
+    # compare-and-delete — 3 reads here, vs main's single-key 1. Pinned as a
+    # DELTA so the transient read that failed above is never folded into a
+    # magic absolute. RED mutation: read only the canonical spelling
+    # (`PLATFORM_ALIASES = ("_",)`) or drop the compare-and-delete re-read →
+    # the delta is 2 and this reds.
+    assert calls["n"] - before_retry == 3, calls
     assert len(closed) == 1, (
         "a transient failure must not retire the resolve: the retry must "
         "close the stale incident")

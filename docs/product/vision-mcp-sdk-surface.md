@@ -84,8 +84,10 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 contradiction with the bridge table, which describes the **26-tool target**: `run_onboarding` was
 a proposed merge of seven registry tools, the 26 drops it, so those seven have no destination and
 are correctly `REMOVED`. **They are one of the genuine retirements** — `check_connection` replaces
-the proposed entry point and absorbs none of them. (An earlier draft of this footnote claimed
-`run_onboarding` was never in the approved list; that was false and is corrected here.)
+the proposed entry point and absorbs none of them. Two of the seven were **tenant-visible reads**
+(`onboarding_state`, `onboarding_github_status` — both `_ro()`, `http_policy=True`); they are
+**rehomed to the tenancy block (SDK/REST)**, so the capability survives while the MCP surface
+loses both reads.
 
 **`98 − 26 = 72 retired` is wrong** and circulated in earlier drafts: 14 retire, 2 are tenancy-only,
 1 is absorbed into a builder-only SDK method that is not on the MCP, and 81 are
@@ -127,29 +129,31 @@ from the capture 409, because REST is unreachable from an MCP client. It is the 
 exception to "tenancy is not on the MCP" — its SDK method is the builder-only `update_memory_graph`,
 and it needs a `team:manage`-scoped key, so it is **not** a universal self-heal path.
 
-## ⛔ Cross-artifact tensions — do not let the target silently close an owner-open item
+## ⛔ Cross-artifact tensions — an owner-open item is closed by the owner, not by a draft
 
-`docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carried five items left **open**; **one of them — `graph_set_recording` — was ruled on 2026-09-21 and is now resolved**, leaving **four** open: `packs_list` and `pack_install` marked literally **"OPEN — owner decision"**,
-`run_onboarding` marked **"OPEN — decision"**, and `manage_deployment` marked **"placement OPEN"**.
-The beta target has already made a call on all four. **A draft
-making a call does not resolve an owner-open item**, and no lane may treat it as resolved merely
-because the bridge table renders a destination. Each needs the owner, or an explicit statement that
-the beta supersedes it.
+`docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carried five items
+left **open**. **All five are now settled by an owner ruling:** `graph_set_recording` on
+2026-09-21, and the remaining four on **2026-09-22** (both recorded on **#4282**). The beta target
+had already made a call on the four; the ruling is what made it the surface, and the approved doc
+is updated to match. **A draft making a call does not resolve an owner-open item — an owner ruling
+does.**
+
+The rule the four applied: **containers may be on the MCP; account tenancy is not.** A container
+is fine on the agent surface when it is operator-only and never handed to a tenant
+(`index_files`). What is not fine is an operator-only container whose members live on the
+customer-grantable surface — merging those either loses a tenant-visible capability or smuggles
+an exemption into the read/write guarantee.
 
 | Owner-open item (in the approved doc) | What the beta target does | Status |
 |---|---|---|
 | `graph_set_recording` — *keep it as a 24th tool, or accept the loss?* Dropping it leaves an agent that hits a 409 with **no recovery path inside MCP** (REST is unreachable from an MCP client). | **RESOLVED by owner ruling 2026-09-21: KEPT.** Now a 26th MCP tool; the SDK's own per-field `graph_set_recording` stays discarded and the override folds into `update_memory_graph`, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ resolved — the count is 26** |
-| `packs_list` — *does a tenant need to list its own packs?* Folding it into an operator-only tool **removes a tenant-visible read**. | Absorbed under the tenancy block, which is not on the MCP. | **Unresolved.** |
-| `pack_install` — same question for a **write** (`hosted_only`, `http_policy=True`). | Absorbed under the tenancy block. | **Unresolved.** |
-| `run_onboarding` — it absorbs two read-only tenant-served tools, so it is both read and write on a customer-grantable surface, which the read/write principle forbids. | Dropped for `check_connection`. | **Unresolved.** |
-
-Also on the approved doc's plate: **`manage_deployment` was marked "placement OPEN"**, and the beta
-resolves it by moving the whole block to a tenancy surface that is not on the MCP.
+| `manage_deployment` — *placement OPEN* (`org_create`, `packs_list`, `pack_install`). | **RESOLVED 2026-09-22: OFF the MCP.** `org_create` is account tenancy (SDK/REST/console); the two pack members are SDK/REST. Putting account tenancy on the MCP would contradict the recorded tenancy ruling, so no MCP tool carries it. | **✅ resolved — not on the MCP** |
+| `packs_list` — *does a tenant need to list its own packs?* Folding it into an operator-only tool **removes a tenant-visible read**. | **RESOLVED 2026-09-22: SDK/REST only, POST-BETA.** The tenant read is preserved on the SDK/REST pack surface; no competitor exposes pack installation on its agent API, so the MCP does not carry it. Per-graph curation is tracked by **#4663**. | **✅ resolved — SDK/REST post-beta (#4663)** |
+| `pack_install` — same question for a **write** (`hosted_only`, `http_policy=True`). | **RESOLVED 2026-09-22: SDK/REST only, POST-BETA** — the tenant-visible write is preserved there, never lost to an operator-only tool. Per-graph curation is tracked by **#4663**. | **✅ resolved — SDK/REST post-beta (#4663)** |
+| `run_onboarding` — it absorbs two read-only tenant-served tools, so it is both read and write on a customer-grantable surface, which the read/write principle forbids. | **RESOLVED 2026-09-22: dropped for `check_connection`.** Its two tenant-visible reads (`onboarding_state`, `onboarding_github_status`) are **rehomed to the tenancy block (SDK/REST)**; the MCP surface therefore loses both reads **by design**, not by accident. | **✅ resolved — dropped for `check_connection`; two reads rehomed** |
 
 **None of this blocks the docs.** It blocks Phase 1.2 (cutting the surface manifest) and Phase 3.2
-(removing anything): until these four are answered, the target is a **proposal**, and the frozen
-registry is what exists. File them as questions to the owner — with the consequence of each already
-stated above, which is the form they are already in.
+(removing anything). With all five settled, those phases are unblocked on this axis.
 
 ## Implementation plan
 
@@ -174,10 +178,11 @@ handler twice.
 | **1.1** | `tortoise/__all__` listing the 40 approved methods | 0.4 |
 | **1.2** | The approved-surface manifest, cut **once** from that declaration, frozen | 1.1 |
 | **1.3** | The gate: unfiltered `pull_request` check, **fail-closed** on any add/remove/rename | 1.2 |
-| **1.4** | **#3883** — retired names must **WARN** when called, naming the replacement | — |
+| **1.4** | **#3883** — a retired **MCP tool** name must **WARN** when called, naming the replacement. This is the MCP half only; the SDK retires to a failing name (2.5). | — |
 
-**1.4 gates every removal.** Nothing is removed until a caller of a retired name gets a warning
-that names its replacement.
+**1.4 gates every MCP removal.** Nothing is removed from the MCP surface until a caller of a
+retired tool name gets a warning that names its replacement. The SDK does **not** inherit this
+mechanism — see 2.5.
 
 ### Phase 2 — the SDK
 
@@ -187,7 +192,7 @@ that names its replacement.
 | **2.2** | The 4 merges (`create_entity`, `link_entities`, `delete_knowledge`, `update_knowledge`) dispatching internally | 2.1 |
 | **2.3** | `update_memory_graph` — **the rename path that is currently missing** | 2.1 |
 | **2.4** | The Contracts section enforced: pagination cursors, truncation notice, typed errors | 2.1 |
-| **2.5** | 146 retired names → warning aliases (`150 - 4` reused verbatim) | 1.4 |
+| **2.5** | The retired **SDK** names → a **failing name that names its replacement**. **No alias layer, no warning shim, no telemetry** (#3836 (c) ruling): `tortoise-graph` is public on PyPI with no users, so there is no caller to protect and no call telemetry to collect. The earlier “146 → warning aliases” plan is WITHDRAWN. | 2.1 |
 | **2.6** | `check_connection` (the `check_key` + `verify_connection` collapse) | — |
 
 ### Phase 3 — the MCP server

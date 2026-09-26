@@ -711,9 +711,11 @@ class TestProbeSetupBudget:
     it is connect + `_ensure_indexes()` and, on a large graph, an index build
     over the whole graph — so a fully-reachable big graph timed out during
     setup and was reported ``db.ok=false`` / ``status=degraded`` /
-    ``graph_size=0``: the onboarding gate lie. The platform liveness gate
+    ``graph_size=0``: the onboarding gate lie. A REQUEST-PATH liveness gate
     keeps the tight bound (a fast-degrade gate, #1384); the on-demand MCP
-    health tool gets an explicit setup allowance.
+    health tool gets an explicit setup allowance, and so does a BACKGROUND
+    liveness refresher whose request path reads an in-memory snapshot (#2988/
+    #3243 — see ``monitoring.PROBE_SETUP_TIMEOUT``).
     """
 
     def test_platform_liveness_budget_still_times_out_on_a_slow_cold_start(
@@ -730,16 +732,19 @@ class TestProbeSetupBudget:
         assert sdk.query_calls == 0
 
     def test_metrics_default_shape_forwards_no_allowance(self, monkeypatch):
-        """#3143 review: the platform liveness surface that reaches the probe
+        """#3143 review: the request-path liveness surface that reaches the probe
         through ``metrics()`` (the standalone ``serve_health`` server) passes NO
-        allowance, so the #1384 fast-degrade contract holds. The two surfaces
-        that call ``probe_db`` DIRECTLY are pinned in their own files —
-        selfhost in ``tests/test_selfhost.py``, hosted ``_probe_db`` in
-        ``tests/test_hosted_api.py``. A refactor that had ``metrics()`` resolve
-        the allowance itself (the natural 'make all callers benefit' change)
-        would give that surface a multi-second cold-start; this pins the
-        explicit ``setup_timeout=None`` it forwards AND the resulting degraded
-        status."""
+        allowance, so the #1384 fast-degrade contract holds. A REQUEST-PATH
+        liveness probe cannot absorb the allowance as gate latency; the callers
+        that DO pass it (the MCP tool, and the selfhost liveness refresher — a
+        background refresher whose request path reads an in-memory snapshot,
+        #2988/#3243) are pinned in their own files: ``tests/test_selfhost.py``
+        and ``tests/test_selfhost_health_probe_executor.py`` here, hosted
+        ``_probe_db``/``_READY_PROBE`` in ``tests/test_hosted_api.py``. A
+        refactor that had ``metrics()`` resolve the allowance itself (the
+        natural 'make all callers benefit' change) would give this surface a
+        multi-second cold-start; this pins the explicit ``setup_timeout=None``
+        it forwards AND the resulting degraded status."""
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
         forwarded = {}
         real_probe_db = monitoring.probe_db

@@ -240,6 +240,30 @@ DISCRIMINATORS = {
 
 VALID_DEST = set(TARGET_MCP) | {"REMOVED"}
 
+# Destinations the SIBLING SDK rename table (`docs/product/sdk-rename-table.md` §C3b, and
+# its C6 fold record) records as WRONG. `tools/sdk_rename_table.py` reconciles the two
+# artifacts and determined that beta's row — and the owner-approved MCP list it rests on —
+# puts these two on `update_knowledge`, not `refresh_confidence`.
+#
+# The destination map below is OWNER-APPROVED, so the disagreement is DISCLOSED on the row
+# and collected in §D2c — it is never edited here. That is the same rule D2 already states:
+# changing an owner-approved destination is not a build step.
+# tool -> (the reading the sibling carries, the authority for it).
+CONTESTED_DESTINATION: dict[str, tuple[str, str]] = {
+    "tortoise_promote_point": (
+        "update_knowledge",
+        "The owner-approved MCP list absorbs `promote_point` into `revise_knowledge`, whose "
+        "beta successor is `update_knowledge`; beta names the new status a FIELD on "
+        "`update_knowledge`, and promote's incident-operator cascade and approval gate ride "
+        "with it — `refresh_confidence` recomputes confidence and covers neither.",
+    ),
+    "tortoise_set_point_baseline": (
+        "update_knowledge",
+        "Same approved absorption as `tortoise_promote_point`; beta names the starting belief "
+        "a FIELD on `update_knowledge`, not a separate verb.",
+    ),
+}
+
 
 def _registry_rows() -> list[dict]:
     """Every ToolDefinition in the registry, with its SOURCE line number.
@@ -588,6 +612,16 @@ def _validate(rows: list[dict]) -> list[str]:
         # the registry, never on the target not having been built yet.
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", dest[len(ns):]):
             errs.append(f"NAMESPACED destination is not a method name for {name}: {dest!r}")
+
+    # A disclosure that has rotted is worse than none: it would name a row that no longer
+    # exists, or a "documented reading" that is not a destination at all.
+    for tool, (reading, _authority) in sorted(CONTESTED_DESTINATION.items()):
+        if tool not in DESTINATION:
+            errs.append(f"STALE contested-destination key (not in the map): {tool}")
+        if reading not in VALID_DEST and not any(reading.startswith(n) for n in NAMESPACES):
+            errs.append(
+                f"UNRECOGNISED contested reading for {tool}: {reading!r} is not a target"
+            )
     return errs
 
 
@@ -710,9 +744,12 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         bind = f"`{r['sdk_method']}`" if r["sdk_method"] else "**none declared**"
         if r["sdk_method"] and not r["resolves"]:
             bind += " ⚠️ **does not resolve**"
+        # A `⚠️` means the sibling SDK rename table records this destination as WRONG.
+        # The map is owner-approved, so the marker discloses; it never edits the value.
+        flag = " ⚠️" if r["name"] in CONTESTED_DESTINATION else ""
         out.append(
             f"| {i} | `{r['name']}` | {src} | {bind} | "
-            f"{'yes' if r['read_only'] else 'no'} | `{DESTINATION[r['name']]}` |"
+            f"{'yes' if r['read_only'] else 'no'} | `{DESTINATION[r['name']]}`{flag} |"
         )
 
     out += [
@@ -723,6 +760,11 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "",
         "Listed so a reader can tell them apart from the live rows that share their destination: "
         + ", ".join(f"`{n}`" for n in retired_names),
+        "",
+        "**A `⚠️` after a destination means the sibling SDK rename table**",
+        "**(`docs/product/sdk-rename-table.md` §C3b, and its C6 fold record) records that**",
+        "**destination as WRONG.** The map is owner-approved, so it is NOT edited here; §D2c states",
+        "the documented reading and the authority for it.",
         "",
         "### Destination counts",
         "",
@@ -859,6 +901,27 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
             out.append(f"  > {f['quote']}")
     else:
         out.append("None — every row's destination is named in its citation's first clause.")
+
+    out += [
+        "",
+        "#### D2c — destinations the sibling SDK rename table records as WRONG",
+        "",
+        "`docs/product/sdk-rename-table.md` reconciles the same surface this file maps, and its",
+        "§C3b finding plus its C6 fold record name a different destination for the rows below.",
+        "**The destination map here is owner-approved, so it is reported, not edited** — the same",
+        "rule D2 states. Each row's documented reading and the authority for it are shown, so the",
+        "disagreement is visible at the row instead of only in the sibling artifact.",
+        "",
+    ]
+    if CONTESTED_DESTINATION:
+        for tool, (reading, authority) in sorted(CONTESTED_DESTINATION.items()):
+            out.append(
+                f"- **`{tool}`** — map says `{DESTINATION[tool]}`; the documented reading is "
+                f"`{reading}`"
+            )
+            out.append(f"  > {authority}")
+    else:
+        out.append("None — no destination is recorded as wrong in the sibling artifact.")
 
     out += [
         "",

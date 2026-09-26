@@ -71,6 +71,14 @@ family_rank:
 # cannot pass silently. To change the surface you update this file and the
 # manifest together, in a PR that carries the owner's approval.
 #
+# THE ONE VALUE THAT IS NOT DERIVED. Everything else in this file FEEDS the
+# derivation (the keyword set, the ranks, the token table); this is a FROZEN
+# EXPECTATION the derivation's output is compared against. The check REQUIRES it
+# and requires one entry per keyword: an empty or partial `baseline_counts` used
+# to short-circuit its own comparison (`if baseline and ...`), so deleting the
+# table turned the distribution check OFF while every gate stayed green. A change
+# to the keyword distribution therefore requires editing the registry AND
+# recording the new expectation here.
 # #3849: `find` 7 -> 6 — `tortoise_ask` was the removed row (its name token
 # `ask` derives `find`), so the removal moves this count and nothing else.
 baseline_counts:

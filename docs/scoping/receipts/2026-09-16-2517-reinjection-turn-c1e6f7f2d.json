@@ -1,0 +1,1497 @@
+{
+ "acknowledged_limitations": [
+  "SAMPLE SIZE: n=10 questions per sample, 20 total, each an independent 3-arm run \u2014 NOT the full 71-question multi-session tail of the s[150:250] slice.",
+  "chunk_evidence_recall@k is null under --retrieval-only --mock, so the raw-chunk reader surface is UNMEASURED (unchanged from the previous receipt).",
+  "--retrieval-only --mock exits rc=1 in _print_summary (pre-existing bug, filed separately); the report JSON is written before that.",
+  "CROSS-CAMPAIGN REPRODUCIBILITY, MEASURED PRECISELY. Against the superseded turn-grain receipt, the OFF arm reproduces on ALL SEVEN per-question graded metric dicts (session_recall@k, evidence_recall@k, reader_surface@k, reader_evidence@k, turn_recall@k, evidence_retrieved@k, chunk_evidence_recall@k) AND pool_size on 20/20 questions - but its full ordered ranked_ids list differs on 4/20 (S1 2311e44b, a11281a2, 1f2b8d4f; S2 4adc0475). Two of the four differ inside the top-5: 2311e44b is a PURE REORDER of the same five ids and a11281a2 is a MEMBERSHIP change (s37:t10 in, s23:t2 out); the other two first differ below the top-5 (indices 6 and 15). So 'byte-identical' holds at the METRIC level only, never at the ranking level, and the base retrieval RANKING is itself unstable across campaigns. For the injected arms the graded metrics differ on exactly three (arm, question) cells: inj_only and on on S2 3c1045c8 (each session_recall@5 and evidence_recall@5 0.5 -> 1.0), and on on S1 4f54b7c9 (reader_surface@5 1.0 -> 0.5, aggregate 0.95 -> 0.90). The residual is therefore NOT confined to the injected arm - it is harness-side and affects OFF too.",
+  "REPRODUCIBILITY PROBE ON THE DIVERGENT CELL (S2 3c1045c8 \u2014 the divergence that MOVES A GRADED METRIC in the direction the work claims; it is TWO of the three divergent (arm, question) cells, and the third, on/S1 4f54b7c9, is a reader_surface@5 regression that is NOT separately diagnosed here, so the 'not a code effect' attribution below applies to 3c1045c8 only). The divergence is a SEED-ORDER difference, not a code effect: the two campaigns' seeded_sessions lists hold the SAME 5 sessions in a different order (positions 2/3 swapped), and the seed order is first-seen pool rank, so the base pool's ORDER at the C4 insertion point differed even though the graded metrics are identical. THREE single-question artifacts were produced at this revision: TWO barrier-on runs and ONE barrier-off re-run; all three give session_recall@5 1.0, and the barrier-off run's ranked_ids are byte-identical to both barrier-on runs. An AST-level (docstrings stripped) comparison of session_reinjection.py between the two revisions confirms the barrier is the ONLY executable change IN THAT FILE (the same commit also changed the test files and run.py's argparse help strings, none of which the arms execute), so the barrier is result-neutral and the divergence is harness-side (the eval's pre-sort pool order is not pinned).",
+  "FULL-SAMPLE REPEATABILITY AT THIS REVISION (evidence, not a caveat). The whole S2 injection-only arm was re-run TWICE independently (fresh graphs, same cohort, same flags, seedless checkpoints): the @5 metrics (session_recall@5, and therefore recall_all@5 / evidence_recall@5) are identical on 10/10 questions in BOTH repeats, and the second repeat is byte-identical in the top-5 ORDER on all 10. The first repeat changes the top-5 ORDER on 2 questions (f35224e0, 60036106) with the id set unchanged - f35224e0 moves 4 of the 5 indices, 60036106 moves 2. The DEEPER movement is not uniform and is NOT part of the repeatability claim: IN REPEAT 1, f35224e0 also moves evidence_recall@20 and turn_recall@20 (0.5 -> 1.0 each, versus the main arm) and reader_evidence@20 and evidence_retrieved@20 with them, while REPEAT 2 is identical to the main arm at @20 on all 10 questions. context_tokens moves in repeat 1 on f35224e0 (7064 -> 7009) and 60036106 (7986 -> 8000), and in repeat 2 on 7405e8b1 (7997 -> 7984). The no-change guarantee is @5 ONLY.",
+  "ARM ISOLATION IS A PER-QUESTION WIPE, NOT ONE DB PER ARM. The docker:// URI's path is the BASE graph name, which the eval's per-question namespace (team_default__default__<qid>) overrides \u2014 so the three arms share graph NAMES on the :6399 server and the runner script's GRAPH.DELETE <dbbase> is a no-op. Effective isolation comes from run.py's gated per-question wipe (MATCH (n) WHERE n.lme_question_id = $q DETACH DELETE n) followed by a full re-ingest; ingest_latency_ms of 27-84 s per question per arm confirms the re-ingest actually happened (no cache hit). A refused wipe (live/stale run marker) would leak the previous arm's state; no marker file was present in the arm work dirs, so the wipe ran. Recorded because the superseded receipt claims 'ONE DB PER ARM', which is not what the mechanism does.",
+  "PROCESS-LEVEL LATENCY IS NOT A COST PROXY IN THIS CAMPAIGN. The machine was under fleet load: OFF-arm retrieval latency is 110.2 ms (S1) / 90.8 ms (S2) here versus 69.4 / 57.7 ms in the superseded receipt on IDENTICAL code. Use the ISOLATED C4 block cost (session_reinjection_stats.latency_ms = fetch + annotate + merge only) for the arm's cost: 6.4-9.0 ms mean per arm, worst single question 26.0 ms.",
+  "The dedicated :6399 instance was used because the shared :6379 instance was at its 512 MB maxmemory cap (writes failed) and :6380 was concurrently in use by another test lane (its logs show an active defrag on foreign graphs). :6380 and :6379 runs aborted with ingest OutOfMemoryError / health-check failures; their reports are NOT used.",
+  "Turn points have no per-turn index property, so the fetch's deterministic order for turns is coalesce(lme_chunk_index,-1) = -1 for every turn, then p.id LEXICOGRAPHIC (t0, t1, t10, t11, ... t2). The injected turn SET is therefore deterministic but not chronological. Unchanged from the shipped order clause; recorded.",
+  "The injected turn points are NOT clawed back by the C5 chunk re-cap (dedup_pool counts only is_raw_chunk hits), so the total budget is the only injection-volume guard at the default grain."
+ ],
+ "arm_flags": {
+  "inj_only": "--session-reinjection --no-session-reinjection-guard",
+  "off": "(none)",
+  "on": "--session-reinjection"
+ },
+ "branch": "fix/2513-retrieval-evidence",
+ "code_under_test": {
+  "budgets_after": {
+   "per_session": 3,
+   "total": 10,
+   "total_cap_hit_reachable": true
+  },
+  "budgets_before": {
+   "per_session": 3,
+   "total": 20,
+   "total_cap_hit_reachable": false
+  },
+  "default_chunk_kind_after": "event (product turn kind) + turn shape",
+  "default_chunk_kind_before": "session-transcript (eval-only kind)",
+  "fetch_scope_after": "MATCH (seed:Point) WHERE seed.id IN $seed_ids MATCH (s:Session)-[:CONTAINS]->(seed) WITH DISTINCT s MATCH (s)-[:CONTAINS]->(p:Point) WHERE coalesce(p.pointKind,'') = $chunk_kind AND coalesce(p.is_episodic,false) = true AND coalesce(p.content,'') STARTS WITH '[' AND NOT p.id IN $pool_ids",
+  "fetch_scope_before": "MATCH (p:Point) WHERE p.session_id IN $sids AND coalesce(p.pointKind,'') = $chunk_kind AND p.lme_question_id = $q AND NOT p.id IN $pool_ids",
+  "plan_barrier_after": "WITH DISTINCT s between the seed->Session traverse and the Session->Point traverse (code-review cycle-1 fix, c1e6f7f2d). GRAPH.EXPLAIN before: Node By Label Scan (p:Point) with seed.id IN $seed_ids applied LAST; after: the seed list is the driver. Result-neutral (DISTINCT only dedups a shared seed's session fan-out, which the row loop already deduped by id) and confirmed by re-measurement."
+ },
+ "command": "TORTOISE_DB_URI='docker://:falkordb@localhost:6399/<db>' .venv/bin/python -m tools.longmem_eval.run --data <cohort>.json --split s --retrieval-only --mock --limit 10 --output <arm>.json --checkpoint <arm>.cp.json [arm flags]",
+ "derivation": {
+  "census": "sum over fired questions of session_reinjection_stats",
+  "chunk_evidence_recall@5": "report.retrieval aggregate (null under --retrieval-only --mock)",
+  "context_tokens": "report.retrieval.context_tokens_mean",
+  "evidence_recall@5": "per-question mean of outcome evidence_recall@k['5'] (denominator = questions with a non-null value)",
+  "reader_surface@5": "per-question mean of outcome reader_surface@k['5'] (verified EQUAL to the report.retrieval aggregate in all six arms, so the two provenances coincide here)",
+  "recall_all@5": "mean over questions of (session_recall@5 == 1.0)",
+  "retrieval_latency_ms_mean_p95": "outcome retrieval_latency_ms, mean and P95",
+  "session_recall@5": "per-question mean of outcome session_recall@k['5']"
+ },
+ "epic": 2513,
+ "falsifier_verdicts": {
+  "1_flip_census": {
+   "measured": {
+    "S1_off_vs_inj_only_top5_identical_questions": "7/10",
+    "S2_off_vs_inj_only_top5_identical_questions": "10/10",
+    "entering_items_that_are_injected": 0,
+    "entering_items_total_pooled": 2,
+    "recall_all@5_off_inj_only_on": {
+     "S1": [
+      0.6,
+      0.7,
+      0.9
+     ],
+     "S2": [
+      0.7,
+      0.7,
+      0.9
+     ],
+     "pooled": [
+      0.65,
+      0.7,
+      0.9
+     ]
+    }
+   },
+   "verdict": "MECHANISM SURVIVES; BYTE-IDENTITY DOES NOT. At turn grain the guard-ablated top-5 is not byte-identical to OFF (S1 7/10 questions identical, S2 10/10). EVERY id that enters the top-5 is a BASE item already present in OFF's ranked pool (2/2 membership changes; the remaining diffs are pure reorders) - ZERO injected items enter hits[:5] without the guard. So the injected items are the TRIGGER (they fire the guard), not the entering items. The ablated arm's own metric contribution is sample-dependent: inj_only is +0.10 recall_all@5 on S1 and 0.00 on S2, +0.05 pooled, so a single-sample reading would credit the guard with a swing that is not there. This is also the falsifier most exposed to the harness residual recorded under acknowledged_limitations: the S2 question 3c1045c8 does not reproduce across campaigns because its seed ORDER differs. (In THIS receipt the 3 OFF-vs-inj_only top-5 differences are all S1; 3c1045c8 was one of the 2 S2 differences in the SUPERSEDED campaign.)"
+  },
+  "2_surface_census": {
+   "measured": {
+    "S1_reader_surface@5": [
+     1.0,
+     0.95,
+     0.9
+    ],
+    "S2_reader_surface@5": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "chunk_evidence_recall@5": "null in all arms (--retrieval-only --mock)",
+    "pooled_evidence_recall@5_off_inj_only_on": [
+     0.4667,
+     0.4667,
+     0.5167
+    ],
+    "pooled_reader_surface@5": [
+     1.0,
+     0.975,
+     0.95
+    ],
+    "reader_surface@5_provenance": "per-question mean of outcome reader_surface@k['5']; it COINCIDES with the report.retrieval aggregate in all six arms (checked), so the two provenances do not differ here"
+   },
+   "verdict": "PARTIALLY FALSIFIED (the reader surface does not rise, and the evidence metric moves only through the guard). evidence_recall@5 is NOT flat on this substrate (OFF 0.4667 pooled) and it RISES to 0.5167 with the guard ON while staying at the OFF level (0.4667) with the guard ablated - so the metric the feature exists to move moves, but the movement is the session-diverse REORDER's, not the injected turns'. reader_surface@5 is 1.0 in OFF and falls to 0.975 in the injection-only arm and 0.95 with the guard: a net REGRESSION (on S1, two questions lose half their marked items from the reader window). The flat-0.00 evidence_recall@5 triple of the 2026-09-15 receipt (\u2026reinjection-619435301.json, sample B: [0.0, 0.0, 0.0]) was a substrate artefact, not a property of the arm - the superseded turn-grain receipt already reported 0.4667/0.4417/0.4917."
+  },
+  "3_cost_guard": {
+   "measured": {
+    "c4_block_ms_max_per_arm": {
+     "S1_inj_only": 25.59,
+     "S1_on": 17.5,
+     "S2_inj_only": 19.21,
+     "S2_on": 26.01
+    },
+    "c4_block_ms_mean_S1": {
+     "inj_only": 6.94,
+     "on": 6.4
+    },
+    "c4_block_ms_mean_S2": {
+     "inj_only": 9.04,
+     "on": 6.71
+    },
+    "c4_block_ms_percentile_note": "no p95 is quoted: with n=10 per arm a p95 is not resolvable and any single figure depends on the interpolation convention. The MAX is reported instead.",
+    "c4_block_ms_worst_single_question": 26.01,
+    "pooled_context_tokens_mean_off_inj_only_on": [
+     7784.2,
+     7804.9,
+     7802.8
+    ],
+    "process_latency_ms_off_S1_S2": [
+     110.207,
+     90.84
+    ],
+    "process_latency_ms_off_S1_S2_superseded": [
+     69.422,
+     57.676
+    ]
+   },
+   "verdict": "NOT FALSIFIED on volume; process-level latency is NOT a valid cost proxy in this campaign (load-dominated). No context-token regression (pooled 7784.2 -> 7804.9 -> 7802.8 mean tokens, +0.27% / +0.24%), no item-count regression. The OFF arm's own retrieval latency is 110.2 ms (S1) / 90.8 ms (S2) here versus 69.4 / 57.7 ms in the superseded receipt on identical code, so the wall-clock delta between arms is noise. The ISOLATED cost of the C4 block (fetch + annotate + merge, session_reinjection_stats.latency_ms) is 6.4-9.0 ms mean per arm with a WORST SINGLE QUESTION of 26.0 ms (per-arm maxima 25.6 / 17.5 / 19.2 / 26.0 ms; n=10 each) - low-double-digit ms for one extra batched query plus the reorder, with a tail into the mid-20s. NO p95 is quoted: with n=10 per arm it is not resolvable and the value would depend on the interpolation convention."
+  },
+  "4_inertness_guard": {
+   "measured": {
+    "pooled_census": "seeded 99, seed_sessions_total 99, injected_total 163, injected_merged 163, dropped_by_cap 248 (inj_only) / 247 (on), fetch_ok 20/20, total_cap_hit 7/20"
+   },
+   "verdict": "NOT INERT, and total_cap_hit is a LIVE census key: 20/20 fired questions fetched OK, 163 items injected and 163 merged (S1 70/70, S2 93/93), and the total budget bound on 7 of 20 questions (S1 2, S2 5). Under the old TOTAL_ITEMS=20 against a 5x3 structural fan-out the key could never be True."
+  }
+ },
+ "issue": 2517,
+ "kind": "retrieval-only re-measurement after the turn-grain fetch retarget (product verbatim material, product-real session scope, binding total budget) AND after the code-review cycle-1 fixes",
+ "results": {
+  "POOLED_20_multisession": {
+   "falsifier1_pooled": {
+    "entering_items_already_in_off_ranked_pool": 2,
+    "entering_items_that_are_injected": 0,
+    "entering_items_total": 2,
+    "note": "an 'entering item' is an id in inj_only's top-5 that is not in off's top-5; it is INJECTED only if it is absent from off's ranked pool entirely"
+   },
+   "inj_only": {
+    "context_tokens_mean": 7804.9,
+    "evidence_recall@5": [
+     0.4667,
+     20
+    ],
+    "n_questions_pooled": 20,
+    "question_type_histogram": {
+     "multi-session": 20
+    },
+    "reader_evidence@5": [
+     0.4667,
+     20
+    ],
+    "reader_surface@5": [
+     0.975,
+     20
+    ],
+    "recall_all@5": [
+     0.7,
+     20
+    ],
+    "session_recall@5": [
+     0.85,
+     20
+    ],
+    "sr_census": {
+     "dropped_by_cap": 248,
+     "fetch_ok_questions": 20,
+     "injected_merged": 163,
+     "injected_total": 163,
+     "questions_with_seeds": 20,
+     "seed_sessions_total": 99,
+     "seeded": 99,
+     "total_cap_hit_questions": 7
+    }
+   },
+   "off": {
+    "context_tokens_mean": 7784.2,
+    "evidence_recall@5": [
+     0.4667,
+     20
+    ],
+    "n_questions_pooled": 20,
+    "question_type_histogram": {
+     "multi-session": 20
+    },
+    "reader_evidence@5": [
+     0.4667,
+     20
+    ],
+    "reader_surface@5": [
+     1.0,
+     20
+    ],
+    "recall_all@5": [
+     0.65,
+     20
+    ],
+    "session_recall@5": [
+     0.825,
+     20
+    ],
+    "sr_census": {
+     "dropped_by_cap": 0,
+     "fetch_ok_questions": 0,
+     "injected_merged": 0,
+     "injected_total": 0,
+     "questions_with_seeds": 0,
+     "seed_sessions_total": 0,
+     "seeded": 0,
+     "total_cap_hit_questions": 0
+    }
+   },
+   "on": {
+    "context_tokens_mean": 7802.8,
+    "evidence_recall@5": [
+     0.5167,
+     20
+    ],
+    "n_questions_pooled": 20,
+    "question_type_histogram": {
+     "multi-session": 20
+    },
+    "reader_evidence@5": [
+     0.5167,
+     20
+    ],
+    "reader_surface@5": [
+     0.95,
+     20
+    ],
+    "recall_all@5": [
+     0.9,
+     20
+    ],
+    "session_recall@5": [
+     0.95,
+     20
+    ],
+    "sr_census": {
+     "dropped_by_cap": 247,
+     "fetch_ok_questions": 20,
+     "injected_merged": 163,
+     "injected_total": 163,
+     "questions_with_seeds": 20,
+     "seed_sessions_total": 99,
+     "seeded": 99,
+     "total_cap_hit_questions": 7
+    }
+   }
+  },
+  "S1_multisession_tail_10": {
+   "arms": {
+    "inj_only": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": false
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 34.6,
+     "context_tokens_mean": 7760.0,
+     "evidence_recall@5": [
+      0.3333,
+      10
+     ],
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "1f2b8d4f": 0.5,
+       "2311e44b": 0.0,
+       "4f54b7c9": 0.5,
+       "51c32626": 0.0,
+       "85fa3a3f": 0.3333333333333333,
+       "9aaed6a3": 0.5,
+       "a11281a2": 0.5,
+       "cc06de0d": 0.0,
+       "d3ab962e": 0.5,
+       "e6041065": 0.5
+      },
+      "injected_merged": {
+       "1f2b8d4f": 9,
+       "2311e44b": 6,
+       "4f54b7c9": 6,
+       "51c32626": 3,
+       "85fa3a3f": 9,
+       "9aaed6a3": 4,
+       "a11281a2": 7,
+       "cc06de0d": 10,
+       "d3ab962e": 10,
+       "e6041065": 6
+      },
+      "pool_size": {
+       "1f2b8d4f": 784,
+       "2311e44b": 741,
+       "4f54b7c9": 738,
+       "51c32626": 739,
+       "85fa3a3f": 741,
+       "9aaed6a3": 813,
+       "a11281a2": 688,
+       "cc06de0d": 695,
+       "d3ab962e": 797,
+       "e6041065": 741
+      },
+      "reader_surface@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 1.0,
+       "51c32626": 0.5,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 1.0,
+       "a11281a2": 1.0,
+       "cc06de0d": 1.0,
+       "d3ab962e": 1.0,
+       "e6041065": 1.0
+      },
+      "session_recall@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 1.0,
+       "51c32626": 1.0,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 0.5,
+       "a11281a2": 1.0,
+       "cc06de0d": 0.5,
+       "d3ab962e": 0.5,
+       "e6041065": 1.0
+      },
+      "top5": {
+       "1f2b8d4f": [
+        "lme:1f2b8d4f:s11:c5",
+        "lme:1f2b8d4f:s11:t11",
+        "lme:1f2b8d4f:s12:t6",
+        "lme:1f2b8d4f:s11:t4",
+        "lme:1f2b8d4f:s12:t2"
+       ],
+       "2311e44b": [
+        "lme:2311e44b:s45:c4",
+        "lme:2311e44b:s45:t2",
+        "lme:2311e44b:s37:t4",
+        "lme:2311e44b:s37:c2",
+        "lme:2311e44b:s37:t5"
+       ],
+       "4f54b7c9": [
+        "lme:4f54b7c9:s21:t8",
+        "lme:4f54b7c9:s21:c4",
+        "lme:4f54b7c9:s21:t9",
+        "lme:4f54b7c9:s21:t0",
+        "lme:4f54b7c9:s42:c5"
+       ],
+       "51c32626": [
+        "lme:51c32626:s47:t0",
+        "lme:51c32626:s9:t6",
+        "lme:51c32626:s9:c3",
+        "lme:51c32626:s9:t5",
+        "lme:51c32626:s47:t2"
+       ],
+       "85fa3a3f": [
+        "lme:85fa3a3f:s7:t6",
+        "lme:85fa3a3f:s30:c0",
+        "lme:85fa3a3f:s7:t8",
+        "lme:85fa3a3f:s7:t9",
+        "lme:85fa3a3f:s7:t2"
+       ],
+       "9aaed6a3": [
+        "lme:9aaed6a3:s28:c5",
+        "lme:9aaed6a3:s28:t10",
+        "lme:9aaed6a3:s15:t0",
+        "lme:9aaed6a3:s28:c4",
+        "lme:9aaed6a3:s28:t11"
+       ],
+       "a11281a2": [
+        "lme:a11281a2:s37:t0",
+        "lme:a11281a2:s23:t8",
+        "lme:a11281a2:s23:t0",
+        "lme:a11281a2:s37:t8",
+        "lme:a11281a2:s23:t2"
+       ],
+       "cc06de0d": [
+        "lme:cc06de0d:s32:t1",
+        "lme:cc06de0d:s32:t0",
+        "lme:cc06de0d:s32:c0",
+        "lme:cc06de0d:s26:t8",
+        "lme:cc06de0d:s26:t6"
+       ],
+       "d3ab962e": [
+        "lme:d3ab962e:s11:t10",
+        "lme:d3ab962e:s37:t0",
+        "lme:d3ab962e:s32:t0",
+        "lme:d3ab962e:s32:t2",
+        "lme:d3ab962e:s32:c1"
+       ],
+       "e6041065": [
+        "lme:e6041065:s37:c1",
+        "lme:e6041065:s37:t3",
+        "lme:e6041065:s37:t2",
+        "lme:e6041065:s3:t4",
+        "lme:e6041065:s3:t0"
+       ]
+      }
+     },
+     "question_type_histogram": {
+      "multi-session": 10
+     },
+     "reader_evidence@5": [
+      0.3333,
+      10
+     ],
+     "reader_surface@5": 0.95,
+     "recall_all@5": [
+      0.7,
+      10
+     ],
+     "retrieval_latency_ms_mean_p95": [
+      85.69,
+      132.7
+     ],
+     "session_recall@5": [
+      0.85,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 91,
+      "fetch_ok_questions": 10,
+      "injected_merged": 70,
+      "injected_total": 70,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 49,
+      "seeded": 49,
+      "total_cap_hit_questions": 2
+     },
+     "turn_recall@5": [
+      0.3333,
+      10
+     ]
+    },
+    "off": {
+     "arm_flags_present": {
+      "session_reinjection": false,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 34.8,
+     "context_tokens_mean": 7718.1,
+     "evidence_recall@5": [
+      0.3333,
+      10
+     ],
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "1f2b8d4f": 0.5,
+       "2311e44b": 0.0,
+       "4f54b7c9": 0.5,
+       "51c32626": 0.0,
+       "85fa3a3f": 0.3333333333333333,
+       "9aaed6a3": 0.5,
+       "a11281a2": 0.5,
+       "cc06de0d": 0.0,
+       "d3ab962e": 0.5,
+       "e6041065": 0.5
+      },
+      "injected_merged": {
+       "1f2b8d4f": 0,
+       "2311e44b": 0,
+       "4f54b7c9": 0,
+       "51c32626": 0,
+       "85fa3a3f": 0,
+       "9aaed6a3": 0,
+       "a11281a2": 0,
+       "cc06de0d": 0,
+       "d3ab962e": 0,
+       "e6041065": 0
+      },
+      "pool_size": {
+       "1f2b8d4f": 784,
+       "2311e44b": 741,
+       "4f54b7c9": 738,
+       "51c32626": 739,
+       "85fa3a3f": 741,
+       "9aaed6a3": 813,
+       "a11281a2": 688,
+       "cc06de0d": 695,
+       "d3ab962e": 797,
+       "e6041065": 741
+      },
+      "reader_surface@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 1.0,
+       "51c32626": 1.0,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 1.0,
+       "a11281a2": 1.0,
+       "cc06de0d": 1.0,
+       "d3ab962e": 1.0,
+       "e6041065": 1.0
+      },
+      "session_recall@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 0.5,
+       "51c32626": 1.0,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 0.5,
+       "a11281a2": 1.0,
+       "cc06de0d": 0.5,
+       "d3ab962e": 0.5,
+       "e6041065": 1.0
+      },
+      "top5": {
+       "1f2b8d4f": [
+        "lme:1f2b8d4f:s11:c5",
+        "lme:1f2b8d4f:s11:t11",
+        "lme:1f2b8d4f:s12:t6",
+        "lme:1f2b8d4f:s11:t4",
+        "lme:1f2b8d4f:s12:t2"
+       ],
+       "2311e44b": [
+        "lme:2311e44b:s45:c4",
+        "lme:2311e44b:s45:t2",
+        "lme:2311e44b:s37:c2",
+        "lme:2311e44b:s37:t5",
+        "lme:2311e44b:s37:t4"
+       ],
+       "4f54b7c9": [
+        "lme:4f54b7c9:s21:t8",
+        "lme:4f54b7c9:s21:c4",
+        "lme:4f54b7c9:s21:t9",
+        "lme:4f54b7c9:s21:t0",
+        "lme:4f54b7c9:s21:c0"
+       ],
+       "51c32626": [
+        "lme:51c32626:s47:t0",
+        "lme:51c32626:s9:t6",
+        "lme:51c32626:s9:c3",
+        "lme:51c32626:s9:t5",
+        "lme:51c32626:s47:t2"
+       ],
+       "85fa3a3f": [
+        "lme:85fa3a3f:s7:t6",
+        "lme:85fa3a3f:s30:c0",
+        "lme:85fa3a3f:s7:t8",
+        "lme:85fa3a3f:s7:t9",
+        "lme:85fa3a3f:s7:t2"
+       ],
+       "9aaed6a3": [
+        "lme:9aaed6a3:s28:c5",
+        "lme:9aaed6a3:s28:t10",
+        "lme:9aaed6a3:s15:t0",
+        "lme:9aaed6a3:s28:c4",
+        "lme:9aaed6a3:s28:t11"
+       ],
+       "a11281a2": [
+        "lme:a11281a2:s37:t0",
+        "lme:a11281a2:s23:t8",
+        "lme:a11281a2:s23:t0",
+        "lme:a11281a2:s37:t8",
+        "lme:a11281a2:s37:t10"
+       ],
+       "cc06de0d": [
+        "lme:cc06de0d:s32:t1",
+        "lme:cc06de0d:s32:t0",
+        "lme:cc06de0d:s32:c0",
+        "lme:cc06de0d:s26:t8",
+        "lme:cc06de0d:s26:t6"
+       ],
+       "d3ab962e": [
+        "lme:d3ab962e:s11:t10",
+        "lme:d3ab962e:s37:t0",
+        "lme:d3ab962e:s32:t0",
+        "lme:d3ab962e:s32:t2",
+        "lme:d3ab962e:s32:c1"
+       ],
+       "e6041065": [
+        "lme:e6041065:s37:c1",
+        "lme:e6041065:s37:t3",
+        "lme:e6041065:s37:t2",
+        "lme:e6041065:s3:t4",
+        "lme:e6041065:s3:t0"
+       ]
+      }
+     },
+     "question_type_histogram": {
+      "multi-session": 10
+     },
+     "reader_evidence@5": [
+      0.3333,
+      10
+     ],
+     "reader_surface@5": 1.0,
+     "recall_all@5": [
+      0.6,
+      10
+     ],
+     "retrieval_latency_ms_mean_p95": [
+      110.207,
+      140.06
+     ],
+     "session_recall@5": [
+      0.8,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 0,
+      "fetch_ok_questions": 0,
+      "injected_merged": 0,
+      "injected_total": 0,
+      "questions_with_seeds": 0,
+      "seed_sessions_total": 0,
+      "seeded": 0,
+      "total_cap_hit_questions": 0
+     },
+     "turn_recall@5": [
+      0.3333,
+      10
+     ]
+    },
+    "on": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 34.6,
+     "context_tokens_mean": 7745.4,
+     "evidence_recall@5": [
+      0.3833,
+      10
+     ],
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "1f2b8d4f": 0.5,
+       "2311e44b": 0.0,
+       "4f54b7c9": 0.0,
+       "51c32626": 0.0,
+       "85fa3a3f": 0.3333333333333333,
+       "9aaed6a3": 1.0,
+       "a11281a2": 0.5,
+       "cc06de0d": 0.0,
+       "d3ab962e": 1.0,
+       "e6041065": 0.5
+      },
+      "injected_merged": {
+       "1f2b8d4f": 9,
+       "2311e44b": 6,
+       "4f54b7c9": 6,
+       "51c32626": 3,
+       "85fa3a3f": 9,
+       "9aaed6a3": 4,
+       "a11281a2": 7,
+       "cc06de0d": 10,
+       "d3ab962e": 10,
+       "e6041065": 6
+      },
+      "pool_size": {
+       "1f2b8d4f": 784,
+       "2311e44b": 741,
+       "4f54b7c9": 738,
+       "51c32626": 739,
+       "85fa3a3f": 741,
+       "9aaed6a3": 813,
+       "a11281a2": 688,
+       "cc06de0d": 695,
+       "d3ab962e": 797,
+       "e6041065": 741
+      },
+      "reader_surface@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 0.5,
+       "51c32626": 0.5,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 1.0,
+       "a11281a2": 1.0,
+       "cc06de0d": 1.0,
+       "d3ab962e": 1.0,
+       "e6041065": 1.0
+      },
+      "session_recall@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 1.0,
+       "51c32626": 1.0,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 1.0,
+       "a11281a2": 1.0,
+       "cc06de0d": 0.5,
+       "d3ab962e": 1.0,
+       "e6041065": 1.0
+      },
+      "top5": {
+       "1f2b8d4f": [
+        "lme:1f2b8d4f:s11:c5",
+        "lme:1f2b8d4f:s11:t11",
+        "lme:1f2b8d4f:s12:t6",
+        "lme:1f2b8d4f:s12:t2",
+        "lme:1f2b8d4f:s48:t6"
+       ],
+       "2311e44b": [
+        "lme:2311e44b:s45:c4",
+        "lme:2311e44b:s45:t2",
+        "lme:2311e44b:s37:t4",
+        "lme:2311e44b:s37:c2",
+        "lme:2311e44b:s11:t2"
+       ],
+       "4f54b7c9": [
+        "lme:4f54b7c9:s21:c4",
+        "lme:4f54b7c9:s21:t8",
+        "lme:4f54b7c9:s42:c5",
+        "lme:4f54b7c9:s24:t4",
+        "lme:4f54b7c9:s42:t10"
+       ],
+       "51c32626": [
+        "lme:51c32626:s47:t0",
+        "lme:51c32626:s9:t6",
+        "lme:51c32626:s9:c3",
+        "lme:51c32626:s47:t2",
+        "lme:51c32626:s50:t0"
+       ],
+       "85fa3a3f": [
+        "lme:85fa3a3f:s7:t6",
+        "lme:85fa3a3f:s30:c0",
+        "lme:85fa3a3f:s7:t8",
+        "lme:85fa3a3f:s30:t0",
+        "lme:85fa3a3f:s15:t4"
+       ],
+       "9aaed6a3": [
+        "lme:9aaed6a3:s28:c5",
+        "lme:9aaed6a3:s28:t10",
+        "lme:9aaed6a3:s15:t0",
+        "lme:9aaed6a3:s15:c0",
+        "lme:9aaed6a3:s10:t0"
+       ],
+       "a11281a2": [
+        "lme:a11281a2:s37:t0",
+        "lme:a11281a2:s23:t8",
+        "lme:a11281a2:s23:t0",
+        "lme:a11281a2:s37:t8",
+        "lme:a11281a2:s27:t2"
+       ],
+       "cc06de0d": [
+        "lme:cc06de0d:s32:t1",
+        "lme:cc06de0d:s32:c0",
+        "lme:cc06de0d:s26:t8",
+        "lme:cc06de0d:s26:t6",
+        "lme:cc06de0d:s18:t8"
+       ],
+       "d3ab962e": [
+        "lme:d3ab962e:s11:t10",
+        "lme:d3ab962e:s37:t0",
+        "lme:d3ab962e:s32:t0",
+        "lme:d3ab962e:s32:t2",
+        "lme:d3ab962e:s8:t0"
+       ],
+       "e6041065": [
+        "lme:e6041065:s37:c1",
+        "lme:e6041065:s37:t3",
+        "lme:e6041065:s3:t4",
+        "lme:e6041065:s3:t0",
+        "lme:e6041065:s33:t6"
+       ]
+      }
+     },
+     "question_type_histogram": {
+      "multi-session": 10
+     },
+     "reader_evidence@5": [
+      0.3833,
+      10
+     ],
+     "reader_surface@5": 0.9,
+     "recall_all@5": [
+      0.9,
+      10
+     ],
+     "retrieval_latency_ms_mean_p95": [
+      111.543,
+      118.82
+     ],
+     "session_recall@5": [
+      0.95,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 92,
+      "fetch_ok_questions": 10,
+      "injected_merged": 70,
+      "injected_total": 70,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 49,
+      "seeded": 49,
+      "total_cap_hit_questions": 2
+     },
+     "turn_recall@5": [
+      0.3833,
+      10
+     ]
+    }
+   },
+   "cohort_file": "/Users/danielospina/.cache/tortoise-longmemeval/longmemeval_2517_ms10.json",
+   "cohort_sha256": "e0e605b60152d9b5f8e9d03da66618f2f0b0c778b8ac82da6078a032fec07a55",
+   "falsifier1": {
+    "n_questions_compared": 10,
+    "off_vs_inj_only_top5_differ": {
+     "2311e44b": [
+      [
+       "lme:2311e44b:s45:c4",
+       "lme:2311e44b:s45:t2",
+       "lme:2311e44b:s37:c2",
+       "lme:2311e44b:s37:t5",
+       "lme:2311e44b:s37:t4"
+      ],
+      [
+       "lme:2311e44b:s45:c4",
+       "lme:2311e44b:s45:t2",
+       "lme:2311e44b:s37:t4",
+       "lme:2311e44b:s37:c2",
+       "lme:2311e44b:s37:t5"
+      ]
+     ],
+     "4f54b7c9": [
+      [
+       "lme:4f54b7c9:s21:t8",
+       "lme:4f54b7c9:s21:c4",
+       "lme:4f54b7c9:s21:t9",
+       "lme:4f54b7c9:s21:t0",
+       "lme:4f54b7c9:s21:c0"
+      ],
+      [
+       "lme:4f54b7c9:s21:t8",
+       "lme:4f54b7c9:s21:c4",
+       "lme:4f54b7c9:s21:t9",
+       "lme:4f54b7c9:s21:t0",
+       "lme:4f54b7c9:s42:c5"
+      ]
+     ],
+     "a11281a2": [
+      [
+       "lme:a11281a2:s37:t0",
+       "lme:a11281a2:s23:t8",
+       "lme:a11281a2:s23:t0",
+       "lme:a11281a2:s37:t8",
+       "lme:a11281a2:s37:t10"
+      ],
+      [
+       "lme:a11281a2:s37:t0",
+       "lme:a11281a2:s23:t8",
+       "lme:a11281a2:s23:t0",
+       "lme:a11281a2:s37:t8",
+       "lme:a11281a2:s23:t2"
+      ]
+     ]
+    },
+    "off_vs_inj_only_top5_identical_questions": 7,
+    "session_recall@5_flips_inj_only_to_on": {
+     "9aaed6a3": [
+      0.5,
+      1.0
+     ],
+     "d3ab962e": [
+      0.5,
+      1.0
+     ]
+    },
+    "session_recall@5_flips_off_to_inj_only": {
+     "4f54b7c9": [
+      0.5,
+      1.0
+     ]
+    },
+    "session_recall@5_flips_off_to_on": {
+     "4f54b7c9": [
+      0.5,
+      1.0
+     ],
+     "9aaed6a3": [
+      0.5,
+      1.0
+     ],
+     "d3ab962e": [
+      0.5,
+      1.0
+     ]
+    }
+   },
+   "selector": "tail s[150:250], question_type == 'multi-session', items [0:10] (the SAME cohort the previous receipt measured as sample B)"
+  },
+  "S2_multisession_tail_10_disjoint": {
+   "arms": {
+    "inj_only": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": false
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 35.9,
+     "context_tokens_mean": 7849.9,
+     "evidence_recall@5": [
+      0.6,
+      10
+     ],
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 0.5,
+       "6456829e": 0.5,
+       "681a1674": 0.5,
+       "7405e8b1": 0.5,
+       "a4996e51": 0.0,
+       "d905b33f": 0.5,
+       "e25c3b8d": 1.0,
+       "f35224e0": 0.5
+      },
+      "injected_merged": {
+       "3c1045c8": 10,
+       "4adc0475": 10,
+       "60036106": 10,
+       "6456829e": 6,
+       "681a1674": 9,
+       "7405e8b1": 9,
+       "a4996e51": 10,
+       "d905b33f": 10,
+       "e25c3b8d": 9,
+       "f35224e0": 10
+      },
+      "pool_size": {
+       "3c1045c8": 817,
+       "4adc0475": 737,
+       "60036106": 727,
+       "6456829e": 734,
+       "681a1674": 719,
+       "7405e8b1": 705,
+       "a4996e51": 770,
+       "d905b33f": 757,
+       "e25c3b8d": 800,
+       "f35224e0": 775
+      },
+      "reader_surface@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 1.0,
+       "6456829e": 1.0,
+       "681a1674": 1.0,
+       "7405e8b1": 1.0,
+       "a4996e51": 1.0,
+       "d905b33f": 1.0,
+       "e25c3b8d": 1.0,
+       "f35224e0": 1.0
+      },
+      "session_recall@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 1.0,
+       "6456829e": 0.5,
+       "681a1674": 1.0,
+       "7405e8b1": 1.0,
+       "a4996e51": 1.0,
+       "d905b33f": 0.5,
+       "e25c3b8d": 1.0,
+       "f35224e0": 0.5
+      },
+      "top5": {
+       "3c1045c8": [
+        "lme:3c1045c8:s24:t0",
+        "lme:3c1045c8:s22:t1",
+        "lme:3c1045c8:s22:c0",
+        "lme:3c1045c8:s24:t1",
+        "lme:3c1045c8:s26:t0"
+       ],
+       "4adc0475": [
+        "lme:4adc0475:s27:t2",
+        "lme:4adc0475:s27:t4",
+        "lme:4adc0475:s37:t8",
+        "lme:4adc0475:s37:t6",
+        "lme:4adc0475:s37:c3"
+       ],
+       "60036106": [
+        "lme:60036106:s39:c4",
+        "lme:60036106:s39:t10",
+        "lme:60036106:s39:t9",
+        "lme:60036106:s38:t0",
+        "lme:60036106:s39:c5"
+       ],
+       "6456829e": [
+        "lme:6456829e:s32:c1",
+        "lme:6456829e:s32:t3",
+        "lme:6456829e:s41:t10",
+        "lme:6456829e:s41:t7",
+        "lme:6456829e:s41:c3"
+       ],
+       "681a1674": [
+        "lme:681a1674:s34:t0",
+        "lme:681a1674:s6:t0",
+        "lme:681a1674:s6:t2",
+        "lme:681a1674:s34:t2",
+        "lme:681a1674:s34:c0"
+       ],
+       "7405e8b1": [
+        "lme:7405e8b1:s30:t0",
+        "lme:7405e8b1:s30:t10",
+        "lme:7405e8b1:s10:c2",
+        "lme:7405e8b1:s30:t9",
+        "lme:7405e8b1:s10:t6"
+       ],
+       "a4996e51": [
+        "lme:a4996e51:s43:t5",
+        "lme:a4996e51:s43:c2",
+        "lme:a4996e51:s43:t4",
+        "lme:a4996e51:s43:t1",
+        "lme:a4996e51:s19:t6"
+       ],
+       "d905b33f": [
+        "lme:d905b33f:s33:t4",
+        "lme:d905b33f:s30:t7",
+        "lme:d905b33f:s30:c3",
+        "lme:d905b33f:s23:t6",
+        "lme:d905b33f:s33:t6"
+       ],
+       "e25c3b8d": [
+        "lme:e25c3b8d:s19:c2",
+        "lme:e25c3b8d:s19:t6",
+        "lme:e25c3b8d:s19:c4",
+        "lme:e25c3b8d:s11:t0",
+        "lme:e25c3b8d:s19:t5"
+       ],
+       "f35224e0": [
+        "lme:f35224e0:s2:t2",
+        "lme:f35224e0:s32:t0",
+        "lme:f35224e0:s12:t2",
+        "lme:f35224e0:s32:t5",
+        "lme:f35224e0:s32:t3"
+       ]
+      }
+     },
+     "question_type_histogram": {
+      "multi-session": 10
+     },
+     "reader_evidence@5": [
+      0.6,
+      10
+     ],
+     "reader_surface@5": 1.0,
+     "recall_all@5": [
+      0.7,
+      10
+     ],
+     "retrieval_latency_ms_mean_p95": [
+      104.035,
+      126.76
+     ],
+     "session_recall@5": [
+      0.85,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 157,
+      "fetch_ok_questions": 10,
+      "injected_merged": 93,
+      "injected_total": 93,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 50,
+      "seeded": 50,
+      "total_cap_hit_questions": 5
+     },
+     "turn_recall@5": [
+      0.6,
+      10
+     ]
+    },
+    "off": {
+     "arm_flags_present": {
+      "session_reinjection": false,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 35.7,
+     "context_tokens_mean": 7850.3,
+     "evidence_recall@5": [
+      0.6,
+      10
+     ],
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 0.5,
+       "6456829e": 0.5,
+       "681a1674": 0.5,
+       "7405e8b1": 0.5,
+       "a4996e51": 0.0,
+       "d905b33f": 0.5,
+       "e25c3b8d": 1.0,
+       "f35224e0": 0.5
+      },
+      "injected_merged": {
+       "3c1045c8": 0,
+       "4adc0475": 0,
+       "60036106": 0,
+       "6456829e": 0,
+       "681a1674": 0,
+       "7405e8b1": 0,
+       "a4996e51": 0,
+       "d905b33f": 0,
+       "e25c3b8d": 0,
+       "f35224e0": 0
+      },
+      "pool_size": {
+       "3c1045c8": 817,
+       "4adc0475": 737,
+       "60036106": 727,
+       "6456829e": 734,
+       "681a1674": 719,
+       "7405e8b1": 705,
+       "a4996e51": 770,
+       "d905b33f": 757,
+       "e25c3b8d": 800,
+       "f35224e0": 775
+      },
+      "reader_surface@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 1.0,
+       "6456829e": 1.0,
+       "681a1674": 1.0,
+       "7405e8b1": 1.0,
+       "a4996e51": 1.0,
+       "d905b33f": 1.0,
+       "e25c3b8d": 1.0,
+       "f35224e0": 1.0
+      },
+      "session_recall@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 1.0,
+       "6456829e": 0.5,
+       "681a1674": 1.0,
+       "7405e8b1": 1.0,
+       "a4996e51": 1.0,
+       "d905b33f": 0.5,
+       "e25c3b8d": 1.0,
+       "f35224e0": 0.5
+      },
+      "top5": {
+       "3c1045c8": [
+        "lme:3c1045c8:s24:t0",
+        "lme:3c1045c8:s22:t1",
+        "lme:3c1045c8:s22:c0",
+        "lme:3c1045c8:s24:t1",
+        "lme:3c1045c8:s26:t0"
+       ],
+       "4adc0475": [
+        "lme:4adc0475:s27:t2",
+        "lme:4adc0475:s27:t4",
+        "lme:4adc0475:s37:t8",
+        "lme:4adc0475:s37:t6",
+        "lme:4adc0475:s37:c3"
+       ],
+       "60036106": [
+        "lme:60036106:s39:c4",
+        "lme:60036106:s39:t10",
+        "lme:60036106:s39:t9",
+        "lme:60036106:s38:t0",
+        "lme:60036106:s39:c5"
+       ],
+       "6456829e": [
+        "lme:6456829e:s32:c1",
+        "lme:6456829e:s32:t3",
+        "lme:6456829e:s41:t10",
+        "lme:6456829e:s41:t7",
+        "lme:6456829e:s41:c3"
+       ],
+       "681a1674": [
+        "lme:681a1674:s34:t0",
+        "lme:681a1674:s6:t0",
+        "lme:681a1674:s6:t2",
+        "lme:681a1674:s34:t2",
+        "lme:681a1674:s34:c0"
+       ],
+       "7405e8b1": [
+        "lme:7405e8b1:s30:t0",
+        "lme:7405e8b1:s30:t10",
+        "lme:7405e8b1:s10:c2",
+        "lme:7405e8b1:s30:t9",
+        "lme:7405e8b1:s10:t6"
+       ],
+       "a4996e51": [
+        "lme:a4996e51:s43:t5",
+        "lme:a4996e51:s43:c2",
+        "lme:a4996e51:s43:t4",
+        "lme:a4996e51:s43:t1",
+        "lme:a4996e51:s19:t6"
+       ],
+       "d905b33f": [
+        "lme:d905b33f:s33:t4",
+        "lme:d905b33f:s30:t7",
+        "lme:d905b33f:s30:c3",
+        "lme:d905b33f:s23:t6",
+        "lme:d905b33f:s33:t6"
+       ],
+       "e25c3b8d": [
+        "lme:e25c3b8d:s19:c2",
+        "lme:e25c3b8d:s19:t6",
+        "lme:e25c3b8d:s19:c4",
+        "lme:e25c3b8d:s11:t0",
+        "lme:e25c3b8d:s19:t5"
+       ],
+       "f35224e0": [
+        "lme:f35224e0:s2:t2",
+        "lme:f35224e0:s32:t0",
+        "lme:f35224e0:s12:t2",
+        "lme:f35224e0:s32:t5",
+        "lme:f35224e0:s32:t3"
+       ]
+      }
+     },
+     "question_type_histogram": {
+      "multi-session": 10
+     },
+     "reader_evidence@5": [
+      0.6,
+      10
+     ],
+     "reader_surface@5": 1.0,
+     "recall_all@5": [
+      0.7,
+      10
+     ],
+     "retrieval_latency_ms_mean_p95": [
+      90.84,
+      100.85
+     ],
+     "session_recall@5": [
+      0.85,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 0,
+      "fetch_ok_questions": 0,
+      "injected_merged": 0,
+      "injected_total": 0,
+      "questions_with_seeds": 0,
+      "seed_sessions_total": 0,
+      "seeded": 0,
+      "total_cap_hit_questions": 0
+     },
+     "turn_recall@5": [
+      0.6,
+      10
+     ]
+    },
+    "on": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 35.6,
+     "context_tokens_mean": 7860.2,
+     "evidence_recall@5": [
+      0.65,
+      10
+     ],
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 0.5,
+       "6456829e": 0.5,
+       "681a1674": 0.5,
+       "7405e8b1": 0.5,
+       "a4996e51": 0.5,
+       "d905b33f": 0.5,
+       "e25c3b8d": 1.0,
+       "f35224e0": 0.5
+      },
+      "injected_merged": {
+       "3c1045c8": 10,
+       "4adc0475": 10,
+       "60036106": 10,
+       "6456829e": 6,
+       "681a1674": 9,
+       "7405e8b1": 9,
+       "a4996e51": 10,
+       "d905b33f": 10,
+       "e25c3b8d": 9,
+       "f35224e0": 10
+      },
+      "pool_size": {
+       "3c1045c8": 817,
+       "4adc0475": 737,
+       "60036106": 727,
+       "6456829e": 734,
+       "681a1674": 719,
+       "7405e8b1": 705,
+       "a4996e51": 770,
+       "d905b33f": 757,
+       "e25c3b8d": 800,
+       "f35224e0": 775
+      },
+      "reader_surface@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 1.0,
+       "6456829e": 1.0,
+       "681a1674": 1.0,
+       "7405e8b1": 1.0,
+       "a4996e51": 1.0,
+       "d905b33f": 1.0,
+       "e25c3b8d": 1.0,
+       "f35224e0": 1.0
+      },
+      "session_recall@5": {
+       "3c1045c8": 1.0,
+       "4adc0475": 1.0,
+       "60036106": 1.0,
+       "6456829e": 1.0,
+       "681a1674": 1.0,
+       "7405e8b1": 1.0,
+       "a4996e51": 1.0,
+       "d905b33f": 0.5,
+       "e25c3b8d": 1.0,
+       "f35224e0": 1.0
+      },
+      "top5": {
+       "3c1045c8": [
+        "lme:3c1045c8:s24:t0",
+        "lme:3c1045c8:s22:t1",
+        "lme:3c1045c8:s22:c0",
+        "lme:3c1045c8:s24:t1",
+        "lme:3c1045c8:s26:t0"
+       ],
+       "4adc0475": [
+        "lme:4adc0475:s27:t2",
+        "lme:4adc0475:s27:t4",
+        "lme:4adc0475:s37:t8",
+        "lme:4adc0475:s37:t6",
+        "lme:4adc0475:s1:t10"
+       ],
+       "60036106": [
+        "lme:60036106:s39:t10",
+        "lme:60036106:s39:c4",
+        "lme:60036106:s38:t0",
+        "lme:60036106:s38:t10",
+        "lme:60036106:s35:c0"
+       ],
+       "6456829e": [
+        "lme:6456829e:s32:c1",
+        "lme:6456829e:s32:t3",
+        "lme:6456829e:s41:t10",
+        "lme:6456829e:s41:t7",
+        "lme:6456829e:s38:t6"
+       ],
+       "681a1674": [
+        "lme:681a1674:s34:t0",
+        "lme:681a1674:s6:t0",
+        "lme:681a1674:s6:t2",
+        "lme:681a1674:s34:t2",
+        "lme:681a1674:s41:t4"
+       ],
+       "7405e8b1": [
+        "lme:7405e8b1:s30:t0",
+        "lme:7405e8b1:s30:t10",
+        "lme:7405e8b1:s10:c2",
+        "lme:7405e8b1:s10:t6",
+        "lme:7405e8b1:s27:c4"
+       ],
+       "a4996e51": [
+        "lme:a4996e51:s43:t5",
+        "lme:a4996e51:s43:c2",
+        "lme:a4996e51:s19:t6",
+        "lme:a4996e51:s19:t0",
+        "lme:a4996e51:s34:t8"
+       ],
+       "d905b33f": [
+        "lme:d905b33f:s33:t4",
+        "lme:d905b33f:s30:t7",
+        "lme:d905b33f:s30:c3",
+        "lme:d905b33f:s23:t6",
+        "lme:d905b33f:s33:t6"
+       ],
+       "e25c3b8d": [
+        "lme:e25c3b8d:s19:c2",
+        "lme:e25c3b8d:s19:t6",
+        "lme:e25c3b8d:s11:t0",
+        "lme:e25c3b8d:s11:c0",
+        "lme:e25c3b8d:s31:t7"
+       ],
+       "f35224e0": [
+        "lme:f35224e0:s2:t2",
+        "lme:f35224e0:s32:t0",
+        "lme:f35224e0:s12:t2",
+        "lme:f35224e0:s32:t5",
+        "lme:f35224e0:s45:t4"
+       ]
+      }
+     },
+     "question_type_histogram": {
+      "multi-session": 10
+     },
+     "reader_evidence@5": [
+      0.65,
+      10
+     ],
+     "reader_surface@5": 1.0,
+     "recall_all@5": [
+      0.9,
+      10
+     ],
+     "retrieval_latency_ms_mean_p95": [
+      102.216,
+      103.67
+     ],
+     "session_recall@5": [
+      0.95,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 155,
+      "fetch_ok_questions": 10,
+      "injected_merged": 93,
+      "injected_total": 93,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 50,
+      "seeded": 50,
+      "total_cap_hit_questions": 5
+     },
+     "turn_recall@5": [
+      0.65,
+      10
+     ]
+    }
+   },
+   "cohort_file": "/Users/danielospina/.cache/tortoise-longmemeval/longmemeval_2517_ms20.json",
+   "cohort_sha256": "3905e0dc50a7058145ca200fad1e4223106f50b0e873d378037073337325fc6b",
+   "falsifier1": {
+    "n_questions_compared": 10,
+    "off_vs_inj_only_top5_differ": {},
+    "off_vs_inj_only_top5_identical_questions": 10,
+    "session_recall@5_flips_inj_only_to_on": {
+     "6456829e": [
+      0.5,
+      1.0
+     ],
+     "f35224e0": [
+      0.5,
+      1.0
+     ]
+    },
+    "session_recall@5_flips_off_to_inj_only": {},
+    "session_recall@5_flips_off_to_on": {
+     "6456829e": [
+      0.5,
+      1.0
+     ],
+     "f35224e0": [
+      0.5,
+      1.0
+     ]
+    }
+   },
+   "selector": "tail s[150:250], question_type == 'multi-session', items [10:20] (disjoint from S1; never measured before)"
+  }
+ },
+ "revision_measured": {
+  "sha": "c1e6f7f2d",
+  "subject": "fix(2517): review fixes \u2014 plan barrier, honest scope contracts, fixture that can fail",
+  "subject_note": "the receipt file itself is added by a LATER commit (8f1af7f62, which touches only this file) and corrected in 7be20eb27 \u2014 which ALSO edits tortoise/retrieval.py (comments only; MACHINE-CHECKED by tools/longmem_eval/guard_measured_revision.py over tortoise/ and tools/) and tests/test_session_reinjection_rules.py (comments only, checked by inspection \u2014 the guard pathspec does not cover tests/). The measured tree was c1e6f7f2d with a clean working tree at launch, and no executable RETRIEVAL code changed after it",
+  "tree": "clean at launch (verified: nothing uncommitted when the arms started)",
+  "verified_by": "tools/longmem_eval/guard_measured_revision.py (committed 807e0ad02 and hardened in later commits \u2014 `git log --oneline -- tools/longmem_eval/guard_measured_revision.py` is the authority on that history, and this field is written by one of them, so it names none of them) \u2014 `python -m tools.longmem_eval.guard_measured_revision --rev c1e6f7f2d --paths tortoise/ tools/` from this worktree exits 0, reporting 255 files compared, ONE comment/docstring-only difference (tortoise/retrieval.py), the files added after the revision (this guard tool: it did not exist at that revision, so it is listed, not compared), and 100 byte-cache files, which the guard NOW REFUSES by default \u2014 see BYTECODE below (that historical check ran under the superseded default that excused them). It refuses, with the reason on stderr, when: the revision does not resolve or any git call fails; a file present at the revision is deleted or no longer tracked; a tracked .py differs executably (docstrings and comments stripped before the AST comparison); a tracked non-.py differs at all; a tracked file's MODE or on-disk TYPE changed (a chmod -x, or a regular file replaced by a symlink of the same bytes, executes differently while the content compare passes); a non-allowlisted untracked file exists under the surface; or nothing under --paths existed at the revision, because an empty comparison must not read as a clean one. It does NOT read git diff, so assume-unchanged/skip-worktree index flags, rename collapsing and .gitignore rules cannot defeat it \u2014 all three were demonstrated as bypasses against the previous implementation and are now refused. STATED LIMIT: the excused set is by SUFFIX only, never by directory, so a stray __pycache__/evil.py refuses. BYTECODE (#3712, closed in this branch): a .pyc is executable code and CPython runs it in preference to the .py beside it, and a forged byte-cache's mtime/size header matches its source by construction \u2014 so no header check can separate it, and one crafted __pycache__/evilmod.cpython-312.pyc executed different code while the superseded default printed 'no executable change'. The guard now REFUSES any .pyc/.pyo under the surface BY DEFAULT \u2014 untracked, staged/index-tracked, committed, or present at the measured revision alike, case-variant suffixes included (the match is casefolded \u2014 on a case-insensitive filesystem the importer's ...cpython-312.pyc open() resolves to a forged ...PYC, which the cycle-14 review reproduced executing while the guard exited 0): git's bookkeeping does not change what CPython executes, and the first fix (which scanned only the untracked set) was itself defeated by an INDEX-tracked forged byte-cache reported as 'added after the revision' with the guard still exiting 0. The former --strict-bytecode flag is the default (kept as a no-op), and the measured run is required to be byte-code-free: tools/longmem_eval/run_protocol.py launches every run step with -B and PYTHONDONTWRITEBYTECODE=1 (for the runner and the children it spawns). --allow-bytecode is the explicit opt-out, and a run that takes it states in its own output that the attestation does NOT cover bytecode. For the historical verification above this means the 100 excused byte-cache files would now produce a REFUSAL: re-running the attestation requires the byte-caches cleared (or the opt-out taken, with the weaker claim recorded). The declared bypass surface is pinned by tests/test_guard_measured_revision.py (58 tests, one per declared class: content drift, index flags, rename collapsing, ignore rules, mode/type, presence, non-Python files, unresolvable revision, git failure, empty surface, byte-cache refusal by default \u2014 untracked, staged, committed, present-at-revision and case-variant suffixes each pinned \u2014 and the declared exemptions). Out of its scope, by construction: reachability (it proves absence of executable change on the declared paths, not that a change sat on the executed path, and not that the declared paths are the entire import graph; the measured command also imports tests/model_adapters.py lazily for a non-default ingest mode, which is outside the declared surface)"
+ },
+ "substrate": {
+  "embedder": "BAAI/bge-small-en-v1.5 (384-dim, local SentenceTransformer; pre-flight OK)",
+  "graph": "dedicated docker FalkorDB 127.0.0.1:6399, image pinned to sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62 \u2014 the SAME digest the shared :6379 container runs, uncontended. NOTE (corrected): the three arms SHARE graph names on this server \u2014 the docker:// URI path is the BASE graph name and the eval's per-question namespace overrides it, so one-DB-per-arm is NOT what the mechanism does. Effective isolation is run.py's gated per-question wipe + full re-ingest (see acknowledged_limitations). pool_size verified identical across the 3 arms question-for-question",
+  "reader": "mock (--retrieval-only --mock): no reader surface is measured"
+ },
+ "supersedes": "the pre-review-fix receipt, committed as e66f32849 docs/scoping/receipts/2026-09-16-2517-reinjection-turn-f1cdb1b56.json and deleted in 7be20eb27 (`git show e66f32849:docs/scoping/receipts/2026-09-16-2517-reinjection-turn-f1cdb1b56.json` still resolves). The two receipts disagree on THREE (arm, question) cells across two questions: inj_only on S2 3c1045c8 and on on S2 3c1045c8 (each session_recall@5 and evidence_recall@5 0.5 then, 1.0 now) and on on S1 4f54b7c9 (reader_surface@5 1.0 then, 0.5 now). The 3c1045c8 cells are diagnosed under acknowledged_limitations as a harness-side seed-ORDER difference; the 4f54b7c9 cell is NOT separately diagnosed. The only executable change in the MEASURED code path between the two revisions is the result-neutral WITH DISTINCT s plan barrier (the same commit also changed the test files and run.py's argparse help strings - neither is executed by the arms). The OFF arm's graded metrics and pool_size are identical across both campaigns (its ranked_ids are NOT \u2014 they differ on 4/20). This receipt is the authoritative one."
+}

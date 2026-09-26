@@ -569,18 +569,19 @@ def test_capture_metadata_creates_document_no_points():
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(uri)
     try:
-        # Document exists with fields (discover by sessionId — doc_id may differ)
+        # Document Source exists with fields (discover by sessionId — doc_id may differ).
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source keyed url = doc_id.
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.sessionId = 's1' "
-            "RETURN d.topics, d.summary, d.eventId"
+            "MATCH (s:Source) WHERE s.sessionId = 's1' "
+            "RETURN s.topics, s.summary, s.eventId"
         ).result_set
         assert rows, "Document not created"
         assert rows[0][0] == ["licensing", "AGPL"], rows[0][0]
         assert rows[0][1] == "Compared"
-        # sessionCaptured Event + produces→Document + uses→Skill
+        # sessionCaptured Event + produces→document Source + uses→Skill
         ev = proj.g.query(
-            "MATCH (e:Event {eventKind:'sessionCaptured'})-[:produces]->(d:Document) "
-            "WHERE d.sessionId = 's1' RETURN count(e)"
+            "MATCH (e:Event {eventKind:'sessionCaptured'})-[:produces]->(s:Source) "
+            "WHERE s.sessionId = 's1' RETURN count(e)"
         ).result_set
         assert ev[0][0] >= 1, ev
         uses = proj.g.query(
@@ -636,9 +637,9 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
 
 
 @_live_db
-def test_capture_defaults_doc_status_captured():
-    """#133 P0: --capture-metadata with NO doc_status in frontmatter
-    must default the Document to doc_status='captured' (not 'draft')."""
+def test_capture_defaults_needs_extraction():
+    """#133 P0 / D10: --capture-metadata with NO extraction flag in frontmatter
+    must mark the document Source needs_extraction=true (extraction pending)."""
     import json  # noqa: F401
     uri = _live_uri(f"test_ingest133_{os.urandom(4).hex()}")
     db = uri
@@ -661,11 +662,11 @@ def test_capture_defaults_doc_status_captured():
     proj = FalkorProjection.from_uri(uri)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.title = 'CapDefault' "
-            "RETURN d.doc_status"
+            "MATCH (s:Source) WHERE s.title = 'CapDefault' "
+            "RETURN s.needs_extraction"
         ).result_set
         assert rows, "Document not created"
-        assert rows[0][0] == "captured", f"expected captured, got {rows[0][0]!r}"
+        assert rows[0][0] is True, f"expected needs_extraction=True, got {rows[0][0]!r}"
     finally:
         proj.close()
 
@@ -686,7 +687,7 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     _f.close()
     t = _tmp("ne.md")
     Path(t).write_text(
-        "---\ntitle: NeedsExtract\ntopics: a\ndoc_status: captured\n"
+        "---\ntitle: NeedsExtract\ntopics: a\n"
         "needs_extraction: true\n---\n\n## User\nImportant decision\n",
         encoding="utf-8")
     args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
@@ -697,8 +698,8 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     proj = FalkorProjection.from_uri(uri)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.title = 'NeedsExtract' "
-            "RETURN d.needs_extraction"
+            "MATCH (s:Source) WHERE s.title = 'NeedsExtract' "
+            "RETURN s.needs_extraction"
         ).result_set
         assert rows and rows[0][0] is True, f"needs_extraction not stored: {rows}"
     finally:
@@ -707,8 +708,8 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
 
 @_live_db
 def test_upgrade_on_already_extracted_is_noop():
-    """#133: --upgrade on a Document already doc_status='extracted' → no-op
-    'doc already extracted, skipped' (idempotency)."""
+    """#133 + D10 (#5026): --upgrade on a document Source already extracted
+    (needs_extraction=false) → no-op 'doc already extracted, skipped'."""
     import json  # noqa: F401
     uri = _live_uri(f"test_ingest133_{os.urandom(4).hex()}")
     db = uri
@@ -719,17 +720,19 @@ def test_upgrade_on_already_extracted_is_noop():
     _f = _FP.from_uri(uri)
     _f.g.query("MATCH (n) DETACH DELETE n")
     _f.close()
-    # The Document id MUST equal the file path so _do_upgrade finds it and
-    # exercises the "already extracted → skip" path (review P1).
+    # The document Source id MUST equal the file path so _do_upgrade finds it
+    # and exercises the "already extracted → skip" path (review P1).
     t = _tmp("already.md")
     Path(t).write_text("---\ntitle: X\n---\n\n## User\nhi\n", encoding="utf-8")
-    # Real convention: Document id = filename (args.transcript.name), sourcePath = full path
+    # Real convention: document id = filename (args.transcript.name), sourcePath = full path
     doc_id = Path(t).name
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(uri)
     try:
+        # D10: a document is a :Source; needs_extraction=false means extracted.
         proj.g.query(
-            "CREATE (d:Document {id:$id, title:'X', doc_status:'extracted', sourcePath:$sp})",
+            "CREATE (s:Source {url:$id, id:$id, title:'X', "
+            "documentKind:'document', needs_extraction:false, sourcePath:$sp})",
             params={"id": doc_id, "sp": str(t)},
         )
     finally:
@@ -743,10 +746,10 @@ def test_upgrade_on_already_extracted_is_noop():
     proj = FalkorProjection.from_uri(uri)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document {id:$id}) RETURN d.doc_status",
+            "MATCH (s:Source {url:$id}) RETURN s.needs_extraction",
             params={"id": doc_id},
         ).result_set
-        assert rows[0][0] == "extracted", rows[0][0]
+        assert rows[0][0] is False, rows[0][0]
     finally:
         proj.close()
 
@@ -775,13 +778,14 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     # Real file under the base — doc sourcePath = file path (ingest convention)
     real_file = corpus / "doc-a.md"
     real_file.write_text(
-        "---\ntitle: A\ndoc_status: captured\n---\n\n## User\nhi\n",
+        "---\ntitle: A\n---\n\n## User\nhi\n",
         encoding="utf-8")
     proj = FalkorProjection(db)
     try:
+        # D10: a document is a :Source; its extraction signal is needs_extraction.
         proj.g.query(
-            "CREATE (d:Document {id:$id, title:'A', doc_status:'captured', "
-            "sourcePath:$sp})",
+            "CREATE (s:Source {url:$id, id:$id, title:'A', documentKind:'document', "
+            "needs_extraction:true, sourcePath:$sp})",
             params={"id": str(real_file), "sp": str(real_file)},
         )
     finally:
@@ -795,10 +799,10 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.sourcePath = $sp RETURN d.doc_status",
+            "MATCH (s:Source) WHERE s.sourcePath = $sp RETURN s.needs_extraction",
             params={"sp": str(real_file)},
         ).result_set
-        assert rows and rows[0][0] == "extracted", f"expected extracted, got {rows}"
+        assert rows and rows[0][0] is False, f"expected extracted (needs_extraction=False), got {rows}"
     finally:
         proj.close()
 
@@ -816,12 +820,12 @@ def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
     corpus.mkdir()
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
     from tortoise.projection import FalkorProjection
-    # Tenant-crafted Document pointing at a path outside the base
+    # Tenant-crafted document Source pointing at a path outside the base
     proj = FalkorProjection(db)
     try:
         proj.g.query(
-            "CREATE (d:Document {id:'doc-evil', title:'Evil', "
-            "doc_status:'captured', sourcePath:$sp})",
+            "CREATE (s:Source {url:'doc-evil', id:'doc-evil', title:'Evil', "
+            "documentKind:'document', needs_extraction:true, sourcePath:$sp})",
             params={"sp": "/etc/passwd"},
         )
     finally:
@@ -830,13 +834,13 @@ def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
-    # Doc NOT extracted — the file was never read
+    # Doc NOT extracted — the file was never read (needs_extraction stays true)
     proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document {id:'doc-evil'}) RETURN d.doc_status",
+            "MATCH (s:Source {url:'doc-evil'}) RETURN s.needs_extraction",
         ).result_set
-        assert rows[0][0] == "captured", f"expected captured (fail-closed), got {rows[0][0]}"
+        assert rows[0][0] is True, f"expected pending (fail-closed), got {rows[0][0]}"
     finally:
         proj.close()
 
@@ -853,13 +857,13 @@ def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
     # without containment)
     real = _tmp("doc-real.md")
     Path(real).write_text(
-        "---\ntitle: Real\ndoc_status: captured\n---\n\n## User\nreal content\n",
+        "---\ntitle: Real\n---\n\n## User\nreal content\n",
         encoding="utf-8")
     proj = FalkorProjection(db)
     try:
         proj.g.query(
-            "CREATE (d:Document {id:'doc-x', title:'X', doc_status:'captured', "
-            "sourcePath:$sp})",
+            "CREATE (s:Source {url:'doc-x', id:'doc-x', title:'X', "
+            "documentKind:'document', needs_extraction:true, sourcePath:$sp})",
             params={"sp": real},
         )
     finally:
@@ -871,9 +875,9 @@ def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
     proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document {id:'doc-x'}) RETURN d.doc_status",
+            "MATCH (s:Source {url:'doc-x'}) RETURN s.needs_extraction",
         ).result_set
-        assert rows[0][0] == "captured"
+        assert rows[0][0] is True
     finally:
         proj.close()
 

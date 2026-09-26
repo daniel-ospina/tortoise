@@ -1,0 +1,86 @@
+# THE disposition vocabulary for the #4282 surface rebuild.
+#
+# Declared ONCE here. `tools/sdk_rename_table.py` READS this file (via `_load_vocabulary`)
+# and its generated legend REFERENCES it instead of restating its values. Before this file
+# existed the vocabulary lived only in a comment block in that generator plus a
+# hand-written legend line, so nothing but the generator knew what any value meant.
+#
+# SCOPE — which generators consume this, and which deliberately do not (checked for #4282):
+#   * `tools/sdk_rename_table.py`      — READS it. Its Part A `disposition`/axes cells are
+#     expanded from `dispositions` below; a row's combination must be a declared one.
+#   * `tools/bridge_table.py`          — does NOT read it, by design. Its `REMOVED` is a
+#     DESTINATION token in the MCP bridge's own namespace (`MCP tool -> target tool`), not a
+#     disposition of an SDK method. The one overlap — a `REMOVED` MCP tool whose SDK method
+#     is a fold rather than a delete — is DISCLOSED in `bridge-table.md` §D2c, which names
+#     this vocabulary's home (`sdk-rename-table.md` §C3b / its C6 fold record).
+#   * `tools/mcp_rename_table.py`      — does NOT read it. It maps served MCP tool -> name to
+#     call today -> target-surface name, and its `REMOVED` token is the same destination-namespace
+#     value as the bridge's. No lifecycle/visibility/basis is stated there.
+#
+# WHY ORTHOGONAL AXES AND NOT AN ENUM.
+#
+# A single flat disposition value conflates three independent facts. The observed harm
+# is real: `DISCARDED` was consumed as a COMMAND (`tools/sdk_rename_table.py` —
+# "DISCARDED is Phase 2's signal to DELETE"), so "not on the public surface" and
+# "delete this" were spelled the same way — one word carrying a visibility fact and a
+# delete COMMAND.
+#
+# OVERRIDES: a single flat lifecycle enum (the common convention — an AIP-style
+# "Stability levels" list alone) — disposition is modelled as orthogonal axes because
+# lifecycle and visibility are independent, and a delete instruction is neither.
+# Convergent: Google AIP-181 literally names "Stability axes"; Kubernetes distinguishes
+# internal vs versioned structures; JetBrains annotates `@ApiStatus.Internal`; Go uses
+# the `internal/` package boundary; PEP 387 lists test suites as explicitly not public API.
+#
+# ⛔ `deferred` is deliberately NOT a value of this vocabulary. It already means the
+# OPPOSITE in this repo: `docs/ONTOLOGY.md` uses "deferred" for *postponed / not done*
+# ("temporal decay granularity = deferred"), while the old rename table used `DEFERRED`
+# for *done and shipping*. Carrying the word across would re-create the collision. The
+# state it named is `visibility: unlisted`.
+declaration: disposition-vocabulary
+issue: 4282
+
+axes:
+  lifecycle:
+    question: What happens to the method?
+    values:
+      stable:       not changed by this migration
+      experimental: reachable but not yet committed to
+      deprecated:   superseded by a named target; the old name goes away
+      removed:      retired with no successor
+  visibility:
+    question: On which surface is the capability reachable?
+    values:
+      public:   on the published MCP/SDK surface
+      unlisted: live and callable, but deliberately not advertised
+      internal: not public API — project-internal, test infrastructure, or pending deletion
+  basis:
+    question: How strong is the evidence for this row?
+    values:
+      stated:    the cited quote names this method and its destination
+      derived:   a doc gives the destination only for a namespace or wildcard covering it
+      unbacked:  no doc states a destination
+      contested: the docs name conflicting destinations
+
+# The delete instruction is its OWN field because it is a COMMAND to Phase 2, not a
+# description of the method. It is the value that used to be hidden inside `DISCARDED`.
+delete_instruction:
+  question: Must Phase 2 delete the implementation?
+  values:
+    delete: remove the implementation
+    retain: keep the code — a relocation, an open finding, or a merge target that dispatches to it
+
+# A disposition is a COMBINATION of the axes — never a value of any one of them.
+#   target: self  → the method is already on the target surface under its own name
+#   target: named → the row's destination is a target method name (lifecycle deprecated)
+#   target: none  → no destination; the axes + delete instruction carry the disposition
+# A row whose basis is `unbacked`/`contested` states no destination at all, so its
+# lifecycle/visibility/delete are left unstaked (`null`) rather than guessed.
+dispositions:
+  UNCHANGED:  {target: self,  lifecycle: stable,     visibility: public,   delete: retain}
+  RENAMED:    {target: named, lifecycle: deprecated, visibility: public,   delete: retain}
+  DISCARDED:  {target: none,  lifecycle: removed,    visibility: internal, delete: delete}
+  UNLISTED:   {target: none,  lifecycle: stable,     visibility: unlisted, delete: retain}
+  RELOCATED:  {target: none,  lifecycle: stable,     visibility: internal, delete: retain}
+  UNBACKED:   {target: none,  basis: unbacked}
+  CONTESTED:  {target: none,  delete: retain,        basis: contested}

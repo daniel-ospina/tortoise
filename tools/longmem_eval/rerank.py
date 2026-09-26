@@ -41,6 +41,7 @@ from tortoise.rerank import (  # noqa: F401
     RERANK_TRUNCATE_CHARS,
     CrossEncoderScorer,
     FakeScorer,
+    _clamp_int,
     _env_float,
     _env_int,
     _fetch_embeddings,

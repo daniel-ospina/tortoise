@@ -43,6 +43,20 @@ later), we need a clear license grant from every outside contributor. See the
 
 ## The MCP tool surface and public SDK methods cannot grow by accident
 
+> ⛔ **THE RULE.** You may not add or remove a tool from the MCP surface, or a method from the
+> SDK surface, without **human approval from Daniel**. This is a mandated rule, not a
+> suggestion: the procedure below is the *mechanism*; Daniel's approval is the *authority*.
+>
+> **WHY IT EXISTS.** The surface is the contract every agent and every customer integration is
+> built on. Changing it changes what every agent can see and do, so it materially affects
+> customer outcomes — it is not an implementation detail.
+>
+> **WHAT TO DO.** Get Daniel's approval **first**, before you write the change or re-cut
+> anything, through the repo `AGENTS.md` "USER QUESTIONS" / "DECISION RELAY" path: say which
+> tool or method, what it does, and why it is needed. Then follow the steps below, which record
+> that approval on the row. A green gate is **not** the approval — see *What the gates do and
+> do not prove* below.
+
 Adding an entry to `TOOL_REGISTRY` in [`tortoise/tool_registry.py`](tortoise/tool_registry.py) does not
 just register a tool — it **expands what every agent can see**. That surface grew to 98 MCP tools and
 150 public SDK methods without anyone deciding it should, so it is now gated. (The #3863 curation then
@@ -55,8 +69,63 @@ compares the live declaration against the approved baseline in
 any added public SDK method, any removal, any **changed SDK binding** (which method a tool fronts), any
 change to how a tool is served (HTTP vs stdio-only), a registry whose entry count no longer matches the
 baseline (a duplicate name a name comparison cannot see), or an exemption that has become reachable. A
-missing, unreadable, or malformed baseline is also a failure, as is an unreadable served-surface
-declaration — the guard must never skip a check and still report success.
+missing, unreadable, or malformed baseline is also a failure — including a **duplicate row name**, which
+a name-keyed comparison silently drops and so cannot verify, and a row whose `name` is not a non-empty
+string (which used to crash the check with a traceback rather than fail closed) — as is an unreadable
+served-surface declaration: the guard must never skip a check and still report success. An SDK row is
+identified by its name: it must be `sdk:<its method>`, so a row that renames a real method or fronts an
+existing method under a new name is a failure rather than an invisible addition.
+
+**What the gate does *not* fail on: an added field on an existing response.** A field that is off
+by default, and leaves the response unchanged when it is off, is neither a new tool nor a new
+endpoint — so it does not gate **as an addition**. The precedent is the W4 why-layer key on the
+`tortoise_analyze` response: written only when `TORTOISE_W4_ENRICHMENT` is truthy
+(1/true/yes/on; unset or `0` means off), with every other
+field byte-identical when it is absent. That is a different `why` key from the one on
+`volunteer_context`, which is present by default.
+
+**One qualification: the gate also fingerprints implementations.** It records a digest of each
+registered tool's own code object, so a field added *inside a tool's handler* changes that tool's
+fingerprint — and, since the fingerprint covers the function's source position, the fingerprint of every
+tool defined after it — and reds the gate, correctly, as a changed implementation rather than a new
+tool. Add response fields in the SDK or assembly layer, not inside a tool function.
+
+**And it must still be recorded.** Every such addition goes in the `response_fields` table in
+[`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md), which is rendered from
+`config/surface-manifest.yml`. Two of `check`'s properties defend that record: an empty or missing
+`response_fields` block is a failure, and every entry must name a tool or endpoint that exists in
+the manifest — so the record can be neither deleted nor left unanchored.
+
+**Be precise about the half the machine cannot check.** Nothing inspects response bodies at
+runtime, so a field that nobody recorded at all is **not** caught by any check. That half is a
+reviewing obligation, and it is stated as one rather than implied to be automatic. The carve-out is
+about what the guard *fails* on — not about what goes *unrecorded*. An unrecorded field has no
+approval behind it and the carve-out does not cover it.
+
+The baseline cannot be *edited* either. `tools/surface_manifest.py check` (the same required job) also
+**re-derives the whole baseline from the declaration** and reds on any difference outside the columns that
+are not a function of the code. Those columns are exactly `NON_DERIVABLE_ROW_KEYS` and
+`NON_DERIVABLE_DOC_KEYS` in the tool (the authority — read them there): `used_by`, `recommendation`,
+`basis` and `reason` (they read a machine-local call log), the human `approval` reference and `exemption`
+flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr` /
+`response_fields`. One
+consequence worth stating plainly: those columns **are** editable in a PR, so the review evidence a reader
+sees in the generated document is not gate-verified — the served surface is. So hand-editing the
+baseline's `counts:`, a row's description, its `class`, `served` or `served_from`, or any other derived
+cell is a red build, not a shortcut: change the registry, then re-cut.
+
+Two things have no automatic path and are updated by hand as part of a re-cut: the `approval` fields (a
+re-cut resets them to `null` and marks the baseline `pending-owner-approval`, so the owner re-records
+them — see "To propose an addition"), and `baseline_counts` in
+[`config/surface-order.yml`](config/surface-order.yml), the frozen keyword distribution the derived
+`counts:` is checked against. The check reads that table for `keywords`, `tokens`, `family_rank` **and**
+`baseline_counts`, and refuses a table whose shapes or ranks are wrong or whose `baseline_counts` is
+empty — an empty table cannot turn the distribution check off. If an added tool moves the distribution,
+the check reds until the order table records the new expectation. Note what the approval reference does
+and does not do: the gate verifies its **shape** (a PR number and an `@handle`), never that the review it
+names exists. The carrier for the approval is the **#4282 mandate above and Daniel's review** — not a
+machine control. (The repository ruleset the #3863 scope doc proposed as that carrier was **rejected by
+the owner on #4282** as over-engineering; do not re-introduce one.)
 
 **"Added tool" means the advertised surface, not just the registry.** A tool can reach agents without
 ever entering `TOOL_REGISTRY`, by three routes the guard checks separately, because each is invisible
@@ -82,9 +151,18 @@ to the others:
 **Scope, stated plainly.** The gate constrains the *registration routes* — what `TOOL_REGISTRY`
 declares, what the server registers, and what the transforms do. It is **not** a security boundary
 against someone who edits `mcp_server.py` and `tools/surface-guard.py` together; a party who can edit
-the guard can defeat any gate, and the control for that class is required review, not this check. What
-the gate guarantees is that the surface cannot grow as a **side effect** — silently, in a diff nobody
-reads, through a route nobody chose.
+the guard can defeat any gate, and the control for that class is Daniel's review — the #4282 mandate
+— not this check. What the gate guarantees is that the surface cannot grow as a **side effect** —
+silently, in a diff nobody reads, through a route nobody chose.
+
+**What the gates do and do not prove.** `tools/surface-guard.py` and
+`tools/surface_manifest.py check` are **drift / consistency controls**. They compare the live
+declaration against the frozen baseline, so they catch a change that is *unrecorded* — a new tool or
+method that entered the code without the baseline being re-cut. They **cannot** prove that Daniel
+approved an expansion: a change that updates the registry **and** the baseline together satisfies
+every property and passes both. The approval is carried by the mandated rule above and by Daniel's
+review, never by a machine check. A lane that reads a green gate as "approved" will not seek
+approval — which is the one failure this section exists to prevent.
 
 **To propose an addition**, in the same PR:
 

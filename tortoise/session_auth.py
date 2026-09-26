@@ -102,14 +102,16 @@ def _resolve_fetch_total() -> float:
     sum would let the hard deadline win the race against the phases and strand
     the httpx worker in its socket read (CPython #87185 cannot cancel it), so
     it is clamped UP to the phase sum plus the margin and the clamp is logged.
-    NOTE the convention differs from ``hosted_api._health_probe_interval``: that
+    NOTE the convention differs from ``monitoring.health_probe_interval`` (the
+    shared resolver; ``hosted_api._health_probe_interval`` is only its
+    back-compat alias since #2988): that
     function REJECTS a below-floor value and falls back to its default, whereas
     this one clamps up. The direction is deliberate — the floor here IS the
     safe value (a lower hard deadline strands a worker), so the operator's
     requested value is preserved as far as is safe instead of being discarded.
 
     NON-FINITE values are REJECTED, not clamped (mirrors
-    ``_health_probe_interval``). ``float()`` accepts ``nan`` and ``inf``, and a
+    ``monitoring.health_probe_interval``). ``float()`` accepts ``nan`` and ``inf``, and a
     bare ``v > 0`` is NaN-safe but NOT inf-safe: ``inf`` — and ``1e309``, which
     ``float()`` evaluates to ``inf`` — passes it, is not ``< floor``, and lands
     in ``asyncio.timeout(inf)``, which NEVER fires. One env value would silently

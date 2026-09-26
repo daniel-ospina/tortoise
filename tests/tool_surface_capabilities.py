@@ -60,13 +60,44 @@ NON_SDK_WRITER_OPERATIONS: dict[str, str] = {
                               "tortoise/pack_manifest_store.py",
 }
 
+# The TOOL that carries each non-SDK writer operation.  #4035 corrected the
+# `tortoise_pack_install` declaration to the handler-served idiom
+# (`sdk_method=""`; the helper is reached from `mcp_server.py`), so the
+# operation is no longer a declared SDK label — the binding is by TOOL NAME.
+NON_SDK_WRITER_BINDINGS: dict[str, str] = {
+    "upsert_tenant_manifest": "tortoise_pack_install",
+}
+
+# Reads reached through helpers OUTSIDE the sdk.py derivation boundary.  A
+# read-through op that WRITES on a self-heal path (`get_tenant_packs` →
+# `ensure_tenant_packs` MERGE (:PackInstall)) is covered by
+# READ_THROUGH_WRITE_METHODS; it lands here for the *declared-binding* half,
+# because #4035 blanked that method's only declaration
+# (`tortoise_packs_list.sdk_method=""` — handler-served, #4035) and a
+# declared-set entry with no declaring registry row is otherwise unchecked.
+NON_SDK_READ_OPERATIONS: dict[str, str] = {
+    "get_tenant_packs": "pack_state.get_tenant_packs → self-heal "
+                        "`ensure_tenant_packs` MERGE (:PackInstall) (#4122)",
+}
+
+# The TOOL that carries each non-SDK read operation, mirroring
+# NON_SDK_WRITER_BINDINGS.  A blanked declaration removes the op from the
+# `by_method` index, so the read-classification property must also be asserted
+# per TOOL NAME or it silently stops being checked (#4035 review).
+NON_SDK_READ_BINDINGS: dict[str, str] = {
+    "get_tenant_packs": "tortoise_packs_list",
+}
+
 # Registry `sdk_method` labels that do not resolve to a TortoiseSDK attribute.
 # These are the #3994 `fix-declaration` rows (declared-SDK-link drift, not
 # missing features).  Kept exact so a *new* dangling declaration fails.
-DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({
-    "analyze", "entity_profile", "get_tenant_packs", "health",
-    "upsert_tenant_manifest",
-})
+# #4035 blanked `analyze`/`entity_profile`/`upsert_tenant_manifest` and
+# `get_tenant_packs`, so only the retired `tortoise_health` (`health`) is still a
+# registry row.  `get_tenant_packs` moved to NON_SDK_READ_OPERATIONS: its only
+# declaration is gone, so keeping it here would exempt a *future* row that
+# re-declares it from resolution — a re-declaration on a handler-served tool is
+# the defect, not an exemption.
+DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({"health"})
 
 class DeclaredBindingDivergence(NamedTuple):
     """One recorded declared-binding divergence (#4337).
@@ -170,10 +201,14 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_seed",
     "tortoise_onboarding_session_recording",
     "tortoise_onboarding_github_connect", "tortoise_onboarding_github_index",
+    # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
+    "tortoise_pack_install",
 })
 NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     "tortoise_overview", "tortoise_get", "tortoise_onboarding_state",
     "tortoise_onboarding_github_status",
+    # #4035: handler-served reads (declaration corrected to sdk_method="")
+    "tortoise_packs_list", "tortoise_entity_profile", "tortoise_analyze",
 })
 
 # Writer-annotated tools that are NOT in WRITE_TOOL_NAMES because they are
@@ -885,7 +920,25 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
         # 2c — empty sdk_method must be declared
         if not e.sdk_method and e.name not in (NON_SDK_WRITER_TOOLS | NON_SDK_READ_TOOLS):
             out.append(f"{e.name}: empty sdk_method but not declared non-SDK")
-    # non-SDK writer operations must be bound to a writer tool in WRITE_TOOL_NAMES
+    # non-SDK writer operations must be bound to a writer tool in WRITE_TOOL_NAMES.
+    # TWO arms, deliberately.  The TOOL-NAME arm (NON_SDK_WRITER_BINDINGS) is what
+    # survives the #4035 declaration blanking; the OP-KEYED arm below still fires
+    # for any OTHER entry that *declares* a non-SDK writer op — the name-keyed arm
+    # alone checked one named tool and let a second read-annotated declarer pass
+    # both this function and the resolution exemption (#4035 review).
+    by_name = {e.name: e for e in entries}
+    for operation, tool_name in sorted(NON_SDK_WRITER_BINDINGS.items()):
+        e = by_name.get(tool_name)
+        if e is None:
+            # liveness (the bound tool exists) is asserted by
+            # declared_set_violations against the SERVED set; here `entries`
+            # may be a synthetic subset, so a missing tool is skipped.
+            continue
+        if e.name not in _ms.WRITE_TOOL_NAMES or (
+                e.annotations is None or e.annotations.readOnlyHint is not False):
+            out.append(
+                f"{e.name}: non-SDK writer operation {operation!r} not "
+                f"writer-classified in WRITE_TOOL_NAMES")
     for operation in sorted(NON_SDK_WRITER_OPERATIONS):
         for e in by_method.get(operation, []):
             if e.name not in _ms.WRITE_TOOL_NAMES or (
@@ -1015,11 +1068,18 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
         for e in bound:
             if e.http_policy:
                 out.append(f"{e.name}: declared HTTP-excluded operation {op!r} is HTTP-exposed")
+    by_name = {e.name: e for e in entries}
     for op in sorted(NON_SDK_WRITER_OPERATIONS):
-        if not by_method.get(op):
+        bound_tool = NON_SDK_WRITER_BINDINGS.get(op)
+        if bound_tool is None or bound_tool not in by_name:
             out.append(f"NON_SDK_WRITER_OPERATIONS entry {op!r} has no tool binding")
+    for op in sorted(NON_SDK_READ_OPERATIONS):
+        bound_tool = NON_SDK_READ_BINDINGS.get(op)
+        if bound_tool is None or bound_tool not in by_name:
+            out.append(f"NON_SDK_READ_OPERATIONS entry {op!r} has no tool binding")
     for op in sorted(READ_THROUGH_WRITE_METHODS):
         if op not in methods and op not in NON_SDK_WRITER_OPERATIONS \
+                and op not in NON_SDK_READ_OPERATIONS \
                 and op not in DANGLING_SDK_DECLARATIONS:
             out.append(f"READ_THROUGH_WRITE_METHODS entry {op!r} does not resolve")
         for e in by_method.get(op, []):
@@ -1028,6 +1088,24 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
                 out.append(
                     f"{e.name}: READ_THROUGH_WRITE_METHODS entry {op!r} bound to a "
                     f"non-read HTTP tool")
+        # #4035 split: a read-through op carried by a handler-served tool has no
+        # `sdk_method` declaration left for the `by_method` loop above to key on,
+        # so it becomes UNREACHABLE and the read-classification property stops
+        # being checked at all.  Assert it per TOOL NAME as well — the same repair
+        # NON_SDK_WRITER_BINDINGS already carries for the writer half.  This is an
+        # ADDITIONAL arm, never a replacement: the op-keyed loop still covers every
+        # entry that does declare the op (compute_confidence / get_confidence).
+        bound_tool = NON_SDK_READ_BINDINGS.get(op)
+        if bound_tool is None:
+            continue
+        e = by_name.get(bound_tool)
+        if e is None:
+            continue  # liveness ('has no tool binding') is asserted above
+        if not e.http_policy or e.annotations is None \
+                or e.annotations.readOnlyHint is not True:
+            out.append(
+                f"{bound_tool}: READ_THROUGH_WRITE_METHODS entry {op!r} bound to a "
+                f"non-read HTTP tool")
     for op in sorted(INTERNAL_PATH_READERS):
         if op not in methods:
             out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
@@ -1038,10 +1116,11 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
     # the binding arms here already have: the ledger is compared against whatever
     # `entries` it is handed, so a caller passing a filtered registry sees the
     # same treatment for the ledger as for any other declared set.  (Not every arm
-    # below is subset-sensitive — `READ_THROUGH_WRITE_METHODS` and
-    # `INTERNAL_PATH_READERS` check only resolution and bound-entry properties —
-    # but the ones that ask for a tool binding are, and a filtered caller is
-    # expected to know it passed a filtered set.)  The divergence arm cannot host
+    # below is subset-sensitive — `INTERNAL_PATH_READERS` checks only resolution —
+    # but `READ_THROUGH_WRITE_METHODS` asks for a tool binding in BOTH the
+    # `by_method` and the `NON_SDK_READ_BINDINGS` arms, so it is subset-sensitive
+    # too, and a filtered caller is expected to know it passed a filtered set.)
+    # The divergence arm cannot host
     # this check: it is also called on probe SUBSETS, where the real ledger keys
     # are legitimately absent.
     known = {e.name for e in entries}

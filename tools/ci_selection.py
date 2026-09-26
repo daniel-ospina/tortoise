@@ -58,16 +58,16 @@ WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 # #3400: this is now the FALLBACK invariant, used only when the manifest
 # carries no `durations` map at all. Once measured durations exist the
 # balance invariant is DURATION (below) — LPT packs by weight, and a correct
-# pack can legitimately carry very different file counts (the real pool
-# splits 195/325 while both halves weigh 28.0m: one 855s file on one side,
-# ~130 sub-second files on the other).
+# pack can legitimately carry very different file counts: a few multi-minute
+# files on one side against the long tail of sub-second ones on the other.
 HALF_IMBALANCE_TOLERANCE = 3
 
 # #3400: with measured durations, the halves must stay DURATION-balanced
-# within this ratio. Index parity on the same pool leaves a=18.8m vs b=37.1m
-# (1.97x); the LPT pack lands at 1.00x. 1.25 is loose enough for run-to-run
-# noise and
-# tight enough that a reversion to parity (1.97x on the real pool) reds.
+# within this ratio. Index parity on the same pool leaves a tilt far above it —
+# which files land on even vs odd indices has nothing to do with what they cost
+# — while the LPT pack balances the same pool. 1.25 is loose enough for noise
+# and tight enough that a reversion to parity reds. (Do not restate either
+# figure here: both move whenever the pool does.)
 HALF_DURATION_IMBALANCE_RATIO = 1.25
 
 # #1473: weight for a fast file with no measured duration. The pack can only
@@ -78,12 +78,10 @@ DEFAULT_FAST_WEIGHT = 2.0
 # the flat default), which silently degenerated the duration-aware pack into
 # a count-based one. Floor the coverage so it cannot rot back. The check is
 # skipped entirely for an ABSENT/EMPTY map (a repo that has not adopted
-# durations is not failed) and bites once the map is populated: 90% leaves
-# ~52 files of headroom on the current 520-file pool (actual: 96.5%, after the
-# merge of main grew the pool from 500 — the 18 unmeasured files carry no hand
-# entry: 16 are main-added tests, 2 (test_helpers.py,
-# test_provenance_extractedfrom_3263.py) were already unmeasured on the branch.
-# They pack at DEFAULT_FAST_WEIGHT).
+# durations is not failed) and bites once the map is populated. Do not restate
+# the pool size or the current percentage here — the durations map's own header
+# carries the sweep that measures them, and a figure copied into this comment is
+# what went stale before (it read "520 files / 96.5%" while the pool had grown).
 DURATION_COVERAGE_MIN = 0.90
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
@@ -108,9 +106,23 @@ SHARED_MODULES = (
     "tortoise/env_truthy.py",
     "tortoise/tool_registry.py",
     "tortoise/mcp_server.py",
-    "tortoise/projection/",
+    # ⚠️ #4713: naming the package's entry point rather than the whole
+    # `tortoise/projection/` directory is a deliberate coverage REDUCTION. A
+    # submodule edit now runs only the surfaces registered for it below, plus the
+    # `core` pins that exercise it — the sdk/api suites wait for the next main
+    # push. Take the `edges.py` treatment below as the model if that is wrong.
+    "tortoise/projection/__init__.py",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
+    # #4069: suite-wide test helpers re-exported by `tests/conftest.py`. Both are
+    # imported at conftest MODULE level and hand their fixtures to every surface's
+    # tests, and neither is a `test_*.py` file, so the manifest never classifies
+    # them: without these entries a change to one selected `core` only, and a break
+    # it induced in an api/eval/onboarding/ep/battery test never ran on the PR that
+    # made it (#1349/#3332/#3910). The `tests.*` half of that rule is enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
+    "tests/_tmpdir_hygiene.py",
+    "tests/_embedded.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -129,6 +141,10 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/welcome.html",
                    "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
+                   # #2409: the public contact form's page. Registered here for the
+                   # same reason as the rest of this tuple — a PR touching only
+                   # this page must still select the guard that holds it.
+                   "website/contact.html",
                    "website/index.html",
                    "website/privacy.html",
                    # #3485: the shared cross-subdomain session bridge is a
@@ -150,6 +166,22 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #3673: the served skill documents and the installer belong to
+                   # this surface. The parity contract between
+                   # `tortoise/onboarding/SKILL.md` and its served mirror is
+                   # asserted by test_onboarding_variants.py, and the installer's
+                   # `SKILLS=(...)` is what the dashboard's shipped-set claim is
+                   # pinned against (test_installer_preserves_foreign_skill_
+                   # content.py, dual-registered onto this surface below).
+                   #
+                   # Before these entries a change to the SERVED copy alone matched
+                   # no pattern: `surfaces=[]` -> the parity gate ran only via the
+                   # tier-1 fallback (coverage by accident, not by design, and it
+                   # would vanish the moment the test left `tier1`). Worse, the
+                   # installer ran NO guard at all — its guard is on `core` and is
+                   # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
+                   "website/apps/dashboard/public/skills/",
+                   "website/apps/dashboard/public/install-tortoise-skills.sh",
                    # #3952: the blog-admin console SPA's build config and its
                    # committed build snapshot own the guard tests added in
                    # tests/test_admin_return_to.py (the build base, and
@@ -394,7 +426,8 @@ SOURCE_PATTERNS = {
             # the entries above: the flat "tools/" prefix would swallow a
             # shape-rate-only PR into tier-1 smoke and the ask-lane tests
             # would not run where the measurement changed.
-            "tools/ask_shape_rate.py"),
+            "tools/ask_shape_rate.py",
+            "tortoise/projection/edges.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -406,6 +439,16 @@ SOURCE_PATTERNS = {
             # CORE_ALSO: many core-registered tests (test_backup_sweep.py,
             # test_backup_multigraph_e2e.py, test_backup_watcher.py,
             # test_alert_store.py) also pin it.
+            # #4367: email_notify.py OWNS `_build_invite_link` (and the invite
+            # sender itself). `tests/test_email_integration_resend.py` —
+            # registered in `api` — is the guard that pins the invite-link
+            # contract and replays the recorded accept-page cassette, and
+            # `test_email_notify.py` (also `api`) pins the sender. Without this
+            # entry an email_notify.py-only change matched no pattern, fell
+            # through to `core`, and NEITHER guard ran on the PR that can break
+            # them — the regression was caught only post-merge, on push to
+            # main. Same silent-drop shape as the #2938/#3154 entries above.
+            "tortoise/email_notify.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
@@ -424,6 +467,17 @@ SOURCE_PATTERNS = {
             # its pinning tests are registered across api, core AND ep, so the
             # named-surface match must not drop `core` (see CORE_ALSO).
             "tortoise/api.py",
+            # #3036: tortoise/oauth.py is the hosted OAuth implementation, and
+            # its pinning tests are `api`-registered (test_oauth_mcp.py,
+            # test_oauth_token_fault.py, test_3036_oauth_retention.py,
+            # test_attribution_actor.py, test_user_identity_authority.py) plus
+            # `api`+`core` (test_control_plane_offload_3498.py). Without this
+            # entry an oauth.py-only change selected no named surface and fell
+            # through to `core`, silently skipping ALL of those — the
+            # #2938/#3154/#4367 silent-drop class, on the file a retention- or
+            # token-flow fix must change. Paired with CORE_ALSO so the
+            # core-registered half is not dropped by the named-surface match.
+            "tortoise/oauth.py",
             # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
             # and `test_bridge_table.py` (registered in `api`) is the drift gate
             # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
@@ -440,7 +494,24 @@ SOURCE_PATTERNS = {
             # 0.1 entry directly above and the same reason: a generator-only edit
             # is swallowed by the flat `tools/` prefix and the gate never runs on
             # the PR that can break it (#4454 covers a docs-only hand-edit).
-            "tools/mcp_rename_table.py"),
+            "tools/mcp_rename_table.py",
+            # #4282 Phase 0.3b: `tools/sdk_rename_table.py` GENERATES
+            # `docs/product/sdk-rename-table.md`, and `test_sdk_rename_table.py`
+            # (registered in `api` AND `core`) is the drift gate. Same gap as the
+            # bridge table above: `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface and the gate never ran on
+            # the PR that can break it. A docs-only hand-edit of the generated
+            # file still skips the matrix by the docs-PR policy (tortoise #4454).
+            "tools/sdk_rename_table.py",
+            # #4282 Phase 0.4 + 1.1: `tools/sdk_surface.py` derives the declared
+            # `TortoiseSDK` public surface and GENERATES `config/sdk-surface.json` +
+            # `docs/product/sdk-surface-declaration.md`; `test_sdk_surface.py`
+            # (registered in `api` AND `core`) is the drift gate. Same gap as the bridge
+            # table above: `tools/` is in NON_PYTHON_PREFIXES, so a generator-only edit
+            # selected NO surface and the gate never ran on the PR that can break it.
+            # A docs-only hand-edit of the generated doc still skips the matrix by the
+            # repo's deliberate docs-PR policy (tortoise #4454).
+            "tools/sdk_surface.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
@@ -487,7 +558,25 @@ SOURCE_PATTERNS = {
 # `--manifest-only` alone selected only tier-1 smoke — the pin for the code being
 # changed would not have run. That is the #1349/#3332/#3616 silent-drop class, on
 # the file this PR modifies.
-CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py")
+#
+# #4069: the temp-dir sweep is test-infra whose guard tests
+# (tests/test_tmpdir_sweep.py, tests/test_tmpdir_hygiene.py) are
+# core-registered. `_selection_relevant()` consults CORE_ALSO, so
+# this entry has a DUAL role: it admits a `tools/` path past the
+# flat NON_PYTHON_PREFIXES filter AND, in the match loop below,
+# adds `core` and marks the path found — so a tool-only change
+# selects `core` instead of the unknown-path fail-closed full
+# matrix, and never drops to tier-1 smoke (the #1349/#3332/#3910
+# silent-drop class). No TOOL_CARVEOUTS entry is needed: that
+# tuple is redundant for any path already listed here.
+CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
+             "tortoise/projection/edges.py",
+             "tools/tmpdir_sweep.py",
+             # #3036: oauth.py is pinned by BOTH api-registered tests
+             # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
+             # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
+             # `api` match must not drop the core half.
+             "tortoise/oauth.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -569,6 +658,14 @@ TOOL_CARVEOUTS = (
     # A narrower core-only mapping is possible but not needed: a
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
+    # #4408: the local-branch reaper (tools/branch_reaper.py) owns
+    # tests/test_branch_reaper.py. Same silent-drop class as the preflight
+    # carve-out above: the flat "tools/" prefix would swallow a reaper-only
+    # change, `changed` comes back empty, select() takes the docs-only path and
+    # the reaper's mutation tests never run on the PR that changes it. No
+    # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
+    # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
+    "tools/branch_reaper.py",
     # #2573: the CI embedder gate (tools/embedder_provision.py) owns
     # tests/test_embedder_provision.py. Same silent-drop class as the
     # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
@@ -595,6 +692,19 @@ TOOL_CARVEOUTS = (
     # exact "proxy silent in the case it exists to cover" class this harness is
     # written to detect, so it must not apply to the harness itself.
     "tools/embedded_evidence.py",
+    # #2718/#4860: the eval-key isolation launcher owns
+    # tests/test_run_with_eval_keys.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows `tools/run-with-eval-keys.sh`, so a
+    # wrapper-only change (e.g. a fingerprint-format edit, or a change to the
+    # managed-key set) would come back as `changed=[]`, select() would take the
+    # docs-only return, and the wrapper's own guard suite would never run on
+    # the PR that changed the wrapper. No SOURCE_PATTERNS entry matches a `.sh`
+    # path, so it lands in the unknown-path branch -> FULL matrix (fail closed)
+    # — the safe default for the file that owns provider-key isolation.
+    # Pinned by
+    # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
+    "tools/run-with-eval-keys.sh",
 )
 
 
@@ -1013,11 +1123,11 @@ def push_legs(manifest: dict) -> dict:
     fast = fast_pool(manifest)
     # #3400: pack the push halves by measured duration (#1473 LPT) instead of
     # the duration-blind index-parity split this used to be (`fast[0::2]` /
-    # `fast[1::2]`). Parity on the real pool put 37.1m of work in half (b)
-    # against 18.8m in half (a) — 1.97x — and blew the 55m watchdog. LPT is
-    # deterministic (ties break on name) and lands the same pool at 28.0m /
-    # 28.0m. split_fast_gate returns `tests/`-prefixed names; the workflow's
-    # matrix format is bare, so strip the prefix.
+    # `fast[1::2]`). Parity on the real pool leaves a tilt far above the ratio
+    # below — the pool's cost is not index-uniform — and blew the 55m watchdog;
+    # LPT is deterministic (ties break on name) and balances the same pool.
+    # split_fast_gate returns `tests/`-prefixed names;
+    # the workflow's matrix format is bare, so strip the prefix.
     fast_a, fast_b = split_fast_gate(fast,
                                      _durations_map(manifest))
     half_a = [f[len("tests/"):] for f in fast_a]
@@ -1179,7 +1289,7 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
     # #3400: the balance invariant is DURATION once measured weights exist.
     # LPT packs by weight, so a heavy file dumped entirely on one half is
     # caught even when the counts look even — and a correct duration pack may
-    # legitimately carry very different counts (195 vs 325 on the real pool).
+    # legitimately carry very different counts.
     # The ±3 count check would red that correct split, so it now applies only
     # to manifests with no durations map at all (e.g. the small test
     # fixtures, or a repo that has not adopted durations).
@@ -1300,7 +1410,12 @@ def _durations_map(manifest: dict) -> dict:
 
 
 def duration_issues(manifest: dict) -> list[str]:
-    """#1473: every durations key must be classified and non-slow."""
+    """#1473/#4712: every durations key must be a CLASSIFIED test file.
+
+    Slow and carve-out lane keys carry their measured cost here too, so a cost
+    regression in a lane that exists *because* it is expensive is visible.
+    Values must additionally be numeric and finite.
+    """
     issues = []
     # #3407 review cycle 4 (pre-existing): this site and `--split` below used
     # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
@@ -1316,14 +1431,11 @@ def duration_issues(manifest: dict) -> list[str]:
     if raw is not None and not isinstance(raw, dict):
         return [f"durations is not a mapping: {type(raw).__name__}"]
     durations = _durations_map(manifest)
-    slow = set(manifest.get("slow_files", []))
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     for name in durations:
-        if name in slow:
-            issues.append(f"durations key {name} is a slow file (must be fast-gate)")
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
         # P2 (#3407 review): validate the VALUE, not just the key. Both guards

@@ -30,7 +30,8 @@ EXPECTED_RANGE_EMBEDDED = {
     # is corrupt too). The full label scan is correct on both. See
     # _ensure_indexes.
     "Point": ["id", "pointKind", "content_hash"],
-    "Document": ["id", "documentKind"],
+    # D10 (#5026): the :Document label is retired — a document is a :Source
+    # (its range key is url, below) and no :Document index is created.
     "Subject": ["id", "name"],
     "Object": ["id", "name"],
     "Event": ["eventId"],

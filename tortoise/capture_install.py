@@ -89,16 +89,25 @@ Relationship to ``tortoise/hook_install.py`` (PR #3866)
 -------------------------------------------------------
 #3866 adds the **drift/repair** path — ``tortoise hooks status|upgrade`` — over
 a ``HarnessLayout`` registry, and versions the contract with a
-``# tortoise-hook-version: N`` marker inside each shipped script.  This module
+``tortoise-hook-version: N`` marker inside each shipped artifact (``#`` for a
+shell hook, ``//`` for the Pi TypeScript extension, #4680).  This module
 deliberately does **not** re-declare any of that: it installs the shipped
 artifacts *verbatim* (no marker is injected, no version constant is declared)
 and emits exactly the settings shape #3866's ``_entry_command_dicts`` /
 ``_invokes_script`` classify as ours — a matcher entry whose ``hooks`` array
 holds ``{"type": "command", "command": ".claude/hooks/<name>", "timeout": 60}``.
-The artifact an install produces is therefore one ``tortoise hooks status``
-reads as current, and a stale install is repaired by ``tortoise hooks
-upgrade`` — #3808 is the mechanism #3795/#3801 operate through.  There is one
-version contract, and it lives in the shipped script.
+The artifact a **layout** install produces is therefore one
+``tortoise hooks status`` reads as current, and a stale layout install is
+repaired by ``tortoise hooks upgrade`` — #3808 is the mechanism
+#3795/#3801 operate through.  There is one version contract, and it lives in
+the shipped artifact: the shell half in ``HARNESS_LAYOUTS`` (that status/
+upgrade pair), and the Pi artifact half in
+``hook_install.ARTIFACT_CONTRACTS["pi"]`` — which those two
+commands CANNOT reach, because both resolve through ``get_layout`` and reject
+``pi`` outright (#5351).  Pi's installed seam is graded by ``tortoise doctor``
+and by ``session verify`` through the same contract, and it is repaired by
+``tortoise install pi`` (plus ``hook_install.detect_artifact_install`` for the
+read side).
 
 Because the two modules answer the same question — "is this entry ours?" —
 :func:`_is_our_script_command` here **delegates** to #3866's
@@ -162,8 +171,43 @@ CAPTURE_SEAM: dict[str, str] = {
     "pi": "tortoise/pi-hooks/tortoise-capture.ts",
 }
 
-#: Claude Code hook scripts → ``.claude/hooks/``.
-CLAUDE_SCRIPTS: tuple[str, ...] = ("session-start.sh", "session-end.sh")
+#: The per-hook budget #3754 established and #3801 identified as the
+#: load-bearing half of the contract: Claude Code cancels a SessionEnd hook at
+#: its 1.5 s default, the budget rises to the highest per-hook timeout, and 60
+#: is the documented ceiling.  Must stay equal to the value the dashboard
+#: block emits (pinned by ``tests/test_capture_install.py``).
+CLAUDE_TIMEOUT = 60
+
+#: The cheaper per-turn budget.  The turn hook spools the transcript locally
+#: (no network round-trip), so it does not need SessionEnd's 60 s; the
+#: dashboard emits this value too.
+CLAUDE_PER_TURN_TIMEOUT = 30
+
+#: Claude Code capture hooks as ``(script, event, timeout)`` — THIS is the
+#: single source of truth.  ``CLAUDE_SCRIPTS`` is DERIVED from it, so the files
+#: the installer COPIES and the registrations it MERGES can never name
+#: different sets of scripts.
+#:
+#: They once did (#3971 merge): ``hook_install._claude_layout()`` carried
+#: ``session-turn.sh`` (added with the per-turn spool) while this module kept a
+#: separately-maintained ``CLAUDE_SCRIPTS`` pair, so the installer placed TWO
+#: scripts and ``detect_install`` demanded THREE — an install that reports
+#: ``missing-script: session-turn.sh`` immediately after installing, with the
+#: drift guard unable to say why.
+CLAUDE_CAPTURE_HOOKS: tuple[tuple[str, str, int], ...] = (
+    ("session-start.sh", "SessionStart", CLAUDE_TIMEOUT),
+    ("session-end.sh", "SessionEnd", CLAUDE_TIMEOUT),
+    # #3963: the CHEAP per-turn capture.  Capture used to happen only at
+    # SessionEnd, which is cancelled at its ~1.5 s default (#3754) and does not
+    # fire at all on a kill — so an interrupted session filed nothing.  This
+    # hook spools the transcript locally (no network) at every user prompt; the
+    # filing is deferred to the SessionStart drain / the SessionEnd flush.
+    ("session-turn.sh", "UserPromptSubmit", CLAUDE_PER_TURN_TIMEOUT),
+)
+
+#: Claude Code hook scripts → ``.claude/hooks/`` (derived; see above).
+CLAUDE_SCRIPTS: tuple[str, ...] = tuple(
+    name for name, _, _ in CLAUDE_CAPTURE_HOOKS)
 
 #: Codex's shipped capture hook (one script) and the event it registers.
 CODEX_SCRIPT_NAME = "tortoise-session-end.sh"
@@ -191,15 +235,19 @@ CODEX_HOOKS_SUBDIR = "hooks"
 CURSOR_REGISTRATION_FILE = "hooks.json"
 CURSOR_HOOKS_SUBDIR = "hooks"
 
-#: The per-hook budget #3754 established and #3801 identified as the
-#: load-bearing half of the contract: Claude Code cancels a SessionEnd hook at
-#: its 1.5 s default, the budget rises to the highest per-hook timeout, and 60
-#: is the documented ceiling.  Must stay equal to the value the dashboard
-#: block emits (pinned by ``tests/test_capture_install.py``).
-CLAUDE_TIMEOUT = 60
+#: ``CLAUDE_TIMEOUT`` / ``CLAUDE_PER_TURN_TIMEOUT`` are declared beside
+#: ``CLAUDE_CAPTURE_HOOKS`` above — one block, so each budget and the script it
+#: belongs to cannot drift apart.
 
 #: The extension name Pi auto-discovers under ``~/.pi/agent/extensions/``.
-PI_EXTENSION_NAME = "tortoise-capture.ts"
+#: DERIVED from the install-contract registry: the seam's NAME and its version
+#: contract are one fact, and the drift detector must inspect exactly the file
+#: the installer writes.  Two independent literals could disagree, which would
+#: leave the detector checking a path the installer never produced (#4680).
+#: Evaluated at import: safe today because ``hook_install`` never imports this
+#: module at module level — if that ever changes, this line becomes an
+#: ImportError rather than a test failure, so keep the dependency one-way.
+PI_EXTENSION_NAME = hook_install.ARTIFACT_CONTRACTS["pi"].install_name
 
 #: The legacy agent-infra extension directory name (#3713).  Pi's loader does
 #: no basename dedupe, so ``tortoise-capture.ts`` and
@@ -486,17 +534,19 @@ def _our_command_dicts(entry: object, script_name: str, hooks_dir: str,
     return hook_install._entry_command_dicts(entry, script_name, hooks_dir, root)
 
 
-def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
+def merge_capture_hooks(data: dict, *, timeout: int | None = None,
                         hooks_dir: str = ".claude/hooks",
                         root: str | os.PathLike[str] = ".") -> dict:
-    """Merge the two capture registrations into a Claude ``settings.json``
+    """Merge the capture registrations into a Claude ``settings.json``
     document, in place, and return it.
 
     Merge, never overwrite: every unrelated key, every other event, and any
-    foreign hook already registered under ``SessionStart`` / ``SessionEnd``
-    survive untouched (a foreign hook is *appended after*, never replaced).  An
-    existing registration of ours is repaired in place — the #3754 ``timeout``
-    is set when absent or lower than ``timeout``, and never lowered.
+    foreign hook already registered under ``SessionStart`` / ``SessionEnd`` /
+    ``UserPromptSubmit`` survive untouched (a foreign hook is *appended after*,
+    never replaced).  An existing registration of ours is repaired in place —
+    the #3754 ``timeout`` is set when absent or lower than the script's budget
+    (#3963: per-script, so the per-turn hook keeps its cheaper 30 s), and never
+    lowered.
 
     The emitted entry is the shape ``tortoise hooks status`` (#3866) classifies
     as ours: a matcher entry whose ``hooks`` array holds
@@ -515,8 +565,10 @@ def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
         data["hooks"] = hooks
     if not isinstance(hooks, dict):
         raise ValueError('"hooks" is not a JSON object')
-    for script_name, event in (("session-start.sh", "SessionStart"),
-                               ("session-end.sh", "SessionEnd")):
+    for script_name, event, script_timeout in CLAUDE_CAPTURE_HOOKS:
+        # An explicit ``timeout`` overrides every script's declared budget;
+        # otherwise each entry keeps the budget declared beside it above.
+        effective = script_timeout if timeout is None else timeout
         entries = hooks.get(event)
         if entries is None:
             entries = []
@@ -539,8 +591,8 @@ def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
                 # ``tortoise hooks status`` report blocking drift on the state
                 # this installer preserves.
                 if (not hook_install._is_timeout_budget(current)
-                        or current < timeout):
-                    existing["timeout"] = timeout
+                        or current < effective):
+                    existing["timeout"] = effective
                 existing.setdefault("type", "command")
             continue
         entries.append({
@@ -548,7 +600,7 @@ def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
             "hooks": [{
                 "type": "command",
                 "command": f"{hooks_dir}/{script_name}",
-                "timeout": timeout,
+                "timeout": effective,
             }],
         })
     return data
@@ -612,6 +664,23 @@ def cursor_home(home: Path) -> Path:
     """
     return hook_install.default_root(
         hook_install.get_layout("cursor"), home)
+
+
+def pi_home(home: Path) -> Path:
+    """Resolve Pi's extension root: ``~/.pi/agent/extensions``.
+
+    Pi has NO ``HarnessLayout`` (its seam is not a scripted hook, so
+    ``hook_install.default_root`` cannot answer for it), so the directory is
+    part of the artifact contract in ``hook_install`` — the
+    ``ARTIFACT_CONTRACTS["pi"].root_relpath`` field — which this delegates to,
+    so the contract, the installer, ``session verify`` and ``doctor`` all read
+    ONE declaration of where the seam lives (#4680).
+    """
+    root = hook_install.artifact_root("pi", Path(home))
+    if root is None:  # pragma: no cover - "pi" is a registered contract
+        raise RuntimeError(
+            "'pi' is missing from hook_install.ARTIFACT_CONTRACTS")
+    return root
 
 
 def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
@@ -934,7 +1003,7 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
 
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
-    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir = pi_home(home)
     dst = ext_dir / PI_EXTENSION_NAME
     legacy = ext_dir / LEGACY_PI_DIRNAME
     legacy_disabled = ext_dir / PI_DISABLED_DIRNAME
@@ -1077,16 +1146,16 @@ def install_capture(
             f"no capture seam for harness {harness!r} (known: {known})"))
     if harness == "claude":
         try:
-            return _install_claude(Path(root), dry_run=dry_run)
+            result = _install_claude(Path(root), dry_run=dry_run)
         except MemoryError:
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
-    if harness in ("codex", "cursor"):
+    elif harness in ("codex", "cursor"):
         # HOME-scoped harnesses share ONE installer; the layout supplies every
         # harness-specific fact (#3818, #3819).
         try:
-            return _install_home_scoped(
+            result = _install_home_scoped(
                 harness,
                 Path(home) if home is not None else Path.home(),
                 dry_run=dry_run)
@@ -1094,17 +1163,53 @@ def install_capture(
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
-    try:
-        return _install_pi(Path(home) if home is not None else Path.home(),
-                           dry_run=dry_run)
-    except MemoryError:
-        raise  # resource exhaustion is not a refusal; the handler allocates
-    except Exception as e:
-        return _install_failed(harness, e)
+    else:
+        try:
+            result = _install_pi(
+                Path(home) if home is not None else Path.home(),
+                dry_run=dry_run)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            return _install_failed(harness, e)
+
+    # Record where this install came FROM, so the INSTALLED hook can resolve
+    # its module dir instead of falling through to its own silent no-op — from
+    # `~/.codex/hooks/`, `$(dirname "$0")/../..` is `$HOME`, not a checkout
+    # (#4314). Best-effort and only after a successful real write: a dry run or
+    # a refusal leaves no record to be misread.  The ONE need-based rule
+    # (``record_hook_src_dir_for_install``) writes it only when the installed
+    # hook cannot resolve `../..` on its own — the SAME condition the hook
+    # reads it under — so it fixes the Codex/Cursor HOME installs and a Claude
+    # project install, while a repo-scoped `--dir` whose `../..` IS a checkout
+    # writes nothing (#4110, #4314).
+    if result.ok and not dry_run:
+        resolved_home = Path(home) if home is not None else Path.home()
+        # A harness with no shell-hook layout (`pi` — a TypeScript extension,
+        # not a `session-end.sh`) has no hooks_dir for the `../..` fallback to
+        # be derived from, so the pre-ruling `get_layout` call raised and the
+        # whole install crashed (the no-fake-layout ruling; recorded on
+        # #4680).  Only a layout-bearing harness has a non-trivial
+        # `default_root`; for the others the record is skipped by
+        # `record_hook_src_dir_for_install` itself.
+        _layout = hook_install.get_layout_optional(harness)
+        if _layout is None or harness == "claude":
+            effective_root = Path(root)
+        else:
+            effective_root = hook_install.default_root(_layout, resolved_home)
+        # Best-effort and unable to fail the install: a record-write raise
+        # (``OSError``, ``UnicodeDecodeError``, …) must never turn a landed
+        # install into a traceback (#3999, #4314).
+        hook_install.record_hook_src_dir_for_install(
+            harness, root=effective_root,
+            home=Path(home) if home is not None else None)
+    return result
 
 
 __all__ = [
     "CAPTURE_SEAM",
+    "CLAUDE_CAPTURE_HOOKS",
+    "CLAUDE_PER_TURN_TIMEOUT",
     "CLAUDE_SCRIPTS",
     "CLAUDE_TIMEOUT",
     "CODEX_EVENT",
@@ -1113,6 +1218,7 @@ __all__ = [
     "CURSOR_EVENT",
     "CURSOR_REGISTRATION_FILE",
     "CURSOR_SCRIPT_NAME",
+    "PI_EXTENSION_NAME",
     "InstallResult",
     "codex_home",
     "cursor_home",
@@ -1120,4 +1226,5 @@ __all__ = [
     "merge_capture_hooks",
     "merge_codex_capture_hooks",
     "merge_cursor_capture_hooks",
+    "pi_home",
 ]

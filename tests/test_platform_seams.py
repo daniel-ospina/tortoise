@@ -234,22 +234,37 @@ def test_install_claude_merges_preserving_existing_hooks(tmp_path):
     assert r.returncode == 0, r.stderr
     cfg = json.loads(target.read_text())
     assert len(cfg["hooks"]["PreToolUse"]) == 1  # untouched
-    ups = cfg["hooks"]["UserPromptSubmit"]
-    assert len(ups) == 1
-    inner = ups[0]["hooks"][0]
-    assert inner["command"].endswith("volunteer-turn.sh claude")
+    # #3963: TWO of our per-turn registrations share the UserPromptSubmit event
+    # — the read hook (volunteer-turn.sh) and the capture seam's spool hook
+    # (session-turn.sh).  Each must land EXACTLY once; counting the matcher
+    # GROUPS (`len(ups) == 1`) was only ever a proxy for that, and the proxy
+    # is now wrong.  The read hook must still be the registration the read
+    # half owns, and the foreign PreToolUse group above must survive.
+    commands = [h.get("command", "")
+                for e in cfg["hooks"]["UserPromptSubmit"]
+                for h in e.get("hooks", [])]
+    assert sum(c.endswith("volunteer-turn.sh claude") for c in commands) == 1, commands
+    assert sum(c.endswith(".claude/hooks/session-turn.sh")
+               for c in commands) == 1, commands
 
 
 def test_install_claude_idempotent_reinstall(tmp_path):
-    """Re-installing claude must NOT duplicate the UserPromptSubmit entry
-    (regression: the merge dedup used to miss wrapper-shaped entries)."""
+    """Re-installing claude must NOT duplicate either UserPromptSubmit
+    registration (regression: the merge dedup used to miss wrapper-shaped
+    entries; #3963: the capture seam adds a SECOND, distinct hook on the same
+    event, so the invariant is per-command, not per-group)."""
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     _run(["install", "claude", "--dir", str(tmp_path)], env)
     _run(["install", "claude", "--dir", str(tmp_path)], env)
     _run(["install", "claude", "--dir", str(tmp_path)], env)
     target = tmp_path / ".claude" / "settings.json"
     cfg = json.loads(target.read_text())
-    assert len(cfg["hooks"]["UserPromptSubmit"]) == 1
+    commands = [h.get("command", "")
+                for e in cfg["hooks"]["UserPromptSubmit"]
+                for h in e.get("hooks", [])]
+    assert sum(c.endswith("volunteer-turn.sh claude") for c in commands) == 1, commands
+    assert sum(c.endswith(".claude/hooks/session-turn.sh")
+               for c in commands) == 1, commands
 
 
 def test_install_codex_refuses_non_object_config(tmp_path):
@@ -448,7 +463,21 @@ def test_install_uninstall_when_absent_is_clean_noop(tmp_path):
             assert not target.exists(), harness  # cline unlinks its file
         else:
             cfg = json.loads(target.read_text())
-            assert "UserPromptSubmit" not in (cfg.get("hooks") or {}), harness
+            cmds = [h.get("command", "")
+                    for e in (cfg.get("hooks") or {}).get("UserPromptSubmit", [])
+                    for h in e.get("hooks", [])]
+            if harness == "claude":
+                # #3963: claude's capture seam registers its OWN per-turn hook
+                # (session-turn.sh) on the same event, and `--uninstall` is
+                # scoped to the read-hook registration — the command DISCLOSES
+                # that the capture seam survives.  Requiring the event KEY to
+                # be absent was only ever a proxy for "the read hook's
+                # registration is gone"; assert the real thing instead.
+                assert not any("volunteer-turn.sh" in c for c in cmds), cmds
+                assert any(c.endswith(".claude/hooks/session-turn.sh")
+                           for c in cmds), cmds
+            else:
+                assert "UserPromptSubmit" not in (cfg.get("hooks") or {}), harness
         r = _run(["install", harness, "--dir", str(tmp_path), "--uninstall"],
                  env)
         assert r.returncode == 0 and "nothing to remove" in r.stdout, harness

@@ -923,6 +923,15 @@ EXPECTED_CLASSIFICATION = {
         # recommended: cloudflare-purge.ts is best-effort and fail-open by design
         "CF_API_TOKEN": ("recommended", ["production"]),
         "CF_ZONE_ID": ("recommended", ["production"]),
+        # #2409: the public contact form's intake seam. `recommended` NOT
+        # `required`, deliberately — `required` reds the deploy, which would
+        # block the very deploy that ships the form. Absence is a visible 503
+        # from functions/contact/submit.ts with the mailto fallback, not an
+        # outage of the rest of the site. Promote once the endpoint is bound.
+        "CONTACT_INTAKE_URL": ("recommended", ["production"]),
+        # An INBOUND credential only: it can submit an item and nothing else
+        # (no send, no read) — distinct from any send-capable provider key.
+        "CONTACT_INTAKE_SECRET": ("recommended", ["production"]),
     },
     # #4054: the BFF appended a second project. SESSIONS points at the SAME
     # account-level tortoise-sessions database; the env vars are what the moved

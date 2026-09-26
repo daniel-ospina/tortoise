@@ -8,9 +8,24 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
 1. **installed** — the seam is present AND the harness's own registration
    loader resolves it, AND the installed artifact actually FIRES (the
    registered command is executed with the harness's documented event
-   payload);
+   payload).  This link measures the INSTALL leg ONLY: present + registered +
+   fired rc=0 is ``PROVEN``, and it is ``INERT`` only when the hook left its
+   own local breadcrumb (``kind: install-inert``) proving the install leg
+   resolved nothing.  An API outage, a missing key, or a capture that files
+   nothing (the ``captured`` link's business) must never rewrite a working
+   install as INERT — those write ``kind: capture-failure``, which this link
+   ignores.  The record is cleared immediately BEFORE the fire, so only a
+   breadcrumb THIS fire produced can count;
 2. **captured** — a ``session_capture_receipt_<harness>`` advanced and the
-   session is retrievable by id with the expected turns;
+   session is retrievable by id with the expected turns.  Both legs are
+   OBSERVED to one deadline (#4675): the receipt is written by a handler the
+   transport bound ABANDONED rather than cancelled, so it lands *after* the
+   session row is already visible (measured live: a seam fired 08:21:02 and
+   the receipt was written 08:21:06).  Reading it once, on the first sighting
+   of the row, FAILed a capture that had landed.  The predicate is unchanged
+   ("receipt advanced AND expected turns retrievable"); only the observation
+   window is.  A settled turn count that is NOT the expected one still breaks
+   the window early, because it never becomes the expected one;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
    were extracted into memory Points.
 
@@ -45,12 +60,23 @@ do).  So after any launch — and after a fire that never returned — the 404 i
 reported as "may still be in flight", never as a clean delete the code cannot
 honour, and there is deliberately no per-harness detach table to drift.
 
-HONEST DISCLOSURE.  A harness whose seam cannot be fired headlessly is NOT
+HONEST DISCLOSURE.  A harness whose seam this command cannot fire is NOT
 faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
 (its cloud agents have no editor-lifetime boundary), and Pi's seam is a
-TypeScript extension the Pi process loads in-process — neither can be fired by
-this command, so their links report ``UNVERIFIABLE-IN-CI`` with the reason.  A
-link is only ever ``PROVEN`` when the path actually ran.
+TypeScript extension the Pi process loads in-process — neither is a command
+this verifier can execute and present as "the harness fired it", so their
+links report ``UNVERIFIABLE-IN-CI``.  That ruling is about the INSTALL leg, not
+the seam's testability: Pi's handler logic is exercised hermetically by
+``tortoise/pi-hooks/tortoise-capture.test.ts``, and the artifact AS INSTALLED
+is loaded and fired by the node probe in
+``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); the residual (a real
+``pi`` process loading the installed extension against the live API) is
+manual-only.  A link is only ever ``PROVEN`` when the path actually ran.
+
+UNVERIFIABLE is NOT "unjudgeable": the static leg still runs, and since #4680
+Pi's installed artifact is graded by the same version contract as the shell
+seams, so a missing / unmarkered / stale / edited Pi seam is a hard ``FAIL``
+here — it is only the LIVE-FIRE leg that stays ``UNVERIFIABLE-IN-CI``.
 """
 from __future__ import annotations
 
@@ -67,10 +93,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from tortoise import capture_install, hook_install
 from tortoise.capture_receipts import capture_receipt_key
+from tortoise.hook_install import KIND_INSTALL_INERT
 
 __all__ = [
     "EXIT_BROKEN",
@@ -78,6 +104,7 @@ __all__ = [
     "EXIT_UNVERIFIABLE",
     "HARNESSES",
     "STATUS_FAIL",
+    "STATUS_INERT",
     "STATUS_PROVEN",
     "STATUS_UNVERIFIABLE",
     "render_report",
@@ -93,6 +120,11 @@ HARNESSES: tuple[str, ...] = tuple(capture_install.CAPTURE_SEAM)
 STATUS_PROVEN = "PROVEN"
 STATUS_FAIL = "FAIL"
 STATUS_UNVERIFIABLE = "UNVERIFIABLE-IN-CI"
+#: The seam is present, registered, and FIRED with rc=0 — but no downstream
+#: effect (no receipt advance, no retrievable session) was observed.  rc=0 is
+#: not evidence: a hook that resolves nothing takes its own silent ``exit 0``
+#: and captures nothing (#4314), so this verdict is deliberately NOT PROVEN.
+STATUS_INERT = "INERT"
 
 #: Exit codes.  0 = every link PROVEN; 1 = a link is BROKEN (the install is
 #: wrong, or the capture/memory leg failed); 2 = nothing is provably broken,
@@ -112,6 +144,14 @@ EXIT_UNVERIFIABLE = 2
 #: editor-lifetime session boundary), and Pi's seam is a TypeScript extension
 #: loaded in-process by Pi — neither is a script this command may execute and
 #: present as "the harness fired it".
+#:
+#: The ruling is about THIS COMMAND's inability to execute the harness's
+#: registration — it is not a claim that the seam is untestable.  Pi's handler
+#: logic is exercised hermetically by its own suite
+#: (``tortoise/pi-hooks/tortoise-capture.test.ts``), and the artifact AS
+#: INSTALLED is loaded and fired by the node probe in
+#: ``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); see
+#: ``UNVERIFIABLE_REASON['pi']``.
 HEADLESS_FIRABLE: dict[str, bool] = {
     "claude": True,
     "codex": True,
@@ -121,6 +161,17 @@ HEADLESS_FIRABLE: dict[str, bool] = {
 
 #: Why a non-firable harness's links are UNVERIFIABLE.  Named per harness so
 #: the report says exactly what is missing, never a generic shrug.
+#:
+#: Pi's entry is deliberately SCOPED ("not firable by this command") and
+#: PLAIN TEXT (it is printed verbatim into a report line).  The over-broad
+#: absolutes — each denying that this seam could be executed or fired
+#: headlessly, or that any headless entry point existed — are false about Pi:
+#: the seam's handlers are fired headlessly by its own suite, and `pi -p` is
+#: non-interactive.  A test pins the absence of those phrases from the PI
+#: RULING's own text — the report string, this ruling, the enum, and the module
+#: docstring — and deliberately NOT from the whole module: one of the phrases is
+#: TRUE of Cursor (this dict's ``cursor`` entry says so)
+#: (`tests/test_session_verify.py::test_pi_is_honestly_unverifiable`).
 UNVERIFIABLE_REASON: dict[str, str] = {
     "cursor": (
         "Cursor's sessionEnd hook is IDE-only — it fires from a local "
@@ -128,8 +179,14 @@ UNVERIFIABLE_REASON: dict[str, str] = {
         "machine."),
     "pi": (
         "Pi's capture seam is a TypeScript extension loaded in-process by Pi "
-        "(~/.pi/agent/extensions/tortoise-capture.ts); it is not a script and "
-        "cannot be executed headlessly."),
+        f"({capture_install.pi_home('~')}/{capture_install.PI_EXTENSION_NAME}), "
+        "not a command this verifier can execute; the install leg is therefore "
+        "not firable by this command. The seam's handler logic is exercised "
+        "hermetically by tortoise/pi-hooks/tortoise-capture.test.ts (run by "
+        "tests/test_pi_capture_hooks.py), and the installed artifact is "
+        "loaded and fired by that test file's node probe (into a temp HOME); the "
+        "residual — a real pi process loading the installed extension "
+        "against the live API — is manual-only."),
 }
 
 #: The capture EVENT each harness registers (the SessionStart seam is Claude's
@@ -174,14 +231,18 @@ def resolve_install_root(harness: str,
     the harness's own default, resolved through the ONE shared resolver
     ``tortoise hook_install.default_root`` — Codex's ``$CODEX_HOME`` (default
     ``~/.codex``), Cursor's ``~/.cursor`` (no env override — Cursor has none),
-    Claude's cwd (project-scoped).  Pi has no ``HarnessLayout`` (its seam is
-    not a scripted hook), so its root is the extension directory
-    ``~/.pi/agent/extensions``.
+    Claude's cwd (project-scoped).  A harness with no ``HarnessLayout`` (its
+    seam is not a scripted hook) is looked up in ``hook_install``'s
+    ``ARTIFACT_CONTRACTS`` instead and resolved through
+    ``hook_install.artifact_root`` — the SAME registry entry ``_static_findings``
+    and ``doctor`` grade it by, so root resolution cannot be registry-driven in
+    one place and literal in another (#4680 review).
     """
     if install_dir is not None:
         return Path(install_dir)
-    if harness == "pi":
-        return Path(home) / ".pi" / "agent" / "extensions"
+    artifact = hook_install.artifact_root(harness, Path(home))
+    if artifact is not None:
+        return artifact
     layout = hook_install.get_layout(harness)
     return hook_install.default_root(layout, Path(home))
 
@@ -193,18 +254,24 @@ def _static_findings(harness: str, root: Path) -> list[dict[str, Any]]:
     """The install's on-disk drift, through the shared detector.
 
     Claude/Codex/Cursor delegate to ``hook_install.detect_install`` (the same
-    read-only detector ``tortoise hooks status`` uses).  Pi has no layout, so
-    its single artifact is checked directly.
+    read-only detector ``tortoise hooks status`` uses).  A harness whose seam
+    is a non-shell artifact (Pi) has no layout to hand that detector, so it
+    delegates to the ARTIFACT half — ``hook_install.detect_artifact_install``
+    — which is why a stale Pi seam is now reportable rather than only its
+    absence (#4680).  Keyed on the registry, never on a literal ``"pi"``, so a
+    seam registered in ``ARTIFACT_CONTRACTS`` is graded here with no edit; a
+    seam class the registry does not know still falls through to
+    ``detect_install`` (and its repair path may equally carry its own
+    hard-coded harness names — ``resolve_install_root`` does that for ``pi``
+    today — so registry membership is what keeps THIS branch generic, not a
+    guarantee about every branch downstream).
     """
-    if harness == "pi":
-        dst = root / capture_install.PI_EXTENSION_NAME
-        if not dst.is_file():
-            return [{
-                "kind": "missing-extension",
-                "detail": f"{dst} is not installed",
-                "blocking": True,
-            }]
-        return []
+    if harness in hook_install.ARTIFACT_CONTRACTS:
+        return [
+            {"kind": f.kind, "detail": f.detail, "script": f.script,
+             "event": f.event, "blocking": f.blocking}
+            for f in hook_install.detect_artifact_install(root, harness)
+        ]
     return [
         {"kind": f.kind, "detail": f.detail, "script": f.script,
          "event": f.event, "blocking": f.blocking}
@@ -295,17 +362,14 @@ def _write_probe_transcript(harness: str, directory: Path) -> Path:
 def _fire_env(base_env: dict[str, str] | None) -> dict[str, str]:
     """The environment the installed hook runs under.
 
-    The fired hook must be able to resolve the CLI.  It prefers ``tortoise``
-    on PATH (the normal installed case); when that is absent the shipped hooks
-    fall back to ``$TORTOISE_SRC_DIR``.  Seed that to the package this command
-    itself is running from, so ``python -m tortoise`` (no console script on
-    PATH) still fires the seam — unless the operator pinned it.
+    Deliberately does NOT seed ``TORTOISE_SRC_DIR``.  The install's own
+    resolution path — the ``hook-src-dir`` record the installer writes under
+    the harness HOME — is the thing whose behaviour must be exercised, so an
+    install that cannot resolve reads ``INERT`` instead of being propped up
+    by a variable no production harness sets (#4314).  A caller may still pin
+    it explicitly through ``base_env``; verify only stops supplying it.
     """
-    env = dict(os.environ if base_env is None else base_env)
-    env.setdefault(
-        "TORTOISE_SRC_DIR",
-        str(Path(capture_install.PACKAGE_DIR).resolve().parent))
-    return env
+    return dict(os.environ if base_env is None else base_env)
 
 
 class LaunchOutcome(enum.Enum):
@@ -518,14 +582,22 @@ def _fire(root: Path, command: str, payload: dict[str, Any],
 
 
 def _api(api_url: str, api_key: str, path: str, *,
-         method: str = "GET") -> dict[str, Any]:
+         method: str = "GET", timeout: float = 30.0) -> dict[str, Any]:
+    # `urlopen` is imported HERE, not at module scope, for the same reason
+    # `tortoise.__main__._session_post` does it: the transport must be
+    # patchable per-call (`urllib.request.urlopen`) so a capture client's tests
+    # exercise the real refusal path instead of the network (#4675). A
+    # module-level binding would freeze the real transport for every caller
+    # that shares this reader — including the post-commit confirmation.
+    from urllib.request import Request, urlopen
+
     req = Request(
         f"{api_url.rstrip('/')}{path}",
         headers={"Authorization": f"Bearer {api_key}"},
         method=method,
     )
     try:
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             body = resp.read()
     except HTTPError as e:
         detail = e.read().decode() if e.fp else ""
@@ -552,14 +624,23 @@ def _read_receipt(api_url: str, api_key: str, harness: str) -> str | None:
 
 
 def _session_detail(api_url: str, api_key: str, session_id: str,
+                    *, timeout: float = 30.0,
                     ) -> dict[str, Any] | None:
     """GET a session by id; None on 404."""
     try:
-        return _api(api_url, api_key, f"/v1/sessions/{session_id}")
+        return _api(api_url, api_key, f"/v1/sessions/{session_id}",
+                    timeout=timeout)
     except _ApiError as e:
         if e.status == 404:
             return None
         raise
+
+
+#: Public spelling of the ONE reader of ``GET /v1/sessions/<id>``. The
+#: "post-commit timeout" confirmation (``tortoise/session_confirm.py``, #4675)
+#: reads through THIS definition so the 404→None / other-status-raises contract
+#: cannot drift between the verifier and the capture client.
+session_detail = _session_detail
 
 
 # ── the chain ─────────────────────────────────────────────────────────────
@@ -676,8 +757,18 @@ def verify_session_capture(harness: str,
     # cleanup reads as "unknown — assume it may have run" and never as proof.
     launch: LaunchOutcome | None = None
     detail: dict[str, Any] | None = None
+    # The env the installed hook RUNS under, resolved ONCE.  The fire and the
+    # breadcrumb read/write key on the SAME env: a caller passing a non-default
+    # HOME must have verify read the breadcrumb the hook wrote under that HOME,
+    # never this process's own home (#4314 P2).
+    fire_env = _fire_env(env)
+    # P1-B: clear the install-inert evidence IMMEDIATELY BEFORE the fire, so
+    # only a breadcrumb THIS fire produced can be read after it.  Without this,
+    # a hook that was inert ONCE leaves a permanent record and every later
+    # `session verify` reports INERT even after the install is repaired.
+    _clear_install_inert_breadcrumb(harness, fire_env)
     try:
-        fired = _fire(root, command, payload, _fire_env(env), timeout)
+        fired = _fire(root, command, payload, fire_env, timeout)
         launch = fired.outcome
         report["fire"] = fired.as_dict()
         if not fired.succeeded:
@@ -693,42 +784,75 @@ def verify_session_capture(harness: str,
                 STATUS_FAIL,
                 "not reachable — the capture was not observed on this run")
             return report
-        report["links"]["installed"] = _link(
-            STATUS_PROVEN,
-            f"present, registered, and fired: {fired.detail}")
+        # The INSTALL leg is present + registered + fired rc=0. It is PROVEN
+        # unless the hook's OWN local breadcrumb proves the install leg
+        # resolved nothing (#4314). The capture outcome is the `captured`
+        # link's business, never this one — an API outage must not rewrite a
+        # working install as INERT.
+        report["links"]["installed"] = _install_link(harness, fired, fire_env)
 
         # ── link 2: captured ─────────────────────────────────────────────
+        # The PREDICATE is #3809's: the per-harness receipt advanced AND the
+        # session is retrievable with its expected turns. What this run fixes
+        # is the OBSERVATION, not the predicate.
+        #
+        # It used to read the session row once (breaking on the first sighting)
+        # and then read the receipt exactly once. The server keeps running a
+        # handler the transport bound abandoned, so the receipt is written
+        # AFTER the session row becomes visible — measured live: a seam fired
+        # 08:21:02 and `session_capture_receipt_cursor` was written 08:21:06.
+        # A single read taken in that window reported "did not advance" for a
+        # capture that had landed. Both legs are therefore polled to the same
+        # deadline, and the early break is kept for the two shapes that cannot
+        # converge: the expected turn count WITH the receipt, and a non-empty
+        # turn count that has stopped changing.
         deadline = time.monotonic() + max(1.0, timeout)
-        while time.monotonic() < deadline:
+        expected_turns = len(_PROBE_TURNS)
+        receipt_after: str | None = None
+        turns_seen = 0
+        previous_turns: int | None = None
+        while True:
             detail = _session_detail(api_url, api_key, probe_id)
-            if detail is not None:
+            try:
+                receipt_after = _read_receipt(api_url, api_key, harness)
+            except _ApiError:
+                receipt_after = None
+            receipt_advanced = (receipt_after is not None
+                                and receipt_after != receipt_before)
+            turns_seen = len(detail.get("turn_points") or []) \
+                if detail is not None else 0
+            if (detail is not None and turns_seen == expected_turns
+                    and receipt_advanced):
+                break
+            if turns_seen and turns_seen == previous_turns \
+                    and turns_seen != expected_turns:
+                # A settled, WRONG turn count never becomes right — do not
+                # spend the rest of the window on it. The expected count must
+                # keep the window open: the receipt is still to come.
+                break
+            previous_turns = turns_seen
+            if time.monotonic() >= deadline:
                 break
             time.sleep(0.5)
 
-        receipt_after: str | None = None
-        try:
-            receipt_after = _read_receipt(api_url, api_key, harness)
-        except _ApiError:
-            receipt_after = None
-
-        expected_turns = len(_PROBE_TURNS)
         if detail is None:
             report["links"]["captured"] = _link(
                 STATUS_FAIL,
                 f"no session {probe_id!r} appeared within {timeout:g}s "
-                f"(receipt {'advanced' if receipt_after != receipt_before else 'did not advance'})",
-                receipt_before=receipt_before, receipt_after=receipt_after)
+                f"(receipt {'advanced' if receipt_advanced else 'did not advance'})",
+                receipt_before=receipt_before, receipt_after=receipt_after,
+                receipt_advanced=receipt_advanced)
         else:
             turn_points = detail.get("turn_points") or []
             turn_count_ok = len(turn_points) == expected_turns
-            receipt_ok = (receipt_after is not None
-                          and receipt_after != receipt_before)
-            if not receipt_ok:
+            if not receipt_advanced:
                 report["links"]["captured"] = _link(
                     STATUS_FAIL,
                     f"session {probe_id!r} exists but "
-                    f"{capture_receipt_key(harness)} did not advance",
+                    f"{capture_receipt_key(harness)} did not advance within "
+                    f"{timeout:g}s",
                     receipt_before=receipt_before, receipt_after=receipt_after,
+                    receipt_advanced=False,
                     turns=len(turn_points))
             elif not turn_count_ok:
                 report["links"]["captured"] = _link(
@@ -736,14 +860,26 @@ def verify_session_capture(harness: str,
                     f"session {probe_id!r} has {len(turn_points)} turns, "
                     f"expected {expected_turns}",
                     receipt_before=receipt_before, receipt_after=receipt_after,
+                    receipt_advanced=True,
                     turns=len(turn_points))
             else:
                 report["links"]["captured"] = _link(
                     STATUS_PROVEN,
                     f"receipt advanced ({receipt_before!r} → {receipt_after!r}); "
-                    f"session {probe_id!r} retrievable with {len(turn_points)} turns",
+                    f"session {probe_id!r} retrievable with "
+                    f"{len(turn_points)} turns",
                     receipt_before=receipt_before, receipt_after=receipt_after,
+                    receipt_advanced=True,
                     turns=len(turn_points))
+
+        # Re-evaluate the INSTALL leg now that the observation window has
+        # closed. It is PROVEN on present + registered + fired rc=0, and INERT
+        # only when the hook's OWN breadcrumb proves it resolved nothing
+        # (#4314). The capture outcome belongs to `captured`, never here: an
+        # API outage must not rewrite a working install as INERT. Re-reading
+        # also catches a detached worker (Codex/Cursor) whose breadcrumb lands
+        # asynchronously, after the synchronous hook already returned.
+        report["links"]["installed"] = _install_link(harness, fired, fire_env)
 
         # ── link 3: memory ───────────────────────────────────────────────
         if detail is None:
@@ -784,7 +920,10 @@ def verify_session_capture(harness: str,
         # the probe session may exist.  Record the failure and let the
         # `finally` delete what the fire may have written.  An unexpected
         # exception still runs the `finally` and then propagates to the CLI's
-        # catch-all (exit 1) — cleanup is never skipped either way.
+        # catch-all (exit 1) — cleanup is never skipped either way.  The
+        # INSTALL leg is still decided by its own breadcrumb, never by the
+        # read that failed.
+        report["links"]["installed"] = _install_link(harness, fired, fire_env)
         report["links"]["captured"] = _link(
             STATUS_FAIL, f"the session read failed after the seam fired: {e}")
         report["links"]["memory"] = _link(
@@ -797,9 +936,89 @@ def verify_session_capture(harness: str,
         # fire-failure return gets it.  There is deliberately no other cleanup
         # call to drift from this one.
         report["cleanup"] = _cleanup(
-            api_url, api_key, probe_id, keep=keep, launch=launch)
+            api_url, api_key, probe_id, keep=keep, launch=launch,
+            env=fire_env)
         report["exit_code"] = _exit_code(report)
     return report
+
+
+def _install_link(harness: str, fired: Any,
+                  env: dict[str, str]) -> dict[str, Any]:
+    """The INSTALL leg's verdict: present + registered + fired rc=0.
+
+    ``PROVEN`` unless the hook left its OWN install-inert breadcrumb, which is
+    the install leg's own evidence that it resolved nothing and captured
+    nothing (#4314).  Only a record whose ``kind`` is
+    :data:`hook_install.KIND_INSTALL_INERT` counts — the ``sessions import``
+    capture path writes the SAME file with ``kind: capture-failure``, and an
+    API outage must never rewrite a working install as ``INERT``.  The
+    breadcrumb is read under the SAME env the hook was fired with (a
+    non-default HOME reads what the hook wrote there).
+    """
+    breadcrumb = _local_capture_error(harness, env)
+    if breadcrumb is not None and breadcrumb.get("kind") == KIND_INSTALL_INERT:
+        return _link(
+            STATUS_INERT,
+            f"fired (rc=0) but the hook's own breadcrumb shows the install "
+            f"resolved nothing and captured nothing ({fired.detail})",
+            breadcrumb=breadcrumb)
+    return _link(
+        STATUS_PROVEN,
+        f"present, registered, and fired with rc=0: {fired.detail}")
+
+
+def _local_capture_error_file(harness: str,
+                              env: dict[str, str]) -> Path:
+    """The breadcrumb path for ``harness`` under the HOOK's env, not ours.
+
+    Mirrors ``tortoise.__main__._capture_error_file`` — the same location and
+    the same ``TORTOISE_IMPORT_RECEIPT_DIR`` override — but resolves the
+    receipt dir and ``HOME`` from the env the hook was FIRED with (``env``),
+    never from this process's ``os.environ``: a caller passing a non-default
+    HOME must read the breadcrumb the hook wrote under that HOME (#4314 P2).
+    When ``env`` supplies neither, the fallback is this process's home.
+    """
+    receipt_dir = env.get("TORTOISE_IMPORT_RECEIPT_DIR")
+    if receipt_dir:
+        base = Path(receipt_dir)
+    else:
+        home = env.get("HOME")
+        base = ((Path(home) if home else Path.home())
+                / ".tortoise" / "import-receipts")
+    return base.parent / "capture-errors" / f"{harness}.json"
+
+
+def _local_capture_error(harness: str,
+                         env: dict[str, str]) -> dict[str, Any] | None:
+    """The local breadcrumb from a capture that never landed, or None.
+
+    Any well-formed dict is returned so the report can show WHAT was found;
+    the caller (:func:`_install_link`) accepts it as install-inert evidence
+    only when its ``kind`` marker matches.
+    """
+    try:
+        data = _json.loads(
+            _local_capture_error_file(harness, env).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _clear_install_inert_breadcrumb(harness: str,
+                                    env: dict[str, str]) -> None:
+    """Remove a PRIOR fire's install-inert record, before the next fire.
+
+    The read condition after a fire is "a record produced by THIS fire".
+    Clearing the install-inert evidence immediately before the fire is what
+    makes that true: a hook that was inert once can no longer fail every later
+    ``session verify`` forever.  A ``capture-failure`` record is left alone —
+    it is different evidence and does not affect the install leg.
+    """
+    record = _local_capture_error(harness, env)
+    if record is None or record.get("kind") != KIND_INSTALL_INERT:
+        return
+    with contextlib.suppress(OSError):
+        _local_capture_error_file(harness, env).unlink()
 
 
 def _probe_id(harness: str) -> str:
@@ -815,7 +1034,22 @@ def _probe_id(harness: str) -> str:
 
 def _cleanup(api_url: str, api_key: str, probe_id: str, *,
              keep: bool,
-             launch: LaunchOutcome | None) -> dict[str, Any]:
+             launch: LaunchOutcome | None,
+             env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Delete the probe session, then drop its machine-local residue.
+
+    The residue tidy-up is a WRAPPER, not the tail of the DELETE path: it must
+    run on every exit, including `--keep` and the 404 arms — `--keep` is the
+    one path that can otherwise exit 0 with a probe still queued (#4714).
+    """
+    result = _cleanup_probe(api_url, api_key, probe_id, keep=keep, launch=launch)
+    _tidy_local_probe(result, probe_id, env)
+    return result
+
+
+def _cleanup_probe(api_url: str, api_key: str, probe_id: str, *,
+                   keep: bool,
+                   launch: LaunchOutcome | None) -> dict[str, Any]:
     """Delete the probe session (and its local import receipt).
 
     Deletion is keyed on the LAUNCH OUTCOME — whether the registered command
@@ -871,29 +1105,77 @@ def _cleanup(api_url: str, api_key: str, probe_id: str, *,
         else f"DELETE returned {body!r} — the probe session may remain")
     if not result["deleted"]:
         result["error"] = True
-    # Local 2xx receipt written by `sessions import` (Codex/Cursor) — best
-    # effort, reported, never fatal on its own.
-    local = _local_import_receipt(probe_id)
+    # Local 2xx receipt written by `sessions import` (Codex/Cursor).
+    return result
+
+
+def _tidy_local_probe(result: dict[str, Any], probe_id: str,
+                      env: dict[str, str] | None) -> None:
+    """Drop the probe's machine-local residue, and report what remains.
+
+    Called on EVERY `_cleanup` exit, including the early ones. It used to live
+    at the tail of the DELETE path, so `--keep` and both 404 arms returned
+    without ever looking — and `--keep` is the one path that can still exit 0
+    with a probe left queued (#4714 review).
+
+    Two kinds of residue, deliberately treated differently: a leftover receipt
+    is inert, while a leftover SPOOL ENTRY is content queued for the tenant
+    graph — so only the latter is fatal.
+    """
+    from tortoise.capture_spool import is_spooled, remove_spool_entry, spool_dir
+
+    # An inert leftover receipt — reported, but never fatal on its own. Resolved
+    # against the SAME env the seam ran under, for the same reason the spool arm
+    # is: a caller pinning the receipt dir must not have verify look elsewhere
+    # and report "none" (#4714 review).
+    local = _local_import_receipt(probe_id, env)
     if local is not None:
         try:
             local.unlink()
             result["local_receipt"] = f"removed {local}"
         except OSError as e:
             result["local_receipt"] = f"could not remove {local}: {e}"
-    return result
+
+    try:
+        # The seam ran under `env` (see `_fire_env`), and this file's invariant
+        # is that the fire and everything verifying it key on the SAME env — a
+        # caller pinning HOME or the spool root must not have verify look
+        # somewhere else and report a false "removed". `spool_dir(env)` resolves
+        # the override, the pytest guard AND HOME from that env.
+        spool_root = spool_dir(env)
+        # Whether the probe is GONE — not whether an unlink was issued. An
+        # unlink can fail, and a caller reporting "removed" on a failed one
+        # would claim a clean run while synthetic content sat queued.
+        was_present = is_spooled(spool_root, probe_id)
+        remove_spool_entry(spool_root, probe_id)
+        if not is_spooled(spool_root, probe_id):
+            result["local_spool"] = "removed" if was_present else "none"
+        else:
+            result["local_spool"] = (
+                f"the probe is STILL SPOOLED at {spool_root} — a drain may file "
+                "synthetic content")
+    except Exception as e:      # pragma: no cover - defensive, mirrors the hook
+        result["local_spool"] = f"could not check the spool: {e}"
+    # Fail CLOSED on residue that is not provably gone, including an error
+    # while checking (the drain's structural probe refusal is the first line).
+    if result.get("local_spool") not in (None, "none", "removed"):
+        result["error"] = True
 
 
-def _local_import_receipt(probe_id: str) -> Path | None:
-    path = Path(os.environ.get(
-        "TORTOISE_IMPORT_RECEIPT_DIR",
-        str(Path.home() / ".tortoise" / "import-receipts"))) / \
-        f"{probe_id}.json"
+def _local_import_receipt(probe_id: str,
+                          env: dict[str, str] | None = None) -> Path | None:
+    source = os.environ if env is None else env
+    base = source.get("TORTOISE_IMPORT_RECEIPT_DIR") or str(
+        Path(source.get("HOME") or Path.home()) / ".tortoise" / "import-receipts")
+    path = Path(base) / f"{probe_id}.json"
     return path if path.exists() else None
 
 
 def _exit_code(report: dict[str, Any]) -> int:
     statuses = [link["status"] for link in report["links"].values()]
-    if STATUS_FAIL in statuses:
+    # INERT is a BROKEN install: the seam fired yet captured nothing, which is
+    # exactly the failure `verify` exists to catch (#4314).
+    if STATUS_FAIL in statuses or STATUS_INERT in statuses:
         return EXIT_BROKEN
     # A leaked write is a BROKEN link, not an unverifiable one: exit 2 means
     # "nothing provably broken", and a failed DELETE proves the opposite.  A
@@ -920,6 +1202,7 @@ def render_report(report: dict[str, Any]) -> str:
     icons = {
         STATUS_PROVEN: "✅",
         STATUS_FAIL: "❌",
+        STATUS_INERT: "⛔",
         STATUS_UNVERIFIABLE: "⚠️ ",
     }
     for link in ("installed", "captured", "memory"):
@@ -929,9 +1212,21 @@ def render_report(report: dict[str, Any]) -> str:
         lines.append(
             f"  {icons.get(entry['status'], '?')} {link}: "
             f"{entry['status']} — {entry['detail']}")
+        breadcrumb = entry.get("breadcrumb")
+        if breadcrumb:
+            detail = (breadcrumb.get("detail")
+                      if isinstance(breadcrumb, dict) else breadcrumb)
+            lines.append(f"      ↳ hook breadcrumb: {detail}")
     cleanup = report.get("cleanup") or {}
     if cleanup.get("detail"):
         lines.append(f"  cleanup: {cleanup['detail']}")
+        # Residue is surfaced, not swallowed: a leftover import receipt or a
+        # leftover SPOOL entry (synthetic content the drain would file) has to
+        # be visible in the default output, not only under --json.
+        if cleanup.get("local_receipt"):
+            lines.append(f"  receipt: {cleanup['local_receipt']}")
+        if cleanup.get("local_spool"):
+            lines.append(f"  spool: {cleanup['local_spool']}")
     code = report.get("exit_code", EXIT_BROKEN)
     verdict = {
         EXIT_OK: "all links PROVEN",

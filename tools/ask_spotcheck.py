@@ -84,6 +84,7 @@ from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
     TortoiseSDK,
     _capture_turn_embeddings,
+    _capture_turn_texts_with_redactions,
     _capture_turn_window,
     _content_hash,
     _normalize_turn_role,
@@ -144,6 +145,7 @@ CAPTURE_CLOCK = _CaptureClock()
 
 def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
                           now: str | _CaptureClock | None = CAPTURE_CLOCK,
+                          capture_redactions: int | None = None,
                           ) -> str | None:
     """MERGE a ``(:Session)`` node in the shape BOTH capture writers write.
 
@@ -182,6 +184,13 @@ def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     sets = "s.turn_count=$tc, s.is_episodic=true"
     params: dict[str, object] = {"sid": session_id, "tc": turn_count}
+    # #4911: the live capture writer also SETs this, inside its batched turn
+    # statement. Written only when the caller knows the count (the seeder does
+    # — it composes the text) so a bare Session-half call is not forced to
+    # invent one.
+    if capture_redactions is not None:
+        sets += ", s.capture_redactions=$redact"
+        params["redact"] = capture_redactions
     if now is None:
         sets = "s.created_at=null, " + sets
     else:
@@ -278,7 +287,14 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     if not transcript.strip():
         return []
     proj = sdk._get_proj()
-    now = merge_capture_session(sdk, session_id, len(windowed), now=now)
+    # #4911: the stored text comes from the PRODUCT's own definition —
+    # ``_capture_turn_texts`` is where the capture path scrubs credentials — so
+    # a seeded fixture cannot teach a shape (or a credential policy) the real
+    # write path no longer produces. The count rides the Session MERGE below,
+    # as it does in the live writer.
+    turn_texts, redaction_counts = _capture_turn_texts_with_redactions(windowed)
+    now = merge_capture_session(sdk, session_id, len(windowed), now=now,
+                                capture_redactions=sum(redaction_counts.values()))
     # #4156: the SAME contract as the Session side — the default models a
     # capture's clock (already resolved above into one ``now`` shared by the
     # session and every turn), while an explicit ``now=None`` means the
@@ -294,9 +310,8 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         time_params = {"now": now}
     # The stored text is composed ONCE — the same string the node stores and
     # the string that is encoded, so a dense hit always resolves to the turn
-    # whose text was embedded (#4194's own rule).
-    turn_texts = [f"[{_normalize_turn_role(t.get('role'))}] "
-                  f"{t['content'][:5000]}" for t in windowed]
+    # whose text was embedded (#4194's own rule). ``turn_texts`` was composed
+    # above from the product's shared definition (#4911).
     # SWITCHABLE SEEDING (W7A): embedded by DEFAULT, because the product's
     # write path now embeds every episodic turn (#4194) and a fixture without
     # a vector BLINDS every retrieval measurement to the dense leg — the

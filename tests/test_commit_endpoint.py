@@ -378,13 +378,15 @@ class TestFourNodeChain:
         assert rows[0][1] == "2026-08-11T10:00:00Z"
         assert rows[0][2] is True
 
-        # Document transcript (summary/story_arc/sessionId/sourcePath; NO content)
+        # Document transcript — D10: a :Source keyed url=doc_<hash>
+        # (summary/story_arc/sessionId/sourcePath; NO content/doc_status)
         rows = g.query(
-            "MATCH (d:Document) WHERE d.sessionId='s1' "
-            "RETURN d.documentKind, d.summary, d.story_arc, d.sourcePath, "
-            "d.is_episodic",
+            "MATCH (s:Source) WHERE s.sessionId='s1' "
+            "AND s.documentKind IS NOT NULL "
+            "RETURN s.documentKind, s.summary, s.story_arc, s.sourcePath, "
+            "s.is_episodic",
         ).result_set
-        assert rows, "Document missing"
+        assert rows, "Document Source missing"
         kind, summary, arc, srcpath, episodic = rows[0]
         assert kind == "transcript"
         assert summary == "summary text"
@@ -392,9 +394,9 @@ class TestFourNodeChain:
         assert srcpath == "session.md"  # basename only (privacy)
         assert episodic is True
 
-        # (Event)-[:produces]->(Document)
+        # (Event)-[:produces]->(document Source)
         n = g.query(
-            "MATCH (e:Event {eventId:$eid})-[:produces]->(d:Document) "
+            "MATCH (e:Event {eventId:$eid})-[:produces]->(d:Source) "
             "WHERE d.sessionId='s1' RETURN count(d)",
             params={"eid": eid},
         ).result_set[0][0]
@@ -408,9 +410,9 @@ class TestFourNodeChain:
         assert rows and rows[0][0] == "agentSession"
         assert rows[0][1] and rows[0][2] == ["0-10"]
 
-        # (Document)<-[:references]-(Source)
+        # (document Source)<-[:references]-(session Source)
         n = g.query(
-            "MATCH (s:Source {url:'session:s1'})-[:references]->(d:Document) "
+            "MATCH (s:Source {url:'session:s1'})-[:references]->(d:Source) "
             "WHERE d.sessionId='s1' RETURN count(d)",
         ).result_set[0][0]
         assert n >= 1
@@ -890,7 +892,14 @@ class TestSessionSourceIndexIdentity:
             params={"pid": raw["points"][0]["id"]},
         ).result_set[0][0]
         assert n >= 1
-        assert _all_source_urls() == ["session:s1"], _all_source_urls()
+        # D10: the commit mints a distinct document :Source (url=doc_<hash>)
+        # alongside the canonical session Source. The assertion's intent is
+        # that any Layer-1-accepted path still re-points extractedFrom at the
+        # session Source — NO bare-basename Source (the fallback's
+        # `session.md`) is ever minted.
+        doc_url = f"doc_{content_hash('s1:2026-08-11T10:00:00Z')}"
+        assert _all_source_urls() == sorted(["session:s1", doc_url]), \
+            _all_source_urls()
 
     @pytest.mark.parametrize("path", [".", "..", "/", "a/.", "a/.."])
     def test_basename_less_provenance_path_422s_before_any_write(
@@ -1030,6 +1039,16 @@ class TestMitigates:
         assert rows, "mitigation artifact missing"
         assert rows[0][0] == 0.4
         assert rows[0][1] == "statement"
+        # #4937 INVARIANT GUARD (the regression pin for the refusal itself is
+        # tests/test_sdk.py::test_mitigates_is_not_an_operator_kind): the
+        # payload spelling MITIGATES never materializes a peer operator kind —
+        # it attaches to the IMPL bridge above (mitigated_by), it is NOT a
+        # generic operator of kind MITIGATES. Holds on main too, so it guards
+        # the invariant rather than the #4937 diff.
+        peer = g.query(
+            "MATCH (o:Point {is_operator:true}) WHERE o.op_type = 'MITIGATES' "
+            "RETURN count(o)").result_set
+        assert peer[0][0] == 0
 
     def test_mitigates_target_missing_operator_422(self, client):
         ops = [
@@ -1703,11 +1722,12 @@ class TestPrivacy:
             "OR n.url CONTAINS '/Users/' RETURN n.content, n.sourcePath, n.url",
         ).result_set
         assert not rows, f"privacy leak: {rows}"
-        # basename-only: the Document.sourcePath is the basename, and the
-        # Source identity is the canonical session-scoped permalink (no
-        # absolute path).
+        # basename-only: the document Source's sourcePath is the basename,
+        # and the Source identity is the canonical session-scoped permalink
+        # (no absolute path).
         rows = g.query(
-            "MATCH (d:Document) WHERE d.sessionId='s1' RETURN d.sourcePath",
+            "MATCH (s:Source) WHERE s.sessionId='s1' "
+            "AND s.documentKind IS NOT NULL RETURN s.sourcePath",
         ).result_set
         assert rows and rows[0][0] == "session.md"
         rows = g.query(

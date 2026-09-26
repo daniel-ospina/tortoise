@@ -39,6 +39,7 @@ unattributable); 2 = environment error (measurement impossible); 3 = NOT-CLOSING
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -858,25 +859,114 @@ def _junit_test_files(path: Path) -> _JunitObservation:
     return _JunitObservation(tuple(sorted(observed)), tuple(sorted(failing)), str(path))
 
 
-def _git(*args: str, cwd: Path | None = None) -> str:
+class UsageError(Exception):
+    """A usage error ⇒ exit 2 with NO record written (D8 precedence 2).
+
+    Distinct from `RuntimeError`, which `main()` reports as an environment error:
+    both exit 2, but a usage error is a property of the INVOCATION, not of the host.
+    """
+
+
+def _git(
+    *args: str, cwd: Path | None = None, env: dict[str, str] | None = None
+) -> str:
+    """Run git and return its stdout.
+
+    `env=None` INHERITS the ambient environment — the production behaviour, and
+    the default so no existing caller changes meaning. The parameter exists so a
+    caller can pin the environment the MEASURED calls see: git reads
+    `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` and the global/system config
+    (`core.autocrlf`, `core.fsmonitor`, `core.untrackedCache`, `status.*`,
+    `diff.*`) straight from it, so a runner's ambient config would otherwise get
+    to decide what the pin measures. A test that sanitises only the FIXTURE's own
+    git invocations does NOT reach these calls — which is how the first version
+    of the `#4540` tests could have passed vacuously (#4203).
+    """
     proc = subprocess.run(
-        ["git", *args], capture_output=True, text=True, cwd=str(cwd or REPO_ROOT)
+        ["git", *args], capture_output=True, text=True, cwd=str(cwd or REPO_ROOT),
+        env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
 
 
-def _porcelain_digest(cwd: Path, exclude: Path | None = None) -> tuple[str, bool]:
-    status = _git("status", "--porcelain=v2", cwd=cwd)
-    diff = _git("diff-index", "HEAD", cwd=cwd)
+def _git_returncode(args: list[str]) -> int:
+    """Run a git predicate whose NON-ZERO rc is an ANSWER, not a failure.
+
+    `_git` raises on rc≠0, which is right for a read whose absence is an error but
+    wrong for `merge-base --is-ancestor`, where rc 1 is the "no" of a well-formed
+    question. This is the rc-bearing counterpart, kept separate so the raising
+    semantics of `_git` are not weakened.
+    """
+    proc = subprocess.run(
+        ["git", *args], capture_output=True, text=True, cwd=str(REPO_ROOT)
+    )
+    return proc.returncode
+
+
+def _strict_ancestor(ancestor: str, descendant: str) -> bool:
+    """True iff `ancestor` is a STRICT ancestor of `descendant` (D16/C1).
+
+    `git merge-base --is-ancestor` is true for an EQUAL pair, which D16 does not
+    accept as a pairing ref — a ref equal to the measured commit cannot be "before
+    the fix" — so equality is excluded explicitly.
+    """
+    if ancestor == descendant:
+        return False
+    return _git_returncode(["merge-base", "--is-ancestor", ancestor, descendant]) == 0
+
+
+def _worktree_at(ref: str, run_root: Path, name: str) -> tuple[Path, bool]:
+    """Materialize `ref` for measurement, WITHOUT disturbing the invoking checkout.
+
+    Returns `(root, added)`. When `ref` is already this checkout's HEAD the tree
+    itself is measured (`added=False`); otherwise a detached worktree is created
+    under `run_root`. Two callers need this: the `--ref` measurement and the
+    `--pairing-ref` baseline red re-run (D16) — both must measure a ref that may
+    not be checked out, and neither may touch the tree it is comparing against.
+    """
+    if ref == _git("rev-parse", "HEAD"):
+        return REPO_ROOT, False
+    wt = run_root / name
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(wt), ref],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), check=True,
+    )
+    return wt, True
+
+
+def _porcelain_digest(
+    cwd: Path, env: dict[str, str] | None = None
+) -> tuple[str, bool]:
+    """The measured tree's cleanliness digest, and whether it is DIRTY.
+
+    The tool's own `--record-out` receipt is NOT excluded here, and does not need
+    to be: `_build_record` REFUSES an in-tree `--record-out` as a usage error
+    before any measurement is taken (#4203, owner-ruled option (a), #4572). With
+    the receipt outside the tree this function performs NO path-based exclusion at
+    all — and an exclusion that does not exist cannot over-match.
+
+    That is the whole point. The exclusion this replaces was re-derived five times
+    (`--record-out tools/e` substring-matched the dirty `tools/embedded_evidence`
+    py; `Path.resolve()` followed a symlink and named a whole directory; the
+    pathspec lacked `literal` and globbed; `:(exclude)X` also matched every `X/…`;
+    a lexical-vs-kernel `--record-out link/../out` divergence), and each spelling
+    traded one over-broad form for another. Every one of them could turn a
+    genuinely dirty tree into a digest that reads clean (post_review_dirty False,
+    exit 0 — the fail-open class of #4540), because any path-based exclusion has
+    to PROVE it names the receipt and nothing else, and each proof rested on an
+    assumption about git's pathspec semantics that turned out to be wrong.
+
+    `--untracked-files=all` is load-bearing and is KEPT: without it git collapses a
+    fresh untracked directory to ONE entry (`? docs/evidence/`), the permanent
+    false-FAIL #4203 was raised to close. `env` pins the environment the measured
+    calls see — see `_git`.
+    """
+    status = _git("status", "--porcelain=v2", "--untracked-files=all", "--", ".",
+                  cwd=cwd, env=env)
+    diff = _git("diff-index", "HEAD", "--", ".", cwd=cwd, env=env)
     blob = (status + "\n" + diff + "\n").encode()
-    if exclude is not None:
-        # The record-out path is excluded from the pin (M5): strip its line.
-        ex = str(exclude.relative_to(cwd)) if exclude.is_relative_to(cwd) else str(exclude)
-        blob = b"\n".join(
-            ln for ln in blob.splitlines() if ex.encode() not in ln
-        ) + b"\n"
     return "sha256:" + hashlib.sha256(blob).hexdigest(), bool(status.strip())
 
 
@@ -1001,7 +1091,11 @@ def _run_once(
         "executed": counts["executed"],
         "skipped": counts["skipped"],
         "load": {"before": before, "after": after, "band": load_band(after)},
-        "tree_moved": False,
+        # `tree_moved` is deliberately NOT set here. A literal `False` written by the
+        # runner is a value no code path can ever make `True`, so the conjunct that
+        # reads it (`pin-not-airtight`'s per-run half) read as protection while
+        # supplying none. `_build_record` measures it from the tree's own porcelain
+        # digest between runs and writes it onto every run.
         "redis_log_cause": cause,
         "cause_evidence": evidence,
         "timed_out": timed_out,
@@ -1078,18 +1172,28 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     ok &= conj("reproducer-absent",
                any(MANDATORY_REPRODUCER.endswith(f) or MANDATORY_REPRODUCER in f
                    for f in rec["selection"]["files"]))
+    # D11: the attested baseline is a RUN too, so its own tree state is part of the
+    # pin — `runs` alone left the pairing worktree's move unexamined.
     ok &= conj("pin-not-airtight",
-               rec["pin"]["worktree_clean"] and all(not r["tree_moved"] for r in rec["runs"]))
+               rec["pin"]["worktree_clean"]
+               and all(not r["tree_moved"]
+                       for r in [*rec["runs"], *(
+                           [rec["red"]["baseline_run"]]
+                           if rec["red"].get("baseline_run") else [])]))
     ok &= conj("cause-unattributed",
                rec["red"]["cause"] in CAUSE_CLASSES and rec["red"]["cause"] != "unattributed")
     ok &= conj("cause-not-expected",
                rec["red"]["cause"] in rec["selection"]["expected_causes"])
     ok &= conj("red-file-list-differs", rec["red"]["same_file_list"])
     ok &= conj("load-bands-do-not-overlap", rec["load"]["overlap"])
+    # `attempted` is deliberately NOT an AND-term here: `main()` rejects `--n < 2`,
+    # so the producer could only ever set it True and it supplied no protection. The
+    # falsifiable claim is `rate_change` (a red was demonstrated and did not appear
+    # at the measured commit); `attempted` still records that a red was demonstrated
+    # at all, so it can be False in a produced record.
     ok &= conj("no-rate-change",
-               (rec["red"]["at_fixed_commit"]["attempted"]
-                and not rec["red"]["at_fixed_commit"]["appeared"]
-                and rec["red"]["at_fixed_commit"]["rate_change"])
+               (rec["red"]["at_fixed_commit"]["rate_change"]
+                and not rec["red"]["at_fixed_commit"]["appeared"])
                or (bool(rec["red"]["at_fixed_commit"]["mutation"])
                    and str(rec["red"]["at_fixed_commit"]["mutation_operator"]).startswith("statement-deletion:")
                    and rec["red"]["at_fixed_commit"]["mutation_target_is_fix_branch"]
@@ -1111,7 +1215,16 @@ def exit_code(rec: dict) -> int:
     ok, _ = closes_issue(rec)
     if ok:
         return 0
-    if any(r["bucket"] in BUCKETS_RED for r in rec["runs"]):
+    # A RED measured anywhere in this invocation is a red — including the attested
+    # pairing-ref baseline, which is persisted under `red.baseline_run` rather than
+    # in `runs`. D14/threat row 10 requires a non-overlapping load band to be exit 1
+    # ("a red measured at load 80 and a green at load 3"); without the baseline in
+    # this test a closing-shaped record that failed only on load returned a clean 3.
+    red_runs = list(rec["runs"])
+    baseline = rec.get("red", {}).get("baseline_run")
+    if baseline:
+        red_runs.append(baseline)
+    if any(r["bucket"] in BUCKETS_RED for r in red_runs):
         return 1
     if rec["verdict"].get("environment_error"):
         return 2
@@ -1124,15 +1237,255 @@ def _tool_version() -> str:
 
 
 def _write_record(rec: dict, out: Path) -> None:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(out.parent), prefix=".rec-", suffix=".tmp")
-    with os.fdopen(fd, "w") as fh:
-        json.dump(_jsonable(rec), fh, indent=2, sort_keys=False)
-        fh.write("\n")
-    os.replace(tmp, out)
+    """Write `rec` to `out` atomically, via a temp in `out`'s PHYSICAL parent.
+
+    The temp must be created in the parent the KERNEL will use, not the lexical
+    one. `mkstemp` normalises its `dir` with `os.path.abspath` — LEXICALLY — while
+    `os.replace(tmp, out)` resolves every directory component of `out` through
+    symlinks. With a symlink followed by `..` the two disagree:
+
+        tree/lnk -> <outside>
+        out = tree/lnk/../destdir
+
+    kernel-resolves the destination to `<outside>/../destdir` (outside the tree,
+    so the pre-write refusal is correctly silent), while `abspath` collapses
+    `lnk/..` to `<tree>` — so the temp file, holding the COMPLETE record JSON, was
+    created INSIDE the measured tree and left there when `os.replace` failed
+    (#4585). `realpath` resolves `..` AFTER the symlink, exactly as the kernel
+    does, so the temp and the destination share one parent.
+
+    If the write or the replace fails, the temp is unlinked before the error is
+    re-raised: a partial record must not survive as dirt in a tree the pin
+    measures. `os.unlink` is best-effort — the caller (`main`) sweeps any
+    `.rec-*` residue that this cleanup could not remove.
+    """
+    parent = Path(os.path.realpath(os.path.dirname(os.fspath(out))))
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=".rec-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(_jsonable(rec), fh, indent=2, sort_keys=False)
+            fh.write("\n")
+        os.replace(tmp, out)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+# `tempfile.mkstemp` names its file `prefix + 8 random chars + suffix`, so a temp
+# THIS tool created is always `.rec-` + exactly 8 of `[a-z0-9_]` + `.tmp`. Matching
+# that shape (rather than an open `.rec-*.tmp` glob) keeps the backstop sweep from
+# deleting a user file that merely shares the prefix: the earlier glob removed any
+# `.rec-anything.tmp` — the tool cleaning up something it never created (#4585).
+_REC_RESIDUE_RE = re.compile(r"\A\.rec-[a-z0-9_]{8}\.tmp\Z")
+
+
+def _sweep_record_residue(*measured_roots: Path) -> list[Path]:
+    """Delete residue `_write_record` left inside a measured tree; return removals.
+
+    A temp file holds the COMPLETE record JSON, so a survivor is exactly the
+    "the tool's own record is part of the dirt it measures" condition #4203 exists
+    to eliminate. `_write_record` now creates the temp in the destination's
+    physical parent and unlinks it on failure, so this is the BACKSTOP for residue
+    that cleanup could not remove (its `os.unlink` failed, or an earlier invocation
+    crashed). Every directory a temp can be created in is swept: the measured roots
+    themselves (a lexical collapse such as `tree/lnk/..` places the temp in the tree
+    ROOT) and the destination's physical parent (where the temp goes when `out`
+    resolves to a nested directory). The sweep is non-recursive, and it removes a
+    file only when its name matches `_REC_RESIDUE_RE` — the exact shape
+    `mkstemp(prefix=".rec-", suffix=".tmp")` emits — so it cannot touch anything
+    else the tree contains. The residual blast radius is stated where it bites: a
+    file that is ITSELF a genuine `.rec-XXXXXXXX.tmp` is indistinguishable from one
+    of our temps and is removed; nothing outside that exact shape is.
+    """
+    removed: list[Path] = []
+    for root in measured_roots:
+        root_real = Path(os.path.realpath(os.fspath(root)))
+        if not root_real.is_dir():
+            continue
+        try:
+            names = sorted(os.listdir(root_real))
+        except OSError:
+            # Best-effort: the sweep runs inside the write-failure handler, so it
+            # must not turn a refusal into a traceback.
+            continue
+        for name in names:
+            if not _REC_RESIDUE_RE.match(name):
+                continue
+            candidate = root_real / name
+            try:
+                os.unlink(candidate)
+            except OSError:
+                continue
+            removed.append(candidate)
+    return removed
+
+
+def _default_record_out() -> Path:
+    """The ONLY supported destination: outside every tree the pin measures.
+
+    Derived, never a stale literal, so the refusal message and `main()`'s fallback
+    cannot drift apart. Computed per call because `TMPDIR` can change within a
+    process (a test, an operator export).
+    """
+    return Path(tempfile.gettempdir()) / "pi-embedded-evidence" / "record.json"
+
+
+def _written_location(out: Path) -> Path:
+    """Where `_write_record(out)` will ACTUALLY create the file.
+
+    `_write_record` calls `os.replace(tmp, out)`. The kernel resolves every
+    DIRECTORY component of `out` through symlinks, but `rename(2)` REPLACES a
+    symlink at the FINAL component rather than following it. So `realpath(out)`
+    would follow that final symlink and report a location the write does not use:
+    `--record-out <a symlink inside the tree that points outside>` would pass a
+    `realpath`-based containment check while the receipt still lands INSIDE the
+    tree — and then the tool's own record is dirt it did not exclude. Resolve the
+    PARENT physically and keep the final component lexical.
+
+    The parent is resolved with `realpath` — never `abspath`. `abspath` collapses
+    `..` LEXICALLY, before any symlink is resolved, so it predicts a destination the
+    kernel does not use: with `lnk -> <tree>/docs`, `abspath("…/lnk/../x.json")`
+    reads "outside" while `os.replace` follows `lnk` and THEN applies `..`, landing
+    the record at `<tree>/x.json` (#4203, reproduced). `realpath` resolves `..`
+    AFTER the symlink, exactly as the kernel does. It also puts both sides of the
+    containment comparison on one basis: a `--ref` measured root comes from
+    `tempfile.mkdtemp()` and is `/var/…` while macOS's `Path.cwd()` is
+    `/private/var/…` — the same directory spelled two ways.
+
+    This is still a PREDICTION, so it is no longer the only thing standing between
+    the tool and its own dirt — `_verify_record_landed_outside` observes where the
+    file actually landed after the write and is the fail-closed backstop.
+    """
+    raw = os.fspath(out)
+    return Path(os.path.realpath(os.path.dirname(raw)), os.path.basename(raw))
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """Do `a` and `b` name the same directory? Asked of the KERNEL, by inode.
+
+    `os.path.samefile` is the only comparison insensitive to BOTH case (a
+    case-variant of a root component passed a string-containment test on a
+    case-insensitive FS — #4203) and any lexical divergence `realpath` left behind.
+    A path that does not exist raises `OSError`; "cannot stat" is not "inside".
+    """
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _inside_tree(candidate: Path, root: Path) -> bool:
+    """Is `candidate` inside `root`? Answered by identity, never by string.
+
+    `candidate` may not exist yet (the record destination usually does not), so
+    walk its ancestors and ask whether any of them IS `root` — `Path.is_relative_to`
+    and `root in candidate.parents` are string tests and were the half that let a
+    case-variant root through.
+    """
+    node = candidate
+    while True:
+        if _same_dir(node, root):
+            return True
+        parent = node.parent
+        if parent == node:
+            return False
+        node = parent
+
+
+def _verify_record_landed_outside(out: Path, *measured_roots: Path) -> None:
+    """Observe where the record ACTUALLY landed; delete it and refuse if in-tree.
+
+    The pre-write refusal is a PREDICTION, and five prior cycles were defeated by
+    predicting a path the kernel then resolved differently (five exclusions, then
+    `abspath`'s lexical `..`). This is the fail-closed half that makes the class
+    terminate: after `os.replace` the file EXISTS, so `realpath(out)` follows the
+    final component too and reports the physical file the kernel created. If that
+    is inside any tree the pin measures, the record is deleted and the invocation is
+    a usage error — the prediction no longer has to be right in any future spelling,
+    because the fact is checked.
+    """
+    landed = Path(os.path.realpath(os.fspath(out)))
+    for root in measured_roots:
+        root_real = Path(os.path.realpath(os.fspath(root)))
+        if _inside_tree(landed, root_real):
+            with contextlib.suppress(OSError):
+                os.unlink(out)
+            raise UsageError(
+                f"--record-out {out} was written inside the measured tree ({root}) "
+                "and has been deleted. The tool's own record must not be part of "
+                "the dirt it is measuring. Write the record outside the measured "
+                f"tree (the default is {_default_record_out()}) and copy or upload "
+                "it afterwards."
+            )
+
+
+def _remove_in_tree_record(out: Path, *measured_roots: Path) -> list[Path]:
+    """Best-effort removal of a record that landed inside a measured tree.
+
+    `_verify_record_landed_outside` already unlinks it, but that unlink is
+    best-effort (the `OSError` is suppressed), and #4585 measured the consequence:
+    with the unlink failing, the verification still raised `UsageError` and `main`
+    returned 2 while the COMPLETE record JSON survived inside the measured tree.
+    The caller runs this during cleanup so the deletion is retried rather than
+    abandoned after one attempt.
+
+    Returns the paths that could NOT be removed — empty on success — so the caller
+    reports the residual honestly instead of implying a clean tree. A path that is
+    not inside a measured tree, or does not exist, is nothing to do: the write
+    never landed it there.
+    """
+    landed = Path(os.path.realpath(os.fspath(out)))
+    in_tree = any(
+        _inside_tree(landed, Path(os.path.realpath(os.fspath(root))))
+        for root in measured_roots
+    )
+    if not in_tree or not os.path.lexists(os.fspath(out)):
+        return []
+    try:
+        os.unlink(out)
+    except OSError:
+        return [out]
+    return []
+
+
+def _refuse_in_tree_record_out(out: Path, *measured_roots: Path) -> None:
+    """Usage error when the receipt would land inside a measured tree (#4203).
+
+    The pin's one-directional property is that a genuinely dirty tree must never
+    read clean. The tool's own record used to be excluded from the measurement BY
+    PATH, and that exclusion over-matched five different ways, each hiding real
+    dirt. The owner ruled (option (a), #4572) that the record must not live in the
+    measured tree at all: with the receipt outside, `_porcelain_digest` performs NO
+    path-based exclusion, so there is nothing left to over-match.
+
+    Every tree the pin measures is checked. `REPO_ROOT` is always one of them —
+    `pin.post_review_dirty` is measured on the INVOKING checkout even when `--ref`
+    points the run at a detached worktree — so an in-repo receipt would dirty the
+    pin whether or not `--ref` was given.
+    """
+    location = _written_location(out)
+    for root in measured_roots:
+        root_real = Path(os.path.realpath(os.fspath(root)))
+        if _inside_tree(location, root_real):
+            raise UsageError(
+                f"--record-out {out} is inside the measured tree ({root}). The "
+                "tool's own record would then be part of the dirt it is "
+                "measuring, falsely reporting a post-review edit. Write the "
+                "record outside the measured tree (the default is "
+                f"{_default_record_out()}) and copy or upload it afterwards."
+            )
 
 
 def _build_record(args: argparse.Namespace) -> dict:
+    # M52/C1: `closing` is accepted ONLY with an explicit `--pairing-ref` — without
+    # it there is no ref to pair against, so a closing claim has no antecedent and
+    # the role is a label with nothing behind it. Enforced BEFORE any measurement or
+    # record construction: a usage error writes NO record and exits 2 (this used to
+    # fall through to exit 3 and still write a record).
+    if args.record_role == "closing" and not args.pairing_ref:
+        raise UsageError("--record-role closing requires --pairing-ref")
     from tools.ci_selection import load_manifest
 
     run_root = Path(tempfile.mkdtemp(prefix="pi-embedded-evidence-"))
@@ -1147,17 +1500,18 @@ def _build_record(args: argparse.Namespace) -> dict:
     requested_ref = None
     measured_root = REPO_ROOT
     worktree_added = False
+    # #4203 owner ruling (option (a), #4572): the record must not live inside the
+    # measured tree. Refuse it BEFORE any measurement — and before the `--ref`
+    # worktree exists — so a usage error costs no measurement and leaves no
+    # worktree behind. `REPO_ROOT` is checked first because `post_review_dirty` is
+    # measured on the invoking checkout even when `--ref` measures elsewhere.
+    if args.record_out is not None:
+        _refuse_in_tree_record_out(args.record_out, REPO_ROOT)
     if args.ref:
         requested_ref = _git("rev-parse", f"{args.ref}^{{commit}}")
-        head = _git("rev-parse", "HEAD")
-        if requested_ref != head:
-            wt = run_root / "worktree"
-            subprocess.run(
-                ["git", "worktree", "add", "--detach", str(wt), requested_ref],
-                capture_output=True, text=True, cwd=str(REPO_ROOT), check=True,
-            )
-            measured_root = wt
-            worktree_added = True
+        measured_root, worktree_added = _worktree_at(requested_ref, run_root, "worktree")
+        if args.record_out is not None:
+            _refuse_in_tree_record_out(args.record_out, measured_root)
     commit = _git("rev-parse", "HEAD", cwd=measured_root)
     tree = _git("rev-parse", "HEAD^{tree}", cwd=measured_root)
 
@@ -1167,20 +1521,36 @@ def _build_record(args: argparse.Namespace) -> dict:
         raise RuntimeError(args.environment_error)
 
     runs: list[dict] = []
+    tree_states: list[tuple[str, bool]] = []
     porcelain = ""
     dirty = False
     try:
         if cur_load > ceiling:
             raise RuntimeError(f"load {cur_load} exceeds ceiling {ceiling}")
+        # D11: the baseline digest is captured BEFORE the first run, so a tree that
+        # moves DURING run 1 is caught. Capturing it after run 1 (the old code) made
+        # run 1 compare with itself — `tree_moved` was False for run 1 by
+        # construction — so a tree that moved only during run 1 left
+        # `pin-not-airtight` passing while the tree moved.
+        base_digest, _base_dirty = _porcelain_digest(measured_root)
         for i in range(1, args.n + 1):
             runs.append(_run_once(files, measured_root, run_root, i, args.marker,
                                   args.run_timeout))
-        # The cleanliness digest MUST be taken while the measured tree still
-        # EXISTS. It used to run after this `finally`, which removes the detached
-        # worktree — so a --ref measurement stat'd a path that was already gone
-        # and died with FileNotFoundError, losing the one field that says the tree
-        # did not move. Read state before the code that deletes it.
-        porcelain, dirty = _porcelain_digest(measured_root, exclude=args.record_out)
+            # The per-run tree state. The cleanliness digest MUST be taken while the
+            # measured tree still EXISTS (see below) — and it is taken once per run so
+            # `tree_moved` is MEASURED: a run whose tree digest differs from the
+            # pre-run baseline is a moved tree, which `pin-not-airtight` refuses.
+            tree_states.append(_porcelain_digest(measured_root))
+        # `tree_moved` is per-run: True iff this run's tree state differs from the
+        # digest captured before run 1.
+        for r, (digest, _d) in zip(runs, tree_states, strict=True):
+            r["tree_moved"] = digest != base_digest
+        # The pin's own cleanliness is the FINAL state, read before the `finally`
+        # that removes the worktree. (It used to run after the `finally`, which
+        # removed the detached worktree — so a --ref measurement stat'd a path that
+        # was already gone and died with FileNotFoundError, losing the field that
+        # says the tree did not move.)
+        porcelain, dirty = tree_states[-1] if tree_states else ("", False)
     finally:
         if worktree_added:
             subprocess.run(
@@ -1188,21 +1558,144 @@ def _build_record(args: argparse.Namespace) -> dict:
                 capture_output=True, text=True, cwd=str(REPO_ROOT),
             )
 
-    red_run = next((r for r in runs if r["bucket"] in BUCKETS_RED), None)
+    # R2/D24: the certificate binds to the REVIEWED head SHA. `commit` is the
+    # MEASURED commit (which may be a detached `--ref`); `head_sha` is the invoking
+    # checkout's HEAD, read independently — not the same variable copied into the
+    # field it is later compared against. A `--ref` re-run after the branch moved,
+    # or a checkout carrying uncommitted post-review edits, is refused by
+    # `certificate-not-bound-to-review-head`. A literal (`head_sha = commit`,
+    # `post_review_dirty = False`) made that conjunct unfailable.
+    reviewed_head = _git("rev-parse", "HEAD")
+    _, review_dirty = _porcelain_digest(REPO_ROOT)
+
+    # D16: when a pairing ref is declared, the RED is re-run AT THE PAIRING REF
+    # inside this invocation, so `at_fixed_commit` becomes a MEASURED claim (the
+    # red appeared at the pairing ref; it did not appear at the measured, fixed
+    # commit). The producer previously hardcoded `attempted: False` /
+    # `appeared: None` / `rate_change: False`, which made `no-rate-change`
+    # unreachable for EVERY record the producer could emit.
+    baseline_run = None
+    pair_ref = None
+    pairing_is_ancestor = False
+    if args.pairing_ref:
+        pair_ref = _git("rev-parse", f"{args.pairing_ref}^{{commit}}")
+        # C1/D16: a `--pairing-ref` must be a STRICT ancestor of the measured commit.
+        # Equal, descendant or unrelated is a usage error, validated BEFORE the
+        # baseline so a bad ref costs no measurement and writes no record. This is
+        # load-bearing: `--pairing-ref` drives `rate_change`, so without it an
+        # arbitrary ref would make `no-rate-change` satisfiable by a red measured
+        # anywhere.
+        pairing_is_ancestor = _strict_ancestor(pair_ref, commit)
+        if not pairing_is_ancestor:
+            raise UsageError(
+                f"--pairing-ref {pair_ref} must be a strict ancestor of the "
+                f"measured commit {commit}"
+            )
+        pair_root = run_root / "pairing"
+        pair_root.mkdir(parents=True, exist_ok=True)
+        pair_measured, pair_added = _worktree_at(pair_ref, run_root, "pairing-worktree")
+        try:
+            pair_base_digest, _pbd = _porcelain_digest(pair_measured)
+            baseline_run = _run_once(files, pair_measured, pair_root, 1, args.marker,
+                                     args.run_timeout)
+            pair_post_digest, _ppd = _porcelain_digest(pair_measured)
+            # The baseline is a RUN too: persist its own tree state so `pin-not-airtight`
+            # and a re-evaluating verifier can see whether the pairing worktree moved.
+            baseline_run["tree_moved"] = pair_post_digest != pair_base_digest
+        finally:
+            if pair_added:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(pair_measured)],
+                    capture_output=True, text=True, cwd=str(REPO_ROOT),
+                )
+
+    measured_red_runs = [r for r in runs if r["bucket"] in BUCKETS_RED]
+    measured_green_runs = [r for r in runs if r["bucket"] in BUCKETS_PASSING]
+    measured_red_run = next(iter(measured_red_runs), None)
+
+    if baseline_run is not None:
+        # The red the record attests to is the pairing-ref re-run, never the
+        # measured runs' own red: a closing record's runs are green by definition,
+        # so its red identity can only come from the baseline.
+        attested_red_runs = (
+            [baseline_run] if baseline_run["bucket"] in BUCKETS_RED else []
+        )
+        attested_red_run = attested_red_runs[0] if attested_red_runs else None
+        red_ref = pair_ref
+        red_ref_tree = _git("rev-parse", f"{pair_ref}^{{tree}}")
+    else:
+        attested_red_runs = measured_red_runs
+        attested_red_run = measured_red_run
+        red_ref = requested_ref or commit
+        red_ref_tree = tree
+
+    # F17/D14: the OVERLAP set is the band of EVERY run that entered the comparison
+    # — the measured runs AND the attested red (the pairing-ref baseline, which is a
+    # run but is not in `runs`). Built from `runs` alone the set held only green
+    # bands on the one shape that can close, so `len(bands) == 1` was trivially true
+    # and the conjunct could never fire: a red measured at L-C and greens at L-A
+    # recorded `overlap: true` and a CLOSING verdict.
     bands = {r["load"]["band"] for r in runs}
-    green_runs = [r for r in runs if r["bucket"] in BUCKETS_PASSING]
-    red_runs = [r for r in runs if r["bucket"] in BUCKETS_RED]
-    # F4a: derived from the red runs' own recorded file lists, never a literal.
-    same_file_list = _red_file_list_matches(red_runs, files)
-    red_band = (red_run or runs[-1])["load"]["band"]
-    green_band = (green_runs[0]["load"]["band"] if green_runs else red_band)
-    cause = red_run["redis_log_cause"] if red_run else None
-    cause_evidence = red_run["cause_evidence"] if red_run else {}
+    if attested_red_run is not None:
+        bands.add(attested_red_run["load"]["band"])
+
+    # F17/plan schema: the red/green mix counts every run that entered the
+    # comparison — the measured `runs` PLUS the attested baseline red. Derived from
+    # the run objects, never the `{"red": 1, "green": 0}` literal that contradicted
+    # a closing record whose own `runs` were all green and whose
+    # `observed_failure_rate` was 0.0.
+    contributing_runs = list(runs)
+    if attested_red_run is not None and all(attested_red_run is not r for r in runs):
+        contributing_runs.append(attested_red_run)
+    red_green_mix = {
+        "red": sum(1 for r in contributing_runs if r["bucket"] in BUCKETS_RED),
+        "green": sum(1 for r in contributing_runs if r["bucket"] in BUCKETS_PASSING),
+    }
+    assert sum(red_green_mix.values()) == len(contributing_runs), (
+        "red_green_mix must account for every contributing run: "
+        f"mix={red_green_mix} runs={len(contributing_runs)}"
+    )
+
+    # F4a: derived from the attested red runs' own recorded file lists, never a
+    # literal.
+    same_file_list = _red_file_list_matches(attested_red_runs, files)
+    # F17/D14: `red_band`/`declared_band` come from the ATTESTED red, not from
+    # `runs[-1]` — on a closing shape the last measured run is GREEN, so writing its
+    # band as the red's band recorded a green L-A run as the red regime while the red
+    # was actually measured at L-C.
+    red_band = (
+        attested_red_run["load"]["band"] if attested_red_run is not None
+        else (measured_red_run or runs[-1])["load"]["band"]
+    )
+    green_band = (measured_green_runs[0]["load"]["band"] if measured_green_runs else red_band)
+    cause = attested_red_run["redis_log_cause"] if attested_red_run else None
+    cause_evidence = attested_red_run["cause_evidence"] if attested_red_run else {}
+    # D9 conjunct 11 (`no-rate-change`): a red was demonstrated (at the pairing ref,
+    # or among the measured runs when no pairing ref is given) and did NOT appear at
+    # the measured, fixed commit. `attempted` records that a red was demonstrated at
+    # ALL — with no red there is no rate to compare — and is NOT a constant:
+    # `bool(runs)` was one (`main()` rejects `--n < 2`, so it was True on every
+    # record that could reach the conjunct). `closes_issue` no longer ANDs it, so it
+    # carries no protection it cannot supply; `rate_change` is the falsifiable claim.
+    attempted = bool(attested_red_run)
+    appeared = bool(measured_red_runs)
+    rate_change = bool(attested_red_run) and not appeared
     # DERIVED from the label it summarises, never a literal (it was `True`).
     # `attributable` is a claim ABOUT `red.cause`, so a record with `red.cause ==
     # null` (no red run) or `unattributed` was claiming an attribution it does not
     # have.
     attributable_ = attributable(cause)
+
+    # The verdict summarises the red the record actually ATTESTED TO. Derived from
+    # the measured runs it printed ALL-GREEN with `green_only: true` while
+    # `red.cause` was non-null (the pairing-ref red) — the exact pair `main()` prints
+    # as the human summary.
+    if attested_red_run is None:
+        red_status = "ALL-GREEN"
+    elif baseline_run is not None:
+        red_status = "RED-AT-PAIRING-REF"
+    else:
+        red_status = "RED-AT-PINNED-REF"
 
     rec = {
         "schema": "embedded-evidence/1",
@@ -1218,22 +1711,21 @@ def _build_record(args: argparse.Namespace) -> dict:
         "manifest": mrec,
         "pin": {
             "commit": commit,
-            "head_sha": commit,
+            "head_sha": reviewed_head,
             "head_sha_verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "post_review_dirty": False,
+            "post_review_dirty": review_dirty,
             "tree_object": tree,
             "requested_ref": requested_ref,
-            "pairing_ref": None,
+            "pairing_ref": pair_ref,
             "worktree_clean": not dirty,
             "porcelain_digest": porcelain,
-            "record_out_excluded": str(args.record_out) if args.record_out else None,
             "measured_root": str(measured_root),
             "environment_pinned": False,
         },
         "n": {
             "requested": args.n,
             "mode": "explicit",
-            "observed_failure_rate": (len(red_runs) / len(runs)) if runs else 0.0,
+            "observed_failure_rate": (len(measured_red_runs) / len(runs)) if runs else 0.0,
             "max_runs": DEFAULT_MAX_RUNS,
             "declared_local": True,
             "note": "N=10 is DECLARED LOCAL — no source makes any N canonical.",
@@ -1258,28 +1750,41 @@ def _build_record(args: argparse.Namespace) -> dict:
             "ledger_root": str(run_root),
         },
         "red": {
-            "ref": requested_ref or commit,
-            "ref_role": "pinned-head-pre-fix" if not args.pairing_ref else "last-before-first-family-fix",
-            "ref_tree_object": tree,
+            "ref": red_ref,
+            # D16/C1: DERIVED from the ancestry RESULT, never from flag presence.
+            "ref_role": (
+                "per-cause" if (pairing_is_ancestor and getattr(args, "cause", None))
+                else "last-before-first-family-fix" if pairing_is_ancestor
+                else "pinned-head-pre-fix"
+            ),
+            "ref_tree_object": red_ref_tree,
             "cause": cause,
             "cause_evidence": cause_evidence,
-            "red_green_mix": {"red": len(red_runs), "green": len(green_runs)},
+            "red_green_mix": red_green_mix,
+            # D16: the baseline run is PERSISTED, not discarded. It is the only
+            # evidence from which `rate_change` can be re-derived, and `exit_code`
+            # reads its bucket to classify a non-overlap as the red D14 requires.
+            "baseline_run": baseline_run,
             "at_fixed_commit": {
-                "attempted": False,
-                "appeared": None,
-                "rate_change": False,
+                "attempted": attempted,
+                "appeared": appeared,
+                "rate_change": rate_change,
                 "mutation": None,
                 "mutation_operator": None,
                 "mutation_target_is_fix_branch": False,
                 "mutation_red_returned": False,
-                "surface": None,
-                "surface_assertion": None,
+                # R1/D23: caller-declared, so the conjunct can be REACHED (a
+                # produced record can pass) and can FAIL (an internal seam or an
+                # empty assertion). Left as literals these were `None` in every
+                # produced record, so the conjunct could never pass.
+                "surface": getattr(args, "surface", None),
+                "surface_assertion": getattr(args, "surface_assertion", None),
             },
             "same_file_list": same_file_list,
         },
         "verdict": {
-            "status": "RED-AT-PINNED-REF" if red_runs else "ALL-GREEN",
-            "green_only": not red_runs,
+            "status": red_status,
+            "green_only": attested_red_run is None,
             "attributable": attributable_,
             "environment_error": False,
             "closes_issue": False,
@@ -1295,8 +1800,7 @@ def _build_record(args: argparse.Namespace) -> dict:
     rec["verdict"]["closes_issue"] = ok
     rec["verdict"]["violations"] = reasons
     rec["verdict"]["status"] = (
-        "PAIRED-RED-DEMONSTRATED" if ok else
-        ("RED-AT-PINNED-REF" if red_runs else "ALL-GREEN")
+        "PAIRED-RED-DEMONSTRATED" if ok else red_status
     )
     rec["exit_code"] = exit_code(rec)
     return rec
@@ -1318,6 +1822,15 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--record-role", default="historical-attestation",
                        choices=["historical-attestation", "closing"])
         p.add_argument("--record-out", default=None)
+        # R1/D23: the consumer shipping surface the mutation/rate-change proof is
+        # asserted against, and the resolving test-ID that pins it. Both are
+        # CALLER-declared: the tool cannot infer which test exercises
+        # `tortoise_search` vs an internal helper. The conjunct
+        # `certification-not-on-shipping-surface` rejects anything that is not a
+        # member of SHIPPING_SURFACES with a non-empty assertion, so the free-form
+        # values are the falsifiable input, not an argparse allowlist.
+        p.add_argument("--surface", default=None)
+        p.add_argument("--surface-assertion", default=None, dest="surface_assertion")
     c = sub.add_parser("classify")
     c.add_argument("--redis-log", required=True)
     args = parser.parse_args(argv)
@@ -1339,12 +1852,78 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         rec = _build_record(args)
+    except UsageError as exc:
+        print(f"usage error: {exc}", file=sys.stderr)
+        return 2
     except RuntimeError as exc:
         print(f"environment error: {exc}", file=sys.stderr)
         return 2
 
-    out = args.record_out or Path(tempfile.gettempdir()) / "pi-embedded-evidence" / "record.json"
-    _write_record(rec, out)
+    out = args.record_out or _default_record_out()
+    measured_roots = [REPO_ROOT, Path(rec["pin"]["measured_root"])]
+    try:
+        _write_record(rec, out)
+        # #4203: the pre-write refusal PREDICTS the destination; this OBSERVES it.
+        # A record that slipped past the prediction is deleted and refused here, so
+        # no future spelling of the path can leave the tool's own record as dirt in
+        # a tree it is measuring.
+        _verify_record_landed_outside(out, *measured_roots)
+    except BaseException as exc:
+        # #4585: cleanup is UNCONDITIONAL on failure — the exception TYPE cannot
+        # tell us whether residue survives, because BOTH unlinks that decide it are
+        # best-effort: `_write_record` suppresses its own, and
+        # `_verify_record_landed_outside` suppresses its own. A non-OSError from
+        # `json.dump` (or a `UsageError` from the post-write verification) whose
+        # unlink failed therefore used to escape with the temp — holding the
+        # COMPLETE record — still inside the measured tree. Sweep FIRST, then map
+        # the exit, so no failure path returns or raises without having cleaned up.
+        swept = _sweep_record_residue(
+            *measured_roots,
+            # The physical parent the temp is created in, so a temp that resolved
+            # to a NESTED in-tree directory (a symlink swapped after the pre-write
+            # refusal) is swept too — the measured roots alone only reach the
+            # top-level collapse.
+            Path(os.path.realpath(os.path.dirname(os.fspath(out)))),
+        )
+        if isinstance(exc, UsageError):
+            # #4585 (b): the record itself landed inside the tree and the
+            # verification's own unlink failed. Retry the removal here; if it STILL
+            # cannot be removed, say so rather than imply a clean tree.
+            survivors = _remove_in_tree_record(out, *measured_roots)
+            print(f"usage error: {exc}", file=sys.stderr)
+            if survivors:
+                print(
+                    "error: the in-tree record at "
+                    f"{', '.join(str(s) for s in survivors)} could NOT be removed; "
+                    "the tool's own bytes are still inside the measured tree. "
+                    "Delete it manually before trusting the pin.",
+                    file=sys.stderr,
+                )
+            return 2
+        if isinstance(exc, OSError):
+            # #4585: a failed write is a REFUSAL, never a traceback. The environment
+            # made certification impossible, so the exit code is 2 (environment
+            # error) — but the operator must be told WHAT failed, WHY it matters and
+            # WHAT to do, and any `.rec-*` temp left inside a measured tree has been
+            # swept above: the temp holds a complete record, and leaving it would
+            # make the tool's own bytes part of the dirt the pin measures.
+            detail = (
+                f"removed {len(swept)} temp file(s) from the measured tree"
+                if swept else "no temp residue was found in the measured tree"
+            )
+            print(
+                f"error: could not write the record to {out}: {exc}. "
+                "The record was NOT written, so no certification exists for this "
+                f"head ({detail}). Write the record outside the measured tree (the "
+                f"default is {_default_record_out()}) and re-run; if the destination "
+                "already exists it must be a FILE, not a directory.",
+                file=sys.stderr,
+            )
+            return 2
+        # Anything else (MemoryError, TypeError, KeyboardInterrupt …): the sweep
+        # has already run, so the bytes are gone; re-raise rather than mislabel it
+        # as a refusal.
+        raise
     print(json.dumps({
         "record": str(out),
         "status": rec["verdict"]["status"],

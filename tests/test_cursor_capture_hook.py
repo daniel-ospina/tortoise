@@ -29,7 +29,7 @@ from tortoise.hook_install import count_canonical_markers, read_hook_version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh"
-VERSION_MARKER = "# tortoise-hook-version: 1"
+VERSION_MARKER = "# tortoise-hook-version: 2"
 
 #: The machine's REAL home, resolved from the password database — NOT from
 #: ``$HOME``, which tests monkeypatch.  ``~/.cursor`` under this path is the
@@ -117,11 +117,11 @@ def _wait_for_done(log: Path, timeout: float = 12) -> None:
 def test_hook_artifact_carries_the_version_marker():
     """The install contract is one marker, column-0, one per file.
 
-    Mutation: delete ``# tortoise-hook-version: 1`` from the shipped hook — the
+    Mutation: delete ``# tortoise-hook-version: 2`` from the shipped hook — the
     install then has no generation to compare and this REDs."""
     text = HOOK.read_text(encoding="utf-8")
     assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), text[:120]
-    assert read_hook_version(HOOK) == 1
+    assert read_hook_version(HOOK) == 2
     assert count_canonical_markers(HOOK) == 1, (
         "exactly one column-0 marker (an in-body mention is not a declaration)")
 
@@ -259,6 +259,9 @@ def test_real_transcript_parses_and_imports_through_the_real_cli(tmp_path, monke
     # 2. The REAL CLI path, with only the network transport stubbed (a receipt
     # is a 2xx server fact; `_cmd_sessions_import` builds the request for real).
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not consent.
+    # This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -583,3 +586,101 @@ def test_reinstall_repairs_a_hook_that_lost_its_exec_bit(tmp_path):
     assert again.ok, again.error
     assert again.changed is True, again.actions
     assert installed.stat().st_mode & stat.S_IXUSR
+
+
+def _failing_tortoise(bindir: Path, log: Path, message: str) -> None:
+    """A `tortoise` that records its argv and FAILS with ``message`` on stderr.
+
+    Stands in for a real non-2xx capture — the 504 the deployed server returns
+    when its wait bound is exceeded (#4580, #4714)."""
+    script = bindir / "tortoise"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$@" >> {log}\n'
+        f"echo '{message}' >&2\n"
+        f'echo DONE >> {log}\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
+    """#4714: a capture that fails must leave EVIDENCE, not silence.
+
+    The seam used to run `sessions import … || true`, so a non-2xx (the
+    server's 504 wait bound, #4580) vanished: no spool, no breadcrumb, no
+    receipt — the user was told nothing while nothing was captured. That is
+    the defect this test pins shut.
+
+    The hook must STILL exit 0 — fail-open is the contract: a capture failure
+    must never block the session. But the failure has to be RECORDED, and with
+    kind ``capture-failure`` rather than the recorder's ``install-inert``
+    default. `session verify` reads the kind, so recording a capture failure
+    as install-inert would report a HEALTHY install as INERT — the inversion
+    #4314 exists to prevent.
+
+    Mutation: restore ``|| true`` — the breadcrumb assertion REDs (silence).
+    Mutation: drop the third argument (the kind) — the kind assertion REDs.
+    """
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    # The REAL failure shape: the 504 body contains DOUBLE QUOTES. A
+    # quote-free message let an escaping bug through (the raw detail emitted
+    # invalid JSON that `session verify` could not parse, measured #4714), so
+    # the error text here must keep its quotes. No apostrophe: the helper
+    # wraps this in single quotes, so a `'` would truncate the fake's own
+    # script.
+    _failing_tortoise(
+        bindir, log,
+        'import failed (HTTP 504): {"detail":"The wait\tbudget was exceeded"}')
+    transcript = tmp_path / "agent.jsonl"
+    transcript.write_text(
+        '{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}\n',
+        encoding="utf-8")
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": "c-fail", "session_id": "c-fail",
+                    "transcript_path": str(transcript),
+                    "reason": "window_close", "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, (
+        "a failed capture must never break Cursor's shutdown (fail-open)")
+
+    _wait_for_done(log)
+    # Wait on the ARTIFACT, not the marker. The fake writes DONE *before* it
+    # exits, while the hook records the breadcrumb only AFTER reaping it — so
+    # _wait_for_done returning does not imply the crumb exists and asserting on
+    # it races.
+    # Poll until the content PARSES, not merely until the NAME exists: the hook
+    # writes with `>` (truncate) then printf, so a reader can catch an empty or
+    # partial file and raise JSONDecodeError — the same "assert on the artifact
+    # before it is complete" class this poll exists to close.
+    crumb = home / ".tortoise" / "capture-errors" / "cursor.json"
+    deadline = time.monotonic() + 10
+    record = None
+    while time.monotonic() < deadline:
+        try:
+            record = json.loads(crumb.read_text(encoding="utf-8"))
+            break
+        except (OSError, ValueError):
+            time.sleep(0.05)
+    assert record is not None, (
+        "a failed capture left NO parseable evidence — silence is the defect (#4714)")
+    assert record["kind"] == "capture-failure", record
+    assert "504" in record["detail"], record
+    assert record["harness"] == "cursor", record
+    assert "wait" in record["detail"] and "budget" in record["detail"], (
+        "the error text must survive JSON-escaping — a raw interpolation of a "
+        "quote-bearing message emits INVALID JSON")
+    raw = crumb.read_text(encoding="utf-8")
+    assert "\\t" in raw, (
+        "POSITIVE CONTROL: the tab must actually reach the file as a \\t escape. "
+        "Without this the guard below passes vacuously if tab delivery ever breaks")
+    assert "\t" not in raw, (
+        "a raw tab in the JSON text is a control character and makes the file "
+        "unparseable — it must be escaped or stripped. Assert on the RAW file: "
+        "json.loads would decode a correct \\t back to a tab and hide this")

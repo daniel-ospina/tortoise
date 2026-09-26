@@ -28,6 +28,50 @@
       "statement": "Routine scheduling note about the team demo."
     }
   ],
+  "planted_operators": [
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 7,
+        "verbatim_anchor": "We route ember alerts by service ownership instead of by page group"
+      },
+      "id": "wp03_ember_design_op_01",
+      "reason": "ownership-based routing (t7, 'the core of the redesign') reduces the unactionable-page claim (t5) \u2014 ONTOLOGY \u00a73.9 mitigated_by + \u00a75; the measure's claim is the from endpoint, the problem claim the to endpoint. FLAGGED (scoping finding F1) as on wp01 op_02.",
+      "relation_turn": 7,
+      "to": {
+        "planted_turn": 5,
+        "verbatim_anchor": "Roughly thirty percent of alerts are unactionable because the ownership lookup fails"
+      }
+    },
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 9,
+        "verbatim_anchor": "A service with no owner row falls to the default rotation and we flag it in the weekly ownership report"
+      },
+      "id": "wp03_ember_design_op_02",
+      "reason": "the default-rotation fallback plus weekly ownership report (t9) closes the ownership-based-router gap claim (t8, the assistant's explicit risk) \u2014 ONTOLOGY \u00a73.9 mitigated_by; 'No silent drops, every alert still lands somewhere' states the dampening. FLAGGED (scoping finding F1) as on wp01 op_02.",
+      "relation_turn": 9,
+      "to": {
+        "planted_turn": 8,
+        "verbatim_anchor": "they will fall through any ownership-based router"
+      }
+    },
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 15,
+        "verbatim_anchor": "auto-suppress alerts during declared maintenance windows"
+      },
+      "id": "wp03_ember_design_op_03",
+      "reason": "maintenance-window auto-suppression (t15) reduces the named noise-source claim (t14, the assistant's 'the other classic noise source') \u2014 ONTOLOGY \u00a73.9 mitigated_by. The user's 'Yes' + 'ember reading them costs us nothing' states the relation. FLAGGED (scoping finding F1) as on wp01 op_02.",
+      "relation_turn": 15,
+      "to": {
+        "planted_turn": 14,
+        "verbatim_anchor": "Maintenance windows are the other classic noise source"
+      }
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

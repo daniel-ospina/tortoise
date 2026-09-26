@@ -667,3 +667,45 @@ class TestDeploymentGateAndView:
         v3 = tenant_view(sdk)
         assert any(m["namespace"] == "tenant-ops" for m in v3["tenant"]), \
             "view must refresh after a :PackManifest write"
+
+
+# ── #2814: the REAL writers' output must survive a real rebuild ─────────────
+
+
+class TestRebuildDurability:
+    def test_tenant_manifest_survives_rebuild_all(self, client, tmp_path):
+        """Upload via the real endpoint → `rebuild_all` → the live graph keeps it.
+
+        The proof drives the REAL wipe+replay and asserts on the graph AFTER
+        it — a helper-only assertion would pass while the wipe destroyed the
+        manifest, which is the non-falsifying failure mode #2814 must avoid.
+        (Docker lane; `TORTOISE_TEST_MODE=1` redirects the graph to a
+        `test_*` name so the production bulk-wipe guard stays armed.)
+        """
+        from tortoise.pack_manifest_store import get_tenant_manifests
+
+        r = client.post("/v1/packs/manifests",
+                        json={"manifest_yaml": VALID_MANIFEST})
+        assert r.status_code == 201, r.text
+        sdk = _team_sdk()
+        before_manifests = get_tenant_manifests(sdk)
+        before_installs = sorted(
+            (row[0], row[1], row[2])
+            for row in sdk._get_proj().g.query(
+                "MATCH (p:PackInstall) RETURN p.namespace, p.source, "
+                "p.status ORDER BY p.namespace").result_set)
+        assert before_installs, "the upload activated nothing — vacuous test"
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk._get_proj().rebuild_all(str(events))
+
+        assert get_tenant_manifests(sdk) == before_manifests, (
+            "the real :PackManifest did not survive rebuild_all (#2814)")
+        after_installs = sorted(
+            (row[0], row[1], row[2])
+            for row in sdk._get_proj().g.query(
+                "MATCH (p:PackInstall) RETURN p.namespace, p.source, "
+                "p.status ORDER BY p.namespace").result_set)
+        assert after_installs == before_installs, (
+            "the real :PackInstall (source='custom') did not survive (#2814)")

@@ -816,3 +816,33 @@ class TestBackfillScript:
                 legacy_graph).query(
                 "MATCH (p:PackInstall) RETURN p.namespace").result_set
             assert legacy_rows == []
+
+
+# ── #2814: the REAL writer's output must survive a real rebuild ─────────────
+
+
+def test_pack_install_survives_rebuild_all(tmp_path):
+    """`ensure_tenant_packs` → `rebuild_all` → the live graph still holds them.
+
+    The survival proof must drive the REAL `rebuild_all` (wipe included) and
+    assert on the **live graph after replay** — not on a helper the wipe never
+    touches. A helper-only assertion would pass while the wipe destroyed the
+    configuration, which is the non-falsifying failure mode #2814 must avoid.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(db_path=str(tmp_path / "survive.db"),
+                      namespace=f"test_survive_{os.urandom(4).hex()}")
+    try:
+        ensure_tenant_packs(sdk)
+        before = [tuple(r) for r in _read_installs(sdk)]
+        assert before, "the writer activated nothing — the test would be vacuous"
+
+        sdk._get_proj().rebuild_all(str(events))
+
+        after = [tuple(r) for r in _read_installs(sdk)]
+        assert after == before, (
+            "the real writer's :PackInstall records did not survive "
+            "rebuild_all byte-identically (#2814)")
+    finally:
+        sdk.close()

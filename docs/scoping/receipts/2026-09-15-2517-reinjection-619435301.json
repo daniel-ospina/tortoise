@@ -1,0 +1,702 @@
+{
+ "acknowledged_limitations": [
+  "BOUNDED: 10 questions per sample, 3 arms; neither the full 100-question tail nor the 50-question head cohort was run (the plan asked for both)",
+  "sample A landed on 10/10 single-session-preference questions (the tail slice's first 10), so it does not exercise the multi-session loss the arm targets; sample B was added to cover the target type",
+  "reader-side metrics are mock-reader; chunk_evidence_recall@k is null in --retrieval-only --mock, so falsifier 2's chunk surface is UNMEASURED",
+  "--retrieval-only --mock exits rc=1 in _print_summary (pre-existing bug, filed separately); the report JSON is written before that",
+  "no seed-free control: the guard runs only after injection fired, so the guard's own contribution cannot be isolated from injection firing by these three arms alone (see falsifier 1 attribution below)",
+  "SAMPLE A'S ARM DELTAS ARE NON-ATTRIBUTABLE (code-review cycle 2): its three arms did not run on a pinned, identical substrate (unlike sample B, which used a separate DB per arm and where off == inj_only question-for-question). Witness: for questions 505af2f5 and b0479f84 the off arm reports session_recall@5 = 0.0 while inj_only — the SAME injection with the reorder ablated — reports 1.0, and for b0479f84 off's evidence_recall@5 denominator is empty (null) where both injected arms report 1.0. Injection alone provably cannot promote a distinct session into hits[:5] (an injected group is spliced after its session's LAST base rank, and guard=False skips only the reorder), so those deltas are run-to-run ingest/pool drift, not arm effects. Read every A.* figure in this receipt as a same-revision observation, not an arm effect."
+ ],
+ "arm_flags": {
+  "inj_only": "--session-reinjection --no-session-reinjection-guard",
+  "off": "(none)",
+  "on": "--session-reinjection"
+ },
+ "branch": "fix/2513-retrieval-evidence",
+ "cohort": {
+  "built_by": "tools/longmem_eval/build_cohorts.py (committed in this PR)",
+  "committed_as_data": false,
+  "materialized_at_receipt_time": true,
+  "products": "longmemeval-cleaned (dataset.py: xiaowu0162/longmemeval-cleaned)",
+  "source": "/Users/danielospina/.cache/tortoise-longmemeval/longmemeval_s_cleaned.json",
+  "source_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+ },
+ "command": "TORTOISE_DB_URI='docker://:falkordb@localhost:6379/<db>' .venv/bin/python -m tools.longmem_eval.run --data <cohort>.json --split s --retrieval-only --mock --limit 10 --output <arm>.json --checkpoint <arm>.cp.json [<arm flags>]",
+ "derivation": {
+  "census": "sum over fired questions of session_reinjection_stats",
+  "evidence_recall@5": "per-question mean of outcome evidence_recall@k['5'] (denominator = questions with a non-null value)",
+  "reader_surface@5 / chunk_evidence_recall@5": "report.retrieval (aggregate)",
+  "recall_all@5": "mean over questions of (session_recall@5 == 1.0)",
+  "session_recall@5": "per-question mean of outcome session_recall@k['5']"
+ },
+ "epic": 2513,
+ "falsifier_verdicts": {
+  "1_flip_census": {
+   "attribution": "guard-ablated (inj_only) recall_all@5 == off exactly, and the ranked top-5 is byte-identical to off, although 54 injected chunks merged: the injected items alone cannot enter hits[:5] because they are anchored after their session's last base hit and the base top-5 is dominated by the top-ranked session. The flips appear only with the guard on, which reorders DISTINCT sessions into the window (so the items that enter are existing pool items of other sessions). The arm as a whole (injection firing -> guard runs) is what moves recall_all@5; the injected chunks are the trigger, not the entering items.",
+   "measured": {
+    "B.inj_only_recall_all@5": [
+     0.7,
+     10
+    ],
+    "B.off_recall_all@5": [
+     0.7,
+     10
+    ],
+    "B.off_session_recall@5": [
+     0.75,
+     10
+    ],
+    "B.on_recall_all@5": [
+     0.9,
+     10
+    ],
+    "B.on_session_recall@5": [
+     0.95,
+     10
+    ],
+    "per_question_flips_on_vs_off": {
+     "4f54b7c9": [
+      0.5,
+      1.0
+     ],
+     "9aaed6a3": [
+      0.0,
+      1.0
+     ],
+     "d3ab962e": [
+      0.0,
+      0.5
+     ]
+    }
+   },
+   "verdict": "NOT FALSIFIED (on the multi-session sample; the flip is real but attributable to the GUARD, not to the injected items)"
+  },
+  "2_surface_census": {
+   "interpretation": "on the multi-session sample the marked evidence is not retrieved at k=5 by ANY arm (evidence_recall@5 == 0.0 for all 10 questions in all three arms): the reader-surface claim of part 2 of the confirmed problem is NOT supported here, and the arm neither raises it nor costs it. chunk_evidence_recall@k is unmeasurable under --retrieval-only --mock. Sample A's single-session questions DO have non-zero evidence recall and ON reports a common-denominator mean of 0.5 vs off's 0.4444 (+0.0556), with one previously vacuous question becoming evidence-bearing — but see the SAMPLE A non-attributability limitation: that sample's arms did not share a pinned substrate (off vs inj_only disagree where injection alone cannot move hits[:5]), so this A figure is NOT an arm effect. The reader-surface verdict rests on sample B alone, which is clean.",
+   "measured": {
+    "A.evidence_recall@5": {
+     "off_(mean,n)": [
+      0.4444,
+      9
+     ],
+     "on_(mean,n)": [
+      0.55,
+      10
+     ]
+    },
+    "B.chunk_evidence_recall@5": {
+     "off": null,
+     "on": null
+    },
+    "B.evidence_recall@5": {
+     "off": [
+      0.0,
+      10
+     ],
+     "on": [
+      0.0,
+      10
+     ]
+    },
+    "B.reader_surface@5": {
+     "off": 0.355,
+     "on": 0.355
+    }
+   },
+   "verdict": "FALSIFIED (null) on the multi-session sample: no surface rose"
+  },
+  "3_cost_guard": {
+   "interpretation": "the guard reorders rather than adds: context_point_count and context_tokens are unchanged (the C4 injected chunks merge then the re-cap/window trim holds the budget). Latency adds single-digit ms per fired question for the fetch (sr latency mean is reported per arm).",
+   "measured": {
+    "A.context_tokens_mean": {
+     "off": 5698.8,
+     "on": 5793.6
+    },
+    "B.context_point_count_mean": {
+     "off": 35.2,
+     "on": 35.4
+    },
+    "B.context_tokens_mean": {
+     "off": 7742.2,
+     "on": 7742.8
+    },
+    "B.retrieval_latency_ms_mean": {
+     "off": [
+      259.718,
+      10
+     ],
+     "on": [
+      292.241,
+      10
+     ]
+    }
+   },
+   "verdict": "NOT FALSIFIED: no evidence_recall@5 regression, no token regression"
+  },
+  "4_inertness_guard": {
+   "interpretation": "the census distinguishes 'seeded but fetch failed' from 'nothing seeded' (fetch_ok per question); every fired question in both samples has fetch_ok=true and injected_merged>0, so the observed nulls are real nulls, not an inert arm.",
+   "measured": {
+    "A.census": {
+     "dropped_by_cap": 45,
+     "fetch_ok_questions": 10,
+     "injected_merged": 43,
+     "injected_total": 147,
+     "questions_with_seeds": 10,
+     "seed_sessions_total": 50
+    },
+    "B.census": {
+     "dropped_by_cap": 321,
+     "fetch_ok_questions": 10,
+     "injected_merged": 54,
+     "injected_total": 141,
+     "questions_with_seeds": 10,
+     "seed_sessions_total": 49
+    }
+   },
+   "verdict": "NOT INERT on either sample (injected_merged > 0)"
+  }
+ },
+ "issue": 2517,
+ "kind": "retrieval-only measurement, bounded (10 questions x 3 arms x 2 samples)",
+ "results": {
+  "A_single_session_preference_10": {
+   "arms": {
+    "inj_only": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": false
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 39.7,
+     "context_tokens_mean": 5759.0,
+     "evidence_recall@5": [
+      0.5,
+      10
+     ],
+     "n_excluded": 0,
+     "n_failed": 0,
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "07b6f563": 0.5,
+       "1d4e3b97": 0.0,
+       "1da05512": 0.0,
+       "505af2f5": 0.0,
+       "75f70248": 1.0,
+       "a89d7624": 0.0,
+       "b0479f84": 1.0,
+       "b6025781": 1.0,
+       "d6233ab6": 0.5,
+       "fca70973": 1.0
+      },
+      "injected_merged": {
+       "07b6f563": 5,
+       "1d4e3b97": 4,
+       "1da05512": 4,
+       "505af2f5": 2,
+       "75f70248": 5,
+       "a89d7624": 4,
+       "b0479f84": 9,
+       "b6025781": 0,
+       "d6233ab6": 7,
+       "fca70973": 3
+      },
+      "session_recall@5": {
+       "07b6f563": 1.0,
+       "1d4e3b97": 1.0,
+       "1da05512": 1.0,
+       "505af2f5": 1.0,
+       "75f70248": 1.0,
+       "a89d7624": 1.0,
+       "b0479f84": 1.0,
+       "b6025781": 1.0,
+       "d6233ab6": 1.0,
+       "fca70973": 1.0
+      }
+     },
+     "reader_evidence@5": [
+      0.5,
+      10
+     ],
+     "reader_surface@5": 1.0,
+     "recall_all@5": [
+      1.0,
+      10
+     ],
+     "report_path": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pi-cm-2517b/measure/inj_only.json",
+     "retrieval_latency_ms_mean": [
+      157.854,
+      10
+     ],
+     "session_recall@5": [
+      1.0,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 45,
+      "fetch_ok_questions": 10,
+      "injected_merged": 43,
+      "injected_total": 147,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 50
+     },
+     "turn_recall@5": [
+      0.5,
+      10
+     ]
+    },
+    "off": {
+     "arm_flags_present": {
+      "session_reinjection": false,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 38.2,
+     "context_tokens_mean": 5698.8,
+     "evidence_recall@5": [
+      0.4444,
+      9
+     ],
+     "n_excluded": 0,
+     "n_failed": 0,
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "07b6f563": 0.5,
+       "1d4e3b97": 0.0,
+       "1da05512": 0.0,
+       "505af2f5": 0.0,
+       "75f70248": 1.0,
+       "a89d7624": 0.0,
+       "b0479f84": null,
+       "b6025781": 1.0,
+       "d6233ab6": 0.5,
+       "fca70973": 1.0
+      },
+      "injected_merged": {
+       "07b6f563": 0,
+       "1d4e3b97": 0,
+       "1da05512": 0,
+       "505af2f5": 0,
+       "75f70248": 0,
+       "a89d7624": 0,
+       "b0479f84": 0,
+       "b6025781": 0,
+       "d6233ab6": 0,
+       "fca70973": 0
+      },
+      "session_recall@5": {
+       "07b6f563": 1.0,
+       "1d4e3b97": 1.0,
+       "1da05512": 1.0,
+       "505af2f5": 0.0,
+       "75f70248": 1.0,
+       "a89d7624": 1.0,
+       "b0479f84": 0.0,
+       "b6025781": 1.0,
+       "d6233ab6": 1.0,
+       "fca70973": 1.0
+      }
+     },
+     "reader_evidence@5": [
+      0.4444,
+      9
+     ],
+     "reader_surface@5": 0.8889,
+     "recall_all@5": [
+      0.8,
+      10
+     ],
+     "report_path": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pi-cm-2517b/measure/off.json",
+     "retrieval_latency_ms_mean": [
+      796.262,
+      10
+     ],
+     "session_recall@5": [
+      0.8,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 0,
+      "fetch_ok_questions": 0,
+      "injected_merged": 0,
+      "injected_total": 0,
+      "questions_with_seeds": 0,
+      "seed_sessions_total": 0
+     },
+     "turn_recall@5": [
+      0.4,
+      10
+     ]
+    },
+    "on": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 39.6,
+     "context_tokens_mean": 5793.6,
+     "evidence_recall@5": [
+      0.55,
+      10
+     ],
+     "n_excluded": 0,
+     "n_failed": 0,
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "07b6f563": 0.5,
+       "1d4e3b97": 0.0,
+       "1da05512": 0.0,
+       "505af2f5": 0.0,
+       "75f70248": 1.0,
+       "a89d7624": 0.5,
+       "b0479f84": 1.0,
+       "b6025781": 1.0,
+       "d6233ab6": 0.5,
+       "fca70973": 1.0
+      },
+      "injected_merged": {
+       "07b6f563": 5,
+       "1d4e3b97": 4,
+       "1da05512": 4,
+       "505af2f5": 2,
+       "75f70248": 5,
+       "a89d7624": 4,
+       "b0479f84": 9,
+       "b6025781": 0,
+       "d6233ab6": 7,
+       "fca70973": 3
+      },
+      "session_recall@5": {
+       "07b6f563": 1.0,
+       "1d4e3b97": 1.0,
+       "1da05512": 1.0,
+       "505af2f5": 1.0,
+       "75f70248": 1.0,
+       "a89d7624": 1.0,
+       "b0479f84": 1.0,
+       "b6025781": 1.0,
+       "d6233ab6": 1.0,
+       "fca70973": 1.0
+      }
+     },
+     "reader_evidence@5": [
+      0.55,
+      10
+     ],
+     "reader_surface@5": 1.0,
+     "recall_all@5": [
+      1.0,
+      10
+     ],
+     "report_path": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pi-cm-2517b/measure/on.json",
+     "retrieval_latency_ms_mean": [
+      115.404,
+      10
+     ],
+     "session_recall@5": [
+      1.0,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 45,
+      "fetch_ok_questions": 10,
+      "injected_merged": 43,
+      "injected_total": 147,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 50
+     },
+     "turn_recall@5": [
+      0.55,
+      10
+     ]
+    }
+   },
+   "note": "the tail slice's first 10 questions are ALL single-session-preference; this sample therefore does NOT exercise the multi-session loss the arm targets",
+   "question_type_histogram": {
+    "single-session-preference": 10
+   },
+   "selector": "tail s[150:250] (100 q), --limit 10"
+  },
+  "B_multi_session_10": {
+   "arms": {
+    "inj_only": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": false
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 35.4,
+     "context_tokens_mean": 7742.8,
+     "evidence_recall@5": [
+      0.0,
+      10
+     ],
+     "n_excluded": 0,
+     "n_failed": 0,
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "1f2b8d4f": 0.0,
+       "2311e44b": 0.0,
+       "4f54b7c9": 0.0,
+       "51c32626": 0.0,
+       "85fa3a3f": 0.0,
+       "9aaed6a3": 0.0,
+       "a11281a2": 0.0,
+       "cc06de0d": 0.0,
+       "d3ab962e": 0.0,
+       "e6041065": 0.0
+      },
+      "injected_merged": {
+       "1f2b8d4f": 9,
+       "2311e44b": 3,
+       "4f54b7c9": 3,
+       "51c32626": 6,
+       "85fa3a3f": 6,
+       "9aaed6a3": 3,
+       "a11281a2": 6,
+       "cc06de0d": 6,
+       "d3ab962e": 9,
+       "e6041065": 3
+      },
+      "session_recall@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 0.5,
+       "51c32626": 1.0,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 0.0,
+       "a11281a2": 1.0,
+       "cc06de0d": 1.0,
+       "d3ab962e": 0.0,
+       "e6041065": 1.0
+      }
+     },
+     "reader_evidence@5": [
+      0.0,
+      10
+     ],
+     "reader_surface@5": 0.355,
+     "recall_all@5": [
+      0.7,
+      10
+     ],
+     "report_path": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pi-cm-2517b/measureB/ms_inj_only.json",
+     "retrieval_latency_ms_mean": [
+      257.664,
+      10
+     ],
+     "session_recall@5": [
+      0.75,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 321,
+      "fetch_ok_questions": 10,
+      "injected_merged": 54,
+      "injected_total": 141,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 49
+     },
+     "turn_recall@5": [
+      0.0,
+      10
+     ]
+    },
+    "off": {
+     "arm_flags_present": {
+      "session_reinjection": false,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 35.2,
+     "context_tokens_mean": 7742.2,
+     "evidence_recall@5": [
+      0.0,
+      10
+     ],
+     "n_excluded": 0,
+     "n_failed": 0,
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "1f2b8d4f": 0.0,
+       "2311e44b": 0.0,
+       "4f54b7c9": 0.0,
+       "51c32626": 0.0,
+       "85fa3a3f": 0.0,
+       "9aaed6a3": 0.0,
+       "a11281a2": 0.0,
+       "cc06de0d": 0.0,
+       "d3ab962e": 0.0,
+       "e6041065": 0.0
+      },
+      "injected_merged": {
+       "1f2b8d4f": 0,
+       "2311e44b": 0,
+       "4f54b7c9": 0,
+       "51c32626": 0,
+       "85fa3a3f": 0,
+       "9aaed6a3": 0,
+       "a11281a2": 0,
+       "cc06de0d": 0,
+       "d3ab962e": 0,
+       "e6041065": 0
+      },
+      "session_recall@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 0.5,
+       "51c32626": 1.0,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 0.0,
+       "a11281a2": 1.0,
+       "cc06de0d": 1.0,
+       "d3ab962e": 0.0,
+       "e6041065": 1.0
+      }
+     },
+     "reader_evidence@5": [
+      0.0,
+      10
+     ],
+     "reader_surface@5": 0.355,
+     "recall_all@5": [
+      0.7,
+      10
+     ],
+     "report_path": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pi-cm-2517b/measureB/ms_off.json",
+     "retrieval_latency_ms_mean": [
+      259.718,
+      10
+     ],
+     "session_recall@5": [
+      0.75,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 0,
+      "fetch_ok_questions": 0,
+      "injected_merged": 0,
+      "injected_total": 0,
+      "questions_with_seeds": 0,
+      "seed_sessions_total": 0
+     },
+     "turn_recall@5": [
+      0.0,
+      10
+     ]
+    },
+    "on": {
+     "arm_flags_present": {
+      "session_reinjection": true,
+      "session_reinjection_guard": true
+     },
+     "chunk_evidence_recall@5": null,
+     "context_point_count_mean": 35.4,
+     "context_tokens_mean": 7742.8,
+     "evidence_recall@5": [
+      0.0,
+      10
+     ],
+     "n_excluded": 0,
+     "n_failed": 0,
+     "n_questions": 10,
+     "per_question": {
+      "evidence_recall@5": {
+       "1f2b8d4f": 0.0,
+       "2311e44b": 0.0,
+       "4f54b7c9": 0.0,
+       "51c32626": 0.0,
+       "85fa3a3f": 0.0,
+       "9aaed6a3": 0.0,
+       "a11281a2": 0.0,
+       "cc06de0d": 0.0,
+       "d3ab962e": 0.0,
+       "e6041065": 0.0
+      },
+      "injected_merged": {
+       "1f2b8d4f": 9,
+       "2311e44b": 3,
+       "4f54b7c9": 3,
+       "51c32626": 6,
+       "85fa3a3f": 6,
+       "9aaed6a3": 3,
+       "a11281a2": 6,
+       "cc06de0d": 6,
+       "d3ab962e": 9,
+       "e6041065": 3
+      },
+      "session_recall@5": {
+       "1f2b8d4f": 1.0,
+       "2311e44b": 1.0,
+       "4f54b7c9": 1.0,
+       "51c32626": 1.0,
+       "85fa3a3f": 1.0,
+       "9aaed6a3": 1.0,
+       "a11281a2": 1.0,
+       "cc06de0d": 1.0,
+       "d3ab962e": 0.5,
+       "e6041065": 1.0
+      }
+     },
+     "reader_evidence@5": [
+      0.0,
+      10
+     ],
+     "reader_surface@5": 0.355,
+     "recall_all@5": [
+      0.9,
+      10
+     ],
+     "report_path": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/pi-cm-2517b/measureB/ms_on.json",
+     "retrieval_latency_ms_mean": [
+      292.241,
+      10
+     ],
+     "session_recall@5": [
+      0.95,
+      10
+     ],
+     "sr_census": {
+      "dropped_by_cap": 321,
+      "fetch_ok_questions": 10,
+      "injected_merged": 54,
+      "injected_total": 141,
+      "questions_with_seeds": 10,
+      "seed_sessions_total": 49
+     },
+     "turn_recall@5": [
+      0.0,
+      10
+     ]
+    }
+   },
+   "note": "the arm's actual target type",
+   "question_type_histogram": {
+    "multi-session": 10
+   },
+   "selector": "tail s[150:250], filter question_type == 'multi-session', first 10 (built by build_cohorts selectors + an explicit type filter)"
+  }
+ },
+ "revision_measured": {
+  "A_single_session_preference_10": {
+   "sha": "24a2c52a0",
+   "subject": "test(2517): register the C4 E2E surface",
+   "tree": "the cycle-1 review edits were being applied to the working tree while this sample ran; all of them are behaviour-neutral for these metrics (annotation hoist, census preservation under fail-open, latency accounting, guard default) \u2014 stated because the sample is not exactly a named revision"
+  },
+  "B_multi_session_10": {
+   "sha": "619435301",
+   "subject": "fix(2517): address code-review cycle 1 + commit the cohort builder",
+   "tree": "clean (committed; verified: nothing uncommitted at 12:00 local)"
+  }
+ },
+ "substrate": {
+  "embedder": "BAAI/bge-small-en-v1.5 (384-dim, local SentenceTransformer)",
+  "graph": "docker FalkorDB 127.0.0.1:6379 (separate DB per arm for sample B)",
+  "reader": "mock (--retrieval-only --mock): no reader surface is measured"
+ }
+}

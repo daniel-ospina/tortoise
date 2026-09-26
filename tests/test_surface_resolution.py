@@ -16,25 +16,34 @@ The LIVE registered surface (``mcp._list_tools()`` — the tools an agent is
 actually served) is resolved a second, independent way, so "resolves to a live
 method" is asserted on the surface an agent calls, not only on the declaration.
 
-RED BY DESIGN for the known-dead entries recorded in ``_DEAD_LINKS_AWAITING_4282`` (#4282): their ``sdk_method``
-names an attribute ``TortoiseSDK`` does not have. The dead thing is the DECLARED
-SDK BINDING, not the capability — this is registry drift, not a missing feature:
-the behaviour already exists one import away (``pack_state.get_tenant_packs``,
+GREEN TODAY (#4035 / PR #4043): the four entries this instrument recorded dead —
+``tortoise_packs_list``, ``tortoise_pack_install``, ``tortoise_entity_profile``,
+``tortoise_analyze`` — were REPAIRED by declaring them handler-served
+(``sdk_method=""``, resolved via ``getattr(mcp_server, name)``), so
+``_DEAD_LINKS_AWAITING_4282`` is now EMPTY and every case above passes outright.
+The dead thing had always been the DECLARED SDK BINDING, not the capability: the
+behaviour already existed one import away (``pack_state.get_tenant_packs``,
 ``pack_manifest_store.upsert_tenant_manifest``, ``navigation.entityProfile``,
-``analyze.analyze``) and the MCP handlers already call it.
-Do NOT fix, stub, rename or delete them here — the owner-approved canonical list
-(``docs/product/canonical-mcp-tools.md``, merged ``8375c7921``) names this surface,
-and #4282 is the implementation epic that repairs these declarations. Until #4282
-lands, this test is the instrument that keeps the surface measurable. #3835 and
-#3838 were superseded by #3863, which is now CLOSED.
+``analyze.analyze``) and the MCP handlers already called it. #4282 remains the
+epic for the wider canonical-list work; the four rows repaired here are done.
 
-Those entries carry ``xfail(strict=True)``, and that marker is what closes the gate
-in BOTH directions:
+Those entries carried ``xfail(strict=True)``, and that marker is what closed the
+gate in BOTH directions:
 
 * an UNLISTED dead entry is not in the ledger below, so it **FAILS the build** —
   the surface cannot rot further while the curated list is pending; and
 * **repairing** one turns its case into XPASS, and ``strict=True``
   **reds the build** — no expected-failure marker outlives the defect it records.
+
+**Why retiring those four is NOT the suppression the ledger's rule forbids.**
+The rule bars deleting a name to hide a FAILURE. Here the repair actually landed,
+and the very marker the rule protects is what FORCES the retirement —
+``strict=True`` turns a repaired entry into XPASS and reds the build, so an
+un-retired ledger entry is now itself the build failure, not a safety net. The
+ledger tracks PENDING repairs and must shrink when one lands; leaving the names
+in would convert the pending-decision record into exactly the rubber stamp it was
+built to prevent. The two directions are not symmetric: you may never delete a
+name to silence a red, and you must always delete one whose red has been repaired.
 
 The case set is guarded in two layers: the collection gate below runs at IMPORT
 time (during collection, before pytest applies ``-k``/``-m``/node-id selection, so
@@ -42,16 +51,21 @@ no invocation can hide a shrunken or orphaned case set), and
 ``test_resolution_exercises_every_registry_entry`` adds the run receipt — the
 declared cases must actually EXECUTE, not merely be declared or collected.
 
-So this file is red evidence by construction: it is green only while the dead set
-is exactly the set recorded in ``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name
-to that ledger to silence a failure, and do NOT remove a name to accommodate a
-repair — the ledger is the pending-decision record, not a suppression list.
+So this file is red evidence by construction while the dead set is NON-EMPTY: it
+is green only while the dead set is exactly the set recorded in
+``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name to that ledger to silence a
+failure, and do NOT remove a name to SILENCE a failure either — a name is retired
+ONLY when its repair has actually landed, and ``strict=True`` makes that
+self-enforcing (an un-retired repair XPASSes and reds). The ledger is the
+pending-decision record, not a suppression list.
 
 The reds below are of two KINDS and must not read alike. A GENUINE defect is an
 entry that used to resolve and stopped. The EXPECTED surface change of #4282 is
 the canonical redesign — 98 -> 25 MCP tools and 150 -> 40 SDK methods — which
-rewrites the 99-entry registry this instrument pins and legitimately leaves
-entries unresolved. The failure messages therefore append the #4282 rendezvous
+rewrites the registry this instrument pins (82 entries today; the 99-entry
+figure below is `_BASELINE_ENTRY_COUNT`, the PRE-#4282 size the shrink is
+measured from, not the registry as it stands) and legitimately leaves entries
+unresolved. The failure messages therefore append the #4282 rendezvous
 context ONLY when the run's shape matches the redesign, gated on the registry
 having SHRUNK by >= ``_RESHAPE_MIN_ENTRIES`` (a defect does not rewrite the
 registry), so no small-scale genuine regression can be pre-excused as "the
@@ -83,24 +97,24 @@ def _resolve(entry):
 
 
 # --- the pending ledger (#4282) --------------------------------------------
-# The entries whose declared ``sdk_method`` names an attribute TortoiseSDK
-# does not have. #3835 and #3838 were SUPERSEDED by #3863 and are CLOSED; #3863's
-# curation decision landed as the approved list in
-# ``docs/product/canonical-mcp-tools.md`` (merged 8375c7921), and the binding for
-# repairing these is now #4282, the implementation epic. See the module
-# docstring for the two-directional fail-closed property these markers implement.
-_DEAD_LINKS_AWAITING_4282 = frozenset({
-    "tortoise_packs_list",
-    "tortoise_pack_install",
-    "tortoise_entity_profile",
-    "tortoise_analyze",
-    # `tortoise_health` is RE-POINTED, not deleted to silence a failure: #3883
-    # retired the NAME from the advertised surface (#3863's curation), so it no
-    # longer has a case here to carry its pending #4282 repair — the repair
-    # follows the entry. Its replacement is `tortoise_overview(section="health")`,
-    # and the dead declared binding stays visible in the retired half of the
-    # baseline (`config/surface-manifest.yml::retired`).
-})
+# EMPTY as of #4035 / PR #4043. The four entries this instrument originally
+# recorded dead — ``tortoise_packs_list`` (declared ``get_tenant_packs``),
+# ``tortoise_pack_install`` (``upsert_tenant_manifest``),
+# ``tortoise_entity_profile`` (``entity_profile``) and ``tortoise_analyze``
+# (``analyze``) — were REPAIRED by declaring them handler-served: ``sdk_method=""``
+# and the resolution target is ``getattr(mcp_server, name)`` (see ``_resolve``).
+# This ledger was the pending-decision record for that repair; the repair landed,
+# so the record is retired. Leaving the names in would XPASS under
+# ``strict=True`` and red the build — that is the point of ``strict``.
+#
+# `tortoise_health` was never retired here: #3883 removed the NAME from the
+# advertised surface (#3863's curation), so it has no case in this instrument at
+# all. Its dead declared binding stays visible in the retired half of the
+# baseline (`config/surface-manifest.yml::retired`).
+#
+# Re-populate this ledger ONLY for a newly-discovered dead DECLARED binding, with
+# the same pending-decision reason — never to silence a failure.
+_DEAD_LINKS_AWAITING_4282: frozenset[str] = frozenset()
 
 
 def _marks(entry):
@@ -111,12 +125,19 @@ def _marks(entry):
     """
     if entry.name not in _DEAD_LINKS_AWAITING_4282:
         return ()
+    # The declared target differs by SHAPE: an empty ``sdk_method`` resolves
+    # through the entry's own MCP handler (``mcp_server.<name>``), any other
+    # value through ``TortoiseSDK.<method>``. The reason must name the binding
+    # that is actually dead — a blanket "declares sdk_method=..." renders the
+    # false claim "declares sdk_method=''" for a handler-served entry.
+    where = _resolve(entry)[1]  # the binding actually named by the declaration
     return (
         pytest.mark.xfail(
             strict=True,
             reason=(
-                f"#4282: {entry.name} declares sdk_method={entry.sdk_method!r}, which "
-                f"TortoiseSDK does not have. Repairing it is #4282's work on the "
+                f"#4282: {entry.name} declares a binding that does not resolve — "
+                f"the registry names {where!r}, which is absent. "
+                f"Repairing it is #4282's work on the "
                 f"owner-approved canonical list (docs/product/canonical-mcp-tools.md). "
                 f"Repairing it XPASSes this case, which "
                 f"strict=True reds; an unlisted dead entry is not listed here and fails. "
@@ -140,7 +161,7 @@ _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 # note is therefore gated on SHAPE, and the gate is deliberately conservative:
 # it can only open when the registry itself has SHRUNK by >= _RESHAPE_MIN_ENTRIES
 # from its pinned pre-#4282 size. A defect does not rewrite the registry —
-# renaming one SDK method leaves all 99 entries declared — so no small-scale
+# renaming one SDK method leaves the entry count where it was — so no small-scale
 # genuine regression can ever pick up the note. Inside that gate the note
 # additionally requires the surface to be HOLLOWED (>= _HOLLOWED_MIN_DEAD entries
 # unresolved in absolute terms, or >= a quarter of whatever the registry now is,
@@ -149,7 +170,7 @@ _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 #
 # Residuals, stated rather than hidden:
 #  * a STAGED redesign that rewrites tortoise/sdk.py before the registry still
-#    measures 99 entries, so it is indistinguishable from a mass rename and stays
+#    has the pinned size, so it is indistinguishable from a mass rename and stays
 #    a plain defect report — the intended direction of the error;
 #  * once the gate opens it opens for the WHOLE run, so a genuine regression
 #    running alongside the redesign also carries the note — which is why the note
@@ -234,20 +255,21 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
 
     Mutation that REDs this assertion: rename/delete the target it names (e.g.
     rename ``TortoiseSDK.create_point`` in ``tortoise/sdk.py``) — the getattr
-    then returns ``None`` and this case fails. The ``#4282`` entries below
-    are the first red cases — carried as ``xfail(strict=True)``, so repairing one
-    reds the build and an unlisted dead entry fails it.
+    then returns ``None`` and this case fails. An entry the ledger marks
+    known-dead carries ``xfail(strict=True)``, so repairing one reds the build
+    and an unlisted dead entry fails it — both directions fail closed. (The
+    ledger is EMPTY today; see the module docstring.)
     """
     _EXECUTED.add(entry.name)
     assert callable(target), (
         f"{entry.name} does not resolve: the registry names {where!r}, which is "
         f"{'absent' if target is None else type(target).__name__!r}. Unresolved this run: "
         f"{len(_DEAD_TARGETS)} of {len(TOOL_REGISTRY)} registry entries. The dead thing is "
-        f"the DECLARED SDK BINDING — registry drift, not a missing capability. For the #4282 "
-        f"entries the behaviour already exists one import away "
-        f"(pack_state.get_tenant_packs, pack_manifest_store.upsert_tenant_manifest, "
-        f"navigation.entityProfile, analyze.analyze) and the MCP "
-        f"handlers already call it; what is absent is the SDK name the registry declares. "
+        f"the DECLARED SDK BINDING — registry drift, not a missing capability. Check what "
+        f"the declaration actually names before repairing it: a ``sdk_method`` resolves on "
+        f"``TortoiseSDK`` and an empty one through the entry's own MCP handler "
+        f"(``mcp_server.<name>``); when the capability lives on a helper instead, declaring "
+        f"the entry handler-served is the repair. "
         f"Declared sdk_method={entry.sdk_method!r}."
         f"{_rendezvous()}"
     )

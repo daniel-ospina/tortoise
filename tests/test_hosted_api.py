@@ -625,7 +625,7 @@ class TestHealthEndpoints:
         for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
-            with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+            with caplog.at_level(logging.ERROR, logger="tortoise.monitoring"):
                 period = _REAL_HEALTH_PROBE_INTERVAL()
             assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
             assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
@@ -643,7 +643,7 @@ class TestHealthEndpoints:
         for raw in ("1e-9", "0.001", "0.49"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
-            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            with caplog.at_level(logging.WARNING, logger="tortoise.monitoring"):
                 period = _REAL_HEALTH_PROBE_INTERVAL()
             assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
             assert any(r.levelno >= logging.WARNING for r in caplog.records), raw
@@ -946,7 +946,8 @@ class TestBootOrder:
 
 class TestVersionEndpoint:
     """GET /v1/version — public version/sha surface so clients (and the
-    onboarding skill) can detect an outdated server before authenticating.
+    onboarding instructions — not a skill, #4365) can detect an outdated
+    server before authenticating.
     """
 
     def test_version_returns_package_version(self, client):
@@ -1419,6 +1420,23 @@ class TestTeamInfo:
         assert body["max_orgs"] is None
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
+        # #4331: node usage vs the plan's node allowance.
+        assert "nodes_used" in body and isinstance(body["nodes_used"], int)
+        assert body["max_nodes"] == 10000  # TEST_TEAM.max_points (free tier)
+
+    def test_team_info_nodes_used_counts_object_not_point_count(self, client):
+        """#4331: `nodes_used` is the count the points cap gates —
+        non-episodic Points PLUS Object + Subject (#1911) — NOT `point_count`
+        (:Point-only, demo-excluded). An Object write moves nodes_used and
+        leaves point_count alone; rendering point_count against the node cap
+        would be a lying UI."""
+        before = client.get("/v1/team").json()
+        r = client.post("/v1/objects",
+                        json={"name": "node-cap-obj", "objectKind": "project"})
+        assert r.status_code == 200, r.text
+        after = client.get("/v1/team").json()
+        assert after["nodes_used"] == before["nodes_used"] + 1
+        assert after["point_count"] == before["point_count"]
 
     def test_unhandled_500_carries_cors_headers(self, client, monkeypatch):
         """#1591: an unhandled exception must return a 500 WITH the CORS
@@ -1533,6 +1551,11 @@ class TestTeamInfo:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["point_count"] == 0
+        # #4331: the node count (a second graph read) degrades the same way —
+        # it must never turn the fail-soft overview into a 500, and a failed
+        # read is None (unknown), NOT a falsely reassuring 0.
+        assert body["nodes_used"] is None
+        assert body["max_nodes"] == 10000
         assert body["graph_ready"] is False
 
     def test_team_info_reflects_point_count(self, client):
@@ -1759,12 +1782,16 @@ class TestRevokedKeysDoNotConsumeCap2481:
     """#2481 (REGISTRY lane) — revoked keys are audit tombstones, never
     max_api_keys budget consumers. The reported bug: after revoking a key
     a team could not mint a replacement while only revoked tombstones
-    remained. Audit result: every cap seam counts via quota._count_resource
-    with the predicate `revoked_at IS NULL AND (expires_at IS NULL OR > now)`
-    — revoked rows never count. These tests PIN that: revoke-then-mint
-    succeeds at cap, a pre-existing tombstone stack alone can never 402
-    (legacy mint) or 409 (scoped mint), and only a true ACTIVE overage
-    still 402s/409s (active-key semantics unchanged)."""
+    remained. Audit result: the standalone mint gates all count via
+    quota._count_resource with the predicate `revoked_at IS NULL AND
+    (expires_at IS NULL OR > now) AND (created_via IS NULL OR <>
+    'bootstrap')` (#2426 expiry; #4140/R13 bootstrap) — revoked rows never
+    count. (The recovery-mint lanes carry their OWN predicates with the
+    same exclusions; #4140's rule is one LOGICAL predicate, not one literal
+    string.) These tests PIN that: revoke-then-mint succeeds at cap, a
+    pre-existing tombstone stack alone can never 402 (legacy mint) or 409
+    (scoped mint), and only a true ACTIVE overage still 402s/409s
+    (active-key semantics unchanged)."""
 
     def test_revoke_then_mint_succeeds_at_cap(self, client):
         """Team at max (2 active) revokes one key → the revoked row must
@@ -1810,6 +1837,93 @@ class TestRevokedKeysDoNotConsumeCap2481:
         assert client.delete(
             f"/v1/team/keys/{s.json()['id']}").status_code == 200
         assert client.post("/v1/team/keys").status_code == 200
+
+
+class TestBootstrapKeysCapExempt4140:
+    """#4140 / R13 (REGISTRY lane) — bootstrap (24h session) keys are
+    cap-EXEMPT: they never consume a ``max_api_keys`` slot on the standalone
+    mint gate, while every DURABLE credential (provisioned / recovery / NULL
+    legacy created_via) still does. The bug: ``quota._count_resource
+    ("api_keys")`` counted bootstrap nodes, so a free org (allowance 2) with
+    one session key could mint only one durable key before 402.
+
+    The exemption is NULL-TOLERANT — a legacy node with no ``created_via``
+    is DURABLE and must count (the over-exemption direction this predicate
+    must fail closed on)."""
+
+    @staticmethod
+    def _seed(kid, *, created_via="provisioned", expires_at=None,
+              revoked_at=None):
+        from datetime import UTC, datetime
+
+        import tortoise.hosted_api as ha_mod
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', "
+            "key_prefix:$kp, created_by:$cb, created_at:$now, "
+            "created_via:$cv, expires_at:$ea, revoked_at:$ra})",
+            params={"id": kid, "tid": TEST_ORG_ID, "kp": f"tt{kid[:8]}",
+                    "cb": _U1, "now": datetime.now(UTC).isoformat(),
+                    "cv": created_via, "ea": expires_at, "ra": revoked_at},
+        )
+
+    def test_count_excludes_live_bootstrap(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        self._seed("d1", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_count_includes_every_durable_class(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        self._seed("p", created_via="provisioned")
+        self._seed("r", created_via="recovery")
+        self._seed("n", created_via=None)          # legacy NULL → durable
+        self._seed("other", created_via="agent_signup")
+        # near-miss literals are NOT the exact exemption
+        self._seed("cap", created_via="Bootstrap")
+        self._seed("sp", created_via="bootstrap ")
+        self._seed("boot", created_via="bootstrap", expires_at=future)
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 6
+
+    def test_count_excludes_expired_and_revoked_durable(self, client):
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise.quota import _count_resource
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        self._seed("expired", created_via="provisioned", expires_at=past)
+        self._seed("revoked", created_via="provisioned", revoked_at=past)
+        self._seed("live", created_via="provisioned")
+        assert _count_resource(TEST_ORG_ID, "api_keys") == 1
+
+    def test_standalone_mint_gate_ignores_bootstrap_and_blocks_at_cap(
+            self, client):
+        """Boundary: with free max_api_keys=2, two live bootstrap nodes
+        occupy NO slot (both durable mints land); the third durable mint
+        402s (legacy mint)."""
+        from datetime import UTC, datetime, timedelta
+        future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        self._seed("b1", created_via="bootstrap", expires_at=future)
+        self._seed("b2", created_via="bootstrap", expires_at=future)
+        assert client.post("/v1/team/keys", json={"name": "d1"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d2"}).status_code == 200
+        assert client.post("/v1/team/keys", json={"name": "d3"}).status_code == 402
+        # the scoped-mint 409 gate reads the SAME count → same boundary
+        assert client.post(
+            "/v1/team/keys", json={"scopes": ["graphs:read"]}).status_code == 409
+
+    def test_null_legacy_durable_still_consumes_a_slot(self, client):
+        """Over-exemption guard: a node with NULL created_via is DURABLE —
+        two of them fill the free cap and the next mint 402s. This is the
+        direction the predicate must fail closed on."""
+        self._seed("n1", created_via=None)
+        self._seed("n2", created_via=None)
+        assert client.post("/v1/team/keys").status_code == 402
 
 
 class TestKeyAllowance3874:
@@ -1875,9 +1989,25 @@ class TestKeyAllowance3874:
 
             # (d) AT-CAP: the refusal names the SAME allowance (the dashboard
             # parses this number for its at-cap notice).
+            # #4614: the 402 detail is now the STRUCTURED refusal (a dict with
+            # `code`/`resource`/`used`/`limit`), not a bare string. The prose
+            # survives as `detail["message"]` — byte-identical to the old
+            # detail, which is what keeps the dashboard's number parse working
+            # (`website/apps/dashboard/src/main.jsx`'s `api()` maps
+            # `detail.message` -> `err.message`; `keyAllowance.capLimitFrom`
+            # regexes that message). The structured fields are asserted too:
+            # a `code` is what lets a caller tell a quota refusal from any
+            # other 402 without matching text.
             r = client.post("/v1/team/keys", headers=h)
             assert r.status_code == 402, r.text
-            m = re.search(r"limit reached \((\d+)\)", r.json()["detail"])
+            detail = r.json()["detail"]
+            assert isinstance(detail, dict), r.text
+            assert detail.get("code") == "quota_exceeded", r.text
+            assert detail.get("resource") == "api_keys", r.text
+            assert detail.get("limit") == allowance, (
+                f"the refusal's structured limit {detail.get('limit')!r} != the "
+                f"advertised allowance {allowance!r}")
+            m = re.search(r"limit reached \((\d+)\)", detail.get("message") or "")
             assert m is not None, r.text
             assert int(m.group(1)) == allowance, (
                 f"pre-cap allowance {allowance} != at-cap refusal {m.group(1)} "
@@ -3373,6 +3503,43 @@ class TestInternalProvision:
         assert gn in _read_journal_file(str(journal)), \
             "tenant_provision mint must be journaled (#1686)"
 
+    def test_provision_does_not_journal_a_graph_it_did_not_mint(
+            self, internal_client, monkeypatch, tmp_path):
+        """#7795 review P2-3: `provision_tenant` takes a CALLER-SUPPLIED
+        `org_id` (`body.get("org_id")`) with no existence guard, so an
+        unconditional journal append would hand the session sweep a graph
+        THIS call did not create — a live tenant graph for DETACH+DELETE.
+        The append is existence-guarded (mirroring
+        `_eager_provision_org_graph`): a provision whose graph already
+        carries a `TeamMeta` mints nothing and must NOT journal it."""
+        from tests._embedded import _read_journal_file
+
+        journal = tmp_path / "provision_preexisting.graphs.jsonl"
+        monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+        payload = {
+            "org_id": "provisioned-team-preexisting",
+            "org_name": "Provisioned Team Preexisting",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-pe",
+        }
+        # First call mints the graph (and journals it — pinned by the test
+        # above).
+        r1 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r1.status_code == 200, r1.text
+        gn = r1.json()["graph_name"]
+        assert gn in _read_journal_file(str(journal))
+        # Reset the RECORD only: the graph (and its TeamMeta) still exists,
+        # so the second call mints nothing and must not re-journal it.
+        journal.write_text("")
+        r2 = internal_client.post("/internal/provision", json=payload,
+                                  headers=self.INTERNAL_HEADERS)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["graph_name"] == gn
+        assert gn not in _read_journal_file(str(journal)), \
+            "the graph pre-existed this call — journaling it would hand the " \
+            "sweep a tenant graph this call did not mint (#7795 P2-3)"
+
     def test_provision_missing_fields_returns_400(self, internal_client):
         r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
         assert r.status_code == 400, r.text
@@ -4045,6 +4212,46 @@ class TestSessionFloodGate:
         assert "est=" in msg and "max=" in msg, msg
         assert "tier=" in msg, msg
 
+    def test_the_capture_402_is_a_structured_refusal_not_prose(self, client):
+        """#4614: the capture points refusal is a DISTINGUISHABLE state.
+
+        The gate refused with a bare prose ``detail``, so a caller could not
+        tell a quota refusal from any other 402 without matching the message
+        text — and our own capture clients are documented as forbidden from
+        doing exactly that (``capture_spool.classify_failure``: *"a
+        capacity/billing refusal is a category, not a string"*). Assert the
+        machine-readable category and the numbers the gate actually compared,
+        and that the prose survives as ``detail["message"]`` — whose shape the
+        dashboard's number parse and its ``Last attempt — <detail>`` sub-line
+        both depend on.
+        """
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conversation = [{"role": "user", "content": dense}] * 51
+        r = client.post("/v1/sessions", json={
+            "session_id": "quota-structured-session",
+            "conversation": conversation,
+        })
+        assert r.status_code == 402, r.text[:200]
+        detail = r.json()["detail"]
+        assert isinstance(detail, dict), (
+            f"the refusal is still a bare string — no caller can distinguish "
+            f"it without matching prose: {detail!r}")
+        assert detail["code"] == "quota_exceeded", detail
+        assert detail["resource"] == "points", detail
+        # The numbers the gate actually COMPARED — never a fresh recount.
+        assert isinstance(detail["used"], int) and detail["used"] >= 0, detail
+        assert isinstance(detail["limit"], int) and detail["limit"] > 0, detail
+        assert isinstance(detail["estimate"], int) and detail["estimate"] > 0, detail
+        # The GATE invariant (the property the refusal actually expresses) —
+        # not `used < limit`, which is only true because this fixture's org
+        # starts empty. An org already at/over its cap is refused with
+        # `used >= limit`, and that case must not read as a broken refusal.
+        assert detail["used"] + detail["estimate"] > detail["limit"], detail
+        msg = detail["message"]
+        assert msg.startswith("Team points limit reached: "), msg
+        assert f"{detail['used']} in use + {detail['estimate']} estimated" in msg, msg
+        assert f"exceeds {detail['limit']}." in msg, msg
+
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
@@ -4137,7 +4344,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_count(_limits, _resource, sdk=None):
+        def _fail_count(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaCheckError("simulated count query failure")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
@@ -4155,7 +4362,7 @@ class TestQuotaFailClosed:
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
 
-        def _fail_exceeded(_limits, _resource, sdk=None):
+        def _fail_exceeded(_limits, _resource, sdk=None, **_kwargs):
             raise QuotaExceededError("Team points limit reached (1000)")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)
@@ -9383,3 +9590,151 @@ class TestFirstContactPrewarm:
         assert "Retry-After" in exposed, (
             "a browser client cannot read Retry-After without "
             f"Access-Control-Expose-Headers (got {exposed!r})")
+
+
+# ── #4625: the capture path must not compute the projection it discards ──────
+#
+# `_update_onboarding_state` computes the merged projection as its RETURN VALUE
+# (the GET/PATCH writer-echo contract). That projection is not free: it reaches
+# `_registry_existing_graphs()` up to twice (two when the org graph exists,
+# which is the per-capture case), and in URI mode each probe builds a fresh
+# `_make_sdk(namespace="registry")` and opens a NEW FalkorDB connection — TCP +
+# TLS handshake + `Is_Sentinel`'s INFO + `list_graphs` — executed ON the event
+# loop.
+#
+# An AGENT capture — the fleet case — calls the router TWICE (the receipt
+# write, then the last-error clear) and discards both returns: four synchronous
+# TLS handshakes per capture. (A no-harness session-JWT capture makes one call,
+# since it has no last-error key.) With ~46 lanes capturing per turn that stalls the
+# loop for seconds at a time, every read in flight blows the 10s transport
+# bound, and the agent's `tools/list` returns 504 with an EMPTY toolbelt.
+# Reproduced live by py-spy: loop thread in `do_handshake (ssl.py:1319)` <-
+# `_registry_existing_graphs` <- `_get_onboarding_projection` <-
+# `_record_capture_last_error` <- `_capture_session_impl` <- `capture_session`.
+#
+# These tests pin the write-only contract and the echo the GET/PATCH callers
+# depend on. They fail if `_echo=False` stops being honoured (i.e. if the
+# projection is computed again on the discard path).
+
+
+class TestCapturePathSkipsDiscardedProjection:
+    """#4625 — write-only onboarding writes must not compute the echo."""
+
+    @staticmethod
+    def _spy(monkeypatch):
+        """Replace the projection + jsonb legs; record what ACTUALLY ran."""
+        proj_calls: list[str] = []
+        writes: list[tuple] = []
+
+        def _spy_projection(org_id):
+            proj_calls.append(org_id)
+            return {}
+
+        def _spy_write(org_id, state):
+            writes.append((org_id, dict(state)))
+
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_projection", _spy_projection)
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_state", lambda org_id: {})
+        monkeypatch.setattr(_ha_mod, "_write_onboarding_state", _spy_write)
+        return proj_calls, writes
+
+    def test_write_only_skips_the_projection(self, monkeypatch):
+        _ha = _ha_mod
+        proj_calls, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._update_onboarding_state("org-4625", _echo=False, **{key: "boom"})
+
+        # Non-vacuous: the write must still have happened.
+        assert writes, "the write must still happen when the echo is skipped"
+        assert proj_calls == [], (
+            "the write-only path computed the onboarding projection — that is "
+            "the #4625 event-loop stall (two fresh FalkorDB TLS handshakes)")
+
+    def test_default_still_returns_the_echo(self, monkeypatch):
+        """GET/PATCH writer-echo contract must be unchanged."""
+        _ha = _ha_mod
+        proj_calls, _writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None
+
+        reversed_echo = _ha._update_onboarding_state("org-4625", **{key: "boom"})
+
+        assert proj_calls == ["org-4625"], (
+            "the default path must still compute the echo")
+        assert isinstance(reversed_echo, dict)
+        # overlay: the just-written field wins over the projection's value
+        assert reversed_echo.get(key) == "boom"
+
+    def test_record_capture_last_error_is_write_only(self, monkeypatch):
+        """The per-capture hot path — called on 2xx AND non-2xx.
+
+        Asserts the WRITE, not just the absence of a projection call: an
+        early return inside ``_record_capture_last_error`` (e.g. an
+        unresolvable harness key) would satisfy ``proj_calls == []``
+        vacuously and pin nothing.
+        """
+        _ha = _ha_mod
+        proj_calls, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._record_capture_last_error("org-4625", "codex", "capture boom")
+
+        assert writes, (
+            "_record_capture_last_error never reached the write — the absence "
+            "of a projection call would then prove nothing")
+        assert writes[0][1].get(key) == "capture boom", (
+            "the last-error detail must be written")
+        assert proj_calls == [], (
+            "_record_capture_last_error computed the projection it discards — "
+            "this is the per-capture hot path across the fleet")
+
+    def test_record_capture_last_error_flattens_a_structured_refusal(
+            self, monkeypatch):
+        """#4614: a dict 402 detail reaches the dashboard as the message.
+
+        Since the quota refusal became the structured house shape, this is the
+        LIVE path — the capture 402 handler passes ``e.detail`` straight in —
+        and the dashboard renders the stored value as
+        ``Last attempt — <detail>`` (`harnesses.js`). A Python repr
+        (``{'code': ...}``) would leak structure into that sentence, and a
+        naive ``str(detail)`` is what the flattening exists to prevent.
+        """
+        _ha = _ha_mod
+        _, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._record_capture_last_error("org-4614", "codex", {
+            "code": "quota_exceeded", "resource": "points",
+            "used": 24965, "limit": 25000,
+            "message": "Team points limit reached: 24965 in use + 1044 "
+                       "estimated for this capture exceeds 25000. "
+                       "Upgrade your plan.",
+        })
+
+        written = writes[0][1].get(key)
+        assert isinstance(written, str), (
+            f"the dashboard sub-line is text — a dict leaked through: {written!r}")
+        assert written.startswith("Team points limit reached: "), written
+        assert "code" not in written and "{" not in written, (
+            f"a Python repr leaked structure into the failure sentence: {written!r}")
+
+    def test_record_capture_last_error_survives_a_dict_without_a_message(
+            self, monkeypatch):
+        """A structured detail with no ``message`` must still write text.
+
+        The flattening falls back to ``str(detail)`` in that case; the point
+        of pinning it is that the write stays a STRING (the dashboard renders
+        it inside a sentence) even for a shape we do not emit today.
+        """
+        _ha = _ha_mod
+        _, writes = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+
+        _ha._record_capture_last_error("org-4614", "codex", {"code": "weird"})
+
+        written = writes[0][1].get(key)
+        assert isinstance(written, str) and written, written

@@ -66,6 +66,51 @@ def fetch_jobs(repo: str, run_id: str) -> list[dict]:
     return jobs
 
 
+# --- eligible-run selection (ci-timing.yml `find` step) ---------------------
+
+PYTHON_CI_WORKFLOW = "python-ci.yml"
+PICK_RUN_PER_PAGE = 10
+ELIGIBLE_CONCLUSIONS = ("success", "failure")
+
+
+def pick_run_query(repo: str, per_page: int = PICK_RUN_PER_PAGE) -> str:
+    """Single source of truth for the candidate-run query (shared with the tests).
+
+    event=push + branch=main excludes PR smoke runs and nightlies (comparable
+    data requires the FULL matrix); status=completed + exclude_pull_requests
+    keeps only real push-to-main runs.
+    """
+    return (f"repos/{repo}/actions/workflows/{PYTHON_CI_WORKFLOW}/runs"
+            f"?event=push&branch=main&status=completed"
+            f"&exclude_pull_requests=true&per_page={per_page}")
+
+
+def pick_run(repo: str, per_page: int = PICK_RUN_PER_PAGE) -> str | None:
+    """Latest completed push-to-main, non-PR python-ci run id whose conclusion is
+    success/failure (cancelled/skipped runs are not comparable). None when the
+    last `per_page` completed runs contain no eligible one.
+
+    This lives here rather than as an inline `python3 -c` inside the workflow's
+    YAML block scalar: the inline form was indented against the block's dedent,
+    so python received a module whose first statement was indented and died with
+    `IndentationError: unexpected indent` on every weekly run — the find step
+    failed, the dependent artifact steps were skipped, and the measurement loop
+    never ran green (#3400 / audit F8). A function under unit test cannot be
+    broken by YAML indentation.
+    """
+    try:
+        data = gh_api(repo, pick_run_query(repo, per_page))
+    except subprocess.CalledProcessError as exc:
+        # Behaviour parity with the old inline shell: an API failure is not fatal
+        # (measurement-only workflow) — warn and let the step report "none found".
+        print(f"::warning::gh api run-list failed: {exc}", file=sys.stderr)
+        return None
+    for run in data.get("workflow_runs", []):
+        if run.get("conclusion") in ELIGIBLE_CONCLUSIONS:
+            return str(run["id"])
+    return None
+
+
 def steps_by_job(jobs: list[dict]) -> dict[str, list[dict]]:
     """Per-job per-step durations from started_at/completed_at (second granularity)."""
     result: dict[str, list[dict]] = {}
@@ -280,11 +325,20 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate the CI timing measurement artifact (#1477)")
     ap.add_argument("--repo", required=True, help="owner/repo (used for gh api calls)")
+    ap.add_argument("--pick-run", action="store_true",
+                    help="print the latest eligible completed push-to-main python-ci run id "
+                         "and exit (ci-timing.yml's find step; writes no artifact)")
     ap.add_argument("--run-id", default="", help="python-ci run id to sample (empty = no network data)")
     ap.add_argument("--logs-dir", default="logs", help="directory of downloaded pytest log artifacts")
     ap.add_argument("--out-dir", default=".", help="where to write ci-timing.md + ci-timing.json")
     ap.add_argument("--max-history", type=int, default=MAX_HISTORY_DEFAULT)
     args = ap.parse_args()
+
+    if args.pick_run:
+        picked = pick_run(args.repo)
+        if picked:
+            print(picked)
+        return 0
 
     run_id = args.run_id.strip()
     out_dir = Path(args.out_dir)

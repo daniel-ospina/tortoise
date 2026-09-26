@@ -718,6 +718,12 @@ def _backup_graph(
         )
         return {"status": "p0_guard_failed", "org_id": org_id, "graph_id": graph_id}
 
+    # #3030 (review): record that the guard demonstrably RAN and PASSED. Callers
+    # must never infer this from a graph being present in the results map — a
+    # graph whose dump errored, was aborted by the size guard, or never resolved
+    # returns BEFORE this line, so "present" does not mean "checked".
+    p0_checked = True
+
     node_count = int(manifest["node_count"])
 
     # ── Empty-content transition guard (no state.json write on fire). ──
@@ -734,10 +740,10 @@ def _backup_graph(
                     "detail": {"previous": prev_node_count, "now": 0, "drop_pct": 100},
                 }
             )
-            return {"status": "data_loss_candidate", "org_id": org_id,
+            return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
                     "graph_id": graph_id, "node_count": 0}
         # Steady-0 (chronic empty org) is a signal, never an incident.
-        return {"status": "empty_skipped", "org_id": org_id,
+        return {"p0_checked": p0_checked, "status": "empty_skipped", "org_id": org_id,
                 "graph_id": graph_id, "node_count": 0}
     if prev_node_count > 0 and node_count < prev_node_count * 0.5:
         _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
@@ -753,7 +759,7 @@ def _backup_graph(
                 },
             }
         )
-        return {"status": "data_loss_candidate", "org_id": org_id,
+        return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
                 "graph_id": graph_id, "node_count": node_count}
 
     # ── Per-label drift guard (#661): fires when the overall >50% ratio is
@@ -779,7 +785,7 @@ def _backup_graph(
                     },
                 }
             )
-            return {"status": "data_loss_candidate", "org_id": org_id,
+            return {"p0_checked": p0_checked, "status": "data_loss_candidate", "org_id": org_id,
                     "graph_id": graph_id, "node_count": node_count}
 
     # ── #2319 geo-mirror (env-guarded second-store copy): an ACCEPTED
@@ -796,7 +802,7 @@ def _backup_graph(
             logger.exception(
                 "mirror of %s/%s failed (primary backup durable): %s",
                 org_id, graph_id, e)
-            return {"status": "error", "org_id": org_id,
+            return {"p0_checked": p0_checked, "status": "error", "org_id": org_id,
                     "graph_id": graph_id,
                     "error": f"backup accepted but mirror failed: {e}"}
     else:
@@ -840,6 +846,7 @@ def _backup_graph(
         deleted = []
 
     return {
+        "p0_checked": p0_checked,
         "status": "backed_up",
         "org_id": org_id,
         "graph_id": graph_id,
@@ -1372,6 +1379,100 @@ def run_backup_sweep(
         "results": results,
         "incidents": incidents,
     }
+
+
+#: #3030: sweep-emitted guard kinds that a CONCLUSIVE clear run resolves. The
+#: sweep is the authority on its own guards — a run that completed and did not
+#: emit a kind IS the "condition cleared" evidence (delete-to-resolve).
+SWEEP_RESOLVABLE_GLOBAL_KINDS = (
+    "ENUM_DELTA",
+    "NO_ELIGIBLE_TEAMS",
+    "GRAPH_NAME_RESOLUTION_FAIL",
+)
+
+
+def graph_subject(org_id: str, graph_id: str = "") -> str:
+    """The alert-store subject for one graph (#2313): the bare org for the
+    default graph, ``"{org}:{gid}"`` otherwise — the SAME key the watcher and
+    re-baseline use, so open/resolve stay coherent across surfaces."""
+    if not graph_id or graph_id == "default":
+        return org_id
+    return f"{org_id}:{graph_id}"
+
+
+def incident_subject(inc: dict[str, Any]) -> str:
+    """#2313: alert-store subject for a sweep incident.
+
+    Default-graph and org-level incidents keep the bare org subject (the
+    pre-#2313 alert surface). Custom-graph incidents use the per-graph
+    subject ``"{org}:{gid}"`` — the SAME key the watcher uses — so re-baseline
+    and the watcher can open/resolve coherently.
+    """
+    return graph_subject(inc.get("org_id", ""), inc.get("graph_id") or "")
+
+
+def sweep_resolutions(result: dict[str, Any]) -> list[tuple[str, str]]:
+    """The (kind, subject) incidents a CONCLUSIVE sweep run proves CLEARED (#3030).
+
+    Four kinds are emitted by the sweep but had NO resolver on any surface, so
+    once filed they stayed open forever — alert rot, the exact failure mode this
+    channel exists to avoid (live instance: #2821 ``[DR] ENUM_DELTA``, whose own
+    cause #2823 was fixed while the alert could not close).
+
+    Clearing requires POSITIVE EVIDENCE, never the mere absence of an emission
+    (review P0 — the first cut of this function closed live alerts):
+
+    * **Global guards** (`ENUM_DELTA`, `NO_ELIGIBLE_TEAMS`,
+      `GRAPH_NAME_RESOLUTION_FAIL`) need a run that actually LOOKED: at least one
+      team result carrying a graph map. A 0-team/lock-busy run is exactly what
+      ENUM_DELTA reports — resolving it there would silence the #2823
+      silent-degradation class, and it could never re-fire (the guard triggers
+      only on the ``>0 → 0`` transition, which the same run's ops-state write
+      resets).
+    * **`P0_GUARD_FAIL`** is per-graph and cleared only for graphs whose dump
+      demonstrably RAN the guard and passed it (``p0_checked`` — the flag is set
+      only by the post-guard returns). A result that returned earlier —
+      ``aborted_size_guard``, a pre-dump ``error`` — carries no ``p0_checked``,
+      so its P0 incident must stay open. Note the predicate is the FLAG, not the
+      status name: a post-guard mirror failure returns ``status="error"`` *with*
+      ``p0_checked``, and that graph's incident IS cleared.
+    * A **blind** run (``enum_failed``/``error``/``already_running``)
+      resolves nothing: it cannot distinguish "no teams" from "could not look".
+
+    The caller intersects this with the currently OPEN incidents (#3030 review:
+    one list per kind, never an R2 read per graph).
+    """
+    if result.get("status") in ("enum_failed", "error", "already_running"):
+        return []
+    results = result.get("results") or {}
+    # Positive enumeration evidence: the sweep looked and got per-team graph
+    # maps (an empty result set means it had nothing to look at).
+    looked = any(
+        isinstance(res, dict) and isinstance(res.get("graphs"), dict)
+        for res in results.values()
+    )
+    emitted = {
+        (inc.get("kind"), incident_subject(inc))
+        for inc in result.get("incidents", [])
+    }
+    cleared: list[tuple[str, str]] = []
+    if looked:
+        cleared.extend(
+            (kind, "")
+            for kind in SWEEP_RESOLVABLE_GLOBAL_KINDS
+            if (kind, "") not in emitted
+        )
+    for org_id, team_res in results.items():
+        graphs = team_res.get("graphs") if isinstance(team_res, dict) else None
+        if not isinstance(graphs, dict):
+            continue
+        for gid, gres in graphs.items():
+            if not (isinstance(gres, dict) and gres.get("p0_checked")):
+                continue
+            subject = graph_subject(org_id, gid)
+            if ("P0_GUARD_FAIL", subject) not in emitted:
+                cleared.append(("P0_GUARD_FAIL", subject))
+    return cleared
 
 
 # ── #2304 trash purge (delete = quarantine → _GRAPH_PURGE_GRACE_DAYS grace → erasure) ──

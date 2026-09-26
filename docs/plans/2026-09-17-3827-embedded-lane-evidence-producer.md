@@ -99,7 +99,7 @@ boundary the implementation crosses has a layer and a named test.
 | 12 | `tests/test_canary_classify.py` | MODIFY | the 16 existing `classify(...)` call sites + the cross-writer schema assertion | itself |
 | 13 | Ledger `${tempfile.gettempdir()}/pi-embedded-evidence/{selection}/{commit12}/{invocation_id}/` | ARTIFACT (out of repo) | filesystem | `test_embedded_evidence.py::test_ledger_path_is_under_tmpdir_and_not_the_repo`, `::test_tmpdir_resolved_in_python_not_shell`, `::test_concurrent_writers_do_not_collide` (**C13**: same-namespace case), `::test_prune_does_not_remove_a_live_run_file` |
 | 14 | Streak `…/embedded-evidence-streak.json` | ARTIFACT (new name) | the docker streak file must never be touched | `::test_streak_name_is_not_the_ci_file` |
-| 15 | `--record-out <path>` | ARTIFACT (caller-chosen; the family fix's PR commits the closing receipt — **allowed inside the repo and excluded from the pin**, M5) | filesystem | `::test_record_out_path_is_excluded_from_the_pin` (the in-repo exclusion boundary — M5/**M45**), `::test_tracked_record_out_is_exit_2`, `::test_record_out_directory_is_exit_2`, `::test_unwritable_record_out_parent_is_exit_2` (the failure exits — M46) |
+| 15 | `--record-out <path>` | ARTIFACT (caller-chosen, **outside the measured tree** — #4572 option (a); the closing receipt defaults to `$TMPDIR/pi-embedded-evidence/record.json` and is copied/uploaded afterwards) | filesystem | `::test_in_tree_record_out_is_refused` (the out-of-tree boundary — M5/**M45**, superseded by #4572), `::test_tracked_record_out_is_exit_2`, `::test_record_out_directory_is_exit_2`, `::test_unwritable_record_out_parent_is_exit_2` (the failure exits — M46) |
 | 16 | CLI entry `python3 tools/embedded_evidence.py run\|red` | ENTRY | `sys.path` (F27) | `::test_cli_entry_is_direct_python`, `::test_module_imports_sibling_classifier_via_repo_root` |
 | 17 | `.husky/pre-commit` — the `ci_selection --register` hook (**M43**) | WRITER (indirect) | `config/ci-surfaces.yml` is mutated + `git add`-ed whenever a staged `tests/**.py` change is unregistered | auto-registration IS the intended mechanism (the #1429 drift trap): task 4's commit auto-registers `tests/test_embedded_evidence.py` into `core`, task 11's registers the tripwire. Task 12 therefore only adds `carve_out:` + `TEST_NO_REDIRECT_STEMS` (+ the pin) and **verifies** the `core:` entries rather than re-adding them (`::test_new_embedded_tests_are_carve_out_and_core`, `::test_integrity_covers_all_test_files`); the manifest write is not a `tests/` path, so AC10's allowlist is affected **only** by the M24 shared read in `tests/test_tripwire.py` (**C11** — the seventh path, `::test_git_diff_allowlist`) |
 | — | `.gitignore`, `.github/**`, `tortoise/**`, `graph-scripts/**`, `pyproject.toml`, `uv.lock` | **NOT TOUCHED** | — | AC10 |
@@ -118,7 +118,7 @@ reason).
 - **an unwritable `--record-out` parent** (or a directory / a tracked file) ⇒ **exit 2** —
   `test_unwritable_record_out_parent_is_exit_2`, `test_record_out_directory_is_exit_2`,
   `test_tracked_record_out_is_exit_2` (Task 7/9).
-- **`--record-out` omitted** ⇒ **not an error**: it defaults to `LEDGER_DIR/record.json` (D6, M46), recorded
+- **`--record-out` omitted** ⇒ **not an error**: it defaults to `LEDGER_ROOT/record.json` (D6, M46), recorded
   as `record_out_source: "default"` — `test_record_out_defaults_to_ledger_record_json` (Task 9).
 
 **Bug-pattern flags (from `test-design`):**
@@ -159,7 +159,7 @@ behaviour, so no surface is covered only by a happy-path row (R2-10: `tools/embe
 | 12 | `tests/test_canary_classify.py` | the 16 call-site assertions are weakened by the lane edit → `test_docker_lane_unchanged_at_all_16_call_sites` | the two reset-semantics homes drift → `test_bucket_reset_semantics_agree_across_modules` (M11) |
 | 13 | Ledger dir | a relative `--ledger-root` writes inside the checkout → dirties the pin → `test_relative_ledger_root_inside_measured_root_is_exit_2` (M56) | `TMPDIR` unset writes to `/pi-embedded-evidence` → `test_tmpdir_resolved_in_python_not_shell` |
 | 14 | Streak file | the tool overwrites the docker streak → `test_streak_name_is_not_the_ci_file` | a stale streak is read as authority → `test_streak_is_never_read_as_authority` (M14) |
-| 15 | `--record-out` | an in-repo receipt dirties the pin → `test_record_out_path_is_excluded_from_the_pin` (M5) | a tracked/directory/unwritable target → `test_tracked_record_out_is_exit_2`, `test_record_out_directory_is_exit_2`, `test_unwritable_record_out_parent_is_exit_2` |
+| 15 | `--record-out` | an in-repo receipt dirties the pin → `test_in_tree_record_out_is_refused` (M5, superseded by #4572: exit 2, outside-the-tree required, no exclusion) | a tracked/directory/unwritable target → `test_tracked_record_out_is_exit_2`, `test_record_out_directory_is_exit_2`, `test_unwritable_record_out_parent_is_exit_2` |
 | 16 | CLI entry | a `[project.scripts]` entry is added → `test_cli_entry_is_direct_python` | the sibling classifier import relies on cwd → `test_module_imports_sibling_classifier_via_repo_root` |
 | 17 | `.husky/pre-commit` (M43) | auto-registration lands a file in the wrong surface → `test_new_embedded_tests_are_carve_out_and_core`, `test_integrity_covers_all_test_files` | the hook stages `config/ci-surfaces.yml` (a non-`tests/` path) → `test_git_diff_allowlist` (config is outside the seven-path allowlist) |
 
@@ -662,7 +662,7 @@ LEDGER_HISTORY_BOUND = 20                                              # M60: pr
   (M56):** an unwritable ledger root, `TMPDIR` empty (falls back via `tempfile.gettempdir()`) or set to a
   non-writable path, and a `--record-out` that is a **directory** (an unwritable parent is already in D8)
   — each leaves `git status --porcelain` empty. An **omitted** `--record-out` has a stated default:
-  `LEDGER_DIR / "record.json"` (M46), recorded as `record_out_source: "default"`.
+  `LEDGER_ROOT / "record.json"` (M46), recorded as `record_out_source: "default"`.
 - **Retention and cleanup (M60 / C13).** Every per-run `mkdtemp` is removed by the run's `try/finally` —
   after a full invocation no per-run root survives (D17 measures orphans; it does not reap, so the runner
   owns this). The ledger is bounded: at most `LEDGER_HISTORY_BOUND = 20` retained **invocation** directories
@@ -697,15 +697,17 @@ LEDGER_HISTORY_BOUND = 20                                              # M60: pr
   asserts neither raises, the shared artifacts parse, and **each invocation's record carries its own
   `run_id` and `invocation_id`** — rewritten to exercise the same-namespace case (the prior version
   asserted that property against one path, which could not hold).
-- **`--record-out` inside the measured root is allowed and excluded (M5, option (a)).** The resolved
-  `--record-out` path is **excluded from the `porcelain_digest` / `tree_moved` computation** (so the
-  tool's own receipt cannot dirty the pin), and the exclusion is recorded in
-  `pin.record_out_excluded: "<repo-relative path>"`. The deferred GREEN-half handoff writes
-  `<repo>/docs/evidence/3827-green.json` inside the repo — that path is untracked at run time, is
-  excluded from the pin by this rule, and is committed afterwards by the fix PR (Surface Map row 15). The
-  test is re-scoped: `test_record_out_path_is_excluded_from_the_pin` (an in-repo `--record-out` leaves
-  `worktree_clean:true` and the digest unchanged) replaces the now-contradicted
-  `test_record_out_inside_measured_root_is_exit_2`. An unreadable/unwritable `--record-out` parent is still
+- **`--record-out` must be OUTSIDE the measured tree (M5, option (a), REVERSED by #4572).** The earlier
+  ruling allowed an in-repo receipt and excluded it from `porcelain_digest` / `tree_moved`. That exclusion
+  was re-derived five times (substring; `Path.resolve()` following a symlink; a pathspec without `literal`
+  globbing; `:(exclude)X` also matching every `X/…`; a lexical-vs-kernel `link/../out` divergence) and
+  over-matched every time, each spelling a way for a genuinely dirty tree to read clean. #4572 removes the
+  class instead of guarding it: a resolved `--record-out` that lands inside the measured tree is a **usage
+  error (exit 2, no record written)**, and there is now **no path-based exclusion at all**. The receipt
+  defaults to `$TMPDIR/pi-embedded-evidence/record.json` — outside — and the GREEN-half handoff copies it
+  into the fix PR's `docs/evidence/3827-green.json` afterwards (Surface Map row 15). The pin no longer
+  carries `record_out_excluded`. Test: `test_in_tree_record_out_is_refused` (superseding
+  `test_record_out_path_is_excluded_from_the_pin`). An unreadable/unwritable `--record-out` parent is still
   exit 2.
 
 ### D7 — the record schema `embedded-evidence/1`, field by field
@@ -752,7 +754,6 @@ reused verbatim because its fixed `.tmp` name is not writer-safe):
                                                // closing role pairs against; a STRICT ancestor of `commit`
     "worktree_clean": true,
     "porcelain_digest": "sha256:<over `git status --porcelain=v2`>",   // NOT `git write-tree` (AC4)
-    "record_out_excluded": "<repo-relative path | null>",  // M5: excluded from the digest above
     "measured_root": "<abs>",
     "environment_pinned": false,                 // D12/F1: the red runs the ref's SOURCE, current env
     "import_provenance": { "tortoise_file": "<abs>", "in_root": true, "per_run": [...] }
@@ -850,7 +851,11 @@ reused verbatim because its fixed `.tmp` name is not writer-safe):
   // pairing ref is declared and the paired red is re-run in the same invocation):
   // "python3 tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit>
   //    --pairing-ref <last-before-first-family-fix> --record-role closing
-  //    --record-out <repo>/docs/evidence/3827-green.json"
+  //    --surface tortoise_search --surface-assertion <resolving-test-id>"
+  // #4572: --record-out must be OUTSIDE the measured tree, so the closing form
+  // OMITS it (default: $TMPDIR/pi-embedded-evidence/record.json) and copies the
+  // receipt into docs/evidence/3827-green.json afterwards. An in-tree
+  // --record-out is a usage error (exit 2, no record).
   "exit_code": 1
 }
 ```
@@ -1168,8 +1173,9 @@ multi-match log would label by declaration order, not by evidence).
 **Decision.** `worktree_clean` ∧ `porcelain_digest = sha256(git status --porcelain=v2 | git diff-index HEAD)`
 — **never `git write-tree`** (which hashes the index and reports clean for an unstaged edit). A dirty tree
 at run 1, or a digest change between run *k*, makes `tree_moved: true` for that run, keeps the offending
-run in `runs[]`, and exits **1**. The resolved `--record-out` path is **excluded** from the digest (M5,
-D6) and recorded as `pin.record_out_excluded`.
+run in `runs[]`, and exits **1**. The `--record-out` path is **not** excluded from the digest; it must lie
+**outside every measured tree** or the invocation is a usage error (exit 2, no record) — #4572 option (a),
+which supersedes the M5 exclusion. `pin` no longer carries `record_out_excluded`.
 
 **`run --ref` actually pins the measured code (C12).** `--ref` is load-bearing (the `reproduce` string
 embeds it and Task 14 runs at `37d5ef00c` **after** Tasks 1–13's commits, so HEAD ≠ the pinned ref), so its
@@ -2002,7 +2008,7 @@ only to the derivation); **`--max-runs` exceeded by the derivation** (`--confide
 this is not the classifier `ValueError`);
 **`C ∈ {0.0,1.0,-0.1,1.1}`, `p ∈ {0.0,1.0,-0.1,1.1}`, `p > C` with no traceback** — M3/M20; `--run-timeout
 3301`; `--selection nope`); **and the C20 move: the record-out / persistence tests now live in Task 9**
-(`test_exit_code_equals_persisted_and_process_returncode`, `test_record_out_path_is_excluded_from_the_pin`,
+(`test_exit_code_equals_persisted_and_process_returncode`, `test_in_tree_record_out_is_refused`,
 `test_tracked_record_out_is_exit_2`, `test_unwritable_record_out_parent_is_exit_2` — they need Task 9's
 writer, and Task 7 precedes it, so their "run to pass" could not pass where they were).
 
@@ -2089,7 +2095,7 @@ producer is defined and positive-tested (`--record-role`, `closing` **only** wit
 red **and an explicit `--pairing-ref`** — M52/C1/C2); every write-path failure edge exits 2 with no
 traceback (relative `--ledger-root` inside the
 measured root, unwritable ledger root, `--record-out` a directory, `TMPDIR` empty/unwritable — M56); an
-omitted `--record-out` defaults to `LEDGER_DIR/record.json` and is recorded as such (M46); the per-run
+omitted `--record-out` defaults to `LEDGER_ROOT/record.json` and is recorded as such (M46); the per-run
 `mkdtemp` roots are removed after the invocation and the ledger history is bounded
 (`LEDGER_HISTORY_BOUND = 20`, mirroring the docker streak's `runs[:20]` — M60); the record envelope agrees
 with **`tools/ci_timing.py`'s generator**, not its 43-byte committed fixture (C17/M62).
@@ -2128,14 +2134,14 @@ ancestry)` — labelling a pinned HEAD or a commit after the fix `last-before-fi
 passes);
 `test_pairing_ref_must_be_strict_ancestor` (**C1**: same-as-measured / descendant / unrelated ref ⇒
 exit 2);
-`test_record_out_defaults_to_ledger_record_json` (M46: omitted `--record-out` ⇒ `LEDGER_DIR/record.json`,
+`test_record_out_defaults_to_ledger_record_json` (M46: omitted `--record-out` ⇒ `LEDGER_ROOT/record.json`,
 recorded);
 `test_exit_code_equals_persisted_and_process_returncode` (**moved from Task 7 — C20(a)**: persist a record
 for each of the 0/1/2/3 branches; assert `exit_code(persisted_verdict) == persisted exit_code ==
 subprocess returncode` — M1);
-`test_record_out_path_is_excluded_from_the_pin` (**moved from Task 7 — C20(a)**: an in-repo
-`--record-out` leaves `worktree_clean:true`, the digest unchanged, and `pin.record_out_excluded` recorded
-— M5);
+`test_in_tree_record_out_is_refused` (**moved from Task 7 — C20(a)**; superseded by #4572: an in-tree
+`--record-out` is exit 2 with NO record, and the message names the offending path, states why it matters,
+and gives the default outside the tree — M5);
 `test_tracked_record_out_is_exit_2` and `test_unwritable_record_out_parent_is_exit_2` (**moved from
 Task 7 — C20(a)**);
 `test_relative_ledger_root_inside_measured_root_is_exit_2` (a relative `--ledger-root` resolving inside
@@ -2450,19 +2456,31 @@ list, and it mandates **no new code** — if executing it requires a tool change
 
 ```bash
 # AT THE FAMILY FIX'S PR (a fixed commit exists), same lane, same selection:
+# #4572: --record-out is OMITTED — it defaults to
+# $TMPDIR/pi-embedded-evidence/record.json, OUTSIDE the measured tree. An in-tree
+# --record-out is a usage error (exit 2, no record written).
 python3 tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit> \
   --pairing-ref <last-commit-before-first-family-fix> --record-role closing \
-  --record-out <repo>/docs/evidence/3827-green.json
+  --surface tortoise_search --surface-assertion <resolving-test-id>
+# Then copy the receipt into the fixed commit's PR and commit it there:
+cp "$(python3 -c 'import tempfile,pathlib;print(pathlib.Path(tempfile.gettempdir())/"pi-embedded-evidence"/"record.json")')" \
+  docs/evidence/3827-green.json
 ```
+
+(`--surface`/`--surface-assertion` are R1/D23 and are **required for closing**: the conjunct
+`certification-not-on-shipping-surface` admits only a `SHIPPING_SURFACES` member with a non-empty
+resolving test-ID, and the tool cannot infer which test exercises the agent-facing surface — so the
+closing invocation must declare them (#4203; a caller cannot certify a binding it never declared).
 
 (`--ref` makes the recorded `reproduce` string self-contained — M28. `--pairing-ref` is the explicit,
 validated pre-fix ref (C1: a **strict ancestor of the measured commit**; equal/descendant/unrelated ⇒
 exit 2) from which `ref_role` is **derived**, and `--record-role closing` is what makes the receipt a
 closing one (C2 — the previous command passed neither, so it could only ever emit
-`historical-attestation`, which D9 conjunct 12 forbids from closing). The in-repo `--record-out` is
-**allowed and excluded from the pin** (D6/D8, M5 option (a)): `docs/evidence/3827-green.json` is untracked
-at run time, does not dirty `porcelain_digest`, is recorded as `pin.record_out_excluded`, and is committed
-by the fix PR afterwards — the documented closing path no longer exits 2.)
+`historical-attestation`, which D9 conjunct 12 forbids from closing). `--record-out` is OMITTED: it
+defaults to `$TMPDIR/pi-embedded-evidence/record.json`, **outside the measured tree**, and the receipt is
+copied into the fix PR's `docs/evidence/3827-green.json` afterwards. An in-tree `--record-out` is a
+**usage error (exit 2, no record)** — #4572 option (a), which supersedes the M5 exclusion and its
+`pin.record_out_excluded` field.)
 
 There is **no `--paired-red-record` input** (F15): the tool **re-runs `red` itself** at the **pairing ref just
 declared by `--pairing-ref`** (D16/C1: *the last commit before the FIRST family fix landed*, **or** the
@@ -2486,13 +2504,19 @@ hand-written record cannot close (D20: content-bound by digest, not authenticate
    is visible where the fix lands — **the remaining handoff action**.
 3. `#3827` closes **only** on the paired, rate-changed record (D9) — never on a green-only certificate and
    never on a green against `carve-out`/`whole-suite`.
-4. **Re-issue #3867's body (C2 — owner action).** Its current text says an in-repo `--record-out` is
-   *"refused by design"* and describes a vague copy step; both are superseded by M5 option (a) (the
-   in-repo receipt is allowed and excluded from the pin) and by C1/C2 (the closing invocation is
-   `run --selection family --n 10 --ref <fix-commit> --pairing-ref <sha> --record-role closing`). The
-   re-issued body must carry that exact command, the `--pairing-ref` strict-ancestor rule, and the
-   `closes_issue`/exit-code contract — so the issue that owns the GREEN half does not instruct its
-   assignee to run an unreachable path.
+4. **#3867's body is now CORRECT on the record-out point — do not re-issue it for that reason.**
+   Its text says an in-repo `--record-out` is *"refused by design"*; #4572 option (a) **restored**
+   exactly that behaviour (a resolved `--record-out` landing inside the measured tree is a usage error —
+   exit 2, no record written — and there is **no** path-based exclusion). The M5 ruling that superseded
+   it ("the in-repo receipt is allowed and excluded from the pin") was itself reversed, because the
+   exclusion over-matched in five spellings; the class was removed rather than guarded. #3867 does still
+   need re-issuing, for a different reason: the closing invocation must carry
+   `--surface <SHIPPING_SURFACES member> --surface-assertion <resolving-test-id>` (#4203) in addition to
+   `--pairing-ref` and `--record-role closing` — i.e.
+   `run --selection family --n 10 --ref <fix-commit> --pairing-ref <sha> --record-role closing --surface <member> --surface-assertion <test-id>`
+   with `--record-out` omitted (it defaults outside the measured tree) — along with the `--pairing-ref`
+   strict-ancestor rule and the `closes_issue`/exit-code contract, so the issue that owns the GREEN half
+   does not instruct its assignee to run an unreachable path.
 
 ---
 

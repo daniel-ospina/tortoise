@@ -33,6 +33,7 @@ public assets
 public aviso-privacidad.html
 public blog
 public consent.js
+public contact.html
 public docs.html
 public dpa.html
 public faq.html

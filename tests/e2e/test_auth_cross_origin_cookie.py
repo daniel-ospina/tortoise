@@ -158,14 +158,35 @@ def test_host_only_session_cookie_is_not_sent_to_a_sibling_origin(two_origins, r
         )
 
         # Now ask a DIFFERENT origin what Cookie header it receives.
-        echoed = page.evaluate(
-            f"""async () => {{
-                const r = await fetch("{API}/__mock/echo-cookie", {{
-                    credentials: 'include',
-                }});
-                return await r.json();
-            }}"""
+        #
+        # Through the browser context's own request API rather than
+        # `page.evaluate(fetch(...))`: the app's responses now carry a
+        # Content-Security-Policy (#3525) whose `connect-src` cannot list a
+        # throwaway localhost port, so a renderer-side fetch to the sibling
+        # origin is refused before dispatch, and the test would then fail
+        # for a reason that has nothing to do with cookies. Observed:
+        #
+        #   Connecting to 'http://127.0.0.1:9101/__mock/echo-cookie'
+        #   violates the following Content Security Policy directive:
+        #   "connect-src 'self'". The action has been blocked.
+        #   -> TypeError: Failed to fetch
+        #
+        # `ctx.request` shares the context's cookie JAR, which is where the
+        # `__Host-` host-scoping rule actually lives, so the OBSERVATION and
+        # the assertion's power are unchanged: a cookie ever emitted with a
+        # Domain attribute would still be attached to this sibling request.
+        # Positive control FIRST: prove the channel actually carries cookies to
+        # the sibling, so a "not in sent" result below cannot pass vacuously. A
+        # cookie scoped to the sibling's own host MUST come back.
+        ctx.add_cookies([{"name": "sibling_probe", "value": "1",
+                          "domain": "127.0.0.1", "path": "/"}])
+        control = ctx.request.get(f"{API}/__mock/echo-cookie").json().get("cookie") or ""
+        assert "sibling_probe=1" in control, (
+            f"control failed: the sibling request carried no cookie at all "
+            f"({control!r}) — the host-only assertion below would be vacuous"
         )
+
+        echoed = ctx.request.get(f"{API}/__mock/echo-cookie").json()
         sent = echoed.get("cookie") or ""
 
         # Record the observation so the result is visible either way.

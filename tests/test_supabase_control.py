@@ -693,6 +693,32 @@ class TestResolveApiKeyFailSoft:
                                    additive_tiers=[])
         assert row["deleted_at"] is None
 
+    def test_org_billing_state_reads_the_row_and_fails_soft(self, fake):
+        """#4640: the forward twin of org_id_for_stripe_customer — the portal
+        read and the checkout guard both consume it. Absent row → {}; a
+        pre-0012 schema degrades the additive columns to None while the 0006
+        base ``stripe_customer_id`` survives."""
+        from tortoise.supabase_control import org_billing_state
+
+        fake.tables["organizations"][0].update({
+            "stripe_customer_id": "cus_4640",
+            "subscription_status": "active",
+            "customer_email": "owner@example.com",
+        })
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] == "active"
+        assert state["customer_email"] == "owner@example.com"
+        # absent row → no customer anywhere
+        assert org_billing_state(fake, "no-such-org") == {}
+        # pre-0012 drift: the additive tier drops, the base column survives
+        fake.missing_columns = {"organizations": {
+            "subscription_status", "customer_email"}}
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] is None
+        assert state["customer_email"] is None
+
     def test_resolve_api_key_carries_suspension_state(self, fake):
         """O/I/T target 2: with the columns PRESENT, suspension state still
         resolves (enforcement is unchanged — REST 403 / MCP -32006 consume
@@ -1577,6 +1603,22 @@ class TestFakeControlPlane:
         assert cp.query("t", filters=[("b", "is", None)]) == [{"a": 1, "b": None}]
         assert cp.query("t", filters=[("a", "eq", 1)], select=["a"]) == [
             {"a": 1}, {"a": 1}]
+
+    def test_neq_excludes_null_like_sql(self):
+        """#4140: PostgREST `neq`/`<>` has SQL three-valued semantics — a
+        NULL column is NOT `<> value` (it is NULL → excluded). The Pythonic
+        `r.get(col) != value` would KEEP the NULL row, which is how a
+        `created_via=neq.bootstrap` filter could silently over-exempt a
+        legacy NULL durable key. Pinned directly so a revert of the
+        NULL-excluding semantics reddens here."""
+        cp = FakeControlPlane({"t": [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"},
+        ]})
+        # b == NULL never matches `b <> 'x'` (SQL: NULL <> 'x' is NULL)
+        assert cp.query("t", filters=[("b", "neq", "x")]) == []
+        assert cp.query("t", filters=[("a", "neq", 1)]) == [{"a": 2, "b": "x"}]
+        # ...and `col <> NULL` matches NOTHING (SQL: every comparison is NULL)
+        assert cp.query("t", filters=[("b", "neq", None)]) == []
 
     def test_gt_lt_filters_null_excluding(self):
         """#765 dialect: gt/lt mirror SQL NULL semantics — a NULL column
