@@ -38,6 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Mount, get_route_path  # #4490: route-class derivation
 
 import tortoise
 
@@ -2180,6 +2181,172 @@ class McpPathCanonicalizerMiddleware:
 # one and so wraps it from the outside; it never touches scope["path"], so it
 # cannot affect canonicalization order.)
 app.add_middleware(McpPathCanonicalizerMiddleware)
+
+
+# ── #4490: HOSTED-API COMPUTE (machine time) per org ─────────────────────
+#
+# #4490: Fly machine time is a flat shared cost with NO per-org driver. Nothing
+# recorded the server-side wall time or CPU time an org's traffic caused, and the
+# product's only request metrics have their sole call site inside the monitoring
+# server's own handler. This wrapper supplies the missing dimension for EVERY
+# route, REST and the mounted MCP app alike (a FastAPI mount is an ordinary
+# route, so this middleware sees it): a new endpoint cannot be born unmeasured and
+# no handler needs editing.
+#
+# WHERE IT SITS — inside `InFlightMiddleware` and `WaitBoundMiddleware`, NOT
+# outermost: `WaitBoundMiddleware` must stay outermost (#3834, pinned by
+# `test_transport_wait_bound.py::test_middleware_is_installed_outermost`) and the
+# in-flight gauge at index 1 is pinned by
+# `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`. Starlette's
+# `add_middleware` INSERTS at index 0, so registering here — after
+# `McpPathCanonicalizerMiddleware`, before `InFlightMiddleware` — lands this at
+# index 2, inside both.
+#
+# SITTING INSIDE THE BOUND IS WHAT MAKES THE FIGURE TRUTHFUL, not merely polite.
+# On a breach the bound ABANDONS (never cancels) the handler and DROPS its late
+# response; the work still happened. Being inside means this measures the work
+# the org actually caused, including a request whose response was dropped. That is
+# deliberately the OPPOSITE of the sibling egress dimension (#4491), which must
+# NOT credit bytes that never left: compute is the CPU that WAS burned, egress is
+# the bytes that were SENT.
+#
+# THE ORG COMES FROM `scope["state"]["org_id"]` — the SAME dict the auth
+# dependency writes into (already read at `WaitBoundMiddleware` below) — never a
+# client-supplied header or query param, so it cannot be spoofed. WHICH lanes
+# resolve one is a real limit, stated rather than implied: the API-KEY data-plane
+# lanes publish the org (`hosted_api.py:3809`, `:3927`); the SESSION-JWT lane
+# resolves one but deliberately does not publish it (publishing would also change
+# analytics — `AnalyticsMiddleware` reads it at `:1867`), and an MCP call's org
+# lives in a ContextVar this ASGI layer does not own. Those lanes are attributed
+# to `""` (honest unattributed), the same documented limit #5315 accepted.
+
+#: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
+#: request under one is admitted on the code-literal axis rather than falling to
+#: ``__unrouted__``. Boundary-aware matching (not a bare prefix test), so
+#: ``/mcpfoo`` is NOT attributed to the real ``/mcp`` class.
+_COMPUTE_DECLARED_PREFIXES = ("/mcp",)
+#: Exact paths of the app's PLAIN Starlette routes — CODE LITERALS that FastAPI
+#: does not stamp onto the scope (``APIRoute.matches`` sets ``scope["route"]``,
+#: plain ``Route.matches`` does not), so they would otherwise be ``__unrouted__``.
+_COMPUTE_DECLARED_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+
+
+def _route_describes(route, path: str) -> bool:
+    """Whether ``route`` is the route that served ``path``.
+
+    The route's OWN pattern is the arbiter, so path params still resolve to the
+    template (``/v1/points/{pid}`` describes ``/v1/points/abc``). ``re.match``, not
+    ``fullmatch``: the router matches with ``match`` against ``^…$``
+    (``starlette.routing.compile_path``), and Python's ``$`` also matches just
+    before a TRAILING NEWLINE, so ``fullmatch`` would put a matched route's request
+    on the fallback axis.
+
+    TOTAL: any failure to answer is ``False`` (fall back to ``__unrouted__``),
+    never an exception a caller could turn into a failed request.
+    """
+    regex = getattr(route, "path_regex", None)
+    if regex is None:
+        return getattr(route, "path", None) == path
+    try:
+        return regex.match(path) is not None
+    except Exception:  # noqa: BLE001, RUF100 - a label is never worth a 500
+        return False
+
+
+def _compute_route_class(scope, entry_path: str) -> str:
+    """The CODE-LITERAL route class a response is attributed to (#4490).
+
+    ``entry_path`` is ``starlette.routing.get_route_path(scope)`` taken BEFORE the
+    app runs — the request path minus ``root_path``, which is what a route's
+    ``path_regex`` is matched against. Reading ``scope["path"]`` instead would
+    break template matching under a server ``--root-path`` AND pick up a
+    ``Mount``'s prefix once the sub-app has run (``root_path`` is mutated as it
+    descends), collapsing the whole path dimension to ``__unrouted__``.
+
+    The label is ALWAYS a code literal (a matched route template, a declared
+    mount prefix, or a declared plain path) or the single constant
+    ``COMPUTE_UNROUTED``. NO substring of the request path is ever emitted, so
+    traffic can never add a path child — a stricter bound than the two-axis
+    request-derived split the sibling egress dimension needs.
+
+    A ``Mount`` is NEVER the serving template: its pattern is relative to the mount
+    and matches everything beneath it, so it would stand in for the whole
+    undeclared surface. The declared-prefix rule is the only route from a mount to
+    a label.
+    """
+    path = entry_path or ""
+    if path in _COMPUTE_DECLARED_PATHS:
+        return path
+    if "." not in path:
+        for prefix in _COMPUTE_DECLARED_PREFIXES:
+            if path == prefix or path.startswith(prefix + "/"):
+                return prefix
+    route = scope.get("route")
+    template = getattr(route, "path", None)
+    if (isinstance(template, str) and template
+            and not isinstance(route, Mount)
+            and _route_describes(route, path)):
+        return template
+    return _monitoring.COMPUTE_UNROUTED
+
+
+class ComputeAttributionMiddleware:
+    """Account server-side compute per org and route class (#4490).
+
+    Pure ASGI and cheap: two clock reads at entry, two at exit, one record per
+    response. No request/response objects, no buffering, no change to what is
+    sent, no I/O.
+
+    Primitives (bounds stated, not assumed):
+      * wall = ``time.perf_counter()`` — exact per-request seconds;
+      * CPU = ``time.thread_time()`` — the calling (event-loop) thread's user+sys
+        CPU. Exact for a request that ran alone; an UPPER bound under async
+        concurrency, where co-scheduled requests share the loop thread's CPU for
+        the same window; a LOWER bound where work is offloaded to a thread pool
+        (``asyncio.to_thread`` / sync endpoints), which this layer cannot see. A
+        cost signal, not a billing harness.
+
+    MEASUREMENT MUST NEVER BE A NEW FAILURE MODE: the whole record — including the
+    label derivation — is wrapped, and a fault is a DEBUG log, never a raised
+    request (the same fail-soft discipline as ``AnalyticsMiddleware`` and the
+    sibling egress wrapper).
+
+    WHAT IT DOES NOT COUNT, stated rather than assumed: work done outside the ASGI
+    stack (background tasks, the isolated offload pool); and it reads
+    ``scope["state"]["org_id"]`` AFTER the app returns, so an org resolved
+    mid-request is still attributed.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        # ``get_route_path`` (path minus ``root_path``) taken BEFORE the app runs:
+        # a ``Mount`` mutates ``root_path`` as it descends, so the same call at
+        # response time would no longer name the arrival path.
+        entry_path = get_route_path(scope)
+        wall0 = time.perf_counter()
+        cpu0 = time.thread_time()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            wall_s = time.perf_counter() - wall0
+            cpu_s = time.thread_time() - cpu0
+            state = scope.get("state")
+            org_id = state.get("org_id") if isinstance(state, dict) else None
+            try:
+                # Call-time attribute read (`_monitoring`), so the writer can be
+                # substituted; the record is never a new failure mode.
+                path_label = _compute_route_class(scope, entry_path)
+                _monitoring.record_compute(org_id, path_label, wall_s, cpu_s)
+            except Exception:
+                _logger.debug("compute attribution failed", exc_info=True)
+
+
+app.add_middleware(ComputeAttributionMiddleware)
 
 
 class InFlightMiddleware:

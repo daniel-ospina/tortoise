@@ -488,6 +488,246 @@ LOOP_LAG = Histogram(
 )
 
 
+# ── #4490: HOSTED-API COMPUTE (machine time) per org — the request-time dimension ──
+#
+# #4490: Fly machine time is a flat shared cost with NO per-org driver. Nothing
+# recorded the server-side wall time or CPU time an org's traffic caused, and the
+# only request metrics (``REQUEST_COUNT``/``REQUEST_LATENCY`` above) have their
+# sole call site inside the monitoring server's own handler, so they measure the
+# health/monitoring HTTP server, not product traffic. This adds the missing
+# dimension: per-org wall seconds, CPU seconds and request count on the product
+# surface.
+#
+# SHAPE — constrained by the #5045 consolidation comment, which asks for each cost
+# dimension to be a DECLARED dimension of one metering substrate rather than "a
+# sixth separate counter": ONE writer (``record_compute``) owns the unit (seconds,
+# count), the attribution key (org) and the route class, so a dimension registry
+# can enumerate it later without a call-site sweep, and no caller touches a metric
+# object directly (the #501/#3677 house shape). No endpoint, no quota, no cap, no
+# price — this measures; it does not price.
+#
+# BOUNDED CARDINALITY: both labels are capped and everything past the cap folds
+# into ONE shared child (``__other__``). Without the cap, unknown traffic — or a
+# fleet of orgs — grows the Prometheus child set without bound, which is a
+# scrape-cost bug, not a measurement.
+#
+# THE PATH AXIS IS ENTIRELY CODE-LITERAL. The caller (``hosted_api``) passes a
+# FastAPI route TEMPLATE (``/v1/points/{pid}``) or the single constant
+# ``COMPUTE_UNROUTED``; NO substring of the request path is ever admitted as a
+# label. That is a STRICTER bound than the sibling egress dimension's two-axis
+# split (#5315): there is no request-derived axis here at all, so traffic can
+# never add a path child. The ``COMPUTE_MAX_PATHS`` cap is a safety net for route
+# growth, not an attacker-reachable budget.
+#
+# WHY ``_admit_bounded_label`` IS GENERIC (#5045 convergence point): the parent's
+# recorded divergence is that every dimension brings its own cap, its own overflow
+# name and its own admission lifetime. This helper is the shared form — a
+# dimension supplies its own registry set and cap, and the semantics (persistent,
+# never-evicting, shared overflow child) are fixed in one place. Sibling PRs
+# #5315 (``_admit_egress_label``) and #5369 (``_bounded_org_labels``) carry
+# equivalents to fold in; recorded on #5045, not re-litigated here.
+COMPUTE_MAX_ORGS = 512
+#: Code-literal route labels. The live app carries ~130 templates, so 512 is
+#: headroom for new routes rather than a tight fit. NOT traffic-reachable.
+COMPUTE_MAX_PATHS = 512
+COMPUTE_OVERFLOW = "__other__"
+#: The one label for a request that matched no route. Deliberately NOT a path (a
+#: path always starts with ``/``), so a client cannot request a value that
+#: collides with this child and make routine folding indistinguishable from a
+#: real route class.
+COMPUTE_UNROUTED = "__unrouted__"
+
+#: Request count per org and route class — the denominator for wall/CPU seconds.
+COMPUTE_REQUESTS = Counter(
+    "tortoise_compute_requests",
+    "Hosted-API requests by org and route class (#4490)",
+    ["org", "path"],
+)
+#: Server-side wall seconds occupied by an org's requests, by route class. A
+#: Counter of seconds (not a Histogram) so the ORG axis and the bucket axis never
+#: multiply: the per-org figure is ``wall_seconds_total / requests_total``, and
+#: the org-free histogram below carries the distribution.
+COMPUTE_WALL_SECONDS = Counter(
+    "tortoise_compute_wall_seconds",
+    "Server-side wall seconds per request, by org and route class (#4490)",
+    ["org", "path"],
+)
+#: Server-side CPU seconds, by org and route class. Read via ``time.thread_time``
+#: at the middleware (see ``hosted_api.ComputeAttributionMiddleware``): exact when
+#: a request runs alone, an UPPER bound under async concurrency (co-scheduled
+#: requests share the loop thread's CPU for the same window), and a LOWER bound
+#: where work is offloaded to a thread pool (invisible to this layer). A cost
+#: signal, not a billing harness.
+COMPUTE_CPU_SECONDS = Counter(
+    "tortoise_compute_cpu_seconds",
+    "Server-side CPU seconds per request, by org and route class (#4490)",
+    ["org", "path"],
+)
+#: The request-duration DISTRIBUTION by route class ONLY — no org label, so the
+#: org axis and the bucket axis never multiply (mirrors the sibling egress
+#: dimension's org-free histogram). Explicit buckets past the default 10 s tail:
+#: the hosted surface carries multi-second handlers and the transport wait bound
+#: is on that order, so the interesting tail must not collapse into ``+Inf``.
+COMPUTE_REQUEST_SECONDS = Histogram(
+    "tortoise_compute_request_seconds",
+    "Server-side wall seconds distribution by route class (#4490)",
+    ["path"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0),
+)
+
+#: Labels admitted so far, per axis. Membership IS the cap registry, so a warm
+#: label costs one set lookup with NO lock (the hot path); the lock is taken only
+#: while ADMITTING a new label.
+_COMPUTE_ORGS: set[str] = set()
+_COMPUTE_PATHS: set[str] = set()
+_COMPUTE_LOCK = threading.Lock()
+
+#: Characters replaced in an admitted label: C0, DEL and the C1 range (U+0085 NEL
+#: and U+009B CSI are line-break / escape introducers to Unicode-aware readers),
+#: plus U+2028/U+2029 — the SAME CLASS ``mcp_auth._sanitize_for_log`` covers. That
+#: one ESCAPES for a log sink; this one REPLACES with ``?``, because a label is a
+#: series KEY and not splitting a line matters more than the value's readability.
+_COMPUTE_LABEL_TRANSLATE = str.maketrans({
+    **{c: "?" for c in (*range(0x20), 0x7F, *range(0x80, 0xA0))},
+    0x2028: "?",
+    0x2029: "?",
+})
+
+
+def _compute_safe_label(label: str) -> str:
+    """Make a label safe to EMIT (mirrors the class ``mcp_auth._sanitize_for_log``
+    covers, but replaces rather than escapes — a label is a series key).
+
+    Control characters are replaced: a reader that splits on line breaks would
+    drop or garble the series. A label that cannot be UTF-8 encoded is repaired,
+    because ``generate_latest()`` encodes label values, so ONE lone surrogate would
+    make the whole ``/metrics`` endpoint raise for the process lifetime, blinding
+    every alert rather than this one dimension. Not reachable from the HTTP path
+    today (uvicorn replaces invalid bytes; org ids are charset-validated), and this
+    single writer is the only place that can enforce it.
+    """
+    label = label.translate(_COMPUTE_LABEL_TRANSLATE)
+    try:
+        label.encode("utf-8")
+    except UnicodeEncodeError:
+        return label.encode("utf-8", "replace").decode("utf-8")
+    return label
+
+
+def _admit_bounded_label(label: str, seen: set[str], cap: int,
+                        overflow: str = COMPUTE_OVERFLOW) -> str:
+    """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
+
+    The shared bounded-admission form for every per-org dimension (#5045). Additive
+    by construction: an already-admitted label never locks (and never changes); a
+    new label past the cap becomes ``overflow`` so the metric stays bounded rather
+    than raising or dropping the whole record. Admission is first-come and an
+    admitted label is never evicted — eviction either drops accumulated cost or
+    grows the child set without bound, and choosing between those is the metering
+    substrate's decision (#5045), not this counter's.
+    """
+    if label in seen:
+        return label
+    with _COMPUTE_LOCK:
+        if label in seen:
+            return label
+        if len(seen) >= cap:
+            seen.add(overflow)
+            return overflow
+        seen.add(label)
+        return label
+
+
+def record_compute(org: str | None, path: str,
+                   wall_s: float, cpu_s: float = 0.0) -> None:
+    """Record one hosted request's server-side compute for ``org`` on ``path``.
+
+    THE single writer for the compute dimension (#4490): the caller
+    (``hosted_api.ComputeAttributionMiddleware``) supplies what it measured — the
+    org, the route class (a code literal), the wall seconds and the CPU seconds —
+    and never touches a metric object, so the unit and the attribution key stay in
+    one place.
+
+    ``org`` may be ``None``/empty: a request that never resolved an org (an
+    unauthenticated 401, a health probe, a session-JWT or MCP call whose org this
+    ASGI layer cannot see) is attributed to the empty label — an honest
+    "unattributed" child rather than an invented org id.
+
+    ``wall_s``/``cpu_s`` are clamped at 0: a negative duration is impossible data,
+    and a negative increment would corrupt a monotonic counter.
+    """
+    org_label = _admit_bounded_label(
+        _compute_safe_label(org or ""), _COMPUTE_ORGS, COMPUTE_MAX_ORGS)
+    path_label = _admit_bounded_label(
+        _compute_safe_label(path or COMPUTE_UNROUTED), _COMPUTE_PATHS,
+        COMPUTE_MAX_PATHS)
+    wall = max(0.0, float(wall_s))
+    cpu = max(0.0, float(cpu_s))
+    COMPUTE_REQUESTS.labels(org=org_label, path=path_label).inc()
+    COMPUTE_WALL_SECONDS.labels(org=org_label, path=path_label).inc(wall)
+    COMPUTE_CPU_SECONDS.labels(org=org_label, path=path_label).inc(cpu)
+    COMPUTE_REQUEST_SECONDS.labels(path=path_label).observe(wall)
+
+
+def _sum_compute_by_org(metric) -> dict[str, float]:
+    """Sum one org-labelled compute counter's samples, keyed by org.
+
+    Derived from ``collect()`` rather than a second tally, so a snapshot cannot
+    drift from the metric. The ``_created`` series is skipped so a creation
+    TIMESTAMP can never be summed as a duration/count.
+    """
+    totals: dict[str, float] = {}
+    for family in metric.collect():
+        for sample in family.samples:
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            org = sample.labels.get("org")
+            if org is None:
+                continue
+            totals[org] = totals.get(org, 0.0) + float(sample.value)
+    return totals
+
+
+def compute_by_org() -> dict[str, dict[str, float]]:
+    """In-process snapshot of the compute dimension keyed by org (#4490 indicator 3).
+
+    The readable form of the metric, for a person or a test — no dashboard, no UI.
+    ``/metrics`` carries the same figure as Prometheus text (e.g.
+    ``sum by (org) (rate(tortoise_compute_wall_seconds_total[5m]))``); this is the
+    direct read. The ``""`` key is the unattributed share and ``__other__`` the
+    folded tail of the org cap; both are INCLUDED, so the snapshot always
+    reconciles to the whole measurement.
+    """
+    requests = _sum_compute_by_org(COMPUTE_REQUESTS)
+    wall = _sum_compute_by_org(COMPUTE_WALL_SECONDS)
+    cpu = _sum_compute_by_org(COMPUTE_CPU_SECONDS)
+    return {
+        org: {
+            "requests": requests.get(org, 0.0),
+            "wall_seconds": wall.get(org, 0.0),
+            "cpu_seconds": cpu.get(org, 0.0),
+        }
+        for org in sorted(set(requests) | set(wall) | set(cpu))
+    }
+
+
+def _reset_compute() -> None:
+    """Test seam: forget every admitted label and this process's series.
+
+    Clears the cap registries as well as the children — leaving the registries
+    behind would make a following test see labels "already admitted" that no
+    longer exist in the metric, which is exactly the drift the cap must not have.
+    """
+    with _COMPUTE_LOCK:
+        _COMPUTE_ORGS.clear()
+        _COMPUTE_PATHS.clear()
+    COMPUTE_REQUESTS.clear()
+    COMPUTE_WALL_SECONDS.clear()
+    COMPUTE_CPU_SECONDS.clear()
+    COMPUTE_REQUEST_SECONDS.clear()
+
+
 def register(sdk) -> None:
     """Wire SDK so /health can check FalkorDB connectivity + graph size."""
     global _sdk

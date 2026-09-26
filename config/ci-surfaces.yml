@@ -228,6 +228,12 @@ surfaces:
   # REPLACES the `core` fallback, so a core-only registration would never run
   # on an api-only PR. Same #2938 dual-membership convention.
   - test_cohort_cost_cap.py
+  # #4490: hosted-API compute (machine time) per org. Dual-registered with `core`:
+  # the middleware + route-class derivation live in tortoise/hosted_api.py (`api`
+  # SOURCE_PATTERN) while the metric family/writer/reader live in
+  # tortoise/monitoring.py (`core`) — a change to either shared file must run it
+  # (same #2938 dual-membership convention as test_cohort_cost_cap.py above).
+  - test_compute_attribution.py
   # #4194: the turn-write embedding path. Dual-registered with `core` (the
   # SDK capture loop owns there) and `eval` (tortoise/embeddings.py selects
   # eval) because the hosted copy of the same loop lives in the api-owned
@@ -925,6 +931,10 @@ surfaces:
   # on — a sdk.py-only PR must run it (dual-registered with battery).
   - test_battery_parity_vector_guard.py
   - test_monitoring.py
+  # #4490: the per-org compute dimension's metric family/writer/reader live in
+  # tortoise/monitoring.py — a monitoring.py-only PR (which maps to `core`) must
+  # run this file. Dual-registered with `api` (the middleware is in hosted_api.py).
+  - test_compute_attribution.py
   - test_navigation.py
   # #5080: the D12/O4 never-across boundary. Both write-path fold sites — the
   # against-store classifier and the in-capture band — resolve it from one
