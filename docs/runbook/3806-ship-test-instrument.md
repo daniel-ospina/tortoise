@@ -201,6 +201,97 @@ deliberately not this one.
 | `reason` | The failure CLASS — empty iff `verdict == "passed"`. `instrument_error` (exit 3, says nothing about the product) vs `server_did_not_observe` / `positive_not_shown` / `positive_not_attempted` / `walk_incomplete` / `walk_failed` (exit 1) |
 | `verdict` | `passed` / `failed: …` / `incomplete: …` / `instrument-error: …` |
 
+**Redaction.** The record is redacted at the ONE serializer, as a STRUCTURE
+`asdict` produces and BEFORE `json.dumps`, so every recorded string passes the redaction
+walk before it is serialized and the document is valid JSON by construction
+(#5002). Redacting the structure rather than only each string is
+what lets the tool see a structured PAIR (`{"access_token": "…"}`): a dict entry
+whose KEY is in the secret vocabulary has its value redacted whatever its type, a
+secret's **value** in free text is redacted (never merely its key name), and a
+bare `tt_`/`tk_` key or JWT is removed. That vocabulary is deliberately narrow
+(`password`, `*token`, `api_key`, `secret`, `id_token`, `signature`, …): a name
+like `code` or `key` is not one, because a recorded MCP/HTTP body is a JSON
+document whose numeric `{"code": …}` (JSON-RPC) is diagnostic, and `session` is
+an `Observation` field (the session record) rather than a credential. Those
+three are still redacted wherever a `?`/`&`/`#` proves a query parameter, which
+is the carrier the issue is about; a BARE `code=`/`key=`/`session=` with no
+query lead and no URL shape is a stated gap, as is a bare signer-chosen name.
+Scrubbing before serialization
+also means a
+value that is ITSELF a JSON body still holds real quotes, so its key/value pairs
+are redactable — after `json.dumps` they would be escaped and invisible — and an
+embedded body stays parseable (`{"token": null}` becomes
+`{"token": "[REDACTED]"}`, not a bare marker that would break it). Every
+recorded URL — the per-step visited URL, the `signup_responses` record inside a
+step's `detail` (a JSON string, so a field-shaped sweep would miss it), a URL
+inside `extra`, and one inside an exception message — has its **query string and
+fragment DROPPED WHOLE** (userinfo too), keeping scheme/host/path so the record
+still says where the flow landed. That applies to every URL SHAPE: absolute,
+protocol-relative (`//host/…`), root/path-relative (`/cb?…`), and non-http
+(`ftp://…`) — the whole query goes, so a parameter name the signer chose
+(`X-Amz-Signature`) is covered on any URL shape whose value the matcher can
+CONSUME, without a name list knowing it, and the named list also catches a name
+that merely ENDS in one of its words (`X-Amz-Signature` again, via `signature`)
+— a signer name we do not know whose value
+begins on a character the matcher stops at (`<`, `\`, whitespace) is a stated
+gap — and so is a signer name outside the vocabulary (`X-Goog-Credential`) either
+BARE with no URL shape or on a shape whose value starts on one of those stop
+characters (the same name on an ordinary URL shape is covered: its whole query
+is DROPPED, which is why the name's unknownness is not itself the gap). A bare
+`?code=…`/`#session=…` with no URL shape, and a quoted query value
+(`?code="…"`), are the cases the named list (`code`, `token`, `access_token`,
+`id_token`, `session`, `key`, `signature`, …) still covers. A quoted value whose first character is a *structural* one (`]`, `}`, or a SECOND
+quote — `?code="CANARY` itself is covered) with no closing quote is a stated gap of the same class
+(the named pass covers its own vocabulary), and so is a query carried in the
+PATH percent-encoded (`/cb%3Fcode%3D…`), which is a path to `urlsplit` and so is
+never classified as a query at all. A quote after `=` that is the enclosing
+string's OWN CLOSE is not a value: it gets a marker and the quote stays where it
+belongs, so a valueless pair cannot be read across the JSON structure that
+follows it (`{"error": {"url": "https://h/cb?code="}, "id": 2}` stays
+parseable). An UNTERMINATED quoted value (a cut body) is taken to its enclosing
+structure and not to its first internal space — for a token-led run and a
+whitespace/delimiter-led one alike, so a credential's tail cannot survive — and the run stops at a following `name<sep>` (behind a query lead too), so
+owning whitespace cannot swallow the NEXT pair's name and strand its value
+beside the marker; that
+branch is tried only after both TERMINATED ones, so it can never pre-empt a value
+that does close. Whether a `:`-scalar sits at a JSON value position is read at
+the VALUE, not at the key match's start — a key match can begin inside a string
+(a name SUFFIX like `secret` in `"client_secret"`) and still precede a real
+value, and judging by the match start emitted a BARE marker into a JSON value
+position, which is valid JSON in and invalid JSON out. The closer guard treats a
+`:` after the closing quote as JSON SEPARATOR, not as a value, and a container
+DIRECTLY after the structure (`["?token=", {"a": 1}]`) as structure too —
+while a bracket value straight after the closer stays a value the bracket pass
+empties. A dropped part
+survives as `?[REDACTED]` / `#[REDACTED]`, so the record still discloses that the
+redirect carried one. A value the matchers would TRUNCATE at (a
+backslash, an angle bracket, `)`, whitespace) is redacted by the named pass,
+which runs ahead of them on the raw text, so a truncated URL cannot leave its
+value behind. A BRACKETED value is EMPTIED by a
+balanced, string- and escape-aware scan (`["tok"]` → `[]`, `{"v": 1}` → `{}`,
+`[["tok"]]` → `[]`, and an escaped `[\"tok\"]` too), so a list- or
+object-valued secret cannot ride through a recorded body. A regex cannot do
+this — nesting is not regular, and a single-level match let a NESTED list reach
+the artifact (review cycle 12) — and the scanner empties rather than quotes,
+which keeps an embedded body parseable. The pass bounds its own input before running (a
+browser/exception-controlled field must not stall the walk — the bracket scan
+is single-pass, and an UNMATCHED bracket ends it), the caller's cap is applied
+AFTER the redaction so a cut cannot leave a container unterminated ahead of its
+value, and an unterminated bracket is emptied to the end of a broken field — or,
+when the field IS a JSON document (its brackets live inside STRINGS), only to the
+close of the string the bracket sits in, so a body that was fine stays parseable
+rather than left to a pass that cannot match it. A value ends
+at the `&`/`#` that STARTS the next parameter or the fragment: the text after
+those two is a NAME, not this value, so it is left alone (a fragment that carries
+`name=value` is redacted through the `#` lead). The other delimiters a query
+value may contain (`,`, `;`, `:`) are CONSUMED with it, which redacts the
+diagnostic tail of a bare parameter rather than leaking a value that might
+follow it.
+Consuming structure would eat the JSON a value sits in, which the
+structure-survival tests forbid. The stdout summary redacts each field/structured value
+**independently of the write**, so a run whose artifact write failed still
+cannot leak on the CI log.
+
 `verdict` is `passed` only when **both** directions are proven: nothing was
 claimed before the server observed the write, the server *did* observe it
 (`harness-connected` filed), and the screen *showed* it. A hidden connection is
@@ -216,7 +307,7 @@ product.
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) — **plus the bound's own set**: the wedge (context, browser, and `pw.stop()`), the raising closes, the healthy zero-signal run, the exact-pid/`driver_absent`/stale-start-time/reused-ppid cases, the ladder's rungs and its at-most-one-of-each, the exactly-one-entry count, the two no-browser paths, and the killed-inside-the-window document — plus the **hardening set**: a healthy run's margin over the measured teardown with no signal, the abandon path's printed summary, its write-conditional `observation →` line, its shared residue/browser warnings and its unconditional exit, a signal seam that raises, a walk that raises before it settles writing no document, the locale-dependent `%c` start time (four-token, six-token and space-padded renderings all agree with the re-check by construction), the refusal of a non-positive pid, the absolute `ps` path and its budgeted timeout, and the `ps`-**output** seam pins that keep the enumerator's correctness off the venue (a marked child winning over an earlier unmarked one, a marker-matching process that is not this process's child being skipped, a pid whose identity re-read names another parent being refused, and BOTH `ps` reads asking for unlimited width — a host truncates the last column, which is what cut the marker on the CI runner, #4956) — with the ONE live-process-table test retrying the real enumeration inside a short bound and re-reading the whole identity, so a venue whose `ps` renders the table differently cannot decide whether the instrument is correct — the symlink-refusing atomic write, and the scrubbed free text — every one reading `observation.json` **from disk** and asserting the recorded value — **plus the acceptance map**, which names for each of the nine criteria the test that proves it and pins the `_walk` exit count at 11, so a criterion cannot lose its covering test unnoticed | 216 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it — **plus the teardown control set**: each threat class of the destructive surface (pre-existing org, foreign name, ambiguity, unreadable baseline, unreadable confirmation, ambiguous candidate, refused delete, residue-vs-clean, verdict conservation both ways, single-writer funnel, every `_finalize` exit executed and status-asserted) — **plus the bound's own set**: the wedge (context, browser, and `pw.stop()`), the raising closes, the healthy zero-signal run, the exact-pid/`driver_absent`/stale-start-time/reused-ppid cases, the ladder's rungs and its at-most-one-of-each, the exactly-one-entry count, the two no-browser paths, and the killed-inside-the-window document — plus the **hardening set**: a healthy run's margin over the measured teardown with no signal, the abandon path's printed summary, its write-conditional `observation →` line, its shared residue/browser warnings and its unconditional exit, a signal seam that raises, a walk that raises before it settles writing no document, the locale-dependent `%c` start time (four-token, six-token and space-padded renderings all agree with the re-check by construction), the refusal of a non-positive pid, the absolute `ps` path and its budgeted timeout, and the `ps`-**output** seam pins that keep the enumerator's correctness off the venue (a marked child winning over an earlier unmarked one, a marker-matching process that is not this process's child being skipped, a pid whose identity re-read names another parent being refused, and BOTH `ps` reads asking for unlimited width — a host truncates the last column, which is what cut the marker on the CI runner, #4956) — with the ONE live-process-table test retrying the real enumeration inside a short bound and re-reading the whole identity, so a venue whose `ps` renders the table differently cannot decide whether the instrument is correct — the symlink-refusing atomic write, the scrubbed free text and recorded URLs, and the redaction hardening set (a value-less secret param that must not eat the following JSON key, the bounded non-superlinear pass, a double-serialized `detail` that must stay valid JSON on disk, a quoted value followed by punctuation outside the delimiter set, the malformed-URL fallback's userinfo strip and marker, the structural-key vocabulary's deliberate narrowness, a DOUBLED-backslash escape that must still be a quoted value, a non-string value under a secret key that must keep an embedded body parseable, a free-text `=` scalar that must NOT gain quotes, the non-idempotent `?code=/&//` shapes, a value the URL matchers TRUNCATE at (backslash, angle bracket, `)`, whitespace — the named pass runs ahead of them and tolerates the truncating character), a LIST/OBJECT value under a secret key that must be EMPTIED rather than quoted, a value-less param that must not eat a JSON array's `]`, a NESTED and an ESCAPED bracketed value under a secret key read back **from `observation.json`** (the fail-open case a single-level match leaves whole), a value that merely sits in front of a literal `[REDACTED]` (which must still be redacted), the derived query-name list (`sig`), the GAP before a quoted query value, an UNTERMINATED delimiter-led quoted query value (and the JSON shapes that must NOT be mistaken for one), a `:`-scalar outside a JSON value position, and the bracket that ends its string, a field CUT mid-value and a detail past the 40 000-char bound (both of which must still lose the credential, while an unmatched bracket in PROSE leaves a valid body parseable while a TRUNCATED one still loses the credential, a quoted value that STARTS on a delimiter or whitespace and an UNTERMINATED one that continues past an internal space (token-led and whitespace-led alike — its tail must not survive), the quote that CLOSES the string a valueless pair sits in (`{"error": {"url": "https://h/cb?code="}, "id": 2}` must stay parseable), and a `:`-scalar inside a recorded body's string that must NOT gain quotes — while a scalar whose KEY match begins inside a string (the walk matched a name SUFFIX, `{"  client_secret": 5}`) must still gain them, read from the VALUE position rather than the match start — plus a `:` after a key's closing quote and a nested container right after the structure (both must stay valid JSON), an escaped key that must not leave the value position UNBOUND, and a bracketed value straight after a closer that the bracket pass must still empty), a bracket-dense field that must stay linear, and the VALUE-POSITION boundary — a `&` starts the next parameter and a `#` the fragment, so the text after either is a name, while a fragment carrying `name=value` is still redacted through the `#` lead) — the artifact-writing tests reading `observation.json` **from disk** and asserting the recorded value, while the matcher and bounding tests exercise `_scrub_text` directly — **plus the acceptance map**, which names for each of the nine criteria the test that proves it and pins the `_walk` exit count at 11, so a criterion cannot lose its covering test unnoticed | 249 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
 Both suites execute the instrument's **real decision code** (`judge`, the

@@ -698,19 +698,110 @@ def _git_sha() -> str:
         return ""
 
 
-# Redact the VALUE, not merely the key name: a redaction that leaves
-# `"password":"hunter2"` as `"[REDACTED]":"hunter2"` leaks the credential
-# while looking scrubbed (caught by tests/test_ship_test_onboarding.py).
+# The key names whose VALUE is a credential, wherever a key/value pair appears
+# — free text or a structured dict. `_QUERY_SECRET_PARAMS` is the WIDER
+# vocabulary used once a `?`/`&`/`#` proves a query parameter; this list is the
+# narrower one safe to apply to ARBITRARY text and to a dict KEY, where a name
+# like `code` would hit `status_code=200` or a JSON-RPC `{"code": -32602}`.
+# The unambiguous query names are listed in BOTH, so a structured
+# `{"id_token": …}` is redacted too. `session` is deliberately NOT here: it is
+# an `Observation` FIELD (the session record), so a structural `session` key is
+# the record itself, not a credential — its query carrier is still covered by
+# the whole-query drop and by `_QUERY_SECRET_PARAMS`.
+# STATED BOUNDARY: a value ends at whitespace, a `,`/`&`/`}` delimiter, a
+# quote, a backslash, or a STRUCTURED value's `{`/`[` (handled by the
+# structural pass, not by swallowing the value as text). A credential
+# containing one of those raw characters
+# (invalid in a URL query anyway) is therefore only PARTIALLY dropped. The
+# alternative — consuming them — is what eats the JSON structure these values
+# are embedded in, which is worse: it is caught by the "structure survives"
+# tests, and the tolerated residue differs only in the value's tail.
+# The issue's query-parameter names that are NOT also free-text key names: a
+# `?code=`/`&key=`/`#session=` names a credential carrier, while the same word
+# inside a recorded body may be diagnostic (`{"code": …}` — JSON-RPC) or a
+# recorded field (`session`), so these are only redacted behind a query lead.
+# ...derived from the QUERY vocabulary below, minus the free-text key names,
+# so a name can never be in one and missing from the other (review cycle 15:
+# `sig` was).
+_SECRET_KEY_NAMES = ("password", "passwd", "secret", "access_token", "refresh_token",
+                     "session_token", "id_token", "signature",
+                     "api_key", "apikey", "token")
+# A bracketed VALUE in a serialized body, JSON-SHAPED: its content is a run of
+# non-quote characters or COMPLETE quoted strings. A lone quote — the enclosing
+# JSON string's own close — can therefore never be swallowed, while a realistic
+# value (`["tok"]`, `{"access_token": ["tok"]}`) still matches whole.
+_STRUCT_VALUE = (
+    r'(?:\[(?:[^\[\]"\\]|"(?:[^"\\]|\\.)*")*\]'
+    r'|\{(?:[^{}"\\]|"(?:[^"\\]|\\.)*")*\})'
+)
+
+# A run that OWNS its internal whitespace must not cross into the NEXT pair:
+# a whitespace-delimited `name<sep>` STARTS a new credential, and swallowing
+# it left that pair's VALUE verbatim beside the marker (`id_token:"5 x
+# token='CANARY'` leaked CANARY). The lookahead ends the run at the next
+# pair, so the pass below still sees it.
+_KEY_PAIR_AHEAD = (r"(?!\s[?&#]?(?:" + "|".join(_SECRET_KEY_NAMES)
+                   + r")\s*[:=])")
 _SECRET_KEY_RE = re.compile(
-    r'(?P<key>["\']?(?:password|passwd|secret|access_token|refresh_token|session_token'
-    r'|api_key|apikey|token)["\']?)'
+    r'(?P<key>(?:\\{0,32}["\'])?(?:' + "|".join(_SECRET_KEY_NAMES) + r')(?:\\{0,32}["\'])?)'
     r'(?P<sep>\s*[:=]\s*)'
     # A quoted value consumes to its MATCHING quote — pair-aware, so a value
-    # containing the other quote char ("pa'ss word") still reaches its close;
-    # JSON-escaped quotes included. An unquoted value stops at a delimiter.
-    r'(?:(?P<q>["\'])(?:(?!(?P=q))[^\\]|\\.)*(?P=q)|[^\s,}&]+)',
+    # containing the other quote char ("pa'ss word") still reaches its close.
+    # Only the FIRST character is delimiter-restricted; a value may hold a
+    # `;`/`:`/`)`/`]`/`{`/`[` in its TAIL — HEAD consumed those, so stopping at
+    # them was a fail-open REGRESSION (`password=x[S3cret` left the tail).
+    r'(?:'
+    r'(?P<esc>\\{0,32})(?P<q>["\'])'
+    r'(?P<tval>(?:(?!(?P=q))[^\\,;:)\]}&"\'\s]|\\.)'
+    r'(?:(?!(?P=q))[^\\]|\\.)*)(?P=esc)(?P=q)'
+    # ...or a TERMINATED quoted value whose FIRST character is a delimiter or
+    # whitespace (`{"password": " S3CRET"}`): the branch above cannot start on
+    # one, so without this the value was left verbatim (HEAD redacted it). It is
+    # lower priority than the pair-aware branch. The lookahead keeps the
+    # VALUELESS-key shape (`?token=", "status": 200`) off it: a RUN of
+    # delimiters, because a CLOSE or separator before it (`?token="}, "id": 2}`)
+    # is the same shape, and reading the pair's closing quote as the value's
+    # opener ate the following key and left an unparseable body.
+    r'|(?P<esc2>\\{0,32})(?P<q2>["\'])(?!(?:\s*[,;:}\]\{]\s*)+["\'])'
+    r'(?P<tval2>(?:(?!(?P=q2))[^\\]|\\.)*)(?P=esc2)(?P=q2)'
+    # ...or an UNTERMINATED quote (a truncated URL, an exception message) is
+    # still a value. This branch sits AFTER both terminated ones — an
+    # unterminated read must never pre-empt a value that DOES have a closer
+    # (`{"access_token": " a\\q7"}` was cut at the backslash when it came
+    # first), and no "no-closer-here" lookahead can enforce that, because the
+    # closer may be several escape-units away. `oq` takes a non-empty
+    # token-shaped run, `oq2` a whitespace/delimiter-led one; without them a
+    # pair whose value began on a space and had NO close (`{"password":
+    # " SECRET77`, a cut body) matched no branch at all and survived verbatim.
+    # The runs hold NO closing quote (that is branch 2's job) and take INTERNAL
+    # whitespace: a pair committed to being unterminated owns everything to the
+    # enclosing structure, and stopping at the first space left the value's tail
+    # behind (`{"password": ", hunter2` kept `hunter2`).
+    r'|(?P<esc3>\\{0,32})(?P<q3>["\'])'
+    r'(?:(?P<oq>[^\s,;:)\]}&"\'\\{[]+(?:' + _KEY_PAIR_AHEAD
+    + r'[^,}&"\'\\])*)'
+    r'|(?P<oq2>(?!\s*[,;:}\]{]\s*["\'])\s*[^"\'}\]&\\]+))'
+    # ...a bracketed value is EMPTIED (`[]`/`{}`) rather than quoted: the value
+    # goes, and the marker cannot be quoted here without corrupting an enclosing
+    # JSON string. ...and an unquoted value treats a backslash-escape as a UNIT,
+    # so a `\"` inside it neither ends it at the quote nor loses the escape that
+    # keeps the serialized string balanced.
+    r'|(?P<struct>' + _STRUCT_VALUE + r")"
+    r'|(?P<plain>(?:\\[^"\']|[^\s,}&"\'\\{[])+(?:[^\s,}&"\'\\]*)?)'
+    r')',
     re.I,
 )
+# The same vocabulary as a WHOLE key name, for a structured dict entry: a value
+# under `{"access_token": …}` is a credential even though no `=`/`:` sits
+# between them in any single string.
+_SECRET_KEY_NAME_RE = re.compile(
+    r"^(?:" + "|".join(_SECRET_KEY_NAMES) + r")$", re.I)
+
+
+def _is_secret_key(key) -> bool:
+    """Does this dict KEY name a credential, whatever its value's type?"""
+    return (isinstance(key, str)
+            and bool(_SECRET_KEY_NAME_RE.match(key.strip().strip("\"'"))))
 # A bare credential by shape (no accompanying key): a pasted tt_/tk_ key or JWT.
 # tk_ is a REAL minted prefix (tortoise/auth.py::API_KEY_PREFIXES) — redacting
 # only tt_ left scoped/graph keys in the artifact.
@@ -718,18 +809,728 @@ _SECRET_TOKEN_RE = re.compile(
     r"(?:tt|tk)_[A-Za-z0-9_]{8,}"
     r"|ey[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+)?"
 )
+# A JSON SCALAR — a number, `null`, `true`, `false`. An unquoted value under a
+# sensitive key may be one of these inside a recorded JSON BODY, where the
+# replacement must still be a valid JSON value for that body to re-parse.
+_JSON_SCALAR_RE = re.compile(
+    r"(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|null|true|false)\Z", re.I)
 
 
-def _redact_secret_value(match: re.Match) -> str:
+
+
+
+
+def _quote_states(text: str) -> list:
+    """``states[i]`` = the quote holding position ``i`` (None outside), in ONE pass.
+
+    The per-match scan this replaces was O(n) PER MATCH, so a quote-dense field
+    — browser- and exception-controlled — was quadratic: a 40 KB
+    `'token="' * N` field took ~45 s, which is a stall vector the instrument
+    cannot afford. Built once per pass, a lookup is O(1), and the semantics are
+    exactly the scan's: ``states[i]`` is the state BEFORE consuming ``text[i]``,
+    with a backslash-escape run kept inside the string it sits in.
+    """
+    n = min(len(text), _SCRUB_TEXT_LIMIT)
+    states: list = [None] * (n + 1)
+    quote = None
+    i = 0
+    while i < n:
+        ch = text[i]
+        states[i] = quote
+        if ch == "\\":
+            if i + 1 <= n:
+                states[i + 1] = quote
+            i += 2
+            continue
+        if quote is None:
+            if ch in "\"'":
+                quote = ch
+        elif ch == quote:
+            quote = None
+        i += 1
+    if n <= len(text):
+        states[n] = quote
+    return states
+
+
+def _enclosing_quote(text: str, pos: int):
+    """The quote character of the string ``pos`` sits inside, or None.
+
+    One forward scan from the start of the field, because a quote's meaning is
+    decided by the string it sits in and by the field's own escaping: a `\\"`
+    is CONTENT, a bare `"` opens or closes. A fixed-width lookbehind cannot see
+    that. Kept for a single lookup; a pass over many positions uses
+    `_quote_states` once, which is the SAME state at O(1) per lookup.
+    """
+    return _quote_states(text[:pos])[-1] if pos > 0 else None
+
+
+def _at_json_value_position(match: re.Match, states=None) -> bool:
+    """Does this match sit where a JSON VALUE may sit?
+
+    The same `key: scalar` text means two different things: in `{"token": null}`
+    the marker must be a STRING (a bare `[REDACTED]` is not valid JSON), while in
+    `{"note": "retried, token: 3 times"}` — a `:` inside a recorded body's
+    STRING — adding quotes closes the string early and breaks the body. The tell
+    is therefore twofold: the pair must NOT sit inside the field's own quoting,
+    and the character before the KEY must be `{`, `[` or `,` (behind any
+    quoting/escaping). An ESCAPED key quote (`{\\"token\\": null}`) belongs to a
+    body that was itself serialized as a string, so it is judged by the walk
+    alone: its escapes are the inner document's, and skipping them reaches the
+    inner structure.
+    """
+    # The VALUE's position, bound unconditionally: the value-anchored fallback at
+    # the end of this function runs for an ESCAPED key too, and binding `at`
+    # inside the branch below left it unbound there — an `UnboundLocalError` on
+    # valid JSON, which aborted the artifact write, the opposite of the guarantee
+    # this pass exists to keep.
+    at = (match.start("plain") if match.group("plain") is not None
+          else match.start())
+    if not (match.group("key") or "").startswith("\\"):
+        # The string state is read at the VALUE, not at the match start: a key
+        # match can begin INSIDE a string and still carry a real JSON value
+        # (`{" secret": null}` — the walk matches `secret"` inside the key
+        # string, but the scalar sits after that string closed). Judging by the
+        # match start returned False there and emitted a BARE marker into a JSON
+        # value position — valid JSON in, invalid JSON out. What the state has
+        # to distinguish is free TEXT (`"retried, token: 3 times"`, where the
+        # scalar is inside the string and quotes would close it early).
+        if states is not None:
+            here = states[at] if at < len(states) else None
+        else:
+            here = _enclosing_quote(match.string, at)
+        if here:
+            return False
+    i = match.start() - 1
+    while i >= 0 and match.string[i] in " \t\r\n\\\"'":
+        i -= 1
+    if i < 0 or match.string[i] in "{[],":
+        return True
+    # A key match can begin INSIDE a string and still precede a real JSON value —
+    # `{"  client_secret": 5}` matches `secret"` within the key string, so the
+    # position is not a key START and the walk above stops on `_`. Read the pair
+    # from the VALUE instead: a `:` immediately before it, and a structural
+    # opener behind the key. Guarded by the string state, so free text (whose
+    # value sits inside a string) has already returned above.
+    if (states is not None and match.start() < len(states)
+            and states[match.start()]):
+        j = at - 1
+        while j >= 0 and match.string[j] in " \t\r\n":
+            j -= 1
+        if j >= 0 and match.string[j] == ":":
+            j -= 1
+            while j >= 0 and match.string[j] not in "{[,:":
+                j -= 1
+            return j >= 0 and match.string[j] in "{[,:"
+    return False
+
+
+def _marker_leads(rest: str) -> bool:
+    """Does ``rest`` open with our own marker — possibly behind the quote (and
+    escape run) an UNTERMINATED quoted value keeps?
+
+    The walk writes the artifact twice, so the pass must be a FIXED POINT: a
+    second pass sees ``…token=<esc>"[REDACTED]``, where the escape run ALONE
+    looks like an unquoted value. Recognising it as our own output is what
+    stops the marker being duplicated on the second write (review cycle 11).
+    """
+    if rest.startswith(_URL_REDACTED):
+        return True
+    body = rest.lstrip("\\")
+    return body[:1] in "\"'" and body[1:].startswith(_URL_REDACTED)
+
+
+def _redact_secret_value(match: re.Match, states=None) -> str:
+    head = f"{match.group('key')}{match.group('sep')}"
+    esc = match.group("esc") or ""
     q = match.group("q") or ""
-    return f"{match.group('key')}{match.group('sep')}{q}[REDACTED]{q}"
+    if q:
+        # Our own output must be a FIXED POINT (a settled walk writes twice).
+        if match.string.startswith(f"{head}{esc}{q}{_URL_REDACTED}", match.start()):
+            return match.group(0)
+        # The opening quote (and its escape run) is KEPT, and the closing quote
+        # only when the value actually had one — an unterminated value is
+        # redacted in place rather than silently completed into a malformed pair.
+        close = f"{esc}{q}" if match.group("tval") is not None else ""
+        return f"{head}{esc}{q}{_URL_REDACTED}{close}"
+    if match.group("q3"):
+        # A quote that opened a value NOTHING closes (a cut body, a truncated
+        # URL): the opening quote is kept and no close is invented — completing
+        # the pair would fabricate a value the record never had.
+        esc3 = match.group("esc3") or ""
+        q3 = match.group("q3")
+        if match.string.startswith(f"{head}{esc3}{q3}{_URL_REDACTED}",
+                                   match.start()):
+            return match.group(0)
+        return f"{head}{esc3}{q3}{_URL_REDACTED}"
+    if match.group("q2"):
+        # A terminated quoted value that started on a delimiter/whitespace:
+        # the markers keep the quotes so the pair stays balanced. Our OWN
+        # settled output (`token:"}?code=[REDACTED]"`) is a fixed point.
+        if _QUERY_MARKER_TAIL_RE.match(match.group("tval2") or ""):
+            return match.group(0)
+        q2 = match.group("q2")
+        esc2 = match.group("esc2") or ""
+        if match.string.startswith(f"{head}{esc2}{q2}{_URL_REDACTED}",
+                                   match.start()):
+            return match.group(0)
+        return f"{head}{esc2}{q2}{_URL_REDACTED}{esc2}{q2}"
+    struct = match.group("struct")
+    if struct:
+        # An EMPTY structure is this branch's own settled output (`[]`/`{}`), and
+        # an already-emitted marker in brackets is the query pass's: re-redacting
+        # either would make the pass non-idempotent.
+        if struct in ("[]", "{}", _URL_REDACTED):
+            return match.group(0)
+        return f"{head}{'[]' if struct[0] == '[' else '{}'}"
+    plain = match.group("plain")
+    if plain is not None and not plain.strip("\\") \
+            and _marker_leads(match.string[match.end():]):
+        # An escape RUN that leads an already-emitted marker is not a value:
+        # the `plain` branch would strip the escapes and re-redact the marker
+        # on the second write (review cycle 11).
+        return match.group(0)
+    if plain is not None and ":" in match.group("sep") \
+            and _JSON_SCALAR_RE.match(plain) \
+            and _at_json_value_position(match, states):
+        # A JSON PAIR (`{"token": null}`) whose value is a scalar, not a
+        # credential: the marker replaces it AS A STRING, so the record stays
+        # parseable. Only at a JSON VALUE position — an `=` assignment, or a
+        # `:` inside a recorded body's STRING (`"retried token: 3 times"`), is
+        # free text where adding quotes corrupts the body (review cycles 10/16).
+        # The quotes carry the body's OWN escaping, so a double-serialized
+        # record (`{\"token\": null}`) keeps its inner body parseable too.
+        esc = re.match(r"\\*", match.group("key")).group(0)
+        return f'{head}{esc}"{_URL_REDACTED}{esc}"'
+    return f"{head}{_URL_REDACTED}"
+
+
+def _redact_tokens(text: str) -> str:
+    """The shape-only pass: a bare ``tt_``/``tk_`` key or JWT redacted."""
+    return _SECRET_TOKEN_RE.sub("[REDACTED]", text)
+
+
+# #5002 — a recorded URL is a credential carrier. The signup flow lands on
+# `…?code=<oauth code>` (or `…#access_token=…`), and a one-time/signed link
+# carries its own token, so the URL is the one recorded value the free-text
+# passes above cannot fully cover: `_SECRET_KEY_RE` redacts by parameter NAME,
+# and a signed link's names are chosen by the SIGNER, not by us.
+#
+# The query string of a URL the matchers CAN classify is DROPPED WHOLE rather
+# than filtered by name — a name allow-list protects exactly the names someone
+# thought of. Scheme, host and path survive, so the record still says WHERE the
+# flow landed, and the query's PRESENCE survives as `?[REDACTED]`, so it still
+# says the redirect carried one. Userinfo is dropped too (an authority can carry
+# `user:pass`). Only a credential reference with NO url shape left to classify
+# (`?code=…` / `#session=…` in bare prose) falls back to the named list below.
+# Dropping is IDEMPOTENT, which matters because a settled walk writes the
+# record twice (see `_write_observation`).
+_URL_REDACTED = "[REDACTED]"
+
+# Our own settled output for a query value, seen from OUTSIDE as a quoted value
+# (`token:"}?code=[REDACTED]"` — the query pass ran first): only a query NAME
+# bound to the marker, with nothing but punctuation in front, is skipped — a
+# value merely ENDING in the marker (` SECRET[REDACTED]`, `}SECRET?code=…`)
+# must still be redacted.
+_QUERY_MARKER_TAIL_RE = re.compile(
+    r"^[^\w?#&\s\"']*[?&#][^&#\s\"'=]*=" + re.escape(_URL_REDACTED) + r"$")
+# A URL inside free text. Stops at whitespace, at `)`/`>` (the end of a link in
+# prose or a tag), at a quote, and at a BACKSLASH — which may be the escape of
+# the very quote that ends the enclosing JSON string, so consuming it would
+# leave that quote bare and break the serialization.
+_URL_IN_TEXT_RE = re.compile(r"(?:https?|ftps?|file|wss?)://[^\s\"'<>\\)\\]+", re.I)
+# After a URL's query/fragment has been DROPPED, a QUOTED value that followed
+# its `=` is left stranded (`…?[REDACTED]"SECRET"`): the URL matcher stops at
+# the quote, so the credential sits outside it. This removes that remnant
+# (plain or JSON-escaped). It is anchored to the marker this module itself
+# writes and bounded to a token-shaped value, so a JSON separator
+# (`…?[REDACTED]","status": 200`) is never touched — and, being anchored, it
+# cannot rescan the tail the way a `https?://…[?#]…=` prefix search does.
+# A backslash inside the value body is only ever consumed as part of an ESCAPE
+# PAIR, never alone: a lone one may be the escape of the string's closing
+# quote, and eating it would unbalance the JSON.
+_ORPHAN_QUOTED_VALUE_RE = re.compile(
+    r"(?P<marker>[?#]" + re.escape(_URL_REDACTED) + r")"
+    r"(?P<esc>\\{0,32})(?P<q>[\"'])"
+    r"(?:(?P<tval>(?:(?!(?P=q))[^\s,{}\\\\]|\\.)*)(?P=esc)(?P=q)"
+    r"|(?P<oq>[^\s,;:)\]}{\\\"']+))",
+)
+
+
+def _redact_orphan_value(match: re.Match[str]) -> str:
+    """Keep the marker and the opening quote; drop the value."""
+    esc, q = match.group("esc"), match.group("q")
+    head = match.group("marker")
+    if match.string.startswith(f"{head}{esc}{q}{_URL_REDACTED}", match.start()):
+        return match.group(0)          # already redacted — a fixed point
+    close = f"{esc}{q}" if match.group("tval") is not None else ""
+    return f"{head}{esc}{q}{_URL_REDACTED}{close}"
+# The reference SHAPES the absolute matcher does not claim, but which still
+# carry a query/fragment: a protocol-relative `//host/…` (which also covers any
+# UNLISTED `scheme://host/…` from its `//`), a root/path-relative `/path?…` (or
+# `/path#…`), and a non-http scheme. Claiming them means their WHOLE
+# query/fragment is dropped, so a parameter name the SIGNER chose
+# (`X-Amz-Signature`, `X-Goog-Signature`) is covered without the named list
+# below having to know it. The scheme is NOT a `[a-z][a-z0-9+.-]*` prefix: that
+# backtracks quadratically over a long letter run with no `://` after it.
+_RELATIVE_URL_IN_TEXT_RE = re.compile(
+    r"//[^\s\"'<>\\)\\]+"
+    r"|/[^\s\"'<>\\)?#\\]*(?:\?[^\s\"'<>\\)#\\]*)?(?:#[^\s\"'<>\\)\\]*)?",
+    re.I,
+)
+
+# The named query parameters the issue lists, applied to whatever the two
+# matchers above did NOT classify — a bare `?code=…`/`#session=…` with no URL
+# shape at all. In free text these names are too broad to redact outright
+# (`status_code=200` is diagnostic and must survive), but after a `?`, `&` or
+# `#` they are a query/fragment parameter and never prose. Longest-first so a
+# prefix alternative cannot win.
+_QUERY_SECRET_PARAMS = (
+    "access_token", "refresh_token", "session_token", "id_token",
+    "api_key", "apikey", "signature", "password", "passwd",
+    "token", "session", "secret", "code", "sig", "key",
+)
+_QUERY_ONLY_NAMES = tuple(
+    n for n in _QUERY_SECRET_PARAMS if n not in _SECRET_KEY_NAMES)
+_QUERY_PAIR_AHEAD = (r"(?!\s[?&#]?(?:" + "|".join(_QUERY_SECRET_PARAMS)
+                     + r")\s*[:=])")
+
+# A `key="` whose quote CLOSES the string the pair sits in has no value at all.
+# `_SECRET_KEY_RE` and `_QUERY_SECRET_RE` cannot see that: every branch reads the
+# quote as the value's OPENER, and the one that WINS is the one whose run
+# reaches the next quote — so `{"a": ["https://h/cb?token=", 1, 2]}` lost the
+# whole `, 1, 2]` tail and the following key with it. Which quote is a closer is
+# decided by the string state at that position, and no fixed-width lookbehind
+# can see it, so it is resolved HERE, before the regexes: the pair gets a marker
+# and the quote is left exactly where it is. An ESCAPED quote is content
+# (`…?code=\"SEC\"`), never a closer, and a quote that OPENS a value (the
+# state at `{"token": "x"}` is None) is left to the regexes.
+_CLOSER_PAIR_RE = re.compile(
+    r"(?:(?P<lead>[?&#])(?P<qkey>" + "|".join(_QUERY_ONLY_NAMES) + r")|"
+    r"(?P<key>(?:\\{0,32}[\"'])?(?:" + "|".join(_SECRET_KEY_NAMES)
+    + r")(?:\\{0,32}[\"'])?))"
+    r"(?P<sep>\s*[:=]\s*)(?P<esc>\\{0,32})(?P<q>[\"'])", re.I)
+
+
+def _redact_enclosing_closer(text: str) -> str:
+    """A `key="`/`?code="` whose quote CLOSES the enclosing string has no value.
+
+    Called before both name passes, so a valueless pair can never be read across
+    the JSON structure that follows it (see `_CLOSER_PAIR_RE`). The quote state
+    is built ONCE for the whole field — a scan per match made a quote-dense
+    field quadratic.
+    """
+    states = _quote_states(text)
+    limit = len(states) - 1
+
+    def repl(m: re.Match) -> str:
+        if m.group("esc"):
+            return m.group(0)          # an escaped quote is CONTENT, not a closer
+        qpos = m.start("q")
+        if qpos >= limit:
+            return m.group(0)          # past the pass's own bound: not classified
+        if states[qpos] != m.group("q"):
+            return m.group(0)          # not inside a string of its own kind
+        # The pair has no value only when JSON STRUCTURE follows the closer
+        # (`}, "id": 2`, `, 1, 2]`). A value-shaped run — even one behind
+        # whitespace, as in `" CANARY"` — is a value the passes below can still
+        # redact, and writing a marker here would strand it beside the marker.
+        i = m.end()
+        while i < limit and m.string[i] in " \t\r\n":
+            i += 1
+        if i >= limit:
+            pass                       # end of field: nothing follows to redact
+        elif m.string[i] not in ",}]:":
+            return m.group(0)          # a value-shaped run follows
+        else:
+            # A structural character follows — but a BARE value standing between
+            # it and an unbalanced quote (`"token=",CANARY"`) is malformed, and
+            # the passes below redact it, so leave the pair whole. Structure
+            # DIRECTLY after it — a quote, or a nested `{`/`[`/`,`/`:` — is a new
+            # key or element, so the pair really is valueless. Judging by "any
+            # quote within 257 chars" instead read a nested object's key quote as
+            # that bare value and left `["?token=", {"a": 1}]` to be corrupted.
+            # A `{`/`[` IMMEDIATELY after the closer stays value-shaped: a
+            # BRACKET value is emptied by the passes below, and calling it
+            # structure here wrote the marker in FRONT of a value that then
+            # survived beside it (`"#access_token = "[CANARY]"`).
+            k = i + 1
+            while k < limit and m.string[k] in " \t\r\n":
+                k += 1
+            if k < limit and m.string[k] not in "\"'{[,:":
+                stop = min(limit, k + 256)
+                while k < stop and m.string[k] not in ",}]\"":
+                    k += 1
+                if k < limit and m.string[k] == "\"":
+                    return m.group(0)
+        # The closing quote is RE-EMITTED: it belongs to the enclosing string,
+        # not to the pair, so the marker goes before it.
+        return (f"{m.string[m.start():m.start('esc')]}{_URL_REDACTED}"
+                f"{m.group('esc')}{m.group('q')}")
+    return _CLOSER_PAIR_RE.sub(repl, text)
+
+
+_QUERY_SECRET_RE = re.compile(
+    r"(?P<lead>[?&#])"
+    r"(?P<key>" + "|".join(_QUERY_SECRET_PARAMS) + r")"
+    # The separator carries any GAP before the value: `?code= "SEC"` is a
+    # credential with whitespace BETWEEN `=` and the quote, which the named pass
+    # covers for its own vocabulary but the query-only names had no cover for
+    # (review cycle 15).
+    r"(?P<sep>=\s*)"
+    # A quoted value (plain or JSON-escaped) consumed as a unit; else the
+    # unquoted run up to a delimiter — with a backslash-escape taken as a UNIT
+    # so a `\"` in the value neither ends it nor loses its escape.
+    # The quoted run is whitespace-bounded AND must end at a value boundary, so a
+    # JSON snippet like `"…?code=", "status": 200` is not read across its
+    # structure. An UNTERMINATED quote (a truncated URL, an exception message)
+    # must not fall through to the empty unquoted match and leave the value
+    # behind, so `oq` takes a NON-EMPTY TOKEN-SHAPED run to the boundary with
+    # the opening quote kept. Non-empty, and no delimiter/brace/quote in the
+    # class, is what keeps a JSON string's CLOSING quote (`"…?token=", "status"`)
+    # or a following key from being read as part of an unterminated value.
+    # The quoted run consumes to its MATCHING quote, whatever it holds: the same
+    # run must cover a value that legitimately contains JSON punctuation
+    # (`?code=\":hunter2\"`), and narrowing it below a VALUE-shaped set let the
+    # shorter alternatives win with a PREFIX of the value — an unterminated
+    # marker with the credential's tail standing beside it. The valueless-pair
+    # shape (`?token=", "status"`) is held off this branch by the `q2` lookahead
+    # below and by `_redact_enclosing_closer`, which are the guards for it.
+    r"(?:(?P<esc>\\{0,32})(?P<q>[\"'])"
+    r"(?:(?P<tval>(?!(?P=q))[^\s\\]|\\.)*(?P=esc)(?P=q)"
+    r"(?=[\s,;:)\]}&\"']|$)|(?P<oq>[^\s,;:)\]}{\\\"']+(?:" + _QUERY_PAIR_AHEAD + r"[^,}&\"\'\\])*)|(?P<oq2>(?!\s*[,;:]\s*[\"\'\[{])\s*[^\s\"\'}\]]+))"
+    # The unquoted run treats a backslash-escape as a unit, takes LEADING
+    # WHITESPACE (a URL truncated at a space still names its value), allows
+    # `<`/`>` (the matchers stop at an angle bracket, which would otherwise
+    # leave the value as the next token — `…?code=<SECRET`, review cycle 11),
+    # and allows a CLOSING bracket (`?code=]x`) — while a value-OPENING
+    # bracket stays structure, handled by the branch below, because swallowing
+    # it would corrupt an embedded body.
+    # ...or a TERMINATED quoted value starting on a delimiter/whitespace
+    # (`?code=" S3CRET"`), which the branch above cannot start on — while the
+    # same RUN of delimiters before a quote (`?code=", "status"`) is the
+    # string's own structure and keeps the branch off it.
+    r'|(?P<esc2>\\{0,32})(?P<q2>["\'])(?!(?:\s*[,;:}\]\{]\s*)+["\'])'
+    r'(?P<tval2>(?:(?!(?P=q2))[^\\]|\\.)*)(?P=esc2)(?P=q2)'
+    r"|(?P<struct>" + _STRUCT_VALUE + r")"
+    # ...or an UNMATCHED opening bracket RUN (`?code=[x`) — the value may start
+    # with one, and a PAIRED run never reaches here (the branch above wins). It
+    # stops at a quote, so it cannot swallow an enclosing JSON string's close.
+    r"|(?P<open>[\[{][^&#\s\"\'\\{}\[\]]*)"
+    # The unquoted tail stops at the NEXT-PARAM and FRAGMENT delimiters
+    # (`&`, `#`) as well: consuming them took the fragment's own `#` with it, so
+    # the record lost the fact that the redirect carried one
+    # (`…?code=X#access_token=Y` came out `?[REDACTED]` instead of
+    # `?[REDACTED]#[REDACTED]`).
+    r"|(?P<uval>\s*(?:\\[^\"\']|[^&#\s\"\'\\\{\[])*(?:" + _QUERY_PAIR_AHEAD + r"[^,&#}\"\'\\])*))",
+    re.I,
+)
+
+
+def _redact_query_secret(match: re.Match) -> str:
+    head = f"{match.group('lead')}{match.group('key')}{match.group('sep')}"
+    if match.group("q"):
+        # The opening quote (and its JSON escape, if any) is KEPT — and the
+        # closing quote only when the value actually had one, so an
+        # unterminated value is redacted in place rather than silently
+        # completed into a malformed pair.
+        esc, q = match.group("esc"), match.group("q")
+        if match.string.startswith(f"{head}{esc}{q}{_URL_REDACTED}", match.start()):
+            return match.group(0)      # already redacted — a fixed point
+        close = f"{esc}{q}" if match.group("tval") is not None else ""
+        return f"{head}{esc}{q}{_URL_REDACTED}{close}"
+    if match.group("q2"):
+        q2 = match.group("q2")
+        esc2 = match.group("esc2") or ""
+        if match.string.startswith(f"{head}{esc2}{q2}{_URL_REDACTED}",
+                                   match.start()):
+            return match.group(0)
+        return f"{head}{esc2}{q2}{_URL_REDACTED}{esc2}{q2}"
+    if match.group("open"):
+        # An unmatched opening bracket run: EMPTIED to the bare marker (no
+        # quotes, so an enclosing JSON string survives).
+        return f"{head}{_URL_REDACTED}"
+    struct = match.group("struct")
+    if struct:
+        # A bracketed value is EMPTIED to the marker — no quotes, so it can
+        # never corrupt an enclosing JSON string, and the credential goes.
+        return f"{head}{_URL_REDACTED}"
+    uval = match.group("uval")
+    if uval is not None and not uval.strip("\\") \
+            and _marker_leads(match.string[match.end():]):
+        # A run of ESCAPE characters alone is not a value: when the marker
+        # follows it, this is our own settled output for an UNTERMINATED
+        # quoted value, and taking the run as the value again would duplicate
+        # the marker on the second write.
+        return match.group(0)
+    return f"{head}{_URL_REDACTED}"
+
+
+def scrub_url(url: str, limit: int = 2000) -> str:
+    """A recorded URL with its credential-carrying parts REMOVED.
+
+    Drops userinfo, the query string and the fragment; keeps scheme, host and
+    path. ``_redact_tokens`` then covers a credential that rode in the PATH
+    (a one-time ``/verify/tt_…`` link). Built on the module's existing
+    redaction — the free-text pass cannot know every credential-bearing query
+    parameter name, which is why the whole query goes, not just its values.
+
+    ``limit`` bounds the HEAD (scheme/host/path), and the markers are appended
+    AFTER the cut, so the result is IDEMPOTENT: a truncated `…?` alone would
+    re-scrub to a different string on the walk's second write. The markers may
+    therefore push the result slightly past ``limit`` — a credential-free read
+    is worth a few bytes.
+    """
+    raw = str(url or "")
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except ValueError:
+        # A malformed URL (an unbracketed/typo'd IPv6 authority) still cannot
+        # keep its query: `urlsplit` refuses it, so the drop is done by hand
+        # rather than falling through with the credential intact.
+        # The same userinfo drop the parsed path does (an authority can carry
+        # `user:pass`, and a malformed one must not be the way it survives),
+        # and the same `?[REDACTED]` marker, so the record still says the
+        # redirect carried a query.
+        head = raw.split("?", 1)[0].split("#", 1)[0]
+        suffix = ("?" + _URL_REDACTED if "?" in raw else "") \
+            + ("#" + _URL_REDACTED if "#" in raw else "")
+        authority, slash, rest = head.partition("//")
+        if slash:
+            rest = rest.rpartition("@")[2]
+            head = authority + slash + rest
+        head = _redact_tokens(head)
+        if len(head) + len(suffix) > limit:
+            head = head[:max(0, limit - len(suffix))]
+        return head + suffix
+    if not parts.query and not parts.fragment and "@" not in parts.netloc:
+        # NOTHING to drop: return the ORIGINAL text. Rebuilding it through
+        # `urlunsplit` is not a round trip for every form (`//` becomes ''), and
+        # that normalisation made a second pass over already-scrubbed text
+        # produce a different string (review cycle 10).
+        return _redact_tokens(raw[:limit])
+    netloc = parts.netloc.rpartition("@")[2] if "@" in parts.netloc else parts.netloc
+    head = urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    suffix = ("?" + _URL_REDACTED if parts.query else "") \
+        + ("#" + _URL_REDACTED if parts.fragment else "")
+    head = _redact_tokens(head)
+    if len(head) + len(suffix) > limit:
+        head = head[:max(0, limit - len(suffix))]
+    return head + suffix
+
+
+def scrub_urls(text: str) -> str:
+    """``scrub_url`` applied to every URL (or URL-shaped reference) in a text.
+
+    The ``signup_responses`` record rides inside a step's ``detail`` as a JSON
+    STRING, so a sweep that only visited a field NAMED ``url`` would miss it.
+    Applied by ``scrub`` (so every existing call site gains URL safety) and by
+    the one serializer (``_scrub_record``), which is the guarantee.
+
+    The absolute matcher runs first, then the relative/non-http SHAPES (their
+    whole query goes too), then a quoted value stranded by a dropped query, and
+    finally the named parameters for a bare `?code=…` / `#session=…` that has
+    no URL shape at all.
+    """
+    # The query pass's own `key="`-closes-a-string case is resolved first: this
+    # is the entry point `_scrub_text` and every direct caller reach.
+    t = _redact_enclosing_closer(str(text or ""))
+    # The named-param pass runs FIRST. A URL matcher STOPS at a quote,
+    # backslash, `<`, `>` or space, so it can consume the `?code=` LEAD and
+    # rewrite only the query — after which the named pass has nothing to match
+    # and the value survives (`…?code=\SECRET`, review cycle 11). The value is
+    # redacted here, on the raw text, before any rewrite can hide the pair.
+    t = _QUERY_SECRET_RE.sub(_redact_query_secret, t)
+    t = _URL_IN_TEXT_RE.sub(lambda m: scrub_url(m.group(0)), t)
+    t = _RELATIVE_URL_IN_TEXT_RE.sub(lambda m: scrub_url(m.group(0)), t)
+    return _ORPHAN_QUOTED_VALUE_RE.sub(_redact_orphan_value, t)
+
+
+# The serializer's own bound. The URL matchers are not linear on pathological
+# input (`"https://" * 8000`, or a lone unterminated `?code="`), and the fields
+# they run over are browser/exception controlled — a megabyte page body must not
+# stall the walk. A credential past this point is DROPPED (the string is cut),
+# never scanned for, so bounding is safe as well as fast.
+_SCRUB_TEXT_LIMIT = 40_000
+
+
+def _bracket_end(text: str, start: int):
+    """The index of the bracket that CLOSES the one at ``start`` (or None).
+
+    A hand-written scan, because nesting is not a regular language: no regex can
+    take `[["tok"]]` or `{"a": {"b": "tok"}}` as ONE value, and matching a
+    single-level bracket only would let a nested secret ride through the
+    serializer to the uploaded artifact (review cycle 12 — a fail-open
+    regression of the pre-fix control, which redacted it). Escape runs and
+    quoted runs are skipped as units, so a re-serialized body's `\\"tok\\"`
+    counts as content and a `]` inside a string does not close the value.
+    """
+    pairs = {"[": "]", "{": "}"}
+    stack: list[str] = []
+    i, n = start, len(text[:_SCRUB_TEXT_LIMIT])
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            i += 2                       # an escape pair is a unit
+            continue
+        if ch in "\"'":
+            quote, i = ch, i + 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                i += 1
+                if text[i - 1] == quote:
+                    break
+            continue
+        if ch in pairs:
+            stack.append(pairs[ch])
+        elif ch in "]}":
+            if not stack or stack.pop() != ch:
+                return None
+            if not stack:
+                return i
+        i += 1
+    return None
+
+
+_JSON_TAIL_RE = re.compile(r'''^[\s"'}\],:]*$''')
+
+
+def _is_json(text: str) -> bool:
+    """Is this field a JSON document? A valid one holds its brackets inside
+    STRINGS, so an unmatched bracket may not eat the rest of it."""
+    try:
+        json.loads(text)
+    except Exception:
+        return False
+    return True
+
+
+def _unbalanced_end(text: str, start: int, valid: bool) -> int:
+    """Where an UNMATCHED bracket value ends: the end of the field, OR the start
+    of the string that closes the one the bracket sits in.
+
+    Emptying to the end is right for a field CUT mid-container (or a broken one):
+    everything after an unmatched `[` is textually inside it, so a credential
+    later in the field is still removed, and there is no document left to
+    preserve. But a field that IS a JSON document holds its brackets inside
+    STRINGS — an unmatched one there is PROSE, and eating the closing `"}` would
+    break a body that was fine (review cycle 13/14). For those, stop at the
+    string's own close: a quote whose remainder is a JSON continuation (`,`, `}`,
+    `]`) or the end of the field.
+    """
+    if not valid:
+        return len(text)
+    k, n = start + 1, len(text)
+    while k < n:
+        if text[k] == "\\":
+            # An escape PAIR is a unit: the character an odd backslash run
+            # escapes is CONTENT, and reading its quote as the string's close
+            # returned an index that deleted the backslash and left the quote
+            # bare — valid JSON in, invalid JSON out.
+            k += 2
+            continue
+        if text[k] in "\"'":
+            rest = text[k + 1:].lstrip()
+            if not rest or rest[0] in ",}]" or _JSON_TAIL_RE.match(text[k:]):
+                return k
+        k += 1
+    return n
+
+
+def _empty_bracket_values(text: str, names, require_lead: bool) -> str:
+    """Empty a bracketed VALUE under a secret-named key, in place.
+
+    `{"token": [1, 2]}` and `?token=[1, 2]` both hold the credential INSIDE the
+    brackets, so the value is emptied to `[]`/`{}` — valid JSON of the same
+    shape, never a quoted marker (which would corrupt the string it sits in) and
+    never left intact (which is how a nested list reached the artifact).
+    ``require_lead`` needs a `?`/`&`/`#` before the name, so this can cover the
+    query-only names (`code`, `key`, `session`) without firing on a body's
+    `{"code": …}`.
+    """
+    lead = r"(?P<lead>[?&#])" if require_lead else r"(?P<lead>[?&#])?"
+    pattern = re.compile(
+        lead + r"(?P<key>" + "|".join(names) + r")(?:\\{0,32}[\"'])?"
+        r"\s*[:=]\s*(?P<open>[\[{])", re.I)
+    out, pos, balanced = [], 0, None
+    for m in pattern.finditer(text):
+        if m.start() < pos:
+            continue
+        if require_lead and not m.group("lead"):
+            continue
+        start = m.end() - 1
+        end = _bracket_end(text, start)
+        if end is None:
+            if balanced is None:
+                balanced = _is_json(text)
+            # An UNTERMINATED bracket — a field CUT mid-value (the caller's cap,
+            # review cycle 13), or a truncated body. How far it reaches is
+            # decided by `_unbalanced_end`: to the end of a broken field
+            # (everything after an unmatched `[` is textually inside it, and
+            # leaving it to the regex passes leaked — neither `plain` nor `oq`
+            # takes a bracket, and `struct` needs a close), or only to the end
+            # of the STRING it sits in when the field is valid JSON, whose
+            # brackets are inside strings. A scan that emptied to the end in
+            # that case destroyed the body (review cycle 14).
+            end = _unbalanced_end(text, start, balanced)
+            out.append(text[pos:start])
+            out.append("[]" if text[start] == "[" else "{}")
+            pos = end
+            if end >= len(text):
+                break
+            continue
+        if text[start:end + 1] == _URL_REDACTED:
+            continue                    # our own marker: a fixed point
+        out.append(text[pos:start])
+        out.append("[]" if text[start] == "[" else "{}")
+        pos = end + 1
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _scrub_text(text: str) -> str:
+    """The full redaction pass — the serializer's own entry point.
+
+    ``scrub`` is this plus the caller's artifact cap; the serializer uses this
+    so a value redaction is never skipped merely because a string was not
+    routed through `scrub` at its call site. Its own ``_SCRUB_TEXT_LIMIT``
+    bound applies FIRST, so the nonlinear URL matchers never see unbounded
+    browser/exception text.
+    """
+    t = _redact_enclosing_closer(str(text or "")[:_SCRUB_TEXT_LIMIT])
+    # A bracketed value is emptied FIRST, by a balanced scan: the passes below
+    # are regexes and cannot take a nested container as one value, so a
+    # `[["tok"]]` would otherwise be left whole and reach the artifact.
+    t = _empty_bracket_values(t, _SECRET_KEY_NAMES, require_lead=False)
+    t = _empty_bracket_values(t, _QUERY_ONLY_NAMES, require_lead=True)
+    # Built ONCE for the whole field: the state array is what keeps the
+    # value-position check from re-scanning per match (which made a
+    # quote-dense field quadratic).
+    states = _quote_states(t)
+    t = _SECRET_KEY_RE.sub(lambda m: _redact_secret_value(m, states), t)
+    t = _redact_tokens(t)
+    t = scrub_urls(t)
+    # ...again on the FINAL text: a URL rewrite can delete a `[`, which changes
+    # a bracket's balance, and a fixed point requires the pair to be judged on
+    # the text that is actually written (`token:[/#[)]` — review cycle 13).
+    t = _empty_bracket_values(t, _SECRET_KEY_NAMES, require_lead=False)
+    return _empty_bracket_values(t, _QUERY_ONLY_NAMES, require_lead=True)
 
 
 def scrub(text: str, limit: int = 4000) -> str:
-    """Keep an artifact, never a credential."""
-    t = _SECRET_KEY_RE.sub(_redact_secret_value, str(text or ""))
-    t = _SECRET_TOKEN_RE.sub("[REDACTED]", t)
-    return t[:limit]
+    """Keep an artifact, never a credential.
+
+    The REDACTION runs first and the caller's cap is applied LAST. Cutting first
+    split a JSON container, and a value whose close fell past the cut was left
+    unterminated — which is exactly the shape the passes cannot match, so a
+    credential BEFORE the cut reached the artifact (review cycle 13; the
+    pre-fix control redacted and then cut). The stall is still bounded: the
+    passes run on at most `_SCRUB_TEXT_LIMIT` characters, applied first inside
+    `_scrub_text`, and a credential past that bound is dropped.
+    """
+    return _scrub_text(str(text or ""))[:limit]
 
 
 def deployed_bundle(base_url: str) -> str:
@@ -2208,6 +3009,58 @@ def _mint_or_read_key(page, ctx, base_url: str) -> tuple[str | None, str]:
                   f"{scrub(json.dumps(body), 200)}")
 
 
+def _scrub_record(node):
+    """Return a redacted COPY of a record's structure — the #5002 guarantee.
+
+    Applied to ``asdict(obs)`` BEFORE ``json.dumps``, at the one serializer, so
+    every write path is covered without a per-call-site list: the visited-URL
+    fields, the ``signup_responses`` JSON embedded in a step's ``detail`` (a
+    JSON STRING), a URL inside ``extra`` or an exception message, and anything
+    a future step records — including a URL used as a dict KEY.
+
+    Two things the string passes alone cannot do:
+
+    * a credential can be a STRUCTURED pair (`{"access_token": "…"}`), where
+      no single string holds key and value together. A dict entry whose KEY
+      names a secret therefore has its value redacted whatever its type, which
+      also keeps the record valid JSON (the replacement is a string).
+    * scrubbing BEFORE serialization means a value that is itself a JSON body
+      still holds real quotes, so its own key/value pairs are redactable; after
+      ``json.dumps`` they would be escaped and invisible.
+
+    Returning a copy (never mutating) keeps the caller's record intact for the
+    print path, which redacts its own rendering. Idempotent, because a call
+    site may already have scrubbed a value and this pass scrubs again.
+    """
+    if isinstance(node, str):
+        return _scrub_text(node)
+    if isinstance(node, dict):
+        out: dict = {}
+        for key, value in node.items():
+            new_key = _scrub_text(key) if isinstance(key, str) else key
+            if isinstance(new_key, str):
+                # A scrubbed key must not collide with an existing one and
+                # silently drop an entry.
+                new_key = _unique_key(out, new_key)
+            out[new_key] = "[REDACTED]" if _is_secret_key(key) else _scrub_record(value)
+        return out
+    if isinstance(node, list):
+        return [_scrub_record(value) for value in node]
+    if isinstance(node, tuple):
+        return tuple(_scrub_record(value) for value in node)
+    return node
+
+
+def _unique_key(mapping: dict, key: str) -> str:
+    """``key``, suffixed if a redaction made it collide with an existing one."""
+    if key not in mapping:
+        return key
+    n = 2
+    while f"{key}#{n}" in mapping:
+        n += 1
+    return f"{key}#{n}"
+
+
 def _write_observation(obs: Observation, out_dir: Path) -> Path:
     """Serialize the observation ATOMICALLY: ``mkstemp`` + ``os.replace``.
 
@@ -2227,16 +3080,22 @@ def _write_observation(obs: Observation, out_dir: Path) -> Path:
     followed. ``Path.write_text`` follows a symlink (``O_CREAT|O_TRUNC``), the
     #4098 class also documented in ``tools/branch_reaper.py`` and
     ``tools/embedded_evidence.py``.
+
+    The record is redacted BEFORE it is serialized (#5002): this is the ONE
+    serializer, so the guarantee cannot be bypassed by a new call site, and
+    ``json.dumps`` runs last so the written document is valid JSON by
+    construction.
     """
     path = out_dir / "observation.json"
     if path.is_symlink():
         raise OSError(f"refusing to write through a symlinked observation: {path}")
+    payload = json.dumps(_scrub_record(asdict(obs)), indent=2)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
                                     prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(asdict(obs), indent=2) + "\n")
+            fh.write(payload + "\n")
         os.replace(tmp, path)
     except BaseException:
         # Never leave the tmp behind for the NEXT run to trip over (or for a
@@ -2260,14 +3119,14 @@ def _warn_side_effects(obs: Observation) -> None:
     if outcome not in (BROWSER_TEARDOWN_NOT_RUN, BROWSER_TEARDOWN_CLEAN):
         print(f"[ship-test] BROWSER TEARDOWN — {outcome}: the browser this run owned "
               f"was not released cleanly"
-              f" ({obs.browser_teardown.get('detail') or 'no detail'})."
+              f" ({scrub(str(obs.browser_teardown.get('detail') or 'no detail'))})."
               f" That is a CLEANUP fault: it does not change the verdict"
-              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
+              f" ({scrub(obs.verdict)}) or the exit code.", file=sys.stderr)
     if obs.teardown.get("status") in TEARDOWN_RESIDUE_STATES:
         print(f"[ship-test] RESIDUE — teardown {obs.teardown.get('status')}:"
               f" this run may have left a live org behind in the target tenant."
               f" That is a CLEANUP fault: it does not change the verdict"
-              f" ({obs.verdict}) or the exit code.", file=sys.stderr)
+              f" ({scrub(obs.verdict)}) or the exit code.", file=sys.stderr)
 
 
 def _print_summary(obs: Observation, path: Path, *,
@@ -2280,6 +3139,13 @@ def _print_summary(obs: Observation, path: Path, *,
     line a CI job keys on, and the non-clean cleanup warnings. The verdict is
     scrubbed: it can carry free text assembled from an exception message.
 
+    The record is redacted HERE too, independently of the write: a run whose
+    write RAISED (the symlink refusal, a full disk) still prints redacted, so
+    the CI log cannot leak what the missing artifact would not have (#5002).
+    The structured fields are redacted as structures, then rendered — so a
+    credential under a sensitive KEY is caught whichever its value's type, and
+    the printed shape is unchanged.
+
     ``artifact_written`` is what makes the ``observation → path`` line HONEST:
     `_abandon` may have failed to write, and naming an artifact that does not
     exist while stderr contradicts it is exactly the disagreement this path
@@ -2290,13 +3156,14 @@ def _print_summary(obs: Observation, path: Path, *,
     for s in obs.steps:
         mark = "PASS" if s.ok else ("FAIL" if s.ok is False else "--")
         print(f"  {mark:4} {s.name:24} ui={s.ui or '-':14} "
-              f"obs={'Y' if s.observed else 'n'} {s.detail[:90]}")
-    print(f"[ship-test] assertions: {obs.assertions}")
-    print(f"[ship-test] session: {obs.session or '(not reached)'}")
+              f"obs={'Y' if s.observed else 'n'} {_scrub_text(s.detail)[:90]}")
+    print(f"[ship-test] assertions: {scrub(repr(_scrub_record(obs.assertions)))}")
+    print(f"[ship-test] session: "
+          f"{scrub(repr(_scrub_record(obs.session))) if obs.session else '(not reached)'}")
     print(f"[ship-test] deployed sha: {obs.deploy_sha or '(unreadable)'}  "
           f"bundle: {obs.bundle or '(unreadable)'}  instrument: {obs.sha or '(unknown)'}")
     if obs.teardown:
-        print(f"[ship-test] teardown: {obs.teardown}")
+        print(f"[ship-test] teardown: {scrub(repr(_scrub_record(obs.teardown)))}")
     if artifact_written:
         print(f"[ship-test] observation → {path}")
     else:
@@ -2309,12 +3176,13 @@ def _print_summary(obs: Observation, path: Path, *,
         # LOUD, on stderr, with the exit code: a run that could not exercise
         # the product must never be mistaken for a measurement of it.
         # `incomplete` (exit 1) meant both, which is how #4291 hid.
-        print(f"[ship-test] INSTRUMENT ERROR — {obs.reason}: a precondition the "
+        print(f"[ship-test] INSTRUMENT ERROR — {scrub(obs.reason)}: a precondition the "
               f"instrument needs was not met, so this run says NOTHING about the "
               f"product. exit {EXIT_INSTRUMENT_ERROR} (a product finding would "
               f"be exit {EXIT_FAILED})", file=sys.stderr)
     elif obs.reason:
-        print(f"[ship-test] reason: {obs.reason} (exit {exit_code_for(obs.reason)})")
+        print(f"[ship-test] reason: {scrub(obs.reason)} "
+              f"(exit {exit_code_for(obs.reason)})")
 
 
 def _finish(obs: Observation, out_dir: Path) -> Observation:
@@ -2610,7 +3478,7 @@ def main(argv: list[str] | None = None) -> int:
         # an instrument fault BY CONSTRUCTION — fail closed with exit 3 rather
         # than a traceback that exits 1 and reads as a product finding.
         print(f"ship-test: INSTRUMENT ERROR — run aborted: "
-              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+              f"{scrub(f'{type(exc).__name__}: {exc}')}", file=sys.stderr)
         return EXIT_INSTRUMENT_ERROR
     return run_exit_code(obs)
 

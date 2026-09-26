@@ -467,6 +467,1036 @@ def test_scrub_redacts_the_shapes_the_first_pass_missed() -> None:
     # the non-secret surroundings survive, so the artifact is still readable
     kept = scrub('{"org":"acme","api_key":"tt_abcdefgh12345678"}')
     assert '"org":"acme"' in kept
+    # a QUOTED value followed by punctuation outside the delimiter set is still
+    # a value (review cycle 8: a boundary lookahead made these leak entirely)
+    for trailer in (".", "!", "?", "x", "*", "", ",", ")", "}"):
+        for quote in ('"', "'"):
+            out = scrub(f"access_token={quote}Hunter2{quote}{trailer}")
+            assert "Hunter2" not in out, (trailer, quote, out)
+
+
+# ── #5002 — a recorded URL is a credential carrier ──────────────────────────
+# A redirect lands the signup flow on `…?code=<oauth code>` (or
+# `…#access_token=…`) and the observation is uploaded as a CI artifact and
+# attached to reviews. The mechanism is `scrub_url` (dropping the query whole),
+# applied by `scrub` and, as the guarantee, by the one serializer.
+_OAUTH_CODE = "S3cretOauthCode9f3c"
+_ACCESS_TOKEN = "s3cret-access-token-abcdef"
+_CREDENTIALED_URL = (
+    "https://app.premiselabs.co/landing?code=" + _OAUTH_CODE
+    + "&state=xyz#access_token=" + _ACCESS_TOKEN)
+
+
+def test_scrub_url_drops_the_query_and_fragment_whatever_they_are_named() -> None:
+    """The names are the SIGNER's, not ours (`code`/`token`/`id_token`/`session`/
+    `key`/`signature` are only the ones we know), so the query goes WHOLE rather
+    than by name — and scheme/host/path survive, so the record still says where
+    the flow landed."""
+    out = _mod.scrub_url(_CREDENTIALED_URL)
+    assert _OAUTH_CODE not in out and _ACCESS_TOKEN not in out
+    assert out == "https://app.premiselabs.co/landing?[REDACTED]#[REDACTED]"
+    # an UNKNOWN parameter name is covered too — that is the point of dropping
+    assert "leak" not in _mod.scrub_url("https://h/x?X-Amz-Signature=leak-me")
+    # ...and only the parts that can carry a credential are gone
+    assert _mod.scrub_url("https://h/p") == "https://h/p"
+    assert _mod.scrub_url("https://h/p?a=1") == "https://h/p?[REDACTED]"
+    assert _mod.scrub_url("") == "" and _mod.scrub_url(None) == ""
+    assert _mod.scrub_url("about:blank") == "about:blank"
+    # a MALFORMED URL (a `urlsplit` ValueError — a typo'd IPv6 authority) must
+    # not fall through with its query intact: the drop is done by hand there,
+    # with the same userinfo strip and the same `?[REDACTED]` marker.
+    assert _OAUTH_CODE not in _mod.scrub_url("http://[::1/l?code=" + _OAUTH_CODE)
+    assert _mod.scrub_url("http://[::1/l?code=" + _OAUTH_CODE) == \
+        "http://[::1/l?[REDACTED]"
+    assert _mod.scrub_url("http://u:pw@[::1/l?code=" + _OAUTH_CODE) == \
+        "http://[::1/l?[REDACTED]"
+    malformed = _mod.scrub_url("http://u:pw@[::1/l?code=" + _OAUTH_CODE)
+    assert _mod.scrub_url(malformed) == malformed
+    # an authority can carry `user:pass`
+    assert _mod.scrub_url("http://u:pw@h/session") == "http://h/session"
+    # a one-time link's token in the PATH is still a credential
+    assert "tt_abcdefgh12345678" not in _mod.scrub_url(
+        "https://h/verify/tt_abcdefgh12345678")
+    # IDEMPOTENT — a settled walk writes the record twice, so re-scrubbing a
+    # sanitized URL must not move it (nor grow it).
+    once = _mod.scrub_url(_CREDENTIALED_URL)
+    assert _mod.scrub_url(once) == once
+    # ...including at the truncation boundary: a cut that left a bare `…?`
+    # instead of the marker would re-scrub to a DIFFERENT string.
+    for n in range(1980, 2010):
+        long = "https://h/" + "a" * n + "?code=" + _OAUTH_CODE
+        trimmed = _mod.scrub_url(long)
+        assert _OAUTH_CODE not in trimmed
+        assert trimmed.endswith("?[REDACTED]"), (n, trimmed[-20:])
+        assert _mod.scrub_url(trimmed) == trimmed, n
+    # a URL with NOTHING to drop is returned verbatim: rebuilding it through
+    # `urlunsplit` is not a round trip (`//` becomes ''), and that normalisation
+    # made the whole pass non-idempotent on shapes like `?code=/&//` (cycle 10)
+    for nothing in ("//", "/", "https://h/p", "about:blank", "/api/v1/state"):
+        assert _mod.scrub_url(nothing) == nothing, nothing
+    for shape in ("?code=/&//", 'token="\\token=7', '?code="/://', "/&//",
+                  "?code=[REDACTED]&//", "token:[/#[)]", "token:[[REDACTED]",
+                  "token:[", '?code=[1,2]'):
+        once = _mod._scrub_text(shape)
+        assert _mod._scrub_text(once) == once, (shape, once)
+
+
+def test_scrub_now_covers_a_url_embedded_in_free_text() -> None:
+    """`scrub` is EXTENDED IN PLACE (#5002): the free-text pass redacted by key
+    name and could not know a URL parameter's name, so a URL inside a detail
+    string kept its query. Every existing call site gains URL safety."""
+    leak = 'GET /cb -> 302 {"url": "' + _CREDENTIALED_URL + '", "status": 302}'
+    out = scrub(leak)
+    assert _OAUTH_CODE not in out and _ACCESS_TOKEN not in out
+    assert "https://app.premiselabs.co/landing?[REDACTED]#[REDACTED]" in out
+    # a bare `code=` with no URL is NOT a URL accident: the record still keeps
+    # it, because only the URL surface is dropped wholesale
+    assert scrub("status_code=200") == "status_code=200"
+
+
+def test_scrub_urls_covers_shapes_and_names_the_absolute_matcher_misses() -> None:
+    """The `https?://` matcher is not the only carrier. A protocol-relative,
+    root-relative or non-http reference still has a query/fragment — and its
+    WHOLE query is dropped, so a parameter name the SIGNER chose
+    (`X-Amz-Signature`) is covered without the named list knowing it. A bare
+    `?code=…` / `#session=…` with no URL shape falls to the named pass.
+    `status_code=200` as free text (no `?`/`&`/`#` lead) still survives as
+    diagnostic."""
+    for leak in (
+            # shapes the absolute matcher does not claim — whole query dropped
+            f"/landing?code={_OAUTH_CODE}",
+            f"//h/cb?X-Amz-Signature={_ACCESS_TOKEN}",
+            f"ftp://h/l?X-Goog-Signature={_ACCESS_TOKEN}",
+            f"/cb#code={_OAUTH_CODE}",
+            # no URL shape at all — the named pass
+            f"?signature={_ACCESS_TOKEN}&x=1",
+            f"#session={_ACCESS_TOKEN}",
+            f"#key={_OAUTH_CODE}"):
+        out = _mod.scrub_urls(leak)
+        assert _OAUTH_CODE not in out and _ACCESS_TOKEN not in out, (leak, out)
+        assert "[REDACTED]" in out, (leak, out)
+    # a longer parameter name is not half-matched into a shorter one
+    assert _mod.scrub_urls(f"?refresh_token={_ACCESS_TOKEN}") == \
+        "?refresh_token=[REDACTED]"
+    # a name that merely CONTAINS a sensitive one is not a match
+    assert _mod.scrub_urls("?monkey=banana") == "?monkey=banana"
+    assert _mod.scrub_urls("status_code=200") == "status_code=200"
+    # a relative reference's query goes WHOLE (the absolute-URL policy), so a
+    # non-sensitive param on one is dropped rather than kept
+    assert _mod.scrub_urls("/x?status_code=200") == "/x?[REDACTED]"
+    # ...and a path with no query is left exactly as-is
+    assert _mod.scrub_urls("GET /api/v1/state -> 200") == "GET /api/v1/state -> 200"
+    # a QUOTED query value — plain, and the JSON-escaped form a serialized
+    # record carries — is consumed with the query rather than left behind the
+    # dropped `?[REDACTED]`
+    for leak in (f'?code="{_OAUTH_CODE}"',
+                 f"?code='{_OAUTH_CODE}'",
+                 f'https://h/cb?code="{_OAUTH_CODE}"',
+                 f'?code=\\"{_OAUTH_CODE}\\"',
+                 f'"url": "https://h/cb?code=\\"{_OAUTH_CODE}\\""'):
+        assert _OAUTH_CODE not in _mod.scrub_urls(leak), leak
+    # ...while JSON structure after a redacted URL is NOT swallowed
+    assert _mod.scrub_urls('"url": "https://h/cb?[REDACTED]", "status": 200}') == \
+        '"url": "https://h/cb?[REDACTED]", "status": 200}'
+
+
+def test_a_valueless_secret_param_does_not_eat_the_following_json_key() -> None:
+    """The quoted-value branch of the key pass must end at a VALUE boundary.
+
+    `?token=` has no value, so the only quote it can close on belongs to the
+    NEXT key — `?token=", "status": 200` — and consuming it corrupts the
+    embedded detail JSON. The URL's query is dropped whole, the JSON survives.
+    """
+    import json
+
+    for param in ("token", "access_token", "api_key", "password", "secret"):
+        detail = f'[{{"url": "https://h/cb?{param}=", "status": 200}}]'
+        out = _mod.scrub_urls(detail)
+        assert json.loads(out) == \
+            [{"url": "https://h/cb?[REDACTED]", "status": 200}], (param, out)
+    # a value that IS present is still redacted, quoted or not
+    assert _mod.scrub_urls(f'?token="{_ACCESS_TOKEN}"') == '?token="[REDACTED]"'
+    assert _mod.scrub_urls(f"?token={_ACCESS_TOKEN}&x=1") == \
+        "?token=[REDACTED]&x=1"
+    # an UNTERMINATED quote must not fall through and leave the value behind
+    assert _mod.scrub_urls(f'?code="{_OAUTH_CODE}') == '?code="[REDACTED]'
+    # ...and a JSON string's CLOSING quote is never read as an opening one
+    for pair in ('{"url": "?token=", "status": 200}',
+                 '{"url": "?code=", "status": 200}',
+                 '{"url": "?session=", "status": 200}'):
+        out = _mod.scrub_urls(pair)
+        assert json.loads(out)["status"] == 200, out
+
+
+def test_a_closing_quote_is_never_read_as_a_value_opener(tmp_path) -> None:
+    """The quote after `=` may be the enclosing STRING's CLOSE, not a value's
+    OPENER — and no regex branch can tell them apart, because the answer is the
+    string state at that position (a fixed-width lookbehind cannot see it).
+    Reading a closer as an opener consumed the JSON structure that followed it:
+    the `}, "id": 2` tail of an object, the `, 1, 2]` tail of an array, and the
+    next key with it, leaving the detail (and so the artifact) unparseable.
+    A pair whose quote closes its own string has NO value: it gets a marker and
+    the quote stays where it belongs.
+    """
+    import json
+
+    for body in ('{"error": {"url": "https://h/cb?code="}, "id": 2}',
+                 '{"a": ["https://h/cb?token=", 1, 2], "b": "note"}',
+                 '{"url": {"deep": "?code="}, "id": 2}',
+                 '{"a": "?code=", "b": [1, 2]}',
+                 '["?code=", [1, 2]]',
+                 '{"url": "?token=", "status": 200}',
+                 '{"url": "https://h/cb?token=", "status": 200}',
+                 '{"url": "https://h/cb?code=S3CRET"}'):
+        got = _mod.scrub(body)
+        parsed = json.loads(got)                     # must not raise
+        assert _mod.scrub(got) == got, (body, got)   # and must be a fixed point
+        assert "S3CRET" not in got, (body, got)
+        # the structure the closer used to eat is still there
+        assert parsed, (body, got)
+    # ...through the ONE serializer too, where the record AND the embedded detail
+    # must BOTH parse — the shape the defect corrupted
+    for body in ('{"error": {"url": "https://h/cb?code="}, "id": 2}',
+                 '["?code=", [1, 2]]'):
+        obs = _mod.Observation(started_at="x", target={})
+        obs.add(name="landing", detail=body)
+        step = json.loads(_mod._write_observation(
+            obs, tmp_path).read_text())["steps"][0]
+        assert json.loads(step["detail"]) is not None, step
+    # a `:`-scalar INSIDE a recorded body's string is prose, not a JSON pair:
+    # quoting the marker there closed the string early and broke the body
+    for body, bare in (
+            ('{"note": "retried, token: 3 times", "org": "acme"}',
+             "token: [REDACTED] times"),
+            ('{"note": "retried, password: 3 times", "org": "acme"}',
+             "password: [REDACTED] times"),
+            ('{"note": "see, password: 12345"}', "password: [REDACTED]")):
+        got = _mod.scrub(body)
+        json.loads(got)                              # must not raise
+        assert _mod.scrub(got) == got, (body, got)
+        # a BARE marker: quoting it would close the string early
+        assert bare in got, (body, got)
+
+
+def test_the_unquoted_value_tail_is_not_a_fail_open_boundary() -> None:
+    """The unquoted run is FIRST-char-restricted so a structured value's own
+    bracket is handled by the bracket pass — but stopping at `;`, `:`, `)`, `]`,
+    `{` or `[` AFTER the first character was a fail-open REGRESSION against the
+    pre-change tool, which consumed them: `password=x[S3cret` left the secret's
+    tail standing in the artifact. The tail still stops at the JSON/query
+    delimiters (`,`, `&`, `}`, a quote, a backslash) — and it OWNS internal
+    whitespace, because a space inside an unterminated value is part of that
+    value, and stopping there left the credential's tail behind.
+    """
+    for secret in ("password=x[S3cretCanary9f3c",
+                   "access_token=a[SECRET", "token=a{SECRET",
+                   "password=ab;SECRET", "password=ab:SECRET",
+                   "password=ab)SECRET", "password=ab]SECRET",
+                   "password=x{SECRET", "api_key=k]SECRET",
+                   "?code=x[S3cretCanary9f3c"):
+        got = _mod.scrub(secret)
+        assert "SECRET" not in got and "Canary9f3c" not in got, (secret, got)
+        assert _mod.scrub(got) == got, (secret, got)
+
+
+def test_the_closer_guard_keeps_json_structure_and_empties_bracket_values() -> None:
+    """A `:` directly after the closing quote is a JSON SEPARATOR, not a value.
+
+    Calling it value-shaped left the pair to the passes below, which read the
+    key's OWN closing quote as a value opener, so valid JSON came out invalid
+    (`{"{token=": 1}`, `{"token:": null}`). A nested container right after the
+    structure (`, {"a": 1}`) is structure too — the "any quote within 257
+    chars" scan read the object's key quote as the bare value it was looking for
+    and left `["?token=", {"a": 1}]` to be corrupted. A BRACKET value straight
+    after the closer is still a VALUE, though, and must be left to the bracket
+    pass: calling it structure wrote a marker in FRONT of it and let the
+    credential stand beside the marker.
+    """
+    import json
+
+    for body in ('{"{token=": 1}', '{"token:": null}',
+                 '{"access_token=": 5}', '{"a,password=": 1}',
+                 '{"a,secret=": 2}'):
+        json.loads(body)                             # valid JSON in
+        got = _mod.scrub(body)
+        json.loads(got)                              # valid JSON out
+        assert _mod.scrub(got) == got, (body, got)
+    for body in ('["?token=", {"a": 1}]',
+                 '["?code=", {"a": {"b": 1}}]',
+                 '["?token=", [1, 2]]', '["?token="]'):
+        json.loads(body)
+        got = _mod.scrub(body)
+        json.loads(got)
+        assert _mod.scrub(got) == got, (body, got)
+    # a bracketed VALUE straight after the closer is the bracket pass's, not
+    # structure: the marker must REPLACE it, not stand in front of it
+    for body, secret in (('["#access_token = "[CANARY9f3c]", 1, 2]',
+                          "CANARY9f3c"),
+                         ('{"url": "ftp://h/cb?api_key ="[CANARY9f3c]"}',
+                          "CANARY9f3c")):
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+
+
+def test_an_escaped_key_never_leaves_the_value_position_unbound() -> None:
+    """The value-anchored fallback runs for an ESCAPED key too; binding the
+    value position inside the non-escaped branch only made `_scrub_text` raise
+    `UnboundLocalError` on valid JSON — which aborted the artifact write, the
+    opposite of the guarantee this pass exists to keep."""
+    import json
+
+    for body in ('{"note": "a \\"secret\\": 5"}',
+                 '{"detail": "{\\"token\\": null}"}',
+                 '{"a": "x \\"password\\": 5 y"}'):
+        json.loads(body)                             # valid JSON in
+        got = _mod.scrub(body)                       # must not raise
+        json.loads(got)                              # valid JSON out
+
+
+def test_a_whitespace_owning_tail_does_not_cross_into_the_next_pair() -> None:
+    """A run that OWNS its internal whitespace must stop at the NEXT pair.
+
+    Letting it run past a following `name<sep>` swallowed that pair's NAME and
+    left its VALUE verbatim beside the marker — `id_token:"5 x token='CANARY'`
+    emitted `id_token:"[REDACTED]'CANARY'`, a fail-open credential leak into the
+    artifact. The guard is evaluated at EVERY character of the tail (a single
+    check before a greedy run is no guard at all) and tolerates a query lead,
+    because the next pair can sit behind `?`/`&`/`#`.
+    """
+    for body, secret in (
+            ('{"url": "id_token:\\"5 x token=\'CANARY9f3c\'"}',
+             "CANARY9f3c"),
+            ('{"url": "id_token:\'5 x ?id_token:"CANARYBBBB2"\'"}',
+             "CANARYBBBB2"),
+            ('{"token": "ABC password=SECRET7f2a', "SECRET7f2a"),
+            ('?code=ABC token=SECRET7f2a', "SECRET7f2a"),
+            ("{\"a\": \"password:'x y secret=SECRET7f2a'\"}", "SECRET7f2a")):
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+
+
+def test_the_redaction_pass_is_bounded_and_its_matchers_are_not_superlinear() -> None:
+    """The fields the pass runs over are browser/exception controlled, so it
+    must not be a stall vector. It bounds its own input FIRST (a credential
+    past the bound is dropped, never scanned for), and every matcher is linear
+    — a `https?://`-dense field or a long letter run after `=` used to
+    backtrack for seconds at a megabyte scale."""
+    import json
+
+    huge = "https://" * 20_000                       # 160 KB of a URL field
+    assert len(_mod._scrub_text(huge)) <= _mod._SCRUB_TEXT_LIMIT
+    assert len(_mod._scrub_text('?code="' + "b" * 200_000)) < 200_000
+    # the bounded window still redacts what lands INSIDE it
+    assert _OAUTH_CODE not in _mod._scrub_text(
+        f'?code="{_OAUTH_CODE}"' + "b" * 200_000)
+    # a JSON detail larger than the bound is still valid JSON after the walk
+    detail = json.dumps([{"url": "https://h/cb?code=SECRET", "body": huge}])
+    assert json.loads(_mod.scrub_urls(detail)) is not None
+    # ...and a BRACKET-DENSE field cannot rescan from every match: an unmatched
+    # bracket ends the scan, so the pass is linear (it measured ~15 s for one
+    # 40 k field, review cycle 13)
+    import time
+
+    for unit in ("?key:[", "token:[", "?code=["):
+        dense = (unit * 7000)[:40_000]
+        started = time.perf_counter()
+        _mod._scrub_text(dense)
+        assert time.perf_counter() - started < 2.0, unit
+
+
+def test_a_field_truncated_mid_value_still_loses_the_credential(tmp_path) -> None:
+    """The caller's cap must be applied AFTER the redaction. Cutting first split
+    a JSON container, and a value whose close fell past the cut was left
+    UNTERMINATED — the one shape the passes could not match — so a credential
+    before the cut reached the artifact (review cycle 13)."""
+    import json
+
+    secret = "s3cret-access-token-abcdef"
+    body = (f'{{"note": "x", "access_token": ["{secret}", '
+            f'"{"y" * 6000}"]}}')
+    assert secret not in _mod.scrub(body, 200)
+    # the same through the ONE serializer, where the bound is its own
+    obs = _mod.Observation(started_at="x", target={})
+    obs.add(name="before-observation", extra={"body": _mod.scrub(body)})
+    assert secret not in _mod._write_observation(obs, tmp_path).read_text()
+    # ...and past `_SCRUB_TEXT_LIMIT`, where a long field is cut mid-container
+    obs = _mod.Observation(started_at="x", target={})
+    obs.add(name="long",
+            detail=f'{{"access_token": ["{secret}", "{"y" * 50_000}"]}}')
+    assert secret not in _mod._write_observation(obs, tmp_path).read_text()
+    # an UNTERMINATED bracket is emptied, never left to a pass that cannot match
+    assert secret not in _mod._scrub_text(
+        f'{{"access_token": ["{secret}", "y"')
+    assert json.loads('{"access_token": []}') is not None
+    # ...and the bracket-emptied VALUE it produces is the fixed point, not a
+    # hard-coded literal that no implementation could fail. The value must be
+    # NESTED: the single-level `struct` branch of the key pass empties
+    # `["t1"]` on its own, so only the balanced scan reaches through a nesting
+    # to find the credential the one-level regex cannot take as one value.
+    assert _mod.scrub('{"access_token": []}') == '{"access_token": []}'
+    assert _mod.scrub('{"access_token": [["t1"]]}') == \
+        '{"access_token": []}'
+
+
+def test_an_unterminated_quoted_query_value_loses_its_secret() -> None:
+    """A truncated quoted value whose first character the pair-aware run cannot
+    start on used to fall through to the EMPTY unquoted match, leaving the value
+    behind — the exact shape the branch above claims cannot happen (review cycle
+    16). Every leading delimiter must be covered, and the VALUELESS-key shape
+    (`"…?token=", "status": 200`) must still not eat the following key."""
+    import json
+
+    for lead in (" ", "\t", ",", ";", ":", ")", "&", "\\", "(", "[", "{",
+                 "="):
+        for name in ("code", "key", "session", "id_token", "sig"):
+            for shape in (f'?{name}="{lead}QCANARY',
+                          f'https://h/cb?{name}="{lead}QCANARY'):
+                assert "QCANARY" not in _mod.scrub(shape), shape
+    # ...while the JSON shapes that LOOK like that value stay intact: a delimited
+    # `, "…"` / `, […]` after the quote is a continuation, not a value
+    for body in ('["?code=", [1, 2]]', '["?code="]', '["?token="]',
+                 '{"a": "?code=", "b": [1, 2]}', '{"a": "?code=", "b": 1}'):
+        assert json.loads(_mod.scrub(body)) is not None, body
+    for pair in ('{"url": "?token=", "status": 200}',
+                 '{"url": "?code=", "status": 200}',
+                 '{"url": "?token= ", "status": 200}'):
+        assert json.loads(_mod.scrub(pair))["status"] == 200, pair
+    # a quoted value that STARTS on a delimiter AND holds the other quote or a
+    # backslash is still a value (HEAD redacted it)
+    for body, secret in (('{"password": " it\'s q5"}', "q5"),
+                         ('{"token": "\'q6\'"}', "q6"),
+                         ('{"access_token": " a\\\\q7"}', "q7")):
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert json.loads(got) is not None, (body, got)
+
+
+def test_an_unterminated_whitespace_led_quoted_value_is_redacted() -> None:
+    """A quoted value that OPENS on whitespace and NOTHING closes — a cut body
+    (`{"password": " SECRET77`) — matched no value branch at all: the pair-aware
+    run cannot start on a space, the pair-aware fallback needs a closing quote,
+    and the unquoted run cannot start on one either. The secret survived into the
+    artifact, which is this issue's own failure mode, so the unterminated run is
+    taken AFTER both terminated branches and must cover it."""
+    for lead in (" ", "\t", "  ", "\n"):
+        for body, secret in (
+                (f'{{"password": "{lead}SECRET77', "SECRET77"),
+                (f'{{"access_token": "{lead}ATCANARY', "ATCANARY"),
+                (f'{{"client_secret": "{lead}CSCANARY', "CSCANARY"),
+                (f'password="{lead}PWCANARY', "PWCANARY"),
+                (f'{"password"}: "{lead}SECRET77', "SECRET77")):
+            got = _mod.scrub(body)
+            assert secret not in got, (body, got)
+            assert _mod.scrub(got) == got, ("not a fixed point", body, got)
+    # A value committed to being unterminated owns everything to the enclosing
+    # structure: stopping the run at the first INTERNAL space redacted the
+    # delimiter and left the credential's tail (`", hunter2` -> `hunter2`).
+    for body, secret in (('{"password": ", hunter2', "hunter2"),
+                         ('{"password": ", , hunter2', "hunter2"),
+                         ('{"password": " , hunter2', "hunter2"),
+                         ('{"token": " a b c', "a b c"),
+                         ('{"access_token": " x y z', "x y z"),
+                         ('{"password": "hunter2 tail-secret', "tail-secret"),
+                         ('{"token": "ABC DEF GHI', "DEF GHI"),
+                         ('?code=ABC DEF GHI', "DEF GHI"),
+                         ('?code="ABC DEF GHI', "DEF GHI")):
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert _mod.scrub(got) == got, ("not a fixed point", body, got)
+
+
+def test_a_key_that_starts_inside_a_string_still_quotes_a_json_scalar() -> None:
+    """The "is this pair inside a string?" test must read the state at the
+    VALUE, not at the key match's start. A key match can begin INSIDE a string
+    and still carry a real JSON value — the walk matches `secret"` within the key
+    string `" secret"`, while the scalar sits after that string closed. Judging by
+    the match start emitted a BARE marker into a JSON value position, so VALID
+    JSON came out INVALID for every key that opens with `{`, `[`, `,` or a
+    space. Free text still keeps the bare marker."""
+    import json
+
+    for body in ('{" secret": null}', '{"a,password": 5}',
+                 '{"{token": true}', '{"a,access_token": 1}',
+                 '{"  client_secret": 1.5e3}', '{"a,secret": null}'):
+        json.loads(body)                  # the input is valid JSON
+        got = _mod.scrub(body)
+        parsed = json.loads(got)          # and the output must be too
+        assert _mod.scrub(got) == got, (body, got)
+        assert "[REDACTED]" in json.dumps(parsed), (body, got)
+    # ...while a `:`-scalar inside a recorded body's STRING is free text, where
+    # the bare marker is the correct (valid) output
+    prose = _mod.scrub('{"note": "retried token: 3 times", "org": "acme"}')
+    assert json.loads(prose)["note"] == "retried token: [REDACTED] times"
+
+
+def test_an_escaped_quote_does_not_close_an_unmatched_bracket_scan() -> None:
+    """The scan for an unmatched bracket's value stops at the string that closes
+    the one the bracket sits in — but a `\\\"` is CONTENT, not that closer.
+    Reading it as one returned an index that deleted the backslash and left the
+    quote bare, so VALID JSON came out INVALID (`{"a": "token=[\\\""}`)."""
+    import json
+
+    for body in ('{"a": "token=[\\\""}',
+                 '{"a": "token=[x\\\"y"}',
+                 '{"token": "a[\\\"b"}',
+                 '{"a": "?code=[\\\""}'):
+        json.loads(body)                  # the input is valid JSON
+        got = _mod.scrub(body)
+        json.loads(got)                   # and the output must be too
+
+
+def test_a_colon_scalar_outside_a_value_position_does_not_gain_quotes() -> None:
+    """`key: scalar` means two different things: at a JSON VALUE position the
+    marker must be a STRING (a bare `[REDACTED]` is not valid JSON), while a `:`
+    inside a recorded body's STRING is free text where extra quotes close the
+    string early and break the body (review cycle 16). The quotes also carry the
+    body's own escaping."""
+    import json
+
+    for body in ('{"token": null}', '{"token": 5}', '{"password": 12345}',
+                 '{"access_token": true}', '{"secret": 1.5e3}',
+                 '{"a": 1, "token": null}', '{"a": {"token": 3}}',
+                 '{"note": "retried token: 3 times", "org": "acme"}',
+                 '{"note": "password: 12345"}',
+                 '{"data":"{\\"password\\": 12345}"}'):
+        got = _mod.scrub(body)
+        parsed = json.loads(got)          # must not raise
+        assert _mod.scrub(got) == got, (body, got)
+        assert "12345" not in json.dumps(parsed), (body, got)
+    # the JSON pair's marker IS a string, and the prose one is not
+    assert json.loads(_mod.scrub('{"token": null}'))["token"] == "[REDACTED]"
+    assert json.loads(_mod.scrub('{"note": "token: 3"}'))["note"] \
+        == "token: [REDACTED]"
+
+
+def test_every_query_name_and_bracket_shape_is_covered_by_the_structural_pass(
+        ) -> None:
+    """The structural emptier is driven by a NAME LIST, so a name in the query
+    vocabulary that is missing from it falls back to the single-level regex —
+    which cannot take a nested container. `sig` was (review cycle 15); the list
+    is now DERIVED, so the two cannot drift. A query-only name also needs the
+    GAP before a quoted value covered (`?code= \"S\"`), and an unmatched bracket
+    that ends the string must not eat the enclosing close."""
+    import json
+
+    # The property is DERIVED, so it cannot drift — but assert the INTENT (each
+    # query-only name is in the query vocabulary and not a free-text key name),
+    # not the expression that builds the tuple, which would be true by
+    # construction.
+    for name in ("code", "key", "session", "sig"):
+        assert name in _mod._QUERY_SECRET_PARAMS, name
+        assert name in _mod._QUERY_ONLY_NAMES, name
+        assert name not in _mod._SECRET_KEY_NAMES, name
+    assert set(_mod._QUERY_ONLY_NAMES) <= set(_mod._QUERY_SECRET_PARAMS)
+    assert not (set(_mod._QUERY_ONLY_NAMES) & set(_mod._SECRET_KEY_NAMES))
+    for name in ("sig", "code", "key", "session"):
+        for body in (f'?{name}=[["q1"]]', f'?{name}={{"a":{{"b":"q1"}}}}',
+                     f'https://h/p?{name}={{"a":{{"b":"q1"}}}}'):
+            assert "q1" not in _mod.scrub(body), body
+        assert "q2" not in _mod.scrub(f'?{name}= "q2"'), name
+        assert "q3" not in _mod.scrub(f'?{name}=\t"q3"'), name
+    # a body's own `sig` array is not a query parameter and survives
+    assert _mod.scrub('{"sig": [1, 2]}') == '{"sig": [1, 2]}'
+    # the bracket that ENDS the string must not take the enclosing close with it
+    for body in ('{"url": "https://h/cb?code=["}',
+                 '{"a": "token=[", "c": "NOTES"}',
+                 '{"a": "token=[", "c": 1}'):
+        got = _mod.scrub(body)
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+    # the query pass's own marker is a fixed point, while a value that merely
+    # ENDS in the marker is still redacted
+    fixed = 'token:"}?code=\\q4"'
+    once = _mod.scrub(fixed)
+    assert _mod.scrub(once) == once, (fixed, once)
+    for value in (" SECRETCANARY[REDACTED]", " SECRETCANARY&x=[REDACTED]"):
+        assert "SECRETCANARY" not in _mod.scrub('{"password": "' + value + '"}')
+
+
+def test_a_quoted_value_that_STARTS_on_a_delimiter_is_still_redacted() -> None:
+    """The pair-aware quoted branch cannot START on a delimiter or whitespace,
+    so a value like `" S3CRET"` / `",S3CRET"` was left verbatim — HEAD redacted
+    it (review cycle 14). A lower-priority branch covers it, while the
+    VALUELESS-key shape (`?token=", "status": 200`) must still not eat the next
+    key, and the artifact must stay parseable."""
+    import json
+
+    secret = "S3CRETCANARY9f3c"
+    for lead in (" ", "\t", ",", ")", "]", "&", ":", ";", "}", " "):
+        for body in (f'{{"password": "{lead}{secret}"}}',
+                     f'{{"access_token": "{lead}{secret}"}}'):
+            got = _mod.scrub(body)
+            assert secret not in got, (body, got)
+            assert json.loads(got) is not None, (body, got)
+        assert secret not in _mod.scrub(f'?code="{lead}{secret}"'), lead
+    # the valueless-param shape keeps the following key (the reason the branch
+    # above it is first-char-restricted at all)
+    for param in ("token", "code", "session", "api_key"):
+        pair = f'{{"url": "?{param}=", "status": 200}}'
+        assert json.loads(_mod.scrub(pair))["status"] == 200, pair
+
+
+def test_an_unmatched_bracket_only_eats_the_string_it_sits_in() -> None:
+    """A field that IS a JSON document holds its brackets inside STRINGS, so an
+    unmatched one there is prose: the empty may only reach that string's close,
+    or a body that was fine is destroyed (review cycle 14). A field that is NOT
+    a document — a truncated one — is emptied to the end, because a credential
+    later in it is still inside the unmatched bracket."""
+    import json
+
+    for body in ('{"note": "auth token=[see docs", "org": "acme", '
+                 '"status": 200}',
+                 '{"note": "?code=[OOPS", "status": 200}',
+                 '{"note": "[see docs", "x": 1}'):
+        got = _mod.scrub(body)
+        parsed = json.loads(got)                 # must not raise
+        assert _mod.scrub(got) == got, (body, got)
+        assert parsed, (body, got)
+    # a TRUNCATED field (not a document) loses the credential wherever it sits
+    for body in ('{"access_token": ["t1", "y"',
+                 '{"access_token": ["y", "t1"',
+                 '{"access_token": ["y", {"a": "t1"}'):
+        assert "t1" not in _mod.scrub(body), body
+    """An unmatched `[`/`{` behind a secret name is emptied to the end of the
+    field — everything after it is textually inside it — EXCEPT that a JSON
+    CLOSING TAIL (`"}`, `]`) must survive, or a body that was valid before the
+    pass would be broken by it (review cycle 13)."""
+    import json
+
+    for body, secret in (('{"note": "?code=[OOPS"}', "OOPS"),
+                         ('{"note": "?token={OOPS"}', "OOPS"),
+                         ('{"note": "?code=[a, leak7"}', "leak7"),
+                         ('{"access_token": ["leak8", "y"', "leak8")):
+        got = _mod.scrub(body)
+        assert secret not in got, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+        if body.endswith("}"):
+            assert json.loads(got) is not None, (body, got)
+
+
+def test_a_double_serialized_detail_stays_valid_json_on_disk(tmp_path) -> None:
+    """`detail` is itself a JSON STRING inside the record, so the walk sees its
+    text ESCAPED. A value-less secret param there (`?token=", "status": 200`)
+    must not take the inner string's closing quote as its own value delimiter:
+    the artifact must stay parseable AND the inner detail must stay parseable,
+    which is the shape the cycle-7 defect corrupted."""
+    import json
+
+    for param in ("token", "code", "api_key", "access_token", "session"):
+        inner = json.dumps([{"url": f"https://h/cb?{param}=", "status": 200}])
+        obs = _mod.Observation(started_at="x", target={})
+        obs.add(name="landing", detail=inner)
+        raw = _mod._write_observation(obs, tmp_path).read_text()
+        step = json.loads(raw)["steps"][0]
+        assert json.loads(step["detail"]) == \
+            [{"url": "https://h/cb?[REDACTED]", "status": 200}], step
+    # an escaped quoted value inside that detail is still redacted
+    inner = json.dumps([{"url": 'https://h/cb?code=S3cret', "status": 200}])
+    obs = _mod.Observation(started_at="x", target={})
+    obs.add(name="landing", detail=inner)
+    step = json.loads(_mod._write_observation(obs, tmp_path).read_text())["steps"][0]
+    assert "S3cret" not in step["detail"]
+    assert json.loads(step["detail"])[0]["status"] == 200
+
+
+def test_a_doubled_backslash_escape_is_still_a_quoted_value(tmp_path) -> None:
+    """A body recorded as a STRING is serialized once more, so its escapes
+    DOUBLE. The quote-delimiter group must accept a RUN of backslashes, not one:
+    with a single `\\?` the match began on the run's last backslash, the value
+    was left behind, and the credential reached the artifact (review cycle 9,
+    and a regression against the pre-change tool, which consumed the whole
+    value)."""
+    import json
+
+    for n in (1, 2, 3, 4):
+        bs = "\\" * n
+        for param in ("code", "token", "id_token", "password", "signature"):
+            body = f'{{"note": "?{param}={bs}S3cretCanary{bs}"}}'
+            obs = _mod.Observation(started_at="x", target={})
+            obs.add(name="agent-write", extra={"mcp": {"body": body}})
+            raw = _mod._write_observation(obs, tmp_path).read_text()
+            assert "S3cretCanary" not in raw, (n, param, raw)
+            # …and our own output re-scrubs to itself
+            once = json.loads(raw)["steps"][0]["extra"]["mcp"]["body"]
+            assert _mod._scrub_text(once) == once, (n, param, once)
+    # an UNTERMINATED escaped value (a truncated URL) is redacted too, and the
+    # result is still a fixed point
+    for n in (1, 2, 3, 4):
+        bs = "\\" * n
+        once = _mod._scrub_text(f'?token={bs}"S3cretCanary{bs}')
+        assert "S3cretCanary" not in once, (n, once)
+        assert _mod._scrub_text(once) == once, (n, once)
+    # a pathologically long backslash run must not be a stall (the escape group
+    # is bounded — an unbounded `\\*` backtracks quadratically)
+    import time as _time
+    started = _time.monotonic()
+    _mod._scrub_text("\\" * 200_000)
+    # A STALL guard, not a benchmark: the bound is wide enough that a loaded
+    # fleet box cannot red a green change (measured 0.4-1.1 s here), while a
+    # superlinear regression is still orders of magnitude past it.
+    assert _time.monotonic() - started < 10.0
+
+
+def test_a_non_string_value_under_a_secret_key_keeps_the_body_parseable(
+        tmp_path) -> None:
+    """A sensitive key inside a recorded JSON BODY can hold a non-string value
+    (`{"token": null}`, `{"signature": []}`, `{"password": 12345}`). The
+    replacement must stay a JSON VALUE — a bare `[REDACTED]` token there makes
+    the embedded body unparseable (review cycle 9) — while a string value is
+    still redacted."""
+    import json
+
+    for body in ('{"token": null}', '{"token": 5}', '{"password": 12345}',
+                 '{"access_token": true}', '{"signature": []}',
+                 '{"id_token": {"a": 1}}', '{"secret": 1.5e3}'):
+        obs = _mod.Observation(started_at="x", target={})
+        obs.add(name="mcp", extra={"mcp": {"body": body}})
+        got = json.loads(_mod._write_observation(obs, tmp_path).read_text()) \
+            ["steps"][0]["extra"]["mcp"]["body"]
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+    # a STRING under the same keys still loses its value
+    for secret in ("hunter2", "rt-1", "S3cretCode"):
+        assert secret not in _mod.scrub(f'{{"password": "{secret}"}}')
+    # a free-text `=` assignment of a SCALAR inside a recorded body must not
+    # gain quotes: the marker is quoted only for the JSON `:` pair form, so the
+    # embedded body stays parseable (review cycle 10)
+    for note in ("retried token=3 times", "password=12345", "api_key=42 retry",
+                 "token=null", "secret=true"):
+        body = json.dumps({"note": note})
+        got = _mod.scrub(body)
+        parsed = json.loads(got)          # must not raise
+        assert '""' not in parsed["note"], (body, got)
+
+
+def test_a_value_after_a_matcher_truncation_still_loses_its_secret(
+        tmp_path) -> None:
+    """A URL matcher STOPS at a quote, backslash, angle bracket or whitespace,
+    so it can consume the `?code=` LEAD and rewrite only the query — after which
+    a named pass running AFTER it has nothing left to match and the value
+    reaches the artifact. The named pass must run FIRST, on the raw text, and
+    its value run must tolerate the character that truncated the URL (review
+    cycle 11)."""
+    import json
+
+    for param in ("code", "key", "session", "token", "access_token",
+                  "id_token", "signature"):
+        for sep in ("\\", ")", "<", ">", " ", "\t", "\n", "\r", "'", '"'):
+            url = f"https://app.premiselabs.co/landing?{param}={sep}OOPS9"
+            obs = _mod.Observation(started_at="x", target={})
+            obs.add(name="landing", url=url,
+                    detail=json.dumps([{"url": url, "at": sep}]))
+            obs.verdict = f"redirected to {url}"
+            raw = _mod._write_observation(obs, tmp_path).read_text()
+            assert "OOPS9" not in raw, (param, sep, raw)
+            json.loads(raw)                    # the artifact stays parseable
+
+
+def test_a_bracketed_value_under_a_secret_key_is_emptied_never_leaked(
+        tmp_path) -> None:
+    """A secret key can hold a LIST or an OBJECT in a recorded body. Quoting a
+    marker there would corrupt an enclosing JSON string, so the value is
+    EMPTIED (`[]`/`{}`) instead: the credential goes AND the body still parses
+    (review cycle 11)."""
+    import json
+
+    for body, secret in (('{"access_token": ["tok9secret"]}', "tok9secret"),
+                         ('{"signature": ["sig9"]}', "sig9"),
+                         ('{"refresh_token": {"v": "rt9"}}', "rt9"),
+                         ('{"token": [{"a": 1}, "t9"]}', "t9")):
+        obs = _mod.Observation(started_at="x", target={})
+        obs.add(name="mcp", extra={"mcp": {"body": body}})
+        raw = _mod._write_observation(obs, tmp_path).read_text()
+        got = json.loads(raw)["steps"][0]["extra"]["mcp"]["body"]
+        assert secret not in raw, (body, got)
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+    # NESTED containers, which no regex can take as one value: a single-level
+    # match would leave these whole and let the credential reach the artifact
+    # (review cycle 12 — a fail-open regression of the pre-fix control)
+    for body, secret in (('{"token": [["n1"]]}', "n1"),
+                         ('{"access_token": {"a": {"b": "n2"}}}', "n2"),
+                         ('{"password": [{"a": ["n3"]}]}', "n3"),
+                         ('{"token": ["a]b", "n4"]}', "n4")):
+        obs = _mod.Observation(started_at="x", target={})
+        obs.add(name="mcp", extra={"mcp": {"body": body}})
+        raw = _mod._write_observation(obs, tmp_path).read_text()
+        got = json.loads(raw)["steps"][0]["extra"]["mcp"]["body"]
+        assert secret not in raw, (body, got)
+        assert json.loads(got) is not None, (body, got)
+    # ...and a body recorded INSIDE a body has its quotes ESCAPED (`\"`), which
+    # the balanced scan skips as units — the regexes alone could not see it
+    escaped = ('{"data":{"context":"{\\"password\\": [\\"e1\\"]}"}}')
+    obs = _mod.Observation(started_at="x", target={})
+    obs.add(name="mcp", extra={"mcp": {"tools_call": {"body": escaped}}})
+    raw = _mod._write_observation(obs, tmp_path).read_text()
+    assert "e1" not in raw, raw
+    # a NON-secret container is untouched, and a query-only name needs its LEAD
+    # (`{"code": [1, 2]}` is a body's own array, not a query parameter)
+    assert _mod.scrub('{"org": [1, 2]}') == '{"org": [1, 2]}'
+    assert _mod.scrub('{"code": [1, 2]}') == '{"code": [1, 2]}'
+    assert "p1" not in _mod.scrub('?code=[1, ["p1"]]')
+    # a marker followed by further text is not this pass's output, so the value
+    # in front of it is still redacted (review cycle 12)
+    for text in ("token=p2[REDACTED]", 'token=p3"[REDACTED]"'):
+        assert text.split("=")[1].split("[")[0].strip('"') not in \
+            _mod.scrub(text), text
+    # a value-less named param that ends a JSON ARRAY must not eat the `]`
+    # (the closing quote of the STRING was read as the value's opening quote)
+    for body in ('["?token="]', '["?password="]',
+                 '["https://h/a", "https://h/b?token="]'):
+        got = _mod.scrub(body)
+        assert json.loads(got) is not None, (body, got)
+        assert _mod.scrub(got) == got, (body, got)
+
+
+def test_only_a_value_position_is_redacted_never_the_following_name() -> None:
+    """A `&` starts the NEXT parameter and a `#` the fragment: the text after
+    either is a NAME, not the named parameter's value, and is left alone. A
+    fragment that carries a `name=value` credential IS redacted, through the
+    `#` lead — the boundary is a position, not a blind spot (review cycle 11)."""
+    assert _mod.scrub("?code=&next=/x") == "?code=[REDACTED]&next=/x"
+    assert _mod.scrub("?code=SECRET9&next=/x") == "?code=[REDACTED]&next=/x"
+    assert _mod.scrub("?code=#access_token=tt_x") \
+        == "?code=[REDACTED]#access_token=[REDACTED]"
+    assert _mod.scrub("#access_token=SECRET9") == "#access_token=[REDACTED]"
+    assert _mod.scrub("https://h/cb#access_token=SECRET9") \
+        == "https://h/cb#[REDACTED]"
+
+
+def test_the_serializer_redacts_a_key_value_secret_the_issue_names(tmp_path) -> None:
+    """The serializer runs the FULL redaction over the SERIALIZED payload, not
+    only a URL pass, so a string that no call site routed through `scrub` — a
+    raw exception message, say — cannot carry `access_token=<value>` into the
+    artifact, and a structured pair (`{"access_token": "…"}`) is seen as a
+    PAIR, which a per-value pass cannot do."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at="x", target={})
+    obs.add(name="error", detail="RuntimeError: upstream said access_token=" + _ACCESS_TOKEN)
+    obs.verdict = "failed: api_key=" + _OAUTH_CODE
+    path = mod._write_observation(obs, tmp_path)
+    raw = path.read_text()
+    assert _ACCESS_TOKEN not in raw and _OAUTH_CODE not in raw
+    written = json.loads(raw)
+    assert written["steps"][0]["detail"] == \
+        "RuntimeError: upstream said access_token=[REDACTED]"
+    assert written["verdict"] == "failed: api_key=[REDACTED]"
+    # a nested SERIALIZED body — the tool records raw MCP/HTTP bodies — has its
+    # quotes ESCAPED inside the recorded string; the pair must still be seen
+    nested = ('{"data":{"context":"{\\"password\\":\\"' + _ACCESS_TOKEN
+              + '\\"}"}}')
+    obs2 = mod.Observation(started_at="x", target={})
+    obs2.add(name="agent-write", extra={"mcp": {"tools_call": {"body": nested}}})
+    raw2 = mod._write_observation(obs2, tmp_path).read_text()
+    assert _ACCESS_TOKEN not in raw2, raw2
+    assert json.loads(raw2)["steps"][0]["extra"]["mcp"]["tools_call"]["body"]
+
+
+def test_a_structured_key_value_secret_is_redacted_on_disk_and_on_stdout(
+        tmp_path, capsys) -> None:
+    """A credential under a sensitive KEY is a structured pair, not free text:
+    `{"access_token": "…"}`. Scrubbing each VALUE in isolation never sees the
+    pair, which is why the serializer redacts the STRUCTURE before `json.dumps`
+    — and why the summary redacts the structured field before rendering it. A
+    JSON body recorded as a STRING is the same case one layer down, and a
+    non-string value under a sensitive key must be redacted without breaking
+    the document (the replacement is a string)."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at="x", target={})
+    obs.add(name="s", detail="d", extra={"refresh_token": _ACCESS_TOKEN})
+    obs.session = {"access_token": _ACCESS_TOKEN,
+                   "token": {"scopes": ["read"]}}
+    obs.teardown = {"api_key": 42}
+    obs.assertions = {"password": _OAUTH_CODE}
+    # a JSON BODY recorded as a detail string: its own pairs must be redacted
+    obs.add(name="body", detail='{"password":"Hunter2","refresh_token":"rt-1"}')
+    path = mod._write_observation(obs, tmp_path)
+
+    raw = path.read_text()
+    for secret in (_ACCESS_TOKEN, _OAUTH_CODE, "Hunter2", "rt-1"):
+        assert secret not in raw, secret
+    written = json.loads(raw)          # must stay parsable JSON
+    assert written["session"]["access_token"] == "[REDACTED]"
+    assert written["session"]["token"] == "[REDACTED]"
+    assert written["teardown"]["api_key"] == "[REDACTED]"
+    assert written["steps"][0]["extra"]["refresh_token"] == "[REDACTED]"
+    assert "Hunter2" not in written["steps"][1]["detail"]
+
+    mod._print_summary(obs, path)
+    printed = capsys.readouterr()
+    for secret in (_ACCESS_TOKEN, _OAUTH_CODE, "Hunter2", "rt-1"):
+        assert secret not in printed.out, secret
+    # the redaction keeps the KEY, so the log stays diagnostic (the summary
+    # prints session/assertions/teardown; `extra` is artifact-only)
+    assert "access_token" in printed.out
+    assert "api_key" in printed.out and "password" in printed.out
+
+
+def test_the_structural_key_vocabulary_is_narrow_by_design(tmp_path) -> None:
+    """A structured PAIR is redacted when its KEY is a credential name — but the
+    vocabulary must not swallow a name the ARTIFACT itself uses. `session` is an
+    `Observation` field (the session record), and a recorded MCP result is a
+    dict whose numeric `{"code": …}` is diagnostic. Review cycle 8 caught the
+    first by adding `session` to the key list; the query carriers still cover
+    both names."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at="x", target={})
+    obs.session = {"recorded": True, "access_token": _ACCESS_TOKEN}
+    obs.add(name="mcp", detail="d",
+            extra={"mcp": {"error": "invalid params", "code": -32602},
+                   "id_token": _ACCESS_TOKEN, "signature": _OAUTH_CODE})
+    written = json.loads(mod._write_observation(obs, tmp_path).read_text())
+    # the credential-named pairs go…
+    assert written["session"]["access_token"] == "[REDACTED]"
+    assert written["steps"][0]["extra"]["id_token"] == "[REDACTED]"
+    assert written["steps"][0]["extra"]["signature"] == "[REDACTED]"
+    # …while the record itself and the JSON-RPC code survive
+    assert written["session"]["recorded"] is True
+    assert written["steps"][0]["extra"]["mcp"]["code"] == -32602
+
+
+def test_a_query_ending_in_equals_does_not_corrupt_the_artifact(tmp_path) -> None:
+    """An empty query parameter (`?next=`) or base64 padding (`?sig=AbC==`) ends
+    a URL with `=`. The URL redaction must drop that query WITHOUT reading
+    across a following `": "…"` pair, and ``json.dumps`` runs last, so the
+    document is valid JSON with every key in place."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    for suffix in ("?next=", "?sig=AbCdEf==", "?code=", "#frag="):
+        obs = mod.Observation(started_at="x", target={})
+        obs.add(name="landing",
+                url="https://app.x/welcome" + suffix, ui="connected",
+                detail='[{"url": "https://auth.x/verify?token=", "status": 200}]',
+                extra={"k": "v"})
+        written = json.loads(mod._write_observation(obs, tmp_path).read_text())
+        step = written["steps"][0]
+        assert step["ui"] == "connected", (suffix, step)
+        assert step["extra"] == {"k": "v"}, (suffix, step)
+        assert "[REDACTED]" in step["url"]
+    # COMPACT separators (`":"`, `","` — what a recorded MCP/HTTP body uses):
+    # the value's closing quote must not be confused with the next key's
+    # opening quote, which would eat the following entry.
+    compact = '{"id":2,"error":{"url":"https://h/cb?next=","code":-32602}}'
+    obs = mod.Observation(started_at="x", target={})
+    obs.add(name="mcp", extra={"mcp": {"tools_call": {"body": compact}}})
+    body = json.loads(mod._write_observation(obs, tmp_path).read_text()) \
+        ["steps"][0]["extra"]["mcp"]["tools_call"]["body"]
+    assert json.loads(body) == {"id": 2, "error": {
+        "url": "https://h/cb?[REDACTED]", "code": -32602}}, body
+
+
+def test_the_on_disk_artifact_never_carries_a_redirect_credential(
+        monkeypatch, tmp_path, capsys) -> None:
+    """THE #5002 test: ON DISK, not in memory. A real `run_walk` against a fake
+    browser whose signup redirect lands on a credentialed URL AND whose signup
+    response carries one. The artifact is read back from disk — that is the
+    file uploaded as a CI artifact — and the landed-on URL is still diagnostic
+    (scheme/host/path), with the query's PRESENCE visible as the marker."""
+    import json
+
+    obs, _ctx, _ = _run_teardown_walk(
+        monkeypatch, tmp_path, reads=[(200, []), (200, [])], org_create=False,
+        landing_url=("https://app.premiselabs.co/welcome?code=" + _OAUTH_CODE
+                     + "#access_token=" + _ACCESS_TOKEN),
+        signup_response_url=("https://auth.premiselabs.co/auth/v1/signup?access_token="
+                             + _ACCESS_TOKEN + "&code=" + _OAUTH_CODE))
+
+    artifact = (tmp_path / "ship-test" / "observation.json").read_text()
+    assert _OAUTH_CODE not in artifact, "the OAuth code reached the artifact file"
+    assert _ACCESS_TOKEN not in artifact, "the access token reached the artifact file"
+    written = json.loads(artifact)
+    landing = next(s for s in written["steps"] if s["name"] == "landing-after-signup")
+    # the VISITED-URL field, still diagnostic
+    assert landing["url"] == "https://app.premiselabs.co/welcome?[REDACTED]#[REDACTED]"
+    # the `signup_responses` record inside `detail` — a JSON STRING, not a field
+    assert "https://auth.premiselabs.co/auth/v1/signup?[REDACTED]" in landing["detail"]
+    assert landing["detail"].count("[REDACTED]") == 1, landing["detail"]
+    # ...and the printed summary, which is the same record, on the CI log
+    printed = capsys.readouterr()
+    assert _OAUTH_CODE not in printed.out and _ACCESS_TOKEN not in printed.out
+    # the walk itself is unaffected by the redaction
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
+
+
+def test_the_write_site_scrubs_every_url_not_only_a_field_named_url(
+        monkeypatch, tmp_path) -> None:
+    """The guarantee is the ONE serializer, so a URL in a step's `extra`, in the
+    session record, or in the free-text verdict is covered without enumerating
+    call sites — the per-site list is what made the URL fields inconsistent."""
+    import json
+
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at="2026-01-01T00:00:00Z", target={})
+    obs.add(name="wizard-final", url="https://app.x/w?token=" + _ACCESS_TOKEN,
+            detail="landed on /cb?code=" + _OAUTH_CODE
+                   + " then https://app.x/w?signature=" + _OAUTH_CODE,
+            extra={"redirect": "https://app.x/r?key=" + _OAUTH_CODE,
+                   "tupled": ("https://app.x/t?session=" + _ACCESS_TOKEN,),
+                   # a URL used as a KEY is serialized by `json.dumps` too
+                   "https://app.x/k?code=" + _OAUTH_CODE: "keyed",
+                   "nested": [{"href": "https://app.x/n?session=" + _ACCESS_TOKEN}]})
+    obs.session = {"detail": "http://u:pw@h/cb?code=" + _OAUTH_CODE}
+    obs.verdict = "failed: landed on https://app.x/e?code=" + _OAUTH_CODE
+    path = mod._write_observation(obs, tmp_path)
+
+    raw = path.read_text()
+    for secret in (_OAUTH_CODE, _ACCESS_TOKEN, "u:pw@"):
+        assert secret not in raw, f"{secret!r} reached the artifact"
+    written = json.loads(raw)
+    step = written["steps"][0]
+    assert step["url"] == "https://app.x/w?[REDACTED]"
+    assert step["extra"]["redirect"] == "https://app.x/r?[REDACTED]"
+    assert step["extra"]["https://app.x/k?[REDACTED]"] == "keyed"
+    # a TUPLE is preserved by `asdict` and serialized by `json.dumps`, so it
+    # must be rebuilt, not skipped
+    assert step["extra"]["tupled"] == ["https://app.x/t?[REDACTED]"]
+    assert step["extra"]["nested"][0]["href"] == "https://app.x/n?[REDACTED]"
+    assert written["session"]["detail"] == "http://h/cb?[REDACTED]"
+    assert _OAUTH_CODE not in written["verdict"]
+    # the write is IDEMPOTENT: the SAME record is written twice by a settled
+    # walk (pre-teardown, then authoritative), and the second pass must be a
+    # no-op rather than re-redacting the marker into something else.
+    before = path.read_text()
+    mod._write_observation(obs, tmp_path)
+    assert path.read_text() == before
+
+
+def test_the_summary_is_scrubbed_even_when_the_write_failed(
+        tmp_path, capsys) -> None:
+    """#5002 is about a durable, widely-readable record — and the CI LOG is one.
+    A run whose artifact write RAISED still prints the step details, so the
+    print path scrubs independently of the write rather than depending on it."""
+    import tools.ship_test_onboarding as mod
+
+    obs = mod.Observation(started_at="x", target={})
+    obs.add(name="landing-after-signup",
+            url="https://app.x/welcome?code=" + _OAUTH_CODE,
+            detail='[{"url": "https://auth.x/signup?access_token=' + _ACCESS_TOKEN
+                   + '", "status": 200}]')
+    obs.verdict = "passed"
+    # the write fails exactly as the shipped symlink refusal makes it fail
+    leaf = tmp_path / "observation.json"
+    leaf.symlink_to(tmp_path / "nowhere")
+    with pytest.raises(OSError):
+        mod._write_observation(obs, tmp_path)
+    mod._print_summary(obs, leaf, artifact_written=False)
+
+    printed = capsys.readouterr()
+    assert _OAUTH_CODE not in printed.out and _ACCESS_TOKEN not in printed.out
+    assert "[REDACTED]" in printed.out
 
 
 def test_deployed_sha_reads_the_deployments_own_revision(monkeypatch) -> None:
@@ -780,6 +1810,25 @@ def test_main_maps_an_instrument_error_to_its_own_exit_code(monkeypatch) -> None
         == mod.EXIT_INSTRUMENT_ERROR
     assert _run(mod.REASON_SERVER_DID_NOT_OBSERVE, mod.INCOMPLETE_NO_OBSERVATION) \
         == mod.EXIT_FAILED
+
+
+def test_the_cli_abort_message_is_scrubbed(monkeypatch, capsys) -> None:
+    """A `run_walk` exception that escapes the CLI is printed to stderr, which
+    is a durable CI log. A driver timeout's message carries the navigated URL
+    verbatim (`… navigating to "<url>"`), so that path must scrub too — it is
+    the one print path outside `_print_summary` that can carry a redirect URL.
+    """
+    import tools.ship_test_onboarding as mod
+
+    def _boom(_args):
+        raise RuntimeError("Timeout 45000ms exceeded while navigating to \""
+                           + _CREDENTIALED_URL + "\"")
+
+    monkeypatch.setattr(mod, "run_walk", _boom)
+    assert mod.main(["--skip-agent-write", "--allow-prod"]) == mod.EXIT_INSTRUMENT_ERROR
+    err = capsys.readouterr().err
+    assert _OAUTH_CODE not in err and _ACCESS_TOKEN not in err, err
+    assert "Timeout 45000ms exceeded" in err, "the scrub must not swallow the fault"
 
 
 def test_the_agent_write_is_never_attempted_without_a_proven_session() -> None:
@@ -1299,10 +2348,27 @@ class _FakeBrowser:
         self._ctx.events.append("browser_closed")
 
 
+class _FakeResponse:
+    """The two fields the walk's response listener reads (`.url`, `.status`)."""
+
+    def __init__(self, url, status=200):
+        self.url = url
+        self.status = status
+
+
 class _FakePage:
-    def __init__(self, base_url, org_create=False, org_click_raises=False):
+    def __init__(self, base_url, org_create=False, org_click_raises=False,
+                 landing_url=None, signup_response_url=None):
         self._base = base_url.rstrip("/")
-        self.url = self._base + "/welcome"
+        # The URL the signup redirect lands on. A test can supply one carrying a
+        # credential in its query string — the #5002 redirect — so the walk
+        # records a secret URL and the on-disk artifact can be checked for it.
+        self._landing = landing_url or (self._base + "/welcome")
+        self.url = self._landing
+        # OPT-IN: a URL this page "responds" with, so the walk's own response
+        # listener (`signup_responses`) runs against a credential-carrying URL.
+        # None for every pre-existing test, whose listener therefore stays idle.
+        self._signup_response_url = signup_response_url
         # OPT-IN: only a walk that is meant to exercise the org-create step
         # reports the wizard's org-name input as visible. Off by default, so
         # every pre-existing test keeps the behaviour it was written against.
@@ -1312,13 +2378,18 @@ class _FakePage:
         # WRITES is the name teardown MATCHES against (they are one value).
         self.fills = []
 
-    def on(self, *a, **k):
-        pass
+    def on(self, event, handler=None, **k):
+        # A real page fires `response` as each response arrives; the walk
+        # subscribes at start, so delivering the canned one here is equivalent
+        # for the listener's purpose. The handler's OWN filter still decides
+        # whether it is recorded — this only makes the event happen.
+        if event == "response" and handler is not None and self._signup_response_url:
+            handler(_FakeResponse(self._signup_response_url))
 
     def goto(self, url, **k):
         # A fake browser always "lands" in the product: the real signup flow
         # redirects to the app origin, so the walk's landing wait must not spin.
-        self.url = self._base + "/welcome"
+        self.url = self._landing
 
     def wait_for_timeout(self, ms):
         pass
@@ -1383,7 +2454,7 @@ class _FakeCtx:
     def __init__(self, plan, base_url, org_create=False, org_click_raises=False,
                  shares=None, harness=None, ctx_close_wedges=False,
                  ctx_close_raises=False, wedge_release_on=None,
-                 wedge_timeout=None):
+                 wedge_timeout=None, landing_url=None, signup_response_url=None):
         # A sibling context (a second `browser.new_context()`) SHARES the request
         # recorder and the event sink, so it is a distinct object whose missing
         # close is visible, while the test's handle keeps seeing every request.
@@ -1397,6 +2468,8 @@ class _FakeCtx:
         self.events = shares.events if shares else []
         self.harness = harness if harness is not None else _DriverHarness()
         self._base = base_url
+        self._landing_url = landing_url
+        self._signup_response_url = signup_response_url
         self._org_create = org_create
         self._org_click_raises = org_click_raises
         self._ctx_close_raises = ctx_close_raises
@@ -1407,7 +2480,8 @@ class _FakeCtx:
         self._closed = False
 
     def new_page(self):
-        self.page = _FakePage(self._base, self._org_create, self._org_click_raises)
+        self.page = _FakePage(self._base, self._org_create, self._org_click_raises,
+                              self._landing_url, self._signup_response_url)
         return self.page
 
     def close(self):
@@ -1431,7 +2505,8 @@ class _FakeCtx:
 
     def sibling(self):
         return _FakeCtx(None, self._base, self._org_create, self._org_click_raises,
-                        shares=self)
+                        shares=self, landing_url=self._landing_url,
+                        signup_response_url=self._signup_response_url)
 
 
 class _FakeChromium:
@@ -1509,7 +2584,8 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    enum_identity_unreadable=False, identity_override=None,
                    wedge_release_on=None,
                    wedge_timeout=None, expect_reaped=True, signal_raises=False,
-                   stop_raises_base=False, harness_sink=None):
+                   stop_raises_base=False, harness_sink=None, landing_url=None,
+                   signup_response_url=None):
     """Execute the real `run_walk` against a fake browser. Returns the record.
 
     `front_door_hittable=False` makes the front-door probe REPORT the signup CTA
@@ -1543,7 +2619,8 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
                    ctx_close_wedges=ctx_close_wedges,
                    ctx_close_raises=ctx_close_raises,
                    wedge_release_on=wedge_release_on,
-                   wedge_timeout=wedge_timeout)
+                   wedge_timeout=wedge_timeout, landing_url=landing_url,
+                   signup_response_url=signup_response_url)
     if playwright_available:
         fake_sync = types.ModuleType("playwright.sync_api")
         fake_sync.sync_playwright = lambda: _FakeSyncPlaywright(
@@ -2285,7 +3362,8 @@ _DELETE_OK = [(202, {"status": "delete_scheduled", "org_id": "org-1",
 
 def _run_teardown_walk(monkeypatch, tmp_path, *, reads, delete=None,
                        org_create=True, org_click_raises=False, skip_write=False,
-                       org_name=_RUN_ORG, base=None, ui=None):
+                       org_name=_RUN_ORG, base=None, ui=None, landing_url=None,
+                       signup_response_url=None):
     """A walk whose org-list reads and DELETE are supplied by the caller."""
     plan = base if base is not None else _happy_base()
     plan[("GET", _ORG_ROUTE)] = reads
@@ -2296,7 +3374,8 @@ def _run_teardown_walk(monkeypatch, tmp_path, *, reads, delete=None,
         ui_sequence=ui or [NOT_CONNECTED, CONNECTED],
         mcp_tools_call=_MCP_OK, org_create=org_create,
         org_click_raises=org_click_raises, skip_write=skip_write,
-        org_name=org_name)
+        org_name=org_name, landing_url=landing_url,
+        signup_response_url=signup_response_url)
 
 
 def _delete_calls(ctx):
