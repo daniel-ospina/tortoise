@@ -59,10 +59,12 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
 
 # #4243: columns whose SQL type is ``timestamptz``. Postgres's timestamptz input
 # function REJECTS a bare JSON number — the number reaches it as text and is not
-# a valid timestamp literal — so PostgREST 400s. Verified against Postgres 17
-# (``json_populate_record(NULL::t, '{"pe":1756348800}')`` → `date/time field
-# value out of range`, ``{"pe":2024}`` → `invalid input syntax`, and a JSON
-# boolean likewise; JSON null and an ISO-8601 string are accepted). The fake
+# a valid timestamp literal — so PostgREST 400s. Verified against Postgres 18
+# (PGlite 0.5.4, every migration applied):
+# ``json_populate_record(NULL::organizations, '{"pe":1756348800}')`` → `date/time
+# field value out of range: "1756348800"`, ``{"pe":2024}`` → `invalid input
+# syntax for type timestamp with time zone: "2024"`, and a JSON
+# boolean likewise; JSON null and an ISO-8601 string are accepted. The fake
 # stored ANY JSON value verbatim, so it accepted an epoch int — exactly how
 # #4216 (Stripe delivers the period bounds as Unix epoch ints, PATCHed into
 # ``timestamptz`` columns) passed CI and 400'd in production. Default-on
