@@ -2473,6 +2473,22 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
+def _clip(value: object, limit: int = 60) -> str:
+    """Coerce a model-supplied field to bounded text for a report/warning.
+
+    The report must never be STRICTER than the write gate it reports on:
+    `execute_embed` already coerces every one of these fields with `str(...)`
+    before using them (`_norm` above carries the same correction as FIX C),
+    so a `None`/`0` name or content is WRITABLE — as `"None"`/`"0"`. Slicing
+    the raw value raised `TypeError` instead, and because
+    `extract_session_v2` wraps S5 fail-open the raise discarded the WHOLE
+    session's payload, not just the one odd item (#5060). `_parse_json_robust`
+    rung 1 returns parsed JSON without `_validate_output_shape`, so such
+    values reach these sites from real model output.
+    """
+    return str(value)[:limit]
+
+
 def _norm_kind(k: str) -> str:
     """Bare + case-folded kind form — the link-before-create lookup key.
     The model may emit 'plan' where the backend stores 'core:plan'; both
@@ -4705,7 +4721,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # object kind is writable at execute_embed, so it is NOT minted;
         # the report must agree with the write gate).
         if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
-            minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
+            minted.append(f"{k} (entity '{_clip(e.get('name', ''))}')")
     for ev in embed_list.get("events", []) or []:
         if not isinstance(ev, dict):
             continue
@@ -4716,7 +4732,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # write gate).
         if k and k.lower() != UNCLASSIFIED and \
                 k.lower() not in _event_kind_forms(master):
-            minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
+            minted.append(f"{k} (event '{_clip(ev.get('content', ''))}')")
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             continue
@@ -4728,7 +4744,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # otherwise accept (FIX P — the report agrees with the gate).
         if k and k.lower() != UNCLASSIFIED and \
                 k.lower() not in point_full and k.lower() not in point_bare:
-            minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
+            minted.append(f"{k} (point '{_clip(p.get('content', ''))}')")
     return minted
 
 
@@ -5776,12 +5792,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             strength = float(o.get("strength") or 0.3)
         except (TypeError, ValueError):
             warnings.append(f"MITIGATES strength {o.get('strength')!r} not numeric "
-                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            f"('{_clip(o.get('src', ''), 40)}'→"
+                            f"'{_clip(o.get('dst', ''), 40)}') "
                             "→ defaulted to 0.3")
             strength = 0.3
         if not (0.10 <= strength <= 0.50):
             warnings.append(f"MITIGATES strength {strength} outside [0.10, 0.50] "
-                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            f"('{_clip(o.get('src', ''), 40)}'→"
+                            f"'{_clip(o.get('dst', ''), 40)}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
         declared_target_missing = (

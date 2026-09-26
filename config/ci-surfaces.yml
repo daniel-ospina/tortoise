@@ -832,6 +832,7 @@ surfaces:
   - test_extractor_doc.py
   - test_extractor_priors.py
   - test_extractor_reliability.py
+  - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
   - test_falkordb_compat.py
   - test_file_indexer.py
