@@ -1737,7 +1737,9 @@ def _resolve_config_path(include_env: bool = True, *,
       surfaces that transmit prompts (the per-turn volunteer reflex + the
       session-start hosted digest) resolve their identity from the user-global
       config only; a repo-supplied .tortoise must never authorize transmission
-      to a host the repo (attacker-controllable) chose.
+      to a host the repo (attacker-controllable) chose. The transcript-upload
+      family (#3660 — `session capture` / `session drain` / `sessions import`)
+      resolves through `_resolve_transmit_config()`, the same posture.
     """
     import json as _json
     import os as _os
@@ -1779,6 +1781,25 @@ def _resolve_config_path(include_env: bool = True, *,
         api_url = config.get("api_url") or "https://api.premiselabs.co"
         return path, config, api_key, api_url
     return None, None, None, None
+
+
+def _resolve_transmit_config() -> tuple[Path | None, dict | None, str | None, str | None]:
+    """Resolve identity for a TRANSMITTING surface — cwd config excluded.
+
+    The transcript-upload family (#3660) shares the `global_only` posture the
+    per-turn reflex and the session-start digest already had (#2369 D1.2):
+    `session capture`, `session drain` and `sessions import` all POST session
+    content, so a repo-committed `./.tortoise` — attacker-controllable — must
+    never choose the host that content is sent to. Skipping the cwd candidate
+    is what makes the upload fail CLOSED (no key → no transmission) instead of
+    quietly filing the transcript at a repo-chosen endpoint.
+
+    Env is still honoured: it is an explicit, user-controlled source, and the
+    resolver co-sources its URL with its key (D1.1), so a bare
+    `TORTOISE_API_URL` can never redirect a file-store key. Only the FILE
+    candidate list is narrowed.
+    """
+    return _resolve_config_path(global_only=True)
 
 
 def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
@@ -3386,15 +3407,21 @@ def _cmd_session(args) -> int:
         # error the caller can act on.
         return _cmd_session_drain_best_effort(args)
 
-    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
+    # Transmitting-identity resolver (#2369 D1.2, #3660): `session capture`
+    # POSTs the full transcript, so a repo/cwd `./.tortoise` must never choose
+    # the host it is sent to — resolve the user-global config only. Env is
+    # still honoured (its URL is co-sourced with its key, D1.1).
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=sys.stderr)
         return 1
     if api_key is None:
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
+        print("No user-global .tortoise config found — session uploads resolve "
+              "their identity from ~/.tortoise/credentials.json or "
+              "TORTOISE_API_KEY only; a repo-local ./.tortoise never chooses "
+              "the upload host (#3660).", file=sys.stderr)
         return 1
 
     if args.session_cmd == "capture":
@@ -3928,10 +3955,11 @@ def _cmd_session_drain_best_effort(args) -> int:
     # with a traceback. The drain is backgrounded from SessionStart: whatever
     # goes wrong, its contract is exit 0 with the reason on stderr.
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
         if api_key is None:
-            print("spool drain: no .tortoise config — nothing to file",
-                  file=_sys.stderr)
+            print("spool drain: no user-global .tortoise config — nothing to file "
+                  "(a repo-local ./.tortoise never chooses the upload host, "
+                  "#3660)", file=_sys.stderr)
             return 0
         return _cmd_session_drain(api_key, api_url,
                                   getattr(args, "exclude_session_id", None))
@@ -4638,18 +4666,21 @@ def _cmd_sessions_import(args) -> int:
         return 0
 
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=_sys.stderr)
         _record_capture_error(harness, f"invalid config at {e}")
         return 1
     if api_key is None:
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.",
+        print("No user-global .tortoise config found — session uploads resolve "
+              "their identity from ~/.tortoise/credentials.json or "
+              "TORTOISE_API_KEY only; a repo-local ./.tortoise never chooses "
+              "the upload host (#3660).",
               file=_sys.stderr)
         _record_capture_error(
-            harness, "no .tortoise config found (run 'tortoise init "
-                     "--api-key <key>')")
+            harness, "no user-global .tortoise config found (a repo-local "
+                     "./.tortoise never chooses the upload host, #3660)")
         return 1
     # Validate the URL BEFORE the request try. `Request()` raises ValueError for
     # a scheme-less URL, and the response-phase clause now takes the
