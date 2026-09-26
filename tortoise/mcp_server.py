@@ -4010,9 +4010,18 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-
         scoped servers keep the agent's tool-selection surface under ~20.
+
+        #3877: the group is read from the SAME single source `tools_by_group()`
+        reads — the group the registry APPLIED to the entry
+        (`ToolDefinition.group`, assigned once by `_apply_groups`). Re-deriving it
+        here from `GROUP_BY_NAME` with no default dropped every name the map does
+        not list, so those tools were unreachable on EVERY group-scoped server
+        while the registry had already assigned them "memory". One lookup, so the
+        declared group and the served group cannot disagree.
         """
         async def list_tools(self, tools):
             group = _tool_group.get()
+            _by_name = get_tool_by_name()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
             # filter below already excludes the onboarding tools.
@@ -4025,7 +4034,8 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
                     return False
-                tgroup = GROUP_BY_NAME.get(t.name)
+                _entry = _by_name.get(t.name)
+                tgroup = getattr(_entry, "group", None)
                 # explicit curation-group request — serve that group's tools
                 if group and tgroup != group:
                     return False
@@ -4600,7 +4610,7 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
 # handlers dict covers the whole registry: the seven onboarding tools and
 # tortoise_session_capture used to be logged "no handler — skipped" (they
 # were defined after this block's old mid-module position) — #2210.
-from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
+from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter  # noqa: E402
 
 _adapter = FastMCPAdapter(mcp)
 _adapter.register_all(TOOL_REGISTRY, {
