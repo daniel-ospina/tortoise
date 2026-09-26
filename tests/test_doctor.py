@@ -48,6 +48,13 @@ def _run_doctor(argv: list[str]) -> int:
     return main(["doctor", *argv])
 
 
+def _pi_seam_name() -> str:
+    """Pi's installed artifact basename, DERIVED from the contract registry so
+    a rename cannot leave a test writing a file nothing reads."""
+    from tortoise.hook_install import ARTIFACT_CONTRACTS
+    return ARTIFACT_CONTRACTS["pi"].install_name
+
+
 def _seed_db(db_path: str, content: str, attempts: int = 3) -> None:
     """Boot an embedded DB at db_path and write one point.
 
@@ -891,10 +898,9 @@ class TestDoctorPiSeamFreshness:
 
     @staticmethod
     def _seam(home, text: str):
-        from tortoise import hook_install
         root = home / ".pi" / "agent" / "extensions"
         root.mkdir(parents=True, exist_ok=True)
-        path = root / hook_install.ARTIFACT_CONTRACTS["pi"].install_name
+        path = root / _pi_seam_name()
         path.write_text(text, encoding="utf-8")
         return path
 
@@ -984,3 +990,56 @@ class TestDoctorPiSeamFreshness:
         assert "needs a manual fix" in row, row
         assert "run `tortoise install pi` to repair" not in row, (
             "recommending a command that refuses is worse than no hint")
+
+    def test_doctor_never_recommends_the_installer_for_a_symlinked_root(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A symlinked install ROOT makes `tortoise install pi` refuse (it will
+        not write through a symlink), so doctor must not recommend it.
+
+        Mutation: compute the manual set over BLOCKING findings only — the root
+        note is non-blocking, so the hint flips to "run `tortoise install pi`"
+        and this REDs.
+        """
+        home = tmp_path / "home"
+        real = home / "checkout-extensions"
+        real.mkdir(parents=True)
+        (home / ".pi" / "agent").mkdir(parents=True)
+        root = home / ".pi" / "agent" / "extensions"
+        root.symlink_to(real)
+        (real / "tortoise-capture.ts").write_text(
+            "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "symlinked-install" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi`" not in row, (
+            "the installer refuses a symlinked install root, so recommending "
+            "it is wrong")
+
+    def test_doctor_never_recommends_the_installer_for_an_out_of_home_symlink(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A leaf symlink whose target escapes $HOME is refused by the
+        installer; the refusal is expressed in the NON-blocking symlink note,
+        so the hint must consult all findings.  (Peer of the root case above.)
+        """
+        home = tmp_path / "home"
+        self._seam(home, "// tortoise-hook-version: 0\n// tortoise session\n")
+        outside = tmp_path / "outside.ts"
+        outside.write_text(
+            "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+        installed = (home / ".pi" / "agent" / "extensions"
+                     / _pi_seam_name())
+        installed.unlink()
+        installed.symlink_to(outside)
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi`" not in row, row

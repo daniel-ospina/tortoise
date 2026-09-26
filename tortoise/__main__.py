@@ -6439,16 +6439,22 @@ def _cmd_doctor(args):
             # Never recommend a command that REFUSES: `hooks upgrade` rejects
             # every manual-fix kind, and `tortoise install <harness>` refuses
             # the same kinds for an artifact seam (a foreign or unreadable
-            # artifact, a non-regular file, an out-of-HOME symlink) — so those
-            # get the finding's own manual instruction instead.  Repairability
-            # is declared once, in `hook_install.is_manual_fix` (#4680 review).
-            _manual = sorted({f.kind for f in blocking
+            # artifact, a non-regular file, a symlinked install root) — so
+            # those get the finding's own manual instruction instead.
+            # Repairability is declared once, in `hook_install.is_manual_fix`
+            # (#4680 review), and it is asked over ALL findings, not just the
+            # blocking ones: the artifact detector reports a symlinked install
+            # root / leaf as a NON-blocking note, and that note is exactly what
+            # makes `tortoise install` refuse while a blocking `stale-artifact`
+            # sits beside it.  Scoping this set to `blocking` would print the
+            # refusing command — the same mistake `hooks status` avoids.
+            _manual = sorted({f.kind for f in findings
                               if is_manual_fix(f.kind)})
             if _manual:
-                _hint = ("needs a manual fix before `tortoise hooks status "
-                         f"--harness {_harness}` can recommend a repair "
-                         f"({', '.join(_manual)})" if _layout is not None else
-                         "needs a manual fix before `tortoise install "
+                _hint = ("needs a manual fix before "
+                         f"`tortoise hooks upgrade --harness {_harness}` "
+                         f"can run ({', '.join(_manual)})" if _layout is not None
+                         else "needs a manual fix before `tortoise install "
                          f"{_harness}` can run ({', '.join(_manual)})")
             else:
                 _hint = (f"run `tortoise hooks status --harness {_harness}` "

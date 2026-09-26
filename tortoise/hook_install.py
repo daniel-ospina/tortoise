@@ -769,10 +769,10 @@ def contract_version_for(harness: str) -> int | None:
     or a non-shell artifact (answered from :data:`ARTIFACT_CONTRACTS`), so
     ``pi`` is pinned by the SAME test table as its three shell siblings instead
     of falling outside the machinery (#4680).  Its production consumer is
-    ``tortoise doctor`` step 7, which grades both seam classes; ``tortoise
-    hooks status`` also reads its version through it, but only for layout
-    harnesses — the CLI still rejects ``pi`` before reaching this call, so Pi
-    is unreachable there (#5351).
+    ``tortoise doctor`` step 7, which grades both seam classes;
+    ``tortoise hooks status`` also reads its version through it, but only for
+    layout harnesses — the CLI still rejects ``pi`` before reaching this call,
+    so Pi is unreachable there (#5351).
 
     ``None`` means "no contract is registered for this harness" or "the
     shipped seam declares no readable generation".  The former is the normal
@@ -829,9 +829,20 @@ MANUAL_FIX_KINDS = frozenset({
 def is_manual_fix(kind: str) -> bool:
     """Whether a finding of ``kind`` needs a human fix before any repair run.
 
-    True for :data:`MANUAL_FIX_KINDS` and for every ``symlinked*`` kind:
-    ``upgrade_install`` refuses on ANY symlink in a target path, and the
-    finding kinds for those are not knowable in advance.
+    True for :data:`MANUAL_FIX_KINDS` and for every ``symlinked*`` kind.  For
+    the SHELL half that is exact: ``upgrade_install`` refuses on any symlink in
+    a target path.
+
+    For an artifact seam the same rule is deliberately CONSERVATIVE, and the
+    direction matters more than the precision: ``install_capture`` refuses a
+    symlinked install ROOT outright, and for a leaf link whether it refuses
+    depends on where the link RESOLVES TO (a target outside ``$HOME`` is
+    refused, an in-home one is replaced) — which no finding kind expresses.  A
+    blocking ``symlinked-artifact`` covers a broken leaf link, which the
+    installer does replace, so this predicate can ask for a needless manual
+    step.  That is the cheap error: the other one recommends a command that
+    fails.  Callers must therefore read ``kind`` only, never "the installer
+    will work" (the doctor/status hint wording is scoped accordingly).
     """
     return kind in MANUAL_FIX_KINDS or kind.startswith("symlinked")
 
@@ -2181,12 +2192,14 @@ def detect_artifact_install(root: str | os.PathLike[str],
     that could not tell them apart.
 
     Kind names are suffixed ``-artifact`` rather than ``-script`` ONLY for the
-    seam-specific kinds (``unversioned``/``stale``/``ahead``/``modified``/
-    ``symlinked``/``foreign``); the structural kinds ``not-a-regular-file`` and
-    ``not-readable`` are shared verbatim with ``detect_install`` because the
-    two detectors genuinely report the same structural defect there, and a
-    kind-keyed caller (the manual-fix predicate, :func:`is_manual_fix`) then
-    covers both classes with one entry.
+    seam-specific kinds (``missing``/``unversioned``/``stale``/``ahead``/
+    ``modified``/``symlinked``/``foreign``); the structural kinds
+    ``not-a-regular-file`` and ``not-readable`` are shared verbatim with
+    ``detect_install`` because the two detectors genuinely report the same
+    structural defect there, and a kind-keyed caller (the manual-fix predicate,
+    :func:`is_manual_fix`) then covers both classes with one entry.  The
+    ``symlinked-install`` note (a symlinked install ROOT) is shared verbatim
+    too, for the same reason.
 
     KNOWN LIMITATION (tracked by #3713, not this detector's fix): only the one
     artifact file is inspected, so an ACTIVE legacy ``tortoise-capture/``
@@ -2202,31 +2215,59 @@ def detect_artifact_install(root: str | os.PathLike[str],
     contract = ARTIFACT_CONTRACTS.get(harness)
     if contract is None:
         return []
-    installed = Path(root) / contract.install_name
+    root_path = Path(root)
+    installed = root_path / contract.install_name
     findings: list[Finding] = []
+    # The install HOME is the ancestor `root_relpath` names, so the symlink
+    # check covers EVERY component the installer walks — `.pi`, `agent`,
+    # `extensions` and the artifact leaf itself.  `install_capture` refuses a
+    # symlinked install root and writes nothing through it (verified for both
+    # an in-home and an out-of-home target), so without this note `doctor`
+    # would recommend `tortoise install <harness>` for a command that refuses.
+    # This is the artifact peer of `detect_install`'s `symlinked-install`.
+    # A caller handing us a root unrelated to the contract (a test's tmp_path)
+    # falls back to that root, where the check still covers the artifact.
+    home = root_path
+    _parts = contract.root_relpath.parts
+    if tuple(root_path.parts[-len(_parts):]) == _parts:
+        home = root_path.parents[len(_parts) - 1]
+    root_link = _symlink_in_path(home, root_path)
+    if root_link is not None:
+        findings.append(Finding(
+            "symlinked-install",
+            f"{root_link} is a symlink — the installer refuses a symlinked "
+            "install root and writes nothing through it; replace it with a "
+            f"real directory, then re-run `tortoise install {harness}`",
+            blocking=False,
+        ))
     if installed.is_symlink() and not installed.exists():
         # A BROKEN symlink: `.exists()` follows the link, so it would fall
         # through to `missing-artifact` and imply the seam is absent when it
-        # is really a broken pointer.
-        return [Finding(
+        # is really a broken pointer.  (`_symlink_in_path` above did not fire:
+        # it excludes the caller's root and this leaf IS `root`'s child, so the
+        # leaf is still checked here.)
+        findings.append(Finding(
             "symlinked-artifact",
             f"{installed} is a broken symlink — remove or re-point it",
             script=contract.install_name,
-        )]
+        ))
+        return findings
     if not installed.exists():
-        return [Finding(
+        findings.append(Finding(
             "missing-artifact",
             f"{installed} is not installed",
             script=contract.install_name,
-        )]
+        ))
+        return findings
     if not installed.is_file():
         # A directory / FIFO / socket at the artifact path is drift, and
         # reading it (FIFO) could block — report without reading.
-        return [Finding(
+        findings.append(Finding(
             "not-a-regular-file",
             f"{installed} exists and is not a regular file",
             script=contract.install_name,
-        )]
+        ))
+        return findings
     expected = read_hook_version(contract.source)
     if expected is None:
         # Repo defect (pinned by tests) — not this install's problem.
@@ -2292,7 +2333,8 @@ def detect_artifact_install(root: str | os.PathLike[str],
         findings.append(Finding(
             "ahead-artifact",
             f"{installed} is {HOOK_VERSION_TOKEN} {found}, newer than "
-            f"this CLI's {expected} — not replaced",
+            f"this CLI's {expected} — it captures with NEWER logic; "
+            f"`tortoise install {harness}` would replace it with {expected}",
             script=contract.install_name, blocking=False,
         ))
     elif installed.read_bytes() != contract.source.read_bytes():

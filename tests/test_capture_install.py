@@ -3511,9 +3511,41 @@ def test_manual_fix_predicate_covers_both_seam_classes():
     """
     for kind in ("foreign-script", "foreign-artifact", "not-a-regular-file",
                  "not-readable", "unreadable-settings", "symlinked-artifact",
-                 "symlinked-script", "symlinked-settings"):
+                 "symlinked-script", "symlinked-settings",
+                 "symlinked-install"):
         assert hook_install.is_manual_fix(kind), kind
     for kind in ("stale-script", "stale-artifact", "unversioned-script",
                  "unversioned-artifact", "modified-script",
                  "modified-artifact", "ahead-script", "ahead-artifact"):
         assert not hook_install.is_manual_fix(kind), kind
+
+
+def test_pi_symlinked_install_root_is_noted_as_uninstallable(home):
+    """A symlinked install ROOT is refused by `install_capture` (it will not
+    write through a symlink, in-HOME or out), so the detector must SAY so —
+    otherwise `doctor` recommends `tortoise install pi` for a command that
+    refuses (the artifact peer of `detect_install`'s `symlinked-install`).
+
+    Mutation: drop the root-symlink check — the root link is invisible
+    (`missing-artifact` only), and the doctor hint test REDs.
+    """
+    real = home / "checkout-extensions"
+    real.mkdir(parents=True)
+    (home / ".pi" / "agent").mkdir(parents=True)
+    root = home / ".pi" / "agent" / "extensions"
+    root.symlink_to(real)
+    (real / "tortoise-capture.ts").write_text(
+        "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+
+    findings = hook_install.detect_artifact_install(root, "pi")
+    kinds = [f.kind for f in findings]
+    assert "symlinked-install" in kinds, findings
+    note = next(f for f in findings if f.kind == "symlinked-install")
+    assert not note.blocking, "a symlink note is informational, not blocking"
+    assert hook_install.is_manual_fix("symlinked-install")
+    # The stale bytes inside are still reported: the note never masks drift.
+    assert "stale-artifact" in kinds, findings
+    # And the installer really refuses it — the note must not lie.
+    res = install_capture("pi", home=home)
+    assert not res.ok, res.actions
+    assert "symlink" in (res.error or "").lower(), res.error

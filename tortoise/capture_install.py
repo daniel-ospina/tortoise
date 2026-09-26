@@ -96,12 +96,13 @@ artifacts *verbatim* (no marker is injected, no version constant is declared)
 and emits exactly the settings shape #3866's ``_entry_command_dicts`` /
 ``_invokes_script`` classify as ours — a matcher entry whose ``hooks`` array
 holds ``{"type": "command", "command": ".claude/hooks/<name>", "timeout": 60}``.
-The artifact a **layout** install produces is therefore one ``tortoise hooks
-status`` reads as current, and a stale layout install is repaired by
-``tortoise hooks upgrade`` — #3808 is the mechanism #3795/#3801 operate
-through.  There is one version contract, and it lives in the shipped artifact:
-the shell half in ``HARNESS_LAYOUTS`` (that status/upgrade pair), and the Pi
-artifact half in ``hook_install.ARTIFACT_CONTRACTS["pi"]`` — which those two
+The artifact a **layout** install produces is therefore one
+``tortoise hooks status`` reads as current, and a stale layout install is
+repaired by ``tortoise hooks upgrade`` — #3808 is the mechanism
+#3795/#3801 operate through.  There is one version contract, and it lives in
+the shipped artifact: the shell half in ``HARNESS_LAYOUTS`` (that status/
+upgrade pair), and the Pi artifact half in
+``hook_install.ARTIFACT_CONTRACTS["pi"]`` — which those two
 commands CANNOT reach, because both resolve through ``get_layout`` and reject
 ``pi`` outright (#5351).  Pi's installed seam is graded by ``tortoise doctor``
 and by ``session verify`` through the same contract, and it is repaired by
@@ -670,10 +671,10 @@ def pi_home(home: Path) -> Path:
 
     Pi has NO ``HarnessLayout`` (its seam is not a scripted hook, so
     ``hook_install.default_root`` cannot answer for it), so the directory is
-    part of the artifact contract in ``hook_install`` — ``
-    ARTIFACT_CONTRACTS["pi"].root_relpath`` — which this delegates to, so the
-    contract, the installer, ``session verify`` and ``doctor`` all read ONE
-    declaration of where the seam lives (#4680).
+    part of the artifact contract in ``hook_install`` — the
+    ``ARTIFACT_CONTRACTS["pi"].root_relpath`` field — which this delegates to,
+    so the contract, the installer, ``session verify`` and ``doctor`` all read
+    ONE declaration of where the seam lives (#4680).
     """
     root = hook_install.artifact_root("pi", Path(home))
     if root is None:  # pragma: no cover - "pi" is a registered contract

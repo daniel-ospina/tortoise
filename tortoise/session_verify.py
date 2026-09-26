@@ -231,16 +231,18 @@ def resolve_install_root(harness: str,
     the harness's own default, resolved through the ONE shared resolver
     ``tortoise hook_install.default_root`` — Codex's ``$CODEX_HOME`` (default
     ``~/.codex``), Cursor's ``~/.cursor`` (no env override — Cursor has none),
-    Claude's cwd (project-scoped).  Pi has no ``HarnessLayout`` (its seam is
-    not a scripted hook), so its root is the extension directory
-    ``~/.pi/agent/extensions`` — DELEGATED to ``capture_install.pi_home``, the
-    module that WRITES the seam, so the verifier and the installer cannot
-    disagree about where it lives.
+    Claude's cwd (project-scoped).  A harness with no ``HarnessLayout`` (its
+    seam is not a scripted hook) is looked up in ``hook_install``'s
+    ``ARTIFACT_CONTRACTS`` instead and resolved through
+    ``hook_install.artifact_root`` — the SAME registry entry ``_static_findings``
+    and ``doctor`` grade it by, so root resolution cannot be registry-driven in
+    one place and literal in another (#4680 review).
     """
     if install_dir is not None:
         return Path(install_dir)
-    if harness == "pi":
-        return capture_install.pi_home(Path(home))
+    artifact = hook_install.artifact_root(harness, Path(home))
+    if artifact is not None:
+        return artifact
     layout = hook_install.get_layout(harness)
     return hook_install.default_root(layout, Path(home))
 
