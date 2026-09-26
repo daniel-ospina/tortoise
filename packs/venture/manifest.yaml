@@ -1,0 +1,419 @@
+# Venture — general domain pack (issue #2725, epic #2696)
+#
+# A fund / venture-builder / accelerator / holding-co vocabulary that is
+# vertical-neutral: a biotech portfolio, an agritech portfolio and a software
+# portfolio are described with the same kinds. Vertical vocabulary belongs in an
+# overlay pack, never here.
+#
+# Design rules this manifest encodes (issue #2725, owner-approved):
+#   1. State lives on Objects. Points and Events never carry state. Every
+#      state-bearing concept below is an objectKind, so a re-mention MERGEs onto
+#      one node and supersession — not append — decides the current value.
+#   2. Full ontology. Subjects (the companies and people) are core; Objects are
+#      the state carriers; Points are the claims (core `statement`, attached with
+#      the IMPL relations below); Events are the dated occurrences.
+#   3. No cross-pack references. Every relation endpoint and chain step is either
+#      a kind of this pack or a core kind. Nothing here resolves against another
+#      pack, so dropping or upgrading a sibling pack can never silently delete
+#      this one.
+#   4. `opportunity`/`deal` is CRM vocabulary and is NOT declared here.
+#      `roleOpening` is HR vocabulary and is NOT declared here (hiring needs are
+#      carried as action items until an HR pack exists). See
+#      docs/EXPANSION_PACKS.md (Domain pack example).
+#
+# Deferred mechanisms (declared as intent, never invented here):
+#   - Per-kind status folds (event kind → Object.status) are pack-declared folds:
+#     #2729 (mechanism), generalised by #2792. Until they land, each kindDef
+#     description states the intended lifecycle in prose and this pack declares NO
+#     fold surface.
+#   - Value fields (committed/released amounts, valuation) need a declared
+#     property surface: #2818, behind #2782. Until then the amount is not
+#     declared here.
+#   - Declared relations have no runtime write path today (only the core
+#     structural allowlist is writable): #2766. The `semantics:` field carries the
+#     writable-predicate mapping wherever one exists.
+#   - `fundingAgreement ⊂ agreement` is blocked by #2783 (the subclassOf gate
+#     rejects lowercase canonical parents).
+
+namespace: venture
+name: Venture
+version: 0.1.0
+tier: free
+description: >-
+  General venture vocabulary — a fund's stake in a backed company, the programmes
+  that stake runs, the assets those programmes produce, the funding agreements
+  and tranches behind them, the conditions that gate a release, the dated
+  disbursement events, and the action items a meeting produces. Vertical-neutral
+  (biotech, agritech, software use the same kinds).
+
+ontology:
+  extends: core
+
+  # ── State carriers ────────────────────────────────────────────────────────
+  # Objects = state. Each of these holds a current value that a later claim must
+  # SUPERSEDE, never append to.
+  objectKinds:
+  - investment
+  - program
+  - asset
+  - fundingAgreement
+  - tranche
+  - condition
+  - actionItem
+
+  # ── Dated occurrences ─────────────────────────────────────────────────────
+  # Events carry NO state. A release of funds is a `disbursement` event; the
+  # tranche Object keeps `pending → conditions-met → released`. Splitting these
+  # is what makes "has tranche 2 been released?" answerable as current state
+  # while the timeline stays intact.
+  eventKinds:
+  - disbursement
+  - conditionMet
+  - actionItemCompleted
+
+  subclassOf:
+    # A programme is a project-shaped unit of work.
+    program: Project
+    # An action item is a unit of work with an owner and a due date.
+    actionItem: WorkItem
+    # Intended parent is core `agreement` (a grant, priced round, SAFE,
+    # convertible note and loan are all agreements). The subclassOf gate rejects
+    # lowercase canonical parents today (#2783), so the generic core entity type
+    # is declared instead. Change to `agreement` when #2783 lands.
+    fundingAgreement: Object
+
+  hierarchies:
+  - path: Investment → Program
+    type: hasPart
+  - path: Program → Asset
+    type: hasPart
+
+  kindDefs:
+    investment:
+      description: >-
+        The fund's stake in — and ongoing relationship with — a company it backs.
+        This is the portfolio position, not the company: the company itself is a
+        core Subject. Lifecycle: prospective → invested → active → written-off.
+      synonyms:
+      - portfolio company
+      - portfolio position
+      - stake
+      - investee
+      - shareholding
+      - investida
+      - participação
+      examples:
+      - "Alpha Holdings (seed position)"
+      - "the fund's stake in Delta Sciences"
+      nearMisses:
+      - program
+      - fundingAgreement
+
+    program:
+      description: >-
+        A multi-milestone initiative under an investment that produces
+        deliverables — an R&D programme, product line, platform or brand.
+        Lifecycle: proposed → prioritized → active → paused / deprioritized.
+      synonyms:
+      - programme
+      - platform
+      - workstream
+      - product line
+      - initiative
+      - frente
+      - projeto
+      examples:
+      - "Program Alpha"
+      - "the fermentation platform programme"
+      nearMisses:
+      - asset
+      - actionItem
+
+    asset:
+      description: >-
+        A produced or protected thing a programme owns — a product, technology,
+        dataset, patent family or other intellectual property. Lifecycle:
+        idea → developing → validated → protected → licensed.
+      synonyms:
+      - product
+      - technology
+      - intellectual property
+      - patent
+      - trade unit
+      - ativo
+      - tecnologia
+      - patente
+      examples:
+      - "Patent Family P-101"
+      - "Trade Unit T-1"
+      nearMisses:
+      - program
+      - fundingAgreement
+      enforcement: retry
+
+    fundingAgreement:
+      description: >-
+        A funding instrument — the agreement under which money is committed to a
+        programme or company: a grant, term of award, priced round, SAFE,
+        convertible note or loan. Lifecycle: prospect → applied → awarded →
+        active → closed.
+      synonyms:
+      - grant
+      - term of award
+      - round
+      - loan
+      - convertible note
+      - SAFE
+      - financing agreement
+      - edital
+      - outorga
+      - convênio
+      - fomento
+      examples:
+      - "Grant G-2026-01"
+      - "Round R-1 (priced)"
+      nearMisses:
+      - tranche
+      - investment
+
+    tranche:
+      description: >-
+        A scheduled parcel of the funds committed by a funding agreement — the
+        release of each parcel is conditional. The tranche is the state carrier:
+        it holds the current release position. Lifecycle: pending →
+        conditions-met → released (a denial is recorded as a terminal
+        non-release). The actual movement of money is the `disbursement` event,
+        never a property of this Object.
+      synonyms:
+      - parcel
+      - installment
+      - milestone payment
+      - parcela
+      - desembolso programado
+      examples:
+      - "Tranche T1 (30% on signature)"
+      - "Tranche T2 (70% on 75% spend)"
+      nearMisses:
+      - fundingAgreement
+      - condition
+
+    condition:
+      description: >-
+        A gating requirement attached to a tranche (or a funding agreement) that
+        must be satisfied before it may advance — for example a spend threshold
+        that unlocks the next parcel. Lifecycle: unmet → met. Satisfaction is
+        recorded as the dated `conditionMet` event; this Object holds the
+        current position.
+      synonyms:
+      - requirement
+      - precondition
+      - gating requirement
+      - condition precedent
+      - condição
+      - requisito
+      - pré-requisito
+      - gatilho
+      examples:
+      - "spend-threshold-75pct"
+      - "board approval of the next parcel"
+      nearMisses:
+      - tranche
+      - actionItem
+      enforcement: retry
+
+    actionItem:
+      description: >-
+        An owned, dated commitment produced by a meeting or a review — the
+        "next steps" list. Lifecycle: open → in-progress → done. Completion is
+        recorded as the dated `actionItemCompleted` event.
+      synonyms:
+      - action item
+      - next step
+      - follow-up
+      - to-do
+      - task
+      - pendência
+      - próximo passo
+      - dever de casa
+      examples:
+      - "Action Item AI-1: send the revised model to the board"
+      nearMisses:
+      - program
+      - condition
+      enforcement: warn
+
+    disbursement:
+      description: >-
+        The dated movement of money against a tranche — a release of funds. An
+        Event: it records that the transfer happened and carries no state. The
+        tranche Object holds whether the parcel is still pending.
+      synonyms:
+      - release of funds
+      - payment
+      - cash movement
+      - desembolso
+      - liberação
+      - depósito
+      examples:
+      - "Disbursement D1, on the signature date"
+      nearMisses:
+      - tranche
+      - conditionMet
+      enforcement: warn
+
+    conditionMet:
+      description: >-
+        The dated satisfaction of a gating condition. An Event: a fact about when
+        the condition was met, carrying no state. The condition Object holds the
+        current position.
+      synonyms:
+      - condition satisfied
+      - requirement met
+      - requisito comprovado
+      examples:
+      - "conditionMet: spend-threshold-75pct, per the monthly statement"
+      nearMisses:
+      - disbursement
+      - condition
+      enforcement: warn
+
+    actionItemCompleted:
+      description: >-
+        The dated completion of an action item. An Event: it records when the
+        commitment closed and carries no state. The action item Object holds
+        open / in-progress / done.
+      synonyms:
+      - action item done
+      - commitment closed
+      - pendência concluída
+      examples:
+      - "Action Item AI-1 completed"
+      nearMisses:
+      - actionItem
+      enforcement: warn
+
+  # ── Relations ─────────────────────────────────────────────────────────────
+  # Declared relations are declaration-only at runtime today (#2766): only the
+  # core structural allowlist is writable via create_edge. `semantics:` names the
+  # structural predicate the extractor should emit for the relation where one
+  # exists, and is left equal to the predicate where none does yet. Two of the
+  # mappings are INVERSE-named (partOf → hasPart, producedBy → produces) — the
+  # same convention dev uses for decomposesInto → hasPart. Every endpoint is a
+  # kind of this pack or a core entity type — no cross-pack references.
+  relations:
+  - predicate: funds
+    mechanism: IMPL
+    semantics: funds
+    fromKind: venture:fundingAgreement
+    toKind: venture:program
+    cardinality: one_to_many
+    extractable: true
+  - predicate: gatedBy
+    mechanism: IMPL
+    semantics: dependsOn
+    fromKind: venture:tranche
+    toKind: venture:condition
+    cardinality: many_to_one
+    extractable: true
+  - predicate: protects
+    mechanism: IMPL
+    semantics: related
+    fromKind: venture:asset
+    toKind: venture:program
+    cardinality: many_to_one
+    extractable: true
+  - predicate: producedBy
+    mechanism: IMPL
+    semantics: produces
+    fromKind: venture:asset
+    toKind: venture:program
+    cardinality: many_to_one
+    extractable: true
+  - predicate: assignedTo
+    mechanism: IMPL
+    semantics: managedBy
+    fromKind: venture:actionItem
+    toKind: Subject
+    cardinality: many_to_one
+    extractable: true
+  - predicate: partOf
+    mechanism: IMPL
+    semantics: hasPart
+    fromKind: venture:program
+    toKind: venture:investment
+    cardinality: many_to_one
+    extractable: true
+  - predicate: holds
+    mechanism: IMPL
+    semantics: holds
+    fromKind: venture:investment
+    toKind: Subject
+    cardinality: many_to_one
+    # Weakest-supported relation (implied by portfolio/shareholder language
+    # rather than an attested verb) — declared extractable for consistency with
+    # its siblings; gate it if #2787 wires `extractable` into enforcement.
+    extractable: true
+
+  # ── Chains ────────────────────────────────────────────────────────────────
+  # Kind-path chains the extractor respects when connecting entities. The
+  # per-kind STATE lifecycle is not expressible here — chains are kind paths —
+  # so the lifecycle lives in each kindDef description until #2729/#2792.
+  chains:
+  - id: ventureFundingFlow
+    name: Funding Flow
+    description: How committed funding reaches a company — an agreement is
+      parcelled into tranches, each gated by a condition, and each release is
+      recorded as a dated disbursement event.
+    steps:
+    - fundingAgreement
+    - tranche
+    - condition
+    - disbursement
+    enforcement: warn
+  - id: venturePortfolioFlow
+    name: Portfolio Flow
+    description: How a stake carries work that produces assets — a programme
+      belongs to an investment and produces the assets the company owns.
+    steps:
+    - investment
+    - program
+    - asset
+    enforcement: warn
+  - id: ventureActionLoop
+    name: Action Item Lifecycle
+    description: An action item is opened from a meeting and closed by a dated
+      completion event; the Object carries open → in-progress → done.
+    steps:
+    - actionItem
+    - actionItemCompleted
+    enforcement: warn
+
+  memory_granularity: >-
+    Durable: the current position of each stake, programme, asset, funding
+    agreement, tranche, condition and action item; the reason it is where it is;
+    which conditions are still open; who owns which action item and by when.
+    Ephemeral: meeting logistics, attendance, scheduling, pleasantries, and
+    superseded restatements of a state already recorded.
+
+extraction:
+  active: true
+  # Empty = active for every source type. Narrowing to the meeting source kinds
+  # is deliberately NOT declared: they are not in the pack validator's allowlist
+  # until #2726 (PR #2747) lands, and a pack that declares an unregistered source
+  # type is dropped from the registry.
+  sourceTypes: []
+  enforcement:
+    default: warn
+    # Per-kind retry lives on the kindDefs themselves — the kindDefs rung wins
+    # this map anyway, so a second declaration of the same choice would just be
+    # drift-prone. Only the two kinds whose evidence justifies a bounded
+    # classifier retry declare `retry`: `asset` (the same word names both a
+    # programme and an asset) and `condition` (a gating requirement is easily
+    # confused with the tranche it gates).
+    kinds: {}
+    relations: {}
+    chains: {}
+
+connectors: []
+tools: []
+depends_on: []

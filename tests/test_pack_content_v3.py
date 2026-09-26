@@ -14,9 +14,10 @@ Loads the REAL packs from the repo and verifies the converted manifests:
     addresses/hasPart) + enforcement (incident → retry).
   - marketing: campaign→content→channel chain (real kind names).
   - pm: kindDefs enrichment for issue/sprint/card.
-  - All 5 packs compile with zero validation errors (whole-registry compile,
+  - All shipped packs compile with zero validation errors (whole-registry
+    compile,
     R-16); dev + product-strategy at 0.3.0 (problem-family expansion),
-    marketing/pm at 0.2.0, agent-ops new at 0.1.0.
+    marketing/pm at 0.2.0, agent-ops new at 0.1.0, venture new at 0.1.0 (#2725).
 """
 from __future__ import annotations
 
@@ -35,11 +36,12 @@ REPO_PACKS_DIR = Path(__file__).resolve().parents[1] / "packs"
 
 @pytest.fixture(scope="module")
 def registry():
-    """The real repo registry — all 5 packs (agent-ops joined dev, marketing,
-    product-strategy, project-management), converted to manifest v3."""
+    """The real repo registry — every shipped pack (agent-ops joined dev,
+    marketing, product-strategy, project-management; venture #2725),
+    converted to manifest v3."""
     r = PackRegistry(REPO_PACKS_DIR)
     n = r.load_all()
-    assert n == 5, f"expected 5 packs to load, got {n}"
+    assert n == 6, f"expected 6 packs to load, got {n}"
     assert not r.errors, f"whole-registry compile must be clean: {r.errors}"
     return r
 
@@ -47,9 +49,10 @@ def registry():
 class TestWholeRegistryCompile:
     """R-16: every pack PR must pass the whole-registry compile."""
 
-    def test_all_five_packs_load_with_zero_errors(self, registry):
+    def test_all_shipped_packs_load_with_zero_errors(self, registry):
         assert set(registry.packs) == {
             "agent-ops", "dev", "marketing", "product-strategy", "pm",
+            "venture",
         }
         assert not registry.errors
 

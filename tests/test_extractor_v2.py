@@ -2998,6 +2998,13 @@ def _hand_built_master() -> dict:
                                  "/ competitor / market fact is durable if it "
                                  "changes a decision. Ephemeral: ticket status, "
                                  "sprint mechanics, meeting logistics.",
+            "venture": "Durable: the current position of each stake, "
+                       "programme, asset, funding agreement, tranche, condition "
+                       "and action item; the reason it is where it is; which "
+                       "conditions are still open; who owns which action item "
+                       "and by when. Ephemeral: meeting logistics, attendance, "
+                       "scheduling, pleasantries, and superseded restatements "
+                       "of a state already recorded.",
         },
     }
 

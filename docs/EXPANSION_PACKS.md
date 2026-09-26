@@ -6,7 +6,11 @@
 
 An expansion pack extends Tortoise's core ontology with a **domain vocabulary** plus the **business logic** that governs it. Packs are declarative YAML (`manifest.yaml`) — no code runs on load. They give the extractor the kinds it can mint, the chains it must respect, and the `memory_granularity` guidance for what to keep vs strip.
 
-The four starter packs shipped by default: `dev`, `marketing`, `product-strategy`, `pm`, and `agent-ops` (rules-with-why). Your custom packs install alongside them.
+The five starter packs shipped by default: `dev`, `marketing`, `product-strategy`, `pm`, and `agent-ops` (rules-with-why). Your custom packs install alongside them.
+
+One further pack ships in the catalog **without** being a starter: `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items). It is deliberately not auto-installed, and `docs/`-visible per-graph pack selection is #2728.
+
+> ⚠️ **Interim caveat — a shipped pack is catalog-wide today (#2714/#2728).** Shipping a pack under `packs/` puts its vocabulary into **every** graph, not only graphs that installed it: its kinds enter every graph's value brief and kind index, its `memory_granularity` enters the S1 prompt, and its chains are rendered as chain guidance. Per-graph `:PackInstall` records currently gate the pack-state introspection surfaces, **not** the classifier and not the write gate. The two pack-fit layers are separate — **approval** (which packs a graph allows, per graph) and **classification** (which approved kind an item gets, per item) — and making approval actually gate classification is #2714/#2728. Do not read "not a starter" as "not active".
 
 ## When to write a pack (vs using core kinds)
 
@@ -93,7 +97,7 @@ Both surfaces run the same shared validator. A pack that validates locally insta
 
 ## Reserved namespaces
 
-`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces).
+`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces). `venture` ships in the catalog but is **not** a starter and is not in the reserved list.
 
 ## Reference
 
@@ -101,3 +105,4 @@ Both surfaces run the same shared validator. A pack that validates locally insta
 - Canonical spec: `docs/ONTOLOGY.md` §9
 - Governance research (enforcement layering): `docs/research/2026-08-05-expansion-pack-governance-surfaces.md`
 - Worked example: `packs/agent-ops/manifest.yaml` (rules-with-why)
+- Domain pack example: `packs/venture/manifest.yaml` (fund/portfolio state model — Objects hold state, Events are dated, claims are Points)

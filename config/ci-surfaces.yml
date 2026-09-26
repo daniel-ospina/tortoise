@@ -826,6 +826,12 @@ surfaces:
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  # #2725: a `packs/` diff selects `core`, but the enforcement drift pin that
+  # enumerates index-reachable retry kinds lives in this file. Without dual
+  # registration a pack that declares a new per-kind retry passes its own PR's
+  # CI and reds main after merge (it did: venture:asset/venture:condition).
+  # Same rationale and pattern as test_boot_regressions.py above.
+  - test_enforcement.py
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
@@ -1110,6 +1116,13 @@ surfaces:
   # suite directly above.
   - test_invalidate_inverted_window_5358.py
   - test_value_extractor.py
+  # #2725: venture domain pack — manifest scope, corpus kind coverage, the
+  # Objects-hold-state/supersede shape, and the two orthogonal pack-fit layers
+  # (per-graph approval vs per-item classification). Mostly DB-free; the
+  # state/approval assertions follow the repo's URI-gated convention
+  # (db_path fixture + skipif no TORTOISE_DB_URI, as test_pack_state.py and
+  # test_commit_supersession_parity.py do).
+  - test_venture_pack.py
   # #2714 (lane L7): vocab gating by graph — the compile seams
   # (compile_value_brief / compile_vocab) and the graph's :PackInstall
   # APPROVAL set. Guards tortoise/value_extractor.py,
