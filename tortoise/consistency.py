@@ -1070,11 +1070,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # (#4641): onboarding state/edges are raw writes no journal event
         # carries, so a post-wipe raise would strand the store empty (#2943).
         # Reporting `recovered: True` while swallowing that gap is the silent
-        # partial loss itself, so the counts are PROPAGATED (additively — the
-        # `recovered` truth value is unchanged, exactly as the sticky
-        # config-reset marker is) and NAMED in `reason`. A machine caller can
-        # therefore branch on `onboarding_gap` instead of reading a clean
-        # success it did not get.
+        # partial loss itself, so the counts are PROPAGATED — the new
+        # `onboarding_gap` key is additive, but note this is NOT a
+        # purely-value-preserving change: `reason` has a suffix APPENDED below
+        # for the gap case (in-repo callers only log it). `recovered` itself is
+        # unchanged, exactly as the sticky config-reset marker is.
         onboarding_gap = sum(
             int(counts.get(k) or 0) for k in (
                 "onboarding_restore_failures",

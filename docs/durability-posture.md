@@ -135,7 +135,9 @@ property). It gets its own declared sidecar sections instead:
   in `tortoise/onboarding/state.py` count an unrecognised id as an AGENT step,
   so while the edge exists it BLOCKS the grandfathered completion — and
   DROPPING it would UNBLOCK (create) that completion, which is why the
-  capture does not filter the vocabulary.
+  capture does not filter the vocabulary. The guarantee is "carried or
+  refused", never "silently lost": an edge whose endpoints are not both
+  strings makes the capture abort BEFORE the wipe rather than drop it.
 - `:Batch` + the `Point.batch_id` membership — preserved by the
   `batch_snapshot` / `batch_point_links` sections (**#990**): the
   quarantine/commit marker is raw Cypher that rides no journal record, so the
@@ -147,13 +149,14 @@ property). It gets its own declared sidecar sections instead:
 <!-- config-registry:end -->
 
 <!-- config-registry:unenrolled -->
-- `:TeamMeta` — written with a bare `CREATE` and **no identity property**
-  (`sdk.py`, `hosted_api.py`), so it fits neither the registry (which
-  requires one) nor the container/link sections (which key on `id`). Its
-  presence is the whole `#2789` first-org guard, so its loss is load-bearing,
-  not bookkeeping. Preserving an at-most-one-per-graph, label-wide class is
-  its own design step — declared deliberately **not preserved here**, with
-  the class as a known residual. **#5353**
+- `:TeamMeta` — written with a bare `CREATE` and no uniqueness guarantee
+  (`sdk.py`, `hosted_api.py`), so a graph can legitimately hold several and
+  none is addressable by a single identity key — it fits neither the registry
+  (whose rows are keyed) nor the container/link sections (which key on `id`).
+  Its presence is the whole `#2789` first-org guard, so its loss is
+  load-bearing, not bookkeeping. Preserving an at-most-one-per-graph,
+  label-wide class is its own design step — declared deliberately **not
+  preserved here**, with the class as a known residual. **#5353**
 - `:GraphEventMeta` — an event watermark that **is** re-derivable, so it is
   re-derived post-replay rather than snapshotted; today it is reset, which
   collides the next `next_seq` with replayed sequence numbers. **#4653**
@@ -296,7 +299,13 @@ gate in `tests/test_durability_posture.py` fails the build if a
   org-anchor carrier, is taken fresh-wins, because nothing self-heals it and
   the post-restore check compares against the same merged map — so a stale
   leftover anchor would silently destroy a live `onboards` edge and still
-  report a clean restore. The remedy is the same as for #2814: the operator
+  report a clean restore. One further, narrower residual: the anchor edge is
+  **derived** from `org_subject_id` rather than captured as its own pair
+  section, so a raw graph whose `onboards` edge and `org_subject_id` property
+  have DIVERGED is not preserved faithfully — an edge with no matching
+  property is not carried, and a property with no edge gets an edge minted.
+  Every writer in `tortoise/onboarding/state.py` co-writes both, so this is a
+  raw/hand-edited graph only. The remedy is the same as for #2814: the operator
   deletes the pending rescue file (never the retired, entry-less one).
 - **#2814 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar reverts a **colliding** config key to its

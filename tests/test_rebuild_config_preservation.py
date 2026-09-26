@@ -1604,6 +1604,116 @@ def test_post_restore_verification_failure_says_unverified(graph, caplog):
     assert "NOT observed gone" in rendered, rendered
 
 
+def test_onboarding_capture_refuses_a_non_str_step_id(graph):
+    """A non-str `step_id` must REFUSE, not be dropped (#4641 round 5).
+
+    The link leg's `isinstance(..., str)` filter dropped it silently — and
+    because the post-restore check reads through the same capture, expected
+    and live both excluded it, so the run reported a clean, fully-verified
+    restore while the grandfathered completion was UNBLOCKED (a non-str id
+    counts as an AGENT step). Same forgery, same tripwire discipline as the
+    `org_id` guard: abort before the wipe.
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-ns", fork="build")
+    _g(sdk).query(
+        "MATCH (n:OnboardingState {org_id:'org-ns'}) "
+        "MERGE (s:OnboardingStep {org_id:'org-ns', step_id:7}) "
+        "MERGE (n)-[:COMPLETED_STEP]->(s)")
+
+    with pytest.raises(RuntimeError) as exc:
+        sdk._get_proj().rebuild_all(str(events))
+
+    assert "aborted BEFORE the graph wipe" in str(exc.value)
+    assert "step_id" in str(exc.value)
+    assert not os.path.exists(_sidecar_path(events)), (
+        "an unusable rescue file must never be written")
+    # NOT `_read_onboarding`: it `sorted()`s the step ids, and the very poison
+    # this test plants (an int among strings) makes that raise — which is
+    # itself evidence the value is not safely carriable.
+    rows = _g(sdk).query(
+        "MATCH (n:OnboardingState {org_id:'org-ns'}) RETURN count(n)"
+    ).result_set
+    assert rows[0][0] == 1, "the graph was touched"
+
+
+def test_recover_from_log_treats_an_unverified_restore_as_a_gap(graph):
+    """The round-4 `max(onboarding_gap, 1)` branch is driven, not just written.
+
+    A failed verification READ reports the missing counts as None (summing to
+    0), so without that branch `recover_from_log` would hand its caller a clean
+    success over an UNVERIFIED onboarding restore (#4641 review round 5).
+    """
+    from tortoise.consistency import recover_from_log
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-u", fork="build",
+                            steps=("harness-connected",))
+    # A pending sidecar is what routes `recover_from_log` through
+    # `rebuild_all` (the only path that runs the verification).
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-u", "status": "active",
+                              "version": 1, "fork": "build"}],
+        onboarding_step_links=[["org-u", "harness-connected"]]))
+    calls = {"n": 0}
+
+    def _fail_on_second_capture(cypher):
+        if "MATCH (n:OnboardingState)" in cypher and "properties(n)" in cypher:
+            calls["n"] += 1
+            return calls["n"] >= 2
+        return False
+
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+    patcher, injected = _inject_query_failure(sdk, _fail_on_second_capture)
+    with patcher:
+        rec = recover_from_log(str(events), sdk._get_proj())
+
+    assert injected, "the verification-read failure was never injected"
+    assert rec["recovered"] is True, "the rebuild itself did complete"
+    assert rec.get("onboarding_gap") == 1, (
+        "an UNVERIFIED restore must not read as a clean success")
+    assert "onboarding" in rec["reason"]
+
+
+def test_cmd_rebuild_reports_unverified_not_gone(tmp_path, capsys,
+                                                 monkeypatch):
+    """The CLI must not print "gone" for an UNVERIFIED restore.
+
+    Round 4 routed this shape into the gap branch, whose wording asserted the
+    states/edges "are gone" — contradicting the projection's own
+    "NOT observed gone" (round-5 review). The CLI's job here is formatting the
+    counts `rebuild_all` returned, so the counts are injected directly.
+    """
+    import argparse
+
+    from tortoise.__main__ import _cmd_rebuild
+    from tortoise.projection import FalkorProjection
+
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "onboarding_expected": 2, "onboarding_verified": False,
+              "onboarding_restored": 0, "onboarding_missing_orgs": None,
+              "onboarding_missing_links": None,
+              "onboarding_missing_onboards": None,
+              "onboarding_restore_failures": 0}
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        lambda self, _dir: dict(counts))
+    sdk, events = _mk_sdk(tmp_path)
+    sdk.close()
+    _write_journal(events, [])
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
+                                        db=str(tmp_path / "u.db")))
+    out = capsys.readouterr()
+
+    assert rc in (None, 0)
+    assert "Onboarding: 0 of 2 org state(s) restored" in out.out, out.out
+    assert "UNVERIFIED" in out.err, out.err
+    assert "NOT observed gone" in out.err, out.err
+    assert "are gone" not in out.err, out.err
+
+
 def test_onboarding_union_leftover_wins_and_keeps_unpaired_entries():
     """The union policy, by value: leftover verbatim, fresh-only appended.
 
@@ -1821,6 +1931,38 @@ def test_onboarding_gap_is_visible_to_recover_from_log(graph):
         "a partial onboarding restore must be machine-visible to the "
         "auto-recovery caller")
     assert "onboarding" in rec["reason"]
+
+
+def test_auto_health_recover_warns_on_the_onboarding_gap(graph, caplog,
+                                                       monkeypatch):
+    """The embedded auto-recovery consumer of `onboarding_gap` acts on it.
+
+    `_auto_health_recover` (the probe-OK lost-graph path) used to log only its
+    clean "auto-recovered" line, so the round-4 key had a producer and no
+    consumer here (#4641 review round 5).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-r", "status": "complete",
+                              "org_subject_id": "subj-never-journaled"}],
+        onboarding_step_links=[["org-r", "harness-connected"]]))
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+    proj = sdk._get_proj()
+    # The events dir the test writes to is not the DB's own dir, so point the
+    # discovery seam at it and make sure the production guard is off.
+    monkeypatch.setattr(type(proj), "_find_local_jsonl_dir",
+                        lambda self: str(events))
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        proj._auto_health_recover()
+
+    assert any("onboarding" in r.getMessage()
+               and "gap" in r.getMessage()
+               for r in caplog.records), (
+        f"the auto-recovery consumer discarded the gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
 
 
 def test_onboarding_gap_warns_in_the_recover_or_raise_caller(graph, caplog):

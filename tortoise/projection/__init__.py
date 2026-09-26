@@ -706,8 +706,9 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
     unrecognised id as an AGENT step, so while the edge exists it BLOCKS the
     grandfathered completion, and DROPPING it can CREATE that completion —
     the exact forgery this capture exists to prevent. Every `COMPLETED_STEP`
-    edge the live graph holds is therefore captured verbatim, and the
-    validator accepts any string pair.
+    edge the live graph holds is therefore captured verbatim — and one whose
+    endpoints are not both strings makes the capture REFUSE rather than drop
+    it, so the guarantee is "carried or refused", never "silently lost".
 
     An orphan `:OnboardingStep` node (no `COMPLETED_STEP` edge) is not
     captured: it is the ``_prune_orphan_decide_step`` cleanup's residue, it
@@ -758,24 +759,36 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
         f"-[:{COMPLETED_STEP_EDGE}]->(s:{ONBOARDING_STEP_LABEL}) "
         "RETURN n.org_id, s.step_id"
     ).result_set
-    # Explicit, symmetric predicate: a non-str `org_id`/`step_id` is dropped
-    # here (never written), which keeps capture output ⊆ what
-    # `_validate_onboarding_step_link` accepts.
-    #
-    # #4641 review round 4: the step id is NOT filtered to the canonical
-    # vocabulary, and the earlier "drop the foreign ones, they are inert"
-    # reasoning was WRONG in the direction that matters. In
-    # `tortoise/onboarding/state.py`, `resolve_wire_completion` and
-    # `recompute_completion` compute `agent_steps = [s for s in done if s not
-    # in _NON_AGENT_STEPS]` and require `not agent_steps`. An unrecognised id
-    # is NOT in `_NON_AGENT_STEPS`, so it counts as an AGENT step: while the
-    # edge is PRESENT it BLOCKS the grandfathered completion, and DROPPING it
-    # empties `agent_steps` and can therefore FORGE that completion
+    # The step id is NOT filtered to the canonical vocabulary: the earlier
+    # "drop the foreign ones, they are inert" reasoning was WRONG in the
+    # direction that matters. In `tortoise/onboarding/state.py`,
+    # `resolve_wire_completion` and `recompute_completion` compute
+    # `agent_steps = [s for s in done if s not in _NON_AGENT_STEPS]` and
+    # require `not agent_steps`. An unrecognised id is NOT in
+    # `_NON_AGENT_STEPS`, so it counts as an AGENT step: while the edge is
+    # PRESENT it BLOCKS the grandfathered completion, and DROPPING it empties
+    # `agent_steps` and can therefore FORGE that completion
     # (`resolve_wire_completion('active', True, ['made-up-step'])` is False;
-    # with the edge gone it is True). A faithful rebuild must carry every
-    # step edge it found — the vocabulary is not this section's business.
-    links = [(r[0], r[1]) for r in link_rows
-             if isinstance(r[0], str) and isinstance(r[1], str)]
+    # with the edge gone it is True).
+    #
+    # A NON-STR `step_id` FAILS CLOSED instead of being dropped (round 5): a
+    # silent drop is the same forgery — the post-restore check reads through
+    # this same capture, so the loss would be invisible and the run would
+    # report a clean, fully-verified restore. The tripwire mirrors the
+    # `org_id` guard above: abort BEFORE the wipe with the bad edge still in
+    # place to be repaired. The pair must also be loader-acceptable
+    # (`_validate_onboarding_step_link` requires two strings).
+    links = []
+    for row in link_rows or []:
+        oid, sid = row[0], row[1]
+        if not isinstance(oid, str) or not isinstance(sid, str):
+            raise RuntimeError(
+                f"a {COMPLETED_STEP_EDGE} edge cannot survive a rebuild "
+                f"round-trip (org_id={oid!r}, step_id={sid!r} — both must "
+                f"be strings) — carrying it would make the pre-wipe "
+                f"snapshot unloadable on the retry, and DROPPING it could "
+                f"forge a grandfathered onboarding completion (#4641)")
+        links.append((oid, sid))
     return nodes, links
 
 
@@ -5566,8 +5579,8 @@ class FalkorProjection(
         #
         # Placement: this runs HERE, before pass 2, while the analogous config
         # verification runs after pass 2b. That is safe only because NO later
-        # pass touches this class — the only bulk delete (`:4251`) is
-        # label-scoped to Points, and every later `DELETE` is
+        # pass touches this class — the only bulk delete (the label-scoped
+        # Points wipe) is elsewhere entirely, and every later `DELETE` is
         # `:SUPERSEDES`-scoped. A future pass-2 change that touched
         # `:OnboardingState` would silently green this check; move it to the
         # end if that happens.

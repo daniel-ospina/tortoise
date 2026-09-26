@@ -102,13 +102,26 @@ def _cmd_rebuild(args):
         print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
               f"{counts.get('onboarding_expected', 0)} org state(s) restored")
         if onboarding_gap:
-            print(
-                f"Onboarding: {onboarding_gap} state/edge restore "
-                f"gap(s) — the wipe is unconditional and only the journal is "
-                f"replayed, so those onboarding states/edges are gone. "
-                f"Re-run onboarding for the affected org(s) (#4641).",
-                file=sys.stderr,
-            )
+            if counts.get("onboarding_verified") is False:
+                # "Could not confirm" must not be printed as "gone": the
+                # projection's own branch says UNVERIFIED, and the CLI must not
+                # contradict it (round 5).
+                print(
+                    "Onboarding: the post-restore verification COULD NOT RUN "
+                    "— this graph's onboarding state is UNVERIFIED: not "
+                    "confirmed intact, and NOT observed gone. Re-check it "
+                    "before trusting the organizations' onboarding state "
+                    "(#4641).",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Onboarding: {onboarding_gap} state/edge restore "
+                    f"gap(s) — the wipe is unconditional and only the journal "
+                    f"is replayed, so those onboarding states/edges are gone. "
+                    f"Re-run onboarding for the affected org(s) (#4641).",
+                    file=sys.stderr,
+                )
         if counts.get("config_reset"):
             if counts.get("config_reset_read_failed"):
                 # `config_reset` is fail-SAFE, so it does not prove the marker
