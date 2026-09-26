@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import pathlib
 import subprocess
 import sys
@@ -201,6 +202,65 @@ def test_the_rendered_list_agrees_with_the_manifest():
     )
     if doc.get("retired"):
         assert "warn the caller with the" in text, "the retired legend is missing"
+
+
+def test_the_render_does_not_depend_on_a_machine_local_call_log(monkeypatch, tmp_path):
+    """#5205: the rendered list is a function of the TREE, not of the machine.
+
+    `cmd_render` used to overlay `~/.tortoise/analytics_fallback.jsonl` and mark each tool
+    `in use` / `never called` from it. A CI runner has no such log, so its render dropped
+    EVERY marker and `git diff --exit-code` reddened on every pull request, while a
+    developer's render (log present) matched the committed list: two renders of one commit
+    produced two documents. The signal now comes from the frozen `used_by` column, which
+    `cut` writes once at a stated commit — so this test would fail on the old behaviour.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    never = [
+        r["name"]
+        for r in doc["rows"]
+        if not str(r["name"]).startswith("sdk:")
+        and str(r.get("used_by") or "").startswith("never called")
+    ]
+    assert never, "the baseline must carry never-called rows for this test to mean anything"
+
+    def render_under(home: Path) -> str:
+        # A HOSTILE log that names every never-called tool as called. On the old code this
+        # flipped each of those rows to `in use`, so the two renders disagreed.
+        log = home / ".tortoise" / "analytics_fallback.jsonl"
+        if home.name == "with-log":
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(
+                "".join(
+                    # Mirror the real record shape, including the `"mcp_tool_call"` marker
+                    # the old reader keyed on — a fixture the old code would have SKIPPED
+                    # would not have exercised the defect this test pins.
+                    json.dumps(
+                        {"event_name": "mcp_tool_call", "properties": {"tool_name": name}}
+                    )
+                    + "\n"
+                    for name in never
+                ),
+                encoding="utf-8",
+            )
+        monkeypatch.setenv("HOME", str(home))
+        out = tmp_path / f"rendered-{home.name}.md"
+        monkeypatch.setattr(sm, "RENDERED_FILE", out)
+        assert sm.cmd_render(argparse.Namespace()) == 0
+        return out.read_text(encoding="utf-8")
+
+    without_log = render_under(tmp_path / "no-log")
+    with_log = render_under(tmp_path / "with-log")
+    assert without_log == with_log, (
+        "the rendered list changed when a machine-local call log was present — the render "
+        "is reading the machine, not the tree (#5205)"
+    )
+    # And it is the SAME document CI diffs against: the render is a pure function of the
+    # manifest, so a stale or hand-edited `mcp-sdk-surface.md` is detectable locally too.
+    assert with_log == RENDERED.read_text(encoding="utf-8"), (
+        "the local render no longer reproduces the committed list — regenerate it "
+        "(`tools/surface_manifest.py render`) and commit the result"
+    )
 
 
 def test_the_retired_table_does_not_assert_a_nonexistent_sdk_method():
