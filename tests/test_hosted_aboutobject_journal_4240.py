@@ -25,6 +25,13 @@ They also pin the two review findings on the wiring:
   signal and the additive capture-receipt warning. The append stays fail-soft
   by design (the graph mutation already succeeded), so ``ok`` remains True —
   flipping it would trip the #2335 TRUE-retry gate over a persisted write.
+* **F2 (cycle 2)** — the same disclosure must reach the HOSTED receipt, not just
+  the SDK lane: ``test_hosted_receipt_discloses_a_failed_journal_append`` drives
+  ``_capture_session_impl`` itself (it builds its own receipt and never calls
+  ``sdk.capture_session``), asserts the warning is present, and asserts the
+  outcome is unchanged (the envelope's ``status`` is ``"ok"`` — the hosted
+  receipt's success signal — independent of the ``_capture_ok_record`` written
+  earlier).
 
 Class-B doctrine — every test states (1) the value/state that makes it fail and
 (2) that the state is reachable in its fixture:
@@ -57,6 +64,11 @@ Class-B doctrine — every test states (1) the value/state that makes it fail an
 * ``test_unwritable_journal_is_disclosed_and_counted`` — FAILS while a failed
   append is silent (no counter, no receipt warning); reachable: the fixture
   chmods the journal base dir to 0500.
+* ``test_hosted_receipt_discloses_a_failed_journal_append`` — FAILS while the
+  HOSTED receipt omits the disclosure (the pre-cycle-2 state: only the SDK lane
+  carried it); reachable: the hosted impl is driven directly against a mode-0500
+  journal base dir, and the envelope's ``status`` is asserted unchanged
+  (``"ok"`` — the hosted receipt's success signal) alongside it.
 
 The journal is a DOMAIN EVENT LOG, never the durability mechanism
 (``docs/durability-posture.md``): these tests assert the derived graph is
@@ -64,6 +76,7 @@ REBUILDABLE, not that anything keeps it alive.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -362,8 +375,12 @@ def test_live_only_capture_loses_aboutobject_edges_without_the_journal(
     Reachable: the live edge set is asserted non-empty BEFORE the rebuild, and
     the journal file is asserted absent (nothing landed to replay).
 
-    MUTATION (inverse): wire the journal back in → the rebuild preserves the
-    edges and the ``not post`` assertion REDs.
+    MUTATION (inverse): wire the journal back in → the journal-less GUARD REDs
+    FIRST — ``assert not (.../events.jsonl).exists()`` fails with "the
+    journal-less SDK must not have written a journal" (the wired SDK DOES write
+    it), before ``rebuild_all`` runs. The ``not post`` assertion is not the RED
+    site (a wired journal would preserve the edges, but the guard stops the
+    test before reaching it).
     """
 
     def _journal_less_make_sdk(*, namespace=None, graph_name=None):
@@ -438,5 +455,56 @@ def test_unwritable_journal_is_disclosed_and_counted(tmp_path, monkeypatch):
         events.chmod(0o700)  # restore before teardown
     with contextlib.suppress(Exception):
         _drop = ha._make_sdk(namespace=org)
+        _drop._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        _drop.close()
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root bypasses directory mode bits")
+def test_hosted_receipt_discloses_a_failed_journal_append(tmp_path, monkeypatch):
+    """F2 (cycle 2): the disclosure must reach the HOSTED receipt itself.
+
+    The hosted lane builds its own receipt in ``_capture_session_impl`` and never
+    calls ``sdk.capture_session`` (``grep capture_session hosted_api.py``
+    → none), so the SDK-lane warning was invisible to a hosted client — only the
+    operator counter/ERROR log showed a live-only capture. This drives the REAL
+    hosted impl with its own org dict + reserved slot and asserts the warning is
+    on ITS receipt.
+
+    Reachable: ``TORTOISE_EVENT_LOG_BASE_DIR`` points at an existing mode-0500
+    dir, so the hosted SDK's every journal append raises and
+    ``sdk._journal_write_failures`` is non-zero by the time the receipt is built.
+
+    MUTATION: drop the hosted receipt disclosure (the pre-F2 state) → the
+    warning is absent on this receipt → RED. It must NOT be gated on the
+    capture outcome: the graph write persisted, so the envelope's ``status``
+    stays ``"ok"`` (the hosted receipt's success signal — it carries no literal
+    ``ok`` key) — asserting both the warning AND ``status == "ok"`` pins that
+    the disclosure is independent of the ``_capture_ok_record`` written earlier
+    (SDK lane, ``sdk.py`` F1 note).
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    events.chmod(0o500)
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(events))
+    org_id = f"test-4240-{uuid.uuid4().hex[:10]}"
+    org = {"org_id": org_id, "graph_id": None, "key_id": None, "tier": "free",
+           "scopes": [], "legacy_full_access": True, "max_points": 100000,
+           "max_sessions": None}
+    body = ha.SessionRequest(conversation=CONV,
+                             session_id="s-4240-hosted-receipt",
+                             harness="claude")
+    slot = ha._reserve_capture_slot(ha._capture_session_key(org, body.session_id))
+    try:
+        r = asyncio.run(ha._capture_session_impl(body, None, org, slot=slot))
+    finally:
+        slot.release()
+        events.chmod(0o700)  # restore before teardown
+    assert r.get("status") == "ok", r
+    assert any("journal append failed" in w for w in r["warnings"]), (
+        "the hosted receipt did not disclose the failed journal append — a "
+        f"hosted client cannot see its capture is live-only: {r['warnings']}")
+    with contextlib.suppress(Exception):
+        _drop = ha._make_sdk(namespace=org_id)
         _drop._get_proj().g.query("MATCH (n) DETACH DELETE n")
         _drop.close()

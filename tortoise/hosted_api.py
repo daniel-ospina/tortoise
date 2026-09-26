@@ -126,6 +126,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _derive_graph_name,  # #4240 F2: the ONE namespace/graph_name → graph derivation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
+    _journal_write_failure_warning,  # #4240 F1: the shared "a journal append failed" receipt warning
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
@@ -576,9 +577,16 @@ def _resolve_embedded_db_path() -> str:
 #: logged, never raised — the graph mutation already succeeded). The deployed
 #: guard is ``entrypoint.sh``'s boot-time WRITABILITY probe (not just
 #: ``mkdir -p``): a base dir that exists but cannot be written fails the boot
-#: loudly. A journal that starts failing AFTER that probe (the foreseeable
-#: trigger is ENOSPC once the journal grows below the volume's free space) is
-#: recorded, not fatal — see #5612 and ``TortoiseSDK._emit_event``.
+#: loudly for a NON-ROOT uid (mode bits), and for EROFS/ENOSPC on ANY uid
+#: (root cannot bypass those). It does NOT cover a mode-bit failure when the
+#: server runs as root — ``Dockerfile.hosted`` sets no ``USER``, so on Fly the
+#: process is uid 0 and the probe write succeeds on a mode-0500 dir. That case
+#: is covered by the runtime signal, not the boot: a failed append logs at
+#: ERROR, increments ``tortoise_journal_write_failures_total`` and is disclosed
+#: on the capture receipt (``TortoiseSDK._emit_event``). A journal that starts
+#: failing AFTER that probe (the foreseeable trigger is ENOSPC once the journal
+#: grows below the volume's free space) is recorded, not fatal — see #5612 and
+#: ``TortoiseSDK._emit_event``.
 _HOSTED_EVENT_LOG_ENV = "TORTOISE_EVENT_LOG_BASE_DIR"
 
 
@@ -11357,6 +11365,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if _capture_redactions:
         extraction_warnings.append(
             _capture_redaction_warning(_capture_redactions))
+    # #4240 review F1: a journal append that failed during THIS capture is
+    # disclosed on the HOSTED receipt too. The hosted lane builds its own
+    # receipt (it never calls ``sdk.capture_session``), so without this the
+    # customer could not see that the capture is live-only — only the operator
+    # counter/ERROR log showed it. Byte-parity with the SDK lane via the shared
+    # helper, and appended only when non-zero so an ordinary capture's warning
+    # list is unchanged. Deliberately INDEPENDENT of the capture outcome: the
+    # graph write persisted, so the envelope stays successful (``status``
+    # ``"ok"``; the hosted receipt carries no literal ``ok`` key) and the
+    # warning names the journal residue — flipping the outcome would trip the
+    # #2335 TRUE-retry gate over a persisted write.
+    if sdk._journal_write_failures:
+        extraction_warnings.append(
+            _journal_write_failure_warning(sdk._journal_write_failures))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,

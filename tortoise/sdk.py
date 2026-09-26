@@ -219,6 +219,26 @@ def _capture_redaction_warning(count: int) -> str:
         f"except for those spans"
     )
 
+
+def _journal_write_failure_warning(count: int) -> str:
+    """#4240 review F1: the additive warning a capture carries when a journal
+    append failed on a CONFIGURED journal.
+
+    One canonical string, shared with ``hosted_api._capture_session_impl``
+    (byte-parity: both lanes must describe the same event identically — the
+    hosted lane builds its OWN receipt and never calls ``capture_session``, so
+    without this the disclosure would exist only on the SDK lane), naming that
+    THIS capture's records never reached the journal and a later rebuild will
+    therefore lose them. Deliberately independent of the capture's ``ok`` flag:
+    the graph write persisted, and marking it failed would trip the #2335
+    TRUE-retry gate over a write that was in fact persisted.
+    """
+    return (
+        f"journal append failed {count}x — this capture is live-only and will "
+        f"not survive a rebuild (#4240)"
+    )
+
+
 #: #3892: a keyless session re-captured WITH a key while the deployment is on
 #: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
 #: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
@@ -3334,8 +3354,11 @@ class TortoiseSDK:
             # ``capture_session``'s receipt warning below.
             # Residual (deliberate, recorded on #5612): a journal that starts
             # failing AFTER the entrypoint's boot-time writability probe — the
-            # foreseeable trigger is ENOSPC once the journal has grown below
-            # the volume's free space — is still fail-soft. The record is lost
+            # probe catches a NON-ROOT mode-bit failure and EROFS/ENOSPC on any
+            # uid, but NOT a mode-bit failure under root (the image has no USER,
+            # so on Fly the process is uid 0; F1 cycle 2) — is still fail-soft.
+            # The foreseeable trigger is ENOSPC once the journal has grown below
+            # the volume's free space. The record is lost
             # from the journal, `rebuild_all` reconstructs only what the
             # journal holds (so a later rebuild cannot restore that write), and
             # the ONLY signals are this ERROR log, the failure counter and the
@@ -4934,9 +4957,7 @@ class TortoiseSDK:
         # caller of a capture that happened to fail.
         if self._journal_write_failures:
             extraction_warnings.append(
-                f"journal append failed {self._journal_write_failures}x — "
-                "this capture is live-only and will not survive a rebuild "
-                "(#4240)")
+                _journal_write_failure_warning(self._journal_write_failures))
         resp = {
             "session_id": session_id,
             "turns": len(conversation),

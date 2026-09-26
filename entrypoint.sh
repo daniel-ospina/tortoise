@@ -139,11 +139,19 @@ if [ "$_IS_SERVER" = "1" ]; then
     # on the same persistent volume and a missing/unwritable volume is a
     # misconfigured machine, not a retryable condition. #4240 review F1: the
     # check must be WRITABILITY, not creation — `mkdir -p` succeeds on a dir
-    # that already exists but is not writable (mode 500), which is exactly the
-    # state that lets every journal append fail silently while the boot guard
-    # passes. A per-record append failure is fail-soft by design (the graph
-    # mutation stands), so this boot probe is the only place the misconfig can
-    # fail LOUD.
+    # that already exists but is not writable. What this probe covers, stated
+    # exactly (F1 cycle 2 — the earlier comment overclaimed):
+    #   * a NON-ROOT mode-bit failure: the dir exists at mode 500 and the probe
+    #     write is refused for every uid that is not root;
+    #   * EROFS/ENOSPC on ANY uid, root included — root cannot bypass those.
+    # It does NOT cover a mode-bit failure when the process is root, and the
+    # image sets NO USER (Dockerfile.hosted), so on Fly the server is uid 0 and
+    # `: > .write-probe` SUCCEEDS on a mode-0500 dir. That residual is NOT
+    # silent, it is just not a boot-time signal: a failed append logs at ERROR,
+    # increments tortoise_journal_write_failures_total and is disclosed on the
+    # capture receipt (sdk.py::TortoiseSDK._emit_event). A per-record append
+    # failure is fail-soft by design (the graph mutation stands), so this boot
+    # probe is the only place a boot-time VOLUME misconfig can fail LOUD.
     mkdir -p "$TORTOISE_EVENT_LOG_BASE_DIR"
     if ! : > "$TORTOISE_EVENT_LOG_BASE_DIR/.write-probe" 2>/dev/null; then
         echo "tortoise: FATAL — TORTOISE_EVENT_LOG_BASE_DIR is not writable: $TORTOISE_EVENT_LOG_BASE_DIR" >&2

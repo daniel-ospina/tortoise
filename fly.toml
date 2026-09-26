@@ -194,9 +194,13 @@ primary_region = "iad"
   # nothing (pre-#4240) and a rebuild silently loses the live-only edges.
   # Record writes are fail-soft (the graph mutation stands), so entrypoint.sh
   # probes this dir for WRITABILITY at boot — a dir that exists but cannot be
-  # written (mode 500) fails the boot loudly. A journal that starts failing
-  # AFTER that probe (foreseeable trigger: ENOSPC once the journal grows) is
-  # counted/logged and disclosed on the capture receipt, never fatal (#5612).
+  # written fails the boot loudly for a NON-ROOT uid (mode bits), and for
+  # EROFS/ENOSPC on ANY uid. Caveat (F1 cycle 2): the image sets no USER, so on
+  # Fly the server is root and a mode-0500 dir PASSES that probe; that case is
+  # covered by the runtime signal instead (ERROR log + journal_write_failures
+  # counter + capture-receipt warning). A journal that starts failing AFTER the
+  # probe (foreseeable trigger: ENOSPC once the journal grows) is counted/logged
+  # and disclosed on the capture receipt, never fatal (#5612).
   # NOT a durability claim — see docs/durability-posture.md.
   TORTOISE_EVENT_LOG_BASE_DIR = "/data/events"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)
