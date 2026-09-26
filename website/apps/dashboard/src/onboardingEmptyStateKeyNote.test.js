@@ -542,6 +542,9 @@ const NOTE_NAMES = ['OwnerEmptyStateKeyNote', 'MemberEmptyStateKeyNote', 'ownerC
   'keyTabAffordance', 'graphMissingCta', 'REENTRY_BUILD_LEAD_IN', 'REENTRY_SELF_LEAD_IN',
   'REENTRY_KEYED_LEAD_IN', 'GRAPH_MISSING_BUILD_LEAD_IN', 'GRAPH_MISSING_SELF_LEAD_IN']
 const MAIN_IMPORTS = importsFromMain(mainJsxSource, NOTE_NAMES)
+// the imports the whole graph-missing card needs when it is rendered below
+const CARD_IMPORTS = { ...MAIN_IMPORTS,
+  ...importsFromMain(mainJsxSource, ['GraphMissingEmptyStateActions']) }
 
 test('#4637 wiring: every probed name is imported by main.jsx and locally unshadowed', () => {
   // `importsFromMain` fails CLOSED on both failure modes, so this test documents
@@ -666,6 +669,8 @@ test('#4637 wiring: each owner arm’s EFFECTIVE props and rendered copy come fr
         bindings: { ...WIRING_BINDINGS, isBuildFork: buildFork, connectGate: JSON.stringify(gate) },
       })
       assert.equal(arms.length, 2, `two owner arms expected — got ${arms.length}`)
+      assert.deepEqual(arms.map((arm) => arm.props.variant), ['reentry', 'graph-missing'],
+        'each owner note must belong to its own card, in file order')
       for (const arm of arms) {
         const expectedLive = ownerKeyLive(gate.mode)
         assert.equal(arm.props.keyLive, expectedLive,
@@ -721,14 +726,80 @@ test('#4637 wiring: each member arm RENDERS its fork’s lead-in (and never the 
   const memberTags = await probeTags(mainJsxSource, {
     tag: 'MemberEmptyStateKeyNote',
     imports: MAIN_IMPORTS,
-    bindings: { isBuildFork: String(await forkValue("'build'")) },
+    bindings: { isBuildFork: 'true' },
   })
   assert.equal(memberTags.length, 3, `three member note tags expected — got ${memberTags.length}`)
   for (const tag of memberTags) {
     assert.equal(tag.props.buildFork, true,
       `a member note must receive the derived fork fact — got ${JSON.stringify(tag.props)} from ${tag.source}`)
-    assert.ok(['reentry', 'graph-missing'].includes(tag.props.variant),
-      `a member note needs a card variant — got ${tag.props.variant}`)
+  }
+  // …in BOTH directions, so a constant `buildFork={true}` cannot pass (a
+  // constant would render the SDK sentence into a self-fork member's card), and
+  // the card each note belongs to is pinned by order: the re-entry card owns the
+  // first two sites (its keyed and no-key arms), the graph-missing card the last
+  // (`variant="reentry"` on the graph-missing note would tell a member to paste
+  // on a connect step that card does not render).
+  const memberTagsSelf = await probeTags(mainJsxSource, {
+    tag: 'MemberEmptyStateKeyNote',
+    imports: MAIN_IMPORTS,
+    bindings: { isBuildFork: 'false' },
+  })
+  for (const tag of memberTagsSelf) {
+    assert.equal(tag.props.buildFork, false,
+      `a member note must receive the derived fork fact (false) — got ${JSON.stringify(tag.props)}`)
+  }
+  assert.deepEqual(memberTags.map((tag) => tag.props.variant), ['reentry', 'reentry', 'graph-missing'],
+    'the member notes must belong to their own cards, in file order')
+})
+
+test('#4637 wiring: the graph-missing card RENDERS the snippet and the live-key claim only for a gate that holds the key', async () => {
+  // The text counts in the test above cannot see WHICH ARM an occurrence is in:
+  // hoisting the live paragraph (or the snippet) out of the ternary into an
+  // unconditional sibling kept every count at 1 while the card claimed a live key
+  // over a key-less gate and printed `Bearer ` with an empty key (the #1831 P2-1
+  // regression). So the card itself is now COMPILED AND RENDERED with a real gate
+  // — the verdict is the rendered output, which is arm-aware by construction.
+  const sections = extractAll(stripComments(mainJsxSource),
+    /<section className="overview empty-state graph-missing">(?:(?!<section className="overview empty-state graph-missing">)[\s\S])*?<\/section>/,
+    'the sections with the graph-missing className')
+  const card = sections[sections.length - 1]
+  assert.ok(/GraphMissingEmptyStateActions/.test(card), 'the last section must be the graph-missing card')
+  const SENTINEL = 'SENTINEL_SNIPPET_TEXT'
+  for (const mode of GATE_MODES) {
+    const gate = await gateValue(GATE_INPUTS[mode])
+    const holdsKey = Boolean(gate.key)
+    for (const isOwnerAdmin of ['true', 'false']) {
+      const [rendered] = await evalExpressions(card, {
+        imports: CARD_IMPORTS,
+        bindings: {
+          isOwnerAdmin,
+          isBuildFork: 'true',
+          connectGate: JSON.stringify(gate),
+          snippetKey: "''",
+          firstDataSnippet: JSON.stringify(SENTINEL),
+          shownOrgName: "'Acme'",
+          setTab: '() => {}',
+        },
+      })
+      const html = String(rendered.html)
+      // the SNIPPET needs the gate's own plaintext (`existing` holds no plaintext
+      // even though the Organization has a usable row — the two facts differ)
+      assert.equal(html.includes(SENTINEL), holdsKey,
+        `gate ${JSON.stringify(gate)} (ownerAdmin=${isOwnerAdmin}): the copyable snippet may render only when the gate holds the plaintext — got ${html}`)
+      const liveClaim = /API key(s)? (is|are) live/
+      if (isOwnerAdmin === 'true') {
+        // the OWNER's live-key claim is the gate's verdict: true for the modes
+        // that hold a usable key ('embed' the reveal, 'existing' a usable row),
+        // never for an unresolved or absent one
+        assert.equal(liveClaim.test(html), ownerKeyLive(gate.mode),
+          `gate ${JSON.stringify(gate)}: the owner card's live-key claim must follow the gate mode — got ${html}`)
+      } else {
+        // the member arm shows the card's own snippet paragraph (pre-existing
+        // copy) exactly when the snippet renders — no owner note is involved
+        assert.equal(liveClaim.test(html), holdsKey,
+          `gate ${JSON.stringify(gate)}: the member card's live-key paragraph must follow the gate's plaintext — got ${html}`)
+      }
+    }
   }
 })
 
