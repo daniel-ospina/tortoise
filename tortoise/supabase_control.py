@@ -1653,6 +1653,45 @@ def update_onboarding_state(cp, org_id: str, state_dict: dict) -> None:
     )
 
 
+def cas_update_onboarding_state(cp, org_id: str, state_dict: dict,
+                                expected_version: int) -> bool:
+    """#3553: conditional (compare-and-set) PATCH of ``teams.onboarding_state``.
+
+    A TRUE atomic CAS on the Supabase leg: ONE PostgREST PATCH whose WHERE
+    carries the version guard, with ``Prefer: return=representation`` (a
+    non-empty ``select``; see ``query``) so the response body is non-empty IFF
+    the row matched. PostgREST issues a single
+    ``UPDATE ... WHERE id = ... AND <version guard>``; PostgreSQL re-evaluates
+    the guard against the latest committed row under READ COMMITTED, so two
+    racing writers cannot both match — the loser gets ``[]`` and retries.
+
+    Returns True iff the guarded write applied.
+
+    The version lives INSIDE the jsonb dict (``state_version``) — the
+    ``organizations`` table has no version column, and adding one is a schema
+    migration whose deploy order would be a launch-path hazard, while a jsonb
+    path filter needs no migration. ``expected_version == 0`` means "never
+    CAS-written": the guard is ``onboarding_state->>state_version IS NULL``,
+    which is the only representable form of 0 — the CAS always stores
+    ``expected + 1 >= 1``, so a stored literal 0 is unreachable.
+    """
+    from tortoise.hosted_api import _STATE_VERSION_KEY
+
+    payload = dict(state_dict)
+    payload[_STATE_VERSION_KEY] = expected_version + 1
+    guard_col = f"onboarding_state->>{_STATE_VERSION_KEY}"
+    guard = ((guard_col, "is", None) if expected_version == 0
+             else (guard_col, "eq", str(expected_version)))
+    rows = cp.query(
+        "organizations",
+        method="PATCH",
+        select=["id"],
+        filters=[("id", "eq", org_id), guard],
+        json_body={"onboarding_state": payload},
+    )
+    return bool(rows)
+
+
 def org_email(cp, org_id: str) -> str | None:
     """Read ``teams.email`` for an org (None when the row is missing)."""
     rows = cp.query("organizations", select=["email"], filters=[("id", "eq", org_id)])

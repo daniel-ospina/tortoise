@@ -92,6 +92,12 @@ surfaces:
   # surface, and `core` is only matched when nothing else matched — so `api`
   # is what makes these run on an api-only change to the file they guard.
   - test_onboarding_truth_surface.py
+  # #3553: the onboarding-state jsonb read-modify-write CAS (docker-lane).
+  # Dual-registered under `api` as well as `onboarding` for the same reason as
+  # the guards above: the write path it pins lives in tortoise/hosted_api.py,
+  # which selects the `api` surface — an `onboarding`-only entry would never run
+  # it on a hosted_api.py-only change (the file the CAS exists to fix).
+  - test_onboarding_state_cas.py
   # #3287/#2988/#3243: the selfhost health endpoints must not share fate with
   # work — the readiness probe rides its own daemon pool (a starved readiness
   # probe returned a false 503 for a healthy DB, measured 6020 ms with the probe
@@ -1301,6 +1307,7 @@ surfaces:
   - test_onboarding_health_flip.py
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
+  - test_onboarding_state_cas.py    # #3553: jsonb RMW compare-and-set against the REAL registry path (docker-lane)
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
@@ -1780,6 +1787,7 @@ durations:
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
   test_onboarding_state_split.py: 310.7
+  test_onboarding_state_cas.py: 120.0  # #3553: 13 real-store CAS cases incl. 3 threaded races (2 writers x 10 barrier-gated rounds), the read-path materialization interleaves and the Supabase-leg guard units; local docker-lane full-file runs measured 39.5s / 91.4s / 121.7s (host load varies)
   test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 101.8
   test_tortoise_client.py: 11.9

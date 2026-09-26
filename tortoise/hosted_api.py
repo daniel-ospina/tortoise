@@ -20470,6 +20470,31 @@ _ONBOARDING_DEFAULT_STATE = {
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 
+# #3553: the onboarding-state optimistic-concurrency version. Deliberately NOT
+# a state key — it is ABSENT from _ONBOARDING_DEFAULT_STATE (and therefore from
+# _ALLOWED_STATE_KEYS), so no PATCH/MCP caller can set it: it is owned by the
+# write primitive only. The two persistence legs store it differently, because
+# their CAS guards read it differently: the Supabase leg keeps it INSIDE the
+# jsonb dict (one column, no schema migration — the guard is a PostgREST jsonb
+# path filter), while the registry leg keeps it as the Team node property
+# ``state_version`` (the guard is a Cypher WHERE, which cannot look inside a
+# JSON string).
+_STATE_VERSION_KEY = "state_version"
+
+# #3553 conflict policy: bounded retry-with-reread. A version mismatch is a
+# DETECTED race (another writer committed between our read and our guarded
+# write) — re-read the whole state so the other writer's keys are MERGED, not
+# overwritten, then re-apply this call's fields. Exhaustion is fail-loud.
+_ONBOARDING_STATE_CAS_ATTEMPTS = 10
+
+
+class OnboardingStateConflictError(RuntimeError):
+    """#3553: the bounded CAS retry budget was exhausted under sustained
+    concurrent writes to one team's onboarding state. Raised rather than
+    silently dropping a write — a vanished receipt/cursor is user-visible
+    (the dashboard flips back to install-pending, the walk regresses), so the
+    contended case must surface, never be swallowed."""
+
 # Epic #529: copy-attribution enums (#235 artifact_copied schema, verbatim).
 # Not state keys — the PATCH handler pops harness/section and emits an
 # analytics event instead of persisting them.
@@ -20492,6 +20517,11 @@ def _get_onboarding_state(org_id: str) -> dict:
     Auto-initializes to defaults if missing. Supabase mode: ``teams`` rows
     default onboarding_state to '{}', so reads return the merged default
     shape without writing (the first patch materializes the full state).
+
+    #3553: the registry materialization is a GUARDED write — the pre-#3553
+    bare whole-dict SET could clobber a concurrent CAS commit (a node present
+    with an unset ``onboarding_state`` is the common SDK/provision creation
+    shape) and leave ``state_version`` lying about the content.
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -20504,16 +20534,30 @@ def _get_onboarding_state(org_id: str) -> dict:
         stored = _sb_state(get_control_plane(), org_id)
         # None = org row missing — mirror the registry MATCH-no-op: read as
         # defaults, don't write.
-        return stored if stored is not None else _onboarding_defaults()
+        if stored is None:
+            return _onboarding_defaults()
+        # #3553: `state_version` is the CAS guard, not a state key — never
+        # leak it to a reader/API surface. (`_sb_state` returns a fresh dict,
+        # so this pop cannot mutate the stored row.)
+        stored.pop(_STATE_VERSION_KEY, None)
+        return stored
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id: $id}) RETURN t.onboarding_state",
         params={"id": org_id},
     ).result_set
-    if not rows or rows[0][0] is None:
+    if not rows:
+        # Absent node — the pre-#3553 materialize here was a MATCH-no-op;
+        # skip the dead write entirely.
+        return _onboarding_defaults()
+    if rows[0][0] is None:
+        # #3553: guarded materialization (see the docstring). On a guarded-
+        # write refusal a concurrent writer owns the row now — serve ITS
+        # committed state rather than our stale defaults.
         state = _onboarding_defaults()
-        _write_onboarding_state(org_id, state)
+        if not _cas_write_onboarding_state(org_id, state, 0):
+            state, _version = _read_onboarding_state_and_version(org_id)
         return state
     try:
         stored = _json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
@@ -20521,6 +20565,11 @@ def _get_onboarding_state(org_id: str) -> dict:
         stored = {}
     state = _onboarding_defaults()
     state.update(stored)
+    # #3553: defensive — a hand-seeded/legacy jsonb carrying the CAS guard
+    # must not leak it to a reader/API surface (the Supabase branch pops it
+    # above; the registry leg stores it as a node property and should never
+    # see it here, but the pop costs nothing and closes the asymmetry).
+    state.pop(_STATE_VERSION_KEY, None)
     return state
 
 
@@ -20674,27 +20723,175 @@ def _onboarding_defaults() -> dict:
             for k, v in _ONBOARDING_DEFAULT_STATE.items()}
 
 
+def _strip_flow_state_keys(state: dict) -> dict:
+    """#2001 (W5) belt-and-braces: jsonb NEVER holds FLOW state
+    (fork/status/version/step edges/member_progress/last_decide_attempt/
+    compact). #3821: the drop is REPORTED instead of silent — it was the
+    "defensive" backstop with no observer.
+
+    Shared by the whole-dict writer and the #3553 CAS writer so the two write
+    paths cannot drift on the invariant."""
+    _stripped_flow = {k for k in state
+                      if k in _os.FLOW_KEYS or k in _os.STEP_IDS}
+    if not _stripped_flow:
+        return state
+    _report_unregistered(
+        "onboarding_state", "flow_keys_stripped_at_write", _stripped_flow)
+    return {k: v for k, v in state.items()
+            if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
+
+
+def _read_onboarding_state_and_version(org_id: str) -> tuple[dict, int | None]:
+    """#3553: ONE-STATEMENT read of ``(operational_state, state_version)``.
+
+    The state and the version MUST come from the SAME read. Two reads could
+    pair a state observed at version N with a version already advanced to
+    N+1, and the CAS would then apply the STALE state under a guard that
+    already includes another writer's commit — re-introducing exactly the
+    lost update the CAS exists to prevent.
+
+    ``version is None`` means the identity is ABSENT (no Team node / no
+    ``teams`` row) — the pre-existing silent no-op case, kept distinct from
+    version 0 (identity present, never CAS-written) so the caller can
+    preserve the legacy no-op write. This read NEVER writes.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        org_onboarding_state as _sb_state,
+    )
+    if is_supabase_enabled():
+        # One GET: the whole jsonb comes back in one column, so the version
+        # embedded in it is read atomically with the state.
+        stored = _sb_state(get_control_plane(), org_id)
+        if stored is None:
+            return _onboarding_defaults(), None
+        version = stored.get(_STATE_VERSION_KEY)
+        state = dict(stored)
+        state.pop(_STATE_VERSION_KEY, None)
+        return state, (version if isinstance(version, int) else 0)
+    import json as _json
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) "
+        "RETURN t.onboarding_state, coalesce(t.state_version, 0)",
+        params={"id": org_id},
+    ).result_set
+    if not rows:
+        return _onboarding_defaults(), None
+    raw = rows[0][0]
+    try:
+        stored = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (TypeError, ValueError):
+        stored = {}
+    state = _onboarding_defaults()
+    state.update(stored)
+    # Defensive: the registry jsonb never holds the version (it is a node
+    # property), but a hand-seeded/legacy row must not leak it either.
+    state.pop(_STATE_VERSION_KEY, None)
+    stored_version = rows[0][1]
+    return state, (stored_version if isinstance(stored_version, int) else 0)
+
+
+def _cas_write_onboarding_state(org_id: str, state: dict,
+                                expected_version: int) -> bool:
+    """#3553: single-statement GUARDED write — apply ``state`` IFF the stored
+    ``state_version`` equals ``expected_version``. Returns True iff applied.
+
+    ATOMICITY — stated, not implied: the guard and the write are ONE statement
+    on BOTH legs, so the guard cannot interleave with another query's write.
+    - registry: one Cypher ``MATCH ... WHERE coalesce(t.state_version,0) =
+      $expected SET ... RETURN t.id`` — FalkorDB executes a query to
+      completion, so the returned row count is the CAS verdict ([] = mismatch).
+    - Supabase: one PostgREST ``PATCH ... ?id=eq.X&onboarding_state->>version=
+      eq.N`` with ``Prefer: return=representation`` — PostgreSQL re-evaluates
+      the WHERE against the latest committed row under READ COMMITTED, so a
+      racing writer's UPDATE cannot also match; an empty body = mismatch.
+
+    This is NOT an atomic read-modify-write: a mismatch is DETECTED and
+    retried by the caller, never prevented. That is why
+    ``_write_jsonb_fields_cas`` carries a bounded retry budget.
+    """
+    state = _strip_flow_state_keys(state)
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        from tortoise.supabase_control import cas_update_onboarding_state
+        return cas_update_onboarding_state(
+            get_control_plane(), org_id, state, expected_version)
+    import json as _json
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) "
+        "WHERE coalesce(t.state_version, 0) = $expected "
+        "SET t.onboarding_state = $state, t.state_version = $expected + 1 "
+        "RETURN t.id",
+        params={"id": org_id, "expected": expected_version,
+                "state": _json.dumps(state)},
+    ).result_set
+    return bool(rows)
+
+
+def _write_jsonb_fields_cas(org_id: str, fields: dict) -> None:
+    """#3553: apply OPERATIONAL ``fields`` to the jsonb state under an
+    optimistic compare-and-set on ``state_version``.
+
+    CONFLICT POLICY — bounded retry-with-reread (every writer adopts it: every
+    concurrent writer funnels through ``_update_onboarding_state``, and the
+    registry read-path materialization now routes through the CAS too):
+    on a version mismatch, RE-READ the whole state (so the concurrent writer's
+    keys are merged rather than overwritten) and re-apply this call's fields.
+    The budget is ``_ONBOARDING_STATE_CAS_ATTEMPTS``; on exhaustion raise
+    ``OnboardingStateConflictError`` (fail-loud) — under sustained contention
+    the drop must surface instead of silently losing a receipt or a cursor.
+
+    A version of ``None`` (identity absent) preserves the PRE-#3553 semantics
+    exactly: the write is a MATCH-no-op / PATCH-on-a-missing-row, never an
+    error, and the caller's echo still reflects the ACKed fields.
+    """
+    last_version: int | None = None
+    for _ in range(_ONBOARDING_STATE_CAS_ATTEMPTS):
+        state, version = _read_onboarding_state_and_version(org_id)
+        for k, v in fields.items():
+            state[k] = v
+        if version is None:
+            _write_onboarding_state(org_id, state)
+            return
+        last_version = version
+        if _cas_write_onboarding_state(org_id, state, version):
+            return
+    raise OnboardingStateConflictError(
+        f"onboarding state for {org_id!r} changed under "
+        f"{_ONBOARDING_STATE_CAS_ATTEMPTS} concurrent CAS attempts "
+        f"(last observed version {last_version}); fields "
+        f"{sorted(fields)}")
+
+
 def _write_onboarding_state(org_id: str, state: dict) -> None:
     """Persist onboarding state — Supabase ``teams.onboarding_state`` (jsonb —
     no string-wrapping, 0006) or the registry Org node (JSON string —
     #498 fix: FalkorDB node properties must be primitives, not dicts).
 
-    #2001 (W5): defensively STRIPS FLOW keys (fork/status/version/step
-    edges/member_progress/last_decide_attempt/compact) before persisting —
-    jsonb NEVER holds FLOW state (the router branches before the allowlist
-    filter; this is the belt-and-braces backstop the registration-split
-    negatives pin)."""
-    _stripped_flow = {k for k in state
-                      if k in _os.FLOW_KEYS or k in _os.STEP_IDS}
-    if _stripped_flow:
-        # #3821: this is the last chance to learn the router leaked a FLOW
-        # key. The strip itself is unchanged (jsonb NEVER holds FLOW state);
-        # the drop is now reported instead of silent — it was the
-        # "defensive" backstop with no observer.
-        _report_unregistered(
-            "onboarding_state", "flow_keys_stripped_at_write", _stripped_flow)
-        state = {k: v for k, v in state.items()
-                 if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
+    #2001 (W5): defensively STRIPS FLOW keys before persisting — jsonb NEVER
+    holds FLOW state (the router branches before the allowlist filter; this is
+    the belt-and-braces backstop the registration-split negatives pin).
+
+    #3553 NOTE: this whole-dict writer is UNGUARDED by design; it is NOT a
+    concurrent-path writer. Its remaining production caller is the
+    ``version is None`` fallback in ``_write_jsonb_fields_cas`` (the identity
+    is ABSENT — the write is a MATCH-no-op / PATCH on a missing row), plus
+    test seeding. The registry read-path materialization was moved OFF this
+    writer onto the CAS in #3553. On the registry leg it leaves the
+    ``state_version`` node property untouched, so it cannot rewind the epoch;
+    on the Supabase leg the version lives INSIDE the jsonb, so a caller that
+    passes a dict without it would drop it — callers that write a real row
+    must go through the CAS (``cas_update_onboarding_state``), which always
+    re-embeds the version."""
+    state = _strip_flow_state_keys(state)
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -20946,10 +21143,11 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
             # unregistered key matched no arm and vanished with no observer.
             _report_unregistered("onboarding_state", "unknown_key", {k})
     if jsonb_fields:
-        state = _get_onboarding_state(org_id)
-        for k, v in jsonb_fields.items():
-            state[k] = v
-        _write_onboarding_state(org_id, state)
+        # #3553: the OPERATIONAL leg is a compare-and-set — the pre-#3553
+        # read→mutate→whole-dict-write lost any key another writer committed
+        # inside the window (dropped receipt → dashboard flips back to
+        # install-pending; dropped cursor → the walk regresses).
+        _write_jsonb_fields_cas(org_id, jsonb_fields)
     if wrote_step:
         _maybe_apply_completion(org_id)
         # #2006 (W11): emit for the edges this call NEWLY created (empty on a
