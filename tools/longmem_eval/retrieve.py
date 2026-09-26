@@ -105,6 +105,7 @@ from tortoise.retrieval import (
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
     DEFAULT_POOL_SIZE,
+    SESSION_TRANSCRIPT_KIND,
     _validity_marker,  # noqa: F401 — re-exported for the eval tests
     render_context,
     resolve_pool_size,
@@ -125,12 +126,21 @@ from tortoise.retrieval import (
     estimate_tokens as _estimate_tokens,
 )
 from tortoise.retrieval import (
+    guard_and_recap_pool as _guard_and_recap_pool,
+)
+from tortoise.retrieval import (
     is_raw_chunk as _is_raw_chunk,
 )
 from tortoise.retrieval import (
     package_evidence_pool as _package_evidence_pool,
 )
 from tortoise.sdk import TortoiseSDK
+from tortoise.session_reinjection import (  # C4 (#2517): product rules
+    DEFAULT_REINJECTION_PER_SESSION,
+    DEFAULT_REINJECTION_SEED_SESSIONS,
+    DEFAULT_REINJECTION_SEED_WINDOW,
+    DEFAULT_REINJECTION_TOTAL_ITEMS,
+)
 
 from . import encode_cache, evidence
 from .ingest import EXTRACTION_POINT_KIND, event_props_for_hits, point_props_for_hits
@@ -358,14 +368,134 @@ class TimeConstraint:
     ``kind``: "interval" | "recency" | "ordering" | None
     ``start``: ISO date (interval) | day count (recency) | None
     ``end``: ISO date (interval) | None
+    ``anchors`` (#2976): the event/entity phrases the ordering/comparison
+    shape compares ("the dog bed for Max", "the training pads for Luna").
+    Additive — the pre-#2976 consumers read only kind/start/end, so every
+    existing shape is unchanged. An empty tuple means no comparison anchor
+    was recovered; the #2976 temporal leg REQUIRES a matched anchor and
+    stays inert in that case (it never promotes on date-spread alone).
     """
     kind: str | None
     start: str | None = None
     end: str | None = None
+    anchors: tuple[str, ...] = ()
 
 
 #: recency window unit map (D5): day=1, week=7, month=30.
 _UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
+
+# ── #2976: event-referenced ordering/comparison shapes ──────────────────────
+# The measured defect (issue #2976): the TR class asks "which happened first,
+# the X or the Y" / "how many days passed between A and B" — questions that
+# reference EVENTS, not dates. The pre-#2976 detector only fired on numeric
+# "N days ago" / "last N weeks" (recency) and a few literal "how many days"
+# wordings, so 34/55 temporal questions were classified None and the whole
+# time machinery stayed inert. These are closed-form morphologies (research:
+# docs/research/2026-09-08-temporal-reasoning-decomposition-assembler.md §1
+# — TEQUILA constraint rewrite / TempQuestions templates), so they are
+# detectable without an LLM. The numeric recency and explicit-interval
+# checks keep precedence for THEIR shapes; note the deliberate exception
+# documented at the interval branch below (an explicit month/day bound that
+# ALSO carries an ordering cue now classifies as interval, where pre-#2976
+# the legacy ordering triggers won).
+_ORDERING_RE = re.compile(
+    # comparison / superlative ordering: "which/who … first|second|earlier".
+    # The `[^?]{0,80}?` spans are BOUNDED and lazy: an unbounded `[^?]*`
+    # in front of an alternation backtracks super-linearly on long text
+    # (review-caught: 3.6 KB → 0.56 s). Real questions are far shorter
+    # than 80 chars between the wh-word and the ordering cue.
+    r"\b(?:which|what|who)\b[^?]{0,80}?\b(?:first|second|third|earlier"
+    r"|earliest|later|latest|most recently|more recently)\b"
+    # "which … A or B" with no superlative word
+    r"|\bwhich\b[^?]{0,80}?\bor\b"
+    # explicit order requests
+    r"|\border of\b"
+    r"|\bfrom (?:earliest|first) to (?:latest|last)\b"
+    # duration / span shapes: "how many days passed between …",
+    # "how many days before X did I …". Deliberately NOT a bare
+    # "how many … did" branch: that fires on aggregative questions with no
+    # temporal shape and only produces junk anchors (the duration-UNIT
+    # branch below plus the relative branches cover the real shapes).
+    r"|\bhow (?:many|much)\b[^?]{0,80}?\b(?:passed|elapsed|between|before"
+    r"|after|since)\b"
+    # "how many weeks/months/years …" (duration units — no verb cue
+    # needed; the optional quantifier keeps the pre-#2976 tolerance for
+    # the ungrammatical "how days")
+    r"|\bhow\s+(?:many\s+|much\s+)?(?:days?|weeks?|months?|years?|hours?"
+    r"|minutes?)\b"
+    r"|\bhow (?:long|old)\b"
+    # relative anchors
+    r"|\bago\b"
+    r"|\bsince\b"
+    r"|\bbefore\b|\bafter\b"
+    r"|\blast (?:week|month|year|weekend|night|summer|spring|fall|autumn"
+    r"|winter|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\b(?:last|this|next)\s+(?:monday|tuesday|wednesday|thursday|friday"
+    r"|saturday|sunday)\b"
+    r"|\bmost recently\b"
+    # calendar references: a month or a named holiday behind a preposition
+    # ("in March and April", "on Valentine's day") — these name an
+    # absolute window even without a numeric date.
+    r"|\b(?:in|on|during|by|around)\s+(?:january|february|march|april|may"
+    r"|june|july|august|september|october|november|december"
+    r"|valentine'?s day|christmas|thanksgiving|halloween|easter"
+    r"|new year'?s (?:day|eve))\b"
+)
+
+#: Anchor recovery for the co-present (ordering/comparison) class. The
+#: research (§1/§2) is explicit that ordering questions need BOTH compared
+#: instances in hand (RERC reader-per-side; Mem0 state_key co-retrieval), so
+#: the leg needs the two phrases, not just "ordering" as a kind. The lazy
+#: groups are BOUNDED (`.{3,120}?`) for the same reason `_ORDERING_RE`'s
+#: spans are: an unbounded `.+?` anchored to `$` is super-linear on long
+#: text (review-caught).
+_ANCHOR_OR_RE = re.compile(r"[,:]\s*(.{3,120}?)\s+or\s+(.{3,120}?)\s*[?.]?$")
+_ANCHOR_BETWEEN_RE = re.compile(
+    r"\bbetween\s+(?:the\s+)?(.{3,120}?)\s+and\s+(?:the\s+)?"
+    r"(.{3,120}?)\s*[?.]?$")
+_ANCHOR_BEFORE_RE = re.compile(
+    r"\bbefore\s+(?:the\s+)?(.{3,80}?)(?:\s+(?:did|when|do|does)\b|[?.]|$)")
+
+
+def _extract_anchors(t: str) -> tuple[str, ...]:
+    """Recover the compared event phrases from an ordering/comparison shape.
+
+    Best-effort and deterministic (no model call):
+
+    * ``which … first, A or B``   → (A, B)
+    * ``between A and B``         → (A, B)
+    * ``before X did …``          → (X,)
+
+    Anaphoric second sides ("…and the day I received it") reduce to a
+    single content token and are DROPPED — a one-token anchor is claimed by
+    any candidate carrying that word (noise). A phrase whose tokens are ALL
+    stopwords (deictics like "today") is dropped for the same reason.
+    Returns ``()`` when nothing usable remains — the leg then stays inert
+    (it requires a matched anchor; it never promotes on date-spread alone).
+    """
+    from tortoise.temporal_leg import content_tokens
+
+    def _clean(s: str) -> str:
+        if not content_tokens(s):
+            return ""  # deictic-only phrase → no anchor signal
+        return " ".join(s.strip(" .,:;'\"").split())
+
+    m = _ANCHOR_OR_RE.search(t)
+    if m:
+        a, b = _clean(m.group(1)), _clean(m.group(2))
+        if a and b:
+            return (a, b)
+    m = _ANCHOR_BETWEEN_RE.search(t)
+    if m:
+        a, b = _clean(m.group(1)), _clean(m.group(2))
+        if a and b:
+            return (a, b)
+    m = _ANCHOR_BEFORE_RE.search(t)
+    if m:
+        a = _clean(m.group(1))
+        if a:
+            return (a,)
+    return ()
 
 
 def detect_time_constraint(text: str, *,
@@ -380,7 +510,9 @@ def detect_time_constraint(text: str, *,
     | recency   | "N days/weeks/months ago", "last N …" (unit map              | hard filter on [qdate − N_days, qdate] |
     |           |  day=1/week=7/month=30)                                      | |
     | ordering  | "how many days", "how long", "when did", bare "ago" with     | no filter — the question needs the full |
-    |           |  no numeric bound                                             | dated set to compute a span/ordering |
+    |           |  no numeric bound; #2976 adds the event-referenced shapes       | dated set to compute a span/ordering |
+    |           |  "which … first, A or B", "order of", "how many days passed     | (the #2976 temporal leg consumes the |
+    |           |  between A and B", "most recently", "last <weekday>"           |  ``anchors`` additively) |
     | None      | no match                                                     | no filter, no reorder (pure date weight) |
 
     Degradation rule: an unparseable bound (bare "ago", "how many days"
@@ -399,29 +531,58 @@ def detect_time_constraint(text: str, *,
         n = int(m.group(1) or m.group(3))
         unit = (m.group(2) or m.group(4)).rstrip("s")
         return TimeConstraint("recency", start=str(n * _UNIT_DAYS[unit]))
-    # ordering shapes: the question needs the FULL dated set — "how many
-    # days ago" with no numeric bound, "how long", "when did", bare
-    # "ago" with no bound (D5: no hard filter, no false bounds).
-    if (re.search(r"\bago\b", t)
-            or re.search(r"\bhow\s+(many\s+)?days\b", t)
-            or re.search(r"\bhow\s+long\b", t)
-            or re.search(r"\bwhen\s+did\b", t)):
-        return TimeConstraint("ordering")
     # interval: "between <Month day> and <Month day>" (year from
     # ``default_year``) or ISO "YYYY-MM-DD" bounds — explicit window.
+    # Checked BEFORE the #2976 ordering shapes because an explicit date
+    # bound is the strongest signal and the ordering regexes' relative
+    # branches ("before"/"after"/"since") would otherwise swallow a
+    # sentence like "Between June 1 and June 15 … after the meeting" into
+    # ordering + garbage anchors. NOTE: this is a deliberate, documented
+    # kind change for the overlap class (pre-#2976 the legacy ordering
+    # triggers ran first, so "How many days elapsed between June 1 and
+    # June 15?" was ordering and is now interval). It cannot starve the
+    # reader: ``_apply_time_window`` returns [] when no dated hit falls in
+    # the window and the caller then keeps the unfiltered pool
+    # (``tr_window_fallback``).
     m = re.search(
         r"between\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})", t)
     if m:
         return TimeConstraint("interval", start=m.group(1), end=m.group(2))
     m = re.search(
-        r"between\s+([a-z]+)\s+(\d{1,2})\s+and\s+([a-z]+)\s+(\d{1,2})", t)
+        r"between\s+("
+        r"january|february|march|april|may|june|july|august|september|october"
+        r"|november|december)\s+(\d{1,2})\s+and\s+("
+        r"january|february|march|april|may|june|july|august|september|october"
+        r"|november|december)\s+(\d{1,2})", t)
     if m:
-        def _iso(mon: str, day: str) -> str:
-            d = datetime.strptime(f"{mon} {day} {default_year or 2026}",
-                                  "%B %d %Y")
-            return d.date().isoformat()
-        return TimeConstraint("interval", start=_iso(m.group(1), m.group(2)),
-                              end=_iso(m.group(3), m.group(4)))
+        # Month names only (never a bare `word N`) — otherwise a non-date
+        # pair like "between level 1 and level 3" would reach strptime and
+        # raise (the review-caught crash path). An UNPARSEABLE but
+        # month-shaped bound ("february 30") must also degrade, never
+        # raise: fall through to the ordering check, whose no-filter
+        # semantics are the documented degradation rule.
+        try:
+            def _iso(mon: str, day: str) -> str:
+                d = datetime.strptime(f"{mon} {day} {default_year or 2026}",
+                                      "%B %d %Y")
+                return d.date().isoformat()
+
+            _start = _iso(m.group(1), m.group(2))
+            _end = _iso(m.group(3), m.group(4))
+        except ValueError:
+            pass
+        else:
+            return TimeConstraint("interval", start=_start, end=_end)
+    # ordering shapes: the question needs the FULL dated set — "how many
+    # days ago" with no numeric bound, "how long", "when did", bare
+    # "ago" with no bound (D5: no hard filter, no false bounds). #2976
+    # extends the trigger set to the event-referenced comparison/duration
+    # morphologies ("which … first, A or B", "how many days passed
+    # between …", "most recently", "last Saturday") and recovers the
+    # compared anchor phrases for the temporal leg. Still no hard filter —
+    # the leg is an additive rerank, never a window (research §2).
+    if _ORDERING_RE.search(t) or re.search(r"\bwhen\s+did\b", t):
+        return TimeConstraint("ordering", anchors=_extract_anchors(t))
     return TimeConstraint(None)
 
 
@@ -531,12 +692,39 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # re-detected.
             "superseded_by": h.get("superseded_by"),
             "supersedes": h.get("supersedes") or [],
+            # C6 (#2520): the Point status rides the annotated surface — the
+            # ONLY stale clause that catches a status-only row
+            # (``retract_point`` writes status='retracted' and no window and
+            # no CORRECTS edge). Sourced from the search PAYLOAD (which
+            # carries it), never from ``point_props_for_hits`` (which does
+            # not fetch it). Additive key — the annotated key set is 18.
+            "status": h.get("status") or "",
             # E6 (#1538) D7: promoted validity-window fields — additive,
             # only when present (undated hits render no [valid …] marker).
             "valid_from": h.get("valid_from") or "",
             "valid_to": h.get("valid_to") or "",
             "expired_at": h.get("expired_at") or "",
         })
+    return annotated
+
+
+def annotate_pool_additions(hits: list[dict], props: dict, dates: list[str],
+                            *, match_source: str) -> list[dict]:
+    """Annotate a driver's ADDED hits on the SAME surface as the base pool
+    (C3-1 #2567 / C4 #2517 shared contract, harness-local by direction: it
+    needs the eval lane's annotation readers, so a product home would force
+    a product→harness import).
+
+    Delegates to :func:`_annotate_hits` (all 18 annotated keys — including
+    ``session_date``, which is derived from the QUESTION's ``haystack_dates``
+    and is not derivable from ``proj`` or the point props, hence the
+    required ``dates`` argument) and then stamps ``match_source`` — the
+    driver's own retrieval leg (C3-1 passes ``"fts"``, C4 ``"session"``),
+    which ``_annotate_hits`` cannot know.
+    """
+    annotated = _annotate_hits(hits, props, dates)
+    for h in annotated:
+        h["match_source"] = match_source
     return annotated
 
 
@@ -649,7 +837,9 @@ def _leg_mix(hits: list[dict]) -> dict[str, int]:
     Legs are never re-derived — the engine's own ``match_source``
     (fts/vector/structural/rrf/tfidf) lands on annotated hits (missing →
     ``unknown``); embedded mode legitimately shows ``{"tfidf": n}``, real
-    mode ``{"rrf": n}`` (+ per-leg when the engine emits it).
+    mode ``{"rrf": n}`` (+ per-leg when the engine emits it). The C4
+    source-session re-injection leg (#2517) stamps ``"session"`` on the
+    chunks it adds, so a co-run with rerank never conflates the two.
     """
     counts: dict[str, int] = {}
     for h in hits:
@@ -665,7 +855,9 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
                    recency_boost: float = 0.0,
                    leg_trace: list[dict] | None = None,
                    retrieval_budget_ms: int | None = None,
-                   entity_key_expansion: bool = False) -> list[dict]:
+                   entity_key_expansion: bool = False,
+                   query_date: str | None = None,
+                   time_aware: bool = False) -> list[dict]:
     """Hybrid retrieval over the question's ingested graph.
 
     R5 (#1544) D4: ``entity_types`` selects the retrieval pool — TR
@@ -715,6 +907,13 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     passes the resolved bool — the product's ``tortoise_fts_query`` owns the
     mechanism (default OFF there too).
     """
+    # C6 (#2520, #2513): the query-side date anchor rides the ON path only
+    # (the off path passes NO new kwarg — byte-identical, and hermetic
+    # `tortoise_fts_query` stubs with strict signatures stay compatible).
+    _sdk_kwargs: dict = {}
+    if time_aware:
+        _sdk_kwargs["time_aware"] = True
+        _sdk_kwargs["query_date"] = query_date
     merged: dict[str, dict] = {}
     for et in entity_types:
         for h in sdk.tortoise_fts_query(
@@ -731,6 +930,7 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
             # #2518 (C2 #2513): the entity/fact-augmented key expansion
             # sparse-leg pass (default False — byte-identical when off).
             entity_key_expansion=entity_key_expansion,
+            **_sdk_kwargs,
         ):
             merged[h["id"]] = h
     # deterministic union: RRF score desc, then id (no namespace collision
@@ -853,6 +1053,19 @@ def retrieve_for_question(
     tr_top_k: int = DEFAULT_TR_TOP_K,
     tr_date_weight: float = 0.5,
     tr_events: bool = True,
+    # #2976: the temporal retrieval leg — tri-state (True/False explicit,
+    # None = env ``TORTOISE_LME_TEMPORAL_LEG``; only 1/true/yes/on enables
+    # — fail-safe OFF, the #1745 default decision). An ADDITIVE rerank that
+    # fuses a temporal leg (anchor co-present coverage + date/session
+    # spread, ``tortoise.temporal_leg``) into the existing RRF for the
+    # event-referenced ordering/comparison TR class; the semantic leg still
+    # supplies the candidate membership (research §2: never pre-filter).
+    # ``temporal_leg_weight`` / ``temporal_leg_limit`` override the leg's
+    # fusion weight and depth (env ``TORTOISE_LME_TEMPORAL_LEG_WEIGHT`` /
+    # ``TORTOISE_LME_TEMPORAL_LEG_LIMIT``).
+    temporal_leg: bool | None = None,
+    temporal_leg_weight: float | None = None,
+    temporal_leg_limit: int | None = None,
     # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
     # OFF by default (the V3 baseline path is byte-identical; no rerank keys
     # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
@@ -907,6 +1120,32 @@ def retrieve_for_question(
     # lever (2×2 covariate with the #2518 entity-key expansion arm):
     # identical questions, loop ON vs OFF, deltas on recall_all@5.
     coverage_loop: bool | None = None,
+    # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
+    # (True/False explicit, None = env
+    # ``TORTOISE_LME_SESSION_REINJECTION``; only 1/true/yes/on enables —
+    # fail-safe OFF, the #1745 default decision). When ON, a seeded
+    # (rank-triggered, label-free) pool head has each session's remaining
+    # verbatim material fetched in ONE batched query and spliced back after
+    # that session's last base hit (additive), then the shared
+    # session-diverse guard re-caps. Since #2517 the fetched material is the
+    # PRODUCT's episodic TURN points (``pointKind='event'``, turn-shaped);
+    # the eval's raw ``session-transcript`` chunks are the non-default
+    # ``chunk_kind`` arm only. The C5 re-cap counts raw chunks alone, so at
+    # the shipped turn grain the total budget is the volume guard.
+    # ``session_reinjection_guard``
+    # (None = True) is the guard ablation: False still re-caps through the
+    # same ``retrieval.guard_and_recap_pool`` contract but skips the
+    # reorder.
+    session_reinjection: bool | None = None,
+    session_reinjection_guard: bool | None = None,
+    # C4 (#2513): the RESOLVED total injection budget (env
+    # ``TORTOISE_LME_REINJECTION_TOTAL_CAP``, default the product constant
+    # ``DEFAULT_REINJECTION_TOTAL_ITEMS``). The run path resolves it once,
+    # before the loop, and passes it explicitly so the value that gated the
+    # checkpoint fingerprint and the methodology record is EXACTLY the value
+    # the fetch serves (methodology == actual == fingerprint). None = a
+    # direct caller passed nothing; the env fallback below resolves it.
+    session_reinjection_total_cap: int | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (True/False explicit, None = env
     # ``TORTOISE_LME_AGGREGATIVE_FLAG``; only 1/true/yes/on enables —
@@ -938,6 +1177,18 @@ def retrieve_for_question(
     # deltas on the two C2 context-flooding regressions (qids b6025781 /
     # 4f54b7c9) recovering under the arms.
     evidence_assembly: bool | None = None,
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (True/False
+    # explicit, None = env ``TORTOISE_LME_TIME_AWARE_QE``; only
+    # 1/true/yes/on enables — fail-safe OFF, the #1745 default decision).
+    # Arming it (a) anchors the DENSE-leg query with the question date for a
+    # PREFER-LATEST question, (b) applies a bounded recency weight for a
+    # non-TR PREFER-LATEST question, and (c) reorders the FINAL pool
+    # live-before-stale from the promoted supersession state. Non-TR only —
+    # TR keeps its R5 #1544 stack untouched. ``time_aware_recency_weight``
+    # is a TEST/measurement seam (default = the product constant); it is not
+    # a harness knob.
+    time_aware_qe: bool | None = None,
+    time_aware_recency_weight: float | None = None,
     # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
     # eval passes EVAL_RETRIEVAL_BUDGET_MS (1500); None = SDK default
     # 500 ms. Threads ONLY the hybrid arm (``hybrid_search`` →
@@ -1108,9 +1359,49 @@ def retrieve_for_question(
     # (byte-identical, and hermetic hybrid_search stubs with strict
     # signatures stay compatible, matching the off-path conventions of the
     # R5/R6 retrieval knobs above).
+    # C6 (#2520, #2513): resolve the time-aware arm tri-state (explicit flag
+    # > env ``TORTOISE_LME_TIME_AWARE_QE`` > OFF — fail-safe: only
+    # 1/true/yes/on enables, the #1745 default decision) and the freshness
+    # intent ONCE. The arm is non-TR only (TR keeps the R5 stack untouched).
+    if time_aware_qe is not None:
+        time_aware_qe_on = time_aware_qe
+    else:
+        from .rerank import _TRUTHY as _TA_TRUTHY
+        _ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe_on = _ta_env.strip().lower() in _TA_TRUTHY
+    time_aware_intent = None
+    time_aware_armed = bool(time_aware_qe_on and not is_tr)
+    if time_aware_qe_on:
+        from tortoise.time_aware import detect_temporal_intent
+        time_aware_intent = detect_temporal_intent(question["question"])
+    # C6: hoist the question date ABOVE the retrieval call. It was
+    # previously bound only inside the TR branch and again for the reader
+    # header; the non-TR arm needs it, so bind it once here and reuse it
+    # everywhere (a single source — the TR branch and the header no longer
+    # re-read it).
+    question_date = question.get("question_date", "") or None
+
     _hybrid_kwargs: dict = {}
     if entity_key_expansion_on:
         _hybrid_kwargs["entity_key_expansion"] = True
+    # C6: the anchor + recency weight ride the ON path only (blank off path
+    # → the off-path output and the strict hermetic stubs are unchanged).
+    _ta_recency_fields = None
+    _ta_recency_boost = 0.0
+    if time_aware_armed:
+        _hybrid_kwargs["time_aware"] = True
+        _hybrid_kwargs["query_date"] = question_date
+        if (time_aware_intent is not None
+                and time_aware_intent.kind == "prefer-latest"):
+            from tortoise.time_aware import (
+                DEFAULT_TIME_AWARE_RECENCY_WEIGHT,
+            )
+            _ta_recency_fields = {"point": "createdAt",
+                                  "event": "startedAt"}
+            _ta_recency_boost = (
+                DEFAULT_TIME_AWARE_RECENCY_WEIGHT
+                if time_aware_recency_weight is None
+                else time_aware_recency_weight)
     hits = hybrid_search(
         sdk, question["question"],
         limit=pool_limit,
@@ -1119,8 +1410,8 @@ def retrieve_for_question(
         else ("point",),
         recency_fields=(
             {"point": "createdAt", "event": "startedAt"}
-            if is_tr else None),
-        recency_boost=tr_date_weight if is_tr else 0.0,
+            if is_tr else _ta_recency_fields),
+        recency_boost=tr_date_weight if is_tr else _ta_recency_boost,
         # #1786 (R5): the eval's elevated hybrid-arm deadline (None keeps
         # the SDK-default 500 ms collective cap byte-identical).
         retrieval_budget_ms=retrieval_budget_ms,
@@ -1163,7 +1454,9 @@ def retrieve_for_question(
     tr_constraint = None
     tr_window_fallback = False
     if is_tr:
-        question_date = question.get("question_date", "") or None
+        # C6: ``question_date`` was hoisted above the retrieval call — one
+        # binding for the whole function (the TR branch no longer re-reads
+        # it; the non-TR time-aware arm needs the same value).
         try:
             year = int(question_date[:4]) if question_date else None
         except ValueError:
@@ -1177,6 +1470,120 @@ def retrieve_for_question(
                 annotated = windowed
             else:
                 tr_window_fallback = True  # keep the unfiltered pool
+
+    # ── #2976: the temporal retrieval leg — an ADDITIVE rerank of the
+    # event-referenced ordering/comparison TR class ("which happened first,
+    # the X or the Y", "how many days passed between A and B"). The
+    # diagnosis: gold evidence IS in the pool but at ranks 41–120 while the
+    # reader window holds ~12–24 pure-semantic RRF items; the pre-#2976
+    # machinery never fired because those questions name events, not dates.
+    # The leg (``tortoise.temporal_leg``, pure/deterministic) promotes the
+    # best content match for each comparison anchor AND fills the remaining
+    # budget with date/session-spread evidence, then FUSES into the existing
+    # RRF as one more leg (marked in the leg trace). It NEVER filters —
+    # membership stays the semantic pool's (research §2, Mem0 read side:
+    # additive rerank, "semantic relevance always dominates").
+    #
+    # WINDOW-TAIL PLACEMENT (the structural no-harm property):
+    # ``temporal_leg_fusion_order`` fuses ``[head ids] + [picks]`` with
+    # ``ceiling = effective_top_k − limit`` and passes that ceiling as the
+    # leg's ``head`` exclusion, so a pick enters at the TAIL of the reader
+    # window, is never double-counted in the leg list, and cannot displace
+    # the visible head. Placement is structural, not a measured win: the
+    # near-ceiling TF-IDF proxy in ``temporal_leg_replay.py`` scores the
+    # rank-0 counterfactual equal-or-better, so that A/B belongs to the
+    # eval lane against the real 0/52 base — see ``tortoise/temporal_leg.py``
+    # for the measured table and the argument.
+    #
+    # The arm is env/flag-driven from this harness (``TORTOISE_LME_TEMPORAL_LEG``
+    # or the explicit kwarg); ``tools/longmem_eval/run.py`` threads it via
+    # the environment and stamps the resolved value into the run fingerprint
+    # (``_build_fingerprint``) so a checkpoint cannot be resumed across arm
+    # states. CLI-flag threading is the documented follow-up.
+    #
+    # Fail-safe OFF: explicit flag > env ``TORTOISE_LME_TEMPORAL_LEG`` >
+    # OFF; a question with no temporal constraint, a non-TR question, or a
+    # pool with no dated/anchor-relevant candidates leaves the fused order
+    # byte-identical. ──
+    if temporal_leg is not None:
+        temporal_leg_on = temporal_leg
+    else:
+        from .rerank import _TRUTHY as _TL_TRUTHY
+        _tl_env = (os.environ.get("TORTOISE_LME_TEMPORAL_LEG") or "")
+        temporal_leg_on = _tl_env.strip().lower() in _TL_TRUTHY
+    # Resolve the weight BEFORE the gate so the telemetry field has ONE
+    # meaning across both shapes: "the weight the leg runs with", with 0.0
+    # meaning the arm is off (never "0.0 as a placeholder vs 1.0 as the
+    # real value" depending on which branch built the dict).
+    if temporal_leg_on:
+        from tortoise.temporal_leg import (
+            DEFAULT_TEMPORAL_LEG_WEIGHT as _TL_W_DEFAULT,
+        )
+
+        from .rerank import _env_float as _tl_env_float
+        _tl_weight = (
+            temporal_leg_weight if temporal_leg_weight is not None
+            else _tl_env_float("TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
+                               _TL_W_DEFAULT))
+    else:
+        _tl_weight = 0.0
+    temporal_leg_stats: dict[str, Any] = {
+        "on": temporal_leg_on, "applied": False, "kind": None,
+        "anchors": [], "picks": 0, "dated": 0, "leg": [],
+        "ceiling": 0, "weight": _tl_weight,
+    }
+    if (temporal_leg_on and is_tr and annotated
+            and tr_constraint is not None and tr_constraint.kind):
+        from tortoise.temporal_leg import (
+            DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
+            DEFAULT_TEMPORAL_LEG_LIMIT,
+            effective_promotion_budget,
+            temporal_leg_empty_reason,
+            temporal_leg_fusion_order,
+        )
+
+        from .rerank import _env_int
+        _tl_limit = (
+            temporal_leg_limit if temporal_leg_limit is not None
+            else _env_int("TORTOISE_LME_TEMPORAL_LEG_LIMIT",
+                          DEFAULT_TEMPORAL_LEG_LIMIT))
+        # report the CLAMPED budget the fused caller actually used (the
+        # stats block is the ON/OFF reconstruction surface — never report a
+        # knob value that was silently clamped away).
+        _tl_limit = effective_promotion_budget(effective_top_k, _tl_limit)
+        _tl_order, _tl_picks = temporal_leg_fusion_order(
+            annotated, anchors=tr_constraint.anchors,
+            window=effective_top_k, limit=_tl_limit,
+            bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
+            weight=_tl_weight)
+        _tl_dated = sum(1 for h in annotated if h.get("session_date"))
+        temporal_leg_stats = {
+            "on": True,
+            "applied": bool(_tl_picks),
+            "kind": tr_constraint.kind,
+            "anchors": list(tr_constraint.anchors),
+            "picks": len(_tl_picks),
+            "ceiling": max(effective_top_k - _tl_limit, 0),
+            "dated": _tl_dated,
+            "leg": list(_tl_picks),
+            "weight": _tl_weight,
+        }
+        if _tl_picks:
+            _tl_by_id = {h["id"]: h for h in annotated}
+            annotated = [_tl_by_id[pid] for pid in _tl_order
+                         if pid in _tl_by_id]
+            legs.append({"leg": "temporal", "ran": True, "degraded": False,
+                         "reason": None, "count": len(_tl_picks)})
+        else:
+            # honest trace reason — the five distinct empty-leg causes
+            # (never launder a budget/anchor/weight miss as "no dates").
+            legs.append({"leg": "temporal", "ran": True, "degraded": False,
+                         "reason": temporal_leg_empty_reason(
+                             dated=_tl_dated,
+                             anchors=len(tr_constraint.anchors),
+                             weight=_tl_weight,
+                             budget=_tl_limit),
+                         "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──
     pool = _dedup_pool(annotated, max_chunks_per_session=max_chunks_per_session)
@@ -1273,23 +1680,22 @@ def retrieve_for_question(
                              "content", ""),
                          "match_source": "fts"}
                         for pid in _new_ids]
-                    _added_hits = _annotate_hits(_raw_new, _add_props, dates)
+                    _added_hits = annotate_pool_additions(
+                        _raw_new, _add_props, dates, match_source="fts")
                     # additive union in SECOND-PASS relevance order (the A4
                     # leg-merge contract at pool level): the re-query's
                     # ranked members lead — base hits it re-found keep their
                     # pass rank, newly surfaced recovery hits join at their
                     # pass rank; base hits the sparse re-query cannot see
-                    # keep their base ranks appended after. Then the
-                    # session-diverse window discipline (§3(d)): a same-
-                    # session flood must never crowd the guard window.
+                    # keep their base ranks appended after.
                     _merged = _cl.merge_expansion_order(
                         pool, _added_hits, _expanded)
-                    _merged = _cl.session_diverse_order(
-                        _merged, window=_LOOP_WINDOW)
-                    # re-apply the per-session raw-chunk cap (C5) to the
-                    # merged pool — the recovery pass can surface chunks.
-                    _merged = _dedup_pool(
-                        _merged,
+                    # the SHARED guard → C5 re-cap contract (C4 #2517): the
+                    # session-diverse window discipline then the per-session
+                    # raw-chunk cap through ONE function — the ablation
+                    # toggle lives inside it, never in a second entry point.
+                    _merged = _guard_and_recap_pool(
+                        _merged, guard=True, window=_LOOP_WINDOW,
                         max_chunks_per_session=max_chunks_per_session)
                     _merged_ids = {h["id"] for h in _merged}
                     loop_merged_added = len(
@@ -1316,9 +1722,227 @@ def retrieve_for_question(
         "tr_excluded": bool(is_tr),
     }
 
+    # ── C4 (#2517/#2568, #2513): source-session re-injection — from the
+    # SEEDED rank-window approximation of the reader-reachable pool head
+    # (a RANK trigger, label-free: never a stored/read-time mark, which the
+    # product does not have; the window is conservative, not the reader's
+    # admitted set — see session_reinjection.DEFAULT_REINJECTION_SEED_WINDOW),
+    # fetch the
+    # rest of each seeded session's verbatim material — the PRODUCT's
+    # episodic TURN points (pointKind 'event', shape-constrained) by
+    # default, reached through the Session-[:CONTAINS]->Point edge the
+    # product writes; the raw ``session-transcript`` chunk kind stays
+    # addressable for the eval A/B — in ONE batched query and
+    # splice them back immediately after that session's LAST base hit —
+    # additive, so an injected item can never evict a base item; the
+    # shared guard then re-caps through the same contract C3-1 uses.
+    # Product rules live in tortoise/session_reinjection.py. INSERTION
+    # POINT IS PINNED: after the C3-1 block, before the C2 boost — the
+    # three post-stages that move pool-based metrics run in stage order
+    # C3-1 guard → C4 guard → C2 boost, and run.py REFUSES a both-arms-ON
+    # run at arm resolution (two owners of one pool order are refused, not
+    # left order-dependent). TR questions keep the R5 date machinery and
+    # skip; any failure keeps the ORIGINAL pool (fail-open, byte-
+    # identical). OFF by default + env gate
+    # (TORTOISE_LME_SESSION_REINJECTION). ──
+    if session_reinjection is not None:
+        reinjection_on = session_reinjection
+    else:
+        from .rerank import _TRUTHY
+        _sr_env = (os.environ.get("TORTOISE_LME_SESSION_REINJECTION") or "")
+        reinjection_on = _sr_env.strip().lower() in _TRUTHY
+    reinjection_guard = (session_reinjection_guard
+                         if session_reinjection_guard is not None else True)
+    # the seed window is a conservative rank-window approximation of the
+    # reader-reachable pool head, DERIVED from the resolved reader item cap
+    # so a non-default TORTOISE_LME_CONTEXT_ITEMS cannot silently
+    # desynchronise it (the product constant is the fallback). It is NOT the
+    # reader's admitted set: assemble_context SKIPS claim-text-less hits
+    # (#2978) without spending an item slot, so the reader can admit hits
+    # BELOW this rank — a session whose first pool appearance lands in a
+    # skipped-hit gap is reader-reachable yet unseeded (follow-up tracked;
+    # widening it is a measurement-validity change, not a fix).
+    _sr_seed_window = (eff_item_cap if eff_item_cap is not None
+                       else DEFAULT_REINJECTION_SEED_WINDOW)
+    _sr_seed_limit = DEFAULT_REINJECTION_SEED_SESSIONS
+    # per-outcome census (§2): the OFF arm records the same zeroed shape so
+    # the arm delta stays reconstructable per question.
+    sr_seeds: list[str] = []
+    sr_seeded = 0
+    sr_injected_per_session: dict[str, int] = {}
+    sr_injected_total = 0
+    sr_injected_per_session_merged: dict[str, int] = {}
+    sr_injected_merged = 0
+    sr_dropped_by_cap = 0
+    sr_fetch_ok = False
+    sr_total_cap_hit = False
+    sr_latency_ms = 0.0
+    if reinjection_on and not is_tr and pool:
+        from tortoise import session_reinjection as _sr
+
+        # MEASUREMENT-ONLY knob (#2513 total-cap sweep). At the shipped turn
+        # grain the C5 re-cap does NOT bound injected turn points, so the
+        # TOTAL budget is the only volume guard on the injection
+        # (session_reinjection.py:~109). Whether the shipped value truncates
+        # the arm is therefore only answerable by sweeping it — and the
+        # product function already takes it as a parameter
+        # (``source_session_chunk_pass(total_cap=…)``), so no product code
+        # changes. The product constant stays the shipped DEFAULT, never a
+        # ceiling; the clamp (``rerank._env_int``) falls garbage / <1 back
+        # to the constant — never a crash. Precedence: the RUN-RESOLVED
+        # value (below) > env > product constant.
+        #
+        # #2513 (delta-review P1): the run path resolves this knob ONCE,
+        # before the question loop (``run._resolve_reinjection_total_cap``),
+        # and passes it explicitly via ``session_reinjection_total_cap`` —
+        # EXACTLY the sibling-knob contract (TORTOISE_LME_CONTEXT_ITEMS /
+        # _POOL_SIZE / _RERANK_CAP are all resolved in run.py before the
+        # loop and ride the checkpoint fingerprint + methodology record).
+        # Re-reading the env HERE is legitimate only as the direct-caller
+        # fallback: a lazily-read cap would let a cap-10 checkpoint be
+        # resumed by a cap-15 run (two injection volumes blended into one
+        # artifact that declares one config), because the env is not part
+        # of any fingerprint.
+        #
+        # #2513 (delta-review P2): the explicit branch is clamped through the
+        # SAME ``_clamp_int`` as the env fallback — a direct caller passing
+        # 0 / -3 / '15' resolves identically to the env cases, so the claim
+        # above ("the run path and a direct caller can never resolve the
+        # knob differently") is true by construction, not by convention.
+        from .rerank import _clamp_int, _env_int
+        _sr_total_cap = (
+            _clamp_int(session_reinjection_total_cap,
+                       DEFAULT_REINJECTION_TOTAL_ITEMS)
+            if session_reinjection_total_cap is not None
+            else _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
+                          DEFAULT_REINJECTION_TOTAL_ITEMS))
+        _t_sr = time.monotonic()
+        try:
+            _seeds = _sr.seeded_sessions(
+                pool, window=_sr_seed_window, limit=_sr_seed_limit)
+            sr_seeds = [s.session_id for s in _seeds]
+            sr_seeded = len(sr_seeds)
+            if _seeds:
+                _fetch = _sr.source_session_chunk_pass(
+                    sdk._get_proj(), [s.point_id for s in _seeds],
+                    pool_ids={h["id"] for h in pool},
+                    per_session_cap=DEFAULT_REINJECTION_PER_SESSION,
+                    total_cap=_sr_total_cap)
+                sr_fetch_ok = bool(_fetch.get("ok"))
+                sr_dropped_by_cap = int(_fetch.get("dropped_by_cap") or 0)
+                sr_total_cap_hit = bool(_fetch.get("total_cap_hit"))
+                # the FETCH census is recorded the moment the fetch returns:
+                # a later annotate/merge failure must not read as "the graph
+                # fetch is broken" (the two stages are distinguishable —
+                # injected_total>0 with injected_merged==0 is a merge-stage
+                # failure; injected_total==0 with fetch_ok==False is a fetch
+                # failure).
+                sr_injected_per_session = {
+                    sid: len(_rows)
+                    for sid, _rows in (_fetch.get("by_session") or {}).items()}
+                sr_injected_total = sum(sr_injected_per_session.values())
+                # ``dropped_by_cap``/``total_cap_hit`` are FETCH-stage facts
+                # recorded with no later clearing point. Since #2517 they are
+                # BOTH live at the shipped defaults: the total budget (10) is
+                # below the structural fan-out (seed_sessions * per_session =
+                # 15), so ``total_cap_hit`` is reachable, and
+                # ``dropped_by_cap`` counts per-session AND total drops.
+                _added_by_session: dict[str, list[dict]] = {}
+                if sr_fetch_ok:
+                    # ONE annotation pass over ALL fetched ids (the C3-1
+                    # precedent) — not one props+speaker pair per seeded
+                    # session, which made the cost model "1 batched query"
+                    # false at up to 5 seeds.
+                    _all_ids = [r["id"]
+                                for _rows in (_fetch.get("by_session")
+                                              or {}).values()
+                                for r in _rows]
+                    _by_annotated: dict[str, dict] = {}
+                    if _all_ids:
+                        # annotate on the SAME surface as the base pool
+                        # (props → speaker derivation → annotation) and
+                        # stamp the driver's OWN leg ("session"), never a
+                        # borrowed "fts".
+                        _props = point_props_for_hits(
+                            sdk._get_proj(), _all_ids)
+                        _turn_ids = [
+                            p.get("source_turn_id")
+                            for p in _props.values()
+                            if p.get("source_turn_id")]
+                        _spk = _speaker_for_turns(
+                            sdk._get_proj(), _turn_ids)
+                        for p in _props.values():
+                            if (not p.get("speaker")
+                                    and p.get("source_turn_id")):
+                                p["speaker"] = _spk.get(
+                                    p["source_turn_id"], "")
+                        _raw = [
+                            {"id": pid,
+                             "content": (_props.get(pid) or {}).get(
+                                 "content", "")}
+                            for pid in _all_ids]
+                        _hits = annotate_pool_additions(
+                            _raw, _props, dates, match_source="session")
+                        _by_annotated = {h["id"]: h for h in _hits}
+                    for _sid, _rows in (_fetch.get("by_session")
+                                        or {}).items():
+                        _group = [_by_annotated[r["id"]] for r in _rows
+                                  if r["id"] in _by_annotated]
+                        if _group:
+                            _added_by_session[_sid] = _group
+                    if _added_by_session:
+                        _merged = _sr.reinjection_merge_order(
+                            pool, _added_by_session,
+                            seed_order=[s.session_id for s in _seeds],
+                            guard=reinjection_guard,
+                            guard_window=_LOOP_WINDOW,
+                            max_chunks_per_session=max_chunks_per_session)
+                        _merged_ids = {h["id"] for h in _merged}
+                        sr_injected_per_session_merged = {
+                            sid: sum(1 for h in v if h["id"] in _merged_ids)
+                            for sid, v in _added_by_session.items()}
+                        sr_injected_merged = sum(
+                            sr_injected_per_session_merged.values())
+                        pool = _merged
+        except Exception:  # noqa: BLE001, RUF100
+            # fail-open: any failure (fetch OR annotate/merge stage) keeps
+            # the ORIGINAL pool — byte-identical to the one-shot result. The
+            # SEED census AND the FETCH census are NOT wiped: "seeded but the
+            # fetch failed" must stay distinguishable from "nothing seeded"
+            # (a systematically broken fetch would otherwise read as an
+            # honest null), and a merge-stage failure must not impersonate a
+            # graph outage. Only the MERGED counters are cleared.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "C4 source-session re-injection failed for %s — keeping "
+                "the original pool (fail-open)", qid, exc_info=True)
+            sr_injected_per_session_merged = {}
+            sr_injected_merged = 0
+        sr_latency_ms = (time.monotonic() - _t_sr) * 1000.0
+    session_reinjection_stats = {
+        "on": reinjection_on,
+        "seed_window": _sr_seed_window,
+        "seed_limit": _sr_seed_limit,
+        "seed_sessions": sr_seeds,
+        "seeded": sr_seeded,
+        "injected_per_session": sr_injected_per_session,
+        "injected_total": sr_injected_total,
+        "injected_per_session_merged": sr_injected_per_session_merged,
+        "injected_merged": sr_injected_merged,
+        "dropped_by_cap": sr_dropped_by_cap,
+        "fetch_ok": sr_fetch_ok,
+        "total_cap_hit": sr_total_cap_hit,
+        "guard": reinjection_guard,
+        "latency_ms": round(sr_latency_ms, 2),
+        "tr_excluded": bool(is_tr),
+    }
+
     # ── C2 (#1745): evidence-mark boost — applied to the DEDUPED pool
-    # BEFORE ``_recall_metrics`` (the only pool-metric mover: C1 cannot
-    # move the pool-based evidence@20 at all). OFF by default in code —
+    # BEFORE ``_recall_metrics``. Among the pool-metric movers it is the
+    # LAST stage: the post-stages run in stage order
+    # C3-1 guard → C4 guard → C2 boost (the pre-#2517 comment claiming C2
+    # was "the only pool-metric mover" was stale once the loop landed).
+    # OFF by default in code —
     # enabled only by the explicit ``evidence_boost`` flag or the
     # ``TORTOISE_LME_EVIDENCE_BOOST`` env (fail-safe OFF: only
     # 1/true/yes/on enables — the plan's default decision: ON for the
@@ -1366,7 +1990,7 @@ def retrieve_for_question(
     evidence_point_count = ev_rows[0][0] if ev_rows else 0
     ch_rows = sdk._get_proj().g.query(
         "MATCH (p:Point) WHERE p.lme_question_id = $q AND p.has_answer = true "
-        "AND coalesce(p.pointKind, '') = 'session-transcript' "
+        f"AND {CHUNK_KIND_FILTER} "
         "RETURN count(*)", params={"q": qid}).result_set
     chunk_evidence_point_count = ch_rows[0][0] if ch_rows else 0
 
@@ -1432,6 +2056,34 @@ def retrieve_for_question(
     elif (rerank_pool is not None) and not rerank_on:
         pool = pool[:top_k]              # pool-only arm: reader sees top_k
 
+    # ── C6 (#2520, #2513): rank-time prefer-latest ── ─────────────────
+    # Applied to the FINAL ``pool``, immediately before the metrics read it,
+    # so it is the LAST order-owner of the measured surface: every earlier
+    # pool-mover (C3-1 merge, C4 merge, C2 boost, R6 rerank) has already
+    # run, and — with the R6 reranker applied — the reorder happens within
+    # the reranker's selected set. ``prefer_latest_order`` is a stable
+    # membership-preserving reorder (never-starve by construction) gated on
+    # a PREFER-LATEST intent, so the off path pays one bool and the arm is
+    # a pure order change. A DATE-PINNED query:
+    # ("where did I live in 2024?") is deliberately NOT reordered — the
+    # invert-recency guard. ``time_aware_stats`` is recorded only under the
+    # arm (the off path keeps today's exact outcome shape, D2).
+    time_aware_stats: dict | None = None
+    if time_aware_qe_on and not is_tr:
+        from tortoise.time_aware import prefer_latest_order as _prefer_latest
+        pool, time_aware_stats = _prefer_latest(
+            pool, intent=time_aware_intent, question_date=question_date)
+        time_aware_stats = dict(time_aware_stats)
+        time_aware_stats["tr_excluded"] = False
+        time_aware_stats["intent"] = (
+            time_aware_intent.kind if time_aware_intent else None)
+    elif time_aware_qe_on and is_tr:
+        # armed run, TR question: recorded for attribution, never applied
+        # (TR keeps its R5 stack untouched — no regression).
+        time_aware_stats = {"applied": False, "reason": "tr-excluded",
+                            "live": 0, "stale": 0, "tr_excluded": True,
+                            "intent": None}
+
     # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
     # (on the applied path, ``pool`` is the rerank-selected list — recall
     # measures what the reader could actually see; ``rerank_pass["pool_recall@k"]``
@@ -1459,7 +2111,7 @@ def retrieve_for_question(
     # reader window (the measured surface is reader_evidence@k /
     # reader_surface@k below). TR questions keep the R5 time-ascending date
     # machinery and skip the arm (the same exclusion as the C3-1 loop).
-    question_date = question.get("question_date", "") or None
+    # C6: ``question_date`` was resolved ONCE above the retrieval call.
     evidence_assembly_stats: dict[str, Any] = {
         "on": evidence_assembly_on,
         "applied": False,
@@ -1672,6 +2324,14 @@ def retrieve_for_question(
         # Reconstructs which arm a question ran on for the shared-question
         # A/B deltas (identical questions, expansion ON vs OFF).
         "entity_key_expansion": entity_key_expansion_on,
+        # C6 (#2520, #2513): the time-aware query expansion arm — the
+        # resolved tri-state bool + the per-outcome reorder stats
+        # (applied / reason / live / stale / tr_excluded / intent).
+        # ``time_aware_stats`` is present ONLY under the arm (D2 doctrine:
+        # the off-path dict keeps today's exact shape).
+        "time_aware_qe": time_aware_qe_on,
+        **({"time_aware_stats": time_aware_stats}
+           if time_aware_qe_on else {}),
         # C3-1 (#2519, #2567): the coverage-completeness loop arm — the
         # resolved tri-state bool + the §8 per-outcome markers
         # (loop_iterations / loop_fired_facet / loop_merged_added — the
@@ -1679,6 +2339,15 @@ def retrieve_for_question(
         # reconstructable per question). Always present on the hybrid path.
         "coverage_loop": coverage_loop_on,
         "coverage_loop_stats": coverage_loop_stats,
+        # C4 (#2517/#2568, #2513): the source-session re-injection arm —
+        # the resolved bool + the per-outcome census (seed window/limit,
+        # seeded sessions, injected/merged counts per session, dropped-by-
+        # cap, fetch health, total-cap hit, the resolved guard bool, and the
+        # fetch latency + injected-query count reconstruction surface).
+        # Always present on the hybrid path (the OFF arm records the
+        # zeroed shape).
+        "session_reinjection": reinjection_on,
+        "session_reinjection_stats": session_reinjection_stats,
         # C5 (#2521, #2513): the aggregative-intent coverage-check arm —
         # the resolved tri-state bool (explicit flag / env; fail-safe OFF),
         # always present so the A/B arms are reconstructable even when the
@@ -1697,6 +2366,11 @@ def retrieve_for_question(
         # (never starve the reader into abstention).
         "tr_constraint": tr_constraint.kind if tr_constraint else None,
         "tr_window_fallback": tr_window_fallback,
+        # #2976: the temporal retrieval leg arm — the resolved tri-state bool
+        # + per-outcome markers (kind / recovered anchor phrases / leg depth
+        # / dated-pool size) so the A/B is reconstructable per question
+        # (identical questions, leg ON vs OFF).
+        "temporal_leg_stats": temporal_leg_stats,
         # R3 (#1542) D3: write-time embedding coverage (observable dense leg).
         "points_total": total_pts,
         "points_embedded": embedded_pts,
@@ -1726,7 +2400,7 @@ def retrieve_for_question(
             "marked_chunks_in_pool": len(depth_marked_chunk_ranks),
         },
         "retrieval_latency_ms": round(
-            latency_ms + rerank_ms + loop_latency_ms, 2),
+            latency_ms + rerank_ms + loop_latency_ms + sr_latency_ms, 2),
     }
     # R6 (#1545) D6: the rerank pass is recorded ADDITIVELY — the leg-mix
     # ``rerank`` bucket counts selection-loss only (the ``mmr_dropped`` hits),
@@ -1872,7 +2546,13 @@ GATE_MARKER_TTL_MIN: int = _gate_env_int("TORTOISE_LME_GATE_MARKER_TTL_MIN", 30)
 #: modes (a naive ``has_answer=true`` count exceeds ``evidence_points`` on
 #: healthy v2 questions because v2 transcript chunks carry
 #: ``has_answer = contains_evidence``).
-D5_POINTKIND_FILTER = "coalesce(p.pointKind, '') <> 'session-transcript'"
+#: C4 (#2517): the ADDRESSABLE chunk-kind seam — the chunk-count Cypher
+#: below (and any future chunk census) derives from the one product
+#: constant, so a unit test can assert the filter the query actually binds
+#: (the query lives inside a ~700-line function and cannot be asserted
+#: otherwise). ``D5_POINTKIND_FILTER`` is the ``<>`` exclusion twin.
+CHUNK_KIND_FILTER = f"coalesce(p.pointKind, '') = {SESSION_TRANSCRIPT_KIND!r}"
+D5_POINTKIND_FILTER = f"coalesce(p.pointKind, '') <> {SESSION_TRANSCRIPT_KIND!r}"
 
 # ── fault-injection seam (plan P2-5) ───────────────────────────────────────
 #: Test-only query wrapper around ``proj.g.query`` — unit/docker fault

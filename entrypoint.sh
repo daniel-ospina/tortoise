@@ -79,7 +79,7 @@ export HF_HOME="${HF_HOME:-/app/model}"
 export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-/app/model}"
 
 # #1726 (Slice 1): the GitHub-docs ingest sandbox — a SERVER-OWNED staging
-# dir (docs are staged under {TORTOISE_INGEST_BASE_DIR}/{team_id}/).
+# dir (docs are staged under {TORTOISE_INGEST_BASE_DIR}/{org_id}/).
 # /data is the persistent Fly volume (fly.toml mounts) — a restart keeps
 # the staged corpus so re-runs stay 0-new (hash dedup); the dir is
 # server-owned, so the #236 user-supplied-path exclusion is untouched (the

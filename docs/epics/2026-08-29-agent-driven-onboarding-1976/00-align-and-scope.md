@@ -18,6 +18,8 @@ aboutObjects: tortoise
 >
 > **Pipeline state:** ALIGN ✅ (5 review cycles recorded, CLEARED) · RESEARCH ✅ (brief `02-research-brief.md`, CLEARED) · SCOPE ✅ (Human Gate #1 APPROVED 2026-08-29) · PLAN ✅ (coherence CLEARED; Human Gate #2 APPROVED 2026-08-29) · TEST-DESIGN #1992 ✅ · DECOMPOSE ✅ (MECE CLEAN, #1997-#2007) · CAPSTONE #2008 ✅ · VERIFY ✅ (`08-verify.md`).
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ---
 
 # PART A — STRATEGY ALIGNMENT DECISION
@@ -34,7 +36,7 @@ aboutObjects: tortoise
 > - **M6 (invite infra exists):** `tortoise/hosted_api.py` has `POST /v1/invites`, `GET /v1/invites/info`, `POST /v1/invites/accept`, `GET /v1/invites`, `GET /v1/invites/pending`, `POST /v1/invites/pending/{id}/accept`, `DELETE /v1/invites/pending/{id}`, `DELETE /v1/invites/{id}`. ✅
 > - **M9 (no telemetry events for seed/decide):** `tortoise/analytics.py` emits only `tenant_provisioned`, `api_key_created`, `first_api_call`. No seed/decide events exist. ✅ (W11's gap is real)
 > - **R2-9 (tool_registry exists):** `tortoise/tool_registry.py` registers sessions/docs indexer tools with a `ToolAnnotations` curation-group model. ✅
-> - **W5 (onboarding state is Supabase jsonb today):** `tortoise/supabase_control.py` reads/writes `teams.onboarding_state` jsonb (`team_onboarding_state` / `update_onboarding_state`); `hosted_api.py` has `_get_onboarding_state` / `_update_onboarding_state` with a registered-keys allowlist. ✅
+> - **W5 (onboarding state is Supabase jsonb today):** `tortoise/supabase_control.py` reads/writes `teams.onboarding_state` jsonb (`org_onboarding_state` / `update_onboarding_state`); `hosted_api.py` has `_get_onboarding_state` / `_update_onboarding_state` with a registered-keys allowlist. ✅
 > - **W3 anchor-data claim:** `tortoise/session_auth.py` `verify_session_jwt` returns `{user_id, email, app_metadata}` — **no `display_name`**. The issue's correction ("email-prefix derivation; ask once if unusable") is accurate. ✅
 > - **W2 (AGENT_ONBOARDING.md is live single-source):** exists at `tortoise/onboarding/AGENT_ONBOARDING.md`, self-declares single-source-of-truth (deployed via #540). ✅
 > - **W1 (current wizard):** `docs/onboarding.md` documents the 5-step in-dashboard wizard (#1643) with harness chooser, skills primer, GitHub connect, STATE seed, done — exactly what this epic shrinks/archives. ✅

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import tempfile
 
@@ -29,6 +30,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
@@ -159,6 +161,41 @@ class TestCreateOperator:
     def test_invalid_type_raises(self, sdk):
         with pytest.raises(ValueError, match="op_type must be"):
             sdk.create_operator("FOOBAR", "x", ["y"])
+
+    def test_mitigates_is_not_an_operator_kind(self, sdk):
+        """#4937 (F1 ruling on #2552): MITIGATES left the generic operator
+        menu. The refusal must NAME mitigate_operator — a bare 'invalid
+        op_type' leaves the caller with no route to the mechanism."""
+        a, b = _make_point(sdk), _make_point(sdk)
+        with pytest.raises(ValueError) as exc:
+            sdk.create_operator("MITIGATES", a["id"], [b["id"]])
+        msg = str(exc.value)
+        assert "MITIGATES is not an operator kind" in msg
+        assert "mitigate_operator" in msg
+        # No operator node was written (the raise precedes any mutation).
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Point) WHERE o.is_operator = true RETURN count(o)"
+        ).result_set[0][0] == 0
+
+    def test_mitigates_label_is_not_a_builtin_menu_entry(self, sdk):
+        """#4937: the generic operator menu is IMPL/NAND (+ pack-declared
+        relations). Spelling MITIGATES as a label no longer silently rides
+        the built-in fallback — it is warned as undeclared (warn-not-block)."""
+        a, b = _make_point(sdk), _make_point(sdk)
+        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="MITIGATES")
+        assert op["op_type"] == "IMPL"
+        assert any(w.get("code") == "undeclared_relation"
+                   for w in op.get("warnings", [])), op.get("warnings")
+
+    def test_ingest_mitigates_operator_is_refused_with_the_path(self, sdk):
+        """#4937: the ingest operator menu is IMPL/NAND (+ part/whole); a
+        MITIGATES connection is refused with the correct path named."""
+        violations: list[dict] = []
+        sdk._check_connection(0, {"operator": "MITIGATES", "from": "a",
+                                  "to": "b"}, violations)
+        msg = " ".join(v["message"] for v in violations)
+        assert "MITIGATES is not an operator kind" in msg, msg
+        assert "mitigate_operator" in msg, msg
 
     def test_invalid_direction_raises(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
@@ -469,15 +506,19 @@ class TestInvalidateSupersede:
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
 
     def test_invalidate_idempotent_corrects_edge(self, sdk):
-        # #330: re-invalidating the same pair must not duplicate CORRECTS, and
-        # the second call re-asserts (both points still exist -> True) without
-        # creating extra edges.
+        # #330: re-invalidating the same pair must not duplicate CORRECTS.
+        # #2498: the repeat is now an ILLEGAL transition — the shared lifecycle
+        # guard treats the `outdated=true` flag invalidate just wrote as
+        # terminal, so the second call raises instead of re-asserting. The old
+        # #330 re-assert moved `expiredAt` forward and MERGEd one CORRECTS edge
+        # per distinct corrector onto a node every read surface already
+        # excludes. The first call's CORRECTS edge stays unique.
         old = _make_point(sdk, content="old")
         new = _make_point(sdk, content="new")
         r1 = sdk.invalidate_point(old["id"], new["id"])
         assert r1["invalidated"] is True
-        r2 = sdk.invalidate_point(old["id"], new["id"])
-        assert r2["invalidated"] is True  # present endpoints -> re-assert
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.invalidate_point(old["id"], new["id"])
         corrected = sdk.traverse(new["id"], "CORRECTS", direction="outgoing")
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
 
@@ -865,24 +906,25 @@ class TestSanitizeProps:
         assert "sourcePath" not in doc
 
     def test_create_document_links_extracted_from_source(self, sdk):
-        """#394: create_document wires Document → Source via extractedFrom."""
+        """#394 + D10: create_document wires the document Source → Source via
+        extractedFrom (a document is a :Source)."""
         doc = sdk.create_document(
             "Sourced", "planDoc", extractedFrom="https://docs.example.com/spec"
         )
         proj = sdk._get_proj()
         r = proj.g.query(
-            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s:Source {url:$url}) "
+            "MATCH (d:Source {url:$did})-[:extractedFrom]->(s:Source {url:$url}) "
             "RETURN count(*) > 0",
             params={"did": doc["id"], "url": "https://docs.example.com/spec"},
         ).result_set
         assert r[0][0] is True
 
     def test_create_document_no_extracted_from_no_edge(self, sdk):
-        """#394: without extractedFrom, no Document→Source edge is created."""
+        """#394 + D10: without extractedFrom, no extractedFrom edge is created."""
         doc = sdk.create_document("Unsourced", "planDoc")
         proj = sdk._get_proj()
         r = proj.g.query(
-            "MATCH (d:Document {id:$did})-[:extractedFrom]->(s) RETURN count(s)",
+            "MATCH (d:Source {url:$did})-[:extractedFrom]->(s) RETURN count(s)",
             params={"did": doc["id"]},
         ).result_set
         assert r[0][0] == 0
@@ -909,10 +951,10 @@ class TestSanitizeProps:
             sdk.update_point(p["id"], source_path="/etc/passwd")
 
     def test_create_event_document_mint_safe_and_unsafe_ids(self, sdk):
-        # Safe basename id mints a Document
+        # Safe basename id mints a document Source (D10: a document is a :Source)
         sdk.create_event("ev1", "meeting", object="session-2026-08-07.md", objectType="Document")
         rows = sdk._get_proj().g.query(
-            "MATCH (d:Document {id:$id}) RETURN count(d)",
+            "MATCH (s:Source {url:$id}) RETURN count(s)",
             params={"id": "session-2026-08-07.md"},
         ).result_set
         assert rows[0][0] == 1
@@ -928,6 +970,24 @@ class TestSanitizeProps:
         pid = f"op-{uuid.uuid4().hex[:8]}"
         p = sdk.create_point("statement", "Explicit", id=pid)
         assert p["id"] == pid
+
+
+class TestDocumentFtsPostRetrievalFilters:
+    """D10 (#5026): ``tortoise_fts_query(entity_type='document')`` must
+    address the document :Source on EVERY post-retrieval clause. The kind
+    filter and the recency re-rank interpolate a graph label + id field into
+    Cypher; before the fix the label was still ``:Document`` (matches nothing
+    ⇒ ``kind_ids`` empty ⇒ results silently emptied) and the id field was
+    ``id`` instead of ``url``."""
+
+    def test_document_with_kind_returns_the_document(self, sdk):
+        doc = sdk.create_document("Licensing Brief", "brief")
+        hits = sdk.tortoise_fts_query("licensing", entity_type="document",
+                                      kind="brief")
+        ids = {h["id"] for h in hits}
+        assert doc["id"] in ids, \
+            f"document emptied by the post-retrieval kind filter: {hits}"
+        assert all(h.get("point_kind") == "brief" for h in hits), hits
 
 
 # ── Phase-4 promotion + draft queue (#785) ────────────────────────────
@@ -1259,8 +1319,22 @@ def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
     """Round-4 review P2 (PRE-EXISTING): ``TORTOISE_EVENT_RETENTION_INTERVAL``
     was parsed with a bare ``int()``, so ``0``/``-1`` made the gate
     ``now - _EVENT_PURGE_LAST < interval`` always false — a purge DELETE on
-    every ``events_poll``. The validated interval must keep the gate closed."""
+    every ``events_poll``. The validated interval must keep the gate closed.
+
+    #3416: ``time.monotonic()`` is seconds since BOOT, so it is a few hundred
+    on a CI runner booted minutes ago and millions on a long-lived dev box.
+    The old setup seeded the gate with a bare ``0.0`` and leaned on uptime
+    exceeding the interval for that to look like "the past" — it passed on dev
+    boxes and failed on every fresh runner. Simulate a freshly-booted host and
+    seed the gate monotonic-relative (never an absolute literal) so this is
+    deterministic on any host."""
+    import time
+
     import tortoise.event_store as es
+    from tortoise import monitoring
+
+    uptime = 300.0  # a runner booted 5 minutes ago
+    monkeypatch.setattr(time, "monotonic", lambda: uptime)
 
     purges: list[str] = []
     monkeypatch.setattr(es, "purge_expired",
@@ -1268,7 +1342,13 @@ def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
     monkeypatch.setattr(es, "purge_overflow",
                         lambda *a, **k: purges.append("overflow"))
     monkeypatch.setenv("TORTOISE_EVENT_RETENTION_INTERVAL", "0")
-    TortoiseSDK._EVENT_PURGE_LAST = 0.0
+    interval = monitoring.event_retention_interval()
+    assert interval > 0, "a non-positive interval must fall back to a positive one"
+    # "Last purge" one full real interval + 1s in the past → the gate is open
+    # no matter what the host uptime is. monkeypatch restores the previous
+    # class value afterwards, so this process-level gate does not leak into
+    # neighbouring tests.
+    monkeypatch.setattr(TortoiseSDK, "_EVENT_PURGE_LAST", uptime - interval - 1.0)
     # ``_maybe_purge_events`` reads only module-level state + the (patched)
     # purge fns here, so a placeholder receiver/projection is sufficient.
     TortoiseSDK._maybe_purge_events(object(), None)

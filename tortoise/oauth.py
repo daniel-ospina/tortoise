@@ -15,14 +15,14 @@ Flow (locked scoping decisions 2026-08-15, docs/scoping/2026-08-15-524-oauth-mcp
     existing JWKS path (session_auth.verify_session_jwt — D2: "reuse
     JWKS verify"). Branded consent = ONE custom HTML page (D2).
   * P3 — Dynamic Client Registration (RFC 7591) at ``POST /register`` (D1).
-  * P4 — token→team mapping via RFC 8707 resource indicator, client-declared
+  * P4 — token→org mapping via RFC 8707 resource indicator, client-declared
     (D4): the resource is ``{origin}/mcp`` (single-membership users resolve
-    to their sole active team) or ``{origin}/mcp/teams/{team_id}`` (explicit
-    team). Rotating refresh tokens per (user, team), revoked on team
+    to their sole active org) or ``{origin}/mcp/organizations/{org_id}`` (explicit
+    org). Rotating refresh tokens per (user, org), revoked on org
     suspension (D5). #1701 R1 — resource-less OAuth clients (ChatGPT cannot
     declare RFC 8707 resources): ``consent_preview`` returns the account's
-    selectable (non-suspended) teams and the consent page offers a team
-    chooser; suspended teams never bind (preview, mint AND exchange); the AS
+    selectable (non-suspended) orgs and the consent page offers an org
+    chooser; suspended orgs never bind (preview, mint AND exchange); the AS
     origin root is accepted as the bare MCP resource echo.
   * D6 — OAuth tokens are self-sufficient at the MCP boundary: the middleware
     introspects the access token row (no tt_ key minting); the session→key
@@ -70,6 +70,136 @@ ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
 REFRESH_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_REFRESH_TTL",
                                           str(30 * 24 * 3600)))
 AUTH_CODE_TTL_S = int(os.environ.get("TORTOISE_OAUTH_CODE_TTL", "600"))
+# ── Retention / GC windows (issue #3036) ────────────────────────────────────
+# Credential hygiene, a DIFFERENT AXIS from the user-content deletion promise:
+# these rows are service-role-only hashed secrets (0016 RLS), never user
+# content. Canonical promise doc: docs/retention-and-deletion.md (which records
+# the same carve-out for the operational event store).
+#
+# Each value is the DEFAULT grace kept AFTER the row's own expires_at, so a row
+# that is revoked but not yet expired lives out its natural TTL first. That is
+# what makes a #2863 soft-revoke an accounting residue rather than a leak. The
+# env override is read and VALIDATED per sweep (see _retention_seconds), never
+# parsed blindly: a negative override would move the cutoff into the future and
+# delete LIVE credentials.
+OAUTH_CODE_RETENTION_S = 86400
+OAUTH_ACCESS_RETENTION_S = 86400
+OAUTH_REFRESH_RETENTION_S = 86400
+
+# Upper bound on any retention window (10 years). A larger override is
+# indistinguishable from "retention off" AND overflows the cutoff arithmetic
+# (``timedelta`` raises OverflowError), which would skip that table forever.
+_MAX_RETENTION_S = 10 * 365 * 86400
+_MAX_RETENTION_STR = str(_MAX_RETENTION_S)
+
+
+def _retention_seconds(env_name: str, default: int) -> int:
+    """Resolve a retention window from the environment, fail-safe (#3036).
+
+    Mirrors ``monitoring.event_retention_interval``: a value that is not a
+    positive whole number of seconds falls back to ``default`` with a warning.
+    This matters because the window is SUBTRACTED from ``now`` to form a
+    DELETE cutoff — a negative or malformed value would otherwise delete live
+    rows (or raise at import, silently disabling retention).
+
+    The parse is deliberately STRICT — ASCII ``str.isdigit`` — because bare
+    ``int()`` also accepts a sign (``+5``), underscore separators (``1_0``)
+    and non-ASCII digit forms (``٣`` = 3). None of those is a window a human
+    meant, and the last two resolve to a far shorter window than intended.
+
+    Out-of-range handling is DIRECTIONAL on purpose: a non-positive or
+    malformed value falls back to ``default``, but a value ABOVE the ceiling
+    is CLAMPED to it. Falling back to the 1-day default for an operator who
+    asked for a longer window would delete EARLIER than requested — the wrong
+    direction for a retention knob.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    if not (raw.isascii() and raw.isdigit()):
+        logger.warning("oauth: %s=%r is not a positive integer — using %ss",
+                       env_name, raw, default)
+        return default
+    # Width check BEFORE int(): CPython refuses a string longer than
+    # ``sys.get_int_max_str_digits()`` (4300) with an uncaught ValueError, and
+    # no digits-only value this wide can be below the ceiling. Compare
+    # SIGNIFICANT digits, not ``len(raw)``: leading zeros inflate the string
+    # without inflating the value, so ``00000086400`` must resolve to 86400
+    # (not clamp) and ``0000000000`` must hit the non-positive branch.
+    significant = raw.lstrip("0") or "0"
+    if len(significant) > len(_MAX_RETENTION_STR):
+        logger.warning("oauth: %s is wider than %d digits — clamping to %ds",
+                       env_name, len(_MAX_RETENTION_STR), _MAX_RETENTION_S)
+        return _MAX_RETENTION_S
+    value = int(significant)
+    if value <= 0:
+        logger.warning("oauth: %s=%r must be positive — using %ss",
+                       env_name, raw, default)
+        return default
+    if value > _MAX_RETENTION_S:
+        logger.warning("oauth: %s=%r exceeds %ds — clamping",
+                       env_name, raw, _MAX_RETENTION_S)
+        return _MAX_RETENTION_S
+    return value
+
+
+# ── Redemption state (issue #3027) ───────────────────────────────────────────
+# `used_at` records that a request CLAIMED a code; it says nothing about what
+# the claim did. These states make the OUTCOME durable, so a failed or lost
+# redemption is distinguishable from a replay, and "did this code already mint
+# a pair?" is answerable from the grants themselves (the `code_id` link).
+# Design: docs/scoping/2026-09-25-3027-oauth-redemption-state.md.
+#
+#   unclaimed → claimed → minted    the pair was handed to the response
+#                       → burned    terminal; the code never mints again
+#   claimed   → unclaimed           a VERIFIED-CLEAN failure re-armed it
+#                                   (#2863's re-arm, now durably recorded)
+#
+# `burned` is written where the claim's residue is terminal: a pre-mint signal, or
+# a reconcile past the grace that ATTEMPTED to revoke a live orphan family
+# (`_rollback_minted` is best-effort — a failed revoke is captured, and the row
+# survives inert under a now-`burned` code until the retention sweep reaches its
+# TTL) or found none AT PROBE TIME (the probe and the settle are not one
+# transaction, so a family minted between them escapes). An outcome the process
+# could not settle stays `claimed` so the reconciler can resolve it — see
+# `_reconcile_claimed_redemption`.
+#
+# Schema invariant (migration 20260925000002) — DIRECTIONAL, deliberately not the
+# biconditional (a biconditional rejects the pre-#3027 writer, which sets
+# `used_at` alone, during the rolling deploy):
+#   used_at IS NULL  ⇒  redemption_state = 'unclaimed'
+# The CLAIM and the RE-ARM set `used_at` and `redemption_state` in ONE statement;
+# a settle only transitions `redemption_state` on a row that is already `claimed`.
+# So the biconditional holds for everything we write, and the DB enforces the
+# direction that matters (no settled row without a claim timestamp).
+REDEMPTION_UNCLAIMED = "unclaimed"
+REDEMPTION_CLAIMED = "claimed"
+REDEMPTION_MINTED = "minted"
+REDEMPTION_BURNED = "burned"
+
+# An outcome-unknown claim is reconciled only once it is older than this. The
+# window does NOT prove the owner is dead — the mutating grant is awaited with no
+# wall-clock bound above it, so a live sibling can outlive any window
+# (`_reconcile_claimed_redemption` spells this out). What the window bounds is
+# WHEN a later request starts taking the claim over; a live sibling that outlives
+# it simply loses the settle CAS and compensates its pair. Set generously so an
+# ordinary request is not aborted for nothing.
+REDEMPTION_CLAIM_GRACE_S = 60
+
+
+def _redemption_grace_s() -> int:
+    """Resolve the reconcile grace window, fail-safe (#3027).
+
+    Same strict parse and DIRECTIONAL fallback as `_retention_seconds`: a
+    malformed or non-positive override falls back to the default (never to a zero
+    window — that would take a claim over the instant it is written, aborting
+    every concurrent sibling for no gain), and an over-long one is clamped. Read
+    per use so the env stays a reversible lever.
+    """
+    return _retention_seconds("TORTOISE_OAUTH_REDEMPTION_GRACE_S",
+                              REDEMPTION_CLAIM_GRACE_S)
+
+
 # Distinct prefixes so the MCP auth middleware can route Bearer tokens without
 # a table scan (tt_ = tenant key, oat_ = OAuth access token). Refresh tokens
 # are never presented to /mcp — the prefix is a debugging aid.
@@ -124,9 +254,21 @@ class OAuthMintAborted(Exception):
 
 
 class OAuthTemporarilyUnavailable(OAuthError):
-    """503 `temporarily_unavailable` — raised ONLY when the grant is established
-    still-usable: by observation where a write may have landed, or constructively
-    where no write was attempted. Never on an unobserved write state."""
+    """503 `temporarily_unavailable` — raised ONLY when retrying cannot double-issue:
+
+      * constructively, where no write was attempted at all (a pre-claim read
+        failed, or the refresh path failed before minting);
+      * by observation, where a write may have landed — the grant is confirmed
+        still-usable (see `_mint_observably_clean` / `_prev_refresh_unclaimed`);
+      * where a conditional claim was observed to match ZERO rows and the
+        failure is a later classification READ (#3027 `_observe_code` returning
+        'unobservable') — nothing was written by this request, and the retry
+        re-runs the same claim CAS, which is what decides.
+
+    Never on an unobserved WRITE state: a claim PATCH that RAISED may have
+    committed (`_consume_state` → 'unknown'), and that stays terminal
+    `invalid_grant`. This distinction is #2863's, not a new one.
+    """
 
     def __init__(self, error_description: str = "Temporary control-plane failure — retry."):
         super().__init__(503, "temporarily_unavailable", error_description)
@@ -139,6 +281,9 @@ def _log_and_capture(exc: BaseException, *, where: str) -> None:
       lane 2 of `_issue_tokens`        → the single capture of the TRIGGERING exception
       lane 1 loser rollback (capture=True)  → the single capture for the loser path
                                                (nothing else captures there)
+      #3027 delivery-gate loss (capture=True) → the single capture for that path
+                                               (the mint succeeded, so nothing has
+                                               captured; the handler only logs)
       lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
       lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
       the two correction-#8 revokes    → each the single capture for its terminal path
@@ -224,18 +369,168 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
+# Bytes we refuse to reason about in a redirect URI, checked BEFORE any
+# comparison or echo. The authorization code is delivered by NAVIGATING THE
+# BROWSER to the raw `redirect_uri` (see `redirectBack` in the consent page), so
+# the browser's parse — never ours — is what decides where the code actually goes.
+#
+#   * `\` is a GENUINE parser differential and the reason this gate exists.
+#     WHATWG ends the authority at a backslash for special schemes (http/https);
+#     `urlsplit` does not. So `http://evil.example\@localhost/cb` has host
+#     `localhost` to us and `evil.example` to the browser: validated as loopback,
+#     then navigated off-device carrying the code. Found in review; reproduced in
+#     Chromium with the attacker's listener receiving `?code=...`. PKCE does not
+#     help — the attacker authors the authorize request and holds the verifier.
+#
+#   * C0 controls (0x00-0x1F) and DEL are NOT a differential, and this comment
+#     claimed they were until review falsified it. `urlsplit` strips \t \r \n
+#     (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`) exactly as a browser does, and
+#     for the remaining bytes no browser moves the authority boundary either.
+#     The precise treatment is position-dependent (stripped / refused /
+#     percent-encoded — `docs/oauth-mcp.md` carries the per-position detail),
+#     which is why this comment deliberately does NOT try to characterise it:
+#     three review rounds each caught an over-specific claim here. The only
+#     load-bearing point is that the boundary does not move. They are refused
+#     anyway, as defence in depth: no legitimate redirect URI contains a control
+#     character, so the conservative direction costs nothing real. It does mean a
+#     URI registered before this gate existed stops matching — deliberate, and
+#     pinned by `test_differential_uris_are_refused_even_on_exact_match`.
+#
+# Refusing the bytes outright is preferred to modelling WHATWG: a whitelist of
+# "URIs both parsers agree on" cannot be kept correct, and fail-closed is the
+# only safe direction on the input that decides where a credential is sent.
+def _unsafe_redirect_uri_bytes(uri: str) -> bool:
+    """True when a redirect URI holds bytes we refuse to reason about.
+
+    Conservative by design: a raw backslash is a real parser differential
+    between ``urlsplit`` and the browser, the control characters are
+    belt-and-suspenders. See the comment above — this is a fail-closed byte
+    filter, NOT a precise differential detector, which is what earlier wording
+    in this PR wrongly claimed.
+    """
+    return any(ch == "\\" or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri)
+
+
+# Private-use URI schemes (RFC 8252 §7.1) that a harness may register as a
+# redirect target. Cursor IDE's MCP OAuth DCR still sends its custom-scheme
+# callback (cursor://anysphere.cursor-mcp/oauth/callback) on the exthost path —
+# the Cursor 3.13.25 report on their forum, and their own staff answer, confirm
+# it persists alongside the documented loopback/https pair. Registration is
+# ALL-OR-NOTHING (`register_client` rejects the whole request if ANY entry is
+# invalid), so a single custom-scheme entry costs the client its client_id
+# entirely: Cursor never reaches /oauth/authorize and the tester cannot sign in.
+#
+# Deliberately an ALLOWLIST, not "any private-use scheme". The consent page
+# delivers the code by navigating to the raw redirect_uri
+# (`window.location.href = redirect_uri + "?code=…"`), so a scheme the browser
+# executes rather than navigates — javascript:, data:, vbscript: — would run in
+# the consent page's own origin, and a scheme with an app handler the user has
+# is a code-delivery target we have not reasoned about. Failing closed on every
+# scheme that is not listed costs nothing today: Cursor is the only harness in
+# the beta using one. Extending it is a reviewed one-line change with a test.
+_NATIVE_REDIRECT_SCHEMES = frozenset({"cursor"})
+
+
 def _valid_redirect_uri(uri: str) -> bool:
-    """A registration-acceptable redirect URI: https, or http only when the
-    host is loopback (RFC 8252 native-app pattern used by MCP clients)."""
+    """A registration-acceptable redirect URI: https; http only when the host
+    is loopback (RFC 8252 §7.3 native-app pattern used by MCP clients); or a
+    private-use scheme listed in `_NATIVE_REDIRECT_SCHEMES` (RFC 8252 §7.1) —
+    see that constant for why it is an allowlist and not "any scheme".
+
+    URIs holding bytes we refuse to reason about are rejected here too, so a
+    string the browser might read differently can never enter a client row.
+    """
+    if not isinstance(uri, str) or _unsafe_redirect_uri_bytes(uri):
+        return False
     try:
         parsed = urlparse(uri)
     except ValueError:
         return False
+    if "#" in uri:
+        # RFC 6749 §3.1.2 — a fragment is never a valid redirect component, and
+        # this function's error message already promises rejection. Tested as
+        # the literal delimiter, NOT `parsed.fragment`: a bare trailing `#`
+        # parses to an EMPTY fragment, so `if parsed.fragment:` let it through
+        # while it still made the consent page's `redirect_uri + "?code=…"`
+        # navigation land the code inside the fragment (caught in review — both
+        # reviewers, independently). `#` can only ever begin the fragment
+        # (RFC 3986 pchar excludes it), so presence is the correct predicate.
+        return False
     if parsed.scheme == "https" and parsed.hostname:
         return True
-    if parsed.scheme == "http" and parsed.hostname and _is_loopback(parsed.hostname):  # noqa: SIM103
+    if parsed.scheme == "http" and parsed.hostname and _is_loopback(parsed.hostname):
         return True
+    if parsed.scheme in _NATIVE_REDIRECT_SCHEMES:
+        # Not a network location, so "https or loopback" does not describe it.
+        # The invariant that matters is that it names something to hand the code
+        # to — an authority (cursor://anysphere.cursor-mcp/oauth/callback) or at
+        # least a path. Exact-match at authorize time is unchanged
+        # (`_redirect_uri_matches` relaxes only for two LOOPBACK hosts).
+        return bool(parsed.netloc or parsed.path)
     return False
+
+
+def _redirect_uri_matches(registered: str | None,
+                          presented: str | None) -> bool:
+    """#2846 — does ``presented`` match a registered ``redirect_uri``?
+
+    RFC 8252 §7.3: for loopback redirect URIs the authorization server MUST
+    ignore the port, because a native app binds an ephemeral port at request
+    time and cannot know it at registration. Anthropic's connector docs state
+    the same requirement, and the Claude Code CLI depends on it.
+
+    The relaxation is deliberately narrow:
+
+    * BOTH values must be loopback hosts (``_is_loopback`` — the same predicate
+      ``_valid_redirect_uri`` uses) carrying the SAME scheme. Nothing requires
+      ``http``: the relaxation keys on loopback, so an ``https``-on-loopback
+      pair relaxes as well.
+    * scheme, host, path, params, query and fragment must still match exactly
+      (host per RFC 3986 §3.2.2 and scheme per §3.1, case-insensitively).
+    * the userinfo component must match exactly, so ``http://evil@localhost/cb``
+      never satisfies a registration for ``http://localhost/cb``.
+    * anything else — including every non-loopback URI — keeps the original
+      exact-string rule, so the hosted security posture is unchanged.
+
+    Host is NOT relaxed: ``localhost`` and ``127.0.0.1`` are distinct hosts,
+    even though both are loopback. Only the port varies.
+
+    Inputs holding bytes we refuse to reason about are refused outright (see
+    ``_unsafe_redirect_uri_bytes``) — this function's own parse is never the one
+    that decides where the code actually goes.
+    """
+    if not isinstance(registered, str) or not isinstance(presented, str):
+        return False
+    if _unsafe_redirect_uri_bytes(registered) or _unsafe_redirect_uri_bytes(presented):
+        return False
+    if registered == presented:
+        return True
+    try:
+        reg = urlparse(registered)
+        pre = urlparse(presented)
+    except ValueError:
+        return False
+    if not reg.hostname or not pre.hostname:
+        return False
+    if not (_is_loopback(reg.hostname) and _is_loopback(pre.hostname)):
+        return False
+    return (
+        reg.scheme.lower() == pre.scheme.lower()
+        and reg.hostname.lower() == pre.hostname.lower()
+        and reg.username == pre.username
+        and reg.password == pre.password
+        and reg.path == pre.path
+        and reg.params == pre.params
+        and reg.query == pre.query
+        # A `#` can no longer be REGISTERED (see `_valid_redirect_uri`), so a
+        # value carrying one here is a legacy row or an attack: the port
+        # relaxation is refused for it outright rather than comparing the
+        # (possibly empty) fragments — a bare trailing `#` parses to an EMPTY
+        # fragment, compared equal to "no fragment", and matched a registration
+        # without one (review round 1). Identical strings still match via the
+        # exact-equality shortcut above, preserving legacy rows.
+        and "#" not in registered and "#" not in presented
+    )
 
 
 def mcp_resource_url(base: str) -> str:
@@ -243,18 +538,18 @@ def mcp_resource_url(base: str) -> str:
     return base.rstrip("/") + "/mcp"
 
 
-def team_resource_url(base: str, team_id: str) -> str:
-    """Team-scoped resource indicator (D4 — the client-declared team selector)."""
-    return mcp_resource_url(base) + "/teams/" + team_id
+def org_resource_url(base: str, org_id: str) -> str:
+    """Org-scoped resource indicator (D4 — the client-declared org selector)."""
+    return mcp_resource_url(base) + "/organizations/" + org_id
 
 
-# ── RFC 8707 resource → team mapping (P4, D4) ──────────────────────────────
+# ── RFC 8707 resource → org mapping (P4, D4) ──────────────────────────────
 
 def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | None]:
-    """Split a client-declared resource indicator into (canonical, team_id).
+    """Split a client-declared resource indicator into (canonical, org_id).
 
-    Returns (mcp_resource, None) for the bare MCP resource (team resolved
-    from the user's memberships), (mcp_resource, team_id) for a team-scoped
+    Returns (mcp_resource, None) for the bare MCP resource (org resolved
+    from the user's memberships), (mcp_resource, org_id) for an org-scoped
     resource, or raises OAuthError for anything outside the MCP resource
     tree (RFC 8707 §2 — the AS must reject unknown resource values so a
     token can never be minted for a resource the client does not declare).
@@ -262,7 +557,7 @@ def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | N
     #1701 R1: the AS's own origin root (``{base}`` / ``{base}/``) is accepted
     as the bare MCP resource — some OAuth clients (OpenAI/ChatGPT's runtime)
     echo ``resource={origin}`` instead of the PRM value. Exact equality only
-    (never a prefix rule); tokens stay (user, team)-bound and MCP-only.
+    (never a prefix rule); tokens stay (user, org)-bound and MCP-only.
     """
     base_mcp = mcp_resource_url(base)
     if not resource:
@@ -273,43 +568,43 @@ def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | N
     base_root = base.rstrip("/")
     if resource == base_root:
         return base_mcp, None
-    team_prefix = base_mcp + "/teams/"
-    if resource.startswith(team_prefix) and "/" not in resource[len(team_prefix):]:
-        team_id = resource[len(team_prefix):]
-        if team_id:
-            return resource, team_id
+    org_prefix = base_mcp + "/organizations/"
+    if resource.startswith(org_prefix) and "/" not in resource[len(org_prefix):]:
+        org_id = resource[len(org_prefix):]
+        if org_id:
+            return resource, org_id
     raise OAuthError(400, "invalid_resource",
                      "Unknown resource indicator. Expected the MCP endpoint "
                      f"({base_mcp}) or a team-scoped resource under it.")
 
 
-def _selectable_teams(cp, user_id: str) -> list[dict]:
-    """The user's ACTIVE memberships whose teams are not durably suspended —
-    the single source for default-team resolution AND the consent chooser
-    (#1701 R1). Sorted deterministically by team_id (user_memberships has no
+def _selectable_orgs(cp, user_id: str) -> list[dict]:
+    """The user's ACTIVE memberships whose orgs are not durably suspended —
+    the single source for default-org resolution AND the consent chooser
+    (#1701 R1). Sorted deterministically by org_id (user_memberships has no
     ORDER BY; the chooser needs a stable order)."""
     from tortoise.supabase_control import user_memberships
     out = []
     for m in user_memberships(cp, user_id):
-        rows = cp.query("teams", select=["name", "suspended_at"],
-                        filters=[("id", "eq", m["team_id"])])
+        rows = cp.query("organizations", select=["name", "suspended_at"],
+                        filters=[("id", "eq", m["org_id"])])
         if not rows or rows[0].get("suspended_at") is not None:
             continue
-        out.append({"team_id": m["team_id"],
-                    "team_name": rows[0].get("name") or m["team_id"]})
-    return sorted(out, key=lambda t: t["team_id"])
+        out.append({"org_id": m["org_id"],
+                    "org_name": rows[0].get("name") or m["org_id"]})
+    return sorted(out, key=lambda t: t["org_id"])
 
 
-def _default_team(cp, user_id: str) -> str:
-    """The user's sole ACTIVE (non-suspended) team (D4 + #1701 R1).
+def _default_org(cp, user_id: str) -> str:
+    """The user's sole ACTIVE (non-suspended) org (D4 + #1701 R1).
 
-    0 usable teams → error; >1 usable teams → error telling the client to
-    declare a team-scoped resource. Suspended memberships never count toward
-    the default, so a 1-active + 1-suspended account binds the active team
-    and never dead-ends on the multi-team 400."""
-    active = _selectable_teams(cp, user_id)
+    0 usable orgs → error; >1 usable orgs → error telling the client to
+    declare an org-scoped resource. Suspended memberships never count toward
+    the default, so a 1-active + 1-suspended account binds the active org
+    and never dead-ends on the multi-org 400."""
+    active = _selectable_orgs(cp, user_id)
     if len(active) == 1:
-        return active[0]["team_id"]
+        return active[0]["org_id"]
     if not active:
         raise OAuthError(403, "invalid_grant",
                          "This account has no active team. Create a team "
@@ -317,24 +612,24 @@ def _default_team(cp, user_id: str) -> str:
     raise OAuthError(400, "invalid_resource",
                      "This account belongs to multiple teams — the MCP client "
                      "must declare a team-scoped resource indicator "
-                     f"({team_resource_url('<base>', '<team_id>')} form).")
+                     f"({org_resource_url('<base>', '<org_id>')} form).")
 
 
-def _resolve_team(cp, user_id: str, base: str, resource: str | None) -> str:
-    """RFC 8707 mapping (D4): client-declared resource → team_id, verified
+def _resolve_org(cp, user_id: str, base: str, resource: str | None) -> str:
+    """RFC 8707 mapping (D4): client-declared resource → org_id, verified
     against the user's active memberships."""
-    _, team_id = parse_resource(base, resource)
-    if team_id is not None:
-        from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, user_id, team_id) is None:
+    _, org_id = parse_resource(base, resource)
+    if org_id is not None:
+        from tortoise.supabase_control import membership_for_user_org
+        if membership_for_user_org(cp, user_id, org_id) is None:
             raise OAuthError(403, "invalid_resource",
                              "Not a member of the requested team.")
-        return team_id
-    return _default_team(cp, user_id)
+        return org_id
+    return _default_org(cp, user_id)
 
 
-def _team_name(cp, team_id: str) -> str | None:
-    rows = cp.query("teams", select=["name"], filters=[("id", "eq", team_id)])
+def _org_name(cp, org_id: str) -> str | None:
+    rows = cp.query("organizations", select=["name"], filters=[("id", "eq", org_id)])
     return rows[0].get("name") if rows else None
 
 
@@ -359,6 +654,89 @@ def get_client(cp, client_id: str) -> dict | None:
     return row
 
 
+def resolve_client(cp, client_id: str) -> dict | None:
+    """Client lookup for the authorize/token paths: registry first (DCR or
+    operator-issued), then **CIMD** (#2847).
+
+    CIMD is what lets a Claude connector obtain a client identity WITHOUT the
+    ``POST /register`` round-trip, so the DCR limiter stops being load-bearing
+    at directory scale. The metadata document is fetched under the full SSRF
+    control set in ``tortoise.cimd``; this function owns only the control-plane
+    side — persisting ONE ``oauth_clients`` row per distinct client_id URL,
+    which `oauth_codes`/`oauth_access_tokens`/`oauth_refresh_tokens` require by
+    foreign key.
+
+    Failure policy: a CIMD problem returns ``None`` (→ the caller's existing
+    "Unknown or revoked client_id"), never a 5xx — the fetch is attacker-
+    reachable, so its failures must not become an availability signal. That
+    includes a control-plane write failure on the provisioning insert, which is
+    why the persist sits inside the guard below.
+    """
+    row = get_client(cp, client_id)
+    if row is not None:
+        return row
+    from tortoise import cimd
+    if not cimd.is_cimd_client_id(client_id) or not cimd.cimd_enabled():
+        return None
+    try:
+        record = cimd.resolve_client_metadata(
+            client_id,
+            supported_scopes=set(SCOPES_ACCEPTED),
+            supported_grants=set(SUPPORTED_GRANTS),
+            default_scope=" ".join(SCOPES_SUPPORTED))
+        _persist_cimd_client(cp, record)
+    except Exception:
+        # Deliberately broad: a refused/blocked fetch — or a control-plane
+        # failure while provisioning — must land as an unknown client, not as
+        # a distinguishable error (no SSRF oracle, no 5xx).
+        return None
+    # #2847 review P1 — revocation fail-open. `_persist_cimd_client`'s duplicate
+    # re-read goes through the RAW `_client_row`, so a REVOKED CIMD client could
+    # come back non-None here while the registry path returns None: the consent
+    # page rendered and an authorization code was minted for a revoked client
+    # (the token endpoint still rejected, so no token was issued). Re-reading
+    # through the REVOKED-FILTERED accessor here — on the single resolver both
+    # /oauth/authorize and /oauth/token share — closes it whatever the insert
+    # did, and keeps this path's answer identical to the registry path's.
+    # Fail-closed when the row is absent: the FK on oauth_codes requires it.
+    return get_client(cp, client_id)
+
+
+def _persist_cimd_client(cp, record: dict) -> None:
+    """Insert the ``oauth_clients`` row a CIMD client needs for the FK, once.
+
+    Growth bound: one row per distinct client_id URL — ``O(client
+    implementations)`` (a handful), not ``O(connections)`` as DCR is. Claude's
+    URL is stable, so this is exactly one row, ever.
+
+    Concurrency: two simultaneous first-time authorizations of the same URL
+    race on the primary key; the loser's insert raises while the row is
+    present, which is not an error. A re-read that still finds nothing
+    re-raises, so a genuine control-plane failure is never silently absorbed.
+    The caller re-reads through the revoked-filtered accessor, so this function
+    deliberately returns nothing — its return value is not a trusted view.
+    """
+    row = {
+        "id": record["client_id"],
+        "client_secret_hash": None,
+        # The HOST, never the document's self-asserted client_name (Anthropic's
+        # consent-screen rule — a client must not name itself on our page).
+        "client_name": record["client_name"],
+        "redirect_uris": record["redirect_uris"],
+        "grant_types": record["grant_types"],
+        "response_types": record["response_types"],
+        "token_endpoint_auth_method": record["token_endpoint_auth_method"],
+        "scope": record["scope"],
+        "created_at": _now_iso(),
+        "revoked_at": None,
+    }
+    try:
+        cp.query("oauth_clients", method="POST", json_body=row)
+    except Exception:
+        if _client_row(cp, record["client_id"]) is None:
+            raise
+
+
 def register_client(cp, body: dict) -> dict:
     """RFC 7591 DCR — validate metadata, mint client_id (+ secret for
     confidential clients), persist, return the full registration response."""
@@ -379,8 +757,9 @@ def register_client(cp, body: dict) -> dict:
     invalid = [u for u in redirect_uris if not isinstance(u, str) or not _valid_redirect_uri(u)]
     if invalid:
         raise OAuthError(400, "invalid_client_metadata",
-                         "Each redirect_uri must be https (or http loopback), "
-                         "absolute, and may not contain a fragment.")
+                         "Each redirect_uri must be https, http loopback, or a "
+                         "supported native-app scheme, absolute, and may not "
+                         "contain a fragment.")
 
     grant_types = body.get("grant_types", ["authorization_code"])
     if not isinstance(grant_types, list) or not grant_types:
@@ -454,7 +833,7 @@ def _verify_client_auth(cp, client_id: str, body: dict) -> dict:
     """
     if not client_id:
         raise OAuthError(401, "invalid_client", "client_id is required.")
-    row = _client_row(cp, client_id)
+    row = resolve_client(cp, client_id)
     if row is None or row.get("revoked_at") is not None:
         raise OAuthError(401, "invalid_client", "Unknown client_id.")
     method = row.get("token_endpoint_auth_method") or "none"
@@ -477,65 +856,88 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               code_challenge: str | None,
                               code_challenge_method: str | None) -> dict:
     """Validate the /oauth/authorize request. Returns the client row."""
-    client = get_client(cp, client_id)
-    if client is None:
-        raise OAuthError(400, "invalid_request", "Unknown or revoked client_id.")
-    if response_type != "code":
-        raise OAuthError(400, "invalid_request",
-                         "Only response_type=code is supported.")
-    if redirect_uri not in (client.get("redirect_uris") or []):
-        raise OAuthError(400, "invalid_request",
-                         "redirect_uri is not registered for this client.")
-    if not code_challenge or not _valid_pkce(code_challenge):
-        raise OAuthError(400, "invalid_request",
-                         "code_challenge (PKCE, 43-128 chars) is required.")
-    if code_challenge_method != "S256":
-        raise OAuthError(400, "invalid_request",
-                         "Only code_challenge_method=S256 is supported.")
-    return client
+    client = resolve_client(cp, client_id)
+    try:
+        if client is None:
+            raise OAuthError(400, "invalid_request", "Unknown or revoked client_id.")
+        if response_type != "code":
+            raise OAuthError(400, "invalid_request",
+                             "Only response_type=code is supported.")
+        # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
+        # keeps the exact-string rule. See `_redirect_uri_matches`.
+        #
+        # A non-list `redirect_uris` can only come from a legacy/hand-corrupted row
+        # (`register_client` requires a list and the column is jsonb). Normalize it
+        # to a single-element list so a bare string stays ONE uri: iterating the
+        # string directly would compare character by character and silently stop
+        # matching it at all.
+        registered_uris = client.get("redirect_uris") or []
+        if not isinstance(registered_uris, (list, tuple)):
+            registered_uris = [registered_uris]
+        if not any(_redirect_uri_matches(u, redirect_uri)
+                   for u in registered_uris):
+            raise OAuthError(400, "invalid_request",
+                             "redirect_uri is not registered for this client.")
+        if not code_challenge or not _valid_pkce(code_challenge):
+            raise OAuthError(400, "invalid_request",
+                             "code_challenge (PKCE, 43-128 chars) is required.")
+        if code_challenge_method != "S256":
+            raise OAuthError(400, "invalid_request",
+                             "Only code_challenge_method=S256 is supported.")
+        return client
+    except OAuthError as exc:
+        # #3669 finding 2: stamp the client resolved ABOVE onto the error
+        # (None when the client itself was unresolvable) so the
+        # /oauth/authorize handler can choose the redirect-vs-JSON shape
+        # WITHOUT resolving a second time. On the FAILURE path that second
+        # resolve cost a second CIMD fetch and a second rate-limit charge
+        # (the success path paid nothing — the fetch cache absorbed it),
+        # halving the effective failure budget.
+        exc.client = client
+        raise
 
 
 def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
-    """Consent-page team preview (D4 + #1701 R1 account-chooser).
+    """Consent-page org preview (D4 + #1701 R1 account-chooser).
 
-    A client-declared team-scoped resource resolves to that team (membership
-    AND suspension checked — a suspended team 403s here, never at exchange).
+    A client-declared org-scoped resource resolves to that org (membership
+    AND suspension checked — a suspended org 403s here, never at exchange).
     A bare/omitted/origin-root-echoed resource resolves to the sole ACTIVE
-    team or, for several, returns the selectable list for the page's chooser.
-    Zero active teams keeps the 403 so an account with no usable team cannot
+    org or, for several, returns the selectable list for the page's chooser.
+    Zero active orgs keeps the 403 so an account with no usable org cannot
     mint a code.
     """
-    _, team_id = parse_resource(base, resource)
-    if team_id is not None:
-        from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, user_id, team_id) is None:
+    _, org_id = parse_resource(base, resource)
+    if org_id is not None:
+        from tortoise.supabase_control import membership_for_user_org
+        if membership_for_user_org(cp, user_id, org_id) is None:
             raise OAuthError(403, "invalid_resource",
                              "Not a member of the requested team.")
-        _assert_team_usable(cp, team_id)  # suspended → 403 invalid_grant
+        _assert_org_usable(cp, org_id)  # suspended → 403 invalid_grant
         return {
-            "team_id": team_id,
-            "team_name": _team_name(cp, team_id),
-            "resource": (team_resource_url(base, team_id) if resource
+            "org_id": org_id,
+            "org_name": _org_name(cp, org_id),
+            "resource": (org_resource_url(base, org_id) if resource
                          else mcp_resource_url(base)),
         }
-    teams = _selectable_teams(cp, user_id)
-    if len(teams) == 1:
+    orgs = _selectable_orgs(cp, user_id)
+    if len(orgs) == 1:
         return {
-            "team_id": teams[0]["team_id"],
-            "team_name": teams[0]["team_name"],
+            "org_id": orgs[0]["org_id"],
+            "org_name": orgs[0]["org_name"],
             # byte-identical with today: a truthy declared resource (bare MCP
-            # or origin echo) keeps the team-scoped resource field.
-            "resource": (team_resource_url(base, teams[0]["team_id"])
+            # or origin echo) keeps the org-scoped resource field.
+            "resource": (org_resource_url(base, orgs[0]["org_id"])
                          if resource else mcp_resource_url(base)),
         }
-    if len(teams) > 1:
+    if len(orgs) > 1:
         return {
-            "team_id": None,
-            "team_name": None,
+            "org_id": None,
+            "org_name": None,
             "resource": mcp_resource_url(base),
             "memberships": [
-                {**t, "resource": team_resource_url(base, t["team_id"])}
-                for t in teams
+                {**t, "resource": org_resource_url(base, t["org_id"])}
+                for t in orgs
             ],
         }
     raise OAuthError(403, "invalid_grant",
@@ -546,22 +948,22 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
 def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
                     redirect_uri: str, code_challenge: str, state: str | None,
                     scope: str | None, resource: str | None) -> tuple[str, str]:
-    """Bind a (user, team) grant to a single-use PKCE code (P2 + P4).
+    """Bind a (user, org) grant to a single-use PKCE code (P2 + P4).
 
-    Resolves the team from the client-declared resource indicator (RFC 8707)
-    at consent time so the code carries the exact team the token will bind.
-    #1701 R1: the team must be USABLE (not suspended) — a suspended team can
+    Resolves the org from the client-declared resource indicator (RFC 8707)
+    at consent time so the code carries the exact org the token will bind.
+    #1701 R1: the org must be USABLE (not suspended) — a suspended org can
     never mint a code (suspension surfaces at consent, not at a later
-    exchange). Returns (code, team_id).
+    exchange). Returns (code, org_id).
     """
-    team_id = _resolve_team(cp, user_id, base, resource)
-    _assert_team_usable(cp, team_id)
+    org_id = _resolve_org(cp, user_id, base, resource)
+    _assert_org_usable(cp, org_id)
     code = secrets.token_urlsafe(32)
     cp.query("oauth_codes", method="POST", json_body={
         "code_hash": _sha256(code),
         "client_id": client_id,
         "user_id": user_id,
-        "team_id": team_id,
+        "org_id": org_id,
         "redirect_uri": redirect_uri,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -569,9 +971,16 @@ def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
         "resource": resource,
         "expires_at": _expires_iso(AUTH_CODE_TTL_S),
         "used_at": None,
+        # #3027: state every new code explicitly. The column has a DB default,
+        # but sending it keeps the PostgREST seam and the in-memory fake in
+        # lockstep (the fake has no column defaults).
+        "redemption_state": REDEMPTION_UNCLAIMED,
+        "redemption_id": None,
+        "redemption_settled_at": None,
+        "redemption_note": None,
         "created_at": _now_iso(),
     })
-    return code, team_id
+    return code, org_id
 
 
 def _consume_state(cp, code: str) -> str:
@@ -599,14 +1008,18 @@ def _consume_state(cp, code: str) -> str:
 
 
 def _restore_code(cp, code: str, expected) -> bool:
-    """CAS re-arm (#2863): clear `used_at` ONLY if it still holds the value this
-    request wrote, and only while the code is still redeemable.
+    """CAS re-arm of the claim THIS request owns (#2863, #3027). Clears `used_at`
+    ONLY if it still holds the value this request wrote AND the claim is still
+    ours (`redemption_state='claimed'`), and only while the code is redeemable.
 
     True iff the re-arm is confirmed observable. Any raise / empty result / None
     expectation ⇒ False (terminal) — never a retryable signal on unobserved state.
     The expiry filter mirrors `_consume_state`: the failure path can spend ~20 s
     before the re-arm, so a near-TTL code must not be re-armed into a 503 whose retry
     then returns expired `invalid_grant`.
+
+    The `redemption_state` condition is #3027's FENCE: a reconciler that took the
+    claim over (and burned it) cannot be undone by this request's late re-arm.
     """
     if expected is None:
         return False
@@ -615,8 +1028,17 @@ def _restore_code(cp, code: str, expected) -> bool:
                         select=["used_at", "expires_at"],
                         filters=[("code_hash", "eq", _sha256(code)),
                                  ("used_at", "eq", expected),
+                                 ("redemption_state", "eq", REDEMPTION_CLAIMED),
                                  ("expires_at", "gt", _now_iso())],
-                        json_body={"used_at": None})
+                        json_body={"used_at": None,
+                                   # #3027: clear the redemption state in the SAME
+                                   # CAS, so the durable state can never disagree
+                                   # with `used_at` (the schema constrains them to
+                                   # agree). A re-arm means "unclaimed" again.
+                                   "redemption_state": REDEMPTION_UNCLAIMED,
+                                   "redemption_id": None,
+                                   "redemption_settled_at": None,
+                                   "redemption_note": None})
         return bool(rows)
     except Exception as exc:
         logger.warning("oauth: code re-arm failed: %s", exc)
@@ -674,37 +1096,240 @@ def _prev_refresh_unclaimed(cp, prev_refresh: dict) -> bool:
         return False
 
 
-def _consume_code(cp, code: str) -> dict:
-    """Single-use auth-code redemption (RFC 6749 §4.1.2).
+def _settle_redemption(cp, code_row: dict | None, state: str,
+                       *, note: str | None = None) -> bool:
+    """CAS-settle the claim this request OWNS (#3027). True iff the CAS WON.
 
-    Atomic claim: one conditional UPDATE (``WHERE used_at IS NULL``) with
-    return=representation — a concurrent worker reusing the same code sees
-    zero affected rows and fails invalid_grant (no SELECT-then-PATCH race,
-    PR #1264 review P2).
+    The write is fenced on the claim identity — `id` AND
+    `redemption_state='claimed'` AND (when present) `redemption_id` — so exactly
+    ONE of {the owning request, a reconciler that took the claim over} can record
+    the outcome, and the loser is told so by the return value:
+
+      * `exchange_auth_code` uses this as its DELIVERY GATE — a pair is only
+        returned if the `minted` settle won; on a loss it compensates the pair it
+        minted and reports the failure, so a reconciler can never revoke a family
+        that is about to be delivered, and a late attempt can never resurrect a
+        claim the reconciler already resolved.
+      * `_reconcile_claimed_redemption` takes ownership with the same CAS BEFORE
+        it revokes anything, so it can never revoke a family whose owner then
+        delivers it.
+
+    Best-effort by CONTRACT — never raises (a state-recording failure must not
+    turn a coherent OAuth error into a 500), and the return value is the fence.
+    `used_at` is left untouched: the claim wrote it, and `minted`/`burned` are
+    terminal states that keep it.
     """
-    rows = cp.query("oauth_codes", select=[
-        "code_hash", "client_id", "user_id", "team_id", "redirect_uri",
-        "code_challenge", "code_challenge_method", "scope", "resource",
-        "expires_at", "used_at",
-    ], method="PATCH",
-        filters=[("code_hash", "eq", _sha256(code)), ("used_at", "is", None)],
-        json_body={"used_at": _now_iso()})
+    if not code_row or code_row.get("id") is None:
+        return False
+    filters = [("id", "eq", code_row["id"]),
+               ("redemption_state", "eq", REDEMPTION_CLAIMED)]
+    # A legacy/pre-state row carries no redemption_id; the id+state CAS still
+    # fences it (PostgREST `eq` does not match NULL, so an unconditional filter
+    # would make such a row un-settleable in production while the fake matched it).
+    # (`eq` with a NULL is NOT "match NULL": `_encode` renders it `eq.None`, i.e.
+    # the LITERAL string — a 400 on a `bigint` column and a literal compare on a
+    # `text` column. Either way it matches no real row, so the clause must be
+    # omitted, not passed as NULL.)
+    if code_row.get("redemption_id") is not None:
+        filters.append(("redemption_id", "eq", code_row["redemption_id"]))
+    try:
+        rows = cp.query("oauth_codes", method="PATCH", select=["id"],
+                        filters=filters,
+                        json_body={"redemption_state": state,
+                                   "redemption_settled_at": _now_iso(),
+                                   "redemption_note": note})
+        return bool(rows)
+    except Exception as exc:
+        logger.warning("oauth: redemption settle (%s) failed: %s", state, exc)
+        return False
+
+
+def _observe_code(cp, code: str) -> dict:
+    """READ-ONLY classification of a code after a zero-row claim (#3027).
+
+    Returns the row (so the caller can settle or reconcile it) with an added
+    ``state``: one of 'unclaimed' | 'claimed' | 'minted' | 'burned' | 'expired'
+    | 'missing' | 'unobservable'.
+
+    Never writes, and never raises: the claim PATCH has already been OBSERVED as
+    a zero-row result, so nothing was written on this path, and a failed read is
+    'unobservable' (a retryable signal is then safe — unlike an unobserved
+    WRITE, which #2863 keeps terminal).
+
+    The zero-row observation is load-bearing for that safety, and it rests on the
+    control-plane seam: a select-bearing PATCH is sent with
+    `Prefer: return=representation`, whose genuine zero-match result is a
+    content-bearing `[]`, and a transport failure RAISES rather than returning
+    empty (`supabase_control.query`). So on the normal seam a COMMITTED claim does
+    not arrive here as zero rows.
+
+    Residual, stated rather than hidden: `query` ALSO reads a 2xx with an EMPTY
+    body as `[]`, so an intermediary that stripped a committed PATCH's body would
+    make this look like a zero-row claim. The consequence is bounded and is NOT a
+    double-issue — the retry re-runs the same claim CAS, which is what actually
+    decides — but the signal is then retryable for a code that is in fact
+    consumed, i.e. #2863's "untruthful retry" would be reinstated by the seam.
+    Pinned by `test_empty_body_patch_reads_as_zero_rows` in the fault suite; do
+    not widen the 503 basis further without re-reading it.
+    """
+    try:
+        rows = cp.query("oauth_codes", select=[
+            "id", "used_at", "expires_at", "redemption_state",
+            "redemption_id", "client_id", "org_id",
+        ], filters=[("code_hash", "eq", _sha256(code))])
+    except Exception as exc:
+        logger.warning("oauth: code state observation failed: %s", exc)
+        return {"state": "unobservable"}
     if not rows:
-        # Unknown code, or already claimed (single-use) — the token endpoint
-        # must never distinguish, and must never double-issue.
+        return {"state": "missing"}
+    row = dict(rows[0])
+    if row.get("used_at") is not None:
+        state = row.get("redemption_state")
+        # The schema invariant makes a non-'unclaimed' state the only reachable
+        # value when `used_at` is set. A row observed through a pre-migration
+        # seam carries no state column at all; treat it as 'claimed' — the
+        # reconcilable state — never as terminal.
+        return {**row, "state": state if state in (
+            REDEMPTION_CLAIMED, REDEMPTION_MINTED, REDEMPTION_BURNED)
+            else REDEMPTION_CLAIMED}
+    expires = _parse_ts(row.get("expires_at"))
+    if expires is None or expires < _now():
+        return {**row, "state": "expired"}
+    return {**row, "state": REDEMPTION_UNCLAIMED}
+
+
+def _live_family_for_code(cp, code_row: dict) -> list[tuple[str, str]]:
+    """Every LIVE token row linked to this code (#3027). Raises on read failure.
+
+    A code row with NO id is refused rather than probed: there is no `code_id`
+    value to filter on, and passing NULL would render `code_id=eq.None` — a 400 on
+    the `bigint` column, and on a `text` column a compare against the literal
+    "None". Probing is therefore impossible, NOT "matches every unlinked row".
+    """
+    code_id = code_row.get("id")
+    if code_id is None:
+        raise ValueError("code row carries no id — cannot resolve its family")
+    out: list[tuple[str, str]] = []
+    for table in ("oauth_refresh_tokens", "oauth_access_tokens"):
+        rows = cp.query(table, select=["id"],
+                        filters=[("code_id", "eq", code_id),
+                                 ("revoked_at", "is", None)])
+        out.extend((table, r["id"]) for r in rows if r.get("id") is not None)
+    return out
+
+
+def _reconcile_claimed_redemption(cp, code_row: dict) -> str:
+    """Settle an outcome-unknown claim (#3027). Returns 'burned-orphan' |
+    'burned-clean' | 'inflight' | 'lost-race' | 'unobservable'.
+
+    The durable `code_id` link is the evidence an in-process read cannot supply
+    across requests: it asks the GRANTS whether this code minted, so a later
+    request can resolve a claim whose compensation failed.
+
+    ⛔ There is deliberately NO cross-request re-arm. "Older than the grace"
+    does not prove the owner is dead — the mutating grant is awaited with no
+    wall-clock bound above it, and a control-plane stall (or an operator lowering
+    the grace) can hold an attempt between its claim and its settle for an
+    arbitrarily long time. Re-arming on that guess is exactly how TWO live
+    families get minted for one single-use code: the late owner wakes, mints, and
+    records `minted` over the re-armed row. A residue with no family is therefore
+    BURNED — fail safe; the client re-runs authorization. The common
+    verified-clean failure still re-arms, IN PROCESS, via `_restore_code`.
+
+    Ordering is load-bearing: ownership is taken with a CAS on the claim identity
+    BEFORE anything is revoked. If the owner settles first, this CAS loses
+    ('lost-race') and NOTHING is touched, so a family that is about to be
+    delivered is never revoked. If this CAS wins, the owner's own settle loses and
+    `exchange_auth_code` compensates its pair instead of delivering it.
+    """
+    claimed_at = _parse_ts(code_row.get("used_at"))
+    if claimed_at is None or (_now() - claimed_at).total_seconds() < _redemption_grace_s():
+        return "inflight"
+    try:
+        family = _live_family_for_code(cp, code_row)
+    except Exception as exc:
+        logger.warning("oauth: redemption reconcile read failed: %s", exc)
+        return "unobservable"
+    if not _settle_redemption(cp, code_row, REDEMPTION_BURNED,
+                              note="orphan-revoked" if family else "unresolved"):
+        return "lost-race"
+    if family:
+        # The claim is now ours to decide, so no delivery can follow: these rows
+        # belong to a mint whose response was lost and whose compensation failed.
+        _rollback_minted(cp, family, _now_iso(), capture=True)
+        return "burned-orphan"
+    return "burned-clean"
+
+
+def _consume_code(cp, code: str) -> dict:
+    """Single-use auth-code redemption (RFC 6749 §4.1.2) with the durable
+    redemption state machine (#3027).
+
+    Atomic claim: one conditional UPDATE (``WHERE used_at IS NULL AND
+    redemption_state='unclaimed' AND expires_at > now()``) with
+    return=representation — a concurrent worker reusing the same code sees zero
+    affected rows and cannot double-issue (no SELECT-then-PATCH race, PR #1264
+    review P2). The claim records the timestamp, the state AND a fresh
+    `redemption_id` in the SAME statement, so the durable state can never be
+    half-written relative to the CAS.
+
+    On zero rows the row is re-read READ-ONLY to classify WHY. Every verdict
+    EXCEPT `unobservable` is TERMINAL (`invalid_grant`): a minted code is a
+    replay, and a CLAIMED code is consumed by an attempt that may still be
+    running — a different request must never re-arm it (two live families) and
+    must never report it retryable (the retry can terminate, which #2863 records
+    as the untruthful signal it removed). A `claimed` observation also triggers
+    the lazy reconcile, which settles the residue for good. `unobservable` — the
+    classification READ failed — is a retryable 503 instead, because the claim
+    PATCH was OBSERVED to match zero rows (so this request wrote nothing, and the
+    retry re-runs that same CAS); see `_observe_code`.
+    """
+    for attempt in (1, 2):
+        rows = cp.query("oauth_codes", select=[
+            "id", "code_hash", "client_id", "user_id", "org_id", "redirect_uri",
+            "code_challenge", "code_challenge_method", "scope", "resource",
+            "expires_at", "used_at", "redemption_state", "redemption_id",
+        ], method="PATCH",
+            filters=[("code_hash", "eq", _sha256(code)),
+                     ("used_at", "is", None),
+                     ("redemption_state", "eq", REDEMPTION_UNCLAIMED),
+                     ("expires_at", "gt", _now_iso())],
+            json_body={"used_at": _now_iso(),
+                       "redemption_state": REDEMPTION_CLAIMED,
+                       "redemption_id": secrets.token_urlsafe(16),
+                       "redemption_settled_at": None,
+                       "redemption_note": None})
+        if rows:
+            row = rows[0]
+            # Defence in depth: the claim filter already excludes an expired code.
+            if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
+                _settle_redemption(cp, row, REDEMPTION_BURNED, note="expired")
+                raise OAuthError(400, "invalid_grant", "Authorization code expired.")
+            return row
+        observed = _observe_code(cp, code)
+        state = observed.get("state")
+        if state == REDEMPTION_CLAIMED:
+            verdict = _reconcile_claimed_redemption(cp, observed)
+            logger.info("oauth: code already claimed (%s)", verdict)
+            raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
+        if state == "unclaimed" and attempt == 1:
+            continue                        # lost a claim race — retry exactly once
+        if state == "unobservable":
+            raise OAuthTemporarilyUnavailable(
+                "Could not determine the authorization code's state — retry.")
+        if state == "expired":
+            raise OAuthError(400, "invalid_grant", "Authorization code expired.")
         raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
-    row = rows[0]
-    if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
-        raise OAuthError(400, "invalid_grant", "Authorization code expired.")
-    return row
+    # Unreachable: the loop either returns a claimed row or raises.
+    raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
 
 
-def _assert_team_usable(cp, team_id: str) -> None:
-    """D5: a suspended team cannot mint/refresh tokens. The durable
+def _assert_org_usable(cp, org_id: str) -> None:
+    """D5: a suspended org cannot mint/refresh tokens. The durable
     suspended_at check is the single rejection authority (mirrors the tt_
     path's #308 semantics)."""
-    rows = cp.query("teams", select=["suspended_at", "tier"],
-                    filters=[("id", "eq", team_id)])
+    rows = cp.query("organizations", select=["suspended_at", "tier"],
+                    filters=[("id", "eq", org_id)])
     if not rows:
         raise OAuthError(403, "invalid_grant", "Team not found.")
     if rows[0].get("suspended_at") is not None:
@@ -715,61 +1340,63 @@ def _assert_team_usable(cp, team_id: str) -> None:
 
 # ── Token issuance / exchange (P2 + P4 + D5) ────────────────────────────────
 
-def _quota_fields(cp, team_row: dict) -> dict:
+def _quota_fields(cp, org_row: dict) -> dict:
     """Quota shape shared with resolve_api_key so REST/MCP limits match
     (#329): preserve None (unlimited, Team tier), fall back to pricing.
     #1859 P3-2: max_points column (points-cap override) takes precedence
     over graph_size_cap, then pricing — mirrors resolve_api_key."""
-    from tortoise.pricing import tier_limits  # noqa: I001
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
+    from tortoise.pricing import tier_limits
     from tortoise.quota import derived_tier
-    tier = derived_tier({**team_row, "id": team_row.get("id")})
+    tier = derived_tier({**org_row, "id": org_row.get("id")})
     lim = tier_limits(tier)
-    mp = team_row.get("max_points")
+    mp = org_row.get("max_points")
     if mp is None:
-        mp = team_row.get("graph_size_cap")
+        mp = org_row.get("graph_size_cap")
     return {
-        "team_id": team_row.get("id"),
+        "org_id": org_row.get("id"),
         "tier": tier,
-        "max_users": (team_row.get("max_users")
-                      if team_row.get("max_users") is not None
+        "max_users": (org_row.get("max_users")
+                      if org_row.get("max_users") is not None
                       else lim["max_users_per_team"]),
-        "max_graphs": (team_row.get("max_graphs")
-                       if team_row.get("max_graphs") is not None
+        "max_graphs": (org_row.get("max_graphs")
+                       if org_row.get("max_graphs") is not None
                        else lim["max_graphs_per_team"]),
         "max_points": (int(mp)
                        if mp is not None
                        else int(lim["max_graph_nodes"])),
         "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
-        "suspended_at": team_row.get("suspended_at"),
-        "flagged_at": team_row.get("flagged_at"),
+        # #4010: sessions are unlimited for every tier — no cap of any kind
+        # (the pre-#4010 DEFAULT_MAX_SESSIONS fallback is deleted).
+        "max_sessions": None,
+        "suspended_at": org_row.get("suspended_at"),
+        "flagged_at": org_row.get("flagged_at"),
         # #1765: prefer the owner's USER email (demotion — teams.email is a
         # stale-prone contact field), fall back to the contact value.
-        "email": _owner_email_or(cp, team_row.get("id"), team_row.get("email")),
+        "email": _owner_email_or(cp, org_row.get("id"), org_row.get("email")),
     }
 
 
-def _owner_email_or(cp, team_id: str, fallback) -> str | None:
+def _owner_email_or(cp, org_id: str, fallback) -> str | None:
     from tortoise.supabase_control import owner_email
     try:
-        return owner_email(cp, team_id) or fallback
+        return owner_email(cp, org_id) or fallback
     except Exception:
         return fallback
 
 
-def _team_row(cp, team_id: str) -> dict | None:
-    rows = cp.query("teams", select=[
+def _org_row(cp, org_id: str) -> dict | None:
+    rows = cp.query("organizations", select=[
         "id", "tier", "max_users", "max_graphs", "graph_size_cap",
         "max_points", "suspended_at", "flagged_at", "email",
-    ], filters=[("id", "eq", team_id)])
+    ], filters=[("id", "eq", org_id)])
     return rows[0] if rows else None
 
 
-def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
+def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
                   scope: str, resource: str | None,
                   prev_refresh: dict | None = None,
-                  prev_access_id: str | None = None) -> dict:
+                  prev_access_id: str | None = None,
+                  code_id: int | None = None) -> dict:
     """Mint an access+refresh pair; rotate (revoke) the previous pair when
     called from the refresh path (D5 rotation).
 
@@ -788,6 +1415,13 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
     # #2863: appended BEFORE the POST, so a commit-then-lost POST still gets its
     # rollback (the row exists even though the response never arrived).
     minted: list[tuple[str, str]] = []
+    # #3027: the provenance link back to the authorizing code. Omitted (rather
+    # than sent as NULL) for a family with no origin code — a refresh rotation of
+    # one minted before this migration. The column and the claim's
+    # `redemption_state` filter are read unconditionally, so the migration MUST be
+    # applied before this code (the deploy's migration-drift gate is fail-closed
+    # on that ordering).
+    code_link = {"code_id": code_id} if code_id is not None else {}
     try:
         minted.append(("oauth_refresh_tokens", refresh_id))
         cp.query("oauth_refresh_tokens", method="POST", json_body={
@@ -795,12 +1429,13 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
             "token_hash": _sha256(refresh),
             "client_id": client_id,
             "user_id": user_id,
-            "team_id": team_id,
+            "org_id": org_id,
             "scope": scope,
             "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
             "revoked_at": None,
             "rotated_from": prev_refresh["id"] if prev_refresh is not None else None,
             "created_at": now,
+            **code_link,
         })
         minted.append(("oauth_access_tokens", access_id))
         cp.query("oauth_access_tokens", method="POST", json_body={
@@ -808,12 +1443,13 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
             "token_hash": _sha256(access),
             "client_id": client_id,
             "user_id": user_id,
-            "team_id": team_id,
+            "org_id": org_id,
             "scope": scope,
             "expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
             "revoked_at": None,
             "refresh_token_id": refresh_id,
             "created_at": now,
+            **code_link,
         })
         if prev_refresh is not None:
             claimed = cp.query("oauth_refresh_tokens", method="PATCH",
@@ -867,7 +1503,7 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
     """POST /oauth/token grant_type=authorization_code (P2 + P4).
 
     Validates the PKCE verifier, redirect_uri, client auth, and the RFC 8707
-    resource (must map to the SAME team the code was bound to), then issues
+    resource (must map to the SAME org the code was bound to), then issues
     the access+refresh pair.
     """
     # #2863: the redemption is atomic-feel — a failure after the atomic claim
@@ -892,25 +1528,54 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
                             code_row.get("code_challenge_method") or "S256"):
             raise OAuthError(400, "invalid_grant", "PKCE verification failed.")
         # RFC 8707: the resource at the token endpoint must resolve to the same
-        # team the authorization code was bound to (lenient when omitted — the
+        # org the authorization code was bound to (lenient when omitted — the
         # mcp SDK always sends it, but a bare authorize→token pair is legal).
         resource = body.get("resource")
         if resource:
-            _, requested_team = parse_resource(base, resource)
-            if requested_team is not None and requested_team != code_row["team_id"]:
+            _, requested_org = parse_resource(base, resource)
+            if requested_org is not None and requested_org != code_row["org_id"]:
                 raise OAuthError(400, "invalid_grant",
                                  "Resource indicator does not match the authorized team.")
-        _assert_team_usable(cp, code_row["team_id"])
+        _assert_org_usable(cp, code_row["org_id"])
         scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
         out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
-                            team_id=code_row["team_id"], scope=scope,
-                            resource=code_row.get("resource"))
-    except OAuthError:
-        raise                        # an intentional terminal signal — never re-arm
+                            org_id=code_row["org_id"], scope=scope,
+                            resource=code_row.get("resource"),
+                            code_id=code_row.get("id"))
+        # #3027: record delivery BEFORE returning the pair — and DELIVERY IS
+        # GATED ON THIS CAS. The reconciler takes ownership of a stale claim with
+        # the same CAS before it revokes anything, so exactly one of us can
+        # settle: if we lose, a family we just minted must not be delivered
+        # (it would be revoked out from under the client) and we compensate it
+        # and report the failure instead.
+        if not _settle_redemption(cp, code_row, REDEMPTION_MINTED):
+            minted = [("oauth_refresh_tokens", out["_refresh_id"]),
+                      ("oauth_access_tokens", out["_access_id"])]
+            # capture=True is this path's SINGLE capture (I4): nothing has captured
+            # yet — `_issue_tokens` succeeded — and the handler below only logs. A
+            # failed compensation here leaves a live, never-delivered row, which
+            # must not vanish silently.
+            _rollback_minted(cp, minted, _now_iso(), capture=True)
+            raise OAuthMintAborted(_mint_observably_clean(cp, minted))
+    except OAuthError as exc:
+        # #3027: an intentional terminal signal AFTER the claim burns the code
+        # durably (CAS-fenced on the claim identity, so it cannot overwrite a
+        # reconciler's decision). Without this the row would stay 'claimed' and
+        # the reconciler would later burn a live residue the client already
+        # knows failed. A retryable signal is not a terminal outcome, so
+        # `temporarily_unavailable` never burns.
+        if consumed and not isinstance(exc, OAuthTemporarilyUnavailable):
+            _settle_redemption(cp, code_row, REDEMPTION_BURNED, note="terminal")
+        raise
     except OAuthMintAborted as exc:
         logger.warning("oauth: auth-code mint aborted (recovered=%s)", exc.recovered)
         if exc.recovered and _restore_code(cp, body.get("code", ""), code_row["used_at"]):
             raise OAuthTemporarilyUnavailable() from None
+        # `recovered=False` deliberately does NOT record a terminal state: the
+        # outcome is UNKNOWN, which is precisely what #3027 exists to represent.
+        # The code stays 'claimed' for `_reconcile_claimed_redemption` to resolve
+        # against the durable `code_id` link; burning it here would hide the
+        # orphan from the one mechanism that can revoke it.
         raise OAuthError(400, "invalid_grant",
                          "The authorization code could not be redeemed — re-run "
                          "authorization.") from None
@@ -932,11 +1597,11 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
     return {k: v for k, v in out.items() if not k.startswith("_")}
 
 
-def _revoke_team_family(cp, user_id: str, team_id: str) -> None:
-    """D5: revoke the user's ENTIRE refresh-token family for a team (called
-    on team suspension). Mirrors durable revocation semantics of api_keys."""
+def _revoke_org_family(cp, user_id: str, org_id: str) -> None:
+    """D5: revoke the user's ENTIRE refresh-token family for an org (called
+    on org suspension). Mirrors durable revocation semantics of api_keys."""
     cp.query("oauth_refresh_tokens", method="PATCH",
-             filters=[("user_id", "eq", user_id), ("team_id", "eq", team_id),
+             filters=[("user_id", "eq", user_id), ("org_id", "eq", org_id),
                       ("revoked_at", "is", None)],
              json_body={"revoked_at": _now_iso()})
 
@@ -944,8 +1609,8 @@ def _revoke_team_family(cp, user_id: str, team_id: str) -> None:
 def refresh_grant(cp, body: dict, base: str) -> dict:
     """POST /oauth/token grant_type=refresh_token (D5).
 
-    Rotating per (user, team): each use revokes the presented token and mints
-    a fresh pair. Team suspension revokes the whole (user, team) family;
+    Rotating per (user, org): each use revokes the presented token and mints
+    a fresh pair. Org suspension revokes the whole (user, org) family;
     a lapsed membership revokes the presented token.
     """
     # #2863: wrap every pre-mint read (the FIRST one is `_verify_client_auth` →
@@ -956,8 +1621,8 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
         client = _verify_client_auth(cp, body.get("client_id"), body)
         refresh_token = body.get("refresh_token", "")
         rows = cp.query("oauth_refresh_tokens", select=[
-            "id", "token_hash", "client_id", "user_id", "team_id", "scope",
-            "expires_at", "revoked_at",
+            "id", "token_hash", "client_id", "user_id", "org_id", "scope",
+            "expires_at", "revoked_at", "code_id",
         ], filters=[("token_hash", "eq", _sha256(refresh_token))])
         if not rows:
             raise OAuthError(400, "invalid_grant", "Invalid refresh token.")
@@ -972,24 +1637,24 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
             raise OAuthError(400, "invalid_grant", "Refresh token expired.")
         resource = body.get("resource")
         if resource:
-            _, requested_team = parse_resource(base, resource)
-            if requested_team is not None and requested_team != row["team_id"]:
+            _, requested_org = parse_resource(base, resource)
+            if requested_org is not None and requested_org != row["org_id"]:
                 raise OAuthError(400, "invalid_grant",
                                  "Resource indicator does not match the token's team.")
-        # D5: suspension → revoke the whole (user, team) family, then reject.
+        # D5: suspension → revoke the whole (user, org) family, then reject.
         try:
-            _assert_team_usable(cp, row["team_id"])
+            _assert_org_usable(cp, row["org_id"])
         except OAuthTemporarilyUnavailable:
             raise        # a transient signal must NEVER trigger family revocation
         except OAuthError:
             try:
-                _revoke_team_family(cp, row["user_id"], row["team_id"])
+                _revoke_org_family(cp, row["user_id"], row["org_id"])
             except Exception as exc:  # correction #8: the single capture for this path
                 _log_and_capture(exc, where="family revoke")
             raise
         # Lapsed membership → revoke this token (the grant dies with the seat).
-        from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, row["user_id"], row["team_id"]) is None:
+        from tortoise.supabase_control import membership_for_user_org
+        if membership_for_user_org(cp, row["user_id"], row["org_id"]) is None:
             try:
                 cp.query("oauth_refresh_tokens", method="PATCH",
                          filters=[("id", "eq", row["id"])],
@@ -1010,10 +1675,16 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
             "Temporary control-plane failure before token rotation — retry.") from None
     try:
         out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
-                            team_id=row["team_id"], scope=row.get("scope")
+                            org_id=row["org_id"], scope=row.get("scope")
                             or " ".join(SCOPES_SUPPORTED), resource=resource,
                             prev_refresh=row,
-                            prev_access_id=prev_access[0]["id"] if prev_access else None)
+                            prev_access_id=prev_access[0]["id"] if prev_access else None,
+                            # #3027: rotation INHERITS the family's origin code, so
+                            # a live rotated descendant is still discoverable from
+                            # the code the reconciler is resolving. A link that died
+                            # at the first rotation would make the reconciler blind
+                            # to the live family and re-arm a live grant.
+                            code_id=row.get("code_id"))
     except OAuthMintAborted as exc:
         logger.warning("oauth: refresh mint aborted (recovered=%s)", exc.recovered)   # I4: log-only
         if exc.recovered:
@@ -1045,19 +1716,19 @@ def revoke_token(cp, body: dict) -> None:
 # ── MCP-boundary introspection (D6) ─────────────────────────────────────────
 
 def resolve_oauth_access_token(cp, token: str) -> dict | None:
-    """Introspect an ``oat_`` access token → team dict (same shape as
+    """Introspect an ``oat_`` access token → org dict (same shape as
     resolve_api_key) or None. This is the OAuth half of the MCP auth
     boundary — no tt_ key is minted (D6).
 
     Checks, in order: prefix, token row (revoked_at authoritative, expiry),
-    team existence + durable suspension (the suspended_at check rides the
-    returned dict so TeamResolutionMiddleware's existing #308 gate applies
+    org existence + durable suspension (the suspended_at check rides the
+    returned dict so OrgResolutionMiddleware's existing #308 gate applies
     identically to OAuth and tt_ credentials).
     """
     if not isinstance(token, str) or not token.startswith(ACCESS_TOKEN_PREFIX):
         return None
     rows = cp.query("oauth_access_tokens", select=[
-        "token_hash", "client_id", "user_id", "team_id", "scope",
+        "token_hash", "client_id", "user_id", "org_id", "scope",
         "expires_at", "revoked_at",
     ], filters=[("token_hash", "eq", _sha256(token))])
     if not rows:
@@ -1068,17 +1739,17 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     exp = _parse_ts(row.get("expires_at"))
     if exp is None or exp < _now():
         return None
-    team = _team_row(cp, row["team_id"])
-    if team is None:
+    org = _org_row(cp, row["org_id"])
+    if org is None:
         return None
-    team = _quota_fields(cp, team)
+    org = _quota_fields(cp, org)
     # #2600: the resolved dict carries the RAW actor fields (the token row's
     # user_id/client_id) so consuming seams (mcp_auth middleware / REST DI)
     # can alias the canonical `actor_user_id` — additive, transport-agnostic
     # (the resolver never aliases; the seam gates UUID shape).
-    team["user_id"] = row.get("user_id")
-    team["client_id"] = row.get("client_id")
-    return team
+    org["user_id"] = row.get("user_id")
+    org["client_id"] = row.get("client_id")
+    return org
 
 
 # ── Metadata (P1 — RFC 9728 PRM + RFC 8414 AS metadata) ────────────────────
@@ -1093,6 +1764,16 @@ def protected_resource_metadata(base: str) -> dict:
     }
 
 
+def _cimd_advertised() -> bool:
+    """#2847 — is the CIMD client-identity path advertised?
+
+    Reads the flag at CALL time (no cached metadata): the env is the reversible
+    lever, and a cached copy would make flipping it require a restart.
+    """
+    from tortoise import cimd
+    return bool(cimd.client_id_metadata_document_supported())
+
+
 def authorization_server_metadata(base: str) -> dict:
     """RFC 8414 Authorization Server Metadata (OAuth 2.1 profile)."""
     base = base.rstrip("/")
@@ -1105,6 +1786,11 @@ def authorization_server_metadata(base: str) -> dict:
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+        # #2847: advertise the registration-free client-identity path. Claude
+        # selects CIMD only when this flag AND "none" above are both present
+        # (the CIMD client authenticates as a public client), otherwise it
+        # falls back to DCR and re-registers on every fresh connection.
+        "client_id_metadata_document_supported": _cimd_advertised(),
         "code_challenge_methods_supported": ["S256"],
         "scopes_supported": SCOPES_ACCEPTED,
     }
@@ -1112,7 +1798,7 @@ def authorization_server_metadata(base: str) -> dict:
 
 # ── Branded consent page (D2 — one custom HTML page, signup/signin pattern) ─
 
-_CONSENT_HTML = """<!DOCTYPE html>
+_CONSENT_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1170,9 +1856,9 @@ _CONSENT_HTML = """<!DOCTYPE html>
     <p class="muted" id="client-line"></p>
     <div class="row"><span class="k">Requested scopes</span><span class="v" id="scope-line"></span></div>
     <div class="row"><span class="k">Resource</span><span class="v" id="resource-line"></span></div>
-    <div class="row"><span class="k">Team</span>
-      <span class="v" id="team-line">resolving…</span>
-      <select id="team-select" style="display:none;background:var(--bg,#0d1a2d);color:var(--text,#e2e8f0);border:1px solid var(--border,#1e293b);border-radius:6px;font-family:var(--mono);font-size:13px;padding:4px 6px;max-width:60%;text-align:left;" aria-label="Team for this connection"></select>
+    <div class="row"><span class="k">Org</span>
+      <span class="v" id="org-line">resolving…</span>
+      <select id="org-select" style="display:none;background:var(--bg,#0d1a2d);color:var(--text,#e2e8f0);border:1px solid var(--border,#1e293b);border-radius:6px;font-family:var(--mono);font-size:13px;padding:4px 6px;max-width:60%;text-align:left;" aria-label="Org for this connection"></select>
     </div>
     <div class="actions">
       <button class="btn-deny" id="btn-deny">Deny</button>
@@ -1212,6 +1898,10 @@ _CONSENT_HTML = """<!DOCTYPE html>
   // storage, so an ingested OAuth/email session must persist to the cookie
   // or the sign-in fallback loops. detectSessionInUrl stays true so the
   // provider redirect back with #access_token is ingested.
+  // #3503: this page is the ONE place it stays true — it does NOT load
+  // website/assets/supabase-session.js (that file's factory sets it false,
+  // because its load-time IIFE is the fragment consumer there), so this
+  // inline client is the sole consumer of the hash and must ingest it.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):
@@ -1317,22 +2007,22 @@ _CONSENT_HTML = """<!DOCTYPE html>
     }
     if (res.status === 401) return null;   // stale/rejected session
     if (!res.ok) {
-      // Terminal 4xx (suspended team, no usable team) carries an actionable
+      // Terminal 4xx (suspended org, no usable org) carries an actionable
       // error_description — surface it verbatim; only 5xx is retryable.
       const payload = await res.json().catch(() => null);
       const err = new Error((payload && (payload.error_description || payload.error)) ||
-          ("Could not resolve team: " + res.status));
+          ("Could not resolve org: " + res.status));
       if (res.status >= 500) err.transient = true;
       throw err;
     }
     return res.json();
   }
 
-  // #1701 R1: account-chooser state. teamResource is set ONLY by the picker's
+  // #1701 R1: account-chooser state. orgResource is set ONLY by the picker's
   // change handler — an untouched picker can never authorize (no silent
   // wrong-org bind). previewInFlight guards concurrent showConsent runs.
   let previewInFlight = false;
-  let teamResource = null;
+  let orgResource = null;
   let staleRefreshes = 0;   // at most ONE refresh per stale cycle
   const authBtn = () => document.getElementById("btn-auth");
   function disableAuthorize() { authBtn().disabled = true; }
@@ -1356,9 +2046,9 @@ _CONSENT_HTML = """<!DOCTYPE html>
     document.getElementById("client-line").textContent =
         PARAMS.client_name + " wants to access your Tortoise MCP surface.";
     document.getElementById("scope-line").textContent = PARAMS.scope || "mcp";
-    document.getElementById("team-line").style.display = "";
-    const teamSelect = document.getElementById("team-select");
-    teamSelect.style.display = "none";
+    document.getElementById("org-line").style.display = "";
+    const orgSelect = document.getElementById("org-select");
+    orgSelect.style.display = "none";
     hideRetry();
     try {
       const preview = await fetchPreview(data.session.access_token);
@@ -1367,38 +2057,38 @@ _CONSENT_HTML = """<!DOCTYPE html>
       if (memberships && memberships.length > 1) {
         // Account chooser — options are REBUILT from scratch every run so a
         // sequential re-run can never duplicate rows. Authorize stays disabled
-        // until the user explicitly picks a team (change event below).
-        document.getElementById("team-line").style.display = "none";
-        while (teamSelect.firstChild) teamSelect.removeChild(teamSelect.firstChild);
+        // until the user explicitly picks an org (change event below).
+        document.getElementById("org-line").style.display = "none";
+        while (orgSelect.firstChild) orgSelect.removeChild(orgSelect.firstChild);
         const placeholder = document.createElement("option");
         placeholder.value = "";
         placeholder.disabled = true;
         placeholder.selected = true;
-        placeholder.textContent = "Choose a team…";
-        teamSelect.appendChild(placeholder);
+        placeholder.textContent = "Choose an org…";
+        orgSelect.appendChild(placeholder);
         memberships.forEach((m) => {
           const opt = document.createElement("option");
           opt.value = m.resource;
-          opt.textContent = (m.team_name || m.team_id) + " (" + m.team_id + ")";
-          teamSelect.appendChild(opt);
+          opt.textContent = (m.org_name || m.org_id) + " (" + m.org_id + ")";
+          orgSelect.appendChild(opt);
         });
-        teamSelect.style.display = "block";
+        orgSelect.style.display = "block";
         document.getElementById("resource-line").textContent =
-            "Tortoise MCP — choose the team this connection will use";
+            "Tortoise MCP — choose the org this connection will use";
         disableAuthorize();
-      } else if (preview.team_id) {
-        // single / sole-active-team auto-bind — the page renders EXACTLY as
-        // before R1 (byte-identical single-team contract): the resource line
+      } else if (preview.org_id) {
+        // single / sole-active-org auto-bind — the page renders EXACTLY as
+        // before R1 (byte-identical single-org contract): the resource line
         // shows the client-declared value (or the pre-R1 default), never the
-        // resolved team URL
+        // resolved org URL
         document.getElementById("resource-line").textContent =
-            PARAMS.resource || "default (sole team)";
-        document.getElementById("team-line").textContent =
-            (preview.team_name || preview.team_id) + " (" + preview.team_id + ")";
+            PARAMS.resource || "default (sole org)";
+        document.getElementById("org-line").textContent =
+            (preview.org_name || preview.org_id) + " (" + preview.org_id + ")";
         enableAuthorize();
       } else {
         disableAuthorize();
-        showError("No usable team for this account.");
+        showError("No usable org for this account.");
       }
       return "ok";
     } catch (e) {
@@ -1412,7 +2102,7 @@ _CONSENT_HTML = """<!DOCTYPE html>
   async function runConsentFlow() {
     if (previewInFlight) return;   // concurrent guard (spans the refresh too)
     previewInFlight = true;
-    teamResource = null;           // never carry a stale selection between runs
+    orgResource = null;           // never carry a stale selection between runs
     staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
     disableAuthorize();
     let result;
@@ -1458,15 +2148,15 @@ _CONSENT_HTML = """<!DOCTYPE html>
     runConsentFlow();
   };
 
-  const teamSelectEl = document.getElementById("team-select");
-  teamSelectEl.onchange = function () {
-    teamResource = teamSelectEl.value;
-    if (teamResource) enableAuthorize(); else disableAuthorize();
+  const orgSelectEl = document.getElementById("org-select");
+  orgSelectEl.onchange = function () {
+    orgResource = orgSelectEl.value;
+    if (orgResource) enableAuthorize(); else disableAuthorize();
   };
 
   document.getElementById("btn-auth").onclick = async () => {
     hideError(); spinner(true);
-    if (authBtn().disabled) { spinner(false); showError("Resolving your team… retry in a moment."); return; }
+    if (authBtn().disabled) { spinner(false); showError("Resolving your org… retry in a moment."); return; }
     const { data } = await supabaseClient.auth.getSession();
     if (!data.session) { spinner(false); showSignin(); return; }
     const doPost = async (accessToken) => fetch("/oauth/consent", {
@@ -1483,7 +2173,7 @@ _CONSENT_HTML = """<!DOCTYPE html>
         code_challenge_method: PARAMS.code_challenge_method,
         state: PARAMS.state,
         scope: PARAMS.scope,
-        resource: teamResource || PARAMS.resource || null,
+        resource: orgResource || PARAMS.resource || null,
       }),
     });
     try {
@@ -1570,3 +2260,84 @@ def consent_page_html(*, client_name: str, scope: str | None,
         .replace("__SUPABASE_ANON_KEY__", _json_for_script(supabase_anon_key)) \
         .replace("__NONCE__", nonce)
     return html, nonce
+
+
+# ── Retention / GC (issue #3036) ────────────────────────────────────────────
+
+def sweep_oauth_retention(cp, *, now: datetime | None = None) -> dict[str, int]:
+    """Hard-delete dead OAuth rows past their retention grace (issue #3036).
+
+    GC for the three token tables 0016 introduced with no TTL sweep. A row is
+    dead once its own ``expires_at`` is in the past (a redeemed or unredeemed
+    code, an expired or revoked access/refresh token); it is then kept for a
+    short forensic grace (``OAUTH_*_RETENTION_S``) before this sweep removes
+    it. Those windows are credential hygiene — a different axis from the
+    user-content deletion promise (``docs/retention-and-deletion.md``).
+
+    Delete order: access rows first, then refresh rows, then codes. That order
+    matters because ``refresh_grant`` DOES dereference the relationship (it
+    looks up the live access row by ``refresh_token_id`` to revoke it): an
+    access row is reaped before any refresh row it points at, so the
+    ``ON DELETE SET NULL`` action added by migration 20260925000001 is a safety
+    net for an out-of-band / manual delete, not this path.
+
+    The invariant that makes the order sufficient is ``ACCESS_TOKEN_TTL_S +
+    access window <= REFRESH_TOKEN_TTL_S + refresh window``. It HOLDS for the
+    shipped defaults; it is NOT enforced, so an operator override that inverts
+    the two TTLs relative to the two windows can leave a LIVE access row
+    pointing at a reap-eligible refresh row, and this sweep then NULLs that
+    back-link via the FK. That is a PROVENANCE loss, not a revocation gap: no
+    read path treats a NULL pointer as a live grant (``refresh_grant``
+    resolves the refresh row by hash first and only then dereferences; the
+    rotation path cannot run once the parent row is gone), and the access
+    token still carries its own ``expires_at``/``revoked_at`` check.
+
+    Each table is swept INDEPENDENTLY: a failure on one table is recorded and
+    the other two are still attempted, so a persistent query fault cannot
+    starve GC for the healthy tables. If any table failed, a RuntimeError is
+    raised AFTER the loop (fail-closed); every table already swept committed,
+    and the un-swept rows keep their past ``expires_at`` so the next cycle
+    retries them.
+
+    Returns, per table, the number of rows OBSERVED as eligible at sweep time.
+    It is a best-effort count, not an exact delete count: the eligibility read
+    is a separate PostgREST request (capped by the project's max-rows) and the
+    DELETE is a second request, so a full read page makes the number a lower
+    bound. Idempotent: a re-run finds nothing and deletes nothing.
+    """
+    now_dt = now or _now()
+
+    def _cutoff(seconds: int) -> str:
+        # Defensive floor: a cutoff of `now` only matches rows already expired.
+        return (now_dt - timedelta(seconds=max(0, int(seconds)))).isoformat()
+
+    plan = (
+        ("oauth_access_tokens", "TORTOISE_OAUTH_ACCESS_RETENTION_S",
+         OAUTH_ACCESS_RETENTION_S),
+        ("oauth_refresh_tokens", "TORTOISE_OAUTH_REFRESH_RETENTION_S",
+         OAUTH_REFRESH_RETENTION_S),
+        ("oauth_codes", "TORTOISE_OAUTH_CODE_RETENTION_S",
+         OAUTH_CODE_RETENTION_S),
+    )
+    observed: dict[str, int] = {}
+    failures: dict[str, str] = {}
+    for table, env_name, default in plan:
+        observed[table] = 0
+        try:
+            cutoff = _cutoff(_retention_seconds(env_name, default))
+            doomed = cp.query(table, select=["id"],
+                              filters=[("expires_at", "lt", cutoff)])
+            if not doomed:
+                continue
+            cp.query(table, method="DELETE",
+                     filters=[("expires_at", "lt", cutoff)])
+            observed[table] = len(doomed)
+        except Exception as exc:  # per-table isolation — sweep the rest
+            failures[table] = str(exc)
+            logger.warning("oauth: retention sweep failed for %s: %s",
+                           table, exc)
+    if failures:
+        raise RuntimeError(
+            "oauth retention sweep failed for "
+            + ", ".join(f"{t}: {failures[t][:200]}" for t in sorted(failures)))
+    return observed

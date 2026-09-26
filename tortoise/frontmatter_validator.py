@@ -6,8 +6,9 @@ The index/ingest pipeline's identity and metadata logic (``file_indexer``
 frontmatter fields per template:
 
   - **session template** — ``sessionId``, ``topics``, ``summary``, ``eventId``,
-    ``doc_status``, ``agent``, ``message_count``
-  - **document template** (corpus files) — ``title``, ``doc_status``,
+    ``agent``, ``message_count``
+  - **document template** (corpus files) — ``title`` (and the retired
+    ``doc_status`` removed by D10, ONTOLOGY v3.15 §4.4),
     ``topics``, ``summary``, ``sessionId``
 
 This module ADDS an *optional* quality gate on top of the tolerant parser:
@@ -33,14 +34,17 @@ Design invariants:
     degraded dict (all required fields missing).
   - Nothing here ever raises or blocks a write — ``validate_and_warn`` is the
     only call-site surface used by the channels and it logs WARNINGs only.
-  - The env-gate seam mirrors ``TORTOISE_SESSION_LLM_MOCK``
-    (``os.environ.get(...).strip().lower() == "1"``) — set ``1`` to enable.
+  - The env-gate seam resolves ``TORTOISE_VALIDATE_FRONTMATTER`` through the
+    declared truthy contract (``tortoise/env_truthy.py``): ``1``/``true``/``yes``/
+    ``on`` in any case enable it; unset/blank/garbage leaves it OFF.
 """
 from __future__ import annotations
 
 import logging
 import os
 from typing import Any
+
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 logger = logging.getLogger("tortoise.frontmatter_validator")
 
@@ -57,15 +61,14 @@ SESSION_REQUIRED_FIELDS: tuple[str, ...] = (
     "topics",
     "summary",
     "eventId",
-    "doc_status",
     "agent",
     "message_count",
 )
 
 # Document template — the fields the corpus (document) path consumes.
+# D10 (ONTOLOGY v3.15 §4.4): `doc_status` is retired and is no longer required.
 DOCUMENT_REQUIRED_FIELDS: tuple[str, ...] = (
     "title",
-    "doc_status",
     "topics",
     "summary",
     "sessionId",
@@ -82,19 +85,20 @@ CAPTURE_REQUIRED_FIELDS: tuple[str, ...] = (
 # Fields whose only check is "a non-empty string" (beyond presence).
 # ``session_id`` is the hosted-capture synthetic identity field (#1362).
 _STRING_FIELDS = frozenset(
-    {"sessionId", "eventId", "summary", "doc_status", "agent", "title",
+    {"sessionId", "eventId", "summary", "agent", "title",
      "session_id"}
 )
 
 
 def validation_enabled() -> bool:
-    """True when ``TORTOISE_VALIDATE_FRONTMATTER`` is set to ``1``.
+    """True when ``TORTOISE_VALIDATE_FRONTMATTER`` is set to a truthy spelling.
 
-    Default OFF. The seam mirrors the ``TORTOISE_SESSION_LLM_MOCK`` test-seam
-    pattern (``os.environ.get(...).strip().lower() == "1"``) so the two gates
-    behave identically under CI/test environments.
+    Default OFF. #4097: resolved through the declared truthy contract, so ``1``,
+    ``true``/``yes``/``on`` in any case (and with surrounding whitespace) all
+    enable it — previously only the exact string ``"1"`` did, so every other
+    spelling silently did nothing.
     """
-    return os.environ.get(TORTOISE_VALIDATE_FRONTMATTER, "").strip().lower() == "1"
+    return is_truthy(os.environ.get(TORTOISE_VALIDATE_FRONTMATTER))
 
 
 def _missing(value: Any) -> bool:

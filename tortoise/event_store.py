@@ -1,14 +1,14 @@
-"""Durable per-tenant event store — `:GraphEvent` nodes in the team's graph.
+"""Durable per-tenant event store — `:GraphEvent` nodes in the org's graph.
 
 #432 (subscriptions + claim lifecycle): the SDK emit hook writes graph-change
-events here. The graph namespace IS the team partition — there is NO `team_id`
+events here. The graph namespace IS the org partition — there is NO `org_id`
 property (plan-review P2): the SDK writes into its own graph, and REST/MCP
 isolation comes from the namespace (server-derived, never client-supplied).
 
 Schema (idempotent; mirror sdk.py `_ensure_registry_indexes` pattern):
 - exact-match index on `event_id` FIRST, then a unique constraint
   (FalkorDB requires the index before the constraint)
-- plain index on `seq` (per-graph = per-team cursor reads)
+- plain index on `seq` (per-graph = per-org cursor reads)
 
 Delivery: at-least-once. `append_event` catches a unique-constraint violation
 on `event_id` (duplicate append) → logs and skips (never crashes the
@@ -157,7 +157,7 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
 def purge_expired(proj, retention_days: int = 30) -> int:
     """Delete :GraphEvent nodes older than `retention_days` (ISO8601 ts cutoff).
 
-    Per-graph = per-team — no team_id filter (plan-review P2). Idempotent.
+    Per-graph = per-org — no org_id filter (plan-review P2). Idempotent.
     Returns the number of deleted nodes.
     """
     from datetime import timedelta
@@ -174,7 +174,7 @@ def purge_expired(proj, retention_days: int = 30) -> int:
 
 
 def purge_overflow(proj, max_events: int) -> int:
-    """Enforce a per-team size cap: delete the OLDEST events over `max_events`.
+    """Enforce a per-org size cap: delete the OLDEST events over `max_events`.
 
     Returns the number of deleted nodes.
     """

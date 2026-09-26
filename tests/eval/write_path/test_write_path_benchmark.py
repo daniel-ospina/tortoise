@@ -45,7 +45,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-from tests.eval.write_path import corpus, runner, schema  # noqa: E402
+from tests.eval.write_path import corpus, generate_corpus, runner, schema  # noqa: E402
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL  # noqa: E402
 
 # Module wall-clock cap.  #2514 extended the corpus from 5 to 7 sessions
@@ -143,11 +143,28 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert report["metrics"]["salient_unit_survival_macro"] <= 1.0
     assert report["metrics"]["provenance_accuracy"] == 1.0
     # #2514 operator-edge audit: the echo lane structurally writes no operator
-    # edges — the planted 4 are graded 0 edge_correct (audit dimension on the
-    # completed run; the operator bar is a product-lane bar, see scoping note).
-    assert report["operator_audit"]["planted"] == 4
-    assert report["operator_audit"]["edge_correct"] == 0
-    assert 1 <= report["operator_audit"]["content_ok"] <= 4
+    # edges — the planted edges are graded by the cue-word relation stage, so
+    # only a few match (the audit dimension on the completed run; the operator
+    # bar is a product-lane bar, see scoping note).
+    #
+    # Pinned to the corpus FLOOR (a LOWER BOUND, so `>=`) AND tied to the
+    # gold-derived ACTUAL count. Two different jobs, and neither is a literal,
+    # so growing the corpus reddens nothing:
+    #   * `>=` catches a total that drops BELOW the floor. The equality cannot
+    #     (both sides read the same gold content, so they shrink together).
+    #   * `== corpus.planted_operator_count()` catches an AUDIT that stops
+    #     covering the corpus — the grader counts only the sessions the runner
+    #     selected and collapses duplicate ids, while this count iterates the
+    #     corpus itself. The floor cannot catch that.
+    # NEITHER catches a within-floor shrink of the committed gold; that is
+    # ``validate_committed``'s per-kind-floor job.
+    assert report["operator_audit"]["planted"] >= \
+        generate_corpus.MIN_PLANTED_OPERATOR_EDGES
+    assert report["operator_audit"]["planted"] == corpus.planted_operator_count()
+    assert report["operator_audit"]["edge_correct"] < \
+        report["operator_audit"]["planted"]
+    assert 1 <= report["operator_audit"]["content_ok"] <= \
+        report["operator_audit"]["planted"]
     # Every session contributed a graded gold + memory points + control 1.0.
     seen_sessions = {r["session_id"] for r in report["session_results"]}
     assert seen_sessions == set(corpus.session_ids())
@@ -161,7 +178,14 @@ def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     assert runner.validate_receipt(receipt) == []
     assert receipt["judge_pin"] == JUDGE_PIN_MECHANICAL
     assert receipt["corpus_hash"] == corpus.compute_fixtures_hash()
-    assert receipt["operator_audit"]["planted"] == 4
+    # The receipt must CARRY the audit (it is the publish artifact).
+    # ``build_receipt`` REBUILDS an explicit projection rather than copying the
+    # report's block, so this equality is a real cross-object check — a
+    # projection that drops or substitutes the key fails here. Pinned to the
+    # gold-derived count (an independent source), never to the report's own
+    # field and never to a literal.
+    assert "operator_audit" in receipt
+    assert receipt["operator_audit"]["planted"] == corpus.planted_operator_count()
 
 
 def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_path):
@@ -293,3 +317,128 @@ def test_bpre_lane_config_mismatch_is_inconclusive(sdk_factory, tmp_path):
         run_fixtures_hash=drifted_hash,
     )
     assert verdict2 == schema.VERDICT_INCONCLUSIVE
+
+
+def test_capture_session_fails_over_on_403_key_limit(monkeypatch, tmp_path):
+    """#4860 requirement 4 — end-to-end reachability of the rotation.
+
+    The sealed measurement path is ``runner.run_benchmark`` →
+    ``sdk.capture_session`` (runner.py calls it directly for every session)
+    → the v2 provider chain (``_extract_session_v2`` → ``_model_adapter`` →
+    ``build_extractor_model``). This drives that EXACT capture call with the
+    REAL 3-provider ``RotatingModel`` and the REAL
+    ``requests.Response.raise_for_status()`` body path, and proves the run
+    survives an exhausted-provider 403: ``openrouter`` is the exhausted leg
+    (exactly issue #4860's configured chain — deepseek-direct funded,
+    openrouter spent), the capture returns ``ok=True`` on a live leg, and no
+    fatal error is recorded. On the pre-fix code the 403 was unconditionally
+    FATAL and this capture aborted (``ok=False``)."""
+    import itertools
+
+    import requests
+
+    import tortoise.model_adapters as ma
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    for key in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "VENICE_API_KEY"):
+        monkeypatch.setenv(key, "test-key")
+
+    or_key_limit = json.dumps({"error": {
+        "message": "Key limit exceeded (monthly limit).",
+        "code": 403}})
+    s1_story = "The session revealed a durable strategy decision."
+    s2_json = ('{"entities": [], "events": [], "operators": [], '
+               '"points": [{"content": "the new strategy is durable", '
+               '"pointKind": "statement", '
+               '"quote": "the new strategy is durable", "tier": "A"}]}')
+    s4_json = ('{"entities": [], "events": [], "operators": [], "points": [], '
+               '"retractions": [], "link_before_create": [], '
+               '"chain_notes": []}')
+    calls = {"venice": 0, "openrouter": 0, "deepseek": 0}
+
+    def _resp(url, body=None):
+        r = requests.Response()
+        r.url = url
+        r.encoding = "utf-8"
+        if body is not None:
+            r.status_code = 403
+            r._content = body.encode("utf-8")
+        else:
+            r.status_code = 200
+            r._content = json.dumps({
+                "choices": [{"message": {"content": "unused"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+            }).encode("utf-8")
+        r.request = requests.Request("POST", url).prepare()
+        return r
+
+    def _fake_post(session, url, *args, **kwargs):
+        if "api.venice.ai" in url:
+            calls["venice"] += 1
+        elif "openrouter.ai" in url:
+            calls["openrouter"] += 1
+        elif "api.deepseek.com" in url:
+            calls["deepseek"] += 1
+        else:  # pragma: no cover — no other host is expected
+            raise AssertionError(f"unexpected provider URL {url!r}")
+        if "openrouter.ai" in url:
+            return _resp(url, body=or_key_limit)
+        system = ""
+        messages = (kwargs.get("json") or {}).get("messages") or []
+        if messages:
+            system = messages[0].get("content", "")
+        if "STORY SUMMARIZER" in system:
+            content = s1_story
+        elif "GRAPH MAPPER" in system:
+            content = s2_json
+        elif "GAP REVIEWER" in system:
+            content = s4_json
+        else:
+            content = s2_json
+        resp = _resp(url)
+        resp._content = json.dumps({
+            "choices": [{"message": {"content": content},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+        }).encode("utf-8")
+        return resp
+
+    monkeypatch.setattr(requests.sessions.Session, "post", _fake_post)
+
+    # Deterministic rotation: try the exhausted openrouter leg FIRST on every
+    # pick, then a healthy leg — the rotation policy is the subject here, not
+    # the weighted round-robin RNG.
+    pick_seq = itertools.cycle(["openrouter", "venice", "deepseek-direct"])
+
+    def _forced_pick(self):
+        target = next(pick_seq)
+        names = [p.provider for p in self.providers]
+        return names.index(target) if target in names else 0
+
+    monkeypatch.setattr(ma.RotatingModel, "_pick", _forced_pick)
+
+    db = tmp_path / "keylimit_capture.db"
+    sdk = TortoiseSDK(db_path=str(db), namespace=f"test_403kl_{uuid.uuid4().hex[:8]}")
+    try:
+        capture = sdk.capture_session(
+            [{"role": "user", "content": "we decided X"},
+             {"role": "assistant", "content": "the plan is durable"}],
+            session_id="wp_kl_403", harness="pi",
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    assert calls["openrouter"] == 1, (
+        "the exhausted leg must be hit exactly once and then cooldowned")
+    assert calls["venice"] >= 1, "rotation must reach a live configured leg"
+    assert capture.get("ok") is True, capture.get("errors")
+    assert capture.get("errors") == []
+    assert capture.get("extraction_provider") == "venice"
+    assert capture.get("extraction_mode") == "llm:venice"

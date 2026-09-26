@@ -54,6 +54,11 @@ on:
       - 'tortoise/**'
       - 'packs/**'          # #1929: pack content changes must redeploy (G1 gate)
       - 'tests/sample_transcript.txt'  # #1929: the image copies it (mine-conversation example)
+      - 'product/pricing.json'        # #4246: Dockerfile.hosted COPYs it and tortoise/pricing.py
+                                      # reads it at /app/product/pricing.json — without this a
+                                      # pricing-only change never redeployed the hosted image,
+                                      # so prod kept serving the previous pricing while the
+                                      # required pricing-artifact check stayed green.
       - 'fly.toml'
       - 'Dockerfile.hosted'
       - 'entrypoint.sh'
@@ -62,24 +67,60 @@ on:
       - 'uv.lock'
   workflow_dispatch:
     inputs:
-      # #1719 (Task 7): DB-health gate bypass for incident-fix deploys.
-      # Defaults TRUE during the incident window (RC3 FalkorDB restore is
-      # in flight — db.ok=false is the CURRENT prod state, and a hard gate
-      # would block the very fix that restores it). Flip to false once the
-      # data plane is healthy so the gate guards every deploy again.
+      # ══ #4759 — the bypass convention for ALL FOUR skip-* inputs below ══════
+      # Each bypassable deploy gate has TWO lanes: this dispatch input (per run)
+      # and a `SKIP_*` repo variable (persistent — the ONLY lane on a push run,
+      # where the `inputs` context is null).
+      #
+      #   input                       repo variable                  gate
+      #   skip-db-health-gate         SKIP_DB_HEALTH_GATE            DB health verification
+      #   skip-pack-smoke             SKIP_PACK_SMOKE                pack-catalog smoke
+      #   skip-fly-machines-guard     SKIP_FLY_MACHINES_GUARD        Fly machine guard
+      #   skip-fly-secret-provenance  SKIP_FLY_SECRET_PROVENANCE     Fly secret provenance
+      #
+      # Every bypass renders through ONE reporter (.github/scripts/deploy-bypass.sh
+      # `report`), so the four cannot be reported differently: it keeps the
+      # `::warning::` AND appends a uniform block to `$GITHUB_STEP_SUMMARY` naming
+      # the gate, the lane that fired, and BYPASSED. Each deploy job ends with a
+      # `Deploy gate audit` step (`if: always()`) stating every gate in that job
+      # as bypassed or not — so a green run cannot be read as "every gate passed"
+      # while one was skipped.
+      #
+      # THE WINDOW IS MACHINE-CHECKED. A persistent bypass also sets a dated
+      # companion variable `SKIP_<VAR>_SET_AT` (YYYY-MM-DD, UTC). The scheduled
+      # workflow `skip-bypass-expiry` (daily) ages every set lane and goes RED
+      # past `WINDOW_DAYS` (default 7, in deploy-bypass.sh) or when the date is
+      # missing/invalid — and the deploy-time report calls the same state OVERDUE
+      # in the run summary. A bypass can therefore no longer be left set
+      # silently. docs/infra-runbook.md §8.2.
+      #
+      # Defaults FALSE — re-armed by #4605 (2026-09-22, UTC). This input was
+      # 'true' ONLY as the RC3 FalkorDB-restore mitigation, a dated
+      # incident-window state with its own exit condition ("flip to false once
+      # the data plane is healthy"). That condition was evaluated and MET:
+      # sampling https://api.premiselabs.co/health on 2026-09-22 returned
+      # db.ok=true on every completed response (db latency 2.4-713.7 ms
+      # against the 1500 ms probe budget) with /health/ready 200
+      # {"db":"connected","control_plane":"connected"}, so fail-closed
+      # verification no longer reddens a healthy deploy. DO NOT "restore" the
+      # incident-window default: bypass per run with this input, or per window
+      # with the SKIP_DB_HEALTH_GATE repo variable (docs/infra-runbook.md
+      # §8.2).
+      # Since #4538 it reports release health in its own job
+      # (`post-deploy-verify`) and does not colour the deploy job.
       # Emits a ::warning:: when bypassed (auditability — never silently
       # skipped).
       skip-db-health-gate:
-        description: 'Skip the post-deploy DB health gate (incident-fix deploys)'
+        description: 'Skip the post-deploy DB health verification (incident-fix deploys)'
         required: false
-        default: 'true'
+        default: 'false'
         type: boolean
       # #1929: incident-fix deploys must not be blocked by a packaging-gate
       # flake (the smoke builds Dockerfile.hosted locally, incl. the HF
       # model bake). Mirrors skip-db-health-gate; a skipped gate emits a
       # warning — never silent. Incident-window convention: set
       # vars.SKIP_PACK_SMOKE=true during packaging incidents, clear it after
-      # (same runbook as SKIP_DB_HEALTH_GATE).
+      # (docs/infra-runbook.md §8 — the SKIP_* bypass convention).
       skip-pack-smoke:
         description: 'Skip the pack-catalog smoke (incident-fix deploys)'
         required: false
@@ -93,9 +134,24 @@ on:
       # incident-fix deploys; exit-2 (could-not-determine: API error, shape
       # drift) can NEVER be bypassed. Incident-window convention: set
       # vars.SKIP_FLY_MACHINES_GUARD=true during incidents, CLEAR IT AFTER
-      # (same runbook as SKIP_DB_HEALTH_GATE).
+      # (docs/infra-runbook.md §8 — the SKIP_* bypass convention).
       skip-fly-machines-guard:
         description: 'Skip the Fly machine fleet guard (incident-fix deploys)'
+        required: false
+        default: 'false'
+        type: boolean
+
+      # #4126: an incident-time fix may require hand-setting a secret on Fly,
+      # which is by definition an UNDECLARED name and would otherwise hard-block
+      # the very deploy that fixes the incident. Mirrors skip-fly-machines-guard:
+      # the skip translates ONLY exit-1 (undeclared / stale declarations) and
+      # emits a warning — never silent. Exit-2 (missing or empty secret list,
+      # unparsable manifest) can NEVER be bypassed. Convention: set
+      # vars.SKIP_FLY_SECRET_PROVENANCE=true during the incident, CLEAR IT AFTER,
+      # and declare the secret in .github/scripts/fly-managed-secrets.txt
+      # (docs/infra-runbook.md §8.1 — the provenance gate).
+      skip-fly-secret-provenance:
+        description: 'Skip the Fly secret provenance guard (incident-fix deploys)'
         required: false
         default: 'false'
         type: boolean
@@ -162,13 +218,36 @@ jobs:
     # the run red.
     if: ${{ needs.packaging-smoke.result == 'success' || needs.packaging-smoke.result == 'skipped' }}
     steps:
-      - name: Warn when pack smoke bypassed (#1929)
-        # Auditability — a bypassed pack gate must never be silent (mirrors
-        # the skip-db-health-gate warning convention below).
-        if: ${{ inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true' }}
-        run: |
-          echo "::warning::pack-catalog smoke BYPASSED (skip-pack-smoke) — the hosted image ships without a pack gate"
+      # checkout FIRST (#4759). The bypass report below runs the shared reporter,
+      # which lives in the repo, so it needs the checkout. Nothing is lost by the
+      # reorder: the end-of-job `Deploy gate audit` step (`if: always()`) derives
+      # this gate's bypass from its LANE, so it still reports the skip even if an
+      # earlier step in this job fails.
       - uses: actions/checkout@v4
+      - name: Bypass report — pack smoke (#1929, #4759)
+        # Auditability — a bypassed pack gate must never be silent. #4759 made
+        # this UNIFORM across all four gates and moved it into the run SUMMARY:
+        # the ::warning:: is preserved, and the block the reporter appends below
+        # states the gate, the lane that fired, and BYPASSED — so a reader of the
+        # summary can tell "gate passed" from "gate skipped" without opening a
+        # step log. The window start (`SKIP_PACK_SMOKE_SET_AT`) is read too: a
+        # bypass left set past the window is called out OVERDUE.
+        if: ${{ inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true' }}
+        env:
+          # #4334 discipline: the values are bound in env and read as QUOTED
+          # shell variables — never interpolated into the run text, where a
+          # value's quotes/`$(…)` would be parsed as shell syntax.
+          BYPASS_INPUT_FIRED: ${{ inputs.skip-pack-smoke || false }}
+          BYPASS_VARIABLE_FIRED: ${{ vars.SKIP_PACK_SMOKE == 'true' }}
+          SKIP_PACK_SMOKE_SET_AT: ${{ vars.SKIP_PACK_SMOKE_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+        run: |
+          bash .github/scripts/deploy-bypass.sh report \
+            --key SKIP_PACK_SMOKE \
+            --input-fired "$BYPASS_INPUT_FIRED" \
+            --variable-fired "$BYPASS_VARIABLE_FIRED" \
+            --set-at "$SKIP_PACK_SMOKE_SET_AT" \
+            --effect "the hosted image ships without a pack gate (the whole packaging-smoke job is skipped)"
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: '3.12'
@@ -188,16 +267,41 @@ jobs:
           diff -u /tmp/committed-reqs.txt /tmp/expected-reqs.txt
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
+        # #4334: every secret is bound in `env:` and referenced as a QUOTED
+        # shell variable. `${{ secrets.X }}` must never appear in a `run:`
+        # body — GitHub substitutes it into the shell SOURCE before bash
+        # parses it, so a value containing `"` loses its quotes (the
+        # STRIPE_PRICE_IDS outage) and one containing `$(…)`/backticks would
+        # EXECUTE. An expanded variable's contents are data, never re-parsed.
+        env:
+          FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+          TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
+          FALKORDB_CLOUD_URI: ${{ secrets.FALKORDB_CLOUD_URI }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           # Core secrets are mandatory — the API cannot boot without them.
-          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_CLOUD_URI }}" ]; then
+          if [ -z "$FASTAPI_INTERNAL_KEY" ] || [ -z "$TORTOISE_SECRET_PEPPER" ] || [ -z "$FALKORDB_CLOUD_URI" ]; then
             echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
           # Supabase migration drift gate (#1095): SUPABASE_ACCESS_TOKEN is
           # hard-required — the gate is fail-closed, a missing token must fail
           # the deploy, never silently skip the schema check.
-          if [ -z "${{ secrets.SUPABASE_ACCESS_TOKEN }}" ]; then
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
             echo "::error::SUPABASE_ACCESS_TOKEN must be set in GitHub secrets (migration drift gate, #1095)"
             exit 1
           fi
@@ -205,7 +309,7 @@ jobs:
           # guard stays ARMED even when skipped by skip-fly-machines-guard —
           # a missing token must fail the deploy, never silently disarm the
           # fleet check.
-          if [ -z "${{ secrets.FLY_API_TOKEN }}" ]; then
+          if [ -z "$FLY_API_TOKEN" ]; then
             echo "::error::FLY_API_TOKEN must be set in GitHub secrets (Fly machine guard, #1896)"
             exit 1
           fi
@@ -213,52 +317,211 @@ jobs:
           # never ships with billing silently dead. STRIPE_PRICE_IDS / Resend /
           # BILLING_* are warn-only — they degrade lazily at runtime (billing
           # endpoints 503, notifications skipped) until configured.
-          if [ -z "${{ secrets.STRIPE_SECRET_KEY }}" ] || [ -z "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ]; then
+          if [ -z "$STRIPE_SECRET_KEY" ] || [ -z "$STRIPE_WEBHOOK_SECRET" ]; then
             echo "::error::STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set in GitHub secrets"
             exit 1
           fi
-          # Session capture LLM provider (#1197, #1346): POST /v1/sessions
-          # fails closed (503) with no provider key — the regex extraction loop
-          # was removed (#822). Session capture is an OPTIONAL feature that
-          # degrades gracefully server-side (explicit 503, API boots fine):
+          # Session capture LLM provider (#1197, #1346): with no provider key
+          # POST /v1/sessions still STORES each capture, but never extracts it
+          # into memory points — the regex extraction loop was removed (#822)
+          # and #3892 made storage unconditional. Extraction is an OPTIONAL
+          # feature that degrades gracefully server-side (the API boots fine
+          # and the receipt says "no-provider"):
           # missing keys must NOT block deploys of the rest of the API (a
           # fail-closed gate here held ALL deploys for 2+ days, shipping stale
           # code to prod). Warn-only, matching the STRIPE_PRICE_IDS / Resend /
           # backup (#545) optional-secret pattern — when a key is added to GH
           # secrets the secrets-set step below propagates it to Fly on the
           # next deploy.
-          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ] && \
-             [ -z "${{ secrets.DEEPSEEK_API_KEY }}" ] && \
-             [ -z "${{ secrets.OPENAI_API_KEY }}" ] && \
-             [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
-            echo "::warning::No LLM provider key set — POST /v1/sessions fails closed (503) until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
+          if [ -z "$OPENROUTER_API_KEY" ] && \
+             [ -z "$DEEPSEEK_API_KEY" ] && \
+             [ -z "$OPENAI_API_KEY" ] && \
+             [ -z "$GEMINI_API_KEY" ]; then
+            echo "::warning::No LLM provider key set — POST /v1/sessions stores captures but skips LLM extraction into memory until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
           fi
-          if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then
+          if [ -z "$STRIPE_PRICE_IDS" ]; then
             echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
           fi
-          if [ -z "${{ secrets.RESEND_API_KEY }}" ] || [ -z "${{ secrets.BILLING_NOTIFY_TO }}" ]; then
+          if [ -z "$RESEND_API_KEY" ] || [ -z "$BILLING_NOTIFY_TO" ]; then
             echo "::warning::RESEND_API_KEY/BILLING_NOTIFY_TO not set — billing email notifications disabled until configured"
           fi
-          if [ -z "${{ secrets.RESEND_FROM_EMAIL }}" ]; then
+          if [ -z "$RESEND_FROM_EMAIL" ]; then
             echo "::warning::RESEND_FROM_EMAIL not set — transactional/billing sender falls back to noreply@premiselabs.co (#1136)"
           fi
           # Backup (TORTOISE_BACKUP_KEY + R2_*) is env-gated at runtime and
           # Pro-tier-only — missing secrets degrade gracefully (backup
           # endpoints 402/503), so warn instead of blocking the deploy (#545).
-          if [ -z "${{ secrets.TORTOISE_BACKUP_KEY }}" ]; then
+          if [ -z "$TORTOISE_BACKUP_KEY" ]; then
             echo "::warning::TORTOISE_BACKUP_KEY not set — backups disabled until configured"
           fi
-          if [ -z "${{ secrets.R2_ACCOUNT_ID }}" ] || [ -z "${{ secrets.R2_BUCKET }}" ]; then
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_BUCKET" ]; then
             echo "::warning::R2_* secrets not fully set — backup storage disabled until configured"
           fi
           # Session-capture LLM test seam (#1197): TORTOISE_SESSION_LLM_MOCK=1
-          # COUNTS as 'configured' for the 503 gate, but it lives on Fly's env
+          # COUNTS as 'configured' for the extraction gate, but it lives on Fly's env
           # (not GitHub secrets) so this gate CANNOT check it. A deploy with
           # MOCK set passes every gate here while captures write offline
           # MockModel points. Operator checklist: verify it is ABSENT on Fly
           # before/after each deploy (docs/infra-runbook.md §4.6 —
           # `fly secrets list -a tortoise-y4mjjq | grep TORTOISE_SESSION_LLM_MOCK`
           # must be empty).
+      # Fly secret provenance gate (#4126): fail-closed check that every secret
+      # on the app has a declared managing source. The 2026-09-19 incident:
+      # TORTOISE_SESSION_LLM_MODEL + OPENROUTER_API_KEY were hand-set on Fly
+      # with no managing source, the deployed key 403'd on every extraction
+      # call, and production answered 200 with extracted: 0 for 50/50 sessions
+      # — invisible to CI because a name no file mentions cannot be compared
+      # against anything. Runs BEFORE the drift gate so its output is visible on
+      # every deploy attempt, not only on a deploy that gets as far as Fly.
+      #
+      # Incident-fix bypass: skip-fly-secret-provenance input /
+      # SKIP_FLY_SECRET_PROVENANCE var (the same convention as
+      # skip-fly-machines-guard) — it translates ONLY exit-1 (undeclared/stale
+      # declarations, which is what an operator hand-setting a secret mid-
+      # incident produces). Exit-2 (missing/empty secret list, unparsable
+      # manifest) can never be bypassed and always blocks the deploy.
+      - name: Check Fly secret provenance (fail-closed)
+        run: |
+          # Which GitHub Actions secrets does THIS run actually carry? No CI token
+          # can list repository secrets, so the checker is told. A declared
+          # `gh-secret:X` whose X is missing from this list is a VIOLATION when the
+          # name is on Fly: the guarded propagation skips the assignment on every
+          # deploy, so Fly keeps a hand-managed value — the #4126 incident, where
+          # TORTOISE_SESSION_LLM_MODEL's GitHub secret never existed and the
+          # hand-set Fly value survived every deploy.
+          #
+          # NAMES only — no secret value is ever appended (and none is needed).
+          # A name MISSING from this list reads as ABSENT, so forgetting a line
+          # FAILS the deploy for that name instead of silently reopening the hole.
+          # Keep it in step with .github/scripts/fly-managed-secrets.txt: every
+          # `gh-secret:<NAME>` there needs its line here.
+          #
+          # #4334: each probe reads a variable bound in this step's `env:` —
+          # never an Actions secret template in the run text, where a value's
+          # `"` would be parsed as shell syntax (and `$(…)` executed).
+          GH_PRESENT=""
+          [ -n "$BACKUP_ALERT_ASSIGNEE" ] && GH_PRESENT="$GH_PRESENT BACKUP_ALERT_ASSIGNEE"
+          [ -n "$BACKUP_SIMULATE_ENABLED" ] && GH_PRESENT="$GH_PRESENT BACKUP_SIMULATE_ENABLED"
+          [ -n "$BILLING_CANCEL_URL" ] && GH_PRESENT="$GH_PRESENT BILLING_CANCEL_URL"
+          [ -n "$BILLING_FROM_EMAIL" ] && GH_PRESENT="$GH_PRESENT BILLING_FROM_EMAIL"
+          [ -n "$BILLING_NOTIFY_TO" ] && GH_PRESENT="$GH_PRESENT BILLING_NOTIFY_TO"
+          [ -n "$BILLING_SUCCESS_URL" ] && GH_PRESENT="$GH_PRESENT BILLING_SUCCESS_URL"
+          [ -n "$DEEPSEEK_API_KEY" ] && GH_PRESENT="$GH_PRESENT DEEPSEEK_API_KEY"
+          [ -n "$DR_ISSUES_PAT" ] && GH_PRESENT="$GH_PRESENT DR_ISSUES_PAT"
+          [ -n "$FALKORDB_CLOUD_URI" ] && GH_PRESENT="$GH_PRESENT FALKORDB_CLOUD_URI"
+          [ -n "$FASTAPI_INTERNAL_KEY" ] && GH_PRESENT="$GH_PRESENT FASTAPI_INTERNAL_KEY"
+          [ -n "$GEMINI_API_KEY" ] && GH_PRESENT="$GH_PRESENT GEMINI_API_KEY"
+          [ -n "$GH_CALLBACK_URL" ] && GH_PRESENT="$GH_PRESENT GH_CALLBACK_URL"
+          [ -n "$GH_CLIENT_ID" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_ID"
+          [ -n "$GH_CLIENT_SECRET" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_SECRET"
+          [ -n "$OPENAI_API_KEY" ] && GH_PRESENT="$GH_PRESENT OPENAI_API_KEY"
+          [ -n "$OPENROUTER_API_KEY" ] && GH_PRESENT="$GH_PRESENT OPENROUTER_API_KEY"
+          [ -n "$POSTHOG_API_KEY" ] && GH_PRESENT="$GH_PRESENT POSTHOG_API_KEY"
+          [ -n "$POSTHOG_HOST" ] && GH_PRESENT="$GH_PRESENT POSTHOG_HOST"
+          [ -n "$R2_ACCESS_KEY_ID" ] && GH_PRESENT="$GH_PRESENT R2_ACCESS_KEY_ID"
+          [ -n "$R2_ACCOUNT_ID" ] && GH_PRESENT="$GH_PRESENT R2_ACCOUNT_ID"
+          [ -n "$R2_BUCKET" ] && GH_PRESENT="$GH_PRESENT R2_BUCKET"
+          [ -n "$R2_SECRET_ACCESS_KEY" ] && GH_PRESENT="$GH_PRESENT R2_SECRET_ACCESS_KEY"
+          [ -n "$RESEND_API_KEY" ] && GH_PRESENT="$GH_PRESENT RESEND_API_KEY"
+          [ -n "$RESEND_FROM_EMAIL" ] && GH_PRESENT="$GH_PRESENT RESEND_FROM_EMAIL"
+          [ -n "$SENTRY_DSN" ] && GH_PRESENT="$GH_PRESENT SENTRY_DSN"
+          [ -n "$STRIPE_PRICE_IDS" ] && GH_PRESENT="$GH_PRESENT STRIPE_PRICE_IDS"
+          [ -n "$STRIPE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT STRIPE_SECRET_KEY"
+          [ -n "$STRIPE_WEBHOOK_SECRET" ] && GH_PRESENT="$GH_PRESENT STRIPE_WEBHOOK_SECRET"
+          [ -n "$SUPABASE_ANON_KEY" ] && GH_PRESENT="$GH_PRESENT SUPABASE_ANON_KEY"
+          [ -n "$SUPABASE_SERVICE_KEY" ] && GH_PRESENT="$GH_PRESENT SUPABASE_SERVICE_KEY"
+          [ -n "$SUPABASE_URL" ] && GH_PRESENT="$GH_PRESENT SUPABASE_URL"
+          [ -n "$TELEGRAM_BOT_TOKEN" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_BOT_TOKEN"
+          [ -n "$TELEGRAM_CHAT_ID" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_CHAT_ID"
+          [ -n "$TORTOISE_AUDIT_DSN" ] && GH_PRESENT="$GH_PRESENT TORTOISE_AUDIT_DSN"
+          [ -n "$TORTOISE_BACKUP_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY"
+          [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
+          [ -n "$TORTOISE_ENCRYPTION_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
+          [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && GH_PRESENT="$GH_PRESENT TORTOISE_LINK_INTENT_SECRET"
+          [ -n "$TORTOISE_SECRET_PEPPER" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
+          [ -n "$TURNSTILE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
+          export GH_SECRETS_PRESENT="$GH_PRESENT"
+          # The gate parses the workflow YAML (a step/job `if:` or an `env:` value is
+          # not part of the `run:` shell, so execution cannot see it and line
+          # positions are not a contract). PyYAML is a project dependency; the runner
+          # has uv but not the project env, so provision it explicitly. A provisioning
+          # failure is an exit-2-CLASS failure — never the bypassable exit 1 — so it
+          # is distinguished before the gate runs.
+          if ! uv run --no-project --with pyyaml python3 -c "import yaml" >/dev/null 2>&1; then
+            echo "::error::cannot provision PyYAML for the Fly secret provenance gate — deploy blocked. Provisioning failure is exit-2 class and can never be bypassed." >&2
+            exit 2
+          fi
+          set +e
+          uv run --no-project --with pyyaml python3 .github/scripts/check-fly-secret-drift.py
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$RC" -eq 2 ]; then
+            echo "::error::Fly secret provenance could not determine state (exit-2) — deploy blocked. Exit-2 can never be bypassed." >&2
+            exit 2
+          fi
+          if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-secret-provenance || vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}" = "true" ]; then
+            # #4759: uniform reporting — the ::warning:: plus a run-SUMMARY block
+            # (gate, lane, BYPASSED, window). Never silent was the old contract;
+            # visible-without-the-log is the new one.
+            bash .github/scripts/deploy-bypass.sh report \
+              --key SKIP_FLY_SECRET_PROVENANCE \
+              --input-fired "${{ inputs.skip-fly-secret-provenance || false }}" \
+              --variable-fired "${{ vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}" \
+              --set-at "$SKIP_FLY_SECRET_PROVENANCE_SET_AT" \
+              --effect "an undeclared or stale secret declaration will NOT block this deploy"
+            exit 0
+          fi
+          exit "$RC"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: tortoise-y4mjjq
+          # #4334: the GH_SECRETS_PRESENT probe reads these as shell variables.
+          BACKUP_ALERT_ASSIGNEE: ${{ secrets.BACKUP_ALERT_ASSIGNEE }}
+          BACKUP_SIMULATE_ENABLED: ${{ secrets.BACKUP_SIMULATE_ENABLED }}
+          BILLING_CANCEL_URL: ${{ secrets.BILLING_CANCEL_URL }}
+          BILLING_FROM_EMAIL: ${{ secrets.BILLING_FROM_EMAIL }}
+          BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
+          BILLING_SUCCESS_URL: ${{ secrets.BILLING_SUCCESS_URL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DR_ISSUES_PAT: ${{ secrets.DR_ISSUES_PAT }}
+          FALKORDB_CLOUD_URI: ${{ secrets.FALKORDB_CLOUD_URI }}
+          FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
+          GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
+          TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
+          TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
+          TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
+          TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
+          TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          # #4759: the bypass report's window start and its per-job audit marker.
+          SKIP_FLY_SECRET_PROVENANCE_SET_AT: ${{ vars.SKIP_FLY_SECRET_PROVENANCE_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
       # Migration drift gate (#1095): fail-closed check that repo migrations
       # are not ahead of prod before shipping app code. The #1001 P0 (code
       # reading teams.suspended_at/flagged_at whose migration never reached
@@ -296,72 +559,168 @@ jobs:
             exit 2
           fi
           if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
-            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (runbook: SKIP_DB_HEALTH_GATE)." >&2
+            # #4759: uniform reporting — the ::warning:: plus a run-SUMMARY block.
+            bash .github/scripts/deploy-bypass.sh report \
+              --key SKIP_FLY_MACHINES_GUARD \
+              --input-fired "${{ inputs.skip-fly-machines-guard || false }}" \
+              --variable-fired "${{ vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" \
+              --set-at "$SKIP_FLY_MACHINES_GUARD_SET_AT" \
+              --effect "orphan/crash-loop machines will NOT block this deploy"
             exit 0
           fi
           exit "$RC"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq
+          # #4759: the bypass report's window start and its per-job audit marker.
+          SKIP_FLY_MACHINES_GUARD_SET_AT: ${{ vars.SKIP_FLY_MACHINES_GUARD_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
+        # #4334: every secret is bound in `env:` and referenced as a QUOTED
+        # shell variable; the flyctl argv is a bash ARRAY (`"${ARGS[@]}"`).
+        # Never interpolate `${{ secrets.X }}` into the run text: GitHub
+        # substitutes it into the shell SOURCE before bash parses it, so a
+        # JSON value's `"` characters were read as quote toggles and REMOVED
+        # (the valid 573-char STRIPE_PRICE_IDS catalog reached Fly as a 501-char,
+        # zero-quote string → PriceCatalog() raised BillingConfigError →
+        # checkout_price_ids {} → checkout dead in prod), and a value
+        # containing `$(…)`/backticks would have EXECUTED. An expanded
+        # variable's contents are data, never re-parsed. The same anti-pattern
+        # remains in other workflows (blog-write-e2e, deploy-pages,
+        # attach-tortoise-domain, e2e-live-reconcile) — tracked in #4361.
+        env:
+          FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+          TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
+          FALKORDB_CLOUD_URI: ${{ secrets.FALKORDB_CLOUD_URI }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          BILLING_FROM_EMAIL: ${{ secrets.BILLING_FROM_EMAIL }}
+          BILLING_SUCCESS_URL: ${{ secrets.BILLING_SUCCESS_URL }}
+          BILLING_CANCEL_URL: ${{ secrets.BILLING_CANCEL_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TORTOISE_SESSION_LLM_MODEL: ${{ secrets.TORTOISE_SESSION_LLM_MODEL }}
+          TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
+          TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DR_ISSUES_PAT: ${{ secrets.DR_ISSUES_PAT }}
+          BACKUP_ALERT_ASSIGNEE: ${{ secrets.BACKUP_ALERT_ASSIGNEE }}
+          BACKUP_SIMULATE_ENABLED: ${{ secrets.BACKUP_SIMULATE_ENABLED }}
+          TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
+          TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
+          GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
+          TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
+          ARGS=(FASTAPI_INTERNAL_KEY="$FASTAPI_INTERNAL_KEY" TORTOISE_SECRET_PEPPER="$TORTOISE_SECRET_PEPPER" FALKORDB_CLOUD_URI="$FALKORDB_CLOUD_URI")
           # #2208: TORTOISE_GIT_SHA — the exact deploy commit, exposed by GET
           # /v1/version so clients/skills can detect an outdated server.
           # GITHUB_SHA is the checked-out commit on push AND workflow_dispatch
           # (the ref head), so it always matches what this run deploys.
-          ARGS="$ARGS TORTOISE_GIT_SHA=${GITHUB_SHA}"
+          ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
           # embeds (supabase-js createClient). Was never synced to Fly, so the
           # page rendered with an empty key ('supabaseKey is required').
-          [ -n "${{ secrets.SUPABASE_ANON_KEY }}" ] && ARGS="$ARGS SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+          [ -n "$SUPABASE_ANON_KEY" ] && ARGS+=(SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY")
+          # #4126: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY were hand-set on Fly
+          # with no managing source (both showed `Deployed`, i.e. never touched by
+          # a staged deploy). Both already exist as GitHub Actions secrets, so
+          # declaring the deploy as their source is the truthful fix: the value on
+          # Fly stops being hand-set and a rotation from GitHub is the only step
+          # needed for it to take effect. The GitHub secret keeps its legacy name
+          # SUPABASE_SERVICE_KEY; the FLY variable keeps the name the app reads
+          # (`SUPABASE_SERVICE_ROLE_KEY` — tools/capture_cost_report.py accepts
+          # either, tortoise/ reads the *_ROLE_* one).
+          [ -n "$SUPABASE_URL" ] && ARGS+=(SUPABASE_URL="$SUPABASE_URL")
+          [ -n "$SUPABASE_SERVICE_KEY" ] && ARGS+=(SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_KEY")
           # Stripe billing (#310): pass all billing secrets when present.
-          ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }} STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
-          [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
-          [ -n "${{ secrets.RESEND_API_KEY }}" ] && ARGS="$ARGS RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}"
-          [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && ARGS="$ARGS BILLING_NOTIFY_TO=${{ secrets.BILLING_NOTIFY_TO }}"
+          ARGS+=(STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY" STRIPE_WEBHOOK_SECRET="$STRIPE_WEBHOOK_SECRET")
+          [ -n "$STRIPE_PRICE_IDS" ] && ARGS+=(STRIPE_PRICE_IDS="$STRIPE_PRICE_IDS")
+          [ -n "$RESEND_API_KEY" ] && ARGS+=(RESEND_API_KEY="$RESEND_API_KEY")
+          [ -n "$BILLING_NOTIFY_TO" ] && ARGS+=(BILLING_NOTIFY_TO="$BILLING_NOTIFY_TO")
           # #1136: single managed sender identity — RESEND_FROM_EMAIL (billing
           # override optional when a distinct billing sender is desired).
-          [ -n "${{ secrets.RESEND_FROM_EMAIL }}" ] && ARGS="$ARGS RESEND_FROM_EMAIL=${{ secrets.RESEND_FROM_EMAIL }}"
-          [ -n "${{ secrets.BILLING_FROM_EMAIL }}" ] && ARGS="$ARGS BILLING_FROM_EMAIL=${{ secrets.BILLING_FROM_EMAIL }}"
-          [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && ARGS="$ARGS BILLING_SUCCESS_URL=${{ secrets.BILLING_SUCCESS_URL }}"
-          [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
+          [ -n "$RESEND_FROM_EMAIL" ] && ARGS+=(RESEND_FROM_EMAIL="$RESEND_FROM_EMAIL")
+          [ -n "$BILLING_FROM_EMAIL" ] && ARGS+=(BILLING_FROM_EMAIL="$BILLING_FROM_EMAIL")
+          [ -n "$BILLING_SUCCESS_URL" ] && ARGS+=(BILLING_SUCCESS_URL="$BILLING_SUCCESS_URL")
+          [ -n "$BILLING_CANCEL_URL" ] && ARGS+=(BILLING_CANCEL_URL="$BILLING_CANCEL_URL")
           # Session-capture LLM provider (#1197): propagate the four provider
           # keys so the verify-secrets gate above and the shipped app AGREE —
-          # a key present in GH secrets never reaches Fly otherwise (and the
-          # app would 503 every capture even though the gate passed).
-          [ -n "${{ secrets.OPENROUTER_API_KEY }}" ] && ARGS="$ARGS OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
-          [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && ARGS="$ARGS DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
-          [ -n "${{ secrets.OPENAI_API_KEY }}" ] && ARGS="$ARGS OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
-          [ -n "${{ secrets.GEMINI_API_KEY }}" ] && ARGS="$ARGS GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
-          # Session-capture extraction model (#1197/#1358): propagate the
-          # model override when set (e.g. openrouter:google/gemini-2.0-flash —
-          # the flash-class default the epic-909 gate validated). Unset → the
-          # per-provider default (deepseek-chat) applies at runtime.
-          [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ] && ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=${{ secrets.TORTOISE_SESSION_LLM_MODEL }}"
+          # a key present in GH secrets never reaches Fly otherwise (and every
+          # capture would store turns but never extract them, even though the
+          # gate passed).
+          [ -n "$OPENROUTER_API_KEY" ] && ARGS+=(OPENROUTER_API_KEY="$OPENROUTER_API_KEY")
+          [ -n "$DEEPSEEK_API_KEY" ] && ARGS+=(DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY")
+          [ -n "$OPENAI_API_KEY" ] && ARGS+=(OPENAI_API_KEY="$OPENAI_API_KEY")
+          [ -n "$GEMINI_API_KEY" ] && ARGS+=(GEMINI_API_KEY="$GEMINI_API_KEY")
+          # Session-capture extraction model (#1197/#1358, #4126): the model id
+          # is NOT a credential, so the default lives HERE — in version control,
+          # where a reviewer can see it — and is assigned UNCONDITIONALLY. Before
+          # #4126 this was a guarded no-op: with the GitHub secret absent the
+          # deploy passed nothing, Fly's hand-set value survived every deploy, and
+          # "the secret is absent" was indistinguishable from "deliberately using
+          # the default". A GitHub secret still overrides the default when one
+          # exists. Unset on both → the per-provider default (deepseek-chat)
+          # applies at runtime.
+          #
+          # #4259 review: the versioned default NAMES a provider, so it requires
+          # that provider's key. Removing OPENROUTER_API_KEY while another
+          # provider key is set would leave the override pointing at a provider
+          # the app is no longer configured for (sdk raises on the mismatch), so
+          # warn here rather than let the deploy ship that state silently.
+          if [ -z "$OPENROUTER_API_KEY" ] && [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
+            echo "::notice::TORTOISE_SESSION_LLM_MODEL comes from a GitHub secret — the key it names must be configured"
+          elif [ -z "$TORTOISE_SESSION_LLM_MODEL" ] && [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::warning::TORTOISE_SESSION_LLM_MODEL is the versioned openrouter default but OPENROUTER_API_KEY is not set on GitHub — session-capture extraction will fail until that key is configured or the model override is changed (docs/infra-runbook.md §4.6)"
+          fi
+          if [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
+            ARGS+=(TORTOISE_SESSION_LLM_MODEL="$TORTOISE_SESSION_LLM_MODEL")
+          else
+            ARGS+=(TORTOISE_SESSION_LLM_MODEL=openrouter:google/gemini-2.5-flash)
+          fi
           # Optional (env-gated at runtime): only pass when set, so unconfigured
           # backups / GitHub OAuth never fail the deploy.
-          [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
+          [ -n "$TORTOISE_BACKUP_KEY" ] && ARGS+=(TORTOISE_BACKUP_KEY="$TORTOISE_BACKUP_KEY")
           # #2318: the RETAINED previous backup key is synced ONLY while the
           # GitHub secret exists (a rotation overlap window — old user-backup
           # archives stay decryptable in-app). Absent → the app reads no
           # *_PREVIOUS candidate. Clear it from GitHub + Fly after the window.
-          [ -n "${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY_PREVIOUS=${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}"
-          [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && ARGS="$ARGS R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}"
-          [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && ARGS="$ARGS R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}"
-          [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && ARGS="$ARGS R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}"
-          [ -n "${{ secrets.R2_BUCKET }}" ] && ARGS="$ARGS R2_BUCKET=${{ secrets.R2_BUCKET }}"
+          [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && ARGS+=(TORTOISE_BACKUP_KEY_PREVIOUS="$TORTOISE_BACKUP_KEY_PREVIOUS")
+          [ -n "$R2_ACCOUNT_ID" ] && ARGS+=(R2_ACCOUNT_ID="$R2_ACCOUNT_ID")
+          [ -n "$R2_ACCESS_KEY_ID" ] && ARGS+=(R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID")
+          [ -n "$R2_SECRET_ACCESS_KEY" ] && ARGS+=(R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY")
+          [ -n "$R2_BUCKET" ] && ARGS+=(R2_BUCKET="$R2_BUCKET")
           # Backup sweep (#596): dual-channel alerting needs the Telegram pair +
           # the GitHub PAT; BACKUP_SWEEP_ENABLED=true only when ALL required
           # syncable secrets are present (fail-closed default — a missing
           # secret keeps the sweep off, never crashes the boot, #545).
-          [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && ARGS="$ARGS TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && ARGS="$ARGS TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}"
-          [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && ARGS="$ARGS DR_ISSUES_PAT=${{ secrets.DR_ISSUES_PAT }}"
-          [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ] && ARGS="$ARGS BACKUP_ALERT_ASSIGNEE=${{ secrets.BACKUP_ALERT_ASSIGNEE }}"
-          [ -n "${{ secrets.BACKUP_SIMULATE_ENABLED }}" ] && ARGS="$ARGS BACKUP_SIMULATE_ENABLED=${{ secrets.BACKUP_SIMULATE_ENABLED }}"
-          if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
-            ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
+          [ -n "$TELEGRAM_BOT_TOKEN" ] && ARGS+=(TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN")
+          [ -n "$TELEGRAM_CHAT_ID" ] && ARGS+=(TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID")
+          [ -n "$DR_ISSUES_PAT" ] && ARGS+=(DR_ISSUES_PAT="$DR_ISSUES_PAT")
+          [ -n "$BACKUP_ALERT_ASSIGNEE" ] && ARGS+=(BACKUP_ALERT_ASSIGNEE="$BACKUP_ALERT_ASSIGNEE")
+          [ -n "$BACKUP_SIMULATE_ENABLED" ] && ARGS+=(BACKUP_SIMULATE_ENABLED="$BACKUP_SIMULATE_ENABLED")
+          if [ -n "$TORTOISE_BACKUP_KEY" ] && [ -n "$R2_ACCOUNT_ID" ] && [ -n "$R2_ACCESS_KEY_ID" ] && [ -n "$R2_SECRET_ACCESS_KEY" ] && [ -n "$R2_BUCKET" ] && [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && [ -n "$DR_ISSUES_PAT" ] && [ -n "$BACKUP_ALERT_ASSIGNEE" ]; then
+            ARGS+=(BACKUP_SWEEP_ENABLED=true)
             echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
             # REGISTRY_STREAM_KEY is deliberately NOT synced from GH (#661);
             # REGISTRY_STREAM_KEY_PREVIOUS (the #2318 rotation-overlap
@@ -378,26 +737,42 @@ jobs:
           fi
           # GitHub OAuth (#542): GH_CLIENT_ID/GH_CLIENT_SECRET (GitHub reserves GITHUB_* prefix) + encryption key —
           # warn-only until the OAuth app is registered and secrets set.
-          if [ -z "${{ secrets.GH_CLIENT_ID }}" ] || [ -z "${{ secrets.GH_CLIENT_SECRET }}" ]; then
+          if [ -z "$GH_CLIENT_ID" ] || [ -z "$GH_CLIENT_SECRET" ]; then
             echo "::warning::GH_CLIENT_ID/GH_CLIENT_SECRET not set — GitHub OAuth disabled until configured (#542)"
           fi
-          if [ -z "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ]; then
+          if [ -z "$TORTOISE_ENCRYPTION_KEY" ]; then
             echo "::warning::TORTOISE_ENCRYPTION_KEY not set — token encryption unavailable until configured (#542)"
           fi
-          [ -n "${{ secrets.GH_CLIENT_ID }}" ] && ARGS="$ARGS GITHUB_CLIENT_ID=${{ secrets.GH_CLIENT_ID }}"
-          [ -n "${{ secrets.GH_CLIENT_SECRET }}" ] && ARGS="$ARGS GITHUB_CLIENT_SECRET=${{ secrets.GH_CLIENT_SECRET }}"
-          [ -n "${{ secrets.GH_CALLBACK_URL }}" ] && ARGS="$ARGS GITHUB_CALLBACK_URL=${{ secrets.GH_CALLBACK_URL }}"
-          [ -n "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ] && ARGS="$ARGS TORTOISE_ENCRYPTION_KEY=${{ secrets.TORTOISE_ENCRYPTION_KEY }}"
+          [ -n "$GH_CLIENT_ID" ] && ARGS+=(GITHUB_CLIENT_ID="$GH_CLIENT_ID")
+          [ -n "$GH_CLIENT_SECRET" ] && ARGS+=(GITHUB_CLIENT_SECRET="$GH_CLIENT_SECRET")
+          [ -n "$GH_CALLBACK_URL" ] && ARGS+=(GITHUB_CALLBACK_URL="$GH_CALLBACK_URL")
+          [ -n "$TORTOISE_ENCRYPTION_KEY" ] && ARGS+=(TORTOISE_ENCRYPTION_KEY="$TORTOISE_ENCRYPTION_KEY")
+          # #4126 adoption: the three remaining Fly-only secrets the deploy now
+          # MANAGES. Their GitHub Actions secrets were created FROM the live Fly
+          # value, so the first propagated deploy rewrites each to what the app
+          # already runs — behaviour-preserving — and from then on a GitHub
+          # rotation is the only step needed. Declared `gh-secret:` in
+          # .github/scripts/fly-managed-secrets.txt, with the matching probe line
+          # in the provenance gate above.
+          #   TORTOISE_AUDIT_DSN (#669/#771) — audit_events Supabase pooler DSN
+          #   TORTOISE_LINK_INTENT_SECRET (#1765) — HMAC key for link-intent refs;
+          #     unset → link-intent 503 (fail-closed)
+          #   SENTRY_DSN — error tracking; activates only when set
+          # Guarded, matching every other optional secret — and NOT a silent
+          # fallback to hand-management: an absent GitHub secret leaves the Fly
+          # value untouched, which the provenance gate reports as UNSOURCED and
+          # BLOCKS the deploy (#4126/#4259).
+          [ -n "$TORTOISE_AUDIT_DSN" ] && ARGS+=(TORTOISE_AUDIT_DSN="$TORTOISE_AUDIT_DSN")
+          [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && ARGS+=(TORTOISE_LINK_INTENT_SECRET="$TORTOISE_LINK_INTENT_SECRET")
+          [ -n "$SENTRY_DSN" ] && ARGS+=(SENTRY_DSN="$SENTRY_DSN")
           # #528 server analytics (PostHog) — absent key → analytics module no-ops.
-          [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && ARGS="$ARGS POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
-          [ -n "${{ secrets.POSTHOG_HOST }}" ] && ARGS="$ARGS POSTHOG_HOST=${{ secrets.POSTHOG_HOST }}"
+          [ -n "$POSTHOG_API_KEY" ] && ARGS+=(POSTHOG_API_KEY="$POSTHOG_API_KEY")
+          [ -n "$POSTHOG_HOST" ] && ARGS+=(POSTHOG_HOST="$POSTHOG_HOST")
           # #308 signup CAPTCHA (Cloudflare Turnstile) — absent secret → API
           # fails open (signup works, warning logged), matching the optional
           # env-gated feature pattern.
-          [ -n "${{ secrets.TURNSTILE_SECRET_KEY }}" ] && ARGS="$ARGS TURNSTILE_SECRET_KEY=${{ secrets.TURNSTILE_SECRET_KEY }}"
-          flyctl secrets set --stage $ARGS --app tortoise-y4mjjq
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          [ -n "$TURNSTILE_SECRET_KEY" ] && ARGS+=(TURNSTILE_SECRET_KEY="$TURNSTILE_SECRET_KEY")
+          flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq
       - name: Deploy (retry through Fly lease/API races)
         # Uses app-scoped deploy token (#660). NOTE (verified 2026-08-09):
         # app-scoped deploy tokens CAN still manage this app's secrets —
@@ -415,45 +790,137 @@ jobs:
           exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}
-      - name: Post-deploy DB health gate (#1719 Task 7)
+      - name: Deploy gate audit — deploy-api (#4759)
+        # The authoritative "was anything skipped" statement for this job, and it
+        # runs even when an earlier step failed (`if: always()`) — so a reader
+        # never has to infer a pass from the ABSENCE of a bypass block. Each of
+        # the job's three bypassable gates is stated as bypassed or not: the
+        # `if`-gate (pack smoke) from its LANE, the two wrapper gates (Fly
+        # machines / provenance) from the lane plus the marker the report step
+        # writes when it applies the skip. The lines state the BYPASS only —
+        # whether a gate's step executed is the job's colour and its step list.
+        if: always()
+        env:
+          PACK_SMOKE_IN: ${{ inputs.skip-pack-smoke || false }}
+          PACK_SMOKE_VAR: ${{ vars.SKIP_PACK_SMOKE == 'true' }}
+          FLY_MACHINES_IN: ${{ inputs.skip-fly-machines-guard || false }}
+          FLY_MACHINES_VAR: ${{ vars.SKIP_FLY_MACHINES_GUARD == 'true' }}
+          PROVENANCE_IN: ${{ inputs.skip-fly-secret-provenance || false }}
+          PROVENANCE_VAR: ${{ vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+        run: |
+          bash .github/scripts/deploy-bypass.sh audit --job deploy-api \
+            --state "SKIP_PACK_SMOKE=$PACK_SMOKE_IN/$PACK_SMOKE_VAR" \
+            --state "SKIP_FLY_MACHINES_GUARD=$FLY_MACHINES_IN/$FLY_MACHINES_VAR" \
+            --state "SKIP_FLY_SECRET_PROVENANCE=$PROVENANCE_IN/$PROVENANCE_VAR"
+
+  # ── Post-deploy verification (own job; #4538 decision, option b) ──────────
+  #
+  # WHY THIS IS A SEPARATE JOB
+  #   This check runs AFTER `flyctl deploy` has released the image and there is
+  #   NO rollback — it cannot PREVENT anything, it can only REPORT. While it was
+  #   the last step of `deploy-api`, its colour WAS the job's colour, so a red
+  #   verification was rendered as *the deploy failed* — the misattribution that
+  #   made a shipped, healthy release look failed. In its own job, `deploy-api`'s
+  #   conclusion is the DEPLOY's conclusion and this one's is its own: a red run
+  #   here means **the release is live and unhealthy**, never "the deploy failed".
+  #
+  # ⛔ OVERRIDES: the `post-deploy-verify` convention that a post-deploy check is
+  #   WARN-ONLY ("the deploy is already done … never blocks the pipeline") — this
+  #   verification deliberately stays **fail-closed**, because #1719's recorded
+  #   decision is that the pipeline must not report success for a release whose
+  #   graph DB plane is dead. A red run here means *the release is live and
+  #   unhealthy*, which is a real condition worth failing on; the false red that
+  #   made it read as *"the deploy failed"* is what #4545/#4548 removed.
+  #   Do NOT "tidy" this into warn-only: the false red is already fixed, and
+  #   silencing the real signal as well is the fail-open shape #4126 and #4545
+  #   were both fought over.
+  #
+  # Skipped when `deploy-api` did not succeed — there is no release to verify;
+  # this preserves the pre-#4538 behaviour when the deploy itself was skipped.
+  post-deploy-verify:
+    runs-on: ubuntu-latest
+    needs: deploy-api
+    if: ${{ needs.deploy-api.result == 'success' }}
+    steps:
+      # Own checkout: this job runs the repo script below.
+      - uses: actions/checkout@v4
+      - name: Post-deploy DB health verification (post-release; does not gate the deploy)
         # The deploy pipeline previously certified a GREEN deploy while the
         # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
-        # 200 with status:degraded). Gate the deploy on the DB data plane:
-        # fail fast ONLY on app-unreachable (curl error); keep polling
-        # db.ok=false for >=3 min (cold-start DB connection exceeds 60s per
-        # #338; DNS propagation after a restart runs ~2 min per #1381);
-        # assert /health/ready 200 LAST (it ANDs both planes). Bypassable
-        # for incident-fix deploys: the workflow_dispatch input OR the repo
-        # variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
+        # 200 with status:degraded). Verify the release on BOTH planes:
+        # fail fast ONLY on app-unreachable (curl error); poll db.ok (the
+        # FalkorDB data plane) for >=3 min (cold-start DB connection exceeds
+        # 60s per #338; DNS propagation after a restart runs ~2 min per
+        # #1381); then poll /health/ready (it ANDs the Supabase control plane
+        # + the data plane) over its OWN budget, LAST.
+        #
+        # THE WEAKER PREDICATE INFORMS; THE STRONGEST DECIDES (#4771). The db.ok
+        # poll no longer fails the run on its own — it is the FalkorDB data plane
+        # ALONE, and it reads the background liveness refresher, so it can
+        # disagree with readiness (observed live 2026-09-22: db.ok=false on a
+        # 1.5s probe timeout while /health/ready returned 200 on BOTH planes).
+        # On exhaustion phase 2 emits a loud ::warning:: and the run proceeds;
+        # /health/ready — which ANDs the SAME data plane with the control plane —
+        # is what exits 1. This is NOT a weakening: a genuinely unreachable
+        # FalkorDB fails readiness's own probe too (both call _probe_db()).
+        #
+        # A FAILURE HERE MEANS: THE RELEASE IS LIVE AND UNHEALTHY. It does NOT
+        # mean the deploy failed — `flyctl deploy` already succeeded and the
+        # image is released. There is no rollback; the durable detector for the
+        # ongoing condition is the #3981-style runtime alert plus the
+        # availability watchdog (#2850). This is a release-health signal.
+        #
+        # The logic lives in .github/scripts/deploy-health-gate.sh so that it
+        # is TESTABLE — its harness (.github/scripts/deploy-health-gate.test.sh,
+        # run by ci.yml) pins the #4545 regression: the gate used to poll db.ok
+        # and then ASSERT /health/ready ONCE, but db.ok does NOT imply ready
+        # (readiness is a strictly STRONGER predicate — AND of both planes), so
+        # a still-connecting control plane reddened a HEALTHY deploy 2-3s after
+        # the data plane came up. The gate must never assert a predicate it has
+        # not itself observed to be true, on the strength of a weaker one.
+        # #4771 applied the same rule to the DECISION: the harness now pins
+        # (a) db.ok never true + readiness 200 → PASS with a warning, and
+        # (b) db.ok never true + readiness never 200 → FAIL. DO NOT "restore"
+        # phase 2's `exit 1` — it is what made the weaker observation decide.
+        # Bypassable for incident-fix deploys: the workflow_dispatch input OR
+        # the repo variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
         # push-triggered runs the inputs context is null, so the variable
         # lane is the ONLY way to bypass; set it during the incident window,
-        # clear it when RC3 is restored).
+        # clear it when the data plane is healthy).
         if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
-        run: |
-          BASE="https://api.premiselabs.co"
-          # Fail fast on app-unreachable (5 quick probes) — a dead app is a
-          # deploy failure, not a DB-wait.
-          APP_OK=0
-          for i in $(seq 1 5); do
-            if curl -fsS "$BASE/health" >/dev/null 2>&1; then APP_OK=1; break; fi
-            sleep 5
-          done
-          [ "$APP_OK" = "1" ] || { echo "::error::app unreachable after deploy ($BASE/health)"; exit 1; }
-          echo "app reachable — polling DB data plane"
-          # Poll db.ok=true for up to 3 min (180s / 10s).
-          DB_OK=0
-          for i in $(seq 1 18); do
-            if curl -fsS "$BASE/health" 2>/dev/null | grep -q '"ok": *true'; then DB_OK=1; break; fi
-            sleep 10
-          done
-          [ "$DB_OK" = "1" ] || { echo "::error::db.ok stayed false for 3 min — FalkorDB unreachable"; exit 1; }
-          echo "db.ok true"
-          # /health/ready LAST — it ANDs the Supabase control plane + the
-          # FalkorDB data plane; a 200 is the strongest signal.
-          curl -fsS -o /dev/null -w "health/ready: %{http_code}\n" "$BASE/health/ready" \
-            || { echo "::error::/health/ready not 200 after deploy"; exit 1; }
+        run: bash .github/scripts/deploy-health-gate.sh
         shell: bash
-      - name: Warn when DB health gate bypassed
+      - name: Bypass report — DB health verification (#1719, #4759)
+        # #4759: uniform reporting. The old step said SKIPPED only in this step's
+        # log, so a reader of the run SUMMARY saw a green/skipped step and could
+        # not tell the gate apart from one that passed. This keeps the
+        # ::warning:: and appends the same summary block every other bypass
+        # emits — gate, lane that fired, BYPASSED, and the window state from
+        # SKIP_DB_HEALTH_GATE_SET_AT (OVERDUE / NOT RECORDED when it should be).
         if: ${{ inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true' }}
+        env:
+          # #4334 discipline: env-bound, read as quoted shell variables.
+          BYPASS_INPUT_FIRED: ${{ inputs.skip-db-health-gate || false }}
+          BYPASS_VARIABLE_FIRED: ${{ vars.SKIP_DB_HEALTH_GATE == 'true' }}
+          SKIP_DB_HEALTH_GATE_SET_AT: ${{ vars.SKIP_DB_HEALTH_GATE_SET_AT }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
         run: |
-          echo "::warning::DB health gate SKIPPED (skip-db-health-gate input or SKIP_DB_HEALTH_GATE repo variable). Clear it once the data plane is healthy (RC3 restored)."
+          bash .github/scripts/deploy-bypass.sh report \
+            --key SKIP_DB_HEALTH_GATE \
+            --input-fired "$BYPASS_INPUT_FIRED" \
+            --variable-fired "$BYPASS_VARIABLE_FIRED" \
+            --set-at "$SKIP_DB_HEALTH_GATE_SET_AT" \
+            --effect "the release health check does not run, so a live release with a dead graph DB plane is not detected here"
+      - name: Deploy gate audit — post-deploy-verify (#4759)
+        # This job's only bypassable gate, stated as bypassed or not even when an
+        # earlier step failed — so "no bypass block" is never the reader's only
+        # evidence.
+        if: always()
+        env:
+          DB_HEALTH_IN: ${{ inputs.skip-db-health-gate || false }}
+          DB_HEALTH_VAR: ${{ vars.SKIP_DB_HEALTH_GATE == 'true' }}
+          DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
+        run: |
+          bash .github/scripts/deploy-bypass.sh audit --job post-deploy-verify \
+            --state "SKIP_DB_HEALTH_GATE=$DB_HEALTH_IN/$DB_HEALTH_VAR"

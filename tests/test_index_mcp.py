@@ -85,27 +85,27 @@ def _transport_context(monkeypatch):
     the same pattern as tests/test_mcp_server.py::_transport_context.
     """
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 def _dispatch_sdk(monkeypatch, sdk):
     """Route the MCP handler's team-SDK resolution to an isolated embedded DB.
 
-    The handler resolves its SDK per call via _get_team_sdk(); swapping it
+    The handler resolves its SDK per call via _get_org_sdk(); swapping it
     routes the REAL tool-call entry at a fresh graph without touching the
     module-level SDK cache (the swap pattern used by tests/test_mcp_server.py).
     """
     import tortoise.mcp_server as ms
-    monkeypatch.setattr(ms, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
     return ms
 
 
@@ -117,10 +117,19 @@ def _count(g, cypher, params=None) -> int:
 
 def _required_sweep_clean(g) -> int:
     """REQUIRED-set invariant sweep (plan §7, I9): zero Sources with
-    null/empty url/sourceKind/contentHash/ingestedAt."""
+    null/empty url or ingestedAt, and zero PROVENANCE Sources (sourceKind
+    present) with null/empty sourceKind/contentHash.
+
+    D10 (#5026): a document Source carries `documentKind` + `url` +
+    `ingestedAt` but no `sourceKind`/`contentHash` — its version anchor lives
+    on the corpus Source. So the contentHash half is scoped to provenance
+    Sources; the url + ingestedAt invariant holds for EVERY Source.
+    """
     return _count(g, "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR "
-                     "s.sourceKind IS NULL OR s.contentHash IS NULL OR "
-                     "s.contentHash='' OR s.ingestedAt IS NULL RETURN count(s)")
+                     "s.ingestedAt IS NULL OR "
+                     "(s.sourceKind IS NOT NULL AND "
+                     " (s.contentHash IS NULL OR s.contentHash='')) "
+                     "RETURN count(s)")
 
 
 def _hash_pair_sweep(g) -> int:
@@ -199,30 +208,32 @@ class TestE2E17Dispatch:
         """(d) exhausted-quota path — CYCLE-21 RESCOPE: quota enforcement never
         fires on the REAL dispatch path for this tool (stdio early-return +
         http-excluded), so the leg runs a DIRECT-HANDLER call with fabricated
-        _current_team_id/_current_team_limits ContextVars (test_mcp_server.py
+        _current_org_id/_current_org_limits ContextVars (test_mcp_server.py
         _transport_context pattern) asserting the ERR_QUOTA error dict + zero
         graph writes. The real-layer quota posture is STRUCTURAL-ONLY (the S8
         _QUOTA_GATED membership test)."""
-        from tortoise.mcp_auth import _current_team_id, _current_team_limits
+        from tortoise.mcp_auth import _current_org_id, _current_org_limits
 
         sdk = _sdk(tmp_path)
         ms = _dispatch_sdk(monkeypatch, sdk)
         try:
-            tok_id = _current_team_id.set("e2e17-quota-team")
-            tok_lim = _current_team_limits.set(
-                {"team_id": "e2e17-quota-team", "max_points": 0})
+            tok_id = _current_org_id.set("e2e17-quota-team")
+            tok_lim = _current_org_limits.set(
+                {"org_id": "e2e17-quota-team", "max_points": 0,
+                 "max_sessions": None})
             try:
                 r = ms.tortoise_index_files(str(corpus), extract_metadata=False)
             finally:
-                _current_team_id.reset(tok_id)
-                _current_team_limits.reset(tok_lim)
+                _current_org_id.reset(tok_id)
+                _current_org_limits.reset(tok_lim)
             assert r.get("code") == ms.ERR_QUOTA, f"expected ERR_QUOTA, got: {r}"
             assert "limit reached" in r.get("error", ""), r
             # zero graph writes — the quota gate fires before any SDK write
             g = sdk._get_proj().g
             assert _count(g, "MATCH (s:Source) RETURN count(s)") == 0
             assert _count(g, "MATCH (e:Event) RETURN count(e)") == 0
-            assert _count(g, "MATCH (d:Document) RETURN count(d)") == 0
+            assert _count(g, "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+                             "RETURN count(s)") == 0
         finally:
             sdk.close()
 
@@ -279,7 +290,7 @@ class TestE2E17Dispatch:
 
             # ── distinct corpus_name override arm — fresh graph ──
             sdk2 = _sdk(tmp_path, "t2.db")
-            monkeypatch.setattr(ms, "_get_team_sdk", lambda: sdk2)
+            monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk2)
             try:
                 r1 = ms.tortoise_index_files(str(root_a), corpus_name="alpha",
                                              extract_metadata=False)
@@ -344,7 +355,7 @@ class TestE2E17HttpRefusal:
 
         reg = TortoiseSDK(os.path.join(str(tmp_path), "reg.db"),
                           namespace="registry")
-        team = reg.team_create("e2e17-http")
+        team = reg.org_create("e2e17-http")
         key = reg.apikey_create(team["id"], "e2e17-fixture")["api_key"]
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               _registry_sdk=reg)

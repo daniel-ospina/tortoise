@@ -5,6 +5,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_p1_differentiators.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -26,6 +27,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk, **kw):
@@ -43,31 +45,32 @@ class TestProvenance:
 
     def test_extracted_from_stored_not_fabricated_document(self, sdk):
         """create_point persists extractedFrom as a property; it does NOT
-        fabricate a Document node (documents come from DocumentCreated
-        events via the ingest flow, #125)."""
+        fabricate a DOCUMENT (a document is a :Source with documentKind; the
+        provenance Source stub has none, D10 #5026)."""
         proj = sdk._get_proj()
         p = sdk.create_point("statement", "linked claim",
                              extractedFrom="doc/02-design.md")
         assert p["extractedFrom"] == "doc/02-design.md"
         docs = proj.g.query(
-            "MATCH (d:Document {id:$did}) RETURN count(d) > 0",
+            "MATCH (s:Source {url:$did}) WHERE s.documentKind IS NOT NULL "
+            "RETURN count(s) > 0",
             params={"did": "doc/02-design.md"},
         ).result_set
         assert docs[0][0] is False
 
     def test_document_event_creates_document_node(self, sdk, tmp_path):
-        """DocumentCreated event → Document node in the projection (#493)."""
+        """DocumentCreated event → document :Source in the projection (#493,
+        D10: a document is a :Source)."""
         from tortoise.api import EventAPI
         from tortoise.log import EventLog
 
         log = EventLog(str(tmp_path / "p1_events.jsonl"))
         api = EventAPI(log, initiated_by="extractor",
                        projection=sdk._get_proj())
-        api.add_document("doc/03-notes.md", "Notes",
-                         doc_status="captured")
+        api.add_document("doc/03-notes.md", "Notes")
         proj = sdk._get_proj()
         docs = proj.g.query(
-            "MATCH (d:Document {id:$did}) RETURN count(d) > 0",
+            "MATCH (s:Source {url:$did}) RETURN count(s) > 0",
             params={"did": "doc/03-notes.md"},
         ).result_set
         assert docs[0][0] is True
@@ -181,7 +184,7 @@ class TestEntityProjection:
 class TestStubs:
     def test_connectors_package_exists(self):
         from tortoise.connectors import __doc__ as _doc
-        assert "P1-5" in _doc or True  # just import check  # noqa: SIM222
+        assert "P1-5" in _doc  # the stub's docstring names the P1-5 phase
 
     def test_auth_stub_exists(self):
         import tortoise.auth  # noqa: F401

@@ -42,6 +42,11 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 | `AGENT_ONBOARDING.md` Q3 | prompt e2e/manual | false-promise phrasing | drafted copy; grep clean; parity table |
 | Claude Code hooks + Pi extension | ops/e2e | exit-0 violation, receipt missing | hook smoke; Pi 2xx leg observed |
 
+> **#4620 (2026-09-22):** the Pi leg is executably verified for the seam's logic **and** the
+> installed artifact (`tortoise/pi-hooks/tortoise-capture.test.ts`, `tests/test_pi_capture_hooks.py`);
+> the real-`pi` leg is manual-only — procedure + actor in `tortoise/pi-hooks/README.md`. See the
+> amendment at the bottom.
+
 ### Journey Test Map
 
 ### Journey: First-timer opts into memory capture
@@ -115,7 +120,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 ### Task 4: Quota fairness + bounded first-run
 
 **Intent:** The index job gates like sessions do; auto-index cannot exhaust the team cap.
-**Acceptance:** `_run_indexing` preflights `enforce_team_limit("points")` + per-batch re-check; first-run scope = ONE repo (pre-decided fallback) with "index more" affordance; job 402s honestly at cap. **Per-team single-flight (T2-P2 + cycle-3 P1-3, folded):** `_INDEX_JOBS` entries carry `team_id` + `started_at`; ordered algorithm = (1) guard-check FIRST — a `started` entry for the team is REUSED (return its job_id); (2) evict terminal entries or `started` older than the 30-min TTL (presumed-dead — a hung run never bricks the team; the just-reused in-flight entry is never evicted); (3) single-process assumption recorded (DB-backed lock only if Fly scales horizontally). TDD: `test_in_flight_single_flight_reuses` + `test_stuck_started_evicted`.
+**Acceptance:** `_run_indexing` preflights `enforce_org_limit("points")` + per-batch re-check; first-run scope = ONE repo (pre-decided fallback) with "index more" affordance; job 402s honestly at cap. **Per-team single-flight (T2-P2 + cycle-3 P1-3, folded):** `_INDEX_JOBS` entries carry `org_id` + `started_at`; ordered algorithm = (1) guard-check FIRST — a `started` entry for the team is REUSED (return its job_id); (2) evict terminal entries or `started` older than the 30-min TTL (presumed-dead — a hung run never bricks the team; the just-reused in-flight entry is never evicted); (3) single-process assumption recorded (DB-backed lock only if Fly scales horizontally). TDD: `test_in_flight_single_flight_reuses` + `test_stuck_started_evicted`.
 **Files:**
 - Modify: `tortoise/hosted_api.py` (`_run_indexing` + `GitHubIndexRequest`)
 - Test: `tests/test_github_index_lifecycle.py::test_quota_honest_fail` + `test_first_run_single_repo`
@@ -173,7 +178,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 ### Task 8: Docs fetcher + staging (Contents-API walk)
 
 **Intent:** Remote `docs/` folders become corpus documents with hash dedup.
-**Acceptance:** `github_docs.py` walks `GET /repos/{repo}/git/trees/{branch}?recursive=1` filtered to docs/, fetches changed blobs, stages under **`{TORTOISE_INGEST_BASE_DIR}/{team_id}/`** (team-partitioned — T2-P2b); `compute_file_hash` dedup; unchanged re-ingest ⇒ 0 new nodes (falsification (f)). **Input guards (T1-P16 + cycle-3, folded):** text-type guard (skip binary/non-UTF8 blobs, record skipped count) + max-blob-size constant (skip oversized, honest status) + atomic-or-reconciled staging with cleanup on partial failure (no stale files for the next corpus pass). TDD: `test_skip_binary_and_oversized`, `test_staging_cleanup_partial_failure`, `test_two_team_staging_isolation`.
+**Acceptance:** `github_docs.py` walks `GET /repos/{repo}/git/trees/{branch}?recursive=1` filtered to docs/, fetches changed blobs, stages under **`{TORTOISE_INGEST_BASE_DIR}/{org_id}/`** (team-partitioned — T2-P2b); `compute_file_hash` dedup; unchanged re-ingest ⇒ 0 new nodes (falsification (f)). **Input guards (T1-P16 + cycle-3, folded):** text-type guard (skip binary/non-UTF8 blobs, record skipped count) + max-blob-size constant (skip oversized, honest status) + atomic-or-reconciled staging with cleanup on partial failure (no stale files for the next corpus pass). TDD: `test_skip_binary_and_oversized`, `test_staging_cleanup_partial_failure`, `test_two_team_staging_isolation`.
 **Files:**
 - Create: `tortoise/indexer/github_docs.py`
 - Test: `tests/test_docs_fetcher.py`
@@ -244,7 +249,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 **Intent:** T1 automatic capture installs from the harness copy.
 **Acceptance:** `HARNESS_INSTALL['claude']` includes the in-repo `tortoise/claude-hooks/session-{start,end}.sh` install (cp + `.claude/settings.json` SessionStart/SessionEnd entries); `HARNESS_INSTALL['pi']` includes the reflect-hook/tortoise-capture copy-install (outside-repo instructions); hooks pass `harness` through `_cmd_session_capture`; hook smoke test (exit-0 under failure + mocked POST → Session + receipt).
 **Files:**
-- Modify: `website/apps/dashboard/src/harnesses.js`, `tortoise/claude-hooks/session-end.sh` (harness passthrough), `tortoise/claude-hooks/session-start.sh` (**install-probe POST**), `tortoise/__main__.py` (`_cmd_session_capture` payload), `tortoise/hosted_api.py` (**`POST /v1/sessions/install-probe` route** — `get_current_team`-gated, writes `install_probe_{harness}` REGISTERED key, consent-gating decision: probe is UNCONDITIONAL install telemetry (harness + timestamp only, no content), NOT consent-gated; **self-hosted routing pin: probes target the configured `TORTOISE_API_URL`, never a hardcoded hosted host**), Pi extension-on-load probe (copy-install instructions)
+- Modify: `website/apps/dashboard/src/harnesses.js`, `tortoise/claude-hooks/session-end.sh` (harness passthrough), `tortoise/claude-hooks/session-start.sh` (**install-probe POST**), `tortoise/__main__.py` (`_cmd_session_capture` payload), `tortoise/hosted_api.py` (**`POST /v1/sessions/install-probe` route** — `get_current_org`-gated, writes `install_probe_{harness}` REGISTERED key, consent-gating decision: probe is UNCONDITIONAL install telemetry (harness + timestamp only, no content), NOT consent-gated; **self-hosted routing pin: probes target the configured `TORTOISE_API_URL`, never a hardcoded hosted host**), Pi extension-on-load probe (copy-install instructions)
 - Test: `tests/test_session_capture_e2e.py` (hook smoke), manual Pi 2xx leg (ops checklist)
 
 **Steps:** TDD hook smoke + **install-probe round-trip (`test_onboarding_endpoints.py::test_install_probe_round_trip`)** + **probe-before-enable ⇒ toggle-on lands directly in `waiting` (install-pending skipped; the off-state display is unaffected by a probe); NO probe yet ⇒ `install-pending` with the inline install steps (per Task 17's "waiting shown only after a probe")**; receipt ⇒ active (receipt authoritative over probe); **dist rebuild + commit IN THIS SLICE (T1-P4 folded): `npm run build` + commit `dist/` after the harness.js/session-start.sh wiring lands** — the shipped wizard must carry the T1/T3 install copy, not wait for Task 19; commit `feat(1714): T1 session capture wired into harness copies + install probe + dist`.
@@ -252,7 +257,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 ### Task 15: T2 backfill — `tortoise sessions import --harness codex|claude-desktop|pi`
 
 **Intent:** Historical transcript backfill with 2xx-only receipts (scoped as backfill, NOT coupled to the wizard's capture acceptance).
-**Acceptance:** import CLI stages parsed session locally (data preservation), POSTs, writes receipt only on 2xx; 403/402/503 ⇒ fail, no receipt, honest error; Codex + Desktop parsers idempotent on re-import; Cursor spike verdict recorded (ships or honest `unsupported`).
+**Acceptance:** import CLI stages parsed session locally (data preservation), POSTs, writes receipt only on 2xx; 403 ⇒ fail, no receipt, honest error, and a RETRYABLE refusal (402/408/425/429/5xx, including 503) is additionally spooled for a later drain by `_spool_if_retryable` while still exiting 1 with no receipt (#4714); Codex + Desktop parsers idempotent on re-import; Cursor spike verdict recorded (ships or honest `unsupported`).
 **Files:**
 - Modify: `tortoise/__main__.py`
 - Create: `tortoise/session_import/parsers.py` (codex, claude_desktop, cursor-gated; **pi reuses the codex parser — pi session JSONL is a tree-structured JSONL like codex's; named reuse + idempotency test**, or add `pi.py`)
@@ -314,6 +319,10 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 2. **T2 (Task 15)** lands inside Slice 2 after T1+T3 (per user staging).
 3. **Cursor spike + Claude-Web filing-path spike** are research tasks inside their slices; verdicts recorded; web row disabled-with-reason until a server-visible signal is confirmed (Task 13 spike verdict) — never hidden.
 4. **Pi hosted-2xx leg** is an ops checklist item (live key + `tortoise-config.json`), not a CI pytest.
+   > **#4620 (2026-09-22):** the seam's logic and the installed artifact ARE CI-verified; what remains
+   > manual-only is a real `pi` process loading the installed extension. The procedure, actor, pass
+   > condition and blockers are canonical in `tortoise/pi-hooks/README.md` § Verification.
+   > See the amendment at the bottom.
 5. Every commit through **commit-workflow** (pre-flight, PR, code-review gate).
 
 ## Runtime Prerequisites
@@ -337,7 +346,7 @@ Docker FalkorDB test lane · `GITHUB_CLIENT_ID/SECRET` + token `repo` scope · `
 
 **T1-P4 (Slice 2 + Task 19) — in-slice dist rebuild.** A dist rebuild+commit lands in Slice 2 AFTER Task 14 (so shipped T1/T3 harness copy is live, not inert); Task 19 remains the final full sweep. Honors the "same slice/commit as dist rebuild" pin.
 
-**T1-P5 (Task 9) — Document-cap gate made implementable.** `documents` resource added to `_RESOURCE_LIMIT_KEYS` + `resolve_team_limits` + a `max_documents` pricing.json field (or documented derived constant from max_points with a conversion factor — pin one); count discriminator = `documentKind != 'transcript'` (session transcripts MERGE `:Document` with `documentKind='transcript'`, hosted_api.py:4456 — excluded); TDD asserts a session-captured Document does NOT consume the docs cap.
+**T1-P5 (Task 9) — Document-cap gate made implementable.** `documents` resource added to `_RESOURCE_LIMIT_KEYS` + `resolve_org_limits` + a `max_documents` pricing.json field (or documented derived constant from max_points with a conversion factor — pin one); count discriminator = `documentKind != 'transcript'` (session transcripts MERGE `:Document` with `documentKind='transcript'`, hosted_api.py:4456 — excluded); TDD asserts a session-captured Document does NOT consume the docs cap.
 
 **T1-P6 (Task 16/17 + Task 14) — no "enabled-waiting" without an install path.** Sessions toggle-on surfaces the mechanism-install step INLINE (per-harness from HARNESS_INSTALL: Claude hooks cp + settings entries; Pi extension copy-install); capture status becomes **4-state `off → install-pending → waiting → active` (superseded by Task 16's canonical names + the server-visible install-probe — see T2-P1 and the Task 14/16/17 bodies; the file-existence detection below is SUPERSEDED by the install-probe)**.
 
@@ -399,7 +408,7 @@ Docker FalkorDB test lane · `GITHUB_CLIENT_ID/SECRET` + token `repo` scope · `
 
 - **Named-test table (P2-8):** `test_github_index_lifecycle.py::{test_in_flight_single_flight_reuses, test_mid_walk_401_honest_fail, test_cursor_same_second_boundary, test_link_rerun_on_index_completion}`; `test_capture_session.py::{test_repost_same_session_id_zero_new, test_receipt_requires_durable_data, test_receipt_patch_failure_retry_converges, test_invalid_harness_422_opted_team, test_decline_clears_consent_403}`; `test_index_docs_api.py::{test_transcript_not_counted_docs_cap, test_null_kind_doc_counts, test_cross_team_job_poll_404}`; `test_docs_fetcher.py::{test_skip_binary_and_oversized, test_staging_cleanup_partial_failure, test_two_team_staging_isolation}`; `test_onboarding_endpoints.py::test_q3_and_wizard_write_same_keys`.
 - **Document gate (T2-P2a):** pin the DERIVED-CONSTANT option (`max_documents` derived from `max_points` with a documented conversion factor — avoids the `tier_limits` KeyError ripple across all tiers + `_REQUIRED_LIMIT_KEYS`); discriminator `COALESCE(documentKind,'') != 'transcript'` (NULL-kind docs COUNT — no leak); TDD asserts a frontmatter-less docs-endpoint doc counts.
-- **Staging team-partitioning (T2-P2b):** stage under `{TORTOISE_INGEST_BASE_DIR}/{team_id}/...` — team A blobs never picked up by team B; two-team isolation assertion.
+- **Staging team-partitioning (T2-P2b):** stage under `{TORTOISE_INGEST_BASE_DIR}/{org_id}/...` — team A blobs never picked up by team B; two-team isolation assertion.
 - **Extraction-path idempotency scope (T2-P2c):** "re-POST same session_id ⇒ 0 new nodes" is scoped to Session + turn Points (M2/LLM-extracted points are not deterministically keyed — either skip extraction when the Session already existed, or scope the assertion).
 - **Vocabulary sync (T2-P2d):** cross-surface test — `_HARNESS_ANALYTICS_VALUES ⊆` SessionRequest harness Literal, and receipt keys per Literal member.
 - **Post-decline data outcome (T2-P2e):** honest copy says "already-captured sessions remain; new capture is blocked" — TDD: declined team POST ⇒ 403 while existing Sessions untouched.
@@ -418,3 +427,23 @@ Docker FalkorDB test lane · `GITHUB_CLIENT_ID/SECRET` + token `repo` scope · `
 
 <!-- plan-review: cycles=5, status=clean, version=2.3.0 (cycles 3-5 folded into task bodies; cycles 1-2 have incorporation sections) -->
 <!-- final-verification: clean (2 P2s resolved post-gate) -->
+
+## #4620 amendment (2026-09-22) — the Pi seam's verification status, stated
+
+*Appended by `#4620`; the reviewed text above is unchanged (see the two pointers at the
+Integration-Surface row `Claude Code hooks + Pi extension` and sequencing item 4).*
+
+Objective 1's Pi leg has two halves with different verification statuses:
+
+- **Executably verified (hermetic, CI).** The seam's handler logic — `extractTurns`, truncation,
+  payload, credential precedence, the durable spool, and the real `session_start` / `session_shutdown`
+  handlers fired against a mock `pi` with an injected `fetch` — is covered by
+  `tortoise/pi-hooks/tortoise-capture.test.ts` (51 tests), and the artifact **as installed** is loaded
+  and fired by `tests/test_pi_capture_hooks.py` (CI-selected for a `tortoise/pi-hooks/` change). The
+  claim that "nothing loads the extension's seam in a test" is false.
+- **Manual-only.** That a real `pi` process loads the installed extension and calls
+  `turn_end` / `session_shutdown` against the live API. **Canonical: `tortoise/pi-hooks/README.md`
+  § Verification** — the procedure, its precondition, its actor, the pass condition and the
+  `#4661`/`#4675`/`#3713` blocker list live there, and are not restated here. Until `#4661` /
+  `#4675` clear, the live leg yields **no verdict**, so this objective must not be read as verified
+  for Pi.

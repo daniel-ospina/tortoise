@@ -1,25 +1,25 @@
 """Supabase control-plane client for hosted auth resolution (#669 plan Task 3).
 
 The FalkorDB ``control_plane`` registry is being retired in favor of Supabase
-(teams / team_memberships / api_keys, migrations 0006–0009). This module is
+(orgs / org_memberships / api_keys, migrations 0006–0009). This module is
 the read-side seam the hosted auth paths use AFTER the flip:
 
-- API-key resolution (REST ``get_current_team`` + MCP
-  ``TeamResolutionMiddleware``) hashes the presented ``tt_`` token with
+- API-key resolution (REST ``get_current_org`` + MCP
+  ``OrgResolutionMiddleware``) hashes the presented ``tt_`` token with
   ``tortoise.auth.lookup_hash`` (SHA-256(pepper + key), plan P1-1) and does an
   exact-match indexed lookup — O(1), no registry scan.
 - ``api_keys.revoked_at`` is the authoritative revocation source (plan P1-2):
   a revoked ``api_keys`` twin REJECTS even when the matching
-  ``team_memberships`` row is active.
+  ``org_memberships`` row is active.
 - Tier/quota come from the ``teams`` row (max_users/max_graphs/
   graph_size_cap); max_points (the 20260817000001 points-cap override
   column) takes precedence over graph_size_cap, which falls back to
-  ``tortoise.pricing.tier_limits`` defaults (max_api_keys/max_sessions
+  ``tortoise.pricing.tier_limits`` defaults (max_api_keys
   always fall back to pricing) — mirroring the registry path.
 - Invitations (plan Task 4): mint/accept/rescind live here too — pending
   invitations are redeemed by plaintext token via indexed lookup_hash
-  (SHA-256(pepper + token)), accept creates the real team_memberships row
-  with the INVITED role, and dedup (team, email) + 7-day expiry are
+  (SHA-256(pepper + token)), accept creates the real org_memberships row
+  with the INVITED role, and dedup (org, email) + 7-day expiry are
   enforced (0008 partial unique index).
 - Onboarding/GitHub (plan Task 6): onboarding_state (jsonb) + email are
   read/patched on ``teams``; github_token_enc/github_org are read/written
@@ -33,7 +33,7 @@ Fail-closed contract (backup-seam P1-3 pattern): every query error raises
 ``RuntimeError`` — auth never falls back to the registry and never
 authenticates on error. ``update_last_used`` is the one best-effort exception
 (#685 telemetry write-through must never gate auth). #1096 adds a second
-exception at the resolve caller: a failure of the additive teams read (0015
+exception at the resolve caller: a failure of the additive orgs read (0015
 ``suspended_at``/``flagged_at``) degrades to safe defaults
 (un-suspended/un-flagged) at WARNING; base/deletion reads still raise.
 
@@ -49,8 +49,9 @@ no new deps, matching the analytics-write pattern in hosted_api.py.
 
 Query dialect: ``query(table, select, filters, method, json_body, order,
 limit)`` where filters are ``(column, op, value)`` tuples with ops
-``eq | neq | is`` (None → ``IS NULL``) and ``lte`` (ISO-8601 cutoff,
-used by the deleted-team purge sweep, #302). ``method`` supports
+``eq | neq | is`` (None → ``IS NULL``) and the ordered, NULL-excluding
+``gt | gte | lt | lte`` (``lte`` is the ISO-8601 cutoff used by the
+deleted-org purge sweep, #302). ``method`` supports
 ``GET | POST | PATCH | DELETE`` (DELETE is used only by the post-grace
 hard-delete purge). The test fake implements the SAME interface over
 in-memory rows, so the resolution logic is shared verbatim between CI
@@ -59,43 +60,66 @@ and production.
 from __future__ import annotations
 
 import logging
+import math
 import os
+import threading
+import time
 import uuid as _uuid
 from datetime import UTC, datetime, timezone
 
 import httpx
 
+from .retention import RESTORE_WINDOW_HOURS  # #4179 single window authority
+
 _logger = logging.getLogger(__name__)
 
+
+def _record_client_call(started: float) -> None:
+    """Record ONE control-plane HTTP call as ``(duration, thread name)``.
+
+    #3498 item 2 — the FALSIFIER: a call recorded on ``MainThread`` ran on the
+    event loop, i.e. was never offloaded. Instrumentation is best-effort and
+    must never affect auth, so every failure here is swallowed.
+    """
+    try:
+        from .monitoring import record_control_plane_client_call
+        record_control_plane_client_call(
+            time.perf_counter() - started, threading.current_thread().name)
+    except Exception:  # pragma: no cover — telemetry must never break auth
+        pass
+
 # Env-var names: SUPABASE_SERVICE_ROLE_KEY is the canonical name (edge
-# functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name the
-# analytics write path uses — accept either so the flip works with both.
+# functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name —
+# accept either so the flip works with both. The analytics write path now reads
+# BOTH (it previously read only the legacy name, so every hosted analytics
+# event was written to ephemeral disk and lost — #3677), so no caller is left
+# on a single name.
 _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 
-# Base teams columns (migration 0006 — the core teams table; drift-safe).
+# Base orgs columns (migration 0006 — the core orgs table; drift-safe).
 # email is 0006, NOT 0015 — it rides the base read. deleted_at/graph_name
 # are ALSO base: graph_name is 0006 and the token-recovery echo needs it;
 # deleted_at is 20260813000001 and the #1709 recovery guard ("a deleted
-# team is indistinguishable from never-existed → uniform 422") must read it
+# org is indistinguishable from never-existed → uniform 422") must read it
 # for real — a deletion column belongs to the FAIL-CLOSED class (#1096),
 # never an additive-fail-soft tier.
-_TEAM_BASE_SELECT = [
+_ORG_BASE_SELECT = [
     "id", "name", "tier", "max_users", "max_graphs", "graph_size_cap",
     "ops_allowance", "email", "deleted_at", "graph_name",
 ]
-# Additive teams columns, separately migrated after 0006 (0015 abuse state;
+# Additive orgs columns, separately migrated after 0006 (0015 abuse state;
 # 20260813000005 dashboard_key_login; 20260817000001 import ledger + points
 # cap override, #1230). A schema one migration behind raises PostgREST HTTP
 # 400 on these; the auth seam must degrade to safe defaults (un-suspended/
 # un-flagged; key login allowed; import ledger unset), never take down all
 # auth (#1096, defense-in-depth behind the #1095 deploy gate).
-_TEAM_ADDITIVE_SELECT = [
+_ORG_ADDITIVE_SELECT = [
     "suspended_at", "flagged_at",
     # #1148: whether API-key login is accepted for the dashboard (management
     # surface). Default true; claimed owners toggle it (session-authed).
     "dashboard_key_login",
     # #1230: import idempotency ledger + quarantine record + points-cap
-    # override (see _TEAM_ADDITIVE_IMPORT_TIER).
+    # override (see _ORG_ADDITIVE_IMPORT_TIER).
     "last_import_sha256", "last_import_quarantined_sha256",
     # #2040 post-swap pack-failure marker (consulted by the import
     # already-fast-path through the same fail-soft seam).
@@ -111,8 +135,8 @@ _TEAM_ADDITIVE_SELECT = [
 # 20260813000005) still reads the older additive state (0015 carries REAL
 # suspension data — discarding it would bypass enforcement with real data
 # present).
-_TEAM_ADDITIVE_IMPORT_TIER = [
-    # #1230 import idempotency ledger + quarantine record (Team-node props).
+_ORG_ADDITIVE_IMPORT_TIER = [
+    # #1230 import idempotency ledger + quarantine record (Org-node props).
     "last_import_sha256", "last_import_quarantined_sha256",
     # points-cap override (the plan's max_points / graph_size_cap source).
     "max_points",
@@ -122,24 +146,24 @@ _TEAM_ADDITIVE_IMPORT_TIER = [
 # degrades just the marker (already-fast-path re-validates — convergent,
 # never a lie) while the #1230 ledger + max_points stay readable. Dropped
 # FIRST by the ladder (newest migration dropped first).
-_TEAM_ADDITIVE_2040_TIER = ["last_import_pack_failed_sha256"]
-_TEAM_ADDITIVE_DKL_TIER = ["dashboard_key_login"]      # 20260813000005
-_TEAM_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
+_ORG_ADDITIVE_2040_TIER = ["last_import_pack_failed_sha256"]
+_ORG_ADDITIVE_DKL_TIER = ["dashboard_key_login"]      # 20260813000005
+_ORG_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
 # Stripe billing state (0012 — OLDER than 0015). Dropped LAST in the retry
 # ladder (newest migration is dropped first), so a schema missing only 0015
 # still reads real billing state and a pre-0012 schema degrades to safe
 # defaults (None) rather than taking down auth. #1623.
-_TEAM_ADDITIVE_BILLING_TIER = ["subscription_status", "customer_email"]
+_ORG_ADDITIVE_BILLING_TIER = ["subscription_status", "customer_email"]
 
 # #2406 signup-email marker (20260907000001 — the NEWEST additive migration):
 # its OWN tier, dropped FIRST by the #1096 ladder, so a schema missing ONLY
 # the marker column degrades just the marker (the onboarding endpoint reads
 # it as unset → one best-effort send attempt) while all older additive state
 # stays readable. Written by the service-role seam only — no RLS change.
-_TEAM_ADDITIVE_ONBOARDING_TIER = ["onboarding_email_sent_at"]
+_ORG_ADDITIVE_ONBOARDING_TIER = ["onboarding_email_sent_at"]
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
-_QUOTA_SELECT = _TEAM_BASE_SELECT + _TEAM_ADDITIVE_SELECT
+_QUOTA_SELECT = _ORG_BASE_SELECT + _ORG_ADDITIVE_SELECT
 
 
 def _service_key() -> str:
@@ -173,6 +197,43 @@ def is_supabase_enabled() -> bool:
     return configured
 
 
+_LOGIC_TREE_RESERVED = ',()"'
+
+
+def _quote_in_logic_tree(value: object) -> str:
+    """Quote a value for a PostgREST logic tree.
+
+    Inside ``and=(...)``, a value containing ``,`` ``(`` ``)`` or ``"`` is
+    syntax, not data — ``a.gt.x,y`` is TWO conditions and ``a.gt.x)`` closes
+    the group. PostgREST's escape is to wrap the value in double quotes, with
+    an embedded ``"`` backslash-escaped. A value with none of the reserved
+    characters is emitted bare, so the common timestamp/count case keeps the
+    obvious form (#3686 re-review P2: the grouping added this hazard)."""
+    text = "" if value is None else str(value)
+    if not any(ch in text for ch in _LOGIC_TREE_RESERVED):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _encode(op: str, value: object, in_logic_tree: bool = False) -> str:
+    """Encode one PostgREST filter condition. ``in_logic_tree`` applies the
+    quoting rule that only applies inside ``and=(...)``."""
+    if op == "is":
+        return "is.null" if value is None else f"is.{value}"
+    if op == "eq":
+        rendered = f"eq.{value}"
+    elif op == "neq":
+        rendered = f"neq.{value}"
+    elif op in ("gt", "lt", "gte", "lte"):
+        rendered = f"{op}.{value}"
+    else:
+        raise ValueError(f"unsupported filter op {op!r}")
+    if in_logic_tree:
+        head, _, tail = rendered.partition(".")
+        return f"{head}.{_quote_in_logic_tree(tail)}"
+    return rendered
+
+
 class SupabaseControlPlane:
     """PostgREST client for control-plane reads/writes (service role).
 
@@ -202,14 +263,21 @@ class SupabaseControlPlane:
         import httpx
         self._http = httpx.Client(timeout=self._timeout)
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         """Call a Postgres function via PostgREST RPC (#765 plan Task 8).
 
         ``POST {url}/rest/v1/rpc/{fn}`` with the service key and JSON body.
-        Used by the writer flip for ``provision_team`` (the atomic
-        teams + team_memberships + api_keys upsert, migration 0010) — the
-        agent-signup / register / team-create writers must NOT hand-roll
+        Used by the writer flip for ``provision_org`` (the atomic
+        orgs + org_memberships + api_keys upsert, migration 0010) — the
+        agent-signup / register / org-create writers must NOT hand-roll
         three table writes when the RPC is one transaction.
+
+        ``representation`` (#3665): the write lane wants ``return=minimal``
+        (the default — no echo), but a SCALAR-returning read function has its
+        body suppressed by that same header. ``representation=True`` sends
+        ``Prefer: return=representation`` and returns the decoded JSON value
+        (see :meth:`rpc_value`).
 
         Fail-closed contract (same as ``query``): non-2xx responses and
         transport errors raise RuntimeError. Uses the same persistent httpx
@@ -221,12 +289,17 @@ class SupabaseControlPlane:
             "apikey": self._key,
             "Authorization": f"Bearer {self._key}",
             "Content-Type": "application/json",
-            "Prefer": "return=minimal",
+            "Prefer": ("return=representation" if representation
+                       else "return=minimal"),
         }
         try:
             import httpx  # noqa: F401
-            resp = self._http.post(url, params={"select": "*"},
-                                   headers=headers, json=body or {})
+            started = time.perf_counter()
+            try:
+                resp = self._http.post(url, params={"select": "*"},
+                                       headers=headers, json=body or {})
+            finally:
+                _record_client_call(started)
         except RuntimeError:
             raise
         except Exception as e:  # transport errors — fail closed
@@ -263,7 +336,26 @@ class SupabaseControlPlane:
             raise RuntimeError(
                 f"Supabase control-plane bad RPC response ({fn}): {e}"
             ) from e
-        return data if isinstance(data, dict) else None
+        # #3665: a scalar/array-returning RPC decodes to a bare JSON value
+        # (a float, a text[] as a JSON array), NOT a dict. The value is
+        # returned verbatim rather than coerced to None — coercion is what
+        # made a scalar read indistinguishable from an empty one.
+        return data
+
+    def rpc_value(self, fn: str, body: dict | None = None):
+        """Call a scalar-returning RPC and return its decoded value (#3665).
+
+        The read counterpart of :meth:`rpc`. PostgREST returns a scalar /
+        array-returning function's result as the bare JSON body (e.g. a
+        number for ``double precision``, ``["a", "b"]`` for ``text[]``), so
+        the decoded value IS the result — no unwrapping is applied here
+        (guessing a wrapper shape would corrupt an array result).
+
+        FAIL-CLOSED: transport/HTTP failures raise ``RuntimeError`` (from
+        :meth:`rpc`); a body that cannot be decoded raises rather than
+        reading as an empty result.
+        """
+        return self.rpc(fn, body, representation=True)
 
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
@@ -273,8 +365,17 @@ class SupabaseControlPlane:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
-        (value None → ``col=is.null``), ``gt``, ``lt``. Raises RuntimeError
-        on any failure.
+        (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
+        Raises RuntimeError on any failure.
+
+        Filters may repeat a column. TWO OR MORE conditions on the same column
+        are combined into one PostgREST ``and=(...)`` group — a flat query string
+        carries one operator per column, so a second condition would otherwise
+        silently REPLACE the first. A single condition keeps the plain flat form,
+        so existing callers' requests are unchanged. A filter whose column is
+        literally ``"and"`` raises ``ValueError``: it would collide with the
+        logic-tree key this method writes. Values inside the group that carry a
+        reserved character are quoted (see ``_LOGIC_TREE_RESERVED``).
 
         ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
         httpx call. ``None`` (the default) keeps the client-level timeout —
@@ -290,25 +391,42 @@ class SupabaseControlPlane:
         params: dict[str, str] = {}
         if select:
             params["select"] = ",".join(select)
+
+        # ⛔ A PostgREST flat query string carries ONE operator per column, and
+        # `params` is keyed by column — so a SECOND condition on the SAME column
+        # overwrites the first and SILENTLY DROPS a bound. That is not
+        # hypothetical: `_read_recall` passed `created_at gt since` +
+        # `created_at lt until`, so the lower bound vanished and the analytics
+        # leg read the org's whole history instead of the requested window
+        # (found by code review of #3686). `abuse.rule_event_between` had the
+        # same latent drop.
+        #
+        # Fix: group by column. A column with several conditions goes into one
+        # `and=(...)` group (PostgREST ANDs it against the other, flat params);
+        # single-condition columns keep the plain flat form, so no existing
+        # caller's request shape changes.
+        by_col: dict[str, list[tuple[str, object]]] = {}
         for col, op, value in filters or []:
-            if op == "is":
-                params[col] = "is.null" if value is None else f"is.{value}"
-            elif op == "eq":
-                params[col] = f"eq.{value}"
-            elif op == "neq":
-                params[col] = f"neq.{value}"
-            elif op in ("gt", "lt"):
-                # #765 plan Task 8: reconcile (expires_at < now) + the
-                # signup/team-creation rate-limit counts (created_at > cutoff)
-                # need ordered comparisons. NULL semantics mirror SQL: a row
-                # with a NULL column never matches (PostgREST's gt./lt. is
-                # NULL-excluding; the fake mirrors this).
-                params[col] = f"{op}.{value}"
-            elif op == "lte":
-                # ISO-8601 cutoff for the post-grace purge sweep (#302).
-                params[col] = f"lte.{value}"
+            if col == "and":
+                # `and` is the PostgREST logic-tree key this method itself
+                # writes. A filter on a column of that name would be silently
+                # overwritten by the grouped form — refuse it outright, not
+                # only when it happens to carry several conditions.
+                raise ValueError(
+                    "filter column 'and' collides with the PostgREST logic-"
+                    "tree key used to combine same-column conditions")
+            by_col.setdefault(col, []).append((op, value))
+        grouped: list[str] = []
+        for col, conds in by_col.items():
+            if len(conds) == 1:
+                op, value = conds[0]
+                params[col] = _encode(op, value)
             else:
-                raise ValueError(f"unsupported filter op {op!r}")
+                grouped.extend(
+                    f"{col}.{_encode(op, value, in_logic_tree=True)}"
+                    for op, value in conds)
+        if grouped:
+            params["and"] = f"({','.join(grouped)})"
         if order:
             params["order"] = order
         if limit is not None:
@@ -330,32 +448,36 @@ class SupabaseControlPlane:
             # A per-request timeout is forwarded ONLY when supplied — httpx
             # reads ``timeout=None`` as "disable timeouts".
             req_kwargs = {} if timeout is None else {"timeout": timeout}
-            if method == "GET":
-                resp = self._http.get(url, params=params, headers=headers,
-                                      **req_kwargs)
-            elif method == "PATCH":
-                headers["Content-Type"] = "application/json"
-                # return=representation when a select is given → the caller
-                # sees the UPDATED rows ([] when the WHERE matched nothing),
-                # enabling atomic conditional claims (single UPDATE ... WHERE
-                # + rowcount via body, PR #1264 review P2).
-                headers["Prefer"] = ("return=representation" if select
-                                      else "return=minimal")
-                resp = self._http.patch(url, params=params, headers=headers,
-                                        json=json_body or {}, **req_kwargs)
-            elif method == "POST":
-                headers["Content-Type"] = "application/json"
-                headers["Prefer"] = "return=representation"
-                resp = self._http.post(url, params=params, headers=headers,
-                                       json=json_body or {}, **req_kwargs)
-            elif method == "DELETE":
-                # PostgREST row delete (service role). Only used by the
-                # post-grace hard-delete purge (#302) — soft paths PATCH.
-                headers["Prefer"] = "return=minimal"
-                resp = self._http.delete(url, params=params, headers=headers,
-                                         **req_kwargs)
-            else:
-                raise ValueError(f"unsupported method {method!r}")
+            started = time.perf_counter()
+            try:
+                if method == "GET":
+                    resp = self._http.get(url, params=params, headers=headers,
+                                          **req_kwargs)
+                elif method == "PATCH":
+                    headers["Content-Type"] = "application/json"
+                    # return=representation when a select is given → the caller
+                    # sees the UPDATED rows ([] when the WHERE matched nothing),
+                    # enabling atomic conditional claims (single UPDATE ... WHERE
+                    # + rowcount via body, PR #1264 review P2).
+                    headers["Prefer"] = ("return=representation" if select
+                                          else "return=minimal")
+                    resp = self._http.patch(url, params=params, headers=headers,
+                                            json=json_body or {}, **req_kwargs)
+                elif method == "POST":
+                    headers["Content-Type"] = "application/json"
+                    headers["Prefer"] = "return=representation"
+                    resp = self._http.post(url, params=params, headers=headers,
+                                           json=json_body or {}, **req_kwargs)
+                elif method == "DELETE":
+                    # PostgREST row delete (service role). Only used by the
+                    # post-grace hard-delete purge (#302) — soft paths PATCH.
+                    headers["Prefer"] = "return=minimal"
+                    resp = self._http.delete(url, params=params, headers=headers,
+                                             **req_kwargs)
+                else:
+                    raise ValueError(f"unsupported method {method!r}")
+            finally:
+                _record_client_call(started)
         except RuntimeError:
             raise
         except Exception as e:  # transport errors — fail closed
@@ -399,9 +521,9 @@ _abuse_store = None
 _REGISTRY_ABUSE_FIELDS = {"suspended_at", "flagged_at"}
 
 
-def _registry_abuse_write(team_id: str, field: str, value) -> None:
+def _registry_abuse_write(org_id: str, field: str, value) -> None:
     """Durable selfhost enforcement (scoping delta 4, code-review P1 fix):
-    write ONE suspension/staging field onto the registry Team node so the
+    write ONE suspension/staging field onto the registry Org node so the
     auth seams' prop reads actually reject. Field-scoped (never both props
     at once) so concurrent flag/suspend writes cannot clobber each other
     (code-review P2). Lazy hosted_api import — the hosted_api→
@@ -412,7 +534,7 @@ def _registry_abuse_write(team_id: str, field: str, value) -> None:
     sdk = _ha._make_sdk(namespace="registry")
     sdk._get_registry().query(
         f"MATCH (t:Team {{id: $id}}) SET t.{field} = $value",
-        params={"id": team_id, "value": value},
+        params={"id": org_id, "value": value},
     )
 
 
@@ -453,9 +575,9 @@ def _parse_ts(value) -> datetime | None:
     return parsed
 
 
-def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
+def _orgs_row_fail_soft(cp, org_id: str, *, select: list[str],
                          additive_tiers: list[list[str]]) -> dict | None:
-    """Teams row with fail-soft additive columns (#1096).
+    """Orgs row with fail-soft additive columns (#1096).
 
     Primary query selects base+additive (one round-trip). When it raises —
     a missing additive column → PostgREST HTTP 400 (PGRST204 per the
@@ -467,8 +589,8 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
     additive state (0015 suspended_at/flagged_at carry REAL suspension
     data — discarding it would bypass enforcement with real data present).
     If even the base-only select fails, the error PROPAGATES (fail-closed:
-    a broken teams table, or a missing base/deletion column — e.g.
-    team_by_id's #302 deleted_at/grace_hours stay in THAT call site's base
+    a broken orgs table, or a missing base/deletion column — e.g.
+    org_by_id's #302 deleted_at/grace_hours stay in THAT call site's base
     set — must never authenticate or open a kill-switch guard). Logged at
     WARNING per failed attempt so drift stays diagnosable (#1001
     post-mortem). Accepted-by-scope: a non-drift failure of the combined
@@ -484,8 +606,8 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
         dropped = {c for tier in additive_tiers[:k] for c in tier}
         attempt_select = [c for c in select if c not in dropped]
         try:
-            rows = cp.query("teams", select=attempt_select,
-                            filters=[("id", "eq", team_id)])
+            rows = cp.query("organizations", select=attempt_select,
+                            filters=[("id", "eq", org_id)])
             break
         except Exception as e:
             last_exc = e
@@ -495,7 +617,7 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
                     "the newest additive tier dropped (%s); a missing "
                     "additive column degrades, a missing base/deletion "
                     "column fails closed (%s)",
-                    team_id, select,
+                    org_id, select,
                     additive_tiers[0] if additive_tiers else None, e)
             elif set(additive) <= dropped:
                 # Terminal rung — the for-else below logs the single fatal
@@ -505,13 +627,13 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
                 _logger.warning(
                     "teams read failed for %s (select=%s) — retrying with "
                     "the next additive tier dropped (%s): %s",
-                    team_id, select, additive_tiers[k], e)
+                    org_id, select, additive_tiers[k], e)
     else:
         assert last_exc is not None
         _logger.warning(
             "teams base-only read failed for %s (select=%s) — "
             "fail-closed (missing base column or control-plane outage): %s",
-            team_id, [c for c in select if c not in additive], last_exc)
+            org_id, [c for c in select if c not in additive], last_exc)
         raise last_exc
     if not rows:
         return None
@@ -524,32 +646,32 @@ def resolve_api_key(cp, token: str) -> dict | None:
     Order (plan P1-1/P1-2):
     1. ``api_keys`` by lookup_hash (unique index — O(1)). Reject when
        ``revoked_at`` is set (AUTHORITATIVE — a revoked twin rejects even
-       when the team_memberships row is active) or ``expires_at`` passed
+       when the org_memberships row is active) or ``expires_at`` passed
        (#742 semantics).
-    2. ``team_memberships`` by lookup_hash AND status='active' (long-lived
+    2. ``org_memberships`` by lookup_hash AND status='active' (long-lived
        keys; bootstrap/recovery session keys only exist in api_keys).
     3. tier/quota from the ``teams`` row.
 
     Fail-closed: a control-plane error raises (RuntimeError) — it never
     returns None (401) and never falls back to the registry. EXCEPTION
-    (#1096): a failure of the additive teams read (0015 suspended_at/
+    (#1096): a failure of the additive orgs read (0015 suspended_at/
     flagged_at — separately-migrated columns) degrades to safe defaults
     (un-suspended/un-flagged) and is logged at WARNING; the drift-safe
-    base read still raises on failure (a broken teams table never
+    base read still raises on failure (a broken orgs table never
     authenticates).
 
-    Returns the same dict shape as the registry get_current_team path
-    (team_id, key_id, tier, max_users, max_graphs, max_points, max_api_keys,
-    max_sessions) plus additive metadata (key_prefix/created_via/created_by)
+    Returns the same dict shape as the registry get_current_org path
+    (org_id, key_id, tier, max_users, max_graphs, max_points, max_api_keys,
+    max_sessions — always None: unlimited, #4010) plus additive metadata
+    (key_prefix/created_via/created_by)
     plus the C1 tenancy fields (graph_id, graph_namespace, scopes,
     legacy_full_access, delegation_depth, created_by_key_id).
     """
     from tortoise.auth import lookup_hash
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
 
     now = datetime.now(UTC)
     h = lookup_hash(token)
-    team_id = key_id = created_via = created_by = key_prefix = None
+    org_id = key_id = created_via = created_by = key_prefix = None
     # C1 (#2110) tenancy fields — initialized BEFORE the row branch so the
     # membership path (no api_keys row) resolves safe defaults. A
     # membership-path key has no scopes/delegation → full legacy access,
@@ -568,13 +690,13 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # error-blind seam swallows ANY combined-read failure (drift or a
     # transient base-ok/additive-fail error) — a stored enabled=False key
     # re-authenticates for the degrade duration (same fail-open class as
-    # the teams ladder; documented in the #1096 plan). The base api_keys
+    # the orgs ladder; documented in the #1096 plan). The base api_keys
     # columns (0007) stay fail-closed: a failure of the base-only retry
     # propagates.
     #
     # C1: graph_id/scopes/delegation_depth/created_by_key_id join the
     # combined read as a SECOND additive tier (20260901000001). The retry
-    # ladder drops NEWEST-FIRST (mirrors the teams _teams_row_fail_soft
+    # ladder drops NEWEST-FIRST (mirrors the orgs _orgs_row_fail_soft
     # pattern): a pre-C1 schema (C1 columns absent, enabled present) 400s
     # the combined select → retry base+enabled (C1 defaults hold) → only a
     # pre-20260813000005 schema drops enabled too (the pre-existing
@@ -584,7 +706,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
     _API_KEY_ADDITIVE_C1_TIER = [
         "graph_id", "scopes", "delegation_depth", "created_by_key_id",
     ]
-    _API_KEY_BASE_SELECT = ["id", "team_id", "key_prefix", "created_via",
+    _API_KEY_BASE_SELECT = ["id", "org_id", "key_prefix", "created_via",
                             "created_by", "expires_at", "revoked_at"]
     try:
         rows = cp.query(
@@ -632,7 +754,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
         if expires_at is not None and expires_at <= now:
             # #742: expired keys must NOT authenticate.
             return None
-        team_id = row["team_id"]
+        org_id = row["org_id"]
         key_id = row["id"]
         created_via = row.get("created_via")
         created_by = row.get("created_by")
@@ -651,56 +773,56 @@ def resolve_api_key(cp, token: str) -> dict | None:
         legacy_full_access = (delegation_depth is None) and (scopes == [])
     else:
         memberships = cp.query(
-            "team_memberships",
-            select=["team_id"],
+            "org_memberships",
+            select=["org_id"],
             filters=[("lookup_hash", "eq", h), ("status", "eq", "active")],
         )
         if not memberships:
             return None  # registry-only key → nothing resolves (E2E-7-negative)
-        team_id = memberships[0]["team_id"]
+        org_id = memberships[0]["org_id"]
 
-    team_row = _teams_row_fail_soft(
-        cp, team_id, select=_QUOTA_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
-                         _TEAM_ADDITIVE_IMPORT_TIER,
-                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
-                         _TEAM_ADDITIVE_BILLING_TIER])
-    if team_row is None:
-        # Key's team vanished — fail closed (401), never authenticate.
+    org_row = _orgs_row_fail_soft(
+        cp, org_id, select=_QUOTA_SELECT,
+        additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                         _ORG_ADDITIVE_IMPORT_TIER,
+                         _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
+                         _ORG_ADDITIVE_BILLING_TIER])
+    if org_row is None:
+        # Key's org vanished — fail closed (401), never authenticate.
         return None
 
     # #1082 PR2: anon-ceiling derivation at the auth boundary — an
-    # unclaimed zero-email team resolves to the reduced ``anon`` tier until
+    # unclaimed zero-email org resolves to the reduced ``anon`` tier until
     # claimed (owner user_id linked). Fail-open to stored tier on error.
     from tortoise.quota import derived_tier
-    tier = derived_tier({**team_row, "id": team_id})
+    tier = derived_tier({**org_row, "id": org_id})
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
     anon_override = tier == "anon"  # #1082 PR2: stored caps were minted at
     # free values (agent_signup provisions tier='free' columns); when the
     # unclaimed-owner predicate derives anon, override read-time with the
-    # reduced anon tier values — never leave free caps on an anon team.
-    max_users = team_row.get("max_users")
-    max_graphs = team_row.get("max_graphs")
+    # reduced anon tier values — never leave free caps on an anon org.
+    max_users = org_row.get("max_users")
+    max_graphs = org_row.get("max_graphs")
     # #1859 P3-2: honor the max_points column (points-cap override,
     # migration 20260817000001) with graph_size_cap fallback — mirror
-    # import_team's precedence instead of reading graph_size_cap only.
-    max_points = team_row.get("max_points")
+    # import_org's precedence instead of reading graph_size_cap only.
+    max_points = org_row.get("max_points")
     if max_points is None:
-        max_points = team_row.get("graph_size_cap")
+        max_points = org_row.get("graph_size_cap")
     # #1148: dashboard key-login acceptance — normalized BEFORE the dict so
     # a None (additive-read degrade, #1096) becomes the safe default True
     # (the column is NOT NULL DEFAULT true; a drifted schema must not 403
-    # key-auth management for teams that never disabled it). A stored False
+    # key-auth management for orgs that never disabled it). A stored False
     # is carried as-is (the gate stays closed).
-    _dkl = team_row.get("dashboard_key_login")
+    _dkl = org_row.get("dashboard_key_login")
     # C1 (#2110): resolve the key's graph namespace — graph-bound key → the
-    # graphs row's namespace; team-wide (graph_id NULL) → the default graph
-    # = teams.graph_name (in _TEAM_BASE_SELECT). Fail-soft on drift.
+    # graphs row's namespace; org-wide (graph_id NULL) → the default graph
+    # = teams.graph_name (in _ORG_BASE_SELECT). Fail-soft on drift.
     graph_namespace = _graph_namespace_for(
-        cp, team_id, graph_id, team_row.get("graph_name"))
+        cp, org_id, graph_id, org_row.get("graph_name"))
     return {
-        "team_id": team_id,
+        "org_id": org_id,
         "key_id": key_id,
         "tier": tier,
         # max_users/max_graphs: preserve None (unlimited, Team tier) and fall
@@ -715,9 +837,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
         # forces the reduced node cap.
         "max_points": (int(lim["max_graph_nodes"]) if anon_override
                        else (int(max_points) if max_points is not None else lim["max_graph_nodes"])),
-        # 0006 teams has no max_api_keys/max_sessions columns — pricing/defaults
+        # 0006 orgs has no max_api_keys column — pricing resolves it.
+        # #4010: sessions are UNLIMITED for every tier; max_sessions has no
+        # column either, and no constant supplies one.
         "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
+        "max_sessions": None,
         # additive metadata (not part of the registry dict contract)
         "key_prefix": key_prefix,
         "created_via": created_via,
@@ -726,17 +850,17 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "enabled": row.get("enabled", True) if rows else True,
         "dashboard_key_login": True if _dkl is None else _dkl,
         # #308: enforcement (403 SUSPENDED) + owner notification
-        "suspended_at": team_row.get("suspended_at"),
-        "flagged_at": team_row.get("flagged_at"),
-        "email": team_row.get("email"),
+        "suspended_at": org_row.get("suspended_at"),
+        "flagged_at": org_row.get("flagged_at"),
+        "email": org_row.get("email"),
         # #1623: Stripe billing state (webhook store, 0012) — /v1/team
         # renders plan state from these.
-        "subscription_status": team_row.get("subscription_status"),
-        "customer_email": team_row.get("customer_email"),
+        "subscription_status": org_row.get("subscription_status"),
+        "customer_email": org_row.get("customer_email"),
         # C1 (#2110) tenancy fields — the resolution point for the multi-graph
         # epic. graph_namespace: graph-bound key → the graphs row's namespace
-        # (fail-soft None on drift); team-wide (graph_id NULL) → the default
-        # graph = teams.graph_name (in _TEAM_BASE_SELECT).
+        # (fail-soft None on drift); org-wide (graph_id NULL) → the default
+        # graph = teams.graph_name (in _ORG_BASE_SELECT).
         "graph_id": graph_id,
         "graph_namespace": graph_namespace,
         "scopes": scopes,
@@ -746,14 +870,14 @@ def resolve_api_key(cp, token: str) -> dict | None:
     }
 
 
-def _graph_namespace_for(cp, team_id: str, graph_id: str | None,
+def _graph_namespace_for(cp, org_id: str, graph_id: str | None,
                          default_namespace: str | None) -> str | None:
     """Resolve a key's graph namespace (C1 #2110).
 
     graph_id set → the graphs row's namespace; a MISSING row (drift race,
     soft-deleted graph) resolves **None — fail-closed** (the security
-    review P1: a graph-bound key must never silently widen onto the team
-    default graph). graph_id NULL/empty (team-wide key) → the default graph
+    review P1: a graph-bound key must never silently widen onto the org
+    default graph). graph_id NULL/empty (org-wide key) → the default graph
     namespace (teams.graph_name), passed by the caller.
     """
     if not graph_id:
@@ -761,7 +885,7 @@ def _graph_namespace_for(cp, team_id: str, graph_id: str | None,
     try:
         rows = cp.query(
             "graphs", select=["namespace"],
-            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
         )
     except Exception as e:
         _logger.warning(
@@ -789,31 +913,31 @@ def update_last_used(cp, key_id: str) -> None:
 # ── Session-path helpers (get_current_user memberships, E1/E6/E8) ──────────
 
 def user_memberships(cp, user_id: str) -> list[dict]:
-    """Active memberships for a JWT user: [{team_id, role}].
+    """Active memberships for a JWT user: [{org_id, role}].
 
-    Placeholder rows (team_id='') are excluded — mirrors the registry
+    Placeholder rows (org_id='') are excluded — mirrors the registry
     ``_user_memberships`` predicate (plan §4.1 step 6).
     """
     rows = cp.query(
-        "team_memberships",
-        select=["team_id", "role"],
+        "org_memberships",
+        select=["org_id", "role"],
         filters=[("user_id", "eq", user_id), ("status", "eq", "active"),
-                 ("team_id", "neq", "")],
+                 ("org_id", "neq", "")],
     )
-    return [{"team_id": r["team_id"], "role": r["role"]} for r in rows]
+    return [{"org_id": r["org_id"], "role": r["role"]} for r in rows]
 
 
-def membership_for_user_team(cp, user_id: str, team_id: str) -> dict | None:
-    """Active membership for (user, team) → {team_id, role} | None."""
+def membership_for_user_org(cp, user_id: str, org_id: str) -> dict | None:
+    """Active membership for (user, org) → {org_id, role} | None."""
     rows = cp.query(
-        "team_memberships",
+        "org_memberships",
         select=["role"],
-        filters=[("user_id", "eq", user_id), ("team_id", "eq", team_id),
+        filters=[("user_id", "eq", user_id), ("org_id", "eq", org_id),
                  ("status", "eq", "active")],
     )
     if not rows:
         return None
-    return {"team_id": team_id, "role": rows[0]["role"]}
+    return {"org_id": org_id, "role": rows[0]["role"]}
 
 
 def _is_uuid(value: object) -> bool:
@@ -847,20 +971,20 @@ def _is_uuid(value: object) -> bool:
         return False
 
 
-def mint_target_user_for_key(cp, key_created_by, team_id: str) -> str | None:
+def mint_target_user_for_key(cp, key_created_by, org_id: str) -> str | None:
     """#1511: the user a key's session-exchange should mint for.
 
     Returns the key's creator user_id when it is an ACTIVE member of the
-    team (the exchange mints the CREATOR's session — no escalation: a
-    member's key mints the member's session, team-scoped claims only), else
+    org (the exchange mints the CREATOR's session — no escalation: a
+    member's key mints the member's session, org-scoped claims only), else
     None. The endpoint branches on the `created_by` SHAPE BEFORE calling:
-    an anon/identity string on an owner-less team → ANON_TEAM_NO_OWNER; an
+    an anon/identity string on an owner-less org → ANON_TEAM_NO_OWNER; an
     "api"/NULL/unknown shape → KEY_NOT_USER_MINTED. Control-plane fact only
     (FakeControlPlane-testable); the GoTrue admin fetch + mint live in
     hosted_api.py.
 
     Shape-gate (#1719): a non-UUID creator ("api"/"anon-*"/"reg-*", NULL,
-    junk) returns None WITHOUT querying — ``team_memberships.user_id`` is a
+    junk) returns None WITHOUT querying — ``org_memberships.user_id`` is a
     uuid column, so a non-UUID literal would raise PostgREST 22P02 (HTTP 400)
     and surface as an unmapped 500. The endpoint's shape tree classifies
     these (ANON_TEAM_NO_OWNER / KEY_NOT_USER_MINTED). UUID-shaped values
@@ -868,48 +992,48 @@ def mint_target_user_for_key(cp, key_created_by, team_id: str) -> str | None:
     """
     if not key_created_by or not _is_uuid(key_created_by):
         return None
-    mem = membership_for_user_team(cp, key_created_by, team_id)
+    mem = membership_for_user_org(cp, key_created_by, org_id)
     return key_created_by if mem is not None else None
 
 
-def team_by_id(cp, team_id: str) -> dict | None:
-    """Team row (registry-properties-shaped dict) or None.
+def org_by_id(cp, org_id: str) -> dict | None:
+    """Org row (registry-properties-shaped dict) or None.
 
     Additive columns fail soft (#1096): 0015 suspension/staging
     (suspended_at/flagged_at) + 20260813000005 dashboard_key_login (no
-    team_by_id consumer reads it — included for seam uniformity). A schema
+    org_by_id consumer reads it — included for seam uniformity). A schema
     missing them returns the row with safe None defaults, never raises.
     The #302 soft-delete columns (20260813000001 deleted_at/grace_hours)
     are NOT additive-fail-soft: the deletion kill-switch guard must fail
     closed, never open (a schema missing them cannot have soft-deleted
     rows — the write path is equally drifted — so fail-closed is safe).
     """
-    return _teams_row_fail_soft(
-        cp, team_id,
+    return _orgs_row_fail_soft(
+        cp, org_id,
         select=["id", "name", "tier", "email", "graph_name", "max_users",  # noqa: RUF005
-                "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
+                "max_orgs", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
-            + _TEAM_ADDITIVE_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_ONBOARDING_TIER,  # newest migration first
-                         _TEAM_ADDITIVE_2040_TIER,
-                         _TEAM_ADDITIVE_IMPORT_TIER,
-                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
-                         _TEAM_ADDITIVE_BILLING_TIER])
+            + _ORG_ADDITIVE_SELECT,
+        additive_tiers=[_ORG_ADDITIVE_ONBOARDING_TIER,  # newest migration first
+                         _ORG_ADDITIVE_2040_TIER,
+                         _ORG_ADDITIVE_IMPORT_TIER,
+                         _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
+                         _ORG_ADDITIVE_BILLING_TIER])
 
 
 # ── Session-key mint writes (E2E-2 round-trip: mint → api_keys → resolve) ──
 
-def active_api_keys(cp, team_id: str, *, created_via: str | None = None,
+def active_api_keys(cp, org_id: str, *, created_via: str | None = None,
                     created_by: str | None = None) -> list[dict]:
-    """Non-revoked, non-expired api_keys rows for a team (#742 expiry;
+    """Non-revoked, non-expired api_keys rows for an org (#742 expiry;
     #2481 — a REVOKED row is an audit tombstone, never a budget consumer).
 
     Optional created_via/created_by filters (bootstrap cap / recovery cap
     queries). Expiry is filtered here (PostgREST dialect stays minimal).
     """
     filters: list[tuple[str, str, object]] = [
-        ("team_id", "eq", team_id), ("revoked_at", "is", None),
+        ("org_id", "eq", org_id), ("revoked_at", "is", None),
     ]
     if created_via is not None:
         filters.append(("created_via", "eq", created_via))
@@ -917,7 +1041,7 @@ def active_api_keys(cp, team_id: str, *, created_via: str | None = None,
         filters.append(("created_by", "eq", created_by))
     rows = cp.query(
         "api_keys",
-        select=["id", "team_id", "created_via", "created_by", "created_at",
+        select=["id", "org_id", "created_via", "created_by", "created_at",
                 "expires_at", "revoked_at"],
         filters=filters,
     )
@@ -942,6 +1066,33 @@ def revoke_api_key(cp, key_id: str, now: str | None = None) -> None:
         filters=[("id", "eq", key_id)],
         json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},  # noqa: UP017
     )
+
+
+def claim_api_key_revocation(cp, key_id: str, now: str | None = None) -> bool:
+    """#4355: conditionally revoke a LIVE api_keys row and report whether THIS
+    call claimed it.
+
+    ``UPDATE api_keys SET revoked_at = :now WHERE id = :id AND revoked_at IS
+    NULL`` with ``Prefer: return=representation`` (see ``ControlPlane.query``:
+    a PATCH with a ``select`` returns the UPDATED rows, ``[]`` when the WHERE
+    matched nothing). Returns True only when the row was live at the write —
+    the single-statement claim the rotate primitive uses to admit exactly one
+    concurrent rotation of a row.
+
+    Distinct from :func:`revoke_api_key` on purpose: that one is the
+    IDEMPOTENT revoke (an already-revoked row re-answers ``already: true``),
+    whereas a rotate must be able to tell "I released this slot" from "someone
+    else already did", so the loser can compensate and refuse. Never raises on
+    a lost claim (only on a real transport failure, via the seam).
+    """
+    updated = cp.query(
+        "api_keys",
+        select=["id"],
+        method="PATCH",
+        filters=[("id", "eq", key_id), ("revoked_at", "is", None)],
+        json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},  # noqa: UP017
+    )
+    return bool(updated)
 
 def set_api_key_enabled(cp, key_id: str, enabled: bool) -> None:
     """#1148: enable/disable an API key (per-key toggle). Disabled keys stop
@@ -984,16 +1135,16 @@ def set_api_key_scopes(cp, key_id: str, scopes: list[str]) -> None:
     )
 
 
-def set_dashboard_key_login(cp, team_id: str, enabled: bool) -> None:
+def set_dashboard_key_login(cp, org_id: str, enabled: bool) -> None:
     """#1148: set whether API-key login is accepted for the dashboard
     (management surface). Claimed owners toggle this (session-authed,
     PATCH /v1/team/dashboard-login). When false, key-auth management calls
     return 403 dashboard_login_disabled; graph endpoints keep accepting the
-    key. Anon teams always keep it true (the Protect screen IS the bootstrap)."""
+    key. Anon orgs always keep it true (the Protect screen IS the bootstrap)."""
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
-        filters=[("id", "eq", team_id)],
+        filters=[("id", "eq", org_id)],
         json_body={"dashboard_key_login": bool(enabled)},
     )
 
@@ -1016,7 +1167,7 @@ class InvitationError(Exception):
         self.status = status
 
 
-def invitation_mint(cp, team_id: str, email: str, role: str,
+def invitation_mint(cp, org_id: str, email: str, role: str,
                     invited_by: str, expires_days: int = 7,
                     inviter_email: str | None = None) -> dict:
     """Create a pending invitations row; returns the plaintext token ONCE.
@@ -1026,7 +1177,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
     ``tortoise.auth.lookup_hash``; the plaintext is returned to the caller
     exactly once. Acceptance is an O(1) indexed lookup_hash match, no scan.
 
-    Dedup: the 0008 partial unique index (team_id, email) WHERE
+    Dedup: the 0008 partial unique index (org_id, email) WHERE
     status='pending' — a duplicate PENDING invite raises InvitationError(409);
     accepted/revoked invites don't block a fresh re-invite.
 
@@ -1040,15 +1191,15 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
 
     role = (role or "member").strip().lower()
     email = (email or "").strip().lower()
-    if not team_id or not email or "@" not in email:
-        raise InvitationError("team_id and valid email required", status=422)
+    if not org_id or not email or "@" not in email:
+        raise InvitationError("org_id and valid email required", status=422)
     if role not in ("admin", "member"):
         raise InvitationError("role must be 'admin' or 'member'", status=422)
 
     dup = cp.query(
         "invitations",
         select=["id"],
-        filters=[("team_id", "eq", team_id), ("email", "eq", email),
+        filters=[("org_id", "eq", org_id), ("email", "eq", email),
                  ("status", "eq", "pending")],
     )
     if dup:
@@ -1067,7 +1218,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
             method="POST",
             json_body={
                 "id": iid,
-                "team_id": team_id,
+                "org_id": org_id,
                 "lookup_hash": _lookup_hash(token),
                 "role": role,
                 "invited_by": invited_by,
@@ -1078,7 +1229,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
             },
         )
     except RuntimeError as e:
-        # Concurrent duplicate mint: the partial unique index (team_id, email)
+        # Concurrent duplicate mint: the partial unique index (org_id, email)
         # WHERE status='pending' rejects the loser with PostgREST 409 — map
         # that to the documented InvitationError(409) instead of a 500
         # (code-review P2, PR #864). The pre-check above is a friendly
@@ -1105,7 +1256,7 @@ def invitation_accept(cp, token: str, user_id: str,
     ``select=["id","status"]`` (PostgREST return=representation) — the
     PATCH's OWN matched-row count is the authoritative claim: a concurrent
     accept loses the race and its PATCH returns [] → it raises before any
-    membership write (P2-1). On success the REAL team_memberships row is
+    membership write (P2-1). On success the REAL org_memberships row is
     created with the INVITED role (O/I/T: accepted membership carries the
     invited role), status='active'.
 
@@ -1124,9 +1275,9 @@ def invitation_accept(cp, token: str, user_id: str,
     fused_from_email / otp_verified_by) on the invitation. Legacy callers
     (no override) keep the byte-unchanged 403.
 
-    A previously removed/invited membership row for (user, team) is
+    A previously removed/invited membership row for (user, org) is
     resurrected in place (registry MERGE semantics) rather than INSERTed —
-    uq_member_team (user_id, team_id) would reject a duplicate row.
+    uq_member_org (user_id, org_id) would reject a duplicate row.
     """
     import uuid
 
@@ -1136,7 +1287,7 @@ def invitation_accept(cp, token: str, user_id: str,
     h = _lookup_hash(token)
     rows = cp.query(
         "invitations",
-        select=["id", "team_id", "email", "role", "status", "expires_at"],
+        select=["id", "org_id", "email", "role", "status", "expires_at"],
         filters=[("lookup_hash", "eq", h)],
     )
     if not rows:
@@ -1185,11 +1336,11 @@ def invitation_accept(cp, token: str, user_id: str,
                 "Invalid or expired verification code", status=403)
         otp_verified_by = user_id
 
-    # Existing membership for (user, team) — any status.
+    # Existing membership for (user, org) — any status.
     existing = cp.query(
-        "team_memberships",
+        "org_memberships",
         select=["id", "status"],
-        filters=[("user_id", "eq", user_id), ("team_id", "eq", inv["team_id"])],
+        filters=[("user_id", "eq", user_id), ("org_id", "eq", inv["org_id"])],
     )
     if existing and existing[0].get("status") == "active":
         raise InvitationError("Already a member of this team", status=409)
@@ -1198,40 +1349,40 @@ def invitation_accept(cp, token: str, user_id: str,
     # routes through membership_create → max_users gate → 402 on quota. An
     # invite minted on Team tier and accepted after a downgrade to free must
     # not exceed the free tier's 1-user limit — mirror the gate here.
-    team = team_by_id(cp, inv["team_id"])
-    if team is None:
+    org = org_by_id(cp, inv["org_id"])
+    if org is None:
         raise InvitationError("Team no longer exists", status=404)
-    if team.get("deleted_at"):
-        # #302: a soft-deleted team must not mint memberships. Closes the
+    if org.get("deleted_at"):
+        # #302: a soft-deleted org must not mint memberships. Closes the
         # race between the delete cascade and a concurrent accept (the
         # membership kill-switch and the invitation revoke are separate
         # writes).
         raise InvitationError("Team is scheduled for deletion", status=410)
-    if team.get("suspended_at"):
-        # #1853: a suspended team must not mint memberships either — the
+    if org.get("suspended_at"):
+        # #1853: a suspended org must not mint memberships either — the
         # invite may predate the suspension, but the membership would be
         # dead on arrival (every subsequent call 403s). Parity with the
         # deleted_at kill-switch above.
         raise InvitationError("Team is suspended", status=403)
     # #1875/#1877 (P1 cycle-2): join-side free-cap on the TOKEN entry point
     # too — a free-capped invitee must not join a free (or downgraded-window)
-    # team via the email link. Non-consuming (before the single-use PATCH).
-    if team.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
+    # org via the email link. Non-consuming (before the single-use PATCH).
+    if org.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
             and count_active_free_memberships(cp, user_id) >= 1:
         raise InvitationError(
             "You already have a free team — this team requires a paid plan "
             "to join", status=402)
     from tortoise.pricing import tier_limits
-    tier = team.get("tier") or "free"
+    tier = org.get("tier") or "free"
     lim = tier_limits(tier)
-    max_users = team.get("max_users")
+    max_users = org.get("max_users")
     if max_users is None:
         max_users = lim.get("max_users_per_team")
     if max_users is not None:
         member_count = cp.query(
-            "team_memberships",
+            "org_memberships",
             select=["id"],
-            filters=[("team_id", "eq", inv["team_id"]),
+            filters=[("org_id", "eq", inv["org_id"]),
                      ("status", "eq", "active")],
         )
         if len(member_count) >= int(max_users):
@@ -1279,7 +1430,7 @@ def invitation_accept(cp, token: str, user_id: str,
     try:
         if existing:
             cp.query(
-                "team_memberships",
+                "org_memberships",
                 method="PATCH",
                 filters=[("id", "eq", existing[0]["id"])],
                 json_body={"role": inv["role"], "status": "active",
@@ -1288,18 +1439,18 @@ def invitation_accept(cp, token: str, user_id: str,
             )
         else:
             cp.query(
-                "team_memberships",
+                "org_memberships",
                 method="POST",
                 json_body={
                     "id": membership_id,
                     "user_id": user_id,
-                    "team_id": inv["team_id"],
+                    "org_id": inv["org_id"],
                     # 0001 NOT NULL columns; key_hash='pending' is the
                     # reconcilable-placeholder sentinel (an invited member has no
                     # key of their own — session keys live in api_keys).
-                    "team_name": (team or {}).get("name") or "",
+                    "org_name": (org or {}).get("name") or "",
                     "key_hash": "pending",
-                    "graph_name": (team or {}).get("graph_name") or "",
+                    "graph_name": (org or {}).get("graph_name") or "",
                     "role": inv["role"],  # invited role preserved (O/I/T)
                     "status": "active",
                     "invited_email": inv.get("email"),
@@ -1322,7 +1473,7 @@ def invitation_accept(cp, token: str, user_id: str,
         except Exception:
             pass
         raise
-    res = {"team_id": inv["team_id"], "role": inv["role"]}
+    res = {"org_id": inv["org_id"], "role": inv["role"]}
     if email_mismatch and mismatch_override is not None:
         res["accepted_via"] = mismatch_override
         res["mismatch"] = {"invited_email": inv.get("email"),
@@ -1333,7 +1484,7 @@ def invitation_accept(cp, token: str, user_id: str,
 def invitation_info_by_token(cp, token: str) -> dict | None:
     """Public invite-info lookup by plaintext token (#1177).
 
-    Returns the display fields for the accept page: team_id, role, expires_at,
+    Returns the display fields for the accept page: org_id, role, expires_at,
     inviter_email — or None for unknown/expired/consumed tokens. The token is
     matched via its lookup_hash (O(1) index, same as accept). Only display-safe
     fields are returned: never the lookup_hash or the invitee email.
@@ -1343,7 +1494,7 @@ def invitation_info_by_token(cp, token: str) -> dict | None:
 
     rows = cp.query(
         "invitations",
-        select=["id", "team_id", "role", "inviter_email", "expires_at",
+        select=["id", "org_id", "role", "inviter_email", "expires_at",
                 "status", "accepted_at"],
         filters=[("lookup_hash", "eq", _lookup_hash(token))],
     )
@@ -1354,7 +1505,7 @@ def invitation_info_by_token(cp, token: str) -> dict | None:
     if row.get("status") not in (None, "pending") or row.get("accepted_at"):
         return None
     return {
-        "team_id": row["team_id"],
+        "org_id": row["org_id"],
         "role": row.get("role", "member"),
         "inviter_email": row.get("inviter_email"),
         "expires_at": row.get("expires_at"),
@@ -1371,7 +1522,7 @@ def invitation_row_by_token(cp, token: str) -> dict | None:
 
     rows = cp.query(
         "invitations",
-        select=["id", "team_id", "email", "role", "status",
+        select=["id", "org_id", "email", "role", "status",
                 "accepted_at", "expires_at"],
         filters=[("lookup_hash", "eq", _lookup_hash(token))],
     )
@@ -1387,23 +1538,23 @@ def invitation_row_by_token(cp, token: str) -> dict | None:
     return row
 
 
-def invitation_rescind(cp, invitation_id: str, team_id: str,
+def invitation_rescind(cp, invitation_id: str, org_id: str,
                        actor_user_id: str) -> dict:
     """Owner/admin rescind — set status='revoked' (soft delete).
 
-    Scoped to the actor's team (an invite id from another team is a 404).
+    Scoped to the actor's org (an invite id from another org is a 404).
     Idempotent for already-revoked invites (mirrors the registry SDK); an
     ACCEPTED (used) invite cannot be rescinded — the membership already
     exists.
     """
-    mem = membership_for_user_team(cp, actor_user_id, team_id)
+    mem = membership_for_user_org(cp, actor_user_id, org_id)
     if not mem or mem["role"] not in ("owner", "admin"):
         raise InvitationError("Requires owner or admin role in team", status=403)
 
     rows = cp.query(
         "invitations",
-        select=["id", "status", "team_id"],
-        filters=[("id", "eq", invitation_id), ("team_id", "eq", team_id)],
+        select=["id", "status", "org_id"],
+        filters=[("id", "eq", invitation_id), ("org_id", "eq", org_id)],
     )
     if not rows:
         raise InvitationError("Invitation not found", status=404)
@@ -1433,8 +1584,8 @@ def invitation_rescind(cp, invitation_id: str, team_id: str,
     return {"revoked": True, "invitation_id": invitation_id}
 
 
-def pending_invitations(cp, team_id: str) -> list[dict]:
-    """Pending (unused) invites for a team — dashboard surface, oldest first.
+def pending_invitations(cp, org_id: str) -> list[dict]:
+    """Pending (unused) invites for an org — dashboard surface, oldest first.
 
     The actionable set: only status='pending' rows are returned (consumed /
     revoked invites are excluded; list_members shows the resulting
@@ -1442,9 +1593,9 @@ def pending_invitations(cp, team_id: str) -> list[dict]:
     """
     return cp.query(
         "invitations",
-        select=["id", "team_id", "role", "invited_by", "email", "status",
+        select=["id", "org_id", "role", "invited_by", "email", "status",
                 "expires_at", "created_at"],
-        filters=[("team_id", "eq", team_id), ("status", "eq", "pending")],
+        filters=[("org_id", "eq", org_id), ("status", "eq", "pending")],
         order="created_at",
     )
 
@@ -1457,14 +1608,14 @@ def pending_invitations(cp, team_id: str) -> list[dict]:
 # service_role (this client) is the ONLY reader/writer in Supabase mode.
 
 
-def team_onboarding_state(cp, team_id: str) -> dict | None:
-    """Read ``teams.onboarding_state`` (jsonb) for a team.
+def org_onboarding_state(cp, org_id: str) -> dict | None:
+    """Read ``teams.onboarding_state`` (jsonb) for an org.
 
     Returns the stored state merged over the hosted default shape
     (``hosted_api._ONBOARDING_DEFAULT_STATE`` — same shape the registry path
     auto-initializes to), so callers never see a partial dict for an existing
-    row. None when the team row does not exist — the caller mirrors the
-    registry ``MATCH``-no-op (a missing team reads as defaults without
+    row. None when the org row does not exist — the caller mirrors the
+    registry ``MATCH``-no-op (a missing org reads as defaults without
     writing). Unknown stored keys are PRESERVED on the merge (mirrors the
     registry ``state.update(stored)`` semantics — dropping them would let a
     later write-back permanently erase keys the whitelist doesn't know,
@@ -1475,7 +1626,7 @@ def team_onboarding_state(cp, team_id: str) -> dict | None:
     # time hosted_api is fully loaded.
     from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
     rows = cp.query(
-        "teams", select=["onboarding_state"], filters=[("id", "eq", team_id)]
+        "organizations", select=["onboarding_state"], filters=[("id", "eq", org_id)]
     )
     if not rows:
         return None
@@ -1486,7 +1637,7 @@ def team_onboarding_state(cp, team_id: str) -> dict | None:
     return state
 
 
-def update_onboarding_state(cp, team_id: str, state_dict: dict) -> None:
+def update_onboarding_state(cp, org_id: str, state_dict: dict) -> None:
     """PATCH ``teams`` SET onboarding_state = state_dict (jsonb).
 
     PostgREST accepts the JSON object directly in the PATCH body (the
@@ -1495,61 +1646,61 @@ def update_onboarding_state(cp, team_id: str, state_dict: dict) -> None:
     error, never silently lose progress.
     """
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
-        filters=[("id", "eq", team_id)],
+        filters=[("id", "eq", org_id)],
         json_body={"onboarding_state": state_dict},
     )
 
 
-def team_email(cp, team_id: str) -> str | None:
-    """Read ``teams.email`` for a team (None when the row is missing)."""
-    rows = cp.query("teams", select=["email"], filters=[("id", "eq", team_id)])
+def org_email(cp, org_id: str) -> str | None:
+    """Read ``teams.email`` for an org (None when the row is missing)."""
+    rows = cp.query("organizations", select=["email"], filters=[("id", "eq", org_id)])
     return rows[0]["email"] if rows else None
 
 
-def team_name(cp, team_id: str) -> str | None:
-    """Read ``teams.name`` (the org display name) for a team (None when the
+def org_name(cp, org_id: str) -> str | None:
+    """Read ``teams.name`` (the org display name) for an org (None when the
     row is missing) — #1999 (W3) hosted seed anchor data (DM-3: org display
     name ← teams.name, never invented)."""
-    rows = cp.query("teams", select=["name"], filters=[("id", "eq", team_id)])
+    rows = cp.query("organizations", select=["name"], filters=[("id", "eq", org_id)])
     return rows[0]["name"] if rows else None
 
 
-def update_team_email(cp, team_id: str, email: str) -> None:
+def update_org_email(cp, org_id: str, email: str) -> None:
     """PATCH ``teams`` SET email (onboarding flow writes the signup email)."""
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
-        filters=[("id", "eq", team_id)],
+        filters=[("id", "eq", org_id)],
         json_body={"email": email},
     )
 
 
-def team_onboarding_email_sent(cp, team_id: str) -> bool | None:
+def org_onboarding_email_sent(cp, org_id: str) -> bool | None:
     """Marker read: True once the #2406 signup-email was accepted by the
     provider (teams.onboarding_email_sent_at set); False when unset; None
-    when the team row does not exist."""
+    when the org row does not exist."""
     rows = cp.query(
-        "teams", select=["onboarding_email_sent_at"],
-        filters=[("id", "eq", team_id)],
+        "organizations", select=["onboarding_email_sent_at"],
+        filters=[("id", "eq", org_id)],
     )
     if not rows:
         return None
     return rows[0].get("onboarding_email_sent_at") is not None
 
 
-def set_team_onboarding_email_sent(cp, team_id: str) -> bool:
+def set_org_onboarding_email_sent(cp, org_id: str) -> bool:
     """Rowcount-gated marker stamp (#2406): PATCH
     ``onboarding_email_sent_at = now()`` WHERE id AND the marker is still
     NULL (return=representation). True only when THIS call performed the
     stamp (one row updated) — a marker already set (concurrent provision /
     replay raced us) returns False and the provider Idempotency-Key
-    ``onboarding:{team_id}`` collapsed the duplicate send."""
+    ``onboarding:{org_id}`` collapsed the duplicate send."""
     rows = cp.query(
-        "teams",
+        "organizations",
         select=["id"],
-        filters=[("id", "eq", team_id),
+        filters=[("id", "eq", org_id),
                  ("onboarding_email_sent_at", "is", None)],
         method="PATCH",
         json_body={"onboarding_email_sent_at":
@@ -1647,13 +1798,13 @@ def consume_unlink_permit(cp, *, user_id: str, consumed_at: str) -> int:
     return len(rows)
 
 
-def owner_email(cp, team_id: str) -> str | None:
-    """Resolve a team's owner email (#1765 abuse-notify re-point): the
+def owner_email(cp, org_id: str) -> str | None:
+    """Resolve an org's owner email (#1765 abuse-notify re-point): the
     ACTIVE owner's Supabase user email via the GoTrue admin API, falling
-    back to None on anon/zero-owner teams or any admin/transport error (the
+    back to None on anon/zero-owner orgs or any admin/transport error (the
     caller falls back to teams.email, then the ops inbox). Never raises.
     """
-    uid = owner_user_id(cp, team_id)
+    uid = owner_user_id(cp, org_id)
     if not uid:
         return None
     import os as _os
@@ -1680,39 +1831,39 @@ def membership_by_identity(cp, identity: str) -> dict | None:
     (reg-<hash> / anon-). The #1765 register idempotency re-anchor: a
     leftover reg- owner row means the email was already registered."""
     rows = cp.query(
-        "team_memberships",
-        select=["team_id"],
+        "org_memberships",
+        select=["org_id"],
         filters=[("identity", "eq", identity), ("role", "eq", "owner"),
                  ("status", "eq", "active"), ("user_id", "is", None)],
     )
     return rows[0] if rows else None
 
 
-def owner_user_id(cp, team_id: str) -> str | None:
-    """Resolve a team's ACTIVE OWNER user_id (None for anon/zero-owner
-    teams). The abuse-notify re-point (#1765) composes this with the GoTrue
+def owner_user_id(cp, org_id: str) -> str | None:
+    """Resolve an org's ACTIVE OWNER user_id (None for anon/zero-owner
+    orgs). The abuse-notify re-point (#1765) composes this with the GoTrue
     admin seam (hosted_api) to read the owner's email."""
     rows = cp.query(
-        "team_memberships",
+        "org_memberships",
         select=["user_id"],
-        filters=[("team_id", "eq", team_id), ("role", "eq", "owner"),
+        filters=[("org_id", "eq", org_id), ("role", "eq", "owner"),
                  ("status", "eq", "active")],
     )
     return rows[0]["user_id"] if rows else None
 
 
-def github_credentials(cp, team_id: str) -> dict:
+def github_credentials(cp, org_id: str) -> dict:
     """Read the encrypted GitHub token + org from ``teams``.
 
     github_token_enc is column-REVOKEd from anon/authenticated (migration
     0006) — this service-role seam is the ONLY read path for it in Supabase
     mode. Returns ``{"github_token_enc": ..., "github_org": ...}`` (both None
-    when the team row is missing).
+    when the org row is missing).
     """
     rows = cp.query(
-        "teams",
+        "organizations",
         select=["github_token_enc", "github_org"],
-        filters=[("id", "eq", team_id)],
+        filters=[("id", "eq", org_id)],
     )
     if not rows:
         return {"github_token_enc": None, "github_org": None}
@@ -1722,7 +1873,7 @@ def github_credentials(cp, team_id: str) -> dict:
     }
 
 
-def store_github_credentials(cp, team_id: str, *, token_enc: str, org: str) -> None:
+def store_github_credentials(cp, org_id: str, *, token_enc: str, org: str) -> None:
     """PATCH ``teams`` SET github_token_enc + github_org (service role).
 
     Rotation (plan Task 6 "rotation documented"): every OAuth reconnect —
@@ -1731,82 +1882,82 @@ def store_github_credentials(cp, team_id: str, *, token_enc: str, org: str) -> N
     replaced, so rotation needs no separate endpoint or background job.
     """
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
-        filters=[("id", "eq", team_id)],
+        filters=[("id", "eq", org_id)],
         json_body={"github_token_enc": token_enc, "github_org": org},
     )
 
 
-# ── Team deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
+# ── Org deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
 #
 # Two-phase deletion: soft delete (immediate access kill + grace stamp) then
 # hard delete (post-grace purge). All soft phases are PATCH-based — rows stay
 # for audit/forensics until the grace window elapses; the purge then DELETEs
 # the control-plane rows. Immutable ``audit_events`` rows are preserved by
-# design (no FK to teams — the delete trail survives the team).
+# design (no FK to orgs — the delete trail survives the org).
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
-def soft_delete_team(cp, team_id: str, now: str | None = None,
-                     grace_hours: float = 24.0) -> None:
+def soft_delete_org(cp, org_id: str, now: str | None = None,
+                     grace_hours: float = float(RESTORE_WINDOW_HOURS)) -> None:
     """Stamp ``teams.deleted_at`` + persist the grace window (#302).
 
     ``grace_hours`` is stored so the purge sweep and the idempotent replay
     honor the hard_delete_after the API promised at schedule time, even if
     TORTOISE_TEAM_DELETE_GRACE_HOURS changes before the sweep runs.
-    Idempotent: re-stamping an already-deleted team is a no-op PATCH.
+    Idempotent: re-stamping an already-deleted org is a no-op PATCH.
     """
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
-        filters=[("id", "eq", team_id)],
+        filters=[("id", "eq", org_id)],
         json_body={"deleted_at": now or _now_iso(), "grace_hours": grace_hours},
     )
 
 
-def revoke_team_api_keys(cp, team_id: str, now: str | None = None) -> None:
-    """Revoke every non-revoked ``api_keys`` row for the team.
+def revoke_org_api_keys(cp, org_id: str, now: str | None = None) -> None:
+    """Revoke every non-revoked ``api_keys`` row for the org.
 
     The key-plane kill switch: ``resolve_api_key`` treats ``revoked_at`` as
-    authoritative (P1-2), so all ``tt_`` keys for the team fail closed the
+    authoritative (P1-2), so all ``tt_`` keys for the org fail closed the
     moment the delete is requested.
     """
     cp.query(
         "api_keys",
         method="PATCH",
-        filters=[("team_id", "eq", team_id), ("revoked_at", "is", None)],
+        filters=[("org_id", "eq", org_id), ("revoked_at", "is", None)],
         json_body={"revoked_at": now or _now_iso()},
     )
 
 
-def remove_team_memberships(cp, team_id: str, now: str | None = None) -> None:
-    """Mark active ``team_memberships`` removed (session-plane kill switch).
+def remove_org_memberships(cp, org_id: str, now: str | None = None) -> None:
+    """Mark active ``org_memberships`` removed (session-plane kill switch).
 
-    ``user_memberships``/``membership_for_user_team`` only match
-    ``status='active'``, so JWT-session access (teams list, invites, owner
+    ``user_memberships``/``membership_for_user_org`` only match
+    ``status='active'``, so JWT-session access (orgs list, invites, owner
     checks) stops resolving immediately. ``now`` is accepted for signature
-    symmetry but not written: team_memberships has no removed_at column
+    symmetry but not written: org_memberships has no removed_at column
     (migration 0003/0009), and the owner-replay authz check distinguishes
     cascade-removal by role (owner can never be removed/demoted by any
     other path).
     """
     cp.query(
-        "team_memberships",
+        "org_memberships",
         method="PATCH",
-        filters=[("team_id", "eq", team_id), ("status", "eq", "active")],
+        filters=[("org_id", "eq", org_id), ("status", "eq", "active")],
         json_body={"status": "removed"},
     )
 
 
-def revoke_team_invitations(cp, team_id: str, now: str | None = None) -> None:
-    """Revoke pending ``invitations`` for the team (no redemption post-delete).
+def revoke_org_invitations(cp, org_id: str, now: str | None = None) -> None:
+    """Revoke pending ``invitations`` for the org (no redemption post-delete).
 
     ``invitation_accept`` rejects status != 'pending', so a pending invite
-    can never mint a membership in a deleted team. invitations.status is
+    can never mint a membership in a deleted org. invitations.status is
     NOT NULL DEFAULT 'pending' (migration 0008) — a single eq.pending
     PATCH covers every live row; the registry path additionally guards
     legacy NULL status (registry nodes have no NOT NULL constraint).
@@ -1816,65 +1967,65 @@ def revoke_team_invitations(cp, team_id: str, now: str | None = None) -> None:
     cp.query(
         "invitations",
         method="PATCH",
-        filters=[("team_id", "eq", team_id), ("status", "eq", "pending")],
+        filters=[("org_id", "eq", org_id), ("status", "eq", "pending")],
         json_body={"status": "revoked"},
     )
 
 
-def purge_team_control_plane(cp, team_id: str) -> None:
-    """Hard-delete all control-plane rows for a team (post-grace purge, #302).
+def purge_org_control_plane(cp, org_id: str) -> None:
+    """Hard-delete all control-plane rows for an org (post-grace purge, #302).
 
-    Deletes ``api_keys`` + ``team_memberships`` + ``invitations`` FIRST and
+    Deletes ``api_keys`` + ``org_memberships`` + ``invitations`` FIRST and
     the ``teams`` row LAST via the service-role seam: a partial failure
-    leaves the teams row as the retry anchor (the sweep re-scans
-    ``deleted_at <= cutoff`` and finds the team again) — mirroring
-    ``_purge_registry_team``. Only called once the soft-delete grace
+    leaves the orgs row as the retry anchor (the sweep re-scans
+    ``deleted_at <= cutoff`` and finds the org again) — mirroring
+    ``_purge_registry_org``. Only called once the soft-delete grace
     window has elapsed. Raises on failure (fail-closed) — the purge sweep
     logs and skips, never crashes.
     """
-    cp.query("api_keys", method="DELETE", filters=[("team_id", "eq", team_id)])
-    cp.query("team_memberships", method="DELETE", filters=[("team_id", "eq", team_id)])
-    cp.query("invitations", method="DELETE", filters=[("team_id", "eq", team_id)])
-    cp.query("teams", method="DELETE", filters=[("id", "eq", team_id)])
+    cp.query("api_keys", method="DELETE", filters=[("org_id", "eq", org_id)])
+    cp.query("org_memberships", method="DELETE", filters=[("org_id", "eq", org_id)])
+    cp.query("invitations", method="DELETE", filters=[("org_id", "eq", org_id)])
+    cp.query("organizations", method="DELETE", filters=[("id", "eq", org_id)])
 
 
 # ── Task 8 writer inventory: keys + members + provisioning (#765) ────────────
 #
 # The remaining hosted writers flip here (plan Task 8): POST/GET/DELETE
-# /v1/team/keys, /v1/agent/signup + /v1/register + POST /v1/teams (all via
-# the atomic provision_team RPC, migration 0010), members DELETE/PATCH,
+# /v1/team/keys, /v1/agent/signup + /v1/register + POST /v1/organizations (all via
+# the atomic provision_org RPC, migration 0010), members DELETE/PATCH,
 # member listing, reconcile, and the graph-metadata derivation for
 # graph_list. Everything stays fail-closed: a query error raises RuntimeError
 # and no writer ever falls back to the registry.
 
 
-def active_membership_team_ids(cp, user_id: str) -> list[str]:
-    """Active membership team ids for a user, oldest first (#2001 W5 — the
+def active_membership_org_ids(cp, user_id: str) -> list[str]:
+    """Active membership org ids for a user, oldest first (#2001 W5 — the
     compact discriminator + fork inheritance read: a user with prior
     memberships creates a compact org; the earliest org's fork is inherited
     with 'self' fallback — never re-asks the fork card)."""
-    rows = cp.query("team_memberships", select=["team_id"], filters=[
+    rows = cp.query("org_memberships", select=["org_id"], filters=[
         ("user_id", "eq", user_id),
         ("status", "eq", "active"),
     ], order="created_at.asc")
-    return [row.get("team_id") for row in rows if row.get("team_id")]
+    return [row.get("org_id") for row in rows if row.get("org_id")]
 
 
-def provision_team(cp, **params: object) -> None:
-    """Call the atomic provision_team SECURITY DEFINER RPC (migration 0010).
+def provision_org(cp, **params: object) -> None:
+    """Call the atomic provision_org SECURITY DEFINER RPC (migration 0010).
 
-    One transaction: teams + team_memberships + api_keys (idempotent
+    One transaction: orgs + org_memberships + api_keys (idempotent
     upserts; exactly one row each). Writer inventory (#765): agent_signup,
-    /v1/register, POST /v1/teams and the onboarding sub-team create all
+    /v1/register, POST /v1/organizations and the onboarding sub-org create all
     route their Supabase writes through this RPC — never hand-rolled table
-    writes (an atomic provision cannot leave a half-team behind).
+    writes (an atomic provision cannot leave a half-org behind).
 
     Exactly one of ``user_id`` / ``identity`` is required (the RPC enforces
     it too); key hashes are computed by the caller (the pepper lives in app
     code, never the DB — plan P1-1). #1716: key material is OPTIONAL — pass
     ``p_api_key``/``p_key_hash``/``p_lookup_hash`` all NULL to provision a
-    KEYLESS team (teams + membership only, NO api_keys row; the RPC's
-    all-or-none guard rejects a partial set). The onboarding sub-team path
+    KEYLESS org (orgs + membership only, NO api_keys row; the RPC's
+    all-or-none guard rejects a partial set). The onboarding sub-org path
     uses keyless; a session-key mint writes the api_keys row later. Raises
     RuntimeError on failure (fail-closed): a failed provision surfaces as a
     500, and the caller cleans up any data-plane graph it created first.
@@ -1885,32 +2036,32 @@ def provision_team(cp, **params: object) -> None:
     # The RPC transaction is Supabase-only; pack install-state lives in the
     # tenant graph (a different store), so activation rides AFTER the RPC as
     # an idempotent post-step (scoping: "idempotent post-step with retry-safe
-    # semantics"). One hook here covers EVERY provision_team caller (/v1/register,
-    # /v1/teams, agent signup, onboarding sub-team). Best-effort: failure never
+    # semantics"). One hook here covers EVERY provision_org caller (/v1/register,
+    # /v1/organizations, agent signup, onboarding sub-org). Best-effort: failure never
     # blocks provisioning — the introspection surface self-heals on first read.
     # Embedded-aware _make_sdk (code-review conf 60, PR #1261): a bare
     # TortoiseSDK(namespace=...) with no db_path/URI raises when
     # TORTOISE_DB_URI is unset, and the exception is swallowed here →
     # activation silently skipped. _make_sdk mirrors the hosted_api hooks.
-    team_id = params.get("p_team_id")
-    if team_id:
+    org_id = params.get("p_org_id")
+    if org_id:
         try:
             from tortoise.pack_state import ensure_tenant_packs  # noqa: I001
             from tortoise import hosted_api as _ha
-            ensure_tenant_packs(_ha._make_sdk(namespace=team_id))
+            ensure_tenant_packs(_ha._make_sdk(namespace=org_id))
         except Exception:
             _logger.warning(
                 "pack activation failed for team %s — self-heals on first read",
-                team_id, exc_info=True)
-    # #2001 (W5): post-RPC OnboardingState init — covers EVERY provision_team
-    # caller (register_user, /v1/teams, onboarding sub-team). Idempotent
+                org_id, exc_info=True)
+    # #2001 (W5): post-RPC OnboardingState init — covers EVERY provision_org
+    # caller (register_user, /v1/organizations, onboarding sub-org). Idempotent
     # MERGE (no-op when a lane's eager statement already ran); computes
     # compact/fork from the caller's membership anchor (the RPC has just
-    # inserted the NEW membership — exclude the new team so the count is
+    # inserted the NEW membership — exclude the new org so the count is
     # PRIOR memberships; the mirror reads jsonb onboarding_complete
     # one-directionally, never clobbers).
-    if team_id:
-        _ensure_onboarding_node_after_provision(cp, team_id, params)
+    if org_id:
+        _ensure_onboarding_node_after_provision(cp, org_id, params)
 
 
 # ── Agent signup tokens + keyless recovery (#1709, 20260814000001) ─────────
@@ -1923,13 +2074,13 @@ def provision_team(cp, **params: object) -> None:
 # token-existence oracle; an anon-executable wrapper an unauthenticated mint.
 
 
-def provision_team_with_token(cp, **params: object) -> None:
-    """Signup mint: provision_team + one token row in ONE transaction.
+def provision_org_with_token(cp, **params: object) -> None:
+    """Signup mint: provision_org + one token row in ONE transaction.
 
-    NEW-named wrapper (NOT CREATE OR REPLACE on provision_team — a trailing
+    NEW-named wrapper (NOT CREATE OR REPLACE on provision_org — a trailing
     param would create a second OVERLOAD on PG16, see scope cycle-2 P1). The
-    signup path calls this; every other provision_team caller (/v1/register,
-    POST /v1/teams, onboarding) keeps the 15-arg RPC. ``p_signup_token_hash``
+    signup path calls this; every other provision_org caller (/v1/register,
+    POST /v1/organizations, onboarding) keeps the 15-arg RPC. ``p_signup_token_hash``
     is the caller-computed SHA-256(PEPPER + st_ token); a failed provision
     rolls back the token insert (no orphan token). Raises RuntimeError on
     failure (fail-closed → 500).
@@ -1940,12 +2091,12 @@ def provision_team_with_token(cp, **params: object) -> None:
     # has no eager TeamMeta statement, so the node is initialized here via
     # the write-time create-on-write seam. Idempotent MERGE; best-effort
     # (failure self-heals on the next FLOW write).
-    team_id = params.get("p_team_id")
-    if team_id:
-        _ensure_onboarding_node_after_provision(cp, team_id, params)
+    org_id = params.get("p_org_id")
+    if org_id:
+        _ensure_onboarding_node_after_provision(cp, org_id, params)
 
 
-def _ensure_onboarding_node_after_provision(cp, team_id: str,
+def _ensure_onboarding_node_after_provision(cp, org_id: str,
                                             params: dict) -> None:
     """Best-effort OnboardingState node init after an atomic provision.
     Never blocks provisioning (a graph failure self-heals on the next FLOW
@@ -1956,7 +2107,7 @@ def _ensure_onboarding_node_after_provision(cp, team_id: str,
         from tortoise.onboarding import state as _os
         mirror = None
         try:
-            stored = team_onboarding_state(cp, team_id)
+            stored = org_onboarding_state(cp, org_id)
             if stored:
                 mirror = stored.get("onboarding_complete")
         except Exception:
@@ -1964,8 +2115,8 @@ def _ensure_onboarding_node_after_provision(cp, team_id: str,
         creator = params.get("p_user_id") or None
         prior_ids: list[str] = []
         if creator:
-            prior_ids = [tid for tid in active_membership_team_ids(cp, creator)
-                         if tid != team_id]
+            prior_ids = [tid for tid in active_membership_org_ids(cp, creator)
+                         if tid != org_id]
         prior_fork = None
         if prior_ids:
             try:
@@ -1977,20 +2128,20 @@ def _ensure_onboarding_node_after_provision(cp, team_id: str,
         fork, compact = _os.resolve_init_fork_compact(
             bool(prior_ids), prior_fork)
         _os.ensure_onboarding_state_node(
-            _ha._make_sdk(namespace=team_id)._get_proj(), team_id,
+            _ha._make_sdk(namespace=org_id)._get_proj(), org_id,
             fork=fork, compact=compact,
             status_from_mirror=bool(mirror))
     except Exception:
         _logger.warning(
             "onboarding state init failed for team %s — self-heals on first write",
-            team_id, exc_info=True)
+            org_id, exc_info=True)
 
 
 def resolve_signup_token(cp, token_hash: str) -> str | None:
-    """Resolve a signup-token hash → team_id; None = unknown/revoked.
+    """Resolve a signup-token hash → org_id; None = unknown/revoked.
 
     The caller (hosted_api) maps None to the UNIFORM 422 invalid_signup_token
-    (same body for malformed/unknown/revoked/soft-deleted team — no existence
+    (same body for malformed/unknown/revoked/soft-deleted org — no existence
     signal). PostgREST does NOT echo SECURITY DEFINER RPC results with
     return=minimal (repo precedent: metering_increment) — the resolve RPC's
     scalar result is a VOLATILE return, so in production the echo is ALWAYS
@@ -2009,19 +2160,19 @@ def resolve_signup_token(cp, token_hash: str) -> str | None:
         raise
     rows = cp.query(
         "agent_signup_tokens",
-        select=["team_id"],
+        select=["org_id"],
         filters=[("token_hash", "eq", token_hash),
                  ("revoked_at", "is", None)],
     )
-    return rows[0].get("team_id") if rows else None
+    return rows[0].get("org_id") if rows else None
 
 
 class SignupTokenRecoveryError(Exception):
-    """Semantic rejection of a recovery mint (token invalid/revoked, team
+    """Semantic rejection of a recovery mint (token invalid/revoked, org
     deleted). Carries the HTTP status the caller should emit: uniform 422
     invalid_signup_token (indistinguishable from never-existed) — the RPC
     itself fails CLOSED on the FOR UPDATE zero-row lock and on soft-deleted
-    teams (never mints on a bad lock)."""
+    orgs (never mints on a bad lock)."""
 
     def __init__(self, message: str, status: int = 422, code: str = ""):
         super().__init__(message)
@@ -2035,14 +2186,14 @@ _RECOVER_ERROR_CODES = {
 }
 
 
-def recover_team_key(cp, *, token_hash: str, team_id: str,
+def recover_org_key(cp, *, token_hash: str, org_id: str,
                      lookup_hash: str,
                      key_prefix: str, max_api_keys: int) -> str:
-    """Keyless recovery: mint a NEW key on the token's team (one RPC tx).
+    """Keyless recovery: mint a NEW key on the token's org (one RPC tx).
 
     The RPC (20260814000001) SELECTs the token row FOR UPDATE (serializes
     concurrent recoveries so the non-bootstrap cap cannot overshoot),
-    rejects soft-deleted teams, inserts the new api_keys row (created_via=
+    rejects soft-deleted orgs, inserts the new api_keys row (created_via=
     'recovery', created_by='st_'||left(token_hash,12) — token-attributable,
     derived inside the RPC, never caller-supplied) and ONLY THEN, when a new
     row was actually inserted, revokes the OLDEST non-bootstrap key at the
@@ -2055,12 +2206,12 @@ def recover_team_key(cp, *, token_hash: str, team_id: str,
     row means the mint did NOT commit → fail-closed RuntimeError → 500,
     never a fabricated key). Raises SignupTokenRecoveryError (→ uniform 422)
     on semantic rejections; RuntimeError (fail-closed → 500) on control-plane
-    failures. Returns team_id.
+    failures. Returns org_id.
     """
     try:
         cp.rpc("recover_team_key", {
             "p_token_hash": token_hash,
-            "p_team_id": team_id,
+            "p_org_id": org_id,
             "p_lookup_hash": lookup_hash,
             "p_key_prefix": key_prefix,
             "p_max_api_keys": max_api_keys,
@@ -2075,24 +2226,24 @@ def recover_team_key(cp, *, token_hash: str, team_id: str,
         raise
     rows = cp.query(
         "api_keys",
-        select=["team_id"],
+        select=["org_id"],
         filters=[("lookup_hash", "eq", lookup_hash),
-                 ("team_id", "eq", team_id),
+                 ("org_id", "eq", org_id),
                  # [SECOND-MODEL-GATE] P2: a parallel sibling recovery can hit
                  # the cap and revoke the just-minted key between the RPC
                  # commit and this read-back — never return a dead key.
                  ("revoked_at", "is", None)],
     )
     if not rows:
-        raise RuntimeError("recover_team_key returned no team_id")
-    team_id = rows[0].get("team_id")
-    if not isinstance(team_id, str) or not team_id:
-        raise RuntimeError("recover_team_key returned no team_id")
-    return team_id
+        raise RuntimeError("recover_team_key returned no org_id")
+    org_id = rows[0].get("org_id")
+    if not isinstance(org_id, str) or not org_id:
+        raise RuntimeError("recover_team_key returned no org_id")
+    return org_id
 
 
 def signup_token_row(cp, token_hash: str) -> dict | None:
-    """Read a signup-token row (team_id, revoked_at) by its hash (#1715).
+    """Read a signup-token row (org_id, revoked_at) by its hash (#1715).
 
     Unlike resolve_signup_token, the read is UNFILTERED by revocation state
     — the revoke surface must distinguish live / already-revoked / unknown.
@@ -2101,21 +2252,21 @@ def signup_token_row(cp, token_hash: str) -> dict | None:
     """
     rows = cp.query(
         "agent_signup_tokens",
-        select=["team_id", "revoked_at"],
+        select=["org_id", "revoked_at"],
         filters=[("token_hash", "eq", token_hash)],
     )
     return rows[0] if rows else None
 
 
-def revoke_signup_token(cp, token_hash: str, team_id: str) -> None:
+def revoke_signup_token(cp, token_hash: str, org_id: str) -> None:
     """User-facing signup-token revocation (#1715, migration 20260826000001).
 
-    Calls the service_role SECURITY DEFINER RPC — team-scoped + idempotent IN
-    SQL: UPDATE ... WHERE token_hash AND team_id AND revoked_at IS NULL. An
-    unknown token / another team's token / already-revoked is a zero-row
+    Calls the service_role SECURITY DEFINER RPC — org-scoped + idempotent IN
+    SQL: UPDATE ... WHERE token_hash AND org_id AND revoked_at IS NULL. An
+    unknown token / another org's token / already-revoked is a zero-row
     NO-OP (no RAISE — the endpoint maps 404/403/already from its pre-read
-    signup_token_row; the RPC's WHERE is the authoritative team-scope guard,
-    so a caller can never revoke another team's token even with a wrong
+    signup_token_row; the RPC's WHERE is the authoritative org-scope guard,
+    so a caller can never revoke another org's token even with a wrong
     pre-read). The RPC is RETURNS void (PostgREST return=minimal does not
     echo volatile results) — the caller's pre-read is the state authority.
     A control-plane failure raises (fail-closed → 500, never a silent no-op).
@@ -2123,7 +2274,7 @@ def revoke_signup_token(cp, token_hash: str, team_id: str) -> None:
     try:
         cp.rpc("revoke_signup_token", {
             "p_token_hash": token_hash,
-            "p_team_id": team_id,
+            "p_org_id": org_id,
         })
     except RuntimeError as e:
         _logger.warning(
@@ -2133,11 +2284,11 @@ def revoke_signup_token(cp, token_hash: str, team_id: str) -> None:
 
 # ── Claim path (#1082, PR1 — 20260813000004) ────────────────────────────────
 #
-# claim_membership attaches a provider-verified Supabase user to the team
-# resolved from an api_keys.lookup_hash (authoritative key→team binding,
-# unique index 0007, revocation-aware). The RPC NEVER accepts team_id or
+# claim_membership attaches a provider-verified Supabase user to the org
+# resolved from an api_keys.lookup_hash (authoritative key→org binding,
+# unique index 0007, revocation-aware). The RPC NEVER accepts org_id or
 # identity from the caller (solution-verify P1): a client-supplied
-# team_id/identity would let any key + any session JWT claim ANY team.
+# org_id/identity would let any key + any session JWT claim ANY org.
 
 
 class ClaimError(Exception):
@@ -2173,8 +2324,8 @@ def claim_membership(cp, *, lookup_hash: str, user_id: str, email: str) -> dict:
     """Call the claim_membership SECURITY DEFINER RPC (20260813000004).
 
     Attaches the verified Supabase user (user_id) + verified email to the
-    team resolved from ``lookup_hash``'s api_keys row (authoritative
-    key→team binding). Same key, same team, memories intact. Idempotent:
+    org resolved from ``lookup_hash``'s api_keys row (authoritative
+    key→org binding). Same key, same org, memories intact. Idempotent:
     an owner row already linked to ``user_id`` is a noop success.
 
     The caller (hosted_api) MUST have already verified the session JWT + the
@@ -2198,39 +2349,39 @@ def claim_membership(cp, *, lookup_hash: str, user_id: str, email: str) -> dict:
     return {"status": "claimed"}
 
 
-def is_anon_team(cp, team_id: str) -> bool:
-    """True when *team_id* has an ACTIVE OWNER membership with user_id NULL.
+def is_anon_org(cp, org_id: str) -> bool:
+    """True when *org_id* has an ACTIVE OWNER membership with user_id NULL.
 
     The shared anon predicate for the claim path (#1082 PR1: only an
-    unclaimed team may be claimed) AND the derived-tier ceiling (#1082 PR2:
-    unclaimed teams run the reduced ``anon`` tier). Deliberately NOT the
-    ``teams.email IS NULL`` proxy (reg- teams set email at mint; legacy
-    real-user teams may have NULL email — both would misclassify).
+    unclaimed org may be claimed) AND the derived-tier ceiling (#1082 PR2:
+    unclaimed orgs run the reduced ``anon`` tier). Deliberately NOT the
+    ``teams.email IS NULL`` proxy (reg- orgs set email at mint; legacy
+    real-user orgs may have NULL email — both would misclassify).
     """
     rows = cp.query(
-        "team_memberships",
+        "org_memberships",
         select=["id"],
-        filters=[("team_id", "eq", team_id), ("role", "eq", "owner"),
+        filters=[("org_id", "eq", org_id), ("role", "eq", "owner"),
                  ("status", "eq", "active"), ("user_id", "is", None)],
     )
     return bool(rows)
 
 
-def team_by_email(cp, email: str) -> dict | None:
-    """Team row for an email (register idempotency — 409 already_registered)."""
-    rows = cp.query("teams", select=["id"], filters=[("email", "eq", email)])
+def org_by_email(cp, email: str) -> dict | None:
+    """Org row for an email (register idempotency — 409 already_registered)."""
+    rows = cp.query("organizations", select=["id"], filters=[("email", "eq", email)])
     return rows[0] if rows else None
 
 
-def team_by_name(cp, name: str) -> dict | None:
-    """Team row for a name (create_team duplicate-name 409)."""
-    rows = cp.query("teams", select=["id"], filters=[("name", "eq", name)])
+def org_by_name(cp, name: str) -> dict | None:
+    """Org row for a name (create_org duplicate-name 409)."""
+    rows = cp.query("organizations", select=["id"], filters=[("name", "eq", name)])
     return rows[0] if rows else None
 
 
-def team_api_keys(cp, team_id: str,
+def org_api_keys(cp, org_id: str,
                   graph_id: str | None = None) -> list[dict]:
-    """ALL api_keys rows for a team (revoked included — the dashboard lists
+    """ALL api_keys rows for an org (revoked included — the dashboard lists
     them with their revoked_at; registry parity), newest first.
     #1708 D7: additive created_via/expires_at so the dashboard can classify
     ephemeral session keys from API data instead of a prefix heuristic.
@@ -2245,7 +2396,7 @@ def team_api_keys(cp, team_id: str,
               "revoked_at", "enabled", "name", "created_via", "expires_at",
               "graph_id", "scopes", "delegation_depth", "created_by_key_id",
               "created_by"]
-    filters = [("team_id", "eq", team_id)]
+    filters = [("org_id", "eq", org_id)]
     if graph_id is not None:
         filters.append(("graph_id", "eq", graph_id))
     rows = cp.query(
@@ -2258,39 +2409,45 @@ def team_api_keys(cp, team_id: str,
 
 
 def api_key_by_id(cp, key_id: str) -> dict | None:
-    """One api_keys row by id (revoke/shrink lookup — team-scoping +
-    already-revoked + current scopes for the C3 shrink subset check)."""
+    """One api_keys row by id (revoke/shrink lookup — org-scoping +
+    already-revoked + current scopes for the C3 shrink subset check).
+
+    #4355: ``expires_at`` rides the select so the replacement-aware rotate can
+    inherit the displaced row's expiry verbatim when the rotate body omits one
+    (a body-omitted expiry must never WIDEN the replacement to a Never key).
+    """
     rows = cp.query(
         "api_keys",
-        select=["team_id", "revoked_at", "created_via", "enabled", "name",
-                "scopes", "graph_id", "delegation_depth", "created_by_key_id"],
+        select=["org_id", "revoked_at", "created_via", "enabled", "name",
+                "scopes", "graph_id", "delegation_depth", "created_by_key_id",
+                "expires_at"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None
 
 
-# #1877: the per-person "one free team" entitlement — teams WITHOUT an
+# #1877: the per-person "one free org" entitlement — orgs WITHOUT an
 # active paid subscription. Mirrors the dashboard ACTIVE_STATUSES
 # (main.jsx:835) — keep the two definitions in sync (dual-maintenance).
 _BILLING_ACTIVE_STATUSES = frozenset({"active", "past_due", "trialing"})
 
 
 def count_active_free_memberships(cp, user_id: str) -> int:
-    """Active memberships in teams WITHOUT an active paid subscription — the
+    """Active memberships in orgs WITHOUT an active paid subscription — the
     Supabase twin of the registry count (tier='free' proxy; selfhost has no
     subscription model, #1877). Shape-gates user_id (#1719: a non-UUID
     literal would 22P02 → PostgREST 500) and skips dangling memberships
-    (team_by_id None → not counted — the #302 soft-delete sweep can leave
-    memberships for purged teams).
+    (org_by_id None → not counted — the #302 soft-delete sweep can leave
+    memberships for purged orgs).
     """
     if not _is_uuid(user_id):
         return 0
     count = 0
     for m in user_memberships(cp, user_id):
-        team = team_by_id(cp, m["team_id"])
-        if team is None:
+        org = org_by_id(cp, m["org_id"])
+        if org is None:
             continue  # dangling membership — not counted, never a 500
-        if team.get("subscription_status") not in _BILLING_ACTIVE_STATUSES:
+        if org.get("subscription_status") not in _BILLING_ACTIVE_STATUSES:
             count += 1
     return count
 
@@ -2305,7 +2462,7 @@ _PENDING_PAYMENT_STATUS = "pending_payment"
 
 
 def owned_free_org_ids(cp, user_id: str) -> list[str]:
-    """#2789: ids of orgs where *user_id* is an ACTIVE **owner** of a team
+    """#2789: ids of orgs where *user_id* is an ACTIVE **owner** of an org
     with no active paid subscription — oldest first.
 
     The #1877 twin (`count_active_free_memberships`) counts MEMBERSHIPS; this
@@ -2316,34 +2473,34 @@ def owned_free_org_ids(cp, user_id: str) -> list[str]:
     collaborator on someone else's free org owns nothing, so it must not block
     their own org (the trap that motivated #2789).
 
-    Counting = active membership + ``role='owner'`` + team without an active
+    Counting = active membership + ``role='owner'`` + org without an active
     paid subscription, excluding ``pending_payment`` (a not-yet-real org must
     not consume the allowance). Shape-gates user_id (#1719: a non-UUID literal
     would 22P02 → PostgREST 500) and skips dangling memberships
-    (``team_by_id`` None → not counted — the #302 soft-delete sweep can leave
-    memberships for purged teams).
+    (``org_by_id`` None → not counted — the #302 soft-delete sweep can leave
+    memberships for purged orgs).
     """
     if not _is_uuid(user_id):
         return []
     ids: list[str] = []
     for row in cp.query(
-        "team_memberships",
-        select=["team_id", "role"],
+        "org_memberships",
+        select=["org_id", "role"],
         filters=[("user_id", "eq", user_id), ("status", "eq", "active"),
-                 ("team_id", "neq", "")],
+                 ("org_id", "neq", "")],
         order="created_at.asc",
     ):
         if (row.get("role") or "") != "owner":
             continue  # collaborator/invited-member — ownership is what counts
-        team = team_by_id(cp, row["team_id"])
-        if team is None:
+        org = org_by_id(cp, row["org_id"])
+        if org is None:
             continue  # dangling membership — not counted, never a 500
-        status = team.get("subscription_status")
+        status = org.get("subscription_status")
         if status in _BILLING_ACTIVE_STATUSES:
             continue  # paid (or in the paying window) — not a free org
         if status == _PENDING_PAYMENT_STATUS:
             continue  # not real yet — does not consume the allowance
-        ids.append(row["team_id"])
+        ids.append(row["org_id"])
     return ids
 
 
@@ -2359,12 +2516,12 @@ def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,
                            role: str | None = None) -> int:
     """Membership rows created after ``cutoff`` for a user or an anon
     identity — the Supabase twin of the registry rate-limit counts
-    (agent-signup per-identity 3/hour, team-create per-user 3/hour).
+    (agent-signup per-identity 3/hour, org-create per-user 3/hour).
     NULL semantics: a row without the anchor column never matches.
 
-    ``role`` narrows to owner rows when given (team-create parity: the
+    ``role`` narrows to owner rows when given (org-create parity: the
     registry counts ``(m:Membership {user_id:$uid, role:'owner'})`` — a
-    user who accepted invites into other teams must NOT be rate-limited
+    user who accepted invites into other orgs must NOT be rate-limited
     from creating their own; review P2, PR #874).
     """
     filters: list[tuple[str, str, object]] = [("created_at", "gt", cutoff)]
@@ -2374,11 +2531,11 @@ def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,
         filters.append(("identity", "eq", identity))
     if role is not None:
         filters.append(("role", "eq", role))
-    return len(cp.query("team_memberships", select=["id"], filters=filters))
+    return len(cp.query("org_memberships", select=["id"], filters=filters))
 
 
-def team_members(cp, team_id: str) -> list[dict]:
-    """Member listing (E8a): active + invited memberships for a team.
+def org_members(cp, org_id: str) -> list[dict]:
+    """Member listing (E8a): active + invited memberships for an org.
 
     Mirrors the registry ``list_members`` predicate (status active OR
     invited). Identity rows (NULL user_id — anon agents) surface their
@@ -2387,9 +2544,9 @@ def team_members(cp, team_id: str) -> list[dict]:
     anon anchor in user_id directly; 0009 keeps it in ``identity``).
     """
     rows = cp.query(
-        "team_memberships",
+        "org_memberships",
         select=["user_id", "identity", "role", "status", "invited_email"],
-        filters=[("team_id", "eq", team_id)],
+        filters=[("org_id", "eq", org_id)],
     )
     out = []
     for r in rows:
@@ -2404,12 +2561,12 @@ def team_members(cp, team_id: str) -> list[dict]:
     return out
 
 
-def membership_role(cp, team_id: str, user_id: str) -> str | None:
+def membership_role(cp, org_id: str, user_id: str) -> str | None:
     """Role of a member matched by user_id OR identity (agents), any status
     (mirrors the registry remove/role-change lookup which does not filter
     status). None when no row matches.
 
-    #1719 (codebase-review P1-1): ``team_memberships.user_id`` is a uuid
+    #1719 (codebase-review P1-1): ``org_memberships.user_id`` is a uuid
     column — the two-column loop ran the ``user_id eq`` filter FIRST, so an
     identity anchor ("anon-abc") 22P02'd before the identity fallback ever
     matched → live 500 at remove_member/change_member_role. Branch on value
@@ -2420,16 +2577,16 @@ def membership_role(cp, team_id: str, user_id: str) -> str | None:
     cols = ("user_id", "identity") if _is_uuid(user_id) else ("identity",)
     for col in cols:
         rows = cp.query(
-            "team_memberships",
+            "org_memberships",
             select=["role"],
-            filters=[("team_id", "eq", team_id), (col, "eq", user_id)],
+            filters=[("org_id", "eq", org_id), (col, "eq", user_id)],
         )
         if rows:
             return rows[0]["role"]
     return None
 
 
-def set_membership(cp, team_id: str, user_id: str, **updates: object) -> None:
+def set_membership(cp, org_id: str, user_id: str, **updates: object) -> None:
     """PATCH a membership row matched by user_id OR identity (remove =
     status 'removed'; role change = role). Raises on failure (fail-closed).
     Same #1719 shape-branch as membership_role — non-UUID anchors must never
@@ -2437,9 +2594,9 @@ def set_membership(cp, team_id: str, user_id: str, **updates: object) -> None:
     cols = ("user_id", "identity") if _is_uuid(user_id) else ("identity",)
     for col in cols:
         cp.query(
-            "team_memberships",
+            "org_memberships",
             method="PATCH",
-            filters=[("team_id", "eq", team_id), (col, "eq", user_id)],
+            filters=[("org_id", "eq", org_id), (col, "eq", user_id)],
             json_body=dict(updates),
         )
 
@@ -2458,13 +2615,13 @@ def expired_bootstrap_keys(cp, now: str) -> list[dict]:
     )
 
 
-def graph_metadata(cp, team_id: str) -> list[dict]:
+def graph_metadata(cp, org_id: str) -> list[dict]:
     """Graph-metadata derivation for Supabase mode (reader inventory:
     graph_list). C1 (#2110): the graphs table (20260901000001) is the
-    hosted SOR for team→graph 1:N — this seam now returns the default graph
+    hosted SOR for org→graph 1:N — this seam now returns the default graph
     (derived from ``teams.graph_name``) PLUS custom graph rows
     (kind='custom' AND status='active'). Registry-shaped rows
-    [{graph_id, team_id, name, kind, namespace, status}] so callers are
+    [{graph_id, org_id, name, kind, namespace, status}] so callers are
     mode-agnostic (plan §4.2 shared-seam contract, surface 10).
 
     Drift-safe: a schema one migration behind (no graphs table) degrades
@@ -2472,13 +2629,13 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
     dashboard.
     """
     rows = cp.query(
-        "teams", select=["id", "graph_name"], filters=[("id", "eq", team_id)]
+        "organizations", select=["id", "graph_name"], filters=[("id", "eq", org_id)]
     )
     if not rows or not rows[0].get("graph_name"):
         return []
     # C6 #2115: the default graph's override (kind='default' row, upserted by
     # set_graph_recording) rides the derived default row when present; None =
-    # inherit team default (registry parity, #2110). #2701: a kind='default'
+    # inherit org default (registry parity, #2110). #2701: a kind='default'
     # row also carries the DEFAULT graph's RENAMEABLE display name (upserted
     # by set_graph_name) — read it so a renamed default stays renamed across
     # reloads; the fallback stays the historical literal "default". The
@@ -2489,7 +2646,7 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
     try:
         drow = cp.query(
             "graphs", select=["recording", "name"],
-            filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
+            filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
         )
         if drow:
             default_rec = drow[0].get("recording")
@@ -2499,19 +2656,19 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
         default_rec = None  # one migration behind → no default row support
     default = {
         "graph_id": "default",
-        "team_id": team_id,
+        "org_id": org_id,
         "name": default_name,
         "kind": "default",
         "namespace": rows[0]["graph_name"],
         "status": "active",
-        "recording": default_rec,  # inherit team default when None
+        "recording": default_rec,  # inherit org default when None
     }
     try:
         custom = cp.query(
             "graphs",
-            select=["id", "team_id", "name", "kind", "namespace", "status",
+            select=["id", "org_id", "name", "kind", "namespace", "status",
                     "recording"],
-            filters=[("team_id", "eq", team_id), ("kind", "eq", "custom"),
+            filters=[("org_id", "eq", org_id), ("kind", "eq", "custom"),
                      ("status", "eq", "active")],
             order="created_at",
         )
@@ -2524,7 +2681,7 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
     for r in custom:
         out.append({
             "graph_id": r["id"],
-            "team_id": r["team_id"],
+            "org_id": r["org_id"],
             "name": r["name"],
             "kind": r.get("kind", "custom"),
             "namespace": r["namespace"],
@@ -2543,27 +2700,27 @@ def insert_graph(cp, row: dict) -> None:
     cp.query("graphs", method="POST", json_body=row)
 
 
-def delete_graph_row(cp, team_id: str, graph_id: str) -> None:
-    """Hard-delete a graphs row by (id, team) — the rollback path for a
+def delete_graph_row(cp, org_id: str, graph_id: str) -> None:
+    """Hard-delete a graphs row by (id, org) — the rollback path for a
     failed mint (D11: no orphan graph). Never touches the default graph
-    (no row exists for it — it is derived from teams.graph_name)."""
+    (no row exists for it — it is derived from organizations.graph_name)."""
     cp.query("graphs", method="DELETE",
-             filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)])
+             filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)])
 
 
-def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
+def soft_delete_graph(cp, org_id: str, graph_id: str) -> bool:
     """Soft-delete a graphs row (status='deleted' tombstone — the v1
     lifecycle). Returns True when a non-default row was tombstoned, False
     when nothing matched (unknown graph OR the default — callers
     distinguish by a prior kind lookup for the 403 default-guard).
 
     #2304: stamps ``deleted_at`` (the trash grace window's start — the
-    purge enforces the 7-day recovery period off it; legacy tombstones
+    purge enforces the _GRAPH_PURGE_GRACE_DAYS recovery period off it; legacy tombstones
     (deleted_at NULL) predate the column and are treated as past-grace).
     """
     rows = cp.query(
         "graphs", select=["kind"],
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
     )
     if not rows:
         return False
@@ -2571,14 +2728,14 @@ def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
         return False
     cp.query(
         "graphs", method="PATCH",
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
         json_body={"status": "deleted",
                    "deleted_at": _now_iso()},
     )
     return True
 
 
-def restore_graph(cp, team_id: str, graph_id: str) -> bool:
+def restore_graph(cp, org_id: str, graph_id: str) -> bool:
     """#2304 trash restore: flip a tombstoned custom row back to active and
     clear the deletion stamp. Returns False when nothing matched (unknown /
     active / default / ALREADY PURGED — callers 404/403/410). Keys stay dead
@@ -2592,10 +2749,10 @@ def restore_graph(cp, team_id: str, graph_id: str) -> bool:
     concurrent purge stamp between the pre-read and the PATCH makes the
     flip a no-op and returns False, so a purge can never be clobbered and
     the caller is never told a phantom restore happened (#2463 P2).
-    Callers additionally serialize on the per-team sweep lock."""
+    Callers additionally serialize on the per-org sweep lock."""
     rows = cp.query(
         "graphs", select=["kind", "status", "purged_at"],
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
     )
     if not rows or rows[0].get("kind") == "default" \
             or rows[0].get("status") != "deleted" \
@@ -2603,7 +2760,7 @@ def restore_graph(cp, team_id: str, graph_id: str) -> bool:
         return False
     updated = cp.query(
         "graphs", select=["id"], method="PATCH",
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
                  ("status", "eq", "deleted"), ("purged_at", "is", None)],
         json_body={"status": "active", "deleted_at": None,
                    "purged_at": None, "purged_residual": False},
@@ -2611,15 +2768,15 @@ def restore_graph(cp, team_id: str, graph_id: str) -> bool:
     return bool(updated)
 
 
-def trash_graphs(cp, team_id: str) -> list[dict]:
-    """#2304: tombstoned custom rows of a team (the trash list) — the owner
+def trash_graphs(cp, org_id: str) -> list[dict]:
+    """#2304: tombstoned custom rows of an org (the trash list) — the owner
     restore surface. ``deleted_at`` NULL = legacy tombstone (predates the
     column; purge treats it as past-grace). Purged rows (purged_at set) are
     excluded — data is physically gone; nothing to restore."""
     rows = cp.query(
         "graphs",
         select=["id", "name", "namespace", "deleted_at"],
-        filters=[("team_id", "eq", team_id), ("status", "eq", "deleted"),
+        filters=[("org_id", "eq", org_id), ("status", "eq", "deleted"),
                  ("kind", "eq", "custom"), ("purged_at", "is", None)],
         order="deleted_at",
     )
@@ -2631,7 +2788,7 @@ def trash_graphs(cp, team_id: str) -> list[dict]:
     ]
 
 
-def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
+def purge_graph_row(cp, org_id: str, graph_id: str, *, now: str,
                     residual: bool = False) -> bool:
     """#2304: stamp a tombstoned row ``purged_at`` (data physically erased
     by the purge sweep). ``residual`` True = namespace retained (re-occupied
@@ -2647,75 +2804,75 @@ def purge_graph_row(cp, team_id: str, graph_id: str, *, now: str,
     returns False (the registry-lane stamp conditions on status too)."""
     rows = cp.query(
         "graphs", select=["id"],
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
                  ("status", "eq", "deleted")],
     )
     if not rows:
         return False
     updated = cp.query(
         "graphs", select=["id"], method="PATCH",
-        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
                  ("status", "eq", "deleted")],
         json_body={"purged_at": now, "purged_residual": bool(residual)},
     )
     return bool(updated)
 
 
-def set_graph_name(cp, team_id: str, graph_id: str, name: str) -> bool:
+def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
     """#2701: rename a graph's DISPLAY name on a graphs row.
 
     Custom rows PATCH directly. The DEFAULT graph has NO row (derived from
     ``teams.graph_name``) — a rename for graph 0 renames the kind='default'
     display row when one exists (created by set_graph_recording / a prior
     rename) or upserts a fresh one carrying the new name. The row's
-    namespace is NEVER touched by a rename — it is the team's data-plane
+    namespace is NEVER touched by a rename — it is the org's data-plane
     storage key (teams.graph_name at upsert; graphs.namespace is text NOT
     NULL, 20260901000001). Returns True when the name was written against a
     known graph, False when the custom graph is unknown (the default graph
     is always known — its display row is created on demand). Live-name
-    uniqueness (uq_graphs_team_name_active) is the DB backstop for the
+    uniqueness (uq_graphs_org_name_active) is the DB backstop for the
     caller's pre-check (409), mirroring create-graph's pre-check-then-
     insert contract."""
     if graph_id != "default":
         rows = cp.query(
             "graphs", select=["id"],
-            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
                      ("status", "eq", "active")],
         )
         if not rows:
             return False
         cp.query(
             "graphs", method="PATCH",
-            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
             json_body={"name": name},
         )
         return True
     # Default graph: rename the existing kind='default' display row, else
-    # upsert one (namespace = the TEAM graph name — never the display name).
+    # upsert one (namespace = the ORG graph name — never the display name).
     rows = cp.query(
         "graphs", select=["id", "namespace"],
-        filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
+        filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
     )
     if rows:
         cp.query(
             "graphs", method="PATCH",
             filters=[("id", "eq", rows[0]["id"]),
-                     ("team_id", "eq", team_id)],
+                     ("org_id", "eq", org_id)],
             json_body={"name": name},
         )
         return True
     import uuid as _uuid
     from datetime import UTC, datetime
     tro = cp.query(
-        "teams", select=["graph_name"], filters=[("id", "eq", team_id)])
-    team_graph_name = tro[0].get("graph_name") if tro else None
+        "organizations", select=["graph_name"], filters=[("id", "eq", org_id)])
+    org_graph_name = tro[0].get("graph_name") if tro else None
     gid = f"g_{_uuid.uuid4().hex[:16]}"
     try:
         cp.query(
             "graphs", method="POST",
             json_body={
-                "id": gid, "team_id": team_id, "name": name,
-                "kind": "default", "namespace": team_graph_name,
+                "id": gid, "org_id": org_id, "name": name,
+                "kind": "default", "namespace": org_graph_name,
                 "status": "active", "recording": None,
                 "created_at": datetime.now(UTC).isoformat(),
             },
@@ -2725,14 +2882,14 @@ def set_graph_name(cp, team_id: str, graph_id: str, name: str) -> bool:
         # created the kind='default' row first — re-read + PATCH the winner.
         rows = cp.query(
             "graphs", select=["id"],
-            filters=[("team_id", "eq", team_id),
+            filters=[("org_id", "eq", org_id),
                      ("kind", "eq", "default")],
         )
         if rows:
             cp.query(
                 "graphs", method="PATCH",
                 filters=[("id", "eq", rows[0]["id"]),
-                         ("team_id", "eq", team_id)],
+                         ("org_id", "eq", org_id)],
                 json_body={"name": name},
             )
             return True
@@ -2740,37 +2897,37 @@ def set_graph_name(cp, team_id: str, graph_id: str, name: str) -> bool:
     return True
 
 
-def set_graph_recording(cp, team_id: str, graph_id: str,
+def set_graph_recording(cp, org_id: str, graph_id: str,
                         value: bool | None) -> bool:
     """C6 #2115: set the session_recording override on a graphs row.
 
     Custom rows PATCH directly. The DEFAULT graph has NO row (derived from
     ``teams.graph_name``) — an override for graph 0 upserts a kind='default'
-    row (the partial unique index permits name='default' per team; the
+    row (the partial unique index permits name='default' per org; the
     kind='default' rows are invisible to every custom-only reader: graph_metadata
     lists custom rows only + derives the default separately, graph_count counts
     custom active only, soft_delete_graph kind-guards them). ``value`` None =
-    inherit team default — on a MISSING row that is a no-op (NULL IS inherit);
+    inherit org default — on a MISSING row that is a no-op (NULL IS inherit);
     on an existing row it PATCHes recording to null. Returns True when the
     override was written/cleared against a known graph (row PATCHed/upserted
     OR None-on-missing-row), False when the custom graph is unknown."""
     if graph_id != "default":
         rows = cp.query(
             "graphs", select=["id"],
-            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
         )
         if not rows:
             return False
         cp.query(
             "graphs", method="PATCH",
-            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
             json_body={"recording": value},
         )
         return True
     # Default graph: read any kind='default' row (upsert on set).
     rows = cp.query(
         "graphs", select=["id"],
-        filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
+        filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
     )
     if value is None and not rows:
         return True  # no override exists — inherit is already the state
@@ -2778,26 +2935,26 @@ def set_graph_recording(cp, team_id: str, graph_id: str,
         gid = rows[0]["id"]
         cp.query(
             "graphs", method="PATCH",
-            filters=[("id", "eq", gid), ("team_id", "eq", team_id)],
+            filters=[("id", "eq", gid), ("org_id", "eq", org_id)],
             json_body={"recording": value},
         )
         return True
     # Review P1: graphs.namespace is text NOT NULL (20260901000001) — the
-    # default row's namespace is the TEAM graph name (what graph_metadata
+    # default row's namespace is the ORG graph name (what graph_metadata
     # derives the default from: teams.graph_name). PostgREST would reject a
-    # null-namespace INSERT (500); populate it from the team row.
+    # null-namespace INSERT (500); populate it from the org row.
     import uuid as _uuid
     gid = f"g_{_uuid.uuid4().hex[:16]}"
     from datetime import UTC, datetime
     tro = cp.query(
-        "teams", select=["graph_name"], filters=[("id", "eq", team_id)])
-    team_graph_name = tro[0].get("graph_name") if tro else None
+        "organizations", select=["graph_name"], filters=[("id", "eq", org_id)])
+    org_graph_name = tro[0].get("graph_name") if tro else None
     try:
         cp.query(
             "graphs", method="POST",
             json_body={
-                "id": gid, "team_id": team_id, "name": "default",
-                "kind": "default", "namespace": team_graph_name,
+                "id": gid, "org_id": org_id, "name": "default",
+                "kind": "default", "namespace": org_graph_name,
                 "status": "active", "recording": value,
                 "created_at": datetime.now(UTC).isoformat(),
             },
@@ -2808,14 +2965,14 @@ def set_graph_recording(cp, team_id: str, graph_id: str,
         # a duplicate-key 500 (idempotent convergence).
         rows = cp.query(
             "graphs", select=["id"],
-            filters=[("team_id", "eq", team_id),
+            filters=[("org_id", "eq", org_id),
                      ("kind", "eq", "default")],
         )
         if rows:
             cp.query(
                 "graphs", method="PATCH",
                 filters=[("id", "eq", rows[0]["id"]),
-                         ("team_id", "eq", team_id)],
+                         ("org_id", "eq", org_id)],
                 json_body={"recording": value},
             )
             return True
@@ -2823,7 +2980,7 @@ def set_graph_recording(cp, team_id: str, graph_id: str,
     return True
 
 
-def count_graph_keys(cp, team_id: str, graph_id: str) -> int:
+def count_graph_keys(cp, org_id: str, graph_id: str) -> int:
     """Active (non-revoked) api_keys bound to a graph — the key_count
     source for GET /v1/graphs (surface 5).
 
@@ -2831,24 +2988,24 @@ def count_graph_keys(cp, team_id: str, graph_id: str) -> int:
     id is the DERIVED literal 'default' (never a graphs.id — api_keys.graph_id
     REFERENCES graphs(id)), so this seam can never match a default-row count
     and the list short-circuits kind='default' rows to 0 before reaching it.
-    Team-wide rows (graph_id NULL) are the keys that RESOLVE to the default
+    Org-wide rows (graph_id NULL) are the keys that RESOLVE to the default
     graph; they are counted nowhere on a graph row (managed on the API-Keys
     tab) — do NOT special-case 'default' here to count them. #2481: revoked tombstones are
-    excluded — they never consume the team's max_api_keys budget."""
+    excluded — they never consume the org's max_api_keys budget."""
     rows = cp.query(
         "api_keys", select=["id"],
-        filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id),
+        filters=[("graph_id", "eq", graph_id), ("org_id", "eq", org_id),
                  ("revoked_at", "is", None)],
     )
     return len(rows)
 
 
-def graph_key_ids(cp, team_id: str, graph_id: str) -> list[str]:
+def graph_key_ids(cp, org_id: str, graph_id: str) -> list[str]:
     """All api_keys ids bound to a graph (revoked or not) — the delete
     cascade source (every key dies with the graph, E2E-8)."""
     rows = cp.query(
         "api_keys", select=["id"],
-        filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id)],
+        filters=[("graph_id", "eq", graph_id), ("org_id", "eq", org_id)],
     )
     return [r["id"] for r in rows]
 
@@ -2856,39 +3013,74 @@ def graph_key_ids(cp, team_id: str, graph_id: str) -> list[str]:
 # ── Stripe webhook billing state (plan Task 10 — #771 review P1) ───────────
 #
 # The Stripe webhook (_webhook_apply_event) writes billing state on the
-# control plane. Registry mode: Team node SETs. Supabase mode: PATCH the
-# teams row (0012 added subscription_status / customer_email / grace_until /
+# control plane. Registry mode: Org node SETs. Supabase mode: PATCH the
+# orgs row (0012 added subscription_status / customer_email / grace_until /
 # current_period_end next to 0006's tier / stripe_customer_id /
 # subscription_id). Without this branch the webhook would silently lose
 # billing state post-registry-delete — or recreate the registry graph via
 # an unguarded write (FalkorDB GRAPH.QUERY auto-creates missing graphs).
 
 
-def team_id_for_stripe_customer(cp, customer_id: str) -> str | None:
-    """Team id whose teams.stripe_customer_id matches (subscription events).
+def org_id_for_stripe_customer(cp, customer_id: str) -> str | None:
+    """Org id whose teams.stripe_customer_id matches (subscription events).
 
     Registry twin: MATCH (t:Team {stripe_customer_id:$cid}) RETURN t.id.
-    None when no team is bound to the customer (webhook acks 200 "no team
+    None when no org is bound to the customer (webhook acks 200 "no org
     binding" — Stripe stops retrying).
     """
     rows = cp.query(
-        "teams", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
+        "organizations", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
     )
     return rows[0]["id"] if rows else None
 
 
-def update_team_billing(cp, team_id: str, updates: dict) -> None:
-    """PATCH billing state on the teams row (webhook SET twin).
+def org_billing_state(cp, org_id: str) -> dict:
+    """Billing-identity columns for one org (checkout guard + portal read).
+
+    The FORWARD twin of :func:`org_id_for_stripe_customer` (the reverse
+    webhook lookup). Supabase mode only: the registry lane keeps its
+    ``Team``-node read inline in ``hosted_api`` (selfhost). ``{}`` when the
+    org row is absent.
+
+    ``stripe_customer_id`` is a 0006 base column; ``subscription_status`` /
+    ``customer_email`` are the 0012 additive tier, read through the #1096
+    fail-soft ladder so a pre-0012 schema degrades THESE READS to None instead
+    of failing the portal. (The checkout WRITE stays fail-closed: on a first
+    bind ``update_org_billing`` still PATCHes 0012 columns, so a pre-0012
+    deployment cannot complete a checkout — deploy drift, not a normal path.)
+
+    Used by the two billing routes that must agree on WHERE the
+    ``stripe_customer_id`` mirror lives (#4640): the checkout sync-persist and
+    the portal read. A registry-graph read here would miss the authoritative
+    row the webhook wrote post-#669.
+    """
+    row = _orgs_row_fail_soft(
+        cp, org_id,
+        select=["stripe_customer_id", "subscription_status", "customer_email"],
+        additive_tiers=[_ORG_ADDITIVE_BILLING_TIER],
+    )
+    return row or {}
+
+
+def update_org_billing(cp, org_id: str, updates: dict) -> None:
+    """PATCH billing state on the orgs row (webhook SET twin).
 
     ``updates`` is a subset of {tier, stripe_customer_id, subscription_id,
-    subscription_status, customer_email, grace_until, current_period_end}
-    — only columns that exist on teams (0006 + 0012) are written. Raises on
-    failure (fail-closed): a dropped billing write must surface, not
-    silently lose an upgrade/downgrade/cancel.
+    subscription_status, customer_email, grace_until, current_period_end,
+    current_period_start} — only columns that exist on orgs (0006 + 0012 +
+    20260918000001) are written. Raises on failure (fail-closed): a dropped
+    billing write must surface, not silently lose an upgrade/downgrade/cancel.
+
+    ``current_period_start`` (#3825) is the METER WINDOW ANCHOR, and its
+    omission here is SILENT: the ``if k in allowed`` filter below drops the key
+    and the PATCH still succeeds, leaving the column NULL — which the meter
+    resolver then treats as an unresolvable anchor for a subscription org. Any
+    webhook write of a new billing period column MUST be added to ``allowed``
+    in the same change.
     """
     allowed = {"tier", "stripe_customer_id", "subscription_id",
                "subscription_status", "customer_email", "grace_until",
-               "current_period_end",
+               "current_period_end", "current_period_start",
                # quota columns (0006) — apply_limits' Supabase branch writes
                # them; dropping them here would silently keep upgrades at
                # free-tier caps (re-review P1, PR #878)
@@ -2896,10 +3088,26 @@ def update_team_billing(cp, team_id: str, updates: dict) -> None:
     body = {k: v for k, v in updates.items() if k in allowed}
     if not body:
         return
+    # #4216: Stripe delivers the period bounds as Unix EPOCH INTS. These
+    # columns are ``timestamptz``, whose input function rejects a bare JSON
+    # number (PostgREST populates the record and Postgres raises
+    # ``date/time field value out of range: "1756348800"``) — verified against
+    # PGlite. The REGISTRY twin stores the int verbatim because
+    # ``metering._anchor_instant`` accepts both shapes, but the control plane
+    # can only bind an ISO-8601 instant. Normalising HERE — the one seam every
+    # Supabase-lane billing write passes through (checkout and
+    # ``customer.subscription.updated``) — fixes every writer at once without
+    # changing what the webhook handlers pass. (The registry twin does NOT use
+    # this seam: ``mirror_subscription`` writes the graph directly and
+    # ``_anchor_instant`` reads its epoch ints.)
+    for _col in ("current_period_start", "current_period_end"):
+        _v = body.get(_col)
+        if isinstance(_v, (int, float)) and not isinstance(_v, bool):
+            body[_col] = datetime.fromtimestamp(float(_v), tz=UTC).isoformat()
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
-        filters=[("id", "eq", team_id)],
+        filters=[("id", "eq", org_id)],
         json_body=body,
     )
 
@@ -2932,15 +3140,15 @@ def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
     return True
 
 
-def team_tier(cp, team_id: str) -> str | None:
-    """Current tier from the teams row (webhook analytics twin of the
+def org_tier(cp, org_id: str) -> str | None:
+    """Current tier from the orgs row (webhook analytics twin of the
     registry tier read). #1082 PR2: derives the anon ceiling — an
-    unclaimed zero-email team resolves to ``anon`` until claimed."""
-    rows = cp.query("teams", select=["tier"], filters=[("id", "eq", team_id)])
+    unclaimed zero-email org resolves to ``anon`` until claimed."""
+    rows = cp.query("organizations", select=["tier"], filters=[("id", "eq", org_id)])
     if not rows:
         return None
     from tortoise.quota import derived_tier
-    return derived_tier({"tier": rows[0].get("tier"), "id": team_id})
+    return derived_tier({"tier": rows[0].get("tier"), "id": org_id})
 
 
 # ── Write-op metering (post-#669 flip fix — #669) ───────────────────────────
@@ -2948,31 +3156,83 @@ def team_tier(cp, team_id: str) -> str | None:
 # Metering previously stored MeteringRecord nodes in the registry graph —
 # post-flip that RECREATES the deleted registry on every /v1/team call and
 # every write-op increment. Supabase mode stores rows in metering_records
-# (0014): PK (team_id, period), service-role RLS.
+# (0014): PK (org_id, period_start), service-role RLS.
+#
+# #3825: the row's identity is the START of a half-open metering window
+# ``[period_start, period_end)`` — the subscription's billing period (D10),
+# or the calendar month in UTC when the org has no subscription (D13). The
+# month string ``period`` is still written but is a DERIVED label; filtering
+# on it would be the month-granularity defect this issue removes.
 
 
-def metering_get(cp, team_id: str, period: str) -> int:
-    """Write-ops used by a team in a billing period (0 when absent)."""
+def org_metering_anchor(cp, org_id: str) -> dict:
+    """The org's billing anchor (#3825 / D10): ``subscription_id`` plus the
+    subscription's period start/end.
+
+    Returns ``{}`` when the org row does not exist — an unknown org has no
+    subscription, so metering falls back to the D13 calendar month in UTC.
+    A row that EXISTS but has not been populated by the webhook returns
+    ``None`` values; ``metering._current_period`` distinguishes the two and
+    RAISES for a subscription org whose period is unusable, because the
+    alternative is silently metering a paying org on a month bucket. That
+    raise is a SIGNAL, not enforcement (#3981): the write paths absorb it and
+    alert the operator, and the pre-spend admission gate absorbs it too
+    (``cohort_cost.report_unenforceable_cap``).
+
+    ``current_period_start`` ships in migration 20260918000001. On a lane
+    where the migration has NOT been applied this read 400s and NO window
+    resolves for any org — a hard deploy-order dependency, not a silent
+    degradation: the metering drop and the unenforceable cap are both alerted
+    (``metering.report_unmetered_increment`` / #3981).
+    """
+    rows = cp.query(
+        "organizations",
+        select=["subscription_id", "current_period_start",
+                "current_period_end"],
+        filters=[("id", "eq", org_id)],
+    )
+    if not rows:
+        return {}
+    row = rows[0]
+    return {
+        "subscription_id": row.get("subscription_id"),
+        "current_period_start": row.get("current_period_start"),
+        "current_period_end": row.get("current_period_end"),
+    }
+
+
+def metering_get(cp, org_id: str, period_start: str) -> int:
+    """Write-ops used by an org in the window STARTING at *period_start*
+    (0 when absent).
+
+    #3825: the ledger key is ``(org_id, period_start)`` — the window start,
+    not a month label. Equality on the start is exact: one org has at most one
+    row per start, and a renewal mints a new start, so the prior row is never
+    overwritten. Filtering on ``period`` (the derived label) is NOT equivalent
+    — two billing periods of one org can share a month label.
+    """
     rows = cp.query(
         "metering_records",
         select=["write_ops"],
-        filters=[("team_id", "eq", team_id), ("period", "eq", period)],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
     )
     return int(rows[0]["write_ops"]) if rows else 0
 
 
-def metering_increment(cp, team_id: str, period: str, n: int = 1,
-                      nodes_written: int = 0) -> int:
-    """Increment the team's write-op counter for the period; returns the new
-    count. ATOMIC (review P2, PR #911): delegates to the metering_increment
-    SQL RPC (0014/0017) — write_ops = write_ops + n under Postgres row locking —
-    so concurrent increments can never undercount (a GET-then-PATCH would
-    lose updates). Best-effort by contract (metering failures never block a
-    write): the caller swallows exceptions.
+def metering_increment(cp, org_id: str, period_start: str, period_end: str,
+                      n: int = 1, nodes_written: int = 0) -> int:
+    """Increment the org's write-op counter for the window
+    ``[period_start, period_end)``; returns the new count. ATOMIC (review P2,
+    PR #911): delegates to the ``metering_increment`` SQL RPC — write_ops =
+    write_ops + n under Postgres row locking — so concurrent increments can
+    never undercount (a GET-then-PATCH would lose updates). Best-effort by
+    contract (metering failures never block a write): the caller swallows
+    exceptions.
 
-    nodes_written: net-new non-episodic nodes for the period (the value-first
-    commit cost driver, epic #909 §4.4/W-4 — 0 on hold commits). The 0017
-    RPC increments both columns atomically under the same row lock.
+    nodes_written: net-new non-episodic nodes for the window (the value-first
+    commit cost driver, epic #909 §4.4/W-4 — 0 on hold commits). The RPC
+    increments both columns atomically under the same row lock.
 
     #925: the read-back is the only best-effort step. The RPC call itself
     still raises when it fails — though if the response is lost the write
@@ -2986,35 +3246,41 @@ def metering_increment(cp, team_id: str, period: str, n: int = 1,
     """
     cp.rpc(
         "metering_increment",
-        {"p_team_id": team_id, "p_period": period, "p_n": n,
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_n": n,
          "p_nodes_written": nodes_written},
     )
     # PostgREST does not echo SECURITY DEFINER RPC results with
     # return=minimal — read back the atomic new value. The RPC above already
     # committed; if this read-back fails, fall back to the known delta (#925).
     try:
-        return metering_get(cp, team_id, period)
+        return metering_get(cp, org_id, period_start)
     except Exception:
         _logger.warning(
             "metering read-back failed after committed increment "
-            "(non-fatal): team=%s period=%s n=%s", team_id, period, n,
+            "(non-fatal): team=%s period_start=%s n=%s",
+            org_id, period_start, n,
         )
         return n
 
 
-def metering_get_usage(cp, team_id: str, period: str) -> dict:
-    """Ask usage for a team/period from the metering_records row (#1987 Task
+def metering_get_usage(cp, org_id: str, period_start: str) -> dict:
+    """Ask usage for an org's window STARTING at *period_start* (#1987 Task
     6) — the supabase-mode READ path for ``get_ask_usage``. Returns the
     ask_* columns as a dict (all ZEROS when the row is absent — the MERGE
     only creates the record on the first write). Deliberately SEPARATE from
     ``metering_get`` (which stays int-returning write_ops — its int
     consumers: metering.py arithmetic, the metering_increment read-back, and
-    test_supabase_control.py == 0/3 must not break)."""
+    test_supabase_control.py == 0/3 must not break).
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
     rows = cp.query(
         "metering_records",
         select=["ask_calls", "ask_tokens_in", "ask_tokens_out",
                 "ask_cost_usd"],
-        filters=[("team_id", "eq", team_id), ("period", "eq", period)],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
     )
     if not rows:
         return {"ask_calls": 0, "ask_tokens_in": 0, "ask_tokens_out": 0,
@@ -3028,19 +3294,125 @@ def metering_get_usage(cp, team_id: str, period: str) -> dict:
     }
 
 
-def metering_increment_ask(cp, team_id: str, period: str, *, calls: int = 1,
+def metering_increment_ask(cp, org_id: str, period_start: str,
+                           period_end: str, *, calls: int = 1,
                            tokens_in: int = 0, tokens_out: int = 0,
                            cost_usd: float = 0.0) -> None:
-    """Increment the team's ask-usage counters for the period (#1987 Task 6)
-    via the ``metering_increment_ask`` SQL RPC (20260829000001) — the
+    """Increment the org's ask-usage counters for the window
+    ``[period_start, period_end)`` (#1987 Task 6) via the
+    ``metering_increment_ask`` SQL RPC (20260918000001 re-issues it) — the
     ask-side mirror of ``metering_increment`` (atomic under Postgres row
-    locking; best-effort by contract — the caller swallows exceptions)."""
+    locking; best-effort by contract — the caller swallows exceptions).
+
+    #3825: the window, not a month label, is the row key.
+    """
     cp.rpc(
         "metering_increment_ask",
-        {"p_team_id": team_id, "p_period": period, "p_calls": calls,
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_calls": calls,
          "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
+
+
+def metering_increment_capture_cost(cp, org_id: str, period_start: str,
+                                    period_end: str, *,
+                                    calls: int = 0,
+                                    cost_usd: float = 0.0) -> None:
+    """Increment the org's MEASURED capture-extraction cost for the window
+    ``[period_start, period_end)`` (#3665) via the
+    ``metering_increment_capture_cost`` SQL RPC (20260918000001 re-issues it)
+    — the capture-side mirror of ``metering_increment_ask`` (atomic under
+    Postgres row locking; best-effort by contract — the caller swallows
+    exceptions).
+
+    #3825: the window, not a month label, is the row key. NOTE the RPC is
+    DROPPED and recreated by 20260918000001 rather than replaced in place:
+    a new argument list would otherwise be an OVERLOAD, leaving the old
+    month-keyed function callable — the silent second path #3825 removes.
+    """
+    cp.rpc(
+        "metering_increment_capture_cost",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_calls": calls,
+         "p_cost_usd": cost_usd},
+    )
+
+
+def metering_cohort_spend(cp, org_ids: list[str], period_start: str,
+                          period_end: str) -> float:
+    """Measured LLM spend for a COHORT over one metering WINDOW
+    (#3665/#3825).
+
+    Aggregates ``SUM(ask_cost_usd + capture_cost_usd)`` over the cohort's
+    ``metering_records`` rows for the window **server-side**, in the
+    ``metering_cohort_spend`` SQL function (20260918000001).
+
+    WHY AN RPC RATHER THAN A FILTERED ROW READ (code-review cycle 1, P1):
+    PostgREST silently caps a row LIST at the project's ``db-max-rows``, and a
+    silently short read UNDERSTATES spend — a fail-open on a spend ceiling.
+    The row count cannot detect it (a short read returns FEWER rows; the
+    ``(org_id, period_start)`` PK makes an over-return impossible, so the
+    earlier "more rows than the cohort has orgs" guard was unreachable dead
+    code). The function returns ONE scalar, so no row cap can apply.
+
+    WHY A WINDOW RATHER THAN ``period = p_period`` (#3825): the month-equality
+    read #3780 shipped filters on the DERIVED label, so two billing periods of
+    one org that share a month label collapse into one bucket and a period
+    that starts mid-month is matched by a label rather than by its bounds. The
+    SQL applies an OVERLAP test (``period_start < end AND period_end > start``)
+    so a straddling row is counted; the alternative (rows whose start falls
+    inside the window) UNDER-reads and is therefore fail-OPEN on a ceiling.
+
+    One row per ORG per window, never one per capture: the aggregate is
+    bounded by the cohort size, not by capture volume — which is why the cap
+    can afford this read on every admission (#3665 trade-off 2, decided: no
+    cache, no weakened bound).
+
+    FAIL-CLOSED: a failure raises (``RuntimeError`` from ``rpc``), never a
+    partial or zero sum. A non-finite aggregate raises too — a poisoned SUM
+    must not price as a cheap cohort.
+    """
+    wanted = sorted({str(i) for i in (org_ids or []) if i})
+    if not wanted:
+        return 0.0
+    value = cp.rpc_value("metering_cohort_spend",
+                         {"p_org_ids": wanted,
+                          "p_period_start": period_start,
+                          "p_period_end": period_end})
+    total = float(value or 0.0)
+    if not math.isfinite(total):
+        raise RuntimeError(
+            f"metering_records cohort aggregate is not finite ({value!r}) — "
+            "refusing to price the cohort from it (fail-closed)")
+    return total
+
+
+def cohort_org_ids_since(cp, since: str, limit: int) -> list[str]:
+    """Org ids created after *since*, at most ``limit + 1`` of them (#3665).
+
+    Server-side ``array_agg`` (RPC ``cohort_org_ids_since``,
+    20260917000001) — ONE row, one column, so ``db-max-rows`` cannot
+    truncate the cohort the way it could truncate a filtered row list. A
+    truncated cohort is worse than an understated sum: every dropped org
+    reads as "outside the cohort" and the cap is silently DISARMED for it.
+
+    The comparison is ``timestamptz`` in SQL, so the value's format cannot
+    change its meaning (an unvalidated string would compare lexicographically
+    in the registry lane — ``cohort_cost.resolve_cohort_cost_cap`` validates
+    and normalises the value before it reaches either lane).
+
+    Returns up to ``limit + 1`` ids so the caller can detect an over-bound
+    cohort and fail closed rather than pricing a partial set.
+
+    FAIL-CLOSED: a failure raises (``RuntimeError`` from ``rpc``).
+    """
+    value = cp.rpc_value("cohort_org_ids_since",
+                         {"p_since": since, "p_limit": limit})
+    if value is None:
+        return []
+    ids = value if isinstance(value, (list, tuple)) else [value]
+    return [str(i) for i in ids if i]
 
 
 # ── #1875: invitee-side pending/accept/decline (by-id, email-scoped) ────────
@@ -3054,18 +3426,18 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
 
     Preserves the token twin's checks (cycle-4 contract): pending-status
     rejection, expiry, email-match, existing-membership 409, the max_users
-    quota gate, and the team deleted/suspended kill-switches. Additionally
-    applies the #1877 free-team entitlement: when the target team has no
-    active paid subscription and the invitee already holds a free team,
+    quota gate, and the org deleted/suspended kill-switches. Additionally
+    applies the #1877 free-org entitlement: when the target org has no
+    active paid subscription and the invitee already holds a free org,
     the accept is blocked BEFORE the single-use PATCH (NON-consuming — the
-    invitee can leave their free team and re-accept).
+    invitee can leave their free org and re-accept).
     """
     import uuid
 
     now = datetime.now(UTC)
     rows = cp.query(
         "invitations",
-        select=["id", "team_id", "email", "role", "status", "expires_at"],
+        select=["id", "org_id", "email", "role", "status", "expires_at"],
         filters=[("id", "eq", invitation_id)],
     )
     if not rows:
@@ -3090,42 +3462,42 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
                               status=404)
 
     existing = cp.query(
-        "team_memberships",
+        "org_memberships",
         select=["id", "status"],
-        filters=[("user_id", "eq", user_id), ("team_id", "eq", inv["team_id"])],
+        filters=[("user_id", "eq", user_id), ("org_id", "eq", inv["org_id"])],
     )
     if existing and existing[0].get("status") == "active":
         raise InvitationError("Already a member of this team", status=409)
 
-    team = team_by_id(cp, inv["team_id"])
-    if team is None:
+    org = org_by_id(cp, inv["org_id"])
+    if org is None:
         raise InvitationError("Team no longer exists", status=404)
-    if team.get("deleted_at"):
+    if org.get("deleted_at"):
         raise InvitationError("Team is scheduled for deletion", status=410)
-    if team.get("suspended_at"):
+    if org.get("suspended_at"):
         raise InvitationError("Team is suspended", status=403)
     from tortoise.pricing import tier_limits
-    tier = team.get("tier") or "free"
+    tier = org.get("tier") or "free"
     lim = tier_limits(tier)
-    max_users = team.get("max_users")
+    max_users = org.get("max_users")
     if max_users is None:
         max_users = lim.get("max_users_per_team")
     if max_users is not None:
         member_count = cp.query(
-            "team_memberships",
+            "org_memberships",
             select=["id"],
-            filters=[("team_id", "eq", inv["team_id"]),
+            filters=[("org_id", "eq", inv["org_id"]),
                      ("status", "eq", "active")],
         )
         if len(member_count) >= int(max_users):
             raise InvitationError(
                 "Member limit reached", status=402)
 
-    # #1877 free-team entitlement (join side): the target team has no
-    # active paid subscription AND the invitee already holds a free team →
+    # #1877 free-org entitlement (join side): the target org has no
+    # active paid subscription AND the invitee already holds a free org →
     # blocked BEFORE the single-use PATCH (non-consuming; re-acceptable).
     from tortoise.supabase_control import _BILLING_ACTIVE_STATUSES
-    if team.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
+    if org.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
             and count_active_free_memberships(cp, user_id) >= 1:
         raise InvitationError(
             "You already have a free team — this team requires a paid plan "
@@ -3154,7 +3526,7 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
     try:
         if existing:
             cp.query(
-                "team_memberships",
+                "org_memberships",
                 method="PATCH",
                 filters=[("id", "eq", existing[0]["id"])],
                 json_body={"role": inv["role"], "status": "active",
@@ -3163,18 +3535,18 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
             )
         else:
             cp.query(
-                "team_memberships",
+                "org_memberships",
                 method="POST",
                 json_body={
                     "id": membership_id,
                     "user_id": user_id,
-                    "team_id": inv["team_id"],
+                    "org_id": inv["org_id"],
                     # 0001 NOT NULL columns (P1 cycle-2: the by-id accept
-                    # omitted team_name/graph_name → null violations on every
+                    # omitted org_name/graph_name → null violations on every
                     # fresh accept in supabase mode; the token twin fills
                     # them).
-                    "team_name": (team or {}).get("name") or "",
-                    "graph_name": (team or {}).get("graph_name") or "",
+                    "org_name": (org or {}).get("name") or "",
+                    "graph_name": (org or {}).get("graph_name") or "",
                     "key_hash": "pending",
                     "role": inv["role"],
                     "status": "active",
@@ -3194,18 +3566,18 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
         )
         raise InvitationError(f"Could not create membership: {e}",
                               status=402) from e
-    return {"team_id": inv["team_id"], "role": inv["role"]}
+    return {"org_id": inv["org_id"], "role": inv["role"]}
 
 
 def pending_invitations_for_email(cp, email: str) -> list[dict]:
     """#1875: pending invitations for the session user's email (invitee-side
-    list). Returns team name + inviter for the dashboard surface; excludes
+    list). Returns org name + inviter for the dashboard surface; excludes
     consumed/revoked/expired invites."""
     import datetime as _dt
     now = _dt.datetime.now(_dt.UTC).isoformat()
     rows = cp.query(
         "invitations",
-        select=["id", "team_id", "email", "role", "status",
+        select=["id", "org_id", "email", "role", "status",
                 "expires_at", "invited_by", "inviter_email"],
         filters=[("email", "eq", email), ("status", "eq", "pending")],
         order="created_at",
@@ -3215,11 +3587,11 @@ def pending_invitations_for_email(cp, email: str) -> list[dict]:
         exp = r.get("expires_at")
         if exp and exp <= now:
             continue  # expired — not actionable
-        team = team_by_id(cp, r["team_id"])
+        org = org_by_id(cp, r["org_id"])
         out.append({
             "invitation_id": r["id"],
-            "team_id": r["team_id"],
-            "team_name": (team or {}).get("name") or r["team_id"],
+            "org_id": r["org_id"],
+            "org_name": (org or {}).get("name") or r["org_id"],
             "role": r.get("role"),
             "inviter_email": r.get("inviter_email") or r.get("invited_by"),
             "expires_at": r.get("expires_at"),
@@ -3233,7 +3605,7 @@ def decline_invitation_by_email(cp, invitation_id: str, email: str) -> dict:
     (the membership exists)."""
     rows = cp.query(
         "invitations",
-        select=["id", "email", "status", "team_id"],
+        select=["id", "email", "status", "org_id"],
         filters=[("id", "eq", invitation_id)],
     )
     if not rows:
@@ -3366,14 +3738,14 @@ def invitation_otp_verify(cp, invitation_id: str, *, code: str,
     return "ok"
 
 
-def invitation_resend(cp, invitation_id: str, team_id: str,
+def invitation_resend(cp, invitation_id: str, org_id: str,
                       *, actor_user_id: str) -> dict:
     """Owner/admin resend (Slack-style, #2003): rotate the invitation token
     (a fresh plaintext is returned ONCE, hash-only at rest — same posture as
     invitation_mint) and refresh the expiry to +7 days. The invitee-side
     email send stays best-effort in the caller.
 
-    Raises InvitationError: 404 unknown/mismatched team, 409 consumed
+    Raises InvitationError: 404 unknown/mismatched org, 409 consumed
     (accepted) or revoked, 400 expired-pending (an expired pending invite
     must be re-minted, not resurrected by resend — seats and links stay
     honest)."""
@@ -3384,14 +3756,14 @@ def invitation_resend(cp, invitation_id: str, team_id: str,
 
     rows = cp.query(
         "invitations",
-        select=["id", "team_id", "email", "role", "status",
+        select=["id", "org_id", "email", "role", "status",
                 "accepted_at", "expires_at"],
         filters=[("id", "eq", invitation_id)],
     )
     if not rows:
         raise InvitationError("Invitation not found", status=404)
     inv = rows[0]
-    if inv.get("team_id") != team_id:
+    if inv.get("org_id") != org_id:
         raise InvitationError("Invitation not found", status=404)
     if inv.get("accepted_at") is not None or inv.get("status") == "accepted":
         raise InvitationError(
@@ -3435,7 +3807,7 @@ def invitation_resend(cp, invitation_id: str, team_id: str,
             "role": inv.get("role"), "expires_at": new_expires}
 
 
-def invitation_expire(cp, invitation_id: str, team_id: str,
+def invitation_expire(cp, invitation_id: str, org_id: str,
                       *, actor_user_id: str) -> dict:
     """Owner/admin expire-now (Slack-style, #2003): a PENDING invitation is
     marked status='expired' with expires_at=now — the link dies, the invite
@@ -3444,13 +3816,13 @@ def invitation_expire(cp, invitation_id: str, team_id: str,
     now = datetime.now(UTC).isoformat()
     rows = cp.query(
         "invitations",
-        select=["id", "team_id", "status", "accepted_at"],
+        select=["id", "org_id", "status", "accepted_at"],
         filters=[("id", "eq", invitation_id)],
     )
     if not rows:
         raise InvitationError("Invitation not found", status=404)
     inv = rows[0]
-    if inv.get("team_id") != team_id:
+    if inv.get("org_id") != org_id:
         raise InvitationError("Invitation not found", status=404)
     if inv.get("accepted_at") is not None or inv.get("status") == "accepted":
         raise InvitationError(

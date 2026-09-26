@@ -6,11 +6,14 @@ Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 from __future__ import annotations  # noqa: I001
 
 import logging
+import os
 import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
+
+from .env_truthy import is_truthy
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -180,6 +183,47 @@ class SearchScores:
     rrf: float = 0.0
 
 
+# ── #3276: honest EP measurement state ──────────────────────────────────
+# ``has_ep`` must mean "EP has MEASURED this claim", not merely "a persisted
+# prior exists". The two came apart when #2199 began stamping a kind-derived
+# baseline (ep_alpha/ep_beta, baseline_set=true, baseline_source=
+# 'system-default') on decide parts at CREATE: every never-measured decision
+# then read has_ep=True at the prior mean (0.75), so the #2206 relevance gate
+# could not tell "we decided this" from "nobody measured this".
+#
+# A claim is EP-MEASURED when EP flushed a posterior (posterior_alpha — the
+# one column only a real EP run writes), or when it carries a persisted
+# ep_alpha that is NOT a #2199 baseline (legacy EP-prior back-compat).
+# PRIOR-ONLY (has_ep=False, baseline=True): a declared baseline prior — the
+# value is the prior mean, explicitly NOT a measured confidence. UNMEASURED
+# (has_ep=False, baseline=False): neutral Beta(1,1) mean 0.5.
+
+def ep_measured_cypher(alias: str) -> str:
+    """Cypher boolean: EP has MEASURED the :Point bound to ``alias`` (#3276)."""
+    return (f"({alias}.posterior_alpha IS NOT NULL "
+            f"OR ({alias}.ep_alpha IS NOT NULL "
+            f"AND NOT coalesce({alias}.baseline_set, false)))")
+
+
+def ep_baseline_cypher(alias: str) -> str:
+    """Cypher boolean: ``alias`` carries a #2199 baseline prior (#3276)."""
+    return f"coalesce({alias}.baseline_set, false)"
+
+
+def ep_measurement_state(*, posterior_alpha, ep_alpha,
+                         baseline_set: bool) -> str:
+    """Python twin of :func:`ep_measured_cypher`: 'measured' | 'baseline' |
+    'unmeasured' (#3276).
+
+    Pure measurement predicate — it does NOT know about the #2490 terminal
+    override, which each read surface applies on top (a terminal claim is
+    forced to has_ep=False/measured=False/baseline=False regardless of the
+    persisted columns)."""
+    if posterior_alpha is not None or (ep_alpha is not None and not baseline_set):
+        return "measured"
+    return "baseline" if baseline_set else "unmeasured"
+
+
 @dataclass
 class EpEvidence:
     impl_count: int = 0
@@ -215,10 +259,14 @@ class EpBreakdown:
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
-    # Whether this point has persisted EP data (posterior_alpha OR ep_alpha).
-    # True = EP has run on the claim (posterior) or a prior was persisted
-    # (baseline/evidence); False = unmeasured — confidence_mean is the neutral
-    # Beta(1,1) mean 0.5, which is NOT a signal of contestation.
+    # #3276: whether EP has MEASURED this point — True iff a real EP flush
+    # persisted a posterior (or a non-baseline legacy ep_alpha prior). A
+    # #2199 baseline prior alone does NOT set it: a never-measured decision
+    # with the kind-derived system-default baseline reads has_ep=False here
+    # (it used to read True at the 0.75 prior mean — the #3276 leak).
+    # False = not measured; confidence_mean is then the declared prior mean
+    # when ``baseline`` is True, else the neutral Beta(1,1) mean 0.5. Neither
+    # is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
     # decays to vacuity at the terminalizing write, so a terminal claim's
@@ -226,10 +274,65 @@ class EpBreakdown:
     # include-terminal surfaces". Consumers (topic disputed-pair gate,
     # volunteer, mcp) must not read terminal=unmeasured.
     has_ep: bool = False
+    # #3276 aliases of the same measurement state, explicit and unambiguous:
+    #   measured=True                     → EP measured (has_ep True)
+    #   measured=False, baseline=True     → prior-only (declared baseline)
+    #   measured=False, baseline=False    → unmeasured (neutral 0.5)
+    # A TERMINAL claim (#2490 gate) reads measured=False, baseline=False even
+    # when it was measured-and-baseline'd pre-terminalization: its 0.5 is the
+    # decayed vacuity posterior, not the prior, so it is neither prior-only
+    # nor a live measurement (the per-row terminal flag owns that state).
+    measured: bool = False
+    baseline: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
             self.evidence = EpEvidence()
+
+
+# ── Provenance enrichment flag (objectives 5/9, owner decision #3837) ───────
+# The default read path carries SOURCE + WHEN LEARNED + CONFIDENCE; confidence
+# already rides ``ep``. Source (``extractedFrom``) and capture time
+# (``createdAt``) are additive and OFF by default: the search point fetch reads
+# those columns only when this flag is set, so a default call is byte-identical
+# (the #3986 freeze carve-out — a default-off response field is not a surface
+# change. NO RECORDING SURFACE EXISTS for it: ``config/surface-manifest.yml`` has
+# no ``response_fields`` key and ``tools/surface_manifest.py`` derives none, so
+# this carve-out is ASSERTED here, not recorded in the manifest. Recording it
+# would need both a manifest key and its derivation path — a change to the
+# artifact and to the ``cut``/``check`` pair that owns it).
+SEARCH_PROVENANCE_FLAG_ENV = "TORTOISE_SEARCH_PROVENANCE"
+
+
+def search_provenance_enabled() -> bool:
+    """Resolve the additive search-provenance flag. Default OFF.
+
+    Delegates to the single declared env-truthiness contract (#4097):
+    :func:`tortoise.env_truthy.is_truthy` — unset, blank, and garbage all read
+    OFF. A second copy of the vocabulary here is exactly the drift #4097 exists
+    to prevent (and is build-red in ``tests/test_env_truthy.py``).
+
+    ⛔ KNOWN LIMITATION — the flag is a NO-OP on the degraded fallback path AND
+    on every non-Point entity type.
+    The two fallback tiers (``fallback_snapshot.search_snapshot`` and
+    ``fallback_tfidf``) build their ``SearchResult``s and return from
+    ``TortoiseSDK`` BEFORE the flag-gated point fetch runs, so they carry
+    neither ``source_ref`` nor ``captured_at`` and ``to_dict`` emits no
+    ``provenance`` block however the flag is set. This is a boundary, not an
+    oversight: the snapshot keeps a deliberately LEAN projection
+    (``fallback_snapshot._SNAPSHOT_QUERY`` — id/content/pointKind/status/
+    outdated/search_keys/has_answer, no provenance columns) and adding those to
+    it is a separate, policy-governed change to the corpus it caches. A
+    degraded run therefore gets no provenance enrichment. The enrichment is
+    also POINT-ONLY: the flag-gated fetch and the two columns it reads
+    (``n.extractedFrom`` / ``n.createdAt``) sit inside the project search's
+    ``if entity_type == "point":`` branch, while ``SearchResult`` is constructed
+    for every entity type — so a normal (non-degraded) ``document`` / ``event``
+    / ``subject`` search carries no ``source_ref``/``captured_at`` either, and
+    ``to_dict`` emits no ``provenance`` block. The flag enriches the
+    non-degraded POINT query path only.
+    """
+    return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
 
 
 @dataclass
@@ -238,7 +341,8 @@ class SearchResult:
     content: str
     point_kind: str
     scores: SearchScores | None = None
-    match_source: Literal["fts", "vector", "structural", "rrf", "tfidf"] = "rrf"
+    match_source: Literal["fts", "vector", "structural", "rrf", "tfidf",
+                         "session"] = "rrf"
     ep: EpBreakdown | None = None
     relationships: list[dict] = field(default_factory=list)  # SDK compat (sdk.py passes it; non-point = empty)
     # #125 capture metadata (document entity_type) — optional, empty for non-docs
@@ -258,6 +362,12 @@ class SearchResult:
     valid_to: str = ""
     expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
+    # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
+    # when the whole batch resolved no subject AND the graph has no
+    # ``aboutSubject`` producer at all — so it says "this field cannot be
+    # populated here", never "these points happen to have none". Empty ⇒
+    # absent from the wire (additive, byte-identical default).
+    subject_unavailable: str = ""
     # A5 (#2070): stored evidence mark (``has_answer`` — written by the
     # eval ingest / fixture seeding; the product extractor does not write it
     # yet, so production hits are False). Carried so the ask lane's
@@ -265,6 +375,14 @@ class SearchResult:
     # in to_dict (emitted only when True — the wire shape stays clean for
     # the 99% unmarked majority).
     has_answer: bool = False
+    # Provenance enrichment (objectives 5/9; owner decision #3837 — the default
+    # path carries source + when learned + confidence; confidence already rides
+    # ``ep``). ADDITIVE and OFF by default: the point fetch reads these columns
+    # ONLY when ``search_provenance_enabled()``, and ``to_dict`` emits the
+    # ``provenance`` block only when a value is present, so a default call is
+    # byte-identical to pre-change output.
+    source_ref: Any = None  # Point.extractedFrom — the Source/document link
+    captured_at: str = ""   # Point.createdAt — when the fact entered memory
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -307,10 +425,24 @@ class SearchResult:
             d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
+        # #4889: loud counterpart to the absent ``subject`` key above — only
+        # set when the Subject layer's producer is missing entirely.
+        if self.subject_unavailable:
+            d["subject_unavailable"] = self.subject_unavailable
         # A5 (#2070): additive evidence mark — emitted ONLY when known
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
             d["has_answer"] = True
+        # Provenance (#3837 owner decision: source + when learned). Additive —
+        # emitted only when a value is present, so an unflagged call and an
+        # unflagged empty-provenance hit both stay byte-identical.
+        if self.source_ref or self.captured_at:
+            prov: dict[str, Any] = {}
+            if self.source_ref:
+                prov["source"] = self.source_ref
+            if self.captured_at:
+                prov["captured_at"] = self.captured_at
+            d["provenance"] = prov
         return d
 
 
@@ -334,11 +466,199 @@ def classify_query(
 
 #: R3 (#1542) D4 leg-trace entry shape (the R2 #1541 shared contract):
 #: {"leg", "ran", "degraded", "reason", "count"}. ``reason`` is never null
-#: when ``degraded`` is true (shape rule).
+#: when ``degraded`` is true (shape rule). #4999 adds one OPTIONAL key —
+#: ``mechanism`` — present only on an entry whose leg records WHICH path it
+#: took. Legs that do not pass one are byte-identical to the shared shape.
 def _trace_entry(leg: str, *, ran: bool, degraded: bool,
-                 reason: str | None, count: int) -> dict:
-    return {"leg": leg, "ran": ran, "degraded": degraded,
-            "reason": reason, "count": count}
+                 reason: str | None, count: int,
+                 mechanism: str | None = None) -> dict:
+    entry = {"leg": leg, "ran": ran, "degraded": degraded,
+             "reason": reason, "count": count}
+    if mechanism is not None:
+        entry[VECTOR_MECHANISM_KEY] = mechanism
+    return entry
+
+
+#: #4028 — leg-trace reason recorded when the vector leg RAN but the
+#: relevance floor removed every hit. Distinct from `empty_results` (the
+#: graph simply had no near neighbour): this says "there were hits and none
+#: of them was relevant", which the search surface must NOT mistake for a
+#: leg failure and answer from the TF-IDF fallback.
+BELOW_RELEVANCE_FLOOR = "below_relevance_floor"
+
+
+# ── #4999: the vector leg's MECHANISM (index vs scan) ───────────────────────
+# Both the HNSW-index path and the brute-force full scan recorded an
+# IDENTICAL leg-trace entry (``ran=True, degraded=False, reason="ok"``), so a
+# caller could not tell a 4.97 ms indexed query from a 16.96 ms full scan of
+# 7,859 Object vectors without reading this source. ``degraded`` deliberately
+# does NOT carry the signal: per #2952 it means "the vector leg contributed no
+# semantic results", and a brute-force scan DOES return semantic rows —
+# flipping it would make :func:`require_hybrid_read` refuse a valid semantic
+# read (see the #2952 tests). The path is reported additively instead.
+#:
+#: Trace-entry key carrying the mechanism (written by :func:`_trace_entry`,
+#: read by callers); the value is one of the three constants below, and the
+#: key is absent when no path was taken (e.g. ``breaker_open``).
+VECTOR_MECHANISM_KEY = "mechanism"
+#: Index-accelerated ``CALL db.idx.vector.queryNodes`` produced the rows.
+MECHANISM_INDEX = "index"
+#: Brute-force scan and NO index was attempted (embedded mode — the design).
+MECHANISM_SCAN = "scan"
+#: Brute-force scan AFTER an index attempt failed (docker mode): the silent
+#: fallback #4999 is about, now reportable on the trace rather than only in a
+#: log line.
+MECHANISM_SCAN_FALLBACK = "scan_fallback"
+
+
+# ── (C) #2952: declared degraded reads ──────────────────────────────────────
+# The leg trace records WHAT each leg did; a consumer that would otherwise
+# label the result "hybrid" needs an explicit DECLARATION that the vector
+# (semantic) leg did not contribute. ``declared_degraded_read`` derives that
+# marker from the trace; ``require_hybrid_read`` turns it into a fail-loud
+# refusal for real-lane measurement (#2985 / PR #3005 posture). Both are
+# additive and opt-in: default callers (leg_trace=None) see byte-identical
+# behavior and never pay for either.
+
+#: (C) #2952 — marker key identifying a declared vector-leg-unavailable read.
+VECTOR_LEG_UNAVAILABLE = "vector_leg_unavailable"
+
+
+def _vector_leg_healthy(entries: list[dict]) -> bool:
+    """True when at least one vector entry did run, undegraded (#2952)."""
+    return any(
+        e.get("leg") == "vector" and e.get("ran") and not e.get("degraded")
+        for e in entries)
+
+
+def _degraded_read_marker(reason: str, entries: list[dict]) -> dict:
+    """The single marker shape (one construction site, #2952).
+
+    ``vector_leg_unavailable`` / ``missing_legs`` are derived from the
+    trace: a results-bearing TF-IDF fallback is a keyword-only read even
+    when a healthy-but-empty vector entry is present, so the marker must not
+    claim the embedder was unavailable (review P2 fix).
+    """
+    available = not _vector_leg_healthy(entries)
+    return {
+        "degraded_read": True,
+        "hybrid": False,
+        VECTOR_LEG_UNAVAILABLE: available,
+        "missing_legs": ["vector"] if available else [],
+        "reason": reason,
+        "leg_trace": entries,
+    }
+
+
+def _results_bearing_fallback(entries: list[dict]) -> dict | None:
+    """The TF-IDF fallback entry when it actually produced the rows (#2952).
+
+    ``tortoise_fts_query`` runs the fallback only when EVERY primary leg
+    returned zero rows, so a fallback entry with ``count > 0`` proves the
+    returned rows are keyword-only — the read is NOT hybrid even if a
+    vector entry recorded a healthy-but-empty run. ``count == 0``
+    (``no_fallback_applicable``) returns no rows and is not disqualifying.
+    """
+    for e in entries:
+        if e.get("leg") == "fallback" and (e.get("count") or 0) > 0:
+            return e
+    return None
+
+
+def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
+    """(C1) #2952 — explicit single-leg (vector-unavailable) declaration.
+
+    Returns the marker dict when the trace shows a TEXT read whose vector
+    leg did not run (``ran=False``) or ran degraded (``degraded=True`` — e.g.
+    ``no_embedder``, ``encode_failed``, ``breaker_open``, ``query_failed``,
+    ``index_missing``, ``no_embeddings``, ``timeout``), else ``None``.
+
+    Shape: ``{"degraded_read": True, "hybrid": False,
+    "vector_leg_unavailable": <bool — False for a keyword-only fallback whose
+    vector entry ran healthy-but-empty>, "missing_legs": <["vector"] | []>,
+    "reason": <leg-trace reason | "leg_absent" | "leg_trace_unavailable" |
+    "tfidf_fallback">, "leg_trace": [...]}``.
+
+    ``leg_trace=None`` returns ``None`` — an absent trace is not a
+    declaration (a caller that wants the fail-closed treatment calls
+    :func:`require_hybrid_read`, which refuses on it). A structural-only
+    trace (no text leg — no fts/vector/fallback entry; e.g. a ``query=None``
+    full scan) is a single-leg read BY DESIGN and also returns ``None``; an
+    EMPTY trace, by contrast, reports nothing and is declared
+    ``leg_trace_unavailable`` (fail closed). A fallback-only (TF-IDF) trace
+    reports a text leg whose vector leg is absent → ``leg_absent``.
+    """
+    if leg_trace is None:
+        return None
+    entries = [e for e in leg_trace if isinstance(e, dict)]
+    # Positive structural evidence only: a trace whose ONLY leg is the
+    # structural kind-scan is a single-leg read BY DESIGN (query=None full
+    # scan). An unknown/malformed leg vocabulary does NOT earn this escape
+    # hatch — it falls through and is declared (C1/C2 consistency, review P2).
+    if entries and all(e.get("leg") == "structural" for e in entries):
+        return None
+    # A results-bearing TF-IDF fallback is definitive proof the rows are
+    # keyword-only — checked BEFORE the healthy-vector early return (a
+    # healthy-but-empty vector entry must not launder a fallback read).
+    if _results_bearing_fallback(entries) is not None:
+        return _degraded_read_marker("tfidf_fallback", entries)
+    vecs = [e for e in entries if e.get("leg") == "vector"]
+    # ``recall_state(object_centric=True)`` appends one entry per query
+    # (Point + Object), so a single healthy vector entry proves the leg ran.
+    # NOTE: stricter than the #3005 battery submission gate (ran AND NOT
+    # degraded) — a degraded vector leg contributes no semantic results.
+    if _vector_leg_healthy(entries):
+        return None
+    vec = vecs[0] if vecs else None
+    if vec is not None:
+        reason = vec.get("reason") or "leg_absent"
+    elif entries:
+        # a text leg exists (fts/fallback) but no vector entry was recorded
+        reason = "leg_absent"
+    else:
+        reason = "leg_trace_unavailable"
+    return _degraded_read_marker(reason, entries)
+
+
+def require_hybrid_read(leg_trace: list[dict] | None,
+                        *, lane: str | None = None) -> dict:
+    """(C2) #2952 — fail-loud gate: refuse to label a single-leg read hybrid.
+
+    Capability for real-lane measurement (aligns with the #2985 / PR #3005
+    fail-loud pattern): returns ``{"hybrid": True, "vector_leg_unavailable":
+    False}`` only when at least one NOT-degraded vector entry RAN, and raises
+    :class:`~tortoise.exceptions.HybridReadUnavailableError` otherwise —
+    including for ``leg_trace=None`` / empty / structural-only traces (a
+    surface that cannot positively prove the vector leg fails closed).
+
+    This proves the VECTOR (semantic) leg specifically — the #2952 failure
+    class: at least one vector entry RAN and was NOT degraded (a
+    ``degraded=True`` vector leg contributed no semantic results, so the
+    read is keyword-only). This is deliberately STRICTER than the #3005
+    battery capability gate, which asks only whether the vector strategy was
+    SUBMITTED (``ran`` regardless of ``degraded``); a battery lane that
+    records a score should delegate to this predicate so the two gates can
+    never disagree on the same trace. It is not a both-legs health check
+    (the fts leg's own degrade is surfaced separately in the trace).
+
+    Opt-in only: nothing in the product calls this by default, so healthy-
+    path ranking and default result bytes are unchanged.
+    """
+    from .exceptions import HybridReadUnavailableError
+    if leg_trace is None:
+        marker = _degraded_read_marker("leg_trace_unavailable", [])
+    else:
+        entries = [e for e in leg_trace if isinstance(e, dict)]
+        declared = declared_degraded_read(leg_trace)
+        if declared is not None:
+            marker = declared
+        elif _vector_leg_healthy(entries):
+            return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
+        else:
+            # Positive proof required: an absent marker on a non-hybrid trace
+            # (e.g. structural-only) must NOT pass as hybrid.
+            marker = _degraded_read_marker("leg_absent", entries)
+    raise HybridReadUnavailableError(marker, lane=lane)
 
 
 def run_fts_query(
@@ -428,10 +748,14 @@ def run_fts_query(
         logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
         _record(ran=False, degraded=True, reason="breaker_open", count=0)
         return []
-    label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, so the FTS leg reads
+    # the Source label (`_searchText`) — there is no :Document index. The
+    # caller-facing entity_type stays "document".
+    # point→Point, event→Event, subject→Subject
+    label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -449,9 +773,23 @@ def run_fts_query(
         expansion_terms=expansion_terms)
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
+    # D10 (#5026): the :Source label holds BOTH the document node
+    # (documentKind non-NULL) and the corpus/provenance Source (documentKind
+    # NULL), and the fulltext index is on Source._searchText for EVERY Source.
+    # Without a discriminator, entity_type="document" retrieves non-document
+    # Sources (and entity_type="source" retrieves documents) and they occupy
+    # pool slots before LIMIT. The predicate lands in the post-YIELD WHERE —
+    # i.e. at the retrieval layer, ahead of ORDER BY/LIMIT — on the SAME axis
+    # as quota.py's `documents` meter (documentKind IS NOT NULL) and
+    # sdk.list_sources() (documentKind IS NULL). All three legs mean one
+    # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
     if label == "Point":
         status_filter = ("" if excluded_statuses == ()
                          else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+    elif entity_type == "document":
+        status_filter = "WHERE node.documentKind IS NOT NULL "
+    elif entity_type == "source":
+        status_filter = "WHERE node.documentKind IS NULL "
     else:
         status_filter = ""
     try:
@@ -504,6 +842,7 @@ def run_vector_query(
     is_embedded: bool = True, entity_type: str = "point",
     vector_index_api: str | None = None, excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
+    min_similarity: float | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -525,6 +864,16 @@ def run_vector_query(
     for Cypher-native engines (falkordblite 0.10.0's bundled module).
     Falls back to brute-force vec.euclideanDistance if the index is
     unavailable (embedded mode, old FalkorDB, or index creation failed).
+
+    #4999: because both paths return rows, the leg-trace entry carries a
+    ``mechanism`` key naming the path taken — ``"index"`` | ``"scan"`` |
+    ``"scan_fallback"`` (:data:`MECHANISM_INDEX` / :data:`MECHANISM_SCAN` /
+    :data:`MECHANISM_SCAN_FALLBACK`, key :data:`VECTOR_MECHANISM_KEY`). A
+    caller can therefore tell an index-accelerated query from a full table
+    scan without reading this source, and can alert on ``scan_fallback``
+    (an index was expected and was not used). ``degraded`` is intentionally
+    left untouched: a scan still returns SEMANTIC rows, and #2952 defines
+    ``degraded`` as "contributed no semantic results".
 
     vector_index_api: 'procedure' | 'cypher' | None — the API that
     succeeded at index-creation time, recorded on the projection as
@@ -550,14 +899,26 @@ def run_vector_query(
     consecutive slow/failed queries. (#249)
     """
     def _record(*, ran: bool, degraded: bool, reason: str | None,
-                count: int) -> None:
+                count: int, mechanism: str | None = None) -> None:
         if leg_trace is not None:
             leg_trace.append(_trace_entry("vector", ran=ran,
                                           degraded=degraded,
-                                          reason=reason, count=count))
+                                          reason=reason, count=count,
+                                          mechanism=mechanism))
 
     if not query_vec:
         return []
+    # #4028 — the retrieval relevance floor. Expressed in COSINE terms
+    # (embeddings.VECTOR_RELEVANCE_FLOOR); each return branch below converts
+    # it into that branch's own score unit. A nearest neighbour below the
+    # floor is not evidence of relevance (short generic strings sit near the
+    # embedding centroid and score ~0.5 against anything), so it is dropped
+    # rather than fused at rank-1 weight. Default None = no floor, i.e.
+    # byte-identical to pre-#4028 for every caller that does not pass one.
+    _floor_distance: float | None = None
+    if min_similarity is not None:
+        # L2-normalized embeddings: cos = 1 - d^2/2  =>  d = sqrt(2(1-cos)).
+        _floor_distance = (2.0 * (1.0 - min_similarity)) ** 0.5
     if not _breaker_allow("vector"):
         logger.warning("Vector circuit breaker OPEN — skipping vector strategy")
         _record(ran=False, degraded=True, reason="breaker_open", count=0)
@@ -565,22 +926,44 @@ def run_vector_query(
 
     # Operators are Points with is_operator=true — match the Point label
     # (consistent with run_fts_query / run_structural_query). (#172)
-    label = "Point" if entity_type == "operator" else entity_type.capitalize()
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source — the vector leg
+    # reads the Source label, never a Document label. The caller-facing
+    # entity_type stays "document".
+    if entity_type == "document":
+        label = "Source"
+    else:
+        label = "Point" if entity_type == "operator" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
     else:
         id_field = "id"
 
+    # #4999: did THIS call attempt an index query? Embedded mode never does
+    # (the scan is the design, not a fallback); docker mode always does, and a
+    # failure falls through to the scan below. That distinction is what makes
+    # ``scan`` and ``scan_fallback`` tellable apart.
+    index_attempted = False
+
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
+        index_attempted = True
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): the Source label holds both the document node
+        # (documentKind non-NULL) and the corpus/provenance Source
+        # (documentKind NULL); the predicate lands post-YIELD, ahead of the
+        # outer LIMIT, so a document query never fuses a non-document Source
+        # (and vice versa). Same axis on all three legs.
         if label == "Point":
             vec_status_filter = ("" if excluded_statuses == ()
                                  else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+        elif entity_type == "document":
+            vec_status_filter = "WHERE node.documentKind IS NOT NULL "
+        elif entity_type == "source":
+            vec_status_filter = "WHERE node.documentKind IS NULL "
         else:
             vec_status_filter = ""
         try:
@@ -657,13 +1040,32 @@ def run_vector_query(
                     except (IndexError, TypeError, ValueError):
                         score = 0.0
                     out.append((row[0], max(0.0, min(1.0, score))))
-                _record(ran=True, degraded=False, reason="ok", count=len(out))
+                if min_similarity is not None and out:
+                    # Score IS cosine here — filter directly. Only claim the
+                    # FLOOR when there was something to filter: a zero-row
+                    # index result is `empty_results`, not a relevance verdict
+                    # (claiming the floor there would suppress the caller's
+                    # legitimate degraded fallback, #4028 review P1).
+                    kept = [(pid, s) for pid, s in out if s >= min_similarity]
+                    if not kept:
+                        _record(ran=True, degraded=False,
+                                reason=BELOW_RELEVANCE_FLOOR, count=0,
+                                mechanism=MECHANISM_INDEX)
+                        return []
+                    out = kept
+                _record(ran=True, degraded=False, reason="ok", count=len(out),
+                        mechanism=MECHANISM_INDEX)
                 return out
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
+            # #4028: signature A returns NO absolute similarity, only a
+            # rank-ordered id list, so the relevance floor cannot be applied
+            # on this branch (an engine artefact, declared in the PR: the
+            # measured defect is the embedded/brute-force lane).
             total = len(rows)
-            _record(ran=True, degraded=False, reason="ok", count=total)
+            _record(ran=True, degraded=False, reason="ok", count=total,
+                    mechanism=MECHANISM_INDEX)
             return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
         except Exception as e:
             msg = str(e).lower()
@@ -679,6 +1081,10 @@ def run_vector_query(
             # one logical query counts at most once. (#249 review P1-2)
 
     # Brute-force (embedded mode or index query failed)
+    # #4999: `scan_fallback` ONLY when an index attempt actually failed on
+    # this call — an embedded scan is the design and reports plain `scan`.
+    scan_mechanism = (MECHANISM_SCAN_FALLBACK if index_attempted
+                      else MECHANISM_SCAN)
     try:
         start = time.monotonic()
         # #244: vec.euclideanDistance rejects plain-list query params
@@ -688,9 +1094,17 @@ def run_vector_query(
         # vecf32-encoded too (a single plain-list node poisons the whole
         # MATCH — see _upsert_event / session indexers).
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): discriminate the document Source from the
+        # corpus/provenance Source in the MATCH's WHERE — the brute-force
+        # retrieval layer, ahead of the ORDER BY/LIMIT. Same axis as the FTS
+        # and structural legs (documentKind IS NOT NULL ⟺ document).
         if label == "Point":
             bf_status_clause = ("" if excluded_statuses == ()
                                 else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
+        elif entity_type == "document":
+            bf_status_clause = " AND n.documentKind IS NOT NULL"
+        elif entity_type == "source":
+            bf_status_clause = " AND n.documentKind IS NULL"
         else:
             bf_status_clause = ""
         cypher = (
@@ -712,8 +1126,21 @@ def run_vector_query(
             logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
         _breaker_record("vector", True)
         if rows:
-            _record(ran=True, degraded=False, reason="ok", count=len(rows))
-            return [(row[0], float(row[1])) for row in rows]
+            out = [(row[0], float(row[1])) for row in rows]
+            if _floor_distance is not None:
+                # Brute-force score is 1/(1+euclidean distance); invert it
+                # exactly to the distance so the cosine floor compares on the
+                # same quantity the index scored.
+                out = [(pid, s) for pid, s in out
+                       if s > 0 and (1.0 / s - 1.0) <= _floor_distance]
+                if not out:
+                    _record(ran=True, degraded=False,
+                            reason=BELOW_RELEVANCE_FLOOR, count=0,
+                            mechanism=scan_mechanism)
+                    return out
+            _record(ran=True, degraded=False, reason="ok", count=len(out),
+                    mechanism=scan_mechanism)
+            return out
         # R3 (#1542) D4: the explicit zero-row guard — an all-no-embedding
         # graph returns [] WITHOUT raising (the except catch below never
         # fires for the real empty case). Cheap count(p.embedding) guard
@@ -728,22 +1155,25 @@ def run_vector_query(
             embedded = 0
         _record(ran=True, degraded=(embedded == 0),
                 reason=("no_embeddings" if embedded == 0 else "empty_results"),
-                count=0)
+                count=0, mechanism=scan_mechanism)
         return []
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Vector index not available — skipping vector strategy")
             _breaker_record("vector", True)
-            _record(ran=True, degraded=True, reason="index_missing", count=0)
+            _record(ran=True, degraded=True, reason="index_missing", count=0,
+                    mechanism=scan_mechanism)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
             _breaker_record("vector", True)
-            _record(ran=True, degraded=True, reason="no_embeddings", count=0)
+            _record(ran=True, degraded=True, reason="no_embeddings", count=0,
+                    mechanism=scan_mechanism)
         else:
             logger.warning("Vector query failed: %s", e)
             _breaker_record("vector", False)
-            _record(ran=True, degraded=True, reason="query_failed", count=0)
+            _record(ran=True, degraded=True, reason="query_failed", count=0,
+                    mechanism=scan_mechanism)
         return []
 
 
@@ -784,7 +1214,9 @@ def run_structural_query(
         label_str = "Source"
         kind_field = "sourceKind"
     elif entity_type == "document":
-        label_str = "Document"
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source. The structural
+        # leg reads the Source label with the documentKind genre filter.
+        label_str = "Source"
         kind_field = "documentKind"
     elif entity_type == "object":
         label_str = "Object"
@@ -818,6 +1250,18 @@ def run_structural_query(
             _record(ran=True, degraded=False, reason="empty_results", count=0)
             return []
 
+        # D10 (#5026): entity_type="source" is the PROVENANCE Source — the
+        # same partition as sdk.list_sources() (documentKind IS NULL). A D10
+        # document node is a :Source too, so sourceKind alone does not
+        # separate them; the discriminator must be part of the retrieval
+        # WHERE. Placed AFTER the no-filters gate (exactly like the status
+        # clause below) so a kind-less structural call keeps main's
+        # early-return — this clause must never be the sole condition that
+        # fires a full-label scan. The document arm needs no equivalent: its
+        # kind_field IS documentKind, so `n.documentKind = $kind` already
+        # implies non-NULL. All three legs now mean one thing.
+        if entity_type == "source":
+            conditions.append("n.documentKind IS NULL")
         # #1391: terminal-status exclusion (after the no-filters gate so a
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
@@ -1008,6 +1452,8 @@ def degradation_chain(
     excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
     keep_numeric: bool = False,
+    min_vector_similarity: float | None = None,
+    floored_legs: set[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -1046,12 +1492,25 @@ def degradation_chain(
     on ``TimeoutError`` it is discarded and self-recorded as
     ``reason="timeout", ran=True, degraded=True`` (never absent). Default
     None = no trace (byte-identical behavior).
+
+    min_vector_similarity (#4028): optional COSINE relevance floor for the
+        vector leg, forwarded to :func:`run_vector_query`. A nearest
+        neighbour below it carries no relevance signal and is dropped rather
+        than fused at rank-1 weight. Default None = no floor (byte-identical
+        for every pre-#4028 caller).
+    floored_legs (#4028): optional set that receives the name of any leg
+        which RAN but was emptied by ``min_vector_similarity`` — lets the
+        caller distinguish "no relevant neighbour" from "leg failed" (the
+        distinction the search surface needs to avoid answering from the
+        TF-IDF fallback). Default None = not reported.
     """
     import concurrent.futures
 
     results: dict[str, list[tuple[str, float]]] = {}
     futures: dict[concurrent.futures.Future, str] = {}
-    trace_active = leg_trace is not None
+    trace_active = (leg_trace is not None
+                    or min_vector_similarity is not None
+                    or floored_legs is not None)
     #: per-strategy private lists (workers record here, never into the
     #: caller's shared trace — the data-race guard, review P1).
     private: dict[str, list[dict]] = {}
@@ -1081,11 +1540,18 @@ def degradation_chain(
             )] = "fts"
 
         if strategies.get("vector") and query_vec:
+            # #4028: merge the floor kwarg ONLY when one is supplied — the
+            # pinned contract is that a default caller sees byte-identical
+            # submit kwargs (tests/bench/test_degradation_chain.py's doubles
+            # do not accept the new kwarg).
+            _vec_kwargs = _runner_kwargs("vector")
+            if min_vector_similarity is not None:
+                _vec_kwargs["min_similarity"] = min_vector_similarity
             futures[executor.submit(
                 run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
                 vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
-                **_runner_kwargs("vector"),
+                **_vec_kwargs,
             )] = "vector"
 
         if strategies.get("structural"):
@@ -1142,7 +1608,7 @@ def degradation_chain(
         # must not follow it. Timed-out strategies get their self-recorded
         # timeout entry here (fixed order too); a cancelled-but-running
         # worker's late append to its PRIVATE list cannot land in the trace.
-        if trace_active:
+        if trace_active and leg_trace is not None:
             for strategy_name in ("fts", "vector", "structural"):
                 if strategy_name in timed_out:
                     leg_trace.append(_trace_entry(
@@ -1152,6 +1618,22 @@ def degradation_chain(
                 entries = private.get(strategy_name)
                 if entries:
                     leg_trace.extend(entries)
+
+    # #4028: report which legs RAN but were emptied by the relevance floor.
+    # The search surface uses this to avoid treating a floor-emptied vector
+    # leg as a leg FAILURE and answering from the TF-IDF fallback (which
+    # returns hits for any query — the very leak being fixed). Read from the
+    # per-strategy PRIVATE traces, never the caller's shared list.
+    if floored_legs is not None:
+        for strategy_name in ("fts", "vector", "structural"):
+            if strategy_name in timed_out:
+                # A leg the collector discarded as TIMED OUT is not a floor
+                # verdict, however its worker finished later (#4028 review P2).
+                continue
+            if any(e.get("leg") == strategy_name
+                   and e.get("reason") == BELOW_RELEVANCE_FLOOR
+                   for e in private.get(strategy_name, [])):
+                floored_legs.add(strategy_name)
 
     # #2952: return the legs in FIXED strategy order (fts, vector, structural).
     # ``results`` above is populated inside ``as_completed`` — i.e. in thread
@@ -1307,8 +1789,11 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "    ELSE 0.0 "
             "  END AS contention, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
-            "  n.status, coalesce(n.outdated, false) "
+            # #3276: has_ep == EP MEASURED (not merely "a prior exists").
+            # baseline_set plumbs the prior-only distinction to Python.
+            f"  {ep_measured_cypher('n')} AS has_ep, "
+            "  n.status, coalesce(n.outdated, false), "
+            f"  {ep_baseline_cypher('n')} AS baseline_set "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
@@ -1319,8 +1804,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # as measured EP — has_ep=False + contested=False (the columns
             # are fetched so the terminal state is read, not guessed; the len
             # guard tolerates doubles mirroring the pre-#2490 7-col shape).
-            if len(row) > 8 and is_terminal_status(row[7], bool(row[8])):
+            terminal = len(row) > 8 and is_terminal_status(row[7], bool(row[8]))
+            if terminal:
                 has_ep = False
+            # #3276: baseline_set rides the tail (index 9) so the pre-#3276
+            # 7/9-col row shapes keep their index mapping under the len guard.
+            baseline_set = bool(row[9]) if len(row) > 9 else False
+            measured = bool(has_ep)
             total = impl + nand
             variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
@@ -1333,8 +1823,16 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # contested, it's unmeasured. (#2490: terminal claims are
                 # gated above, so their decayed (1,1) posterior never reads
                 # contested either.)
-                contested=bool(has_ep) and variance > CONTESTED_VARIANCE_THRESHOLD,
-                has_ep=bool(has_ep),
+                contested=measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+                has_ep=measured,
+                measured=measured,
+                # prior-only: a declared #2199 baseline on a LIVE claim with
+                # no EP measurement — confidence_mean is the PRIOR mean, never
+                # a measured one. A TERMINAL claim is neither measured nor
+                # prior-only (its 0.5 is the #2490 decayed posterior), so the
+                # terminal gate above also clears `baseline` — see the
+                # EpBreakdown three-state note.
+                baseline=baseline_set and not measured and not terminal,
             )
 
         # Fill in defaults for IDs that are not Point nodes (defaults match
@@ -1548,7 +2046,7 @@ def get_relationships_bounded(
                 "  AND NOT (op)-[:mitigated_by]->(other) "
                 "  AND (type(r2) = 'NAND' "
                 f"       OR {_terminal_expression('other.status')} "
-                "       OR ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
+                f"       OR ({ep_measured_cypher('other')} "
                 "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
                 "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
                 "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
@@ -1559,8 +2057,9 @@ def get_relationships_bounded(
                 # #2490: the aligned has_ep boolean — measured AND NOT terminal
                 # (a decayed terminal's (1,1) posterior is column-
                 # indistinguishable from a measured (1,1), so the status/flag
-                # gate lives INSIDE the projection).
-                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                # gate lives INSIDE the projection). #3276: "measured" is
+                # ep_measured_cypher — a #2199 baseline prior is NOT measurement.
+                f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
                 "  other.createdAt, coalesce(other.outdated, false) "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
@@ -1601,8 +2100,9 @@ def get_relationships_bounded(
                 "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
                 # #2490: aligned has_ep gate (see op_crit) — support peers are
                 # also terminal-gated so a terminal peer's decayed posterior
-                # never reads as measured EP in the assembly.
-                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                # never reads as measured EP in the assembly. #3276: measured
+                # excludes the #2199 baseline prior (see ep_measured_cypher).
+                f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
                 "  other.createdAt, coalesce(other.outdated, false)",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
@@ -1775,6 +2275,90 @@ def get_relationships_bounded(
         logger.warning("Bounded relationship query failed", exc_info=True)
 
     return rels
+
+
+#: #4889 — the fail-loud reason for a structurally-empty ``SearchResult.subject``.
+#:
+#: ``subject`` is read from ``aboutSubject`` edges. When the graph has no
+#: ``aboutSubject`` producer reachable, the field is silently *absent* on every
+#: hit — indistinguishable from "this point has no subject". Measured
+#: read-only 2026-09-23: the whole edge inventory of the dogfood graph
+#: (37,535 Points) holds **0** ``aboutSubject`` edges and **1** ``:Subject``
+#: node, because the capture entity spine stores SUBJECT-kind entities as
+#: ``:Object`` (issue #4934) and the only document-path Subject writer is
+#: behind the opt-in ``--semantic-extract`` flag (issue #4938).
+#: Tracked producers: #1370, #1509. The marker self-clears as soon as any
+#: ``aboutSubject`` edge exists on the graph.
+SUBJECT_BINDING_UNAVAILABLE = (
+    "aboutSubject has no reachable producer for Points or Events on this "
+    "graph, so 'subject' is structurally empty rather than unknown: the "
+    "capture entity spine writes SUBJECT-kind entities as :Object (#4934), "
+    "and the document extractor's Subject writer is opt-in (#4938). "
+    "Tracked producers: #1370, #1509."
+)
+
+
+#: The ``aboutSubject`` shapes ``fetch_point_epistemic_state`` actually reads:
+#: a Point's own edge, or its source Event's edge (the ≤1-hop fallback). The
+#: availability probe must be scoped to these — an ``Object``-sourced
+#: ``aboutSubject`` edge (the GitHub connector writes
+#: ``(o:Object)-[:aboutSubject]->(s:Subject)``) can never resolve the advertised
+#: Point field, so an unscoped count would report "available" on a graph where
+#: every Point hit still carries no subject.
+#:
+#: Written as a UNION ALL of two label-anchored counts, NOT the single
+#: ``MATCH (n) … WHERE n:Point OR n:Event`` form: FalkorDB does not push a
+#: disjunctive label test into the scan, so that form compiles to an ``All Node
+#: Scan`` over the whole graph (~5.9 ms at 9k nodes) while this one is
+#: Subject-anchored (~0.5 ms). Each leg aggregates without a grouping key, so
+#: each yields exactly one integer row (0 when it matches nothing) and the probe
+#: SUMS them.
+_SUBJECT_SOURCE_SCOPED_PROBE = (
+    "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c "
+    "UNION ALL "
+    "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c")
+
+
+def subject_binding_available(graph) -> bool:
+    """True when this graph can carry ``aboutSubject`` edges at all (#4889).
+
+    Counts the Point- and Event-sourced ``aboutSubject`` edges
+    ``fetch_point_epistemic_state`` reads, so an Object-sourced edge (the
+    GitHub connector's shape) cannot make the marker lie (see
+    ``_SUBJECT_SOURCE_SCOPED_PROBE``). The query is label-anchored and BOUNDED
+    (``_DECORATION_TIMEOUT_MS``, the same bound the state fetch uses) — an
+    unbounded full-graph scan on the hot search path is the defect this probe
+    must not reintroduce.
+
+    **Fail-OPEN**: a probe error, an empty result, or a non-integer row
+    returns True. A broken probe must never invent an unavailability claim, so
+    the failure direction that withholds the marker is the safe one.
+    """
+    try:
+        rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE,
+                           timeout=_DECORATION_TIMEOUT_MS).result_set
+        if not rows:
+            # Each UNION ALL leg aggregates without a grouping key, so the
+            # probe always yields rows; an empty result is anomalous and must
+            # not be read as "no edges".
+            logger.warning(
+                "aboutSubject availability probe returned no rows — assuming "
+                "available")
+            return True
+        total = 0
+        for row in rows:
+            if not row or row[0] is None:
+                logger.warning(
+                    "aboutSubject availability probe returned an anomalous "
+                    "row (%r) — assuming available", row)
+                return True
+            total += int(row[0])
+        return total > 0
+    except Exception:  # fail-open, see docstring
+        logger.warning(
+            "aboutSubject availability probe failed — assuming available",
+            exc_info=True)
+        return True
 
 
 def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
@@ -2003,6 +2587,9 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
                 # embedded fallback hits too (``self.query`` nodes carry
                 # ``has_answer``; absent = False).
                 has_answer=bool(meta.get(r["id"], {}).get("has_answer")),
+                # ⛔ No ``source_ref``/``captured_at`` here — this tier is a
+                # no-op for TORTOISE_SEARCH_PROVENANCE; see the KNOWN
+                # LIMITATION note on ``search_provenance_enabled`` above.
             ).to_dict()
             for r in results
         ]
