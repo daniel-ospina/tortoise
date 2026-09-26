@@ -609,11 +609,12 @@ def _compute_safe_label(label: str) -> str:
 
     Control characters are replaced so the label is a clean series KEY — the
     stored key is what downstream consumers of this dimension read, and a key
-    carrying a line break breaks them. Note what does and does NOT depend on this:
-    ``prometheus_client`` (0.26.0, measured) already escapes a newline in the
-    exposition text, so the C0 range is belt-and-braces for the SERIES, while NUL
-    and CSI are passed through RAW and are this function's real load. A label that
-    cannot be UTF-8 encoded is repaired,
+    carrying a line break breaks them. For the SERIES this translation is the ONLY
+    protection: ``prometheus_client`` (0.26.0, measured) escapes exactly ONE
+    control code point — LF — and only in the exposition text, never in the stored
+    key. CR, TAB, NUL, CSI, U+2028 and U+2029 are all passed through RAW, so
+    replacing them here is what keeps both the key and the exposition clean. A
+    label that cannot be UTF-8 encoded is repaired,
     because ``generate_latest()`` encodes label values, so ONE lone surrogate would
     make the whole ``/metrics`` endpoint raise for the process lifetime, blinding
     every alert rather than this one dimension. Not reachable from the HTTP path
