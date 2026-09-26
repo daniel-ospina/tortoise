@@ -4243,17 +4243,26 @@ def _preview_delete_entity(sdk, id: str) -> dict:
         # A url-keyed :Source has no `id`, so without this the preview
         # UNDER-reports the blast radius (the dangerous direction).
         for match_prop in (prop, *secondary_entity_id_props(label)):
-            hit = False
+            # The fall-through condition must be the WRITER's, not "did this
+            # key match anything": `_delete_entity` breaks on the DETACH
+            # DELETE's count, so a primary key whose only match was ALREADY
+            # deleted by an earlier label returns 0 and falls through to the
+            # secondary key. Gating on a raw `hit` (any matched row, `seen` or
+            # not) stops one label early and UNDER-reports the blast radius —
+            # the dangerous direction on an irreversible op. Graph:
+            # `(:Object:Source {id:X})` + `(:Source {url:X})` — the writer
+            # deletes BOTH, a `hit`-gated preview claimed one.
+            added = False
             for (internal,) in proj.g.query(
                 f"MATCH (n:{label} {{{match_prop}:$id}}) RETURN ID(n)",
                 params={"id": id},
             ).result_set:
-                hit = True
                 if internal in seen:
                     continue
                 seen.add(internal)
                 nodes.append(id)
-            if hit:
+                added = True
+            if added:
                 break
     # `_delete_entity` does NOT run the Tag GC (only `delete_point` does).
     edges = _preview_delete_edges(sdk, sorted(seen))

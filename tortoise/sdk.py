@@ -18330,33 +18330,40 @@ class TortoiseSDK:
                     # The graph write still happens — only the journal record is
                     # withheld — and the withhold is LOUD, so this is a declared
                     # deferral, never the silent loss this lane exists to fix.
-                    applied = proj.g.query(
-                        f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
-                        "RETURN count(n)",
-                        params={"id": id_val, "props": props},
-                    )
-                    # A miss mutates nothing, so there is nothing to warn about
-                    # (an `update_entity("no-such-id", name=...)` must not cry
-                    # wolf). `count(n)` is safe HERE because there is no
-                    # `properties(n)` in this RETURN to become a grouping key —
-                    # the hazard the reading query below documents.
-                    matched = bool(applied.result_set and applied.result_set[0][0])
-                    matched_prop = prop
-                    # #4649: same OR-SET as the generic branch below — a
-                    # url-keyed :Source has no `id`, so the primary MATCH above
-                    # misses it.
-                    if not matched:
-                        for match_prop in id_keys[1:]:
-                            applied = proj.g.query(
-                                f"MATCH (n:{label} {{{match_prop}:$id}}) "
-                                "SET n += $props RETURN count(n)",
-                                params={"id": id_val, "props": props},
-                            )
-                            matched = bool(applied.result_set
-                                           and applied.result_set[0][0])
-                            if matched:
-                                matched_prop = match_prop
-                                break
+                    rest = {k: v for k, v in props.items() if k != "name"}
+                    keys = list(rest)
+                    # #4649: the OR-SET, and the write and its read-back are ONE
+                    # statement — the form the generic branch below already uses.
+                    # They MUST NOT be split into a write followed by a separate
+                    # MATCH: a url-keyed :Source is addressed BY `url`, and `url`
+                    # is a writable prop, so a second query matching the ORIGINAL
+                    # url runs AFTER the SET and misses the re-keyed node — the
+                    # write lands, NO `EntityMutated` record is emitted, and
+                    # `rebuild_all` silently reverts the `url` (a live≠replay
+                    # divergence with no fold-miss warning, because there is no
+                    # record to miss). MATCHing first and reading
+                    # `properties(n)` after the SET binds the node by its
+                    # PRE-write key while the returned values are post-write.
+                    applied = None
+                    matched_prop = None
+                    for match_prop in id_keys:
+                        applied = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
+                            "SET n += $props "
+                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                            params={"id": id_val, "props": props, "keys": keys},
+                        )
+                        # A miss mutates nothing, so there is nothing to warn
+                        # about (an `update_entity("no-such-id", name=...)` must
+                        # not cry wolf). A result row means the write landed on
+                        # THIS branch's node. Do NOT add `count(n)`: beside
+                        # `properties(n)` it becomes a grouping key, so a miss
+                        # would yield no row and a duplicate-id match one row PER
+                        # GROUP.
+                        if applied.result_set:
+                            matched_prop = match_prop
+                            break
+                    matched = matched_prop is not None
 
                     # Journal everything the write changed EXCEPT `name`. The
                     # reason `name` is withheld — it moves the node before the
@@ -18365,30 +18372,22 @@ class TortoiseSDK:
                     # would leave #3312 open for the ordinary call
                     # `update_entity(id, name=..., status=...)`, silently
                     # reverting the status on rebuild.
-                    rest = {k: v for k, v in props.items() if k != "name"}
                     if matched and rest:
-                        keys = list(rest)
-                        res = proj.g.query(
-                            f"MATCH (n:{label} {{{matched_prop}:$id}}) "
-                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                            params={"id": id_val, "keys": keys},
+                        vals = list(applied.result_set[0][0])
+                        if len(vals) != len(keys):
+                            _logger.error(
+                                "state arity mismatch for %s %r: %d keys "
+                                "vs %d values — journalling the shorter "
+                                "of the two",
+                                label, id_val, len(keys), len(vals))
+                        # `rest` carries no `name`, so the classifier can
+                        # never return `rename` here — it is `restatus` or
+                        # `revise`, both implemented.
+                        self._journal_entity_mutation(
+                            label, id_val,
+                            classify_entity_mutation_op(rest),
+                            state=dict(zip(keys, vals, strict=False)),
                         )
-                        if res.result_set:
-                            vals = list(res.result_set[0][0])
-                            if len(vals) != len(keys):
-                                _logger.error(
-                                    "state arity mismatch for %s %r: %d keys "
-                                    "vs %d values — journalling the shorter "
-                                    "of the two",
-                                    label, id_val, len(keys), len(vals))
-                            # `rest` carries no `name`, so the classifier can
-                            # never return `rename` here — it is `restatus` or
-                            # `revise`, both implemented.
-                            self._journal_entity_mutation(
-                                label, id_val,
-                                classify_entity_mutation_op(rest),
-                                state=dict(zip(keys, vals, strict=False)),
-                            )
 
                     if matched:
                         # #2296 residual, deliberately NOT promised away here: if

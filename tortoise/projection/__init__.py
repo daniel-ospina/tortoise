@@ -6731,11 +6731,11 @@ class FalkorProjection(
         node count deleted (0 = a fold-miss: the entity was already absent).
 
         #3860: identity is (kind, id). When ``label`` is one of the canonical
-        six the delete is SCOPED to that kind — a delete record owns only the
+        five the delete is SCOPED to that kind — a delete record owns only the
         node kind it names, so it can never destroy a foreign-kind node that
         happens to share the id. ``label=None`` (missing/unknown, i.e. a
         malformed or pre-#3299 raw record) keeps the legacy id-wide delete
-        across all six labels, preserving the "a delete must survive replay"
+        across all five labels, preserving the "a delete must survive replay"
         guarantee for every record shape. The label is NEVER interpolated from
         the journal: only members of ``_CANONICAL_ENTITY_ID_PROPS`` reach the
         Cypher label position.
