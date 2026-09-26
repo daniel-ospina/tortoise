@@ -9738,3 +9738,432 @@ class TestCapturePathSkipsDiscardedProjection:
 
         written = writes[0][1].get(key)
         assert isinstance(written, str) and written, written
+
+
+# ── #3124: the shared per-IP bucket primitive's store is bounded ─────────────
+# The old shape inserted the bucket BEFORE the 429 check and pruned only
+# *stale* buckets, so a fresh-key flood grew the store unbounded and scanned
+# it O(n) per request once over max_entries. These pin the replacement policy:
+# stated cap + reclaim-inactive + reject-new/shared-overflow + O(1) hot path.
+
+class _BucketCountingStore(dict):
+    """A dict that measures store-wide iteration WORK, not just calls.
+
+    ``scans`` counts wholesale iteration entry points (``.items()`` /
+    ``.keys()`` / ``.values()`` — the O(n) surface the old code ran on every
+    request once over ``max_entries``). ``yielded`` counts the KEYS produced
+    by ``__iter__``, so the O(1) one-head inspection reclaim does (one key) is
+    distinguishable from a full-store scan (n keys): counting CALLS would let
+    a `list(store)` full scan hide behind a single ``__iter__``.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.scans = 0
+        self.yielded = 0
+
+    def __iter__(self):
+        for key in super().__iter__():
+            self.yielded += 1
+            yield key
+
+    def items(self):
+        self.scans += 1
+        return super().items()
+
+    def keys(self):
+        self.scans += 1
+        return super().keys()
+
+    def values(self):
+        self.scans += 1
+        return super().values()
+
+
+def _bucket_req(host: str = "1.2.3.4"):
+    from starlette.requests import Request
+    return Request({"type": "http", "method": "POST", "path": "/x",
+                    "headers": [], "query_string": b"",
+                    "client": (host, 1234)})
+
+
+async def _drive_bucket_check(store, lock, keys, **kw):
+    """Drive the primitive over `keys` in ONE event loop; return status codes."""
+    out = []
+    for k in keys:
+        try:
+            await _ha_mod._check_ip_bucket_rate_limit(
+                _bucket_req(), buckets=store, lock=lock, key=k, **kw)
+            out.append(200)
+        except _ha_mod.HTTPException as exc:
+            out.append(exc.status_code)
+    return out
+
+
+class TestBoundedIpBucketStore:
+    """#3124 — the capacity policy for `_check_ip_bucket_rate_limit`."""
+
+    _KW = dict(limit=1, window_s=3600, detail="flood")  # noqa: RUF012
+
+    def test_fresh_key_flood_is_bounded_by_the_store_cap(self, monkeypatch):
+        """#3124 repro: max_entries=8 + many distinct keys in one window.
+
+        Old shape: the store reached the number of keys (20+) and the prune
+        deleted nothing. New shape: owned keys stay ≤ 8, one shared overflow
+        bucket absorbs the next key, and further new keys get a documented
+        429 (the deliberate store-overflow class).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(
+                store, lock, [f"10.0.0.{i}" for i in range(50)],
+                max_entries=8, **self._KW)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert _ha_mod._bucket_owned_count(store) <= 8, \
+            f"store grew past max_entries: {len(store)} keys"
+        assert len(store) <= 9, f"store not bounded: {len(store)} keys"
+        assert codes[:9] == [200] * 9, codes[:9]
+        assert codes[9:] == [429] * 41, codes[9:]
+
+    def test_reclaim_never_evicts_an_active_key(self, monkeypatch):
+        """An attacker flood must not reset a victim's consumed budget.
+
+        Fill the owned cap with ACTIVE keys, then admit a fresh key: it goes
+        to the overflow (never evicting an active key). Only a fully-expired
+        head is reclaimable — then, and only then, room frees for a new key.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            keys = [f"k{i}" for i in range(8)]
+            await _drive_bucket_check(store, lock, keys, max_entries=8,
+                                      **self._KW)
+            active = set(store)
+            await _drive_bucket_check(store, lock, ["fresh-1"],
+                                      max_entries=8, **self._KW)
+            survived = [k for k in active if k in store]
+            # Now expire the head only; reclaim frees exactly that slot.
+            import time
+            head = next(iter(store))
+            store[head] = [time.time() - 10_000]
+            await _drive_bucket_check(store, lock, ["fresh-2"],
+                                      max_entries=8, **self._KW)
+            return store, active, survived, head
+
+        store, active, survived, head = asyncio.run(_run())
+        assert survived == list(active), \
+            f"reclaim evicted active keys: {set(active) - set(survived)}"
+        assert head not in store, "an expired head must be reclaimable"
+        assert "fresh-2" in store, "a freed slot must admit a new key"
+        assert _ha_mod._bucket_owned_count(store) <= 8
+
+    def test_hot_path_does_not_scan_the_store(self, monkeypatch):
+        """Per-request work must not scale with store size.
+
+        Old shape: once `len(buckets) > max_entries` EVERY request ran
+        `for ip, b in buckets.items()`. New shape: a tracked key does no
+        store-wide iteration at all; a fresh key at an all-live cap inspects
+        at most one head.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = _BucketCountingStore(), asyncio.Lock()
+            await _drive_bucket_check(store, lock, [f"k{i}" for i in range(12)],
+                                      max_entries=8, **self._KW)
+            over_cap = len(store)
+            store.scans = store.yielded = 0
+            tracked = await _drive_bucket_check(store, lock, ["k0"],
+                                                max_entries=8, **self._KW)
+            tracked_scans, tracked_yielded = store.scans, store.yielded
+            store.scans = store.yielded = 0
+            fresh = await _drive_bucket_check(store, lock, ["brand-new"],
+                                              max_entries=8, **self._KW)
+            fresh_scans, fresh_yielded = store.scans, store.yielded
+            return (over_cap, tracked, tracked_scans, tracked_yielded,
+                    fresh, fresh_scans, fresh_yielded)
+
+        (over_cap, tracked, tracked_scans, tracked_yielded, fresh, fresh_scans,
+         fresh_yielded) = asyncio.run(_run())
+        assert over_cap > 8, "the test must exercise the OVER-cap path"
+        assert tracked == [429]
+        assert tracked_scans == 0 and tracked_yielded == 0, (
+            f"a tracked key scanned the store: scans={tracked_scans} "
+            f"yielded={tracked_yielded}")
+        assert fresh == [429]  # overflow already full at limit=1
+        assert fresh_scans == 0, f"the fresh path ran {fresh_scans} scan(s)"
+        assert fresh_yielded <= 1, \
+            f"the fresh-key path inspected {fresh_yielded} keys (must be ≤1)"
+
+    def test_defer_charge_creates_no_store_entry(self, monkeypatch):
+        """#1719 preserved and strengthened: a 5xx must consume no budget.
+
+        The deferred check charged nothing before and must not even create an
+        empty bucket now — otherwise a store-saturating flood of 5xx-ing
+        requests would still grow the store.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(
+                store, lock, ["new-key"], max_entries=8,
+                limit=5, window_s=3600, detail="d", defer_charge=True)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert codes == [200]
+        assert store == {}, f"deferred check wrote to the store: {store}"
+
+    def test_charge_re_admits_and_is_bounded_at_cap(self, monkeypatch):
+        """`_charge_ip_bucket` (the deferred writer) shares the same bound.
+
+        A terminal charge for a key the deferred check could not track must
+        land in the shared overflow (never grow the owned key space), and the
+        overflow obeys the #1738 burst bound at `limit`.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            await _drive_bucket_check(store, lock, [f"k{i}" for i in range(8)],
+                                      max_entries=8, **self._KW)
+            await _ha_mod._charge_ip_bucket(
+                store, lock, "brand-new", limit=1, window_s=3600,
+                max_entries=8)
+            owned_after_first = _ha_mod._bucket_owned_count(store)
+            in_store = "brand-new" in store
+            ov_len = len(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            await _ha_mod._charge_ip_bucket(
+                store, lock, "brand-new-2", limit=1, window_s=3600,
+                max_entries=8)
+            ov_len_2 = len(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            return (store, owned_after_first, in_store, ov_len, ov_len_2)
+
+        store, owned_after_first, in_store, ov_len, ov_len_2 = asyncio.run(_run())
+        assert in_store is False, "the charge grew the owned key space"
+        assert owned_after_first <= 8
+        assert len(store) <= 9
+        assert ov_len == 1, "the terminal charge must land in the overflow"
+        assert ov_len_2 == 1, "the overflow must obey the #1738 limit bound"
+
+    def test_recharge_moves_a_key_to_the_tail_so_the_true_oldest_head_is_reclaimed(
+            self, monkeypatch):
+        """Last-charge ordering is what makes `_bucket_reclaim` correct.
+
+        An INACTIVE bucket behind an ACTIVE insertion-order head is *not*
+        reclaimable (reclaim stops at the head — the no-active-eviction
+        invariant). Re-charging the head must move it to the tail so the
+        genuinely-oldest key becomes the head and its slot is freed. Without
+        `_bucket_touch` the store would route the next new key to the shared
+        overflow and never reclaim the expired slot.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        kw = dict(limit=2, window_s=3600, detail="x", max_entries=4)
+
+        async def _run():
+            import time as _time
+            store, lock = {}, asyncio.Lock()
+            await _drive_bucket_check(
+                store, lock, ["k0", "k1", "k2", "k3"], **kw)
+            # k1 is expired but NOT the head; k0 is the active head.
+            store["k1"] = [_time.time() - 10_000]
+            # Re-charging k0 (room for a 2nd entry) must move k0 to the tail,
+            # exposing k1 as the head.
+            second = await _drive_bucket_check(store, lock, ["k0"], **kw)
+            fresh = await _drive_bucket_check(store, lock, ["k9"], **kw)
+            return store, second, fresh
+
+        store, second, fresh = asyncio.run(_run())
+        assert second == [200], second
+        assert fresh == [200], fresh
+        assert "k1" not in store, "the expired head was not reclaimed"
+        assert "k9" in store, "the freed slot did not admit a new key"
+        assert _ha_mod._bucket_owned_count(store) <= 4
+
+    def test_mixed_limit_overflow_is_fail_closed(self, monkeypatch):
+        """One store can carry several `limit`s (`_SENSITIVE_BUCKETS` is
+        20/5/5/5 per op).
+
+        The overflow bucket is shared, so a HIGH-limit key class can fill it
+        and a fresh LOW-limit key then sees `len >= its limit` and is refused.
+        That is strictly more restrictive than the key's own budget — never
+        more permissive — so the coupling is fail-closed and reachable only in
+        the genuine store-overflow regime. This test pins that direction so a
+        future lane cannot make it fail-open.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            # Fill the owned cap (2) with active keys.
+            await _drive_bucket_check(store, lock, ["a", "b"], max_entries=2,
+                                      limit=20, window_s=3600, detail="hi")
+            # New keys are routed to the shared overflow, filling it at the
+            # HIGH limit's cap (20).
+            await _drive_bucket_check(
+                store, lock, [f"hi{i}" for i in range(20)], max_entries=2,
+                limit=20, window_s=3600, detail="hi")
+            ov = len(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            # A fresh LOW-limit key (5) must not be admitted past its budget.
+            low = await _drive_bucket_check(
+                store, lock, ["low"], max_entries=2,
+                limit=5, window_s=3600, detail="lo")
+            return store, ov, low
+
+        store, ov, low = asyncio.run(_run())
+        assert ov == 20, ov
+        assert low == [429], low
+        assert _ha_mod._bucket_owned_count(store) <= 2
+        assert len(store) <= 3, len(store)
+
+    def test_forget_does_not_pop_overflow_for_an_empty_owned_bucket(self):
+        """A present-but-EMPTY owned bucket means nothing was charged for the
+        key, so `_forget_bucket_charge` must not touch the shared overflow
+        (whose entries may belong to another key)."""
+        store = {_ha_mod._BUCKET_OVERFLOW_KEY: [1.0, 2.0], "k": []}
+        _ha_mod._forget_bucket_charge(store, "k")
+        assert store[_ha_mod._BUCKET_OVERFLOW_KEY] == [1.0, 2.0]
+        assert store["k"] == []
+
+    def test_singleton_global_dimension_never_overflows(self, monkeypatch):
+        """A server-fixed singleton key can never hit the store cap, so the
+        overflow path must not engage for it (global invite budgets)."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(
+                store, lock, ["global"] * 5, max_entries=1,
+                limit=2, window_s=3600, detail="g")
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        assert codes == [200, 200, 429, 429, 429], codes
+        assert list(store) == ["global"]
+        assert _ha_mod._BUCKET_OVERFLOW_KEY not in store
+
+    def test_below_cap_budgets_stay_independent(self, monkeypatch):
+        """Preserved semantics: below the cap each key keeps its OWN window.
+
+        Key A exhausting its budget must not refuse key B, and a request that
+        is allowed must still be charged (the 429 boundary stays at limit).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            a = await _drive_bucket_check(store, lock, ["A", "A", "A"],
+                                          max_entries=8, limit=2,
+                                          window_s=3600, detail="x")
+            b = await _drive_bucket_check(store, lock, ["B"],
+                                          max_entries=8, limit=2,
+                                          window_s=3600, detail="x")
+            return store, a, b
+
+        store, a, b = asyncio.run(_run())
+        assert a == [200, 200, 429], a
+        assert b == [200], b
+        assert len(store["A"]) == 2 and len(store["B"]) == 1
+
+    def test_forget_rolls_back_an_overflow_charge(self, monkeypatch):
+        """An overflow-routed successful accept must roll back count-neutral.
+
+        `_forget_invite_accept` popped only the owned bucket, so an
+        overflow-routed accept would leak its charge for the whole window.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            await _drive_bucket_check(
+                store, lock, [("tok", i) for i in range(8)], max_entries=8,
+                limit=1, window_s=900, detail="x")
+            key = ("invite-accept", "token", "fresh")
+            await _ha_mod._charge_ip_bucket(
+                store, lock, key, limit=1, window_s=900, max_entries=8)
+            before = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            _ha_mod._forget_bucket_charge(store, key)
+            after = list(store.get(_ha_mod._BUCKET_OVERFLOW_KEY, []))
+            return before, after
+
+        before, after = asyncio.run(_run())
+        assert len(before) == 1, before
+        assert after == [], "the overflow charge was not rolled back"
+
+
+class TestBoundedMiddlewareStore:
+    """#3124 — `RateLimitMiddleware._buckets` gets a hard key cap."""
+
+    class _MwReq:
+        def __init__(self):
+            import types
+
+            class _Url:
+                path = "/v1/things"
+
+            class _Headers:
+                def get(self, _key, default=None):
+                    return ""
+
+            self.url = _Url()
+            self.headers = _Headers()
+            self.state = types.SimpleNamespace()
+            self.client = types.SimpleNamespace(host="10.0.0.1")
+
+    def _middleware(self, monkeypatch, max_buckets):
+        async def _noop(scope, receive, send):
+            pass
+
+        mw = _ha_mod.RateLimitMiddleware(_noop, max_per_minute=1,
+                                        max_buckets=max_buckets)
+        mw._disabled = False
+        keys = iter([f"ip:10.0.0.{i}" for i in range(500)])
+        monkeypatch.setattr(mw, "_bucket_key", lambda *a, **kw: next(keys))
+
+        async def _next(_req):
+            return "ok"
+
+        return mw, _next
+
+    def test_middleware_store_is_bounded_under_rotating_keys(self, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        mw, _next = self._middleware(monkeypatch, max_buckets=8)
+
+        async def _run():
+            codes = []
+            for _ in range(50):
+                resp = await mw.dispatch(self._MwReq(), _next)
+                codes.append(getattr(resp, "status_code", 200))
+            return codes
+
+        codes = asyncio.run(_run())
+        assert _ha_mod._bucket_owned_count(mw._buckets) <= 8, len(mw._buckets)
+        assert len(mw._buckets) <= 9, len(mw._buckets)
+        assert 429 in codes, "an all-live cap must produce the overflow 429"
+
+    def test_middleware_has_no_periodic_full_scan(self, monkeypatch):
+        """The old 60 s wholesale `.items()` prune is gone: a tracked key must
+        do no store-wide iteration even when the deadline has elapsed."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        mw, _next = self._middleware(monkeypatch, max_buckets=100)
+        mw._buckets = _BucketCountingStore()
+        keys = iter(["ip:1.1.1.1", "ip:1.1.1.1"])
+        monkeypatch.setattr(mw, "_bucket_key", lambda *a, **kw: next(keys))
+
+        async def _run():
+            await mw.dispatch(self._MwReq(), _next)  # create the bucket
+            mw._last_cleanup = 0  # would force the OLD wholesale scan
+            mw._buckets.scans = mw._buckets.yielded = 0
+            await mw.dispatch(self._MwReq(), _next)  # tracked key
+            return mw._buckets.scans, mw._buckets.yielded
+
+        scans, yielded = asyncio.run(_run())
+        assert scans == 0 and yielded == 0, (
+            f"middleware scanned the whole store: scans={scans} "
+            f"yielded={yielded}")

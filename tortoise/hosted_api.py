@@ -1105,6 +1105,19 @@ async def _stop_liveness(app) -> None:
             await asyncio.gather(*pending, return_exceptions=True)
 
 
+def _watcher_expected_on_this_host() -> bool:
+    """Whether a backup watcher was EXPECTED on this host.
+
+    The ONE declaration of the hosted-marker test (#4498): the lifespan's
+    boot-time "no monitor" warning and `/health`'s ``backup_watcher.expected``
+    field both read it, so the two can never disagree about whether this host
+    is supposed to be running a watcher. ``FLY_APP_NAME`` is the same
+    truthiness test the #101 durability guard uses — a deployment that sets it
+    is a hosted deployment and must have backup staleness monitoring.
+    """
+    return bool(os.environ.get("FLY_APP_NAME"))
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -1249,7 +1262,7 @@ async def _lifespan(app):
             # those deployments legitimately leave off: a warning that fires on
             # every healthy non-production boot is training-to-ignore material for
             # the very signal #2922 needed.
-            _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            _watcher_expected = _watcher_expected_on_this_host()
             _not_started_reason = None
             if cfg is None:
                 _not_started_reason = (
@@ -1890,16 +1903,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
     # general 100/min bucket.
     PATH_LIMITS = {"/v1/sessions/commit": 300}  # noqa: RUF012
+    # #3124: hard cap on the key space (see the bounded-store policy block
+    # near the shared primitive). The old 60 s periodic prune was the only
+    # bound and was an O(n) sweep over an attacker-supplied key set (guessed
+    # ``tt_`` keys and ``ip:<host>`` for unauthenticated/session-JWT traffic).
+    MAX_BUCKETS = 10_000
 
-    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None):
+    def __init__(self, app, max_per_minute=100, path_limits: dict | None = None,
+                 max_buckets: int | None = None):
         super().__init__(app)
         self.max_per_minute = max_per_minute
         self.path_limits = dict(self.PATH_LIMITS)
         if path_limits:
             # test seam: override the per-path limits (R-13 bucket testing)
             self.path_limits.update(path_limits)
+        self.max_buckets = (
+            self.MAX_BUCKETS if max_buckets is None else max_buckets)
         self._buckets: dict[str, list[float]] = defaultdict(list)
-        self._last_cleanup = time.time()
         self._lock = asyncio.Lock()
         # RATE_LIMIT_DISABLED=1 disables throttling (test env) — the test
         # suite creates >100 points per run against a shared IP bucket,
@@ -1951,19 +1971,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         now = time.time()
 
         async with self._lock:
-            # Periodic cleanup: prune empty buckets and buckets older than 60s
-            if now - self._last_cleanup > 60:
-                stale = []
-                for k, v in list(self._buckets.items()):
-                    v[:] = [t for t in v if now - t < 60]
-                    if not v:
-                        stale.append(k)
-                for k in stale:
-                    del self._buckets[k]
-                self._last_cleanup = now
-
-            bucket = self._buckets[key_id]
-            bucket[:] = [t for t in bucket if now - t < 60]
+            # #3124: bounded key space + O(1) hot path, via the SAME
+            # `_bucket_route` policy as the shared primitive. Inactive
+            # insertion-order-head buckets are reclaimed ONLY on the new-key
+            # path (a tracked key is pruned in place and never scans the
+            # store); a new key at a full store is charged to the one shared
+            # overflow bucket (capped at this path's limit) instead of growing
+            # the store. Replaces the old 60 s wholesale O(n) prune.
+            bucket, on_overflow = _bucket_route(
+                self._buckets, key_id, now, 60, self.max_buckets)
 
             if len(bucket) >= limit:
                 # Return the 429 response directly: an HTTPException raised in
@@ -1982,6 +1998,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
 
             bucket.append(now)
+            dest = _BUCKET_OVERFLOW_KEY if on_overflow else key_id
+            self._buckets[dest] = bucket
+            _bucket_touch(self._buckets, dest)
         return await call_next(request)
 
 
@@ -3382,23 +3401,38 @@ def _backup_watcher_health() -> dict:
     Mirrors the ``db`` block: a sub-dict carrying ``ok``, folded into
     ``status`` by the caller. Never raises and never 5xxes — a dead monitor
     must not kill a live process's liveness probe (#338).
+
+    #4498: every state also carries ``expected`` — whether a backup watcher
+    was EXPECTED on this host (``FLY_APP_NAME`` set, via the shared
+    `_watcher_expected_on_this_host` the lifespan also reads, so the two can
+    never disagree). On a hosted deploy ``state: "disabled"`` is otherwise
+    indistinguishable from a deployment that deliberately runs without
+    backups; ``expected: true`` alongside ``state: "disabled"`` is the
+    operator's cue to read the boot log. The ``status`` rule is unchanged —
+    ``disabled`` still stays ``ok`` (#4470's explicit acceptance).
     """
+    expected = _watcher_expected_on_this_host()
     try:
         watcher = _WATCHER
         if watcher is not None:
             thread = getattr(watcher, "_thread", None)
             if thread is not None and thread.is_alive():
-                return {"state": "running", "ok": True, "error": None}
+                return {"state": "running", "ok": True, "error": None,
+                        "expected": expected}
             return {
                 "state": "stopped",
                 "ok": False,
                 "error": "watcher thread is not alive",
+                "expected": expected,
             }
         if _WATCHER_START_ERROR is not None:
-            return {"state": "failed", "ok": False, "error": _WATCHER_START_ERROR}
-        return {"state": "disabled", "ok": True, "error": None}
+            return {"state": "failed", "ok": False,
+                    "error": _WATCHER_START_ERROR, "expected": expected}
+        return {"state": "disabled", "ok": True, "error": None,
+                "expected": expected}
     except Exception as exc:  # liveness must answer, always
-        return {"state": "unknown", "ok": False, "error": str(exc)[:200]}
+        return {"state": "unknown", "ok": False, "error": str(exc)[:200],
+                "expected": expected}
 
 
 @app.get("/health")
@@ -3446,7 +3480,10 @@ async def health():
     shape of silent durability failure, so it rides along in ``backup_watcher``
     and flips ``status`` to "degraded" under the identical rule. A disabled
     sweep (no config / kill switch) stays ``ok`` — only "wanted but failed"
-    degrades.
+    degrades. #4498: the block also carries ``expected`` (``FLY_APP_NAME`` set),
+    so on a host where a watcher was expected, ``{"state": "disabled", "ok":
+    true, "expected": true}`` reads as "wanted, and not running" — the
+    operator's cue to check the boot log for the reason.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5312,6 +5349,126 @@ def _normalize_mapped_ipv6(ip):
     return ip
 
 
+# ── Bounded store policy for the shared per-IP bucket primitive (#3124) ──
+# The primitive (and RateLimitMiddleware) pruned only *stale* buckets, so a
+# fresh-key flood pruned nothing — every bucket was charged inside the window.
+# The store then grew for the whole window_s (up to 86 400 s on the signup
+# limiter) and, once over max_entries, every request scanned the whole store
+# (O(n) per request, O(n^2) under a sustained flood). The policy below mirrors
+# #2866's DCR precedent:
+#
+#   owned-key cap .... max_entries (default 10 000) client-keyed buckets
+#   overflow ......... exactly ONE shared bucket per store (reserved key
+#                      _BUCKET_OVERFLOW_KEY), capped at the caller's
+#                      ``limit`` per window
+#   eviction ......... reclaim ONLY buckets whose in-window entries have all
+#                      expired; an ACTIVE key is never evicted
+#   hot path ......... O(1) in store size — no store-wide iteration on any
+#                      check or charge
+#
+# Last-charge ordering (every charge moves its key to the insertion-order
+# tail) makes reclaim O(1) and safe: the head is the least-recently-charged
+# key, so an active head implies every later key is also active. Reclaim stops
+# at the first active head and can never evict an active key — evicting one
+# would reset a victim's consumed budget, the fail-open shape #2866 rejects as
+# alternative C. A NEW key arriving when the owned store is full of active
+# buckets is charged to the shared overflow bucket instead of growing the
+# store; only when that overflow is ALSO at ``limit`` is the request refused
+# (429) — the deliberate, fail-closed store-overflow rejection class. The
+# overflow bucket lives in the SAME caller-owned store (this primitive is
+# polymorphic over 13 call sites, so a second global store cannot be passed
+# without a signature change); capacity counts owned keys only, so the stated
+# bound is owned <= max_entries and len(store) <= max_entries + 1.
+#
+# Accepted overflow-regime properties (deliberate, both fail-CLOSED — a lane
+# must not "fix" either without re-opening the capacity decision):
+#   * Mixed-limit stores. One store may carry keys with different ``limit``s
+#     (``_SENSITIVE_BUCKETS`` is 20/5/5/5 per op; ``RateLimitMiddleware`` is
+#     300/100 per path). The overflow bucket is SHARED, so a high-limit key
+#     class can fill it and a fresh low-limit key then sees ``len >= limit``
+#     and is refused. This can only ever be MORE restrictive than the key's
+#     own budget — never more permissive — so it is fail-closed; it is
+#     reachable only in the genuine store-overflow regime (max_entries active
+#     keys in one window), which is a flood signature. Pinned by
+#     ``test_mixed_limit_overflow_is_fail_closed``.
+#   * ``_forget_bucket_charge`` refunds one entry, so an overflow-routed
+#     successful accept keeps "successes consume no budget" true at the cost
+#     of the shared bucket admitting up to ``limit`` + (successful accepts)
+#     untracked charges. Accepts are themselves bounded by the per-token / IP
+#     / global dimensions, so the overflow stays bounded.
+_BUCKET_OVERFLOW_KEY = "\x00overflow"
+
+
+def _bucket_prune_window(bucket: list, now: float, window_s: int) -> list:
+    """In-window entries of `bucket`. The ONE implementation of the
+    security-relevant window boundary (``now - t < window_s``): #2866's
+    ``_dcr_prune_window`` delegates here (#3124), and the D10 parity test
+    pins the primitive's observable window behaviour."""
+    return [t for t in bucket if now - t < window_s]
+
+
+def _bucket_owned_count(store) -> int:
+    """Client-keyed buckets in `store` — the one shared overflow bucket (if
+    present) does not count against the owned-key cap."""
+    return len(store) - (1 if _BUCKET_OVERFLOW_KEY in store else 0)
+
+
+def _bucket_touch(store, key) -> None:
+    """Move `key` to the insertion-order tail (last-charge ordering) so
+    `_bucket_reclaim` can stop at the first active head. Works on any
+    insertion-ordered mapping (dict/defaultdict/OrderedDict) — the primitive
+    takes a caller-owned store and must not change its type. O(1)."""
+    if not store or next(reversed(store), None) == key:
+        return
+    store[key] = store.pop(key)
+
+
+def _bucket_reclaim(store, now: float, window_s: int, cap: int,
+                    count=None) -> None:
+    """Pop inactive insertion-order-head buckets until the count is below
+    `cap` or the head is active. O(1) at the hot cap; never evicts an active
+    key (#2866 D3/D4 precedent). `count` selects the capacity metric: the
+    default counts OWNED keys (the shared-overflow layout, where the reserved
+    overflow bucket must not consume a slot); #2866's separate-store layout
+    passes ``len``."""
+    _count = _bucket_owned_count if count is None else count
+    while _count(store) >= cap:
+        head_key = next(iter(store), None)
+        if head_key is None:
+            return
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            return  # active head ⇒ every later key is active too
+        del store[head_key]
+
+
+def _bucket_route(store, key, now: float, window_s: int, cap: int):
+    """Resolve ``(bucket, on_overflow)`` for a check/charge of `key` under
+    the #3124 capacity policy — the ONE routing implementation shared by
+    `_check_ip_bucket_rate_limit`, `_charge_ip_bucket` and
+    `RateLimitMiddleware.dispatch`.
+
+    Does NOT insert: a fresh key returns a NEW empty list that the caller
+    writes back only when it charges (so a deferred check and a 429 leave no
+    store entry behind, #1719). A tracked key is pruned in place. A new key
+    at a full owned store is routed to the single shared overflow bucket
+    instead of growing the owned key space (#2866 reject-new/overflow), so
+    the owned count can never exceed `cap`."""
+    bucket = store.get(key)
+    if bucket is not None:
+        bucket[:] = _bucket_prune_window(bucket, now, window_s)
+        return bucket, False
+    _bucket_reclaim(store, now, window_s, cap)
+    if _bucket_owned_count(store) >= cap:
+        bucket = store.get(_BUCKET_OVERFLOW_KEY)
+        if bucket is not None:
+            bucket[:] = _bucket_prune_window(bucket, now, window_s)
+        else:
+            bucket = []
+        return bucket, True
+    return [], False
+
+
 async def _check_ip_bucket_rate_limit(
     request: Request, *,
     buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
@@ -5324,8 +5481,14 @@ async def _check_ip_bucket_rate_limit(
     Shared by /v1/register (3/hr), sensitive ops (export/org_delete), and
     /v1/agent/signup (2/24h). RATE_LIMIT_DISABLED=1 opts out (test env).
     Raises HTTPException(429) with Retry-After when the window is exhausted.
-    Memory bound: when the store exceeds max_entries, drop buckets whose
-    entries are all older than window_s (dead weight — #750.2 precedent).
+
+    #3124 capacity bound (policy block above the helpers): the store holds at
+    most max_entries client-keyed buckets plus one shared overflow bucket. A
+    new key arriving at a full store is charged to the overflow (capped at
+    `limit`/window) instead of growing the key space; reclaim drops only
+    fully-expired buckets and never evicts an active key; the hot path does
+    no store-wide iteration. Below the cap, behaviour — including the 429
+    boundary at `limit` — is unchanged.
 
     P1-FIX-1: bucket key is the caller-supplied `key` (required at wrappers)
     — the sensitive-op store is keyed (ip, op) composite; a bare-ip default
@@ -5349,8 +5512,12 @@ async def _check_ip_bucket_rate_limit(
     ip = _normalize_mapped_ipv6(ip)
     now = time.time()
     async with lock:
-        bucket = buckets[ip]
-        bucket[:] = [t for t in bucket if now - t < window_s]
+        # #3124: the shared `_bucket_route` resolves the bucket WITHOUT
+        # inserting on the check path — a fresh key must not be inserted
+        # before the 429 check (the old `buckets[ip]` did exactly that, which
+        # is why a fresh-key flood could never be bounded).
+        bucket, on_overflow = _bucket_route(
+            buckets, ip, now, window_s, max_entries)
         if len(bucket) >= limit:
             # #1081 review P4: ceil — int() floors and can understate (and
             # yield 0 for near-expiry windows); a client retrying exactly at
@@ -5363,12 +5530,14 @@ async def _check_ip_bucket_rate_limit(
                 headers={"Retry-After": str(remaining)},
             )
         if not defer_charge:
+            # Phase-2 write: a 429 inserted/charged nothing. The deferred path
+            # writes NOTHING here — a 5xx never consumes budget and, unlike
+            # the old defaultdict pre-insertion, leaves no empty bucket
+            # behind (#1719 preserved and strengthened).
             bucket.append(now)
-        if len(buckets) > max_entries:
-            stale = [ip for ip, b in buckets.items()
-                     if not any(now - t < window_s for t in b)]
-            for ip in stale:
-                del buckets[ip]
+            dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
+            buckets[dest] = bucket
+            _bucket_touch(buckets, dest)
 
 
 async def _charge_ip_bucket(
@@ -5397,24 +5566,24 @@ async def _charge_ip_bucket(
     ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
-        # setdefault: the deferred check creates buckets[ip]=[]; a concurrent
-        # request's max_entries prune treats an EMPTY bucket as stale and
-        # deletes it before this charge (botnet regime) — a KeyError here
-        # would replace a terminal 401/403/200 with a 500. A charge is
-        # telemetry and must never alter the response (code-review P2).
-        bucket = buckets.setdefault(ip, [])
-        bucket[:] = [t for t in bucket if now - t < window_s]
+        # #1719 never-raise: no indexing — a concurrent reclaim can delete a
+        # deferred check's bucket before this charge, and a charge is
+        # telemetry, never a failure path (a KeyError here would replace a
+        # terminal 401/403/200 with a 500). #3124: the SAME `_bucket_route`
+        # as the check, so a new key at a full store charges the shared
+        # overflow bucket instead of growing the owned key space.
+        bucket, on_overflow = _bucket_route(
+            buckets, ip, now, window_s, max_entries)
         # #1738 burst bound: a charge must never inflate the bucket past the
         # limiter's limit — drop it (return, no append) when the window is
-        # already full. The 429 boundary is preserved at limit.
+        # already full. The 429 boundary is preserved at limit. The overflow
+        # bucket obeys the same limit, so it cannot outgrow its cap.
         if len(bucket) >= limit:
             return
         bucket.append(now)
-        if len(buckets) > max_entries:
-            stale = [ip for ip, b in buckets.items()
-                     if not any(now - t < window_s for t in b)]
-            for ip in stale:
-                del buckets[ip]
+        dest = _BUCKET_OVERFLOW_KEY if on_overflow else ip
+        buckets[dest] = bucket
+        _bucket_touch(buckets, dest)
 
 
 async def _check_register_rate_limit(request: Request) -> None:
@@ -15373,6 +15542,34 @@ def _resolve_v2_mismatch(token: str, user: dict) -> dict | None:
             "email": inv["email"], "role": inv["role"], "token": token}
 
 
+def _forget_bucket_charge(buckets, key) -> None:
+    """#3124: roll back ONE charge from `buckets` for `key`.
+
+    A successful accept charges exactly one bucket per store (non-deferred
+    path). When the request was routed to the shared overflow bucket (the
+    owned store was full of active keys) the owned key is absent, so the
+    rollback removes one overflow entry instead — count-neutral, so the store
+    bound and the "successful accepts consume no budget" invariant both hold.
+    Because the overflow entries carry no per-key attribution, the popped
+    entry may belong to another untracked key: the shared overflow's effective
+    admission is therefore ``limit`` + (successful accepts), and accepts are
+    themselves bounded by the per-token / IP / global dimensions. The existing
+    concurrent-over-removal tolerance (a simultaneous accept's newest entry
+    may be the one popped) is unchanged and documented at the caller.
+    """
+    bucket = buckets.get(key)
+    if bucket:
+        bucket.pop()
+        return
+    if key in buckets:
+        # Present but EMPTY — no charge was recorded for this key, so there is
+        # nothing to refund and the shared overflow must not be touched.
+        return
+    overflow = buckets.get(_BUCKET_OVERFLOW_KEY)
+    if overflow:
+        overflow.pop()
+
+
 def _forget_invite_accept(request: Request, token: str) -> None:
     """Roll back the attempt recorded by _check_invite_accept_rate_limit
     after a SUCCESSFUL accept — attempts (not successes) are what the caps
@@ -15393,9 +15590,7 @@ def _forget_invite_accept(request: Request, token: str) -> None:
         (_INVITE_ACCEPT_GLOBAL_BUCKETS, _INVITE_ACCEPT_GLOBAL_LOCK,
          ("invite-accept", "global")),
     ):
-        bucket = buckets.get(key)
-        if bucket:
-            bucket.pop()
+        _forget_bucket_charge(buckets, key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -27773,14 +27968,17 @@ async def webhooks_stripe(request: Request):
 
 # ── DCR capacity policy (#2866) ────────────────────────────────────────
 # RFC 7591 registration is an unauthenticated write surface. The limiter is
-# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
-# primitive inserts the bucket (`defaultdict`) BEFORE its 429 check and prunes
-# only *stale* buckets, so an attacker-keyed fresh-key flood grows its store
-# without bound and every request scans the whole store once over
-# `max_entries` (the charge append itself happens after the check; the
-# unbounded growth and the O(n) scan are the defects). The primitive is left
-# byte-identical; the sibling filing tracks it). This limiter states its
-# capacity policy in concrete, falsifiable numbers:
+# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: it
+# supplies dimensions that primitive does NOT — a trusted-CIDR carve-out, an
+# anonymous global aggregate, IPv6 /64 key aggregation (D6), and
+# per-dimension derived caps — and so it keeps its own four stores. The
+# store-bound POLICY is now shared: #3124 gave the primitive the same
+# reclaim-inactive / reject-new-shared-overflow / O(1) shape this limiter was
+# built with, and both now call the shared `_bucket_prune_window` /
+# `_bucket_reclaim` helpers. (#2866's note that the primitive was "left
+# byte-identical" and unbounded is superseded by #3124; do NOT delete this
+# limiter's separate stores — the dimensions above are still only here.)
+# This limiter states its capacity policy in concrete, falsifiable numbers:
 #
 #   per bucket (per client IP, or /64 for IPv6) ... 20/hr   (PER_HOUR)
 #   anonymous global aggregate ................... 600/hr   (ANON_AGGREGATE)
@@ -27827,7 +28025,8 @@ async def webhooks_stripe(request: Request):
 # client `Fly-*` headers (assumption 12 — dated re-verification with an
 # operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
 # filings from this work: #3124 (the shared per-IP primitive + the generic
-# middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
+# middleware's store — now bounded: reclaim-inactive + reject-new/shared
+# overflow + O(1) hot path), #3125 (`_check_claim_rate_limit`
 # keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
 # scope into the minted token), #3134 (dated measurement of real DCR volume —
 # the 600/1200 aggregates are not load-validated). #3036 already covers
@@ -27868,9 +28067,12 @@ _OAUTH_DCR_LOCK = asyncio.Lock()
 
 
 def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
-    """In-window entries of `bucket` (pure; the primitive's window contract is
-    pinned against this by a parity test, D10)."""
-    return [t for t in bucket if now - t < window_s]
+    """In-window entries of `bucket` — delegates to the shared
+    `_bucket_prune_window` (#3124): ONE implementation of the
+    security-relevant window boundary, kept under this name because the
+    primitive's observable window contract is pinned against it by the D10
+    parity test."""
+    return _bucket_prune_window(bucket, now, window_s)
 
 
 def _dcr_retry_after_s(bucket: list[float], now: float, window_s: int) -> int:
@@ -27958,15 +28160,13 @@ def _oauth_dcr_store_key(client_ip) -> str:
 def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
                        cap: int) -> None:
     """Pop inactive LRU-head buckets until the store is below `cap` or the
-    head is active (D3/D4). By the last-charge ordering invariant an active
-    head implies every later key is active too, so this stops at the first
-    live bucket — it can never evict an active key. O(1) at the hot cap."""
-    while store and len(store) >= cap:
-        head_key = next(iter(store))
-        head = store[head_key]
-        if head and now - head[-1] < window_s:
-            break
-        del store[head_key]
+    head is active (D3/D4) — delegates to the shared `_bucket_reclaim`
+    (#3124) with ``count=len``, because this limiter's overflow lives in a
+    SEPARATE store so every key in `store` counts toward the cap. By the
+    last-charge ordering invariant an active head implies every later key is
+    active too, so this stops at the first live bucket — it can never evict an
+    active key. O(1) at the hot cap."""
+    _bucket_reclaim(store, now, window_s, cap, count=len)
 
 
 def _oauth_dcr_deny(retry_after: int) -> None:
