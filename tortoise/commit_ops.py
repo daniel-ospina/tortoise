@@ -94,7 +94,7 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     to an existing-content node, so the refs named nothing and the edge
     dropped silently (#4654). #4970 closed that residual: the hosted §5 point
     loop surfaces the id ``create_point`` actually RESOLVED to (its
-    ``commit_point_id_map`` payload→graph map) and §7 passes the refs through
+    ``point_resolved_ids`` payload→graph map) and §7 passes the refs through
     THIS helper — the same graph-id precondition the capture commit satisfies.
 
     Pure and total: only refs present in ``id_map`` are rewritten, everything

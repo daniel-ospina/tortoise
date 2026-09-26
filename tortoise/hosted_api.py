@@ -11817,6 +11817,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id
         resolved_pid = pid
+        # #1370 fail-closed: stays ``None`` unless a create actually ran and
+        # returned a usable id, so the map below can never hold a
+        # requested-but-unconfirmed id.
+        _rid: str | None = None
         if pr.action == "merge":
             # MERGE bump (zero budget, PL3): updatedAt touch ONLY — never
             # re-write status (update_point refuses non-promoting transitions;
@@ -11890,25 +11894,37 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
-            # #1370: record the id the write RESOLVED to (the map the binder
-            # reads). #4970: the graph id every consumer below must use — the
-            # pre-existing node on a dedup re-key, the payload id otherwise.
+            # #1370: the id the write RESOLVED to. #4970: the graph id §5
+            # CONTAINS and the supersede below must use — the pre-existing
+            # node on a dedup re-key, the payload id otherwise.
             _rid = _written.get("id") if isinstance(_written, dict) else None
             resolved_pid = _rid if isinstance(_rid, str) and _rid else pid
-        # #4970: remember the resolution. Keyed by BOTH the payload point id
-        # (what operator and supersession refs carry) and the id this branch
-        # wrote under (what §5 CONTAINS / §6 aboutObject use — the recomputed
-        # ``supersede_id`` on the supersede path, the payload id otherwise).
+        # #1370's fail-closed contract, PRESERVED: only a CONFIRMED resolved id
+        # enters the map. ``create_point`` returning no usable id must leave the
+        # binder below to SKIP, never bind a requested-but-unconfirmed id (a
+        # phantom link: ``link_entity`` matches no endpoint, returns 0, and the
+        # binder's F7 path reads that as "already present"). When the gate is
+        # false every #4970 consumer degrades to identity via
+        # ``.get(pid, pid)`` — which is exactly the pre-fix behaviour, so no
+        # consumer regresses on that path.
         #
-        # ⛔ On the ``supersede`` action these keys differ and the payload id
-        # IS the PRIOR node's graph id (``reconcile_payload`` sets
+        # #4970 keys the SAME entry by both the payload point id (what
+        # operator and supersession refs carry) and the id this branch wrote
+        # under (what §5 CONTAINS / §6 aboutObject use — the recomputed
+        # ``supersede_id`` on the supersede path, the payload id otherwise).
+        # ⛔ Insertion order is load-bearing: the payload id goes in FIRST so
+        # ``reverse_point_id_map``'s first-payload-id-wins ``setdefault``
+        # yields the payload point, not the supersede target. ⛔ On the
+        # ``supersede`` action the two keys differ and the payload id IS the
+        # PRIOR node's graph id (``reconcile_payload`` sets
         # ``existing_id=pt.id``), so a payload operator ref naming that point
         # resolves to the SUCCESSOR. Deliberate, and consistent with
         # ``supersede_point``'s own edge transfer — an operator edge on a
         # superseded point belongs to its successor; pinned by
         # ``test_supersede_operator_ref_follows_the_successor``.
-        point_resolved_ids[pr.point.id] = resolved_pid
-        point_resolved_ids[pid] = resolved_pid
+        if isinstance(_rid, str) and _rid:
+            point_resolved_ids[pr.point.id] = resolved_pid
+            point_resolved_ids[pid] = resolved_pid
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
             "MERGE (s)-[:CONTAINS]->(p)",
