@@ -1317,6 +1317,11 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C6 (#2520, #2513): the time-aware query expansion
+                       # arm — conditional presence like the sibling C-arm
+                       # knobs (an armed checkpoint resumed without the arm
+                       # is refused by the fingerprint gate).
+                       time_aware_qe: bool | None = None,
                        # C3-1 (#2519, #2567): the coverage-completeness
                        # loop arm — conditional presence (a looped
                        # checkpoint resumed without the arm is refused by
@@ -1496,6 +1501,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            ("time_aware_qe", time_aware_qe),
             ("coverage_loop", coverage_loop),
             # C4 (#2513): the resolved injection total budget — conditional
             # presence like the sibling knobs (absent for an arm-OFF run:
@@ -2730,26 +2736,35 @@ INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
 
 #: Files whose content IS the v2 extractor pipeline (the "extractor code
 #: version" dimension of the ingest fingerprint): ingest_v2.py (the
-#: eval-side pipeline + payload writer) and tortoise/extractor_v2.py (the
-#: production 5-stage extractor). A content change to either invalidates
-#: every cached per-question graph automatically — no manual cache-bust.
+#: eval-side pipeline + payload writer), tortoise/extractor_v2.py (the
+#: production 5-stage extractor), and tortoise/vet_gate.py (its S2.2 gate).
+#: A content change to any of these invalidates every cached per-question
+#: graph automatically — no manual cache-bust.
 INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
     / "tortoise" / "extractor_v2.py",
+    # #5005: the S2.2 VET gate is imported by the extractor and REMOVES
+    # candidates from the embed list, so an uncommitted edit to it changes
+    # extraction output — the dirty-tree half of the fingerprint must see it
+    # (``git_sha`` only covers committed HEAD).
+    Path(__file__).resolve().parent.parent.parent
+    / "tortoise" / "vet_gate.py",
 )
 
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
 #: + model untouched (P1 #2607-review-style gap on the seam): the prompt
 #: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
-#: later pipeline switch, and the stage token caps/truncation. ANY of them
+#: later pipeline switch, the S2.2 VET gate, and the stage token caps/
+#: truncation. ANY of them
 #: toggled between QA cycles must invalidate cached ingests — a silent
 #: reuse across modes would corrupt the very A/B this seam exists for.
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
     "TORTOISE_EXTRACTOR_PROMPT",       # compact ↔ default render
     "TORTOISE_LABEL_ORDER",            # S2/S4 shuffled kind-order renders
-    "TORTOISE_LABEL_SEED",             # the shuffle seed (with the above)
+    "TORTOISE_LABEL_ORDER_SEED",       # the shuffle seed (with the above)
     "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
+    "TORTOISE_VET",                    # S2.2 VET gate (#5005) — DISCARDs items
     "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
     "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
 )
@@ -2759,17 +2774,17 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     """sha256 (full hex) over the extractor pipeline module contents — the
     ``extractor code version`` dimension of the ingest fingerprint.
 
-    Reads the files at run start (cheap: two small modules); the digest is
+    Reads the files at run start (cheap: three small modules); the digest is
     stable within a process and identical across processes on the same
     checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
     missing module would fail the ingest itself long before). P1 (#2607-
-    review class): the two modules' IMPORT CLOSURE (chain_enforcer,
+    review class): the three modules' IMPORT CLOSURE (chain_enforcer,
     kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the
     closure) invalidates cached ingests automatically. ``git_sha`` is the
-    conservative net; ``paths`` keeps the digest sensitive to the two
+    conservative net; ``paths`` keeps the digest sensitive to the three
     hot files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()
@@ -3512,6 +3527,12 @@ def run_evaluation(
     # the methodology — an expanded checkpoint resumed without the arm is
     # refused by the fingerprint gate (same contract as evidence_boost).
     entity_key_expansion: bool | None = None,
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (explicit
+    # flag > ``TORTOISE_LME_TIME_AWARE_QE`` env > OFF, the #1745 fail-safe
+    # default). Resolved once, fingerprinted, and recorded in the
+    # methodology — an armed checkpoint resumed without the arm is refused
+    # by the fingerprint gate (same contract as entity_key_expansion).
+    time_aware_qe: bool | None = None,
     # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
     # (explicit flag > ``TORTOISE_LME_COVERAGE_LOOP`` env > OFF, the #1745
     # fail-safe default). The #2519 all-or-nothing lever (2×2 covariate
@@ -3678,6 +3699,15 @@ def run_evaluation(
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): resolve the time-aware query expansion tri-state
+    # ONCE, before the loop — same contract as the sibling C-arms: a None
+    # with the TORTOISE_LME_TIME_AWARE_QE env set must not record `false`
+    # in the methodology while the per-question retrieval armed
+    # (methodology records the knobs truthfully; fail-safe OFF: only
+    # 1/true/yes/on enables — the #1745 default decision).
+    if time_aware_qe is None:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): resolve the coverage-completeness loop tri-state
     # ONCE, before the loop — same contract as evidence_boost/entity_key_
     # expansion: a None with the TORTOISE_LME_COVERAGE_LOOP env set must
@@ -3832,6 +3862,10 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C6 (#2520, #2513): the resolved time-aware arm rides the
+        # fingerprint — an armed checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        time_aware_qe=bool(time_aware_qe),
         # C3-1 (#2519, #2567): the resolved coverage-loop arm rides the
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
@@ -4303,6 +4337,10 @@ def run_evaluation(
                             # key expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
                             entity_key_expansion=entity_key_expansion,
+                            # C6 (#2520, #2513): the time-aware query
+                            # expansion arm (resolved above; OFF by
+                            # default — the sealed A/B decides adoption).
+                            time_aware_qe=time_aware_qe,
                             # C3-1 (#2519, #2567): the coverage-completeness
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
@@ -4540,6 +4578,12 @@ def run_evaluation(
                         # reconstructs which arm each outcome ran on).
                         "entity_key_expansion": ret.get(
                             "entity_key_expansion"),
+                        # C6 (#2520, #2513): the time-aware query expansion
+                        # arm per question (the A/B arm marker + the
+                        # reorder stamps — read via ret.get so a
+                        # pre-feature checkpoint stays readable).
+                        "time_aware_qe": ret.get("time_aware_qe"),
+                        "time_aware_stats": ret.get("time_aware_stats"),
                         # C3-1 (#2519, #2567): the coverage-completeness
                         # loop arm per question — the resolved bool + the §8
                         # per-outcome markers (loop_iterations /
@@ -4996,6 +5040,10 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C6 (#2520, #2513): the time-aware query expansion arm —
+            # recorded verbatim in the methodology (published numbers carry
+            # which A/B arm produced them).
+            "time_aware_qe": bool(time_aware_qe),
             # C3-1 (#2519, #2567): the coverage-completeness loop arm —
             # recorded verbatim in the methodology (published numbers carry
             # which of the 2×2 arms produced them; the §5 gate deltas are
@@ -5198,6 +5246,10 @@ def outcomes_to_report(
                 # arm marker rides the projection (read via o.get — absent
                 # on pre-feature checkpoints).
                 "entity_key_expansion",
+                # C6 (#2520, #2513): the time-aware query expansion arm +
+                # the reorder stamps ride the projection (read via o.get —
+                # absent on pre-feature checkpoints).
+                "time_aware_qe", "time_aware_stats",
                 # C3-1 (#2519, #2567): the coverage-completeness loop arm +
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
@@ -5667,6 +5719,25 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C2 evidence-mark boost even when "
                          "TORTOISE_LME_EVIDENCE_BOOST is set "
                          "(tri-state: explicit flags beat the env)")
+    # C6 (#2520, #2513): time-aware query expansion — tri-state
+    # --time-aware-qe / --no-time-aware-qe (None default so the
+    # TORTOISE_LME_TIME_AWARE_QE env still applies; OFF by default in code
+    # — the sealed #2513 A/B decides adoption). The A/B switch: identical
+    # questions run once with the arm OFF (baseline) and once ON; the
+    # report's shared-question evidence_recall@k / recall_all@5 deltas gate
+    # the +recall claim.
+    ta = p.add_mutually_exclusive_group()
+    ta.add_argument("--time-aware-qe", dest="time_aware_qe",
+                    action="store_true", default=None,
+                    help="Time-aware query expansion: anchor the dense-leg "
+                         "query with the question date and reorder the "
+                         "final pool live-before-stale on a prefer-latest "
+                         "question (non-TR only). Default: OFF; "
+                         "TORTOISE_LME_TIME_AWARE_QE=1 also enables.")
+    ta.add_argument("--no-time-aware-qe", dest="time_aware_qe",
+                    action="store_false",
+                    help="Force time-aware query expansion OFF (overrides "
+                         "the env var).")
     # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
     # --entity-key-expansion / --no-entity-key-expansion (None default so
     # the TORTOISE_LME_ENTITY_KEY_EXPANSION env still applies; OFF by
@@ -6285,6 +6356,16 @@ def _run_main(parser: argparse.ArgumentParser, args,
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (CLI flag
+    # > TORTOISE_LME_TIME_AWARE_QE env > OFF — fail-safe: only
+    # 1/true/yes/on enables). Resolved once and threaded into
+    # run_evaluation (methodology == actual; the #2513 retrieval A/B
+    # switch).
+    if args.time_aware_qe is not None:
+        time_aware_qe = args.time_aware_qe
+    else:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): coverage-completeness loop — tri-state (CLI flag
     # > TORTOISE_LME_COVERAGE_LOOP env > OFF — fail-safe: only
     # 1/true/yes/on enables, mirroring the boost gate above). Resolved once
@@ -6520,6 +6601,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # arm (tri-state resolved above; OFF by default — the
                 # sealed #2513 A/B decides adoption).
                 entity_key_expansion=entity_key_expansion,
+                # C6 (#2520, #2513): time-aware query expansion arm
+                # (tri-state resolved above; OFF by default — the sealed
+                # #2513 A/B decides adoption).
+                time_aware_qe=time_aware_qe,
                 # C3-1 (#2519, #2567): coverage-completeness loop arm
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).

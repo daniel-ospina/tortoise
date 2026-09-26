@@ -341,9 +341,12 @@ def test_sdk_document_search_returns_metadata():
         uri, graph_name=f"test_search_engine_doc_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source keyed ``url`` — the
+    # :Document label is retired. ``id`` stays the document id (the SDK's
+    # document branch reads the doc Source by url).
     proj.g.query(
-        "CREATE (d:Document {id:'test-sdk-doc', title:'Conv', "
-        "documentKind:'transcript', topics:['licensing'], "
+        "CREATE (s:Source {url:'test-sdk-doc', id:'test-sdk-doc', "
+        "title:'Conv', documentKind:'transcript', topics:['licensing'], "
         "summary:'Test', sessionId:'s1', eventId:'e1', "
         "sourcePath:'/tmp/conv.md', "
         "_searchText:'Conv Test licensing'})"

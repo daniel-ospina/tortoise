@@ -2897,7 +2897,6 @@ def _hand_built_master() -> dict:
             "core:WorkItem": "A unit of work",
             "core:Problem": "A deviation between actual and desired state — "
                             "problem-family parent (2026-08-31)",
-            "core:document": "A document artifact",
             "core:tag": "A tag",
             "core:user": "A user",
             "core:skill": "A skill",
@@ -5524,3 +5523,241 @@ class TestOperatorSemantics2552:
         # NOOP fold — no payload point, no record, no CORRECTS
         assert r["payload"]["points"] == []
         assert all(s["superseded"] != s["supersedes_by"] for s in r["supersessions"])
+
+
+# ── #4716: the mint obeys E7, and minted endpoints get a real turn ─────────
+#
+# Three defects, one seam: the operator-endpoint mint was a payload-local side
+# door around the E7 4-way consolidation the ordinary point path ~100 lines
+# above already implements (Defect A), and `turn_by_point` was built BEFORE the
+# mint so a minted endpoint could never be direction-canonicalized (Defect C).
+# These pins are hermetic — a hand-built S3 search index, no graph, no LLM.
+
+
+class TestMintConsolidation4716:
+    """Part 2 (mint-vs-E7) + Part 3 (mint turn) pins for #4716."""
+
+    def test_mint_folds_exact_duplicate_endpoint(self):
+        """Indicators: an endpoint whose content already exists in-graph
+        creates NO second Point, and the operator wires to the canonical id.
+        The pre-#4716 mint appended a payload point unconditionally, so the
+        belief was duplicated and the operator wired to the copy (#4652's
+        exact case)."""
+        prior = "the ingest queue has no backpressure control"
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": prior, "dst": "a second fresh claim",
+                                "op_type": "IMPL"}]}
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_prior_a", "content": prior,
+                              "kind": "statement"}]}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        contents = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert prior not in contents, "the in-graph prior must NOT be re-minted"
+        assert "a second fresh claim" in contents
+        op = r["payload"]["operators"][0]
+        assert op["src"] == "pt_prior_a"
+        assert op["dst"] == contents["a second fresh claim"]
+        # exact fold is accounted on the result-level `noops` (the channel the
+        # eval ingest reads; production writes no `duplicates` — see #4716).
+        # The record carries the CANONICAL prior's content (#4716 re-review) so
+        # the commit layer can resolve a MITIGATES reason for a folded ref.
+        assert [n["point_id"] for n in r["noops"]] == ["pt_prior_a"]
+        assert r["noops"][0]["reason"] == "identical"
+        assert r["noops"][0]["content"] == prior
+        assert any("operator endpoint folded (#4716 mint-vs-E7)" in w
+                   for w in r["warnings"])
+        # one mint (the other endpoint), not two
+        assert r["stats"]["operator_endpoints_minted"] == 1
+
+    def test_mint_folds_paraphrase_endpoint(self):
+        """#4652: a PARAPHRASE endpoint is the case a commit-time content-hash
+        lookup cannot see — the pre-fix mint committed a near-duplicate Point
+        carrying its own confidence history. E7's paraphrase-NOOP band folds it
+        instead (the two token sets are equal but the strings differ)."""
+        prior = "backpressure control is missing from the ingest queue"
+        para = "the ingest queue is missing backpressure control"
+        assert v2._norm(prior) != v2._norm(para)
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": para, "dst": "an unrelated claim here",
+                                "op_type": "IMPL"}]}
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_prior_b", "content": prior,
+                              "kind": "statement"}]}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        contents = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert para not in contents
+        assert "an unrelated claim here" in contents
+        assert r["payload"]["operators"][0]["src"] == "pt_prior_b"
+        assert r["noops"] and r["noops"][0]["reason"] == "paraphrase"
+        assert r["noops"][0]["point_id"] == "pt_prior_b"
+        # the record names the PRIOR's content (not the paraphrased ref), so a
+        # dampener on a folded src resolves to the canonical claim
+        assert r["noops"][0]["content"] == prior
+
+    def test_mint_entity_guard_reads_the_graph_index(self):
+        """#4656 gap 1: the entity guard's set was built ONLY from
+        `payload_entities`, so an Object already in the graph but not
+        re-emitted this session was minted as a claim Point — a fabricated
+        statement made out of a participant name, against the prompt's own
+        OPERATOR REFERENCING hard rule. The guard now reads `idx["entities"]`
+        too and is fail-closed: the operator drops with a warning."""
+        entity_name = "cleaning-pass tier"
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": entity_name,
+                                "dst": "a fresh claim", "op_type": "IMPL"}]}
+        search = {"entities": [{"id": "obj_plan_1", "name": entity_name,
+                                "kind": "core:plan"}],
+                  "events": [], "points": []}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert not any(p["content"] == entity_name
+                       for p in r["payload"]["points"])
+        # the other endpoint was minted then pruned with the dropped operator
+        assert r["payload"]["points"] == []
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+        assert any("did not resolve" in w for w in r["warnings"])
+
+    def test_mint_update_decision_falls_through_to_add_with_a_warning(self):
+        """An UPDATE cannot be expressed by a mint: it hardcodes
+        ``reason="NEW"`` and emits no supersession record, so an E5 REVISES
+        fold is not expressible (DELETE is never returned by
+        ``classify_consolidation`` from content alone — D5). The mint must not
+        silently pretend it folded — it ADDs and says which decision it saw."""
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": "the release happens at 7pm on friday",
+                                "dst": "an unrelated claim here",
+                                "op_type": "IMPL"}]}
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_prior_c",
+                              "content": "the release happens at 6pm on friday",
+                              "kind": "statement"}]}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        contents = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert "the release happens at 7pm on friday" in contents
+        assert r["noops"] == []
+        assert any("minted as ADD (#4716 mint-vs-E7)" in w
+                   and "UPDATE" in w for w in r["warnings"])
+
+    def test_minted_endpoints_get_source_turns_and_nand_is_canonicalized(self):
+        """Part 3 (#4656 gap 2): `turn_by_point` was built before the mint, so
+        a NAND whose endpoints were minted could never be direction-
+        canonicalized (#909). Now the mint anchors its endpoint ref text to a
+        real turn, the map is built after the mint, and the inverted NAND is
+        swapped with a counted warning."""
+        older = "the cache is probably the source of the stale reads"
+        newer = "the stale reads are not caused by the cache at all"
+        edus = [
+            {"index": 0, "role": "user", "text": f"I think {older}"},
+            {"index": 1, "role": "user", "text": f"actually, {newer}"},
+        ]
+        # the model inverted the direction: the EARLIER claim is src
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": older, "dst": newer, "op_type": "NAND"}]}
+        r = v2.execute_embed(embed, {"points": []}, session_id="s1", edus=edus)
+        ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
+        assert set(ids) == {older, newer}
+        for p in r["payload"]["points"]:
+            assert p["source_turn_id"] in (0, 1)
+            assert p["quote"]
+        assert any("NAND direction canonicalized" in w for w in r["warnings"])
+        op = r["payload"]["operators"][0]
+        assert op["op_type"] == "NAND"
+        assert op["src"] == ids[newer]      # the newer counter-claim attacks
+        assert op["dst"] == ids[older]
+
+    def test_minted_endpoint_without_a_transcript_anchor_stays_unquoted(self):
+        """Nothing is fabricated: with no transcript anchor the minted Point
+        keeps the pre-#4716 shape (empty quote, no source_turn_id) — the
+        canonicalizer's silent None is correct exactly here."""
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": "a claim absent from the transcript",
+                                "dst": "another claim absent from it too",
+                                "op_type": "IMPL"}]}
+        edus = [{"index": 0, "role": "user", "text": "unrelated words spoken"}]
+        r = v2.execute_embed(embed, {"points": []}, session_id="s1", edus=edus)
+        for p in r["payload"]["points"]:
+            assert p["quote"] == ""
+            assert "source_turn_id" not in p
+        # the mint states its own case — the generic emitted-point E3 warning
+        # text (which describes a different event) stays out of the payload
+        assert any("has no transcript anchor" in w for w in r["warnings"])
+        assert not any("has no resolvable source turn" in w
+                       for w in r["warnings"])
+
+    def test_minted_quote_is_kept_only_on_a_verbatim_anchor(self):
+        """#4716 review P2 (three reviewers): `_resolve_source_turn`'s
+        >=0.6 token-overlap band is not proof the ref text is IN the turn, and
+        `quote` is trusted as a verbatim excerpt downstream
+        (`retrieval._is_own_source` / `_same_fact`). The turn is still recorded
+        — that is what the NAND canonicalizer needs — but the quote must stay
+        empty rather than fabricating an excerpt."""
+        turn = ("I believe the stale reads are probably caused by the cache "
+                "layer")
+        ref = "the cache is probably the source of the stale reads"
+        # the overlap band fires (0.625 >= 0.6) with no verbatim containment
+        assert v2._source_turn_overlap(turn, ref) >= 0.6
+        assert ref.lower() not in turn.lower()
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": ref, "dst": "an unrelated claim",
+                                "op_type": "IMPL"}]}
+        edus = [{"index": 0, "role": "user", "text": turn}]
+        r = v2.execute_embed(embed, {"points": []}, session_id="s1", edus=edus)
+        minted = next(p for p in r["payload"]["points"]
+                      if p["content"] == ref)
+        assert minted["source_turn_id"] == 0
+        assert minted["quote"] == "", (
+            "a band anchor must NOT be stored as a verbatim quote")
+
+    def test_minted_endpoint_referenced_by_no_surviving_operator_is_pruned(self):
+        """#4716 acceptance carries #4654's orphan-Point criterion: when a
+        payload point is re-keyed and its operator still drops, the endpoint
+        must not be left committed as an unsupported assertion. The prune is
+        the deliberate post-condition — assert it explicitly (no orphan)."""
+        ref = "an endpoint whose operator will not survive"
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": ref, "dst": ref,
+                                "op_type": "IMPL"}]}   # degenerate self-edge
+        r = v2.execute_embed(embed, {"points": []}, session_id="s1")
+        assert not any(p["content"] == ref for p in r["payload"]["points"]), (
+            "a minted endpoint referenced by no surviving operator must be "
+            "pruned, not committed as an orphan claim")
+        # minted, then pruned — the counter is post-prune by design
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert any("pruned (#2552 mint-before-wire)" in w
+                   for w in r["warnings"])
+
+    def test_prior_row_content_is_total_on_an_empty_prior_id(self):
+        """The total-function contract (#4716 review cycle 4, a line that no
+        test executed): `classify_consolidation` returns an EMPTY `prior_id`
+        when the matched prior row carries no id, so an unguarded
+        `_prior_row_content` would match the first id-less row and return
+        ANOTHER point's content — a fabricated reason downstream. The guard is
+        unreachable from production (`search_graph` drops id-less rows) but the
+        contract must be total for direct `execute_embed` callers."""
+        assert v2._prior_row_content([{"content": "AAA"}], "", "FB") == "FB"
+        # an id-less first row must never be selected as the match
+        priors = [{"content": "AAA"}, {"id": "", "content": "BBB"}]
+        assert v2._prior_row_content(priors, "", "FB") == "FB"
+        # and a real id still resolves, incl. an empty prior content → fallback
+        assert v2._prior_row_content([{"id": "p1", "content": "CCC"}],
+                                     "p1", "FB") == "CCC"
+        assert v2._prior_row_content([{"id": "p1", "content": ""}],
+                                     "p1", "FB") == "FB"
+
+    def test_mint_fold_noop_record_carries_the_canonical_prior_content(self):
+        """The `content` key on a fold record is what lets the commit layer
+        resolve a MITIGATES reason when the operator's ref IS the folded
+        prior's graph id — the extractor must therefore name the PRIOR's
+        content, not the ref it was handed."""
+        prior = "the ingest queue has no backpressure control"
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": prior, "dst": "an unrelated claim here",
+                                "op_type": "IMPL"}]}
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_prior_content_1", "content": prior,
+                              "kind": "statement"}]}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        assert r["noops"], "the fold must be recorded"
+        assert r["noops"][0]["point_id"] == "pt_prior_content_1"
+        assert r["noops"][0]["content"] == prior

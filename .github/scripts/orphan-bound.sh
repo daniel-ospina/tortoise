@@ -21,27 +21,36 @@
 #     one step later — so neither alone can detect a sweep whose own
 #     measurement is broken. A `{reaped, cleared, left, before}` report is
 #     therefore accepted when the count/probe agreement and the accounting
-#     identity hold, with `cleared` a confidence flag whose effect is keyed on
-#     the measured `COUNT`:
+#     identity hold, with `cleared` a diagnostic flag that does not decide the
+#     verdict at any measured `COUNT` (#4989):
 #       * the workflow's `pgrep` COUNT is at or below the sweep's own `left` —
 #         the two probes run the identical `pgrep -f redislite/bin/redis-server`,
-#         one step apart. COUNT ABOVE `left` means the counter is measuring a
-#         population the sweep did not account for, which REDs. COUNT BELOW
-#         `left` is the NORMAL atexit outcome: the sweep's `left` is read during
-#         fixture teardown, and redislite's own `atexit` handler shuts servers
-#         down (`redislite/client.py`) after pytest fully exits, so the
-#         workflow's later probe may legitimately see fewer. A count BELOW the
-#         sweep's measurement is therefore a PASS with the delta logged, not an
-#         anomaly.
-#       * `cleared` — the sweep FINISHED rather than running out of its
-#         time budget. `cleared: false` means the sweep did not prove that its
-#         `left` is an authoritative BOUND, so `left` alone is not trusted — it
-#         is a confidence flag, not a residue of its own. The measured `COUNT`
-#         decides: at zero nothing is live, so the run is clean by measurement
-#         and the exhausted budget is a `::warning::` diagnostic; above zero the
-#         sweep did not prove the backlog clear AND servers remain, so it REDs
-#         — except under a #1371 watchdog kill, where the run is already red and
-#         a second red adds no signal.
+#         and conftest's session-end teardown now calls
+#         `close_embedded_clients()` BEFORE its probe (#1005), so both read the
+#         SAME seam: after this suite's own live clients were closed and their
+#         pools disconnected. That producer-side ordering is what makes
+#         `COUNT <= left` a same-seam comparison.
+#         While the suite's own clients were still open, every server they held
+#         read as a live-client server and `reap()` declined it, so `left`
+#         counted the suite's own clients (147 in the post-#4927 CI sample)
+#         while COUNT measured the post-exit residue (5) — a pair that
+#         `COUNT <= left` could never fail on. COUNT ABOVE `left` means the
+#         counter is measuring a population the sweep did not account for,
+#         which REDs. COUNT BELOW `left` is the residual NOSAVE shutdown: the
+#         #1371 fast close is fire-and-forget, so a server the sweep still saw
+#         can exit in the ~0.05s before the workflow's later probe. A count
+#         BELOW the sweep's measurement is therefore a PASS with the delta
+#         logged, not an anomaly — the workflow can only observe FEWER servers
+#         than the sweep, never more.
+#       * `cleared` — whether the sweep FINISHED or ran out of its time budget.
+#         `cleared: false` says the budget was exhausted, which is a function of
+#         runner LOAD, not of the residue — so it does not decide the verdict at
+#         any measured `COUNT` (#4989). When the positive controls hold, the run
+#         is clean by measurement and the exhausted budget is a `::warning::`
+#         diagnostic. It is a flag about the sweep's budget, not a residue of
+#         its own, and not a red: the reds are the measurement-grounded ones
+#         (COUNT above `left`, a broken accounting identity, a failed probe at a
+#         non-zero count, and an error/skipped/unreadable report).
 #       * the sweep's own ACCOUNTING IDENTITY holds: `reaped + left >= before`,
 #         where `before` is the sweep's pre-sweep live count. A sweep that
 #         reaped `reaped` and left `left` must account for at least everything
@@ -101,12 +110,13 @@
 #     before}                  → bound `left`, plus the positive controls above
 #                               (the count/probe agreement and the
 #                               `reaped + left >= before` accounting identity).
-#                               A `cleared: false` report does not red by
-#                               itself: at COUNT == 0 it is a `::warning::`
-#                               diagnostic (nothing live to bound), and at
-#                               COUNT > 0 it REDs (kill-downgradable) because
-#                               the sweep did not prove the backlog clear while
-#                               servers remain.
+#                               A `cleared: false` report does not red at all:
+#                               it is a `::warning::` diagnostic at ANY
+#                               measured COUNT, because `cleared` reports
+#                               whether the sweep's TIME BUDGET sufficed — a
+#                               function of runner load — not its residue
+#                               (#4989). The reds that remain are the
+#                               measurement-grounded ones below.
 #                               When the report carries non-empty
 #                               `other_suites` the sweep DEFERRED: that path
 #                               is a NON-GATING DIAGNOSTIC (a `::warning::`
@@ -120,19 +130,27 @@
 # WHAT THIS BOUND DOES NOT CATCH — do not read the table above as "a real leak
 #   reds". The bound IS the sweep's own post-sweep measurement (`left`), and
 #   `COUNT` is the same `pgrep` pattern measured later, after interpreter exit
-#   — a point at which atexit can only REMOVE servers. So `COUNT <= left` holds
-#   for any residue present at teardown, including a residue the sweep MEASURES
-#   and DECLINES to act on: `reap()` skips a server with a live client at
-#   teardown and an unconfirmed path-based server (tortoise/embedded_reaper.py).
+#   — a point at which atexit can only REMOVE servers. Since #1005 the suite's
+#   own clients are closed BEFORE the sweep reads `left`, so `COUNT <= left`
+#   now compares two post-close readings; but it still holds for any residue
+#   present at teardown, including a residue the sweep MEASURES and DECLINES to
+#   act on: `reap()` skips a live co-tenant/foreign server, an unconfirmed
+#   path-based server, and a client whose close the exit budget neutralised
+#   (tortoise/embedded_reaper.py, tortoise/embedded_lifecycle.py).
 #   That class lands in `left`, is reported with `cleared: true`, and PASSES at
 #   `COUNT == left` — this gate is bounded by that measurement and does not
 #   independently red it. What the gate DOES red: a leak that appears AFTER the
-#   sweep (`COUNT > left`), a sweep that aborted or failed with servers
-#   remaining (`cleared: false` at a non-zero count, `error`, `skipped`, or a
-#   `probe_failed` at a non-zero count), an identity violation (`reaped + left <
-#   before`), and an unaccounted/unreadable report. A `cleared: false` or
-#   `probe_failed` report at a measured COUNT of zero is a `::warning::`, not a
-#   red: there is no live residue to bound.
+#   sweep (`COUNT > left`), an abort or failure that produced no usable report
+#   (`error`, `skipped`), a `probe_failed` at a non-zero count (no `left` to bind
+#   to), an identity violation (`reaped + left < before`), and an
+#   unaccounted/unreadable report. `cleared: false` does NOT red at any count:
+#   it reports whether the sweep's time budget sufficed, which is a function of
+#   runner load and unrelated to the residue, so redding it fires on healthy
+#   loaded runs — a loaded runner reported `{reaped: 9, cleared: false, left:
+#   159, before: 168}` at COUNT=13 with the identity and `COUNT <= left` both
+#   holding, which is the #4740 false red returned (#4989). A `probe_failed`
+#   report at a measured COUNT of zero is a `::warning::`, not a red: there is
+#   no live residue to bound.
 #   FOLLOW-UP: catching the declined class needs a measurement the sweep does
 #   not yet produce — the count it examined and declined, with reasons — a
 #   separate change, issue #4884. No hand-picked constant is reintroduced for
@@ -145,8 +163,9 @@
 #   conftest end-sweep, so the finalizer that would have produced the report
 #   never ran. A count ABOVE this gate's own bound therefore downgrades to a
 #   `::warning::` (the run is already red and a second red only blinds the
-#   detector), as does a budget-exhausted sweep and a failed probe at a
-#   non-zero count. `error` and `skipped` stay RED even under a kill: those are
+#   detector), as does a failed probe at a non-zero count. A budget-exhausted
+#   sweep is a `::warning::` at EVERY count (#4989), so it has no red left to
+#   downgrade. `error` and `skipped` stay RED even under a kill: those are
 #   unaccounted no matter why pytest stopped.
 #
 # NO LITERAL BOUND. Every number this gate compares against is read from the
@@ -413,17 +432,23 @@ case "$kind" in
   report)
     if [ "$cleared" != "true" ]; then
       # `cleared` is the sweep's confidence that its `left` is a trustworthy
-      # BOUND, not a residue of its own. When the workflow's own identical
-      # pgrep measured nothing live (COUNT == 0) there is nothing left to
-      # bound, so the run is clean by measurement and the exhausted budget is a
-      # diagnostic, not a red. Above zero the sweep did not prove the backlog
-      # clear AND servers remain, so the residue is unproven and this reds —
-      # kill-downgradable per #1371, where the run is already red and a second
-      # red adds no signal.
-      if [ "$COUNT" -gt 0 ]; then
-        red_or_kill_warning "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) and $COUNT redislite servers remain — the sweep did not prove the backlog clear, so the residue is unproven (issue #1005)"
-      fi
-      echo "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) but the workflow's probe measured 0 live servers — nothing remains to bound, so the exhausted budget is diagnostic only (issue #1005)"
+      # BOUND, not a residue of its own: it says whether the reap loop's TIME
+      # BUDGET sufficed, which is a property of the runner's load, not of the
+      # residue. It is therefore diagnostic at EVERY measured count (#4989).
+      # The bound is enforced below — `COUNT > left` and the accounting
+      # identity — and both are derived from the sweep's own measurement rather
+      # than from its budget, so neither is weakened here.
+      #
+      # This arm previously red at COUNT > 0, which reintroduced the false red
+      # #4740 removed. A loaded run reported
+      # `{reaped: 9, cleared: false, left: 159, before: 168}` with COUNT=13:
+      # the identity held (9 + 159 == 168) and COUNT <= left held, so this was
+      # the ONLY firing arm, on a count inside the documented normal band
+      # (tests/conftest.py: "observed as 13 orphans on CI"). The same rule
+      # passed at COUNT == 0 on the #4740 verification run (before=14), which
+      # is what hid it. A gate that reds at the KNOWN-NORMAL residue is the
+      # same defect class as one that reds at zero.
+      echo "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=$COUNT against left=$left — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)"
     fi
     # #4740 review 5: a DEFERRED sweep (other_suites non-empty) ran with
     # only_safe=True, so `left` measures the whole host's embedded servers —
@@ -466,11 +491,12 @@ case "$kind" in
       red_or_kill_warning "redislite orphan gate: $COUNT servers counted but the sweep reported left=$left — the counter observes a population the sweep did not account for"
     fi
     # COUNT <= left: the workflow's later probe sees the same population or
-    # fewer. Fewer is the documented atexit race (redislite shuts its last-client
-    # servers down at interpreter exit, after the sweep's in-teardown reading),
-    # so it is a pass — with the delta logged so it stays visible.
+    # fewer. Since #1005 the sweep's `left` is a post-in-process-close reading,
+    # so the delta is the fire-and-forget NOSAVE window (a server the sweep
+    # still saw exits in ~0.05s), not an interpreter-exit race — a pass, with
+    # the delta logged so it stays visible.
     if [ "$COUNT" -lt "$left" ]; then
-      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=$cleared; $((left - COUNT)) shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement"
+      echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=$cleared; $((left - COUNT)) shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement"
     else
       echo "orphaned redislite servers after suite: $COUNT (sweep before=$before left=$left reaped=$reaped, cleared=$cleared) — within the sweep's own measurement"
     fi

@@ -7,6 +7,11 @@ name: ai-review-gate
 # EITHER the PR's current head sha OR its current diff:
 #   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
 #   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> diff=<sha256> (<owner/repo>) sig=<hmac>
+#   review recorded: reviews/<PR>.json verdict=clean-low @ <full-sha> diff=<sha256> (<owner/repo>) sig=<hmac>
+# The verdict vocabulary is CLOSED and is `clean(-micro|-low)?` (#4755). `clean-low` is
+# emitted by record-review.sh for a content-only (prose/stylesheet) diff whose linked
+# issue may be standard/complex (agent-infra #1348). It must NOT become `verdict=.*`:
+# an out-of-vocabulary verdict (e.g. `verdict=clean-anything`) must still fail.
 #
 # The optional `diff=` segment (issue #2982; accepted shape per #3076) is part
 # of the SIGNED text, so every regex here must accept it — a regex that does
@@ -40,7 +45,7 @@ name: ai-review-gate
 # cannot be satisfied by editing the PR body.
 #
 # Fail closed — scoped to the DIFF-MATCH arm: if the live diff hash cannot be
-# computed (API blip, missing gh/openssl, empty diff) a STALE-SHA `diff=`
+# computed (API blip, missing gh/openssl/python3, empty diff) a STALE-SHA `diff=`
 # marker is NOT accepted via rule (b) — only the sha-match path remains
 # usable. A network failure never becomes a pass. Explicitly: a marker with
 # diff= must never be accepted VIA THE DIFF-MATCH PATH when BOTH live diff
@@ -62,16 +67,23 @@ name: ai-review-gate
 # #4841 (a real BEHIND PR): identical 137,767 bytes, exactly 6 lines differ —
 # four hunk headers + two index lines — `git patch-id --stable` MATCHED, the
 # raw digest DIFFERED and the PR was refused. Normalization (spec below in
-# the run step, where it is applied) drops the `index` lines and rewrites each
-# hunk header to `@@ -0,<old-count> +0,<new-count> @@<heading>`; hunk CONTENT
+# the run step, where it is applied) is ENTRY-SCOPED: it drops an `index` line
+# ONLY when that entry carries a hunk (the hunk content already carries the
+# change) and keeps it VERBATIM for a hunk-less entry (a binary entry, or a
+# hunk-less empty-file add/delete) — the index line is a binary entry's only
+# content-bearing field. Each hunk header is rewritten to
+# `@@ -0,<old-count> +0,<new-count> @@<heading>`; hunk CONTENT
 # and COUNTS are untouched, and `diff --git`/`---`/`+++`/mode/rename/binary
 # lines and the section heading pass through unchanged (counts derive from
 # content, so they move only when content moves).
 #
-# The producer half (agent-infra#1362, record-review.sh) normalizes
-# IDENTICALLY — the two halves are a signed cross-repo contract; if they
+# The producer half (agent-infra#1362, record-review.sh / its
+# scripts/lib/diff-normalize.py) MUST normalize with the SAME hunk-presence
+# predicate — the two halves are a signed cross-repo contract; if they
 # diverge, every freshly-signed marker stops matching fleet-wide (#3076
-# shape). This gate computes BOTH digests from the SAME fetched bytes and
+# shape). (A binary-marker-presence predicate would diverge on a hunk-less
+# NON-binary entry, e.g. an empty-file add/delete.) This gate computes BOTH
+# digests from the SAME fetched bytes and
 # accepts a marker whose signed `diff=` equals EITHER:
 #   live_diff_hash_norm — the normalized digest (post-#1362 producers)
 #   live_diff_hash_raw  — the legacy raw digest (every marker already recorded)
@@ -88,12 +100,11 @@ name: ai-review-gate
 # saw. It verifies only that the marker is signed and that the signed `diff=`
 # equals this PR's diff at check time. The binding between a recorded sha and
 # the diff actually reviewed is enforced by record-review.sh's stale-sha guard,
-# not here. Once the producer half ships (agent-infra PR #767), its
-# `--force-stale` override and its head-fetch fail-open arm will compute `diff=`
-# from the PR's CURRENT diff while keeping the caller-supplied stale sha, so a
-# marker minted that way IS accepted by rule (b) even though the reviewed
-# artifact cannot be shown unchanged. Close that
-# trust gap on the PRODUCER side (agent-infra#784) — do NOT add a
+# not here. The producer half (agent-infra PR #767) SHIPPED and closed that gap
+# producer-side (#784): in the `--force-stale` and head-fetch fail-open arms
+# record-review.sh drops the diff binding (`DIFF_HASH=""`), so the marker
+# degrades to the legacy sha-only shape and rule (b) cannot carry it.
+# Do NOT add a
 # "recorded sha is an ancestor of head" bound here: the repo's documented
 # refresh path is `git rebase origin/main` (sha rewritten, three-dot diff
 # byte-identical when the rebase does not reconcile main into the PR's files),
@@ -223,38 +234,78 @@ jobs:
           # `index <old>..<new>` lines and the `@@ -a,b +c,d @@` hunk headers
           # even when every changed line is byte-identical, so a digest over
           # the raw bytes stops matching a still-correct reviewed verdict.
-          # Normalize before hashing (owner ruling 2026-09-23):
-          #   1. DROP  ^index [0-9a-f]+\.\.[0-9a-f]+( [0-7]{6})?$
-          #   2. REWRITE ^@@ -([0-9]+)(,([0-9]+))? \+([0-9]+)(,([0-9]+))? @@(.*)$
+          # Normalize before hashing (owner ruling 2026-09-23), processing the
+          # diff ENTRY-SCOPED (entry boundaries are `^diff --git ` lines):
+          #   1. entry contains >= 1 hunk line (`^@@ `) -> DROP the `index` line
+          #      (unchanged from the ruling)
+          #   2. entry contains NO hunk line (a binary entry — `^Binary files .*
+          #      differ$` / `^GIT binary patch$` — or a hunk-less empty-file
+          #      add/delete)                 -> KEEP the `index` line VERBATIM
+          #   3. REWRITE ^@@ -([0-9]+)(,([0-9]+))? \+([0-9]+)(,([0-9]+))? @@(.*)$
           #      to `@@ -0,<old-count> +0,<new-count> @@<heading>`, each count
           #      DEFAULTING TO 1 when its group is absent (`@@ -5 +5 @@` means
-          #      one line each per the unified-diff format)
-          #   3. every other line passes through unchanged
+          #      one line each per the unified-diff format) — EVERY entry
+          #   4. every other line passes through unchanged
           #
-          # ⚠️ KNOWN LIMITATION (agent-infra#1362, spec-level — do NOT "fix"
-          # it here): the `index` line is a BINARY file's only content-bearing
-          # field (`Binary files … differ` is content-independent), so two
-          # distinct binary revisions normalize identically. The consumer and
-          # the producer normalize IDENTICALLY by contract; a consumer-only
-          # deviation would make every freshly-signed binary marker
-          # unverifiable (#3076 shape), so the fix belongs in the shared spec
-          # (both halves) via a reopen of the owner ruling, not in this file.
-          # The residual is recorded on agent-infra#1362.
+          # The contract sentence: DROP the `index` line exactly when the hunk
+          # content already carries the change.
           #
-          # The four count-presence combinations are four mutually-exclusive
-          # sed expressions (sed cannot default an unmatched group), each one
-          # idempotent on the already-normalized form. `sed -E` preserves a
-          # missing final newline exactly — awk would append one and change
-          # the digest. The producer (agent-infra#1362) normalizes IDENTICALLY;
-          # this is a signed cross-repo contract, so the spec here must not
-          # drift from record-review.sh's.
+          # Why the carve-out (amendment to the 2026-09-23 ruling, per that
+          # ruling's own rationale — recorded on agent-infra#1362, comment
+          # 5806797023): a binary entry has NO hunks and `Binary files …
+          # differ` carries no content, so the `index` line is its ONLY
+          # content-bearing field. An unconditional drop made two distinct
+          # binary revisions normalize IDENTICALLY: review binary v1, sign the
+          # marker, swap in binary v2, and the required gate ACCEPTED an
+          # unreviewed binary (a fail-open). The ruling's premise is "the
+          # index line is redundant with hunk content" — false precisely when
+          # there is no hunk content.
+          #
+          # The producer half is agent-infra/scripts/lib/diff-normalize.py
+          # (agent-infra#1431). This is a SIGNED cross-repo contract: both
+          # halves must normalize to byte-identical output or every freshly-
+          # signed marker stops matching fleet-wide (#3076 shape). The producer
+          # must use the SAME hunk-presence predicate: a binary-marker-presence
+          # predicate diverges on a hunk-less NON-binary entry (an empty-file
+          # add/delete). The block
+          # below mirrors the producer's `str.split("\n")` / `"\n".join(...)`
+          # over a latin-1 decode, so the final line's trailing-newline state
+          # is preserved and non-ASCII bytes round-trip exactly (an awk that
+          # appends a final newline would shift the digest). Entry-scoping
+          # needs has-this-entry-seen-a-hunk state, which `sed` cannot express.
+          # The guard below requires `python3`; a missing/failed normalizer
+          # leaves BOTH digests empty (fail closed) so a stale `diff=` marker
+          # is never accepted.
           normalize_review_diff() {
-            sed -E \
-              -e '/^index [0-9a-f]+\.\.[0-9a-f]+( [0-7]{6})?$/d' \
-              -e 's/^@@ -([0-9]+) \+([0-9]+) @@(.*)$/@@ -0,1 +0,1 @@\3/' \
-              -e 's/^@@ -([0-9]+),([0-9]+) \+([0-9]+) @@(.*)$/@@ -0,\2 +0,1 @@\4/' \
-              -e 's/^@@ -([0-9]+) \+([0-9]+),([0-9]+) @@(.*)$/@@ -0,1 +0,\3 @@\4/' \
-              -e 's/^@@ -([0-9]+),([0-9]+) \+([0-9]+),([0-9]+) @@(.*)$/@@ -0,\2 +0,\4 @@\5/'
+            python3 -c '
+          import re, sys
+          _IDX = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+( [0-7]{6})?$")
+          _HUNK = re.compile(r"^@@ -([0-9]+)(,([0-9]+))? \+([0-9]+)(,([0-9]+))? @@(.*)$")
+          raw = sys.stdin.buffer.read().decode("latin-1")
+          out = []
+          entry = []
+          has_hunk = False
+          def flush(lines, has_hunk):
+              for line in lines:
+                  if has_hunk and _IDX.match(line):
+                      continue
+                  m = _HUNK.match(line)
+                  if m:
+                      old = m.group(3) if m.group(3) is not None else "1"
+                      new = m.group(6) if m.group(6) is not None else "1"
+                      line = "@@ -0," + old + " +0," + new + " @@" + m.group(7)
+                  out.append(line)
+          for line in raw.split("\n"):
+              if line.startswith("diff --git "):
+                  flush(entry, has_hunk)
+                  entry = []
+                  has_hunk = False
+              entry.append(line)
+              if line.startswith("@@ "):
+                  has_hunk = True
+          flush(entry, has_hunk)
+          sys.stdout.buffer.write("\n".join(out).encode("latin-1"))
+          '
           }
 
           # ── Live diff hashes (#2982, #1362) ───────────────────────────
@@ -278,9 +329,15 @@ jobs:
           # Hash the FILES, not a command-substitution round-trip: `x="$(cmd)"`
           # strips trailing newlines and would change the digest. Each temp
           # file holds exactly the bytes it names.
+          #
+          # `python3` is the normalizer's tool and is part of the guard: if it
+          # is missing BOTH digests stay empty (fail closed). A normalizer that
+          # FAILS likewise clears BOTH — the gate must not silently fall back
+          # to the weaker legacy arm when the signed-contract half is broken.
           live_diff_hash_norm=""
           live_diff_hash_raw=""
-          if command -v gh >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+          if command -v gh >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 \
+             && command -v python3 >/dev/null 2>&1; then
             live_diff_tmp="$(mktemp)"
             if gh api -H "Accept: application/vnd.github.v3.diff" \
                  "repos/${REPO_NAME}/pulls/${PR_NUMBER}" > "$live_diff_tmp" 2>/dev/null \
@@ -289,6 +346,9 @@ jobs:
               live_diff_norm_tmp="$(mktemp)"
               if normalize_review_diff < "$live_diff_tmp" > "$live_diff_norm_tmp"; then
                 live_diff_hash_norm="$(openssl dgst -sha256 < "$live_diff_norm_tmp" | awk '{print $NF}')"
+              else
+                live_diff_hash_norm=""
+                live_diff_hash_raw=""
               fi
               rm -f "$live_diff_norm_tmp"
             fi
@@ -303,6 +363,7 @@ jobs:
           # " diff=<64hex>" segment is inside the HMAC input:
           #   … verdict=clean @ <40hex> (<owner/repo>) sig=<64hex>             (legacy)
           #   … verdict=clean @ <40hex> diff=<64hex> (<owner/repo>) sig=<64hex> (#2982)
+          #   … verdict=clean-low @ <40hex> diff=<64hex> (<owner/repo>) sig=<64hex> (#4755)
           # A regex missing the optional diff= segment rejects every
           # correctly-signed post-#2982 marker WITHOUT ever reaching the HMAC
           # check. That was #3076: the gate fell through to the diagnostic
@@ -315,8 +376,8 @@ jobs:
           # to enumerate candidates for rule (b): the diff-keyed carry-forward
           # arm (#2982) accepts a STALE `@ sha` iff its signed diff= equals the
           # live diff hash.
-          sha_ok_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ ${expected}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
-          marker_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ [0-9a-f]{40}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
+          sha_ok_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ ${expected}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
+          marker_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ [0-9a-f]{40}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
 
           all_markers="$(printf '%s\n' "$body" | grep -E "$marker_re" || true)"
           all_markers="$(printf '%s\n' "$all_markers" | sed '/^$/d')"
@@ -401,7 +462,7 @@ jobs:
             # to guess between "re-record", "fix the repo field", and "fix the
             # key". Priority: unsigned → wrong repo → malformed → stale.
             all_lines="$(printf '%s\n' "$body" \
-              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ " || true)"
+              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ " || true)"
             all_lines="$(printf '%s\n' "$all_lines" | sed '/^$/d')"
 
             if [ -z "$all_lines" ]; then
@@ -440,7 +501,7 @@ jobs:
               # for the repo). Group 3 is the repo segment.
               l_text="${line% sig=*}"
               l_repo=""
-              if [[ "$l_text" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)$ ]]; then
+              if [[ "$l_text" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro|-low)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)$ ]]; then
                 l_repo="${BASH_REMATCH[3]}"
               fi
               if [ -n "$l_repo" ] && [ "$l_repo" != "$REPO_NAME" ]; then
@@ -466,7 +527,7 @@ jobs:
             if [ -n "$head_malformed" ]; then
               m_sha="$(printf '%s' "${head_malformed% sig=*}" | openssl dgst -sha256 | awk '{print $NF}')"
               echo "::error::AI review evidence for the current head carries a signature but its marker text is not a shape this gate accepts — malformed marker (producer/gate contract drift, or a damaged line)."
-              echo "::error::  expected: review recorded: reviews/<PR>.json verdict=clean(-micro)? @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>"
+              echo "::error::  expected: review recorded: reviews/<PR>.json verdict=clean(-micro|-low)? @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>"
               echo "::error::  sha256=${m_sha:0:12}"
               echo "::error::  marker=${head_malformed}"
               echo "::error::Re-record on the final head:"
@@ -491,7 +552,7 @@ jobs:
             # cause — that would suppress the accurate stale/diff diagnostic on
             # a REQUIRED check (review finding, #3057).
             latest_repo=""
-            if [[ "$latest_raw" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)(\ sig=[0-9a-f]{64})?$ ]]; then
+            if [[ "$latest_raw" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro|-low)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)(\ sig=[0-9a-f]{64})?$ ]]; then
               latest_repo="${BASH_REMATCH[3]}"
             fi
             if [ -n "$latest_repo" ] && [ "$latest_repo" != "$REPO_NAME" ]; then

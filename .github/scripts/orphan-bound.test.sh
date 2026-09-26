@@ -18,12 +18,16 @@
 #   * `{reaped, cleared, left}` → bound is READ from the report: two reports
 #     with DIFFERENT `left` both PASS against their own value (cases 1, 2), so a
 #     hardcoded bound cannot satisfy both.
-#   * `cleared: false` → the verdict is decided by the measured COUNT, not by
-#     `cleared` itself: at COUNT == 0 the run is clean by measurement and the
-#     exhausted budget is a warning (case 43), and at COUNT > 0 it REDs (cases
-#     3, 44) — with a watchdog kill downgrading that red (cases 4, 45). This is
-#     the same shape the `probe_failed` arm applies, so the two arms are
-#     uniform (case 40).
+#   * `cleared: false` → a DIAGNOSTIC at EVERY measured COUNT, never a verdict
+#     (#4989): the arm emits one `::warning::` and the run PASSES whenever the
+#     positive controls hold. Pinned at COUNT == 0 (cases 43, 45) — the #4740
+#     case that must not regress — at COUNT == left (cases 3, 4, 35), at
+#     COUNT < left (cases 41, 44, 45, 50), and at the exact #4989 reproduction
+#     (case 50). The measurement-grounded reds on the same shape are unchanged:
+#     COUNT > left (case 51) and the accounting identity (case 52). The arm
+#     carries no #1371 kill branch — there is no red to downgrade (cases 4, 45).
+#     The `probe_failed` (`left: null`) arm is SEPARATE and still keys on the
+#     measured COUNT (case 40): `cleared` does not decide its verdict either.
 #   * the positive control: COUNT ABOVE `left` REDs (case 5), downgraded only
 #     by a watchdog kill (case 6); COUNT BELOW `left` is the documented atexit
 #     outcome and PASSES with the delta logged, at rc=0 (case 7) and under a
@@ -55,10 +59,11 @@
 #     and it is enforced on the `cleared: false` path at COUNT == 0 (case 46),
 #     where it is the remaining self-consistency control.
 #   * the deadline-aborted sweep report (`reaped: 0, cleared: false`, with the
-#     identity trivially satisfied and COUNT == left) → RED at COUNT > 0 (case
-#     35), while the healthy residue shape (`cleared: true`) PASSES (case 36).
-#     At that count only the `cleared` field separates them, so a gate that
-#     drops the `cleared` branch greens the exact abort the sweep now reports.
+#     identity trivially satisfied and COUNT == left) → PASSES with the budget
+#     warning (case 35), while the healthy residue shape (`cleared: true`)
+#     PASSES with NO warning (case 36). The two shapes now differ only in the
+#     warning, not the verdict (#4989): the measurement is self-consistent in
+#     both, so the residue is bounded by `left` in both.
 #   * a DEFERRED sweep (`other_suites` non-empty) → a warning and PASS with
 #     the accounting identity skipped and only the `COUNT <= left` direction
 #     applied (case 37); a deferred `COUNT` above even the mixed-population
@@ -103,24 +108,28 @@
 #     RED — `1` in the kill set would silently warn every leak on the most
 #     common non-zero rc.
 #
-# MUTATION PINS (verified by mutating the script, not the fixture): cases 3, 4,
-# 5, 6, 7, 9, 10, 11, 12, 16, 17, 19, 21 each fail if their branch's verdict
-# flips or its `exit 1` becomes a `return`/fall through, and cases 1/2 fail if
-# the bound stops being read from `left`. Cases 27, 29, 30, 31, 32, 33
-# likewise fail when their new branch is removed or weakened (identity check
-# dropped, `before: null` no longer accepted, `before` no longer required,
-# either magnitude guard removed). Cases 34-40 fail when their branch is
-# removed or weakened (the `probe_failed` COUNT==0 carve-out dropped, the
-# `cleared=false` red removed, the deferral warning or its `COUNT <= left`
-# rescue removed, the mixed-population identity made authoritative again, the
-# contract check neutered). Cases 43-45 fail if the `cleared=false` verdict
-# stops keying on `COUNT` — red restored at COUNT == 0 (case 43), the COUNT > 0
-# red weakened to a pass (case 44), or the kill downgrade dropped (case 45) —
-# and case 40 fails if the `probe_failed` arm goes back to keying on `cleared`
-# at COUNT == 0. Case 46 fails if the accounting identity is skipped whenever
-# `cleared` is false. The count-branch boundary pins (case 41) and the rc=1 kill-set
+# MUTATION PINS (verified by mutating the script, not the fixture): cases 5, 6,
+# 7, 9, 10, 11, 12, 16, 17, 19, 21 each fail if their branch's verdict flips
+# or its `exit 1` becomes a `return`/fall through, and cases 1/2 fail if the
+# bound stops being read from `left`. Cases 27, 29, 30, 31, 32, 33 likewise
+# fail when their new branch is removed or weakened (identity check dropped,
+# `before: null` no longer accepted, `before` no longer required, either
+# magnitude guard removed). Cases 34-40 fail when their branch is removed or
+# weakened (the `probe_failed` COUNT==0 carve-out dropped, the deferral warning
+# or its `COUNT <= left` rescue removed, the mixed-population identity made
+# authoritative again, the contract check neutered). Cases 3, 4, 35, 41, 42,
+# 43, 44, 45, 50 fail if the new warning is dropped or reworded (all of them
+# pin it verbatim); restoring the removed `cleared=false && COUNT>0` red
+# additionally reds 3, 4, 35, 41, 42, 44, 45, 50 on RC/pass-line (43 runs at
+# COUNT == 0, where the old arm already warned) and pre-empts the measurement
+# reds in 51/52; case 51 fails if `COUNT > left` stops redding — the
+# guard that keeps the #4989 relaxation from being a blanket pass; case 52
+# fails if the accounting identity is skipped whenever `cleared` is false; and
+# case 40 fails if the `probe_failed` arm goes back to keying on `cleared` at
+# COUNT == 0. The count-branch boundary pins (case 41) and the rc=1 kill-set
 # pin (case 42) likewise fail when a bound is widened past 0 or `1` is added to
-# the kill set.
+# the kill set (case 42's `cleared=false` sub-block now pins that the arm has
+# NO kill branch at all).
 # A case that merely restates a default would not catch its own removal.
 #
 # Every emitted line that interpolates a report measurement field ($COUNT,
@@ -128,8 +137,8 @@
 # missing/unreadable arm — is pinned VERBATIM at the case that reaches it: the
 # two pass lines, both deferred lines, every red message, and the
 # argument-validation echoes. A single field, separator, or word swapped in any
-# of them REDs instead of printing a wrong measurement. Cases: 1, 2, 5, 7, 8,
-# 11-18, 23, 26-29, 32, 36-38, 40, 43-45, 48, 49.
+# of them REDs instead of printing a wrong measurement. Cases: 1, 2, 3, 4, 5, 7,
+# 8, 11-18, 23, 26-29, 32, 35-38, 40, 41, 43-45, 48, 49, 50, 51, 52.
 #
 # The assertion count is PINNED (see the summary): a lost case must not be
 # indistinguishable from a passing one.
@@ -177,6 +186,8 @@ printf '{"sweep":{"reaped":0,"cleared":true,"left":2,"before":0}}' > "$WORK/befo
 printf '{"sweep":{"reaped":9,"cleared":true,"left":14}}' > "$WORK/nobefore.json"
 printf '{"sweep":{"reaped":1,"cleared":true,"left":99999999999999999999999999,"before":10}}' > "$WORK/overflow_left.json"
 printf '{"sweep":{"reaped":0,"cleared":false,"left":100,"before":100}}' > "$WORK/aborted.json"
+printf '{"sweep":{"reaped":9,"cleared":false,"left":5,"before":14}}' > "$WORK/false4740.json"
+printf '{"sweep":{"reaped":9,"cleared":false,"left":159,"before":168}}' > "$WORK/issue4989.json"
 printf '{"sweep":{"reaped":9,"cleared":true,"left":100,"before":109}}' > "$WORK/healthy100.json"
 printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":[],"sweep":{"reaped":1,"cleared":true,"left":2,"before":40}}' > "$WORK/deferred.json"
 printf '{"token":"t","other_suites":["1234-abcdef12"],"foreign_pids":["111","222"],"sweep":{"reaped":1,"cleared":true,"left":5,"before":40}}' > "$WORK/deferred5.json"
@@ -215,23 +226,29 @@ assert_contains "$OUT" "orphaned redislite servers after suite: 7 (sweep before=
   "the bound is READ from the report: the whole pass line carries this report's own values"
 assert_not_contains "$OUT" "left=14" "uses the report's value, not case 1's"
 
-echo "3. cleared=false at COUNT>0 REDs on a normal exit (servers remain, backlog unproven)"
+echo "3. cleared=false at COUNT>0 does NOT red — it warns and PASSES (#4989)"
+# The old arm red at COUNT > 0; `cleared` describes the sweep's TIME BUDGET
+# (runner load), not its residue, so at any measured count it is a diagnostic.
+# Here COUNT == left == 14, so only the (removed) cleared arm could have red.
 run_gate 14 0 budget.json
-assert_eq "$RC" "1" "exits 1 at a non-zero count"
-assert_contains "$OUT" "cleared=false" "names the exhausted budget"
-assert_contains "$OUT" "did not prove the backlog clear" "names the unproven sweep"
-assert_contains "$OUT" "14 redislite servers remain" "names the actual COUNT"
-assert_not_contains "$OUT" "within the sweep's own measurement" "never prints a pass line"
+assert_eq "$RC" "0" "exits 0 at a non-zero count (the arm no longer reds)"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=14 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the cleared=false warning is VERBATIM at COUNT==left — every field and word"
+assert_contains "$OUT" "orphaned redislite servers after suite: 14 (sweep before=23 left=14 reaped=9, cleared=false) — within the sweep's own measurement" \
+  "the COUNT==left pass line is VERBATIM with this report's own cleared=false"
+assert_not_contains "$OUT" "::error::" "no red at a non-zero count"
 
-echo "4. cleared=false under a watchdog kill downgrades to a warning"
-# #1371: pytest runs session teardown on SIGINT, so a killed run can
-# legitimately exhaust the sweep budget; the run is already red.
+echo "4. cleared=false is rc-independent: a watchdog kill rc does not change it"
+# There is no red left to downgrade, so the same warning + pass line appear at
+# rc=124 as at rc=0 — the arm carries no kill branch (#1371 does not apply).
 run_gate 14 124 budget.json
 assert_eq "$RC" "0" "exits 0 under rc=124"
-assert_contains "$OUT" "::warning::" "emits a warning"
-assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
-assert_not_contains "$OUT" "within the sweep's own measurement" \
-  "the warning path does not print a pass line either"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=14 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the warning is IDENTICAL under a kill rc (no kill branch on this arm)"
+assert_contains "$OUT" "orphaned redislite servers after suite: 14 (sweep before=23 left=14 reaped=9, cleared=false) — within the sweep's own measurement" \
+  "the pass line is printed under a kill rc too"
+assert_not_contains "$OUT" "#1371" "the arm is not kill-aware — there is no red to downgrade"
+assert_not_contains "$OUT" "::error::" "no red under a kill rc either"
 
 echo "5. a COUNT ABOVE left REDs (the positive control)"
 run_gate 15 0 report14.json
@@ -250,20 +267,21 @@ assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "the warning path does not print a pass line either"
 
-echo "7. a COUNT BELOW left PASSES at rc=0 (the atexit race is normal)"
-# `left` is read during fixture teardown; redislite's atexit handler shuts its
-# last-client servers down after pytest fully exits, so the workflow probe
-# legitimately sees fewer. This is the direction that must never red.
+echo "7. a COUNT BELOW left PASSES at rc=0 (the NOSAVE window is normal)"
+# Since #1005 `left` is read AFTER conftest's in-process close, the same seam
+# as the workflow probe; the residual delta is the fire-and-forget NOSAVE
+# window (~0.05s per server), so the later probe legitimately sees fewer. This
+# is the direction that must never red.
 run_gate 13 0 report14.json
 assert_eq "$RC" "0" "exits 0 on COUNT < left"
-assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is reported VERBATIM — every field, separator and delta"
 assert_not_contains "$OUT" "::error::" "no red on the healthy atexit boundary"
 
 echo "8. a kill does NOT turn COUNT < left into a red either"
 run_gate 13 124 report14.json
 assert_eq "$RC" "0" "exits 0 on COUNT < left under rc=124"
-assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=20 left=14 reaped=9, cleared=true; 1 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM under a kill too (the bound is unchanged)"
 assert_not_contains "$OUT" "::warning::" "no spurious warning for a below-bound count"
 
@@ -462,22 +480,25 @@ assert_eq "$RC" "0" "exits 0 when the workflow's own probe measured zero"
 assert_contains "$OUT" "::warning::" "warns that the sweep-side probe failed"
 assert_not_contains "$OUT" "unaccounted for" "does not red an empty residue"
 
-echo "35. a deadline-aborted sweep report REDs (cleared=false proves it)"
+echo "35. a deadline-aborted sweep report now WARNS and PASSES (#4989)"
 # The abort shape: reap() hit the already-expired deadline on its first
 # record and returned []; the identity holds (0 + 100 >= 100) and
-# COUNT == left (100), so ONLY the cleared field can catch the unexamined
-# backlog. Before the conftest fix this shape reported cleared=true.
+# COUNT == left (100). The measurement is self-consistent, so the exhausted
+# budget is a diagnostic — the residue is bounded by `left`, not the budget.
 run_gate 100 0 aborted.json
-assert_eq "$RC" "1" "exits 1 even though the identity holds and COUNT==left"
-assert_contains "$OUT" "cleared=false" "names the aborted sweep"
-assert_not_contains "$OUT" "within the sweep's own measurement" \
-  "does NOT fall through to the pass line (fail-open pin)"
+assert_eq "$RC" "0" "exits 0 — the identity holds and COUNT==left, so only the budget was exhausted"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=100 against left=100 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the aborted sweep emits the same VERBATIM warning"
+assert_contains "$OUT" "orphaned redislite servers after suite: 100 (sweep before=100 left=100 reaped=0, cleared=false) — within the sweep's own measurement" \
+  "the COUNT==left pass line is VERBATIM for the aborted shape"
+assert_not_contains "$OUT" "::error::" "does not red the unexamined-but-bounded backlog"
 
-echo "36. the healthy residue shape PASSES (only cleared separates it from case 35)"
+echo "36. the healthy residue shape PASSES with NO budget warning (cleared=true)"
 run_gate 100 0 healthy100.json
 assert_eq "$RC" "0" "exits 0 on reaped>0, cleared=true"
 assert_contains "$OUT" "orphaned redislite servers after suite: 100 (sweep before=109 left=100 reaped=9, cleared=true) — within the sweep's own measurement" \
   "the COUNT==left pass line is VERBATIM for the healthy residue shape"
+assert_not_contains "$OUT" "::warning::" "cleared=true emits no budget warning"
 
 echo "37. a DEFERRED sweep warns, skips the mixed-population identity, and PASSES"
 # other_suites non-empty: left counts other suites' servers, so it is not an
@@ -586,15 +607,15 @@ assert_contains "$OUT" "nothing swept" "names the unswept population"
 run_gate 1 0 leftnull.json
 assert_eq "$RC" "1" "left=null: COUNT=1 REDs (the COUNT==0 carve-out is exact, not widened to 3)"
 assert_contains "$OUT" "probe FAILED" "names the failed sweep-side probe"
-# cleared=false is a measured-zero carve-out too (`[ "$COUNT" -gt 0 ]` at
-# :423): COUNT=1 is the first count past it, so widening to `-gt 1`/`-gt 2`
-# would green a run with a live server while its warning claims 0 were seen.
+# cleared=false is NOT count-gated (#4989): COUNT=1 must emit the same
+# warning and PASS, so a re-introduced `[ "$COUNT" -gt 0 ]` (which would red
+# here) is caught. The measurement reds are unchanged — case 51 (COUNT>left)
+# and cases 27/47/52 (identity).
 run_gate 1 0 budget.json
-assert_eq "$RC" "1" "cleared=false: COUNT=1 REDs (the first count past the measured-zero carve-out)"
-assert_contains "$OUT" "::error::" "emits an error, not a warning"
-assert_contains "$OUT" "cleared=false" "names the exhausted budget"
-assert_contains "$OUT" "1 redislite servers remain" "names the actual COUNT, not a blanket zero-excuse"
-assert_not_contains "$OUT" "diagnostic only" "does not excuse a live residue as diagnostic"
+assert_eq "$RC" "0" "cleared=false: COUNT=1 PASSES (the arm is not count-gated)"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=1 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the warning is VERBATIM at COUNT=1 (no measured-zero carve-out)"
+assert_not_contains "$OUT" "::error::" "does not red a live residue on the budget alone"
 
 echo "42. rc=1 (tests failed) is NOT a watchdog kill — red arms stay RED"
 # #4740 review 6: `1` is the ordinary "tests failed" rc, not a #1371 kill.
@@ -604,65 +625,68 @@ run_gate 1 1 none.json
 assert_eq "$RC" "1" "no_embedded_servers REDs at rc=1"
 assert_contains "$OUT" "::error::" "emits an error, not a warning"
 assert_not_contains "$OUT" "::warning::" "does not downgrade a leak on a failing run"
+# The cleared=false arm is no longer a red at all, so rc=1 changes nothing
+# here: it must warn and PASS at rc=1 just as at rc=0 (cases 3/44). The rc
+# still matters for the two genuine red arms above.
 run_gate 14 1 budget.json
-assert_eq "$RC" "1" "cleared=false REDs at rc=1"
-assert_contains "$OUT" "::error::" "emits an error, not a warning"
-assert_not_contains "$OUT" "::warning::" "does not downgrade an exhausted budget on a failing run"
+assert_eq "$RC" "0" "cleared=false PASSES at rc=1 (the arm has no red to keep)"
+assert_contains "$OUT" "::warning::" "warns rather than erroring at rc=1"
+assert_not_contains "$OUT" "::error::" "does not red the budget on a merely-failing run"
 run_gate 15 1 report14.json
 assert_eq "$RC" "1" "COUNT > left REDs at rc=1"
 assert_contains "$OUT" "::error::" "emits an error, not a warning"
 assert_not_contains "$OUT" "::warning::" "does not downgrade a count mismatch on a failing run"
 
-echo "43. cleared=false with COUNT==0 PASSES with a warning (nothing live to bound)"
+echo "43. cleared=false with COUNT==0 still PASSES with a warning (#4740 must not regress)"
 # The CI false red (#4740, run 35893361130): reaped=9, cleared=false, left=5,
 # before=14, and the workflow measured COUNT=0 — redislite's atexit had already
-# shut the 5 servers down. A budget-exhausted sweep is only unproven, so at a
-# measured zero there is nothing to bound and the run is clean by measurement.
-run_gate 0 0 budget.json
+# shut the 5 servers down. A budget-exhausted sweep is a diagnostic at every
+# count now (#4989); at a measured zero there is likewise nothing to bound.
+run_gate 0 0 false4740.json
 assert_eq "$RC" "0" "exits 0 when the workflow's own probe measured zero"
-assert_contains "$OUT" "::warning::" "warns that the sweep exhausted its budget"
-assert_contains "$OUT" "cleared=false" "names the exhausted budget"
-assert_contains "$OUT" "diagnostic only" "labels it a diagnostic"
-assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=23 left=14 reaped=9, cleared=false; 14 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=0 against left=5 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the warning is VERBATIM at a measured zero — every field and word"
+assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=14 left=5 reaped=9, cleared=false; 5 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM, interpolating this report's own cleared=false"
 assert_not_contains "$OUT" "cleared=true" \
   "the pass line reports the sweep's own cleared=false, never a hardcoded true"
 assert_not_contains "$OUT" "::error::" "does not red an empty residue"
 
-echo "44. cleared=false with COUNT>0 REDs and names the actual count"
-# COUNT (3) is below left (14), so only the cleared=false branch can red here:
-# the sweep did not prove the backlog clear AND servers remain.
+echo "44. cleared=false with COUNT>0 PASSES and warns with the actual count (#4989)"
+# COUNT (3) is below left (14), so with the old arm this was the ONLY red.
+# The warning interpolates COUNT and left, so a swap is observable here.
 run_gate 3 0 budget.json
-assert_eq "$RC" "1" "exits 1 at a non-zero count"
-assert_contains "$OUT" "cleared=false" "names the exhausted budget"
-assert_contains "$OUT" "did not prove the backlog clear" "names the unproven sweep"
-assert_contains "$OUT" "3 redislite servers remain" "names the actual COUNT"
-assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) and 3 redislite servers remain — the sweep did not prove the backlog clear, so the residue is unproven (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
-  "the cleared=false residue red is VERBATIM at rc=0"
-assert_not_contains "$OUT" "within the sweep's own measurement" \
-  "does NOT fall through to the pass line (fail-open pin)"
+assert_eq "$RC" "0" "exits 0 at a non-zero count"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=3 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the warning is VERBATIM with COUNT=3 != left=14"
+assert_contains "$OUT" "orphaned redislite servers after suite: 3 (sweep before=23 left=14 reaped=9, cleared=false; 11 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
+  "the COUNT<left pass line is VERBATIM at COUNT=3"
+assert_not_contains "$OUT" "::error::" "does not red"
 
-echo "45. the cleared=false pair under a kill rc: zero warns, non-zero downgrades"
+echo "45. the cleared=false arm is identical at a kill rc (no red, no #1371 branch)"
 run_gate 0 124 budget.json
 assert_eq "$RC" "0" "exits 0 at COUNT=0 under rc=124"
-assert_contains "$OUT" "::warning::" "still warns at a measured zero under a kill"
-assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=23 left=14 reaped=9, cleared=false; 14 shut down at interpreter exit after the sweep's teardown reading) — within the sweep's own measurement" \
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=0 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the warning at a measured zero is the same VERBATIM warning"
+assert_contains "$OUT" "orphaned redislite servers after suite: 0 (sweep before=23 left=14 reaped=9, cleared=false; 14 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
   "the COUNT<left pass line is VERBATIM at a measured zero under a kill"
 run_gate 3 124 budget.json
-assert_eq "$RC" "0" "exits 0 at COUNT>0 under rc=124 (downgraded)"
-assert_contains "$OUT" "::warning::" "emits a warning instead of a red"
-assert_contains "$OUT" "#1371" "cites the kill-aware rationale"
-assert_not_contains "$OUT" "within the sweep's own measurement" \
-  "the warning path does not print a pass line either"
+assert_eq "$RC" "0" "exits 0 at COUNT>0 under rc=124"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=3 against left=14 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "the same warning at COUNT>0 — the kill rc changes nothing"
+assert_contains "$OUT" "orphaned redislite servers after suite: 3 (sweep before=23 left=14 reaped=9, cleared=false; 11 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
+  "the pass line is printed under a kill rc too"
+assert_not_contains "$OUT" "#1371" "no kill-aware branch remains on this arm"
 
 echo "46. the accounting identity is enforced under cleared=false at COUNT==0"
-# A budget-exhausted sweep is unproven, not exempt from its own accounting:
+# A budget-exhausted sweep is not exempt from its own accounting:
 # `reaped + left < before` means the sweep's own measurement is broken even
 # when nothing is live. This is the remaining self-consistency control on the
-# cleared=false path, so a report that violates it must RED rather than fall
-# through to the warning-plus-pass line.
+# cleared=false path, so a report that violates it must RED — the warning is
+# emitted first, but it is a diagnostic and does not rescue the red.
 run_gate 0 0 identity_bad_unproven.json
 assert_eq "$RC" "1" "exits 1 when reaped + left < before at COUNT=0 under cleared=false"
+assert_contains "$OUT" "::warning::" "the budget warning is still emitted (diagnostic, not a rescue)"
 # This fixture's `left` (5) differs from the COUNT (0) this case drives, so the
 # line below is satisfied ONLY by the sweep's own measurement: a `left=$left`
 # -> `left=$COUNT` swap on the identity red prints `left=0` for a report that
@@ -710,10 +734,49 @@ assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep 
 assert_contains "$OUT" "deferred sweep: 2 counted; the end-sweep deferred to last-suite-standing (other_suites=1), so left=5 is not an authoritative bound for this suite's residue" \
   "the deferred pass line is VERBATIM with left=5 != COUNT=2"
 
+echo "50. REGRESSION #4989: the reported loaded run (cleared=false, left=159, before=168) at COUNT=13 PASSES"
+# The exact CI reproduction: reaped=9, left=159, before=168 (identity holds,
+# 9 + 159 == 168), COUNT=13 <= left=159. The workflow's pgrep measured 13,
+# inside the documented normal band (tests/conftest.py: "observed as 13
+# orphans on CI"); only the removed `cleared=false && COUNT>0` arm could red
+# it. This case fails if that arm or its message returns.
+run_gate 13 0 issue4989.json
+assert_eq "$RC" "0" "exits 0 — the reported false red is gone"
+assert_contains "$OUT" "::warning::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) with COUNT=13 against left=159 — the exhausted budget is diagnostic; the residue is bounded by left, not by the sweep's budget (issue #1005 / #4989)" \
+  "emits the new warning VERBATIM at the reported fields"
+assert_contains "$OUT" "orphaned redislite servers after suite: 13 (sweep before=168 left=159 reaped=9, cleared=false; 146 shut down after the sweep's post-close reading (fire-and-forget NOSAVE)) — within the sweep's own measurement" \
+  "the COUNT<left pass line is VERBATIM at the reported fields"
+assert_not_contains "$OUT" "::error::" "the diagnostic is not a red"
+
+echo "51. on the SAME #4989 report a COUNT ABOVE left still REDs (not a blanket pass)"
+# COUNT=200 > left=159: the counter observes a population the sweep did not
+# account for. This is the guard that keeps the #4989 relaxation from turning
+# the arm into a blanket pass.
+run_gate 200 0 issue4989.json
+assert_eq "$RC" "1" "exits 1 when COUNT exceeds the sweep's own left"
+assert_contains "$OUT" "::error::redislite orphan gate: 200 servers counted but the sweep reported left=159 — the counter observes a population the sweep did not account for — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the COUNT>left red is VERBATIM on the #4989 report"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "does NOT fall through to the pass line (fail-open pin)"
+
+echo "52. on a cleared=false report an accounting-identity violation at COUNT=13 still REDs"
+# reaped=0 + left=5 < before=40: the sweep's own measurement is broken, so the
+# budget warning does not rescue it. At COUNT=13 the COUNT>left arm also fires
+# (13 > 5); the second run at COUNT=2 (<= left) isolates the identity, proving
+# it alone still reds on a cleared=false report.
+run_gate 13 0 identity_bad_unproven.json
+assert_eq "$RC" "1" "exits 1 at COUNT=13 (left=5, before=40)"
+assert_contains "$OUT" "::warning::" "the budget warning is still emitted (diagnostic, not a rescue)"
+assert_contains "$OUT" "does not account for the servers it started with" "names the broken accounting at COUNT=13"
+run_gate 2 0 identity_bad_unproven.json
+assert_eq "$RC" "1" "exits 1 at COUNT=2 <= left=5, so only the identity can red"
+assert_contains "$OUT" "::error::redislite orphan gate: the sweep does not account for the servers it started with — before=40, reaped=0, left=5 (reaped + left < before); the sweep's own measurement is broken — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the identity red is VERBATIM at COUNT=2 (COUNT <= left isolates it)"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=187
+expected_assertions=196
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

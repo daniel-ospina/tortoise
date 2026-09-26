@@ -28,7 +28,7 @@ import {
   redirect,
   safeNext,
 } from "../_shared/auth/session";
-import { exchangePkceCode } from "../_shared/auth/supabase";
+import { exchangePkceCode, requireUserSession } from "../_shared/auth/supabase";
 
 interface FlowRow {
   flow_id: string;
@@ -95,10 +95,16 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: "exchange_failed", detail: result.error }, { status });
   }
 
+  // A 2xx is not proof of a usable body — `call()` classifies by status alone,
+  // so a malformed one would throw a TypeError here and surface as a 500 instead
+  // of the 503 this route's contract declares (the #3485 class).
+  const session = requireUserSession(result.data);
+  if (!session) return json({ error: "provider_unavailable" }, { status: 503 });
+
   const handle = await createSession(
     env.SESSIONS,
-    result.data.user.id,
-    result.data.refresh_token,
+    session.userId,
+    session.refreshToken,
     SESSION_MAX_AGE_S,
   ).catch(() => null);
 

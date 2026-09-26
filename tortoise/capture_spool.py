@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -86,6 +87,10 @@ SPOOL_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 SPOOL_MAX_ENTRY_BYTES = 16 * 1024 * 1024
 RETRY_BASE_SECONDS = 30
 RETRY_MAX_SECONDS = 6 * 60 * 60
+# `attempts` is clamped to this before `backoff_delay` computes 2**(n-1): the
+# backoff saturates (30 * 2**10 > 6 h) long before, and a corrupt stored value
+# of 10**400 would otherwise try to materialise an astronomically large int.
+_MAX_ATTEMPTS = 64
 
 DISCARD_ENTRY_TOO_LARGE = "entry_too_large"
 DISCARD_COUNT_EXCEEDED = "spool_count_exceeded"
@@ -165,6 +170,13 @@ class FlushSummary:
     filed: int = 0
     deferred: int = 0
     skipped: int = 0
+    # Entries INSIDE their backoff window — deferred by a previous refusal, not
+    # by anything wrong now. Counted separately from `skipped` because since
+    # #4714 moved 402 from "discard" to "defer", a quota-blocked spool reaches a
+    # steady state where EVERY drain skips and nothing is attempted: without
+    # this counter the drain prints nothing at all and N captures sit unfiled
+    # invisibly (the discard ledger used to be the signal).
+    held_by_backoff: int = 0
     # Deliberately not attempted: the session that is LIVE right now, held back
     # for its own final flush (see ``exclude_session_id``). Counted separately
     # from ``skipped`` so the drain reports WHICH it did.
@@ -274,27 +286,99 @@ def entry_key(session_id: str) -> str:
 # ── Failure classification + backoff ───────────────────────────────────────
 
 
-def classify_failure(status: int | None, detail: str = "") -> str:
+def classify_failure(status: int | float | None, detail: str = "") -> str:
     """``"retry"`` (transient) or ``"permanent"``.
 
-    TRANSIENT: no status (network / timeout), 5xx, 3xx (a redirect on a stored
-    api_url must not delete the capture), the retryable 4xx family
-    (408/425/429), and EVERY 409. On this idempotent upsert a 409 is either
+    TRANSIENT: no status (network / timeout / an unparseable status), 5xx, 3xx (a
+    redirect on a stored api_url must not delete the capture), the retryable 4xx
+    family (402/408/425/429), and EVERY 409. On this idempotent upsert a 409 is either
     #3713's in-flight concurrency condition (retry then replays) or a policy
     state (recording disabled) the user can reverse — a capture must not be
     destroyed because recording was briefly off. Matching the server's prose is
     deliberately avoided: the client ships independently.
 
+    402 is TRANSIENT, and calling it permanent destroyed user data (#4714).
+    The hosted quota gate refuses a capture whose *estimated* point cost would
+    cross the org's cap. Since #4614 that refusal is a STRUCTURED detail, not
+    prose:
+
+        {"detail": {"code": "quota_exceeded", "resource": "points",
+                     "used": 24956, "limit": 25000, "estimate": 48,
+                     "message": "Team points limit reached: 24956 in use + 48
+                                  estimated for this capture exceeds 25000."}}
+
+    `est` is computed from the INCOMING capture, so the identical capture
+    succeeds the moment a node is freed or the tier changes — exactly the
+    "becomes valid by waiting" property that defines transient here. Classified
+    permanent, `_flush_one` routed it to `_discard_entry`, which unlinks the
+    turn log and meta: the spool's only copy of the user's session was deleted
+    by the drain, and the hook's own advice ("run `tortoise session drain` to
+    file it") was what triggered the loss. The spool exists to survive a
+    transient refusal and file it later; in a quota-bound deployment 402 is the
+    transient refusal that actually occurs, so the mechanism was inverted for
+    precisely its own use case.
+
+    Not detected by prose: the client ships independently of the server's
+    wording, and a capacity/billing refusal is a category, not a string. #4614
+    gave the refusal that category (`detail.code`); this classifier still keys
+    on the STATUS, deliberately — see the note below.
+
+    ⚠️ The status-keyed verdict is a DATA-SAFETY decision and is NOT narrowed
+    by #4614. Now that a category exists, a caller *could* treat a
+    `quota_exceeded` 402 as terminal, and that would re-open the exact data
+    loss #4714 closed: any entry this drain would otherwise file later would be
+    unlinked instead. The category is for REPORTING and for the surfaces that
+    can act on it (`website/apps/dashboard`, the `capture-errors` breadcrumb);
+    the spool keeps deferring. #5051 holds the question of when a refusal is
+    genuinely terminal; until it is answered, retry is the safe direction.
+
+    Any 402 is retried, with the ENTRY's `backoff_delay` capping the cadence —
+    carried across turns, so a growing session is retried on the backoff clock
+    rather than once per turn. That converts immediate loss into a BOUNDED,
+    DEFERRED one: `SPOOL_MAX_ENTRIES` / `SPOOL_MAX_TOTAL_BYTES` still apply, and
+    `prune_spool` evicts oldest-first with a recorded reason, so an org that
+    stays over quota does eventually lose the oldest captures — visibly, on the
+    discard ledger, never silently. Retry is the safe direction here: the
+    asymmetry is a bounded, recorded deferral versus irreversible unlink of the
+    only copy.
+
     PERMANENT: every other 4xx — a malformed payload or an out-of-range turn
     count never becomes valid by waiting.
     """
-    if status is None:
+    # Total over "no status", matching the Pi leg's classifyFailure exactly so
+    # the two cannot disagree: None (never got one) and a value that is not a
+    # usable finite number (an unparseable status). Without the isfinite arm a
+    # NaN returned "permanent" while the Pi leg returned "retry" for the same
+    # input — a divergence the cross-leg parity test is meant to make
+    # impossible.
+    #
+    # The `math.isfinite` call is WRAPPED, not guarded by an isinstance: an int
+    # too large to convert to a float (`math.isfinite(10**400)`) raises
+    # OverflowError rather than returning inf, and an escaping error here would
+    # DROP the capture — `__main__`'s `_spool_if_retryable` swallows it into
+    # "spool write failed", and `_flush_one` reports `entry_failed`. That is
+    # strictly worse than either verdict this function can return, and it also
+    # made the Python leg diverge from the Pi leg, which pins the same absurd
+    # magnitude to Infinity and answers "retry".
+    if status is None or isinstance(status, bool):
+        # `bool` FIRST, because in Python a bool IS an int: `math.isfinite(True)`
+        # is True, so `True`/`False` would fall through every transient arm and
+        # land on "permanent" — routing a corrupt status to `_discard_entry` and
+        # DELETING the capture. The Pi leg is correct here only by accident
+        # (`Number.isFinite(true)` is false because `isFinite` requires
+        # `typeof === "number"`), which is exactly the sort of accident the
+        # cross-leg parity test cannot see once the two legs stop matching.
+        return "retry"
+    try:
+        if not math.isfinite(status):
+            return "retry"
+    except (TypeError, ValueError, OverflowError):
         return "retry"
     if 300 <= status < 400:
         return "retry"
     if status >= 500:
         return "retry"
-    if status in (408, 425, 429):
+    if status in (402, 408, 425, 429):
         return "retry"
     if status == 409:
         return "retry"
@@ -681,8 +765,15 @@ def write_spool_entry(
         "turns_count": len(snapshot.turns),
         "content_digest": new_digest,
         "capture_key": capture_key(snapshot.session_id, snapshot.turns),
-        "attempts": 0,
-        "next_attempt_at_ms": 0,
+        # The backoff belongs to the ENTRY, not to one snapshot. A session that
+        # keeps growing writes a new meta on EVERY turn; resetting these here
+        # re-armed the retry window each time, so a deferred 402 was re-POSTed at
+        # turn cadence with no backoff at all (#4714) — the "capped cadence"
+        # this module promises held only for a STATIC entry. A new turn is not a
+        # new upload attempt, so carry them forward. The filing path resets them
+        # (attempts=0) and a genuinely fresh entry starts at zero.
+        "attempts": _attempts(prior or {}),
+        "next_attempt_at_ms": _carried_window(prior or {}),
     }
     if snapshot.model:
         meta["model"] = snapshot.model
@@ -757,16 +848,92 @@ def _age_key(meta: dict) -> tuple[str, str, str]:
 
 
 def _backoff_ms(meta: dict) -> float:
-    """`next_attempt_at_ms` as a number, however corrupt the stored value is.
+    """`next_attempt_at_ms` as a finite number, however corrupt the stored value is.
 
     A non-numeric value ("soon", null, a nested dict) raised `ValueError` out of
     `flush_spool` and wedged the drain; 0 means "retry now", which is the safe
     reading.
+
+    A NON-FINITE window is not a window: `inf > now_ms` is true forever, and
+    because `write_spool_entry` now carries this field forward, an `inf` would
+    have made a growing session permanently un-fileable — it reports "will
+    retry" and never can. `float(10**400)` raises `OverflowError` rather than
+    returning `inf`, so that is caught too: this helper runs on the WRITE path,
+    where an escaping error would break `session spool`'s documented exit 0.
     """
     try:
-        return float(meta.get("next_attempt_at_ms") or 0)
-    except (TypeError, ValueError):
+        raw = meta.get("next_attempt_at_ms") or 0
+    except AttributeError:  # a non-dict meta is #4906's class; stay total anyway
         return 0.0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        # A REAL number only, mirroring the Pi leg's `clampWindow`
+        # (`typeof value === "number"`). `float("1790000000000")` would honour a
+        # numeric STRING the Pi leg zeroes — and since the two legs share ONE
+        # spool dir, a future string window would make the Python drain HOLD an
+        # entry the Pi drain retries, while `_carried_window` wrote the
+        # string-derived float back to disk.
+        return 0.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(value) or value <= 0:
+        # `<= 0` as well as non-finite: the Pi leg's `clampWindow` returns 0 for
+        # both, and the two legs share ONE spool directory. A negative window is
+        # inert at every consumer (it is never `> now_ms`), but leaving it to be
+        # written back would put a value on disk that only one leg can produce.
+        return 0.0
+    return value
+
+
+def _carried_window(prior: dict) -> float:
+    """The prior entry's backoff window, bounded to what the write path can produce.
+
+    `_backoff_ms` makes it a finite number; this makes it a PLAUSIBLE one. A
+    legitimately written window is at most ``written_at + RETRY_MAX_SECONDS``
+    (``backoff_delay`` saturates there), so anything further out is corrupt — and
+    because this value is CARRIED forward it would be re-written on every turn
+    and strand the entry permanently, with every surface reporting nothing
+    wrong.
+    """
+    window = _backoff_ms(prior)
+    ceiling = time.time() * 1000.0 + RETRY_MAX_SECONDS * 1000
+    return window if window <= ceiling else 0.0
+
+
+def _attempts(meta: dict) -> int:
+    """`attempts` as a small non-negative int, however corrupt the stored value is.
+
+    Clamped, because `backoff_delay` computes `2 ** (attempts - 1)` from it and
+    a stored `10**400` would try to materialise an astronomically large integer.
+    The backoff is fully saturated long before this bound.
+    """
+    try:
+        raw = meta.get("attempts") or 0
+    except AttributeError:  # a non-dict meta is #4906's class; stay total anyway
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        # A REAL number only, matching the Pi leg's `clampAttempts`
+        # (`typeof value === "number"`). `int("5")` would accept a numeric
+        # STRING and put the entry on attempt 5 — a 16-minute wait — where the
+        # Pi leg computes attempt 1, and the two legs share one spool dir.
+        # Booleans are ints in Python and are refused for the same reason: no
+        # legitimate writer produces one, so it is corrupt input.
+        return 0
+    try:
+        # Through a FLOAT, so the magnitude JS would have parsed to Infinity is
+        # read the same way here. `10**400` is a 401-digit integer: Python holds
+        # it exactly, but `JSON.parse` yields Infinity and the Pi leg's
+        # `Number.isFinite` then yields attempt 0 (a 30 s wait), where a direct
+        # `int(raw)` yielded attempt 64 (a SIX-HOUR wait) from the same bytes.
+        # Both are retryable, so neither loses the capture — but the two legs
+        # must not disagree about a cadence they share one directory for.
+        as_float = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if not math.isfinite(as_float):
+        return 0
+    return min(max(0, int(as_float)), _MAX_ATTEMPTS)
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
@@ -851,7 +1018,7 @@ def flush_spool(
             }))
             with contextlib.suppress(Exception):
                 retry_meta = read_spool_meta(root, sid) or meta
-                retry_meta["attempts"] = int(meta.get("attempts") or 0) + 1
+                retry_meta["attempts"] = _attempts(meta) + 1
                 retry_meta["next_attempt_at_ms"] = (
                     now_ms + backoff_delay(retry_meta["attempts"]) * 1000)
                 _write_meta(root, retry_meta)
@@ -950,7 +1117,17 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
         summary.skipped += 1
         return
-    if _backoff_ms(meta) > now_ms:
+    window = _backoff_ms(meta)
+    if window > now_ms + RETRY_MAX_SECONDS * 1000:
+        # No legitimately-written window is further out than now + RETRY_MAX: the
+        # write path can only produce `written_at + backoff_delay(n)`, and
+        # `backoff_delay` saturates at RETRY_MAX. A value beyond that is corrupt,
+        # and the safe reading of an unusable window is "retry now" — honouring
+        # it would strand the entry indefinitely while every surface stayed
+        # silent, the same failure the non-finite guard closes.
+        window = 0.0
+    if window > now_ms:
+        summary.held_by_backoff += 1
         summary.skipped += 1
         return
     turns = read_spool_turns(root, sid)
@@ -1016,7 +1193,15 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # Re-read before the backoff write-back for the same reason as the CAS
     # above: never clobber newer turns written while the POST was in flight.
     pending = read_spool_meta(root, sid) or meta
-    pending["attempts"] = int(meta.get("attempts") or 0) + 1
+    if pending.get("filed_key") and pending.get("filed_key") == pending.get("capture_key"):
+        # A CONCURRENT flush already filed this exact content while our POST was
+        # in flight. Re-arming the backoff here would attach a window to content
+        # that was never refused — and since `write_spool_entry` now CARRIES the
+        # window, the next turn's NEW content would inherit it and wait up to
+        # RETRY_MAX (6 h) with no attempt behind it (#4714 cycle-7 review).
+        summary.skipped += 1
+        return
+    pending["attempts"] = _attempts(meta) + 1
     pending["next_attempt_at_ms"] = now_ms + backoff_delay(pending["attempts"]) * 1000
     _write_meta(root, pending)
     summary.deferred += 1

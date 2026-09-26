@@ -88,7 +88,7 @@ class EventAPI:
         prov.setdefault("run_id", self.current_run)
         # #49 Phase 2: context param removed — context is deprecated.
         # Context/domain is now tracked via pointKind + provenance extractedFrom.
-        return {
+        p = {
             "id": ulid(),
             "content": content,
             "operator": operator,
@@ -98,6 +98,51 @@ class EventAPI:
             "status": "draft",
             "createdAt": now_iso(),
         }
+        # #5004: journal the vector + its identity. `EventAPI` is the SECOND
+        # journal producer (ingest / mining / CLI write through it), and the
+        # invariant `derived = replay(journal)` is producer-agnostic: without
+        # this, an ingest-created Point's replay re-encoded under whatever
+        # embedder was configured and silently produced a DIFFERENT graph from
+        # the same journal. The vector is computed with the SAME store-declared
+        # width the projection will use, and stamped through the SAME shared
+        # seam the SDK writer uses (`stamp_journal_embedding`) so the two
+        # producers cannot drift. `apply()` then RESTORES it verbatim, so the
+        # live node and the journal agree by construction (one compute, not
+        # two).
+        if operator is None and isinstance(content, str) and content:
+            vec = None
+            try:
+                from .embeddings import encode_for_store, stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # #5148: the seam MODULE is unimportable AT THIS MOMENT. Note
+                # what this does NOT claim: `tortoise.embeddings` is imported
+                # transitively at package-import time (sdk -> cross_lens), and
+                # `numpy` is a core dependency, so a plain missing-dependency
+                # install never reaches here. What it covers is an import hook
+                # or an import environment that fails at the call site — and
+                # the principle that a WRITE must not depend on an import
+                # succeeding, which is the rule this block already follows for
+                # an unavailable EMBEDDER. PRESENCE IS OWNERSHIP holds
+                # regardless, and NOTHING is lost by skipping the stamp: with
+                # no vector, `stamp_journal_embedding` only re-sets `embedding`
+                # to the `None` written below, and its attestation block
+                # requires a vector to fire.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                try:
+                    vec = encode_for_store(
+                        content,
+                        getattr(self.projection, "required_embedding_dim", None))
+                except Exception:  # noqa: BLE001, RUF100
+                    vec = None
+            # PRESENCE IS OWNERSHIP (#5004 round-3): the key is set EVEN when
+            # the encode failed or the embedder is unavailable, so the replay
+            # is told the journal owns this field for this id and must not
+            # invent a vector the live node does not have.
+            p["embedding"] = vec
+            if stamp_journal_embedding is not None:
+                stamp_journal_embedding(p, creating=True)
+        return p
 
     # -- ingest lifecycle / idempotency gate --------------------------------
     def begin_ingest(self, source_id, extractor_version, key: IngestKey, *,
@@ -142,6 +187,54 @@ class EventAPI:
     def add_point(self, content, provenance, *, corrects=None, **fields) -> str:
         p = self._point(content, provenance)
         p.update(fields)
+        # #5004 review: `_point` stamped a SERVER-computed vector. A
+        # caller-supplied `embedding` in `fields` replaces that vector while the
+        # identity/text-hash still describe the server one — a false
+        # attestation that the replay would then trust. Re-normalise the FINAL
+        # payload: a foreign vector is carried (so it is restored verbatim), but
+        # with NO attestation, because its origin is not ours to vouch for.
+        #
+        # (The SDK surface refuses caller-supplied `embedding` outright — see
+        # `TortoiseSDK._sanitize_props` — so this path is reachable only from a
+        # direct `EventAPI` caller, which never gets an MCP/SDK guarantee.)
+        if "embedding" in fields:
+            # The key stays PRESENT in both branches: an explicit None is the
+            # journal saying "this id has no vector", which the replay must
+            # honour by leaving it unset rather than re-encoding. Set it FIRST,
+            # so presence holds even when the seam below is unreachable.
+            p["embedding"] = fields["embedding"]
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # #5148 review: the same import-at-the-call-site lane as
+                # `_point` — an unimportable seam must not fail a WRITE. Only
+                # the stamp's normalisation safety net is lost; the key is
+                # already present, so PRESENCE IS OWNERSHIP is intact.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                stamp_journal_embedding(p, creating=False)
+        # #5004 round-7: the journal MARKERS are server-minted, and this is the
+        # one producer that does not pass through `_sanitize_props` (an
+        # internal ingest/mining/CLI seam). Allowing them through let a caller
+        # (a) claim a server vector was "caller-owned, stored verbatim" —
+        # flipping the replay's storage form — and (b) set
+        # `embedding_preserved`, which makes `stamp_journal_embedding` skip the
+        # model/text-hash attestation that R1 exists to keep. Reject here for
+        # the same reason the SDK and MCP boundaries do.
+        _forged = sorted(set(fields) &
+                         {"embedding_verbatim", "embedding_preserved",
+                          # #5004 round-8: the IDENTITY keys too. They never
+                          # become node properties (`_POINT_HANDLED`), so this
+                          # is not a parity break — but the attestation itself
+                          # is forgeable: a caller-written `embedding_model`
+                          # rides the journal and makes the replay report a
+                          # model change that never happened.
+                          "embedding_model", "embedding_revision",
+                          "embedding_text_hash"})
+        if _forged:
+            raise ValueError(
+                f"{_forged} are server-managed embedding journal fields and "
+                "cannot be set via add_point(fields=...)")
         # P1 #49: mark events with projection_version=2 so the projection gate
         # (Task 1.6) knows to strip context from v2 events.
         self._emit("PointAdded", point=p, corrects=corrects, projection_version=2)
@@ -298,7 +391,6 @@ class EventAPI:
                      owned_by: str = "",
                      managed_by: str = "",
                      governing_agreement: str = "",
-                     doc_status: str = "draft",
                      format: str = "markdown",
                      version: str = "",
                      createdAt: str | None = None,
@@ -321,11 +413,14 @@ class EventAPI:
         #125: topics/summary/session_id/event_id capture metadata.
         #167: source_path → d.sourcePath for file resolution.
         #133: needs_extraction → d.needs_extraction for --upgrade-all discovery.
+        D10 (ONTOLOGY v3.15 §4.4): ``doc_status`` is RETIRED — liveness is a
+        read of the extracted entities, not a stored field. It is no longer a
+        parameter and is never emitted.
         Epic #900 T3: ``source_url`` overrides the #205 auto-wire target (the
         indexer passes the real ``corpus://`` Source url so no phantom Source
         is merged — the override rides the JOURNALED event, so replay honors
         it); ``domain`` is persisted as ``d.domain`` via ``_persist_extra_props``
-        (intentionally NOT in ``_DOCUMENT_HANDLED`` — the persistence IS the
+        (intentionally NOT in ``_DOC_RETIRED`` — the persistence IS the
         intent); ``suppress_embedding`` skips the unconditional embedding call
         (new-path docs; the legacy branch computes as today — SC4).
         """
@@ -340,7 +435,6 @@ class EventAPI:
                    owned_by=owned_by,
                    managed_by=managed_by,
                    governing_agreement=governing_agreement,
-                   doc_status=doc_status,
                    format=format,
                    version=version,
                    createdAt=createdAt or now_iso(),

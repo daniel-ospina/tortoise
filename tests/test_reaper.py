@@ -142,8 +142,14 @@ def _make_no_path_server():
     concurrent test sessions spawning servers in the same tempdir cannot
     confuse the lookup). Returns the REALPATH'd socket (matching
     discover() output — macOS /var -> /private/var symlink).
+
+    #3767: constructed through the GUARDED `tortoise.FalkorDB` (not raw
+    redislite) so the fixture is faithful to production — a real embedded
+    server carries tortoise's `.tortoise-owners` instrument, which is the
+    positive ownership claim reap() now requires before a fast (unconfirmed)
+    kill.
     """
-    from redislite.falkordb_client import FalkorDB
+    from tortoise import FalkorDB
     db = FalkorDB()  # no path -> fresh tempdir server
     time.sleep(1)
     sock = os.path.realpath(db.client.socket_file)
@@ -893,7 +899,7 @@ def _spawn_orphan(monkeypatch=None):
     import sys as _sys
     code = (
         "import os,subprocess,sys,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        "from tortoise import FalkorDB; db=FalkorDB();\n"
         "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
     )
     proc = sp.Popen([_sys.executable, "-c", code],
@@ -2798,7 +2804,15 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
         monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
                             lambda pid: pid == live_pid)
         monkeypatch.setattr("tortoise.embedded_reaper._socket_dir_from_cmdline",
-                            lambda pid: str(dbdir))  # original (gone) path
+                            # #3767: REALPATH'd — production returns a
+                            # canonical path and `_has_ownership_claim`'s
+                            # absent-dir arm compares it against the
+                            # already-canonical `dbdir_real`. A raw
+                            # `/var/...` here never matches `/private/var/...`
+                            # on macOS, so the ownership claim refused and
+                            # the record classified 'protected' instead of
+                            # the 'candidate' shape this test pins.
+                            lambda pid: os.path.realpath(str(dbdir)))
         monkeypatch.setattr(
             "tortoise.embedded_reaper._pgrep_redis_servers", lambda: [live_pid])
         try:
@@ -4933,12 +4947,98 @@ def test_socketless_binding_never_resolves_the_candidate_path(
     assert refusal is not None, "planted symlink forged the socket-less binding"
 
 
+def test_run_sweep_forwards_jobs_to_reap(monkeypatch):
+    """`--jobs N` must reach reap()'s parallel CLIENT LIST pre-probe.
+
+    #4299: `_run_sweep` forwards `jobs` to discover() but called reap()
+    WITHOUT it, so reap fell back to its own default (jobs=8) and the flag
+    that exists to parallelize the probe pool silently did half its job.
+
+    Mutation: delete `jobs=jobs` from the reap() call in `_run_sweep` and
+    this test fails.
+    """
+    import tortoise.embedded_reaper as R
+
+    captured: dict = {}
+
+    monkeypatch.setattr(R, "discover", lambda jobs=1, **kw: [])
+    monkeypatch.setattr(R, "_mark_orphan_confirmation", lambda records: None)
+    monkeypatch.setattr(R, "_sweep_quarantine_dirs", lambda dry_run=False: [])
+
+    def _fake_reap(records, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(R, "reap", _fake_reap)
+
+    R._run_sweep(dry_run=True, batch_size=None, only_safe=True, jobs=16,
+                 sweep_pid_files=False)
+
+    assert captured.get("jobs") == 16, (
+        f"jobs not forwarded to reap(): {captured.get('jobs')!r} "
+        "(the flag would silently no-op)")
+    # The other kwargs the caller owns must still be forwarded unchanged.
+    assert captured.get("only_safe") is True
+    assert captured.get("dry_run") is True
+
+
+def test_reap_nonpositive_jobs_does_not_crash(monkeypatch):
+    """#4438 review P2: `--jobs 0` / `--jobs -1` must not crash reap().
+
+    `reap()` builds `ThreadPoolExecutor(max_workers=min(jobs, len(cands)))`
+    for its parallel CLIENT LIST pre-probe; a non-positive `jobs` makes that
+    `max_workers=0` -> `ValueError: max_workers must be greater than 0`.
+
+    Mutation: delete the `if jobs < 1: jobs = 1` clamp in reap() and this
+    raises.
+    """
+    import tortoise.embedded_reaper as R
+
+    records = [
+        {"classification": "candidate", "socket_path": "/nonexistent/a.sock"},
+        {"classification": "candidate", "socket_path": "/nonexistent/b.sock"},
+    ]
+    monkeypatch.setattr(R, "_active_client_count", lambda path: None)
+    for jobs in (0, -1):
+        acted = R.reap(records, dry_run=True, jobs=jobs)
+        assert isinstance(acted, list)
+
+
+def test_run_sweep_clamps_nonpositive_jobs_to_one(monkeypatch):
+    """`_run_sweep` clamps a non-positive `jobs` before reap() sees it.
+
+    Pins the CLI `--jobs 0` / `--jobs -1` path (`_run_sweep` is the only
+    caller of `reap` from main()). Mutation: delete the clamp in
+    `_run_sweep` and `captured["jobs"]` is 0/-1.
+    """
+    import tortoise.embedded_reaper as R
+
+    captured: dict = {}
+
+    def _fake_reap(records, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(R, "discover", lambda jobs=1, **kw: [])
+    monkeypatch.setattr(R, "_mark_orphan_confirmation", lambda records: None)
+    monkeypatch.setattr(R, "_sweep_quarantine_dirs", lambda dry_run=False: [])
+    monkeypatch.setattr(R, "reap", _fake_reap)
+
+    for jobs in (0, -1):
+        captured.clear()
+        R._run_sweep(dry_run=True, batch_size=None, only_safe=True, jobs=jobs,
+                     sweep_pid_files=False)
+        assert captured.get("jobs") == 1, (
+            f"non-positive jobs reached reap(): {captured.get('jobs')!r}")
+
+
 # ── #4740 review 4: the end-sweep's `cleared` derivation ───────────────────
 # `sweep_until_cleared` is the loop conftest's session-end sweep runs. Its
-# `cleared` field is what the CI orphan gate binds to, and review 4 found the
-# previous `cleared = not acted` reported True for a deadline-aborted sweep
-# (`reap()` breaks on its first record and returns [], which is not proof the
-# backlog is clear). These cases pin all four stop shapes.
+# `cleared` field is the sweep's own budget/stop-condition claim, carried for
+# diagnosis — not a field the CI orphan gate decides its verdict on; review 4
+# found the previous `cleared = not acted` reported True for a deadline-aborted
+# sweep (`reap()` breaks on its first record and returns [], which is not proof
+# the backlog is clear). These cases pin all four stop shapes.
 
 
 def _scan_aware(records, complete=True):
@@ -5008,11 +5108,9 @@ def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
     the default production actually runs with is the builder's, not
     `sweep_until_cleared`'s. A default of `lambda: 0.0` makes
     `clock() < deadline` always true, so a deadline-aborted sweep reports
-    `cleared=true`, so a deadline-aborted sweep would be reported as finished
-    rather than exhausted and the gate would not red it. The gate's `cleared`
-    effect is keyed on the measured count: at a measured zero a
-    `cleared: false` report warns and passes (nothing remains to bound), and
-    above zero it reds. No clock is injected here.
+    `cleared=true` — reported as finished rather than exhausted, losing the
+    exhausted-budget diagnostic. `cleared` is a diagnostic flag that does not
+    decide the gate's verdict at any measured count. No clock is injected here.
     """
     import inspect
     import time
@@ -5037,9 +5135,8 @@ def test_hygiene_report_threads_cleared_verbatim():
     """#4740 review 6: the report builder must use the declared field set AND
     thread `cleared` through verbatim.
 
-    The gate keys the effect of `cleared: false` on the measured count: at a
-    measured zero it warns and passes (nothing remains to bound), and above
-    zero it reds. This is behavioural — the real module is imported and
+    `cleared` is a diagnostic flag that does not decide the gate's verdict at
+    any measured count. This is behavioural — the real module is imported and
     called — so the AST shapes that passed the round-5 pin (a subscript store,
     a dead branch around the literal, a tuple reorder) cannot satisfy it.
     """
@@ -5301,4 +5398,148 @@ def test_conftest_sweep_returns_build_end_sweep_report():
         "literal anywhere — not in a `Return` and not in a lambda body; such "
         "a literal bypasses the builder and the gate would read it unpinned "
         f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
+    )
+
+
+def test_conftest_closes_embedded_clients_before_the_end_sweep():
+    """#1005 (epic #1647 E2E-7): the end-sweep must probe a CLIENT-CLOSED seam.
+
+    The sweep's `left` is read during fixture teardown. While this process's
+    own embedded clients are still open, every server they hold reads as a
+    live-client server and `reap()` declines it — so `left` counted the
+    suite's own client population (147 in the post-#4927 CI sample) while the
+    workflow's post-exit probe measured the residue (5). `COUNT <= left` was
+    then structurally incapable of failing on the leak it exists to catch.
+
+    The fix is an ORDERING property of two statements in
+    `_redislite_hygiene`'s session-end teardown: `close_embedded_clients()`
+    (the existing idempotent seams atexit uses) must run BEFORE the
+    `end_result = _sweep(...)` assignment. Source order is execution order in
+    this straight-line teardown, so an index comparison over the fixture's own
+    top-level statements proves the property that a value-level AST pin
+    cannot: a `_sweep()` that runs first reads an inflated `left` no matter
+    what it returns.
+
+    The pin is scoped to the fixture's OWN body — a `close_embedded_clients()`
+    call nested in a helper def/lambda (e.g. `_atexit_cleanup`, which runs at
+    interpreter exit, long after the sweep) would satisfy a naive `ast.walk`
+    line comparison while not running before the sweep at all. Calls under a
+    statically-false guard are rejected too.
+
+    Reverting the conftest call (or re-ordering it after the sweep) fails
+    this test and the CI orphan gate silently loses its same-seam bound.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+
+    # Parent links so both the enclosing scope and the fixture's own
+    # top-level statement LIST are visible to the checks below.
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(fixture):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    nested_scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+    def nested_scope(node: ast.AST) -> ast.AST | None:
+        """The nearest helper scope between `node` and the fixture, if any."""
+        cur = parents.get(node)
+        while cur is not None and cur is not fixture:
+            if isinstance(cur, nested_scopes):
+                return cur
+            cur = parents.get(cur)
+        return None
+
+    def under_constant_false_guard(node: ast.AST) -> bool:
+        """True when `node` sits under a statically-false `if`."""
+        cur = parents.get(node)
+        while cur is not None and cur is not fixture:
+            if (
+                isinstance(cur, ast.If)
+                and isinstance(cur.test, ast.Constant)
+                and not cur.test.value
+            ):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    def top_level_statement(node: ast.AST) -> ast.stmt:
+        """The fixture's own top-level statement containing `node`."""
+        cur: ast.AST = node
+        while parents.get(cur) is not fixture:
+            cur = parents[cur]
+        assert isinstance(cur, ast.stmt)
+        return cur
+
+    def top_level_index(node: ast.AST) -> int:
+        # List.index uses identity under `==` for objects, but ast stmt
+        # equality is identity, so this is exact.
+        return fixture.body.index(top_level_statement(node))
+
+    close_calls = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "close_embedded_clients"
+    ]
+    assert len(close_calls) == 1, (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() exactly once (the session-end, "
+        "before-the-sweep close); found "
+        f"{len(close_calls)} call(s) — the end-sweep would otherwise probe a "
+        "population that still includes this process's own clients (#1005)"
+    )
+    close_call = close_calls[0]
+    assert nested_scope(close_call) is None, (
+        "close_embedded_clients() is called inside a nested function/lambda "
+        f"at line {nested_scope(close_call).lineno} — e.g. a helper that runs "
+        "at interpreter exit, AFTER the end-sweep. The session-end close must "
+        "be in _redislite_hygiene's own teardown body so it runs before the "
+        "sweep probes `left` (#1005)"
+    )
+    assert not under_constant_false_guard(close_call), (
+        "close_embedded_clients() sits under a statically-false `if` "
+        f"(line {close_call.lineno}) — the pin would read a dead call as the "
+        "live close (#1005)"
+    )
+
+    end_assigns = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "end_result"
+            for t in n.targets
+        )
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+        and n.value.func.id == "_sweep"
+    ]
+    assert len(end_assigns) == 1, (
+        "tests/conftest.py's _redislite_hygiene must run its session-end sweep "
+        f"as `end_result = _sweep(...)` exactly once; found {len(end_assigns)} "
+        "assignment(s) — the ordering pin needs the single session-end call "
+        "(#1005)"
+    )
+    end_assign = end_assigns[0]
+    assert nested_scope(end_assign) is None, (
+        "the session-end `end_result = _sweep(...)` sits inside a nested "
+        "scope; the pin must compare the fixture's own statements (#1005)"
+    )
+
+    assert top_level_index(close_call) < top_level_index(end_assign), (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() BEFORE `end_result = _sweep(...)`: the "
+        "end-sweep's `left` is read during fixture teardown, and while this "
+        "process's own clients are open every server they hold is declined by "
+        "reap()'s live-client gate — so `left` measures the suite's own "
+        "clients, not the residue, and the gate's `COUNT <= left` comparison "
+        "is not same-seam (#1005). Reorder the close before the sweep."
     )

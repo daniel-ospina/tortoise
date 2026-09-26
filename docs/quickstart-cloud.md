@@ -90,6 +90,34 @@ tortoise session list                               # what's been captured
 tortoise context                                    # memory digest for session-start hooks
 ```
 
+### Session capture requires explicit consent
+
+Filing a transcript to Tortoise Cloud is **off by default** and is never
+inferred from the presence of an API key — exporting `TORTOISE_API_KEY` for the
+MCP `Authorization` header (section 2) only authenticates the connection. To
+let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
+`tortoise sessions import`) file sessions:
+
+```bash
+export TORTOISE_CAPTURE=1     # truthy: 1 / true / yes / on
+```
+
+Without it the hook no-ops and prints a notice; sessions stay on the machine.
+The visible line repeats on each session close while a legacy credential is
+present — only the durable copy is one-time. This is a deliberate behavior
+change: capture used to follow the
+credential. The requirement is **host-agnostic** — it applies to a self-hosted
+endpoint too (a self-hosted daemon is still data leaving the machine), so the
+same opt-in is needed for `docs/quickstart-selfhosted.md`'s replay steps.
+Existing installs must also re-copy the hook — `.claude/hooks/*.sh` are
+per-project copies and do not update themselves:
+`cp tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh`.
+
+A one-time notice is also written durably to
+`~/.tortoise/capture-consent-notice` (a stale copied hook discards the CLI's
+stderr, so the file is the channel that survives it), and `tortoise doctor`
+reports the current consent state.
+
 **Meeting transcripts:** the manual mining flow (transcript → meeting/decision/
 friction events + draft Points) is a local CLI/SDK path — see the
 meeting-transcripts section of [quickstart-selfhosted.md](quickstart-selfhosted.md).
@@ -165,9 +193,13 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
 If you are on a version without the export tool, replay your knowledge through the hosted ingest path — the path verified by the original E2E-12-D replay journey (content parity; Point IDs and edge topology are NOT carried over by replay):
 
 ```bash
+export TORTOISE_CAPTURE=1                        # explicit consent (session capture)
 tortoise session capture --file transcript.txt    # sessions captured while self-hosted
 tortoise create-point "The decision was approved" --kind statement   # individual claims
 ```
+
+(`tortoise session capture` requires the explicit consent opt-in — see
+*Session capture requires explicit consent* in section 3.)
 
 For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the same content.
 

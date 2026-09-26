@@ -167,6 +167,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_backfill_sources.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_restore.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_directory.py": {"e2e-900": "redirect-derived per-path"},
+    # #5137 landed this fixture without a route, which reds this guard on main.
+    # The gold fixture writes :Source rows into an EMBEDDED graph reached through
+    # the `shared_embedded_db` path (the redirect derives a per-path test_* graph);
+    # "gold" is a fixture graph name, not a server graph the SDK resolves from the
+    # registry and not a production-shape namespace.
+    "test_document_source_gold.py": {"gold": "test-constructed"},
 }
 
 # ── ROUTED_SELECT_GRAPH_SITES (cycle-6 P2-10) ───────────────────────────────
@@ -553,6 +559,19 @@ def test_no_redirect_stems_registry_exact():
         # pass. Runs embedded in every lane (same rationale as
         # test_hosted_backup).
         "test_cross_tenant_read_isolation",
+        # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+        # silent vecf32-overwrite behaviour (the server lane lands the same
+        # write), so the module joins the carve-out lane — registered in
+        # ci-surfaces.yml:carve_out + the core surface and in
+        # TEST_NO_REDIRECT_STEMS.
+        "test_vecf32_overwrite_seams_4524",
+        # #5148: `test_sdk_emit_event_survives_unreachable_seam` is
+        # `embedded_only` (it constructs a real embedded store). Without the
+        # carve-out routing it is collected by every URI-set lane and skipped
+        # via the marker hook — a permanently green, permanently unexecuted
+        # gate on main (the #4047/#4524 shape). Registered in all three homes:
+        # ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS, and here.
+        "test_write_path_unreachable_seam_5148",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

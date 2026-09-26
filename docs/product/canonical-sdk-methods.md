@@ -121,7 +121,7 @@ Three rules, each of which caught a real error in this document.
 
 | # | Canonical | MCP tool | Members (current names) | Action |
 |---|---|---|---|---|
-| W1 | `create_entity` | #10 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | keep — `create_point` and `create_event` survive as warning aliases (#3883), the eval harness calls them by name |
+| W1 | `create_entity` | #10 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | keep — `create_point` and `create_event` are **retired to a failing name that names `create_entity`**; there is no SDK alias layer (#3836 (c) ruling). The eval harness calls them by name, so its call sites migrate in Phase 2 |
 | W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
 | W3 | `register_source` | #11 | `create_source`, `complete_source` | keep — **not foldable**: the URL is the node identity |
 | W4 | `index_files` | #12 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
@@ -308,8 +308,8 @@ surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
 **collapse the aliases**. The sketch above does exactly that: **32 groups over 149
 names** — 26 memory-facing (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
-reached by grouping and merging, with the primitives still reachable and `backfill_v25`
-archived. The
+reached by grouping and merging; the retired primitives stop resolving — a call raises with the
+hint naming its replacement (#3836 (c)) — and `backfill_v25` is archived. The
 control plane is what moves behind namespaces; the memory surface
 is what mirrors the approved 23-tool list.
 
@@ -340,12 +340,16 @@ not by method name.
    and in docs, but a mention is not a caller. Every other method on the surface is reached
    by the eval harness, tooling, the hosted REST layer, or tests.
 
-## Callers that must not break
+## Callers that must be migrated first
 
 The eval harness drives `TortoiseSDK` **by method name** — no eval or benchmark invokes an
-MCP tool. So a *tool* rename is invisible to it and an *SDK* rename is not. These names are
-load-bearing and must survive any collapse, or be shimmed with a warning the way #3883 does
-at the tool layer:
+MCP tool. So a *tool* rename is invisible to it and an *SDK* rename is not. Every name below
+is **retired**, not aliased: after Phase 2 a call to it **fails and names its replacement**
+(#3836 (c) ruling — no SDK alias layer, no warning shim, no call telemetry). The two names that
+are themselves targets — `create_entity` and `close` — do **not** retire and need no migration;
+they are listed because the harness calls them and their signature must not drift under it. So
+this is not a set of names to preserve; it is a migration order, because these in-repo callers
+are the only callers that exist:
 
 `create_point` · `create_operator` · `create_event` · `create_entity` · `get_point` ·
 `ingest` · `recall_state` · `promote_point` · `mitigate_operator` · `compute_confidence` ·
@@ -486,7 +490,9 @@ justified as one.
 1. **This list** → owner approval.
 2. **The bridge table** (each tool's `type=`/`mode=` → the SDK method behind it) — the pre-flight.
 3. **The SDK dispatchers**, which are additive and unblock the mirror.
-4. **Collapse the aliases**, with warning shims (#3883's mechanism) for the load-bearing names.
+4. **Collapse the aliases**, then **retire the old names to a failing name that names the
+   replacement** (#3836 (c) ruling — no SDK warning shim). The in-repo callers listed above
+   are the only callers, so migrating them is what makes this step safe.
 5. **Namespace the control plane.**
 
 ## Verification notes

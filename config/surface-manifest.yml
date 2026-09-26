@@ -1,12 +1,26 @@
 manifest_version: 1
 issue: 3863
-cut_at_commit: 6a40d70b9f5d9331e55bd07104335942207b6d1b
+cut_at_commit: 4d11a7b40f8c1dbb5d099acc4b54e09324af5452
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
 approval_status: pending-owner-approval
 approval_principal: null
 approval_pr: null
+# Response FIELDS are outside the frozen surface — the freeze is on tools and
+# endpoints — but each one is recorded here so this manifest stays the single
+# source of truth for what we tell agents we return. A field that is off by
+# default and leaves the response unchanged when off does not gate; an
+# unrecorded one has no approval behind it and the carve-out does not cover it.
+response_fields:
+- response: tortoise_analyze
+  field: why
+  emitted_when: 'TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)'
+  unchanged_when_off: 'yes — the response is byte-identical when the flag is off'
+- response: tortoise_session_capture
+  field: capture_redactions
+  emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'
+  unchanged_when_off: 'n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)'
 counts:
   tools: 82
   sdk_public_methods: 150
@@ -502,7 +516,7 @@ rows:
   cluster_canonical: tortoise_update
   cluster_note: group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete
-  served_from: tortoise/mcp_server.py:92890c80d0ad8e5e
+  served_from: tortoise/mcp_server.py:6d7f25614cef979a
   family: memory
   family_rank: 1
   served: http
@@ -512,7 +526,8 @@ rows:
   keyword_rank: 4
   cluster: delete
   canonical: true
-  job: Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation. Cannot be undone.
+  job: Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation. Cannot be undone. dry_run=True
+    previews the blast radius (which node resolves, and every edge that would go) and changes nothing.
   dependency: declares TortoiseSDK.delete (resolves)
   lifecycle: active
   used_by: never called, tooling, skill-docs, docs
@@ -530,7 +545,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete_point
-  served_from: tortoise/mcp_server.py:8b86b0e0970857d6
+  served_from: tortoise/mcp_server.py:8449e50d5d6790b4
   family: memory
   family_rank: 1
   served: http
@@ -540,7 +555,8 @@ rows:
   keyword_rank: 4
   cluster: delete
   canonical: false
-  job: Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.
+  job: Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. dry_run=True previews the blast
+    radius (the point and every edge that would be removed) and changes nothing.
   dependency: declares TortoiseSDK.delete_point_wrapped (resolves)
   lifecycle: active
   used_by: never called, tooling, skill-docs, docs
@@ -556,7 +572,7 @@ rows:
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_invalidate
-  served_from: tortoise/mcp_server.py:b0fc0114a743dee4
+  served_from: tortoise/mcp_server.py:591cd80d422875c0
   family: memory
   family_rank: 1
   served: http
@@ -566,7 +582,8 @@ rows:
   keyword_rank: 4
   cluster: null
   canonical: null
-  job: Mark a Point outdated with a CORRECTS edge from the correcting Point.
+  job: Mark a Point outdated with a CORRECTS edge from the correcting Point. dry_run=True previews the one-point
+    transition + one edge and changes nothing.
   dependency: declares TortoiseSDK.invalidate_point (resolves)
   lifecycle: active
   used_by: never called, tooling, skill-docs, docs
@@ -580,7 +597,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_retract_point
-  served_from: tortoise/mcp_server.py:c4341b0934a1e86e
+  served_from: tortoise/mcp_server.py:6445ec6797d54bca
   family: memory
   family_rank: 1
   served: http
@@ -591,7 +608,8 @@ rows:
   cluster: null
   canonical: null
   job: Tombstone-retract a Point — status='retracted' (point stays in graph, excluded from default surfaces). Terminal;
-    cannot retract operators or already-terminal points.
+    cannot retract operators or already-terminal points. dry_run=True previews the status transition and changes
+    nothing.
   dependency: declares TortoiseSDK.retract_point (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
@@ -605,7 +623,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_supersede
-  served_from: tortoise/mcp_server.py:2a8f8f9c2a42aaae
+  served_from: tortoise/mcp_server.py:274ce04207a1e00f
   family: memory
   family_rank: 1
   served: http
@@ -617,7 +635,7 @@ rows:
   canonical: null
   job: 'Atomically replace old Point with new — CORRECTS edge + outdated flag. transfer_edges=True (default): full
     supersede — all edges move from old to new. transfer_edges=False: invalidate behavior — outdated flag + CORRECTS
-    edge only, no edge transfer.'
+    edge only, no edge transfer. dry_run=True previews exactly which edges would transfer and changes nothing.'
   dependency: declares TortoiseSDK.supersede (resolves)
   lifecycle: active
   used_by: never called, tooling, skill-docs, docs
@@ -1060,7 +1078,7 @@ rows:
   cluster_canonical: tortoise_update
   cluster_note: group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete_entity
-  served_from: tortoise/mcp_server.py:035f88baa5731282
+  served_from: tortoise/mcp_server.py:72d367c45cf4b38a
   family: graph
   family_rank: 2
   served: http
@@ -1070,7 +1088,8 @@ rows:
   keyword_rank: 4
   cluster: delete
   canonical: false
-  job: Delete any entity by ID.
+  job: Delete any entity by ID. DESTRUCTIVE — cannot be undone. dry_run=True previews the node(s) and every edge
+    that would be removed and changes nothing.
   dependency: declares TortoiseSDK.delete_entity (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
