@@ -11336,6 +11336,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # event loop on the dedicated telemetry pool, best-effort EXCEPT the
     # #3821 strict-mode ``UnregisteredTelemetryKey``, which must propagate —
     # so this site does NOT wrap it in a swallow-all handler.
+    # ⚠️ The ``capture_cost`` ledger emit **in the ``_emit_capture_ledger``
+    # helper this write path calls** DOES swallow everything ("never block
+    # capture") — the two conventions sit far apart in this file, so the
+    # divergence is called out here rather than left to be discovered. It is
+    # deliberate on this side (#3821 is a convention with its own rationale,
+    # and this row is new), and reconciling `capture_cost` to it is a separate
+    # decision about an existing billing-adjacent site — not something to
+    # change as a side effect of adding a measurement.
     if _graph_ops is not None and (
             not session_existed or retry_failed_capture):
         _ops_props = _capture_graph_ops_props(

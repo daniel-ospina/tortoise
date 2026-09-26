@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import math
 import os
 import re
@@ -181,6 +182,8 @@ class GraphOpsCounter:
 
 
 # ── context plumbing ──────────────────────────────────────────────────
+_logger = logging.getLogger("tortoise.graph_ops")
+
 _ACTIVE: ContextVar[GraphOpsCounter | None] = ContextVar(
     "tortoise_graph_ops_active", default=None)
 _PHASE: ContextVar[str] = ContextVar(
@@ -193,17 +196,42 @@ def record_graph_op(cypher: str) -> None:
     Called from ``_GuardedGraph.query`` on EVERY graph access. A no-op (one
     ContextVar read) when no capture is active, so non-capture paths pay
     nothing measurable.
+
+    NEVER RAISES. The whole module is **measurement, not metering**, and this
+    is the one function that runs INSIDE a customer's graph write — the
+    caller's query has not executed yet, so anything raised here would abort a
+    write that was otherwise perfectly valid. That is a metering failure
+    causing data loss, which inverts the contract.
+
+    The hazard is real rather than hypothetical: ``GraphOpsCounter.record``
+    deliberately RAISES on an unknown phase (it must not mint a bucket
+    ``as_dict`` omits). ``capture_phase`` validates before setting ``_PHASE``,
+    so today the raise is unreachable — but ``_PHASE`` is a ContextVar any
+    future caller could set directly, and a typo there would otherwise surface
+    as a failed graph write rather than as a metering bug. Caught here, at the
+    one place every caller passes through, rather than at each call site.
+
+    Recorded, not silent: the drop is logged at WARNING with the traceback, so
+    the measurement gap is discoverable instead of becoming a quietly low
+    count in a figure this repo prices from.
     """
     counter = _ACTIVE.get()
     if counter is None:
         return
-    kind = classify_op(cypher)
-    phase = _PHASE.get()
-    if phase == _EXTRACT:
-        # Inside the extraction call: reads are the search/dedup leg, writes
-        # are the deterministic commit leg.
-        phase = "extraction" if kind == "read" else "commit"
-    counter.record(phase, kind)
+    try:
+        kind = classify_op(cypher)
+        phase = _PHASE.get()
+        if phase == _EXTRACT:
+            # Inside the extraction call: reads are the search/dedup leg,
+            # writes are the deterministic commit leg.
+            phase = "extraction" if kind == "read" else "commit"
+        counter.record(phase, kind)
+    except Exception:  # see the docstring: never break the write
+        _logger.warning(
+            "graph-op metering dropped one op (non-fatal) — the graph write "
+            "it was measuring proceeds unmeasured",
+            exc_info=True,
+        )
 
 
 @contextmanager
