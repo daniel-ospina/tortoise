@@ -44,6 +44,14 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3892 (B6): the read-path status contract. Dual-registered with `core` for
+  # the same reason as the three guards above: one half of the suite pins the
+  # `status` field on the shipped GET /v1/search response, and the file that
+  # serves it is tortoise/hosted_api.py, which selects the `api` surface. A PR
+  # that dropped the field from that route alone would otherwise never run the
+  # guard written for it. The `core` half is the primary arm — it pins
+  # tortoise/read_status.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_read_status.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
   # above and for the same reason: the file it guards is tortoise/hosted_api.py,
@@ -1057,6 +1065,7 @@ surfaces:
   - test_slack_connector.py
   - test_sparse.py
   - test_status_projection.py
+  - test_read_status.py  # #3892 (B6): the read-path status contract — the recorded four terms on search/recall (tortoise/read_status.py + tortoise/sdk.py; dual-registered with `api` for the hosted /v1/search field)
   - test_stop_writes.py
   - test_structural_leg_r4.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
@@ -1769,6 +1778,14 @@ durations:
 # and is not a measurement).
   test_fly_secret_drift.py: 8.5
   test_embedded_evidence.py: 17.2
+  # #3892 (B6): new file in this pool — it has no CI junit measurement yet (a file that
+  # never ran cannot appear in an artifact), so it takes the flat 2.0s default under the
+  # #3400 policy above, same as `test_embedded_evidence.py` (#3827) and the #4221 group.
+  # Required, not cosmetic: main sits exactly on the 90% coverage floor (541/601 = 90.02%),
+  # so this file entering the pool without a weight would drop it to 541/602 = 89.87% and
+  # red `test_duration_coverage_guard_boundary_and_realistic` (the #4348 one-file trap).
+  # Refresh from the first post-merge main run that includes it.
+  test_read_status.py: 2.0
   test_shared_state_concurrency.py: 0.2
   test_shared_state_events.py: 0.2
   test_shared_state_events_claim.py: 0.1
