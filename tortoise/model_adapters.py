@@ -763,10 +763,14 @@ def _reset_failover_cooldown() -> None:
 class RoutingModel:
     """Primary adapter + optional fallback with failover (D4/D5 #1530).
 
-    ``complete()`` tries the primary; the exception class decides (D4):
-    FATAL (401/402/403) and FATAL_CONFIG (400/404/unknown 4xx) re-raise
-    immediately — no retry, NO failover; TRANSIENT/UNKNOWN fails over to the
-    fallback when configured. Stickiness (D5): once an in-complete call
+    ``complete()`` tries the primary; the exception class decides (D4).
+    Auth (401/403) and FATAL_CONFIG (400/404/unknown 4xx) re-raise
+    immediately — no retry, NO failover. The provider-specific class
+    (HTTP 402, or a 403 carrying the provider's key-limit body) fails over
+    to the fallback exactly as ``RotatingModel`` rotates to an alternative
+    (#1951/#4860) — with no fallback configured it still raises (fail loud,
+    mirrors the rotation pool's n==1 guard); TRANSIENT/UNKNOWN fails over to
+    the fallback when configured. Stickiness (D5): once an in-complete call
     fails over, ``last_route``/``route`` flip to the fallback and STAY there
     for the rest of this extraction (forward-only, never back
     mid-extraction). The DEADLINE-abort path (``note_stall``) is separate:
@@ -844,7 +848,10 @@ class RoutingModel:
                               max_tokens=max_tokens)
         except BaseException as e:  # noqa: BLE001, RUF100 — classify first
             self.errors.append(f"{type(e).__name__}: {e}")
-            if is_fatal(e) or self.fallback is None:
+            billing = is_billing_exhausted(e)
+            if (is_fatal(e) and not billing) or self.fallback is None:
+                # auth (401/403) + config 4xx — never fail over; the no-fallback
+                # case raises regardless (#1951/#4860, mirrors RotatingModel)
                 raise
             _note_failure(self.primary.provider, self.cooldown_s)
             self._failed_over = True

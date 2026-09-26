@@ -378,8 +378,18 @@ def test_failover_on_transient_uses_fallback(monkeypatch):
 
 
 def test_fatal_4xx_no_failover(monkeypatch):
-    """FATAL (401/402/403) → exception propagates, fallback NEVER called."""
-    for status in (401, 402, 403):
+    """Auth-class FATAL 4xx (401, and a signature-less 403) → exception
+    propagates, fallback NEVER called.
+
+    INTENT CHANGE (#4960): this test previously pinned 402 — and a body-less
+    403 — inside the no-failover loop, the pre-#1951 taxonomy boundary before
+    HTTP 402 was recognised as the provider-specific billing class. #4960
+    routes ``RoutingModel`` through the same ``is_billing_exhausted``
+    carve-out ``RotatingModel`` already had, so 402 and a key-limit 403 now
+    fail over; the credential class pinned here is unchanged (it was never
+    billing). The billing-eligible behaviour is pinned by
+    ``test_billing_exhausted_fails_over_to_fallback``."""
+    for status in (401, 403):   # credential failures; 402 = billing class (#4960)
         _reset_failover_cooldown()
         err = requests.HTTPError(f"HTTP {status}")
         err.response = type("R", (), {"status_code": status})()
@@ -388,6 +398,57 @@ def test_fatal_4xx_no_failover(monkeypatch):
         model = RoutingModel(primary, fallback, cooldown_s=0)
         with pytest.raises(requests.HTTPError):
             model.complete(system="s", user="u")
+        assert fallback.calls == 0, f"fallback must never run on {status}"
+        assert model.failover_used is False
+
+
+def test_billing_exhausted_fails_over_to_fallback(monkeypatch):
+    """#4960: a provider-specific billing exhaustion — HTTP 402, or a 403
+    carrying the provider's key-limit body (#4860) — fails over to the
+    fallback on the 1-2-provider ``RoutingModel`` shape, exactly as
+    ``RotatingModel`` rotates to an alternative. The issue's own scenario:
+    keyed deepseek + openrouter, the openrouter leg's key budget spent.
+
+    FAILS on the pre-fix code (the gate consulted only ``is_fatal``, so the
+    fallback was never tried and ``fallback.calls == 0``)."""
+    cases = [
+        (402, None),                       # Payment Required (#1951)
+        (403, OR_KEY_LIMIT_BODY),          # exhausted key budget (#4860)
+    ]
+    for status, body in cases:
+        _reset_failover_cooldown()
+        err = _http_error(status) if body is None else _http_error_body(status, body)
+        primary = _StubAdapter("deepseek-direct").fail_with(err)
+        fallback = _StubAdapter("openrouter")
+        model = RoutingModel(primary, fallback, cooldown_s=0)
+        out = model.complete(system="s", user="u")
+        assert out.startswith("openrouter:"), f"{status} must fail over"
+        assert primary.calls == 1
+        assert fallback.calls == 1, f"fallback must be called on {status}"
+        assert model.last_route == "openrouter"
+        assert model.route == "openrouter"
+        assert model.failover_used is True
+
+
+def test_fatal_credential_error_reraises_without_failover():
+    """#4960 negative control: a genuinely fatal error — 401, and a 403 with
+    NO key-limit signature (wrong credential, or an unreadable body) — must
+    still re-raise and must NOT call the fallback. The billing carve-out
+    must never widen to the credential class."""
+    cases = [
+        (401, None),
+        (403, OR_BAD_CREDENTIAL_BODY),
+        (403, None),                       # body-less 403 — no proof of the class
+    ]
+    for status, body in cases:
+        _reset_failover_cooldown()
+        err = _http_error(status) if body is None else _http_error_body(status, body)
+        primary = _StubAdapter("deepseek-direct").fail_with(err)
+        fallback = _StubAdapter("openrouter")
+        model = RoutingModel(primary, fallback, cooldown_s=0)
+        with pytest.raises(requests.HTTPError):
+            model.complete(system="s", user="u")
+        assert primary.calls == 1
         assert fallback.calls == 0, f"fallback must never run on {status}"
         assert model.failover_used is False
 
@@ -1409,15 +1470,25 @@ def _http_err(status: int):
 
 
 def test_failover_policy_pin(monkeypatch):
-    """(f) 402 on RoutingModel → re-raised (fatal, no failover); 402 on
-    RotatingModel with >=2 providers → rotates; 429 on RoutingModel WITH a
-    fallback → FAILS OVER (transient); 429 without fallback → re-raised."""
+    """(f) 402 on RoutingModel → FAILS OVER (the provider-specific billing
+    class, #4960); 402 on RotatingModel with >=2 providers → rotates; 429 on
+    RoutingModel WITH a fallback → FAILS OVER (transient); 429 without
+    fallback → re-raised.
+
+    INTENT CHANGE (#4960): the first leg previously pinned the opposite — 402
+    re-raised with NO failover on RoutingModel, the pre-#1951 taxonomy
+    boundary. That was the exact divergence #4960 closes, so the leg now
+    pins the failover (the fallback must be called and serve the result).
+    The credential boundary stays pinned by ``test_fatal_4xx_no_failover``
+    and ``test_fatal_credential_error_reraises_without_failover``."""
     from tortoise.model_adapters import RotatingModel, RoutingModel
-    # 402 fatal on RoutingModel
+    # 402 on RoutingModel → failover (billing class, #4960)
     primary = _StubAdapter("deepseek-direct").fail_with(_http_err(402))
-    m = RoutingModel(primary, _StubAdapter("openrouter"))
-    with pytest.raises(requests.HTTPError):
-        m.complete(system="s", user="u")
+    fb0 = _StubAdapter("openrouter")
+    m = RoutingModel(primary, fb0, cooldown_s=0)
+    assert m.complete(system="s", user="u").startswith("openrouter:")
+    assert fb0.calls == 1, "402 must fail over to the fallback (#4960)"
+    assert m.failover_used is True
     # 402 on RotatingModel n>=2 rotates: the forced RNG picks venice first
     # (its 402 is consumed exactly once), cooldown 60s skips it on the retry
     # so the fallback answers deterministically.
