@@ -2859,8 +2859,18 @@ def test_fork_midconstruction_drops_the_inherited_in_flight_claim(
         state["forked"] = True
         outcome["parent_claim"] = dict(_lifecycle._in_flight_replays)
         outcome["parent_claim_file"] = os.path.exists(claim_path)
+        # #4926: hold the claim lock ACROSS the fork. The at-fork hook must
+        # REPLACE it in the child — an inherited held lock would deadlock the
+        # child's next construction. `held_lock` keeps the object even after
+        # the child's hook rebinds the module global.
+        held_lock = _lifecycle._inflight_claim_lock
+        held_lock.acquire()
         read_fd, write_fd = os.pipe()
-        pid = os.fork()
+        try:
+            pid = os.fork()
+        except BaseException:
+            held_lock.release()
+            raise
         if pid == 0:  # child — no thread here can ever release a claim
             os.close(read_fd)
             try:
@@ -2876,6 +2886,12 @@ def test_fork_midconstruction_drops_the_inherited_in_flight_claim(
                     "pid and the parent's construction is still in flight; "
                     "unlinking it would drop a live construction's "
                     "cross-process signal")
+                assert _lifecycle._inflight_claim_lock is not held_lock, (
+                    "#4926: the at-fork hook must REPLACE the inherited claim "
+                    "lock — we forked holding it, so an inherited lock would "
+                    "deadlock the child's next construction")
+                assert _lifecycle._inflight_claim_lock.locked() is False, (
+                    "#4926: the child's claim lock must be unlocked")
                 os.write(write_fd, b"OK")
             except BaseException as exc:
                 with contextlib.suppress(Exception):
@@ -2884,6 +2900,7 @@ def test_fork_midconstruction_drops_the_inherited_in_flight_claim(
                 with contextlib.suppress(OSError):
                     os.close(write_fd)
                 os._exit(0)
+        held_lock.release()
         os.close(write_fd)
         child_result = os.read(read_fd, 65536).decode()
         os.close(read_fd)
@@ -3188,6 +3205,12 @@ def test_owner_handoff_failure_keeps_the_in_flight_claim(
         sock = _json.loads(
             Path(db_path + ".settings").read_text())["unixsocket"]
         key = os.path.abspath(sock)
+        # #4926 review: `first.close()` below CANNOT reap — `record_owner` is
+        # monkeypatched and the claim is retracted, so `cotenant_holds_server`
+        # reads no owner evidence and fail-CLOSEDs. Capture the server so the
+        # teardown can stop it explicitly instead of leaking an orphan the
+        # reaper cannot see (its socket dir is gone).
+        server_pid = _registry_redis_pid(db_path)
 
         def _explode(_socket_file):
             raise OSError("forced owner-record failure")
@@ -3212,17 +3235,23 @@ def test_owner_handoff_failure_keeps_the_in_flight_claim(
         with contextlib.suppress(Exception):
             if second is not None:
                 second.close()
-        # Drop the deliberately-stuck claim BEFORE closing the last client,
-        # so the server is still reaped at the end of the test (the claim is
-        # exactly what would otherwise pin it forever). #4926: the claim now
-        # has an on-disk half too, and the production release path is the only
-        # thing that retracts it — so retract it here explicitly, or the
-        # server would survive the close below.
+        # Drop the deliberately-stuck claim BEFORE closing the last client
+        # (the claim is exactly what would otherwise pin it forever). #4926:
+        # the claim now has an on-disk half too, and the production release
+        # path is the only thing that retracts it — so retract it here
+        # explicitly.
         if key is not None:
             _lifecycle._in_flight_replays.pop(key, None)
             _lifecycle._retract_inflight_claim(key)
         with contextlib.suppress(Exception):
             first.close()
+        # #4926 review: with the claim gone and `record_owner` monkeypatched,
+        # the guard above fail-CLOSEDs and `first.close()` does NOT reap — so
+        # stop the server explicitly (see the capture comment in `try`).
+        if server_pid and _pid_alive(server_pid):
+            _kill_quiet(server_pid)
+        if server_pid:
+            _wait_server_dead(server_pid)
 
 
 def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
@@ -3260,6 +3289,9 @@ def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
         sock = _json.loads(
             Path(db_path + ".settings").read_text())["unixsocket"]
         key = os.path.abspath(sock)
+        # #4926 review: `first.close()` in the teardown cannot reap (see the
+        # sibling raise-path test) — capture the server for an explicit stop.
+        server_pid = _registry_redis_pid(db_path)
 
         def _fail_to_record(_socket_file):
             # The documented failure: nothing written, refcount untouched.
@@ -3298,15 +3330,21 @@ def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
         with contextlib.suppress(Exception):
             if second is not None:
                 second.close()
-        # Drop the deliberately-stuck claim BEFORE closing the last client,
-        # so the server is still reaped at the end of the test. #4926: its
-        # on-disk half is retracted with it (the production release path is
-        # the only other thing that does this).
+        # Drop the deliberately-stuck claim BEFORE closing the last client.
+        # #4926: its on-disk half is retracted with it (the production release
+        # path is the only other thing that does this).
         if key is not None:
             _lifecycle._in_flight_replays.pop(key, None)
             _lifecycle._retract_inflight_claim(key)
         with contextlib.suppress(Exception):
             first.close()
+        # #4926 review: with the claim gone and `record_owner` monkeypatched,
+        # `first.close()` fail-CLOSEDs and does NOT reap — stop the server
+        # explicitly (see the capture comment in `try`).
+        if server_pid and _pid_alive(server_pid):
+            _kill_quiet(server_pid)
+        if server_pid:
+            _wait_server_dead(server_pid)
 
 
 # ── #4926: the mid-construction claim must be visible CROSS-PROCESS ────
@@ -3550,12 +3588,19 @@ def test_inflight_claim_is_a_liveness_hold_not_an_owner_record(tmp_path):
             "count LIVE (fail closed), exactly as `_owner_records` treats an "
             "unverifiable owner")
     # `pid <= 0` (the `kill(0, 0)` process-group alias) and a non-pid body
-    # behind the prefix are foreign files and are ignored.
-    for bogus in ("0", "-1", "not-a-pid"):
+    # behind the prefix are foreign files and are ignored. (A negative-pid
+    # body like `inflight--1-…` is ignored too, but through the UNPARSEABLE
+    # pid path, not the `pid <= 0` guard, so it is not the case pinned here.)
+    for bogus in ("0", "not-a-pid"):
         _clear()
         _plant(_claim_file_name(_lifecycle, key, bogus, 12345))
         assert _lifecycle._inflight_claim_holds(key) is False, (
             f"#4926: a foreign claim body ({bogus!r}) must be ignored")
+    _clear()
+    _plant(_claim_file_name(_lifecycle, key, "-1", 12345))
+    assert _lifecycle._inflight_claim_holds(key) is False, (
+        "#4926: a negative-pid body must be ignored via the unparseable-pid "
+        "path")
     # a missing owner-record dir is not a hold (the caller fails closed on it
     # through the `_owner_records` branch).
     _clear()
@@ -3563,35 +3608,56 @@ def test_inflight_claim_is_a_liveness_hold_not_an_owner_record(tmp_path):
     assert _lifecycle._inflight_claim_holds(key) is False
 
 
-def test_inflight_claim_publish_and_retract_run_under_the_transition_lock(
+def test_inflight_claim_transition_and_disk_ops_share_one_critical_section(
         tmp_path, monkeypatch):
-    """#4926: the on-disk publish/retract must be INSIDE `_inflight_claim_lock`.
+    """#4926: the map transition and its on-disk op are ONE critical section.
 
     The disk half's correctness rests on being one step with the
     `_in_flight_replays` transition. Without that, two same-process
     constructions on one socket can lose each other's claim: B starts while
     A's file is still present (`FileExistsError` -> "reuse it"), then A's
-    retract unlinks the file B is now relying on — measured against the real
+    retract unlinks the file B is relying on — measured against the real
     functions (`_in_flight_replays[key] == 1` while
     `_inflight_claim_holds(key) is False`), which re-opens the fail-open
     window this PR closes. A two-thread reproduction is not deterministic, so
-    the contract pinned here is that both disk operations happen inside the
-    critical section that guards the transition: the mutation that moves
-    either call outside the `with` reddens this test.
+    the contract is pinned by COUNTING critical-section entries: a
+    construction's increment+publish is entry 1 and its decrement+retract is
+    entry 2, so a mutant that splits either pair into two adjacent `with`
+    blocks (leaving a window another construction can interleave) changes the
+    count and reddens this test.
     """
     import tortoise.embedded_lifecycle as _lifecycle
     from tortoise.projection import FalkorProjection
 
-    seen: dict = {}
+    class _CountingLock:
+        """A real lock wrapper that counts entries into the section."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.entries = 0
+
+        def __enter__(self):
+            self.entries += 1
+            return self._inner.__enter__()
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def locked(self):
+            return self._inner.locked()
+
+    counter = _CountingLock(_lifecycle._inflight_claim_lock)
+    monkeypatch.setattr(_lifecycle, "_inflight_claim_lock", counter)
+    calls: dict = {}
     real_publish = _lifecycle._publish_inflight_claim
     real_retract = _lifecycle._retract_inflight_claim
 
     def _publish(key):
-        seen["publish_locked"] = _lifecycle._inflight_claim_lock.locked()
+        calls["publish_entries"] = counter.entries
         return real_publish(key)
 
     def _retract(key):
-        seen["retract_locked"] = _lifecycle._inflight_claim_lock.locked()
+        calls["retract_entries"] = counter.entries
         return real_retract(key)
 
     monkeypatch.setattr(_lifecycle, "_publish_inflight_claim", _publish)
@@ -3601,19 +3667,70 @@ def test_inflight_claim_publish_and_retract_run_under_the_transition_lock(
     second = None
     try:
         # Construction #1 STARTS the server (no registry yet -> no replay, so
-        # no claim). Construction #2 REPLAYS it and therefore publishes a
-        # claim that must be retracted when it finishes.
+        # it never enters the critical section). Construction #2 REPLAYS it
+        # and therefore publishes a claim that must be retracted when it
+        # finishes.
         second = FalkorProjection(db_path, graph_name="test")
-        assert seen.get("publish_locked") is True, (
-            "#4926: the publish must run under `_inflight_claim_lock`")
-        assert seen.get("retract_locked") is True, (
-            "#4926: the retract must run under `_inflight_claim_lock`")
+        assert calls.get("publish_entries") == 1, (
+            "#4926: the publish must run in the SAME critical section as the "
+            "0 -> 1 transition (entry 1)")
+        assert calls.get("retract_entries") == 2, (
+            "#4926: the retract must run in the SAME critical section as the "
+            "1 -> 0 transition (entry 2)")
+        assert counter.entries == 2, (
+            "#4926: a construction must enter the claim lock exactly twice "
+            "(increment+publish, decrement+retract) — a split critical "
+            f"section leaves an interleaving window, got {counter.entries}")
     finally:
         with contextlib.suppress(Exception):
             if second is not None:
                 second.close()
         with contextlib.suppress(Exception):
             first.close()
+
+
+def test_inflight_claim_publish_never_breaks_construction_and_retries_enoent(
+        tmp_path, monkeypatch):
+    """#4926: the publish swallows I/O failure and retries the ENOENT race.
+
+    Two safety decisions that only the happy path would otherwise exercise:
+    (a) a claim that cannot be written must never raise out of the
+        `RedisMixin.__init__` patch — the construction has to survive
+        `ENOSPC`/`EMFILE`/`EACCES`;
+    (b) the one race that can lose a claim outright is a peer's `rmdir`
+        landing between our `makedirs` and our `open`, so `ENOENT` is retried
+        exactly once.
+    RED mutant: dropping the retry -> (b) fails on the missing file; letting
+    the failure propagate -> (a) raises.
+    """
+    import tortoise.embedded_lifecycle as _lifecycle
+
+    sock = str(tmp_path / "redis.socket")
+    key = os.path.abspath(sock)
+    real_open = os.open
+
+    def _always_fail(path, flags, mode=0o777):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "open", _always_fail)
+    _lifecycle._publish_inflight_claim(key)  # must NOT raise
+    assert _lifecycle._inflight_claim_holds(key) is False
+
+    calls = {"n": 0}
+
+    def _fail_once(path, flags, mode=0o777):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fail_once)
+    _lifecycle._publish_inflight_claim(key)
+    assert calls["n"] == 2, (
+        "#4926: the ENOENT race must be retried exactly once")
+    assert os.path.exists(_lifecycle._inflight_claim_path(key)), (
+        "#4926: the retry must actually create the claim")
+    _lifecycle._retract_inflight_claim(key)
 
 
 # ── #4439: harness fixtures must not fork periodic RDB snapshots ──────────

@@ -1761,9 +1761,15 @@ def _inflight_replay_holds(key: str) -> bool:
 # cross-process signal, i.e. a fail-OPEN gap for the cross-process reader.
 # `_publish_inflight_claim` therefore swallows its own I/O failure (it must
 # never break a construction) and retries the one race that can lose a claim
-# outright (a peer's `rmdir` between our `makedirs` and our `open`); the gap
-# stays bounded because the caller's `_owner_records` branch fails CLOSED
-# whenever the record dir is missing or holds no parseable record.
+# outright (a peer's `rmdir` between our `makedirs` and our `open`). The gap
+# is NOT bounded by the `_owner_records` branch: that branch fails CLOSED only
+# when the record dir is missing or holds no parseable record — a NORMAL
+# instrumented server's dir holds the holder's record, so a publish failure
+# (ENOSPC/EMFILE/EACCES on a zero-byte create) leaves the cross-process
+# reader seeing `live_owners == 1` and re-opens the #4926 window for THAT
+# construction. The in-memory claim still protects same-process co-tenants;
+# the cross-process gap is bounded only by the rarity of that create failing
+# while the socket dir's owner-record store is readable.
 #
 # Residuals, named rather than implied (see also #4944): the publish/retract
 # decisions and the dictionary they are derived from are taken under
@@ -1788,8 +1794,13 @@ def _inflight_claim_digest(socket_key: str) -> str:
     `unix_socket_path` can place two sockets in one directory, and the owner
     records already share that directory. Without the digest a claim for one
     socket would hold — and a retraction for one would remove — the other's;
-    the scoping declares one claim per (process, socket). The key is already
-    absolute at every call site; `abspath` normalises it defensively.
+    the scoping declares one claim per (process, socket). `abspath`, NOT
+    `realpath`: `cotenant_holds_server` calls this on every close, and #4214
+    measures that a per-client `realpath` walk of the temp root hangs
+    `Py_FinalizeEx` (pinned by
+    `test_embedded_lifecycle_fast_close.py::test_interpreter_exits_after_a_slow_temp_root_stat`).
+    `owner_record_dir` normalises its directory with `abspath` too, so the
+    digest's spelling class matches the record dir it names.
     """
     return hashlib.sha1(os.path.abspath(socket_key).encode()).hexdigest()[:12]
 
@@ -1984,6 +1995,12 @@ def _install_owner_record_patch() -> None:
         inflight_key = os.path.abspath(pending) if pending else None
         claimed = inflight_key is not None
         if claimed:
+            # #4926 review: warm the per-process start-time cache OUTSIDE the
+            # lock. The first `_own_start_time()` shells `ps` (bounded by
+            # `_process_start_time`'s 2 s timeout), and holding this
+            # process-global lock across a subprocess would stall every other
+            # in-process construction — unrelated sockets included.
+            _own_start_time()
             # #4926: the read-modify-write and the on-disk publish it gates
             # are ONE atomic step, so two constructions in this process cannot
             # lose each other's claim (the disk half must not disagree with
@@ -2060,19 +2077,18 @@ def _install_owner_record_patch() -> None:
                 # #4926: the decrement and the on-disk retract are one atomic
                 # step (see the increment above), so a concurrent construction
                 # on this socket can neither lose the file nor keep a stale
-                # one. `_retract_inflight_claim` never raises and the guard is
-                # kept so a construction can never be broken by teardown.
-                try:
-                    with _inflight_claim_lock:
-                        remaining = _in_flight_replays.get(inflight_key, 0) - 1
-                        if remaining > 0:
-                            _in_flight_replays[inflight_key] = remaining
-                        else:
-                            _in_flight_replays.pop(inflight_key, None)
-                            _retract_inflight_claim(inflight_key)
-                except Exception:
-                    _in_flight_replays.pop(inflight_key, None)
-                    _retract_inflight_claim(inflight_key)
+                # one. No `except` is needed and none is used: the dict ops
+                # cannot raise and `_retract_inflight_claim` is never-raise.
+                # An `except` that popped unconditionally HERE would drop a
+                # live co-construction's count and unlink its claim OUTSIDE
+                # the lock — re-opening the exact window this lock closes.
+                with _inflight_claim_lock:
+                    remaining = _in_flight_replays.get(inflight_key, 0) - 1
+                    if remaining > 0:
+                        _in_flight_replays[inflight_key] = remaining
+                    else:
+                        _in_flight_replays.pop(inflight_key, None)
+                        _retract_inflight_claim(inflight_key)
 
     RedisMixin.__init__ = _init
     RedisMixin._tortoise_owner_record_patch = True
