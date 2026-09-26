@@ -14,6 +14,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
 from .env_truthy import is_truthy
+from .security import entity_label
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -929,10 +930,14 @@ def run_vector_query(
     # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source — the vector leg
     # reads the Source label, never a Document label. The caller-facing
     # entity_type stays "document".
-    if entity_type == "document":
-        label = "Source"
-    else:
-        label = "Point" if entity_type == "operator" else entity_type.capitalize()
+    # #4997: the entity_type -> label mapping is ONE declaration
+    # (tortoise/security.py::ENTITY_TYPE_LABELS, read via entity_label)
+    # rather than a derivation repeated per query leg. Behaviour is
+    # unchanged: entity_label reproduces the expression it replaces for
+    # every valid entity_type, for an unknown str ("<Capitalized>") and for
+    # a non-str (AttributeError), so this is a provenance change, not a
+    # semantic one. #5407 migrates the FTS/structural legs onto it.
+    label = entity_label(entity_type)
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.
     if entity_type in ("source", "document"):
