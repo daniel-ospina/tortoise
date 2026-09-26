@@ -705,11 +705,20 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # one more writer. So the Event branch carries the SAME fail-closed
         # R-18 predicate as Point: a MISSING flag counts as non-episodic.
         #
-        # Capture/transcript Events (eventKind sessionCaptured/AgentSession) are
-        # stamped ``is_episodic: true`` at creation and stay EXCLUDED — that
-        # exclusion is what keeps this change from re-charging the capture
-        # users the #947 backfill exists for. It is NOT a kind allowlist: the
-        # discriminator stays the ``is_episodic`` flag, exactly as for Points.
+        # Events reaching this branch carry ``is_episodic`` UNSET, which is
+        # why they ARE charged. Only three writers stamp it true: the
+        # ``sessionCaptured`` Event minted by ``sdk.capture_session`` and by
+        # the hosted capture path (both pass ``is_episodic=True`` to
+        # ``create_event``), and the hosted commit path, which sets
+        # ``e.is_episodic=true`` on its AgentSession Event and on its
+        # extracted occurrence Events. Those stay EXCLUDED — that exclusion is
+        # what keeps this change from re-charging the capture users the #947
+        # backfill exists for. It is NOT a kind allowlist: the discriminator
+        # stays the ``is_episodic`` flag, exactly as for Points. Conversely,
+        # ``_session_event_write`` (the session index path — its docstring
+        # pins "no is_episodic on the index path") and a direct
+        # ``create_event`` without the explicit kwarg (``tortoise_create_event``)
+        # leave the flag unset and their Events therefore COUNT.
         rows = sdk._get_proj().g.query(
             "MATCH (n) "
             "WHERE (n:Point AND (n.is_episodic IS NULL OR n.is_episodic = false)) "

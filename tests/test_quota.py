@@ -649,6 +649,29 @@ class TestEventQuota:
         finally:
             tenant.close()
 
+    def test_session_index_event_is_charged(self, reg_sdk, tmp_path):
+        """The session INDEX path (``_session_event_write``) writes its
+        AgentSession Event with ``is_episodic`` UNSET ("no is_episodic on
+        the index path"), so it IS charged. Pins the quota.py #1977 comment:
+        the Event branch is a flag discriminator, NOT a sessionCaptured/
+        AgentSession kind allowlist — only the three writers that explicitly
+        stamp ``is_episodic: true`` (sdk/hosted ``capture_session`` mint, the
+        hosted commit path) stay excluded."""
+        tid = _find_org_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant._session_event_write(
+                {"sessionId": "idx_s1", "title": "Indexed"},
+                "body text", "/tmp/idx_s1.md", "ev_idx1", "idx_s1",
+                "hash1", "Indexed", False, None, "idx_s1.md", "idx_s1.md")
+            rows = tenant._get_proj().g.query(
+                "MATCH (e:Event) RETURN e.eventKind, e.is_episodic"
+            ).result_set
+            assert rows == [["AgentSession", None]]
+            assert count_org_usage(tid, "points", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
     def test_capture_minted_events_stay_excluded(self, reg_sdk, tmp_path):
         """Regression: the capture path stamps its Events episodic, so the
         Event branch must not re-charge capture users (the count stays 2 =
