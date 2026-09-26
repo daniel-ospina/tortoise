@@ -183,7 +183,7 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
 
 
 def apply_payload_operators(proj, sdk, operators: list, *,
-                            point_content_by_id=None) -> None:
+                            point_content_by_id=None) -> list[str]:
     """Apply Layer-1 payload operators with commit semantics (#1532 D3).
 
     IMPL/NAND first via ``sdk.create_operator`` (promote_source=False, #780);
@@ -218,6 +218,19 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     Passing payload ids here is not an error the function can detect: the
     operator write is swallowed as ``operator write skipped (inputs
     missing?)``.
+
+    Returns the ids of the IMPL/NAND operator Points THIS call CREATED, in
+    call order (#4936). A capture must stamp exactly those nodes with its
+    ``sessionCaptured`` eventId: joining on the MINTED point set instead
+    misses every operator whose endpoint RE-KEYED to a pre-existing graph
+    node (#4716 Part 1) — a folded-only capture has no minted ids at all,
+    so the operator topology was left unstamped and invisible to the
+    eventId-keyed retrievable layer (``operator_counts == {}``). Only
+    CREATED nodes are returned: the MITIGATES Cypher fallback can resolve an
+    operator this call did not write, and a caller stamping provenance must
+    never claim a node a prior session created. The derived-commit call site
+    (``hosted_api._execute_commit_writes`` §7) ignores the value — it has no
+    capture eventId to stamp.
     """
     target_op_ids: dict[tuple, str] = {}
     for op in operators:
@@ -278,6 +291,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             reason = str(src)
         sdk.mitigate_operator(op_id, reason=reason,
                               strength=_op_attr(op, "strength") or 0.5)
+    return list(target_op_ids.values())
 
 
 # ── Supersession application (#2164 Task 3) ────────────────────────────
