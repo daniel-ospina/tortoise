@@ -132,6 +132,15 @@ the #2943 pre-wipe sidecar's `event_meta` section, re-established by
 `event_store.reestablish_watermark` after every replay pass.
 <!-- config-registry:end -->
 
+A counter node **missing** one of its two properties — the legacy shape
+`hosted_backup._restore_event_meta` (#3902) already falls back on — is
+REPAIRED, not preserved. The monotone clause is `IS NULL OR <` because a NULL
+carries no position to preserve: preserving it would report a restore that
+never happened, and a NULL `last_seq` would then make the next `next_seq`
+evaluate `null + 1`. A `last_seq` of some **other** type (a string) cannot be
+compared by Cypher's `CASE`, so it is left in place by the write and REFUSED
+loudly afterwards rather than coerced into a value the node does not hold.
+
 `first_seq` is deliberately **not** carried. On this path it is not recoverable
 from the surviving log either — the rebuild replays points, not `:GraphEvent`
 rows (#4664), so the log comes back EMPTY and `first_seq` is derived as

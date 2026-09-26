@@ -4119,6 +4119,15 @@ class FalkorProjection(
                     ]
                 _write_prewipe_snapshot(snapshot_path, payload)
             except (OSError, TypeError, ValueError) as e:
+                # #4653: the `event_meta` section is named as well. It is the one
+                # section whose only other record is the node the wipe destroys
+                # (`:GraphEventMeta` is not re-derivable from the journal), so a
+                # watermark-only refusal would otherwise read as protecting
+                # "0 ... 0 ... and the 0 config entries".
+                watermark_note = (
+                    " The wipe would also destroy the event-log high-water "
+                    "mark this snapshot carries (#4653) — no other record "
+                    "holds it." if event_meta_snapshot else "")
                 raise RuntimeError(
                     f"rebuild aborted BEFORE the graph wipe: could not persist "
                     f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
@@ -4129,9 +4138,10 @@ class FalkorProjection(
                     f"{len(session_point_links)} session link(s) with no "
                     f"durable record (#2943, #3947) — and the "
                     f"{len(config_snapshot)} captured authoritative config "
-                    f"entr(y/ies) with them (#2814). Fix the cause — write "
-                    f"permissions/space on the event-log directory, or a "
-                    f"non-serializable Point property — and re-run."
+                    f"entr(y/ies) with them (#2814).{watermark_note} Fix the "
+                    f"cause — write permissions/space on the event-log "
+                    f"directory, or a non-serializable Point property — and "
+                    f"re-run."
                 ) from e
         elif leftover is not None:
             # Nothing left to protect — do not leave a stale sidecar behind.

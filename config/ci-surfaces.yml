@@ -2336,8 +2336,7 @@ durations:
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.2
   test_rebuild_turn_points_3947.py: 4.5
-  test_rebuild_event_meta_watermark_4653.py: 24.9  # #4653: 25 tests, docker FalkorDB; locally measured
-  test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
+  test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
   test_retention_promise.py: 2.7
   test_retired_tools.py: 0.2
