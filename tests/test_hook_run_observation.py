@@ -1185,3 +1185,68 @@ def test_an_unreadable_probe_outcome_agrees_on_both_surfaces(tmp_path, fields, w
     assert hr["reason"] is None, (why, hr)
     assert hr["probe_outcome"] == "unreadable", (why, hr)
     assert "probe_recorded" not in hr and "probe_rc" not in hr, (why, hr)
+
+
+# ── the clearer must resolve the WRITER's path, not a second one ─────────
+
+def test_the_breadcrumb_clearer_resolves_the_writers_own_path(
+        tmp_path, monkeypatch):
+    """The clear is the other half of the write: ``sessions import`` removes a
+    ``capture-failure`` breadcrumb on a 2xx (``_record_capture_error``'s
+    documented contract).  Under an EMPTY override the writer and the reader
+    both resolve ``$HOME``-relative, so a clearer still deriving the path with
+    ``os.environ.get(name, default)`` looks in the CWD instead — the breadcrumb
+    survives forever and the machine keeps reporting a capture failure that
+    already succeeded.
+
+    Mutation (VERIFIED RED): resolve the override in
+    ``capture_spool._clear_breadcrumb_for`` with ``os.environ.get(name,
+    default)`` — the clearer looks for ``./capture-errors/claude.json``, the
+    file written under ``$HOME`` survives, and this REDs."""
+    from tortoise import capture_spool
+    from tortoise.__main__ import _capture_error_file
+    from tortoise.hook_install import KIND_CAPTURE_FAILURE
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", "")
+    monkeypatch.setenv("HOME", str(home))
+
+    written = _capture_error_file("claude")
+    written.parent.mkdir(parents=True, exist_ok=True)
+    written.write_text(json.dumps({
+        "harness": "claude",
+        "kind": KIND_CAPTURE_FAILURE,
+        "session_id": "imp_abc",
+    }), encoding="utf-8")
+    assert written == home / ".tortoise" / "capture-errors" / "claude.json", (
+        written)
+
+    capture_spool._clear_breadcrumb_for("claude", "imp_abc")
+
+    assert not written.exists(), (
+        "the breadcrumb the writer placed under $HOME survived its own clear: "
+        "the clearer resolved a different tree")
+
+
+@pytest.mark.parametrize("bad_home", ["~", "~/x"])
+def test_an_unresolvable_home_cannot_break_the_capture_breadcrumb(
+        monkeypatch, bad_home):
+    """The derivation is FALLIBLE on purpose — ``Path.home()`` RAISES for
+    ``$HOME=~``/``~/x`` — and both capture-breadcrumb callers run on the
+    FAILURE paths of ``sessions import``, where a raise would replace a
+    reportable capture failure with a traceback.  The breadcrumb is documented
+    best-effort, so both must return quietly.
+
+    Mutation (VERIFIED RED): hoist ``path = _capture_error_file(harness)`` back
+    OUTSIDE the ``try`` in ``_record_capture_error``, or drop ``RuntimeError``
+    from ``_clear_capture_error``'s suppression — this REDs with
+    ``RuntimeError: Could not determine home directory.``"""
+    from tortoise.__main__ import _clear_capture_error, _record_capture_error
+
+    monkeypatch.setenv("HOME", bad_home)
+    monkeypatch.delenv("TORTOISE_IMPORT_RECEIPT_DIR", raising=False)
+
+    # Neither writes nor fails loudly: there is no HOME to write under.
+    _record_capture_error("codex", "unreachable host", session_id="imp_x")
+    _clear_capture_error("codex")

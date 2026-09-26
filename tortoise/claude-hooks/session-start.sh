@@ -57,8 +57,10 @@ fi
 # `codex-hooks/session-end.sh` and `cursor-hooks/session-end.sh`.  This helper
 # is the only one of the six that also drops a trailing `/.` — the copies do
 # not — so a `TORTOISE_IMPORT_RECEIPT_DIR` ending in `/.` still splits them.
-# That residual is the #4373 duplication; a sourced shared snippet would close
-# it, and until then the copies are what the comment above must not overstate.
+# That residual is the #4373 duplication, tracked in #5503 (with the measured
+# per-copy matrix, the receipt writer/reader empty-override split, and the
+# fallible-derivation traceback); a sourced shared snippet would close it, and
+# until then the copies are what the comment above must not overstate.
 # The subtle half is the base: `$TORTOISE_IMPORT_RECEIPT_DIR` names the
 # RECEIPT dir, so the base is its `.parent`, and that must match pathlib's
 # `Path(x).parent` — a TRAILING SLASH is dropped first (a bare `${x%/*}`

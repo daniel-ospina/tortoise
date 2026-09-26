@@ -118,10 +118,11 @@ from tortoise.sdk import (
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
+    _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
-    _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
+    _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
@@ -10256,7 +10257,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
-    _turn_texts = _capture_turn_texts(windowed)
+    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
+    # HERE, off the event loop, on the capture pool, and the writer below and
+    # the linker further down REUSE this exact result instead of recomputing it.
+    # The scrub is ~3 s/MB of client-controlled text (measured: 0.97 s @220k,
+    # linear), and a legal-maximum 500x5,000 capture is 2.5 MB. Reuse removes
+    # the two passes this lane used to pay for the SAME window — the embedding
+    # batch's and the linker's. It must not run on the loop at all:
+    # `_capture_turn_texts` used to be an O(n) f-string loop, but it now scrubs,
+    # so calling it bare here would put seconds of CPU on the loop — the
+    # #3060/#3086 freeze class this file is built around (and which
+    # `test_capture_loop_responsiveness` cannot see: it counts on-loop QUERIES,
+    # and a scrub issues none). See the scoping doc for the pass COUNT this lane
+    # still pays (the extractor and the session `:Source` each scrub the same
+    # window for their own consumers; idempotence keeps the count correct).
+    _turn_texts, _redaction_counts = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_texts_with_redactions, windowed)
     _turn_embs = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
         proj.required_embedding_dim)
@@ -10268,10 +10284,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
     # guard and the rebuild journal all live in that one definition, so this
     # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
-    await _run_off_loop(
+    _capture_redactions = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
         windowed, now=now, turn_embs=_turn_embs,
-        session_existed=session_existed)
+        session_existed=session_existed,
+        texts_and_counts=(_turn_texts, _redaction_counts))
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -10611,7 +10628,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # P1 #1529 (D4): a Source materialization failure is non-fatal and
         # surfaced as an additive warning — never a 500 after writes.
         try:
-            sdk._materialize_session_source(
+            # #4911: off the event loop. The helper now scrubs every turn it is
+            # handed (bounded at 5,000 chars PER TURN, but the turn count is the
+            # caller's), and the pre-existing derivation alone measured ~0.8 s
+            # for a legal-maximum 500x5,000 session — the scrub pushed that to
+            # ~7 s of CPU that would otherwise block every other request on this
+            # loop. Non-fatal either way, same as the surrounding wrap.
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR, sdk._materialize_session_source,
                 session_id, event_id, now, body.conversation)
         except Exception:
             import logging
@@ -10706,10 +10730,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # after the capture). Tracked on the Session node.
     try:
         from .session_link import link_session_entities
-        # #4194: the shared `_capture_turn_texts` is the ONE stored-text
-        # definition — the link trigger, the stored turn, and the embedded text
-        # cannot drift (#1532 D1/D2).
-        link_texts = _capture_turn_texts(windowed)
+        # #4194/#4911: the shared `_capture_turn_texts_with_redactions` is the
+        # ONE stored-text definition — the link trigger, the stored turn, and
+        # the embedded text cannot drift (#1532 D1/D2). The texts were already
+        # computed off the loop above, so the linker adds NO scrub pass of its
+        # own.
+        link_texts = _turn_texts
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
@@ -11152,6 +11178,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # yields []: nothing was added, never a fabricated count. UI rendering
     # of the marker is #1976's — this is the engine data exposure only.
     surfaced = surfaced_marker(extracted, verified_ids=set(facts))
+    # #4911: a capture that redacted a credential says so — byte-parity with
+    # the SDK receipt (`sdk.capture_session`), appended only when non-zero so
+    # an ordinary capture's warning list is unchanged.
+    if _capture_redactions:
+        extraction_warnings.append(
+            _capture_redaction_warning(_capture_redactions))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
@@ -11166,6 +11198,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # #2335 WI-1a: the hosted receipt carries the extractor
             # telemetry (sdk meta stats - real on v2, {} on replayed/M2).
             "stats": meta.get("stats") or {},
+            # #4911: credential-shaped spans redacted from this capture's turn
+            # text before persistence — always present (0 when nothing
+            # matched), byte-parity with the SDK receipt.
+            "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
             # trigger for the in-conversation announcement (SKILL.md §6 copy).
             "first_capture": bool(first_capture)}
