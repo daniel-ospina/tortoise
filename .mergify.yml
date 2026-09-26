@@ -65,6 +65,50 @@ queue_rules:
     batch_size: 2
     batch_max_wait_time: 5 min
 
+# ── Auto-queue: finished work enters the queue with no human click (#3016) ─────
+#
+# WHY THIS EXISTS
+#   `queue_rules[].autoqueue` defaults to **false**, and this file never set it.
+#   The documented consequence is exactly what we lived with: "the pull request
+#   must be manually queued." Mergify therefore posted, on EVERY pull request —
+#   including ones with all six required checks green:
+#
+#     "Tick the box to add this pull request to the merge queue
+#      (same as `@mergifyio queue`)."
+#
+#   …and waited. Roughly one change sat in the queue at a time; whoever clicked,
+#   merged. #3016 ("passing changes that cannot be merged") was that, and it was
+#   a DEFAULT, not a policy: nobody chose it, and nothing recorded choosing it.
+#   Measured 2026-09-25: every sampled PR carried the tick-box comment while all
+#   six required checks passed, `strict` was false, and no review was required.
+#
+# WHY NOT `autoqueue: true`
+#   `queue_rules[].autoqueue` is **deprecated**; Mergify's migration note maps it
+#   to `merge_protections_settings.auto_merge_conditions`. The two are mutually
+#   exclusive BY SCHEMA — a configuration that sets both is REJECTED. This file
+#   must therefore never contain both. Do not "restore" `autoqueue` beside it.
+#
+# WHAT IT DOES HERE
+#   With the merge queue enabled, a matching PR is auto-QUEUED; the queue then
+#   routes it, and its own conditions gate the MERGE. `queue_conditions` above
+#   still gate routing, so they are deliberately not duplicated here — which is
+#   why the entry gate stays exactly as written.
+#
+# THE SAFETY PROPERTY, STATED BECAUSE "NO CLICK" SOUNDS LIKE "NO VALIDATION"
+#   It is not. The queue runs CI on the branch it will actually merge and
+#   re-asserts `merge_conditions` there, and branch protection applies to that
+#   branch's head. What is removed is a click that happened AFTER every gate had
+#   already passed — the click was the dominant constraint on merge throughput
+#   (#5215) and it validated nothing.
+#
+#   Every human gate we rely on sits UPSTREAM of this: plan and UX approval,
+#   design and Class-A judgements (e.g. #1026), and the head-bound review
+#   attestation. DORA/Accelerate agrees — trunk-based, small batches, merge
+#   early; reserve human approval for high blast radius, not every low-risk
+#   change.
+merge_protections_settings:
+  auto_merge_conditions: true
+
 pull_request_rules:
   - name: queue ready PRs onto main
     conditions:
