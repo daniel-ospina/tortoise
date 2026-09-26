@@ -226,8 +226,9 @@ class TestMemoryGranularity:
         assert g and "rule text" in g
 
     def test_agent_ops_kinds_in_v2_master_list(self):
-        """PACK_NS: the agent-ops kinds ride the v2 master list's pack_kinds
-        (the S2/S4 prompt vocabulary)."""
+        """#5165: the agent-ops kinds ride the v2 master list's pack_kinds
+        (the S2/S4 prompt vocabulary) because the brief derives them — no
+        hardcoded namespace tuple is consulted."""
         master = v2.build_master_list()
         assert "agent-ops:rule" in master["pack_kinds"]
 
