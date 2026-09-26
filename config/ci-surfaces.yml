@@ -605,6 +605,7 @@ surfaces:
   - test_dry_run_preview.py
   - test_cmux_dispatch.py
   - test_embedder_provision.py
+  - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
@@ -1775,6 +1776,7 @@ durations:
   test_shared_state_imports.py: 0.1
   test_shared_state_monitoring.py: 0.1
   test_shared_state_recovery.py: 0.2
+  test_hermetic_egress_guard.py: 2.0  # #4387: same #3400 flat-default policy as the six above — no CI junit measurement exists for it yet, and leaving it unmapped drops duration coverage below the 90% floor
   test_license_surface_consumer.py: 0.3
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2

@@ -6,10 +6,12 @@ directly (no user-facing tier path in v1). Used by E2E-1/3/4/5/10/11/12/13.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 
+import httpx
 import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -1145,6 +1147,245 @@ def _disable_embedder_autowarmup(monkeypatch):
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
     yield
+
+
+# ── #4387 item 2: hermetic egress BY DESIGN, not by accident of DNS ───────
+#
+# Two product paths build a default httpx client and therefore leave the
+# process the moment SUPABASE_URL names a real host:
+#   * the analytics sink — POST {SUPABASE_URL}/rest/v1/analytics_events
+#     (tortoise/hosted_api.py:20636);
+#   * the JWKS cold pre-warm — GET {SUPABASE_URL}/auth/v1/.well-known/
+#     jwks.json (tortoise/session_auth.py:421, driven from
+#     tortoise/hosted_api.py:858 at TestClient boot).
+# Neither was stubbed suite-wide, so the ~45 files that set SUPABASE_URL +
+# SUPABASE_SERVICE_ROLE_KEY were hermetic only because test.supabase.co /
+# x.supabase.co / testref.supabase.co happen to be NXDOMAIN. A wildcard A
+# record, a resolver that answers with a parking page, or one typo in a
+# fixture URL would turn all of them into live callers at once.
+#
+# The guard patches the two CONCRETE httpx transports — the narrowest seam
+# that still exercises the real request-building code (URL join, headers,
+# JSON encoding). It deliberately does NOT patch the client classes, so tests
+# that install their own `httpx.Client` stub (the recording pattern at
+# tests/test_analytics_write_path_resolution.py:_CapturingClient and
+# tests/test_analytics_fallback_alert.py:_StubClient) keep observing exactly
+# what they observed before. Transport subclasses a test builds directly
+# (httpx.MockTransport, the ASGI transport behind starlette's TestClient,
+# tests/_github_mock.py:MockGitHubTransport) are different classes and are
+# never touched — they are already hermetic.
+#
+# Policy, in order:
+#   1. @pytest.mark.live / @pytest.mark.integration items reach the real
+#      network by design (the #1787 probes, the Resend integration test);
+#      `_hermetic_egress_live_bypass` flips `allow_live` for them.
+#   2. loopback (127.0.0.0/8, ::1, localhost) is delegated to the real
+#      transport — the suite boots local HTTP servers (e.g.
+#      tests/test_supabase_control.py::test_real_client_survives_multiple_queries)
+#      and the hosted e2e suite serves JWKS from 127.0.0.1.
+#   3. the two known test endpoints are served from memory and recorded. The
+#      JWKS stub answers the 503 a missing upstream produces — deliberately
+#      NOT a healthy 200: a canned 200 would flip the process-global
+#      `session_auth._jwks` cache from cold to warm and change every
+#      fail-closed session-auth surface in the suite, and a canned EMPTY 200
+#      would be the exact #2922 misreport ("0 usable keys" during a transport
+#      outage). The stub is deterministic, not a fabricated upstream.
+#   4. anything else raises httpx.ConnectError — the same class blocked egress
+#      produces — and is recorded. It is raised, not test-failing: the #4387
+#      item 3 call sites (Resend / GitHub send paths) swallow transport errors
+#      by design, so blocking them behaves exactly as blocked egress does while
+#      a call site that lets the error escape fails loudly. Stubbing those call
+#      sites is #4387 item 3, not this change.
+_HERMETIC_ANALYTICS_PATH = "/rest/v1/analytics_events"
+_HERMETIC_JWKS_PATH = "/auth/v1/.well-known/jwks.json"
+_HERMETIC_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "[::1]", "localhost"})
+_HERMETIC_NETWORK_MARKERS = ("live", "integration")
+_HERMETIC_CALL_CAP = 2000
+
+_hermetic_logger = logging.getLogger("tortoise.tests.egress")
+
+
+class _HttpxEgressCall:
+    """One request observed at the #4387 transport guard."""
+
+    __slots__ = ("kind", "method", "url", "host", "path", "transport",
+                 "request")
+
+    def __init__(self, kind, request, transport):
+        self.kind = kind
+        self.method = request.method
+        self.url = str(request.url)
+        self.host = request.url.host
+        self.path = request.url.path
+        self.transport = transport
+        self.request = request
+
+    def __repr__(self):  # pragma: no cover — debug aid
+        return f"<{self.kind} {self.method} {self.url} via {self.transport}>"
+
+
+class _HermeticEgress:
+    """Recorder + policy state for the #4387 transport guard."""
+
+    def __init__(self):
+        self.calls = []
+        self.allow_live = False
+        self.recording = False
+
+    def clear(self):
+        self.calls = []
+
+    def _record(self, kind, request, transport):
+        if len(self.calls) < _HERMETIC_CALL_CAP:
+            self.calls.append(_HttpxEgressCall(kind, request, transport))
+
+    @property
+    def analytics_posts(self):
+        return [c for c in self.calls if c.kind == "analytics"]
+
+    @property
+    def jwks_gets(self):
+        return [c for c in self.calls if c.kind == "jwks"]
+
+    @property
+    def blocked(self):
+        return [c for c in self.calls if c.kind == "blocked"]
+
+    @property
+    def loopback(self):
+        return [c for c in self.calls if c.kind == "loopback"]
+
+
+_HERMETIC_EGRESS = _HermeticEgress()
+# `handle_request` is a plain function on the transport class, so this is a
+# METHOD patch, not an instance patch — it covers the default transport AND
+# every proxy mount httpx builds from HTTP(S)_PROXY, which an `_init_transport`
+# seam would miss (the proxy mounts come from `_init_proxy_transport`).
+_ORIGINAL_SYNC_HANDLE_REQUEST = httpx.HTTPTransport.handle_request
+_ORIGINAL_ASYNC_HANDLE_ASYNC_REQUEST = httpx.AsyncHTTPTransport.handle_async_request
+
+
+def _hermetic_is_loopback(host):
+    return bool(host) and (
+        host in _HERMETIC_LOOPBACK_HOSTS
+        or host.startswith("127.")
+        or host.endswith(".localhost"))
+
+
+def _hermetic_canned_response(request):
+    """(kind, response) for an endpoint the suite stubs; (None, None) else."""
+    method = request.method.upper()
+    path = request.url.path
+    if method == "POST" and path.endswith(_HERMETIC_ANALYTICS_PATH):
+        return "analytics", httpx.Response(201, content=b"", request=request)
+    if method == "GET" and path.endswith(_HERMETIC_JWKS_PATH):
+        return "jwks", httpx.Response(
+            503,
+            json={"message": "no JWKS upstream in the hermetic test suite "
+                             "(#4387)"},
+            request=request,
+        )
+    return None, None
+
+
+def _hermetic_blocked(request, transport):
+    message = (
+        "hermetic egress guard (#4387): blocked a real network request to "
+        f"{request.url} from {transport} — the test suite allows only "
+        "loopback and the stubbed analytics/JWKS endpoints. Mark the test "
+        "@pytest.mark.live (or @pytest.mark.integration) if it genuinely "
+        "needs the network."
+    )
+    _HERMETIC_EGRESS._record("blocked", request, transport)
+    _hermetic_logger.warning(message)
+    return httpx.ConnectError(message, request=request)
+
+
+def _hermetic_dispatch_sync(request, transport, delegate):
+    if _HERMETIC_EGRESS.allow_live or _hermetic_is_loopback(request.url.host):
+        if _HERMETIC_EGRESS.recording:
+            _HERMETIC_EGRESS._record("loopback", request, transport)
+        return delegate()
+    kind, response = _hermetic_canned_response(request)
+    if response is not None:
+        _HERMETIC_EGRESS._record(kind, request, transport)
+        return response
+    raise _hermetic_blocked(request, transport)
+
+
+async def _hermetic_dispatch_async(request, transport, delegate):
+    if _HERMETIC_EGRESS.allow_live or _hermetic_is_loopback(request.url.host):
+        if _HERMETIC_EGRESS.recording:
+            _HERMETIC_EGRESS._record("loopback", request, transport)
+        return await delegate()
+    kind, response = _hermetic_canned_response(request)
+    if response is not None:
+        _HERMETIC_EGRESS._record(kind, request, transport)
+        return response
+    raise _hermetic_blocked(request, transport)
+
+
+def _hermetic_handle_request(self, request):
+    return _hermetic_dispatch_sync(
+        request, "httpx.HTTPTransport",
+        lambda: _ORIGINAL_SYNC_HANDLE_REQUEST(self, request))
+
+
+async def _hermetic_handle_async_request(self, request):
+    return await _hermetic_dispatch_async(
+        request, "httpx.AsyncHTTPTransport",
+        lambda: _ORIGINAL_ASYNC_HANDLE_ASYNC_REQUEST(self, request))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_egress_guard():
+    """#4387 item 2: install the process-wide transport guard once.
+
+    Session-scoped and autouse so it is in place before ANY test — including
+    module-scoped `client` fixtures whose TestClient boot fires the JWKS
+    pre-warm. Teardown restores the original transport methods.
+    """
+    mp = pytest.MonkeyPatch()
+    mp.setattr(httpx.HTTPTransport, "handle_request", _hermetic_handle_request)
+    mp.setattr(httpx.AsyncHTTPTransport, "handle_async_request",
+               _hermetic_handle_async_request)
+    yield _HERMETIC_EGRESS
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_egress_live_bypass(request):
+    """Let @pytest.mark.live / @pytest.mark.integration reach the real net.
+
+    Those tests are excluded from the deterministic suite and reach real
+    upstreams by design (the #1787 probes, the Resend integration test).
+    """
+    previous = _HERMETIC_EGRESS.allow_live
+    _HERMETIC_EGRESS.allow_live = any(
+        request.node.get_closest_marker(marker)
+        for marker in _HERMETIC_NETWORK_MARKERS)
+    try:
+        yield
+    finally:
+        _HERMETIC_EGRESS.allow_live = previous
+
+
+@pytest.fixture
+def hermetic_egress():
+    """The recorded #4387 egress interactions, cleared for this test.
+
+    Exposed so a test can assert what the analytics sink actually POSTed (or
+    that a JWKS fetch was answered) now that the transport — not the
+    individual test — owns the stub. The payload-asserting tests that install
+    their own `httpx.Client` stub keep observing their own recorder; they do
+    not need this one.
+    """
+    _HERMETIC_EGRESS.clear()
+    _HERMETIC_EGRESS.recording = True
+    try:
+        yield _HERMETIC_EGRESS
+    finally:
+        _HERMETIC_EGRESS.recording = False
 
 
 # ── #3820 (cycle-2 P1): the analytics-alert channel is OFF for every test ───
