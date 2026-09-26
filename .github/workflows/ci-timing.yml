@@ -62,13 +62,64 @@ jobs:
         # Artifacts may legitimately be absent (older than retention, run
         # cancelled before the log existed). continue-on-error: the measure
         # job then produces step-timing-only data with a missing-log note.
+        #
+        # ⛔ `github-token` IS REQUIRED HERE AND WAS MISSING. The artifacts
+        # belong to the SAMPLED run, not to this one, and
+        # actions/download-artifact@v4 scopes its default credentials to the
+        # CURRENT run — cross-run downloads need an explicit token
+        # (README §"Download Artifacts from other workflow runs"). Without it
+        # the download fails with an auth error that `continue-on-error`
+        # swallows, so the step reported success while fetching nothing: the
+        # sampled run had eight unexpired `pytest-log-*` artifacts and the
+        # generated artifact still recorded `"files": {}` with an all-zero
+        # `counts`, i.e. no per-file durations at all. The workflow already
+        # grants `permissions: actions: read`, so the token is in scope.
+        #
+        # This is with `tools/ci_timing.py --pick-run`: the run SELECTION was
+        # fixed (#3400 / audit F8, PR #3409) and the ARTIFACT FETCH was not.
         id: download
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: pytest-log-*
           run-id: ${{ steps.find.outputs.run_id }}
+          github-token: ${{ github.token }}
           path: logs
+
+      - name: Assert the download matched the sampled run's artifacts
+        # The observability half of the token bug above. `continue-on-error` on
+        # the download is deliberate — artifacts CAN legitimately be absent —
+        # but its cost was that a FAILED download and an ABSENT artifact were
+        # indistinguishable, so a config error survived as five weeks of
+        # "successful" weekly runs each emitting an empty artifact. A step that
+        # infers absence instead of observing it is the same defect family as
+        # the report itself. This distinguishes the two and fails loudly.
+        #
+        # Only meaningful when a run was actually sampled: an empty RUN_ID
+        # already warns in the find step, and failing here would double-report.
+        if: ${{ steps.find.outputs.run_id != '' }}
+        run: |
+          set -euo pipefail
+          # ⛔ `[ -d logs ]` is load-bearing. Without it, an absent logs/ dir
+          # makes `find logs` exit non-zero, and `set -e` + `pipefail` abort the
+          # step BEFORE the echo and the comparison — turning the legitimate
+          # "no artifacts to fetch" case into a hard failure, i.e. the exact
+          # false alarm this step exists to prevent. The step's whole job is to
+          # separate "fetched nothing because the fetch failed" from "nothing to
+          # fetch"; it must not collapse them one layer up.
+          HAVE=0
+          if [ -d logs ]; then
+            HAVE=$(find logs -name '*.log' | wc -l | tr -d ' ')
+          fi
+          WANT=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/${{ steps.find.outputs.run_id }}/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name | startswith("pytest-log-"))] | length')
+          WANT=${WANT:-0}
+          echo "downloaded $HAVE pytest log(s); the sampled run has $WANT pytest-log-* artifact(s)"
+          if [ "$WANT" -gt 0 ] && [ "$HAVE" -eq 0 ]; then
+            echo "::error::the sampled run has $WANT pytest-log-* artifact(s) but none were downloaded — per-file durations would be empty. This is a FETCH failure (cross-run credentials), not an absent artifact. See the github-token note on the download step."
+            exit 1
+          fi
 
       - name: Generate CI timing artifact
         run: |
