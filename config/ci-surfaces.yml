@@ -538,6 +538,13 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #3982: a date-only temporal value anchors to UTC midnight rather than the
+  # reading machine's local midnight (ECMA-262 §21.4.3.2). DB-free — it only
+  # exercises the shared sort-key primitive under a forced TZ, so the fast
+  # `core` lane is the correct home. It guards the primitive that backs both
+  # window coverage and `at_date` queries, so a regression here moves which
+  # facts a point-in-time read can see.
+  - test_3982_date_only_utc.py
   # #2500: guards the pre-#2490 terminal-EP backfill script
   # (`graph-scripts/2500_backfill_terminal_ep_vacuity.py`) AND the canonical
   # terminal predicate it imports from `tortoise/live.py` — both match no

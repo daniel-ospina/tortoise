@@ -6842,12 +6842,18 @@ class TortoiseSDK:
         # guard's agreement boundary IS the read path's contiguity boundary.
         # It normalizes a purely cosmetic encoding difference
         # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
-        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
-        # #3982), so a date-only-vs-offset-aware pair is a real instant
-        # difference off UTC — refused there, accepted on a UTC host. That is
-        # deliberate: `_covers` has the same host-dependence, so a
-        # host-independent verdict here would disagree with the read path.
-        # #3982 owns the decision on date-only semantics.
+        # accepted. Since #3982 it ANCHORS a DATE-ONLY value to UTC midnight
+        # (ECMA-262 §21.4.3.2: with no offset, date-only forms are UTC). So a
+        # date-only value and the SAME day stated as midnight UTC
+        # ("…T00:00:00Z") compare EQUAL, and that pair is ACCEPTED on every
+        # host — the equality does not depend on the reader's zone.
+        # The equality is specific to the midnight-UTC ENCODING, not to the
+        # calendar day: the same date at any other time of day names a
+        # different instant and is still refused, as is any pair on different
+        # days. Those verdicts are now host-INDEPENDENT rather than
+        # host-dependent. The read path consumes the same primitive
+        # (`_covers`), so the guard and the read path continue to agree. A
+        # zone-less date-TIME is unaffected and still reads locally.
         #
         # The guard's PRESENCE predicate is the read path's, not the
         # resolution branch's. `_covers` gates on `vf is not None`, so a
