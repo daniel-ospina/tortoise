@@ -370,11 +370,17 @@ _GUARDED_DIRS = ("tortoise", "graph-scripts")
 #     assert ``registered == presented`` for a loopback redirect URI (after
 #     ``_unsafe_redirect_uri_bytes``); the values are compared, never handed to
 #     a client. Main-added; same class as the entries above.
+#   * ``tortoise/session_indexer.py`` — ``_graph_entity_keywords`` reads the raw
+#     (percent-ENCODED) userinfo ONLY to hand it to ``_redact_exc``, so a client
+#     that echoes the DSN in either form cannot leak it into a WARNING line. The
+#     DECODED pair that reaches ``FalkorDB`` still comes from
+#     ``parse_uri_userinfo`` (#3067).
 _ALLOWED = {
     "tortoise/config.py",
     "graph-scripts/connectivity_gate.py",
     "tortoise/cimd.py",
     "tortoise/oauth.py",
+    "tortoise/session_indexer.py",
 }
 
 # ``tests/`` is excluded wholesale — tests legitimately probe raw ``urlparse``
@@ -754,13 +760,15 @@ def test_session_indexer_forwards_decoded_credentials(monkeypatch):
 def test_session_indexer_lookup_failure_is_logged_not_silent(monkeypatch, caplog):
     """#3067: a failed lookup must not masquerade as "the graph has no entities".
 
-    The injected error carries the credential-bearing URI and the decoded
-    password — the shape a client produces when it echoes the DSN it was
-    handed. An earlier version injected ``"Authentication required."``, a
-    message with no credential in it, so ``assert "p@ss" not in caplog.text``
-    could not fail even if the logger leaked; the redaction assertions below
-    are now capable of failing (verified by reverting ``_redact_exc`` in
-    ``session_indexer`` to log the raw exception).
+    The injected error carries the credential-bearing URI, the decoded password,
+    and — separately — the percent-encoded userinfo fragment with no ``://``
+    before it, which ``redact_error``'s span regex cannot reach. That is the
+    shape a client produces when it echoes the DSN it was handed. An earlier
+    version injected ``"Authentication required."``, a message with no
+    credential in it, so ``assert "p@ss" not in caplog.text`` could not fail
+    even if the logger leaked; the redaction assertions below are now capable of
+    failing (verified by reverting ``_redact_exc`` in ``session_indexer`` to log
+    the raw exception).
     """
     import falkordb
     import redis
@@ -770,10 +778,14 @@ def test_session_indexer_lookup_failure_is_logged_not_silent(monkeypatch, caplog
     uri = _uri("p@ss", user="admin")
     monkeypatch.setenv("TORTOISE_DB_URI", uri)
     monkeypatch.setattr(si, "_graph_db", None)
+    # Two shapes at once: the full URI (userinfo inside a ``://…@`` span, which
+    # ``redact_error`` masks) and the bare ``user:password@host`` fragment,
+    # which has no ``://`` before it and so escapes that span entirely.
     monkeypatch.setattr(
         falkordb, "FalkorDB",
         _fake_falkordb({}, error=redis.exceptions.AuthenticationError(
-            f"Authentication required for {uri} (user=admin password=p@ss)")))
+            f"Authentication required for {uri} (user=admin password=p@ss; "
+            f"userinfo=admin:p%40ss@db.example.com:6379)")))
 
     with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
         assert si._graph_entity_keywords("anything") == []
@@ -781,9 +793,43 @@ def test_session_indexer_lookup_failure_is_logged_not_silent(monkeypatch, caplog
     assert "AuthenticationError" in caplog.text
     assert "db.example.com" in caplog.text
     # A credential must never reach the log line — neither the percent-escaped
-    # form carried by the URI nor the decoded form the client may echo.
+    # form (inside the URI span AND bare outside it) nor the decoded form the
+    # client may echo.
     assert "p%40ss" not in caplog.text
     assert "p@ss" not in caplog.text
+
+
+def test_redact_exc_scrubs_both_uri_credential_forms():
+    r"""#3067 (P2): the scrub must cover the ENCODED form outside a URI span.
+
+    ``redact_error`` only masks ``://[^@\s]*@``; a client that echoes the
+    credentials it was handed prints them with no scheme in front, and in
+    either the decoded (``p@ss``) or the percent-encoded (``p%40ss``) form.
+    """
+    from tortoise.session_indexer import _redact_exc
+
+    secrets = ("admin", "p@ss", "admin", "p%40ss")
+    assert _redact_exc(
+        Exception("auth failed password=p%40ss"), secrets) == (
+        "Exception: auth failed password=***")
+    assert _redact_exc(
+        Exception("admin:p%40ss@db.example.com:6379"), secrets) == (
+        "Exception: ***:***@db.example.com:6379")
+    # Idempotent: scrubbing an already-scrubbed string does not re-expand the mask.
+    assert _redact_exc(
+        Exception("auth failed password=***"), secrets) == (
+        "Exception: auth failed password=***")
+
+
+def test_redact_exc_short_secrets_do_not_mangle_the_class_name():
+    """#3067 (P2): a 1-2 char secret is not scrubbed — it would destroy the
+    diagnostic (``PermissionError`` -> ``P***rmissionError``) and, if all
+    ``*``, re-expand the mask on a second pass."""
+    from tortoise.session_indexer import _redact_exc
+
+    msg = _redact_exc(PermissionError("Authentication required"), ("e", "x"))
+    assert msg == "PermissionError: Authentication required"
+    assert _redact_exc(PermissionError("boom"), ("**",)) == "PermissionError: boom"
 
 
 def test_session_indexer_failure_log_names_real_endpoint_on_cache_hit(

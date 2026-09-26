@@ -142,19 +142,30 @@ def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
 # Cached FalkorDB connection for graph entity lookups
 _graph_db = None
 
+# A literal shorter than this cannot be scrubbed safely: the scrub is a
+# literal replace, so a 1-2 char value mangles far more diagnostic than it
+# protects (``AuthenticationError`` -> ``Auth***nticationError``, breaking the
+# class name the log line is read for), and a 2-char all-``*`` value re-expands
+# the mask on a second pass. Three characters keeps the scrub idempotent and
+# the class name intact.
+_MIN_SCRUB_LEN = 3
+
+
 def _redact_exc(e: BaseException,
                 secrets: tuple[str | None, ...]) -> str:
-    """``redact_error`` plus a scrub of the URI's known decoded credentials.
+    """``redact_error`` plus a scrub of the URI's known credentials.
 
     ``redact_error`` masks a ``://userinfo@`` span, but a client that echoes
-    the credentials it was handed may print the DECODED password (``p@ss``
-    from a ``p%40ss`` URI) outside that span — and both values are known to
-    the caller, so scrub them explicitly (#3067).
+    the credentials it was handed may print them OUTSIDE that span — in either
+    the DECODED (``p@ss`` from a ``p%40ss`` URI) or the PERCENT-ENCODED
+    (``p%40ss``) form the URI carried. Both are known to the caller, so scrub
+    every form explicitly (#3067). Values shorter than ``_MIN_SCRUB_LEN`` are
+    skipped (see the constant above).
     """
     from tortoise.security import redact_error
     msg = redact_error(e)
     for secret in secrets:
-        if secret:
+        if secret and len(secret) >= _MIN_SCRUB_LEN:
             msg = msg.replace(secret, '***')
     return msg
 
@@ -179,6 +190,10 @@ def _graph_entity_keywords(content: str) -> list[str]:
     port: int | None = None
     username: str | None = None
     password: str | None = None
+    # The ENCODED forms, resolved before the try so the handler below never
+    # NameErrors on an early failure (a missing import, a malformed URI).
+    raw_username: str | None = None
+    raw_password: str | None = None
     try:
         uri = os.environ.get('TORTOISE_DB_URI', '')
         if not uri:
@@ -189,6 +204,10 @@ def _graph_entity_keywords(content: str) -> list[str]:
         parsed = urlparse(uri)
         host = parsed.hostname or 'localhost'
         port = parsed.port or 16379
+        # ``parsed.username``/``.password`` are the percent-ENCODED forms;
+        # ``parse_uri_userinfo`` returns the DECODED pair. Both are credentials
+        # the caller holds, so both are handed to the redactor.
+        raw_username, raw_password = parsed.username, parsed.password
         username, password = parse_uri_userinfo(uri)
         if _graph_db is None:
             from falkordb import FalkorDB
@@ -213,7 +232,8 @@ def _graph_entity_keywords(content: str) -> list[str]:
         logger.warning(
             "graph entity keyword lookup failed at %s:%s — %s; "
             "graph entities omitted from keywords",
-            host, port, _redact_exc(e, (username, password)))
+            host, port,
+            _redact_exc(e, (username, password, raw_username, raw_password)))
     return matches
 
 
