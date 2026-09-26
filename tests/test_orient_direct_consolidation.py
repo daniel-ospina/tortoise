@@ -262,10 +262,12 @@ class TestOverviewDefaultSummary:
         assert len(tortoise_overview(section="sources")) == 1
         # `tags`, `pointkinds`, `structure_check` — see
         # TestOverviewBoundedSections.
-        assert combined["tags"] == {"total": 2, "with_points": 2,
+        assert combined["tags"] == {"total": 2,
                                     "by_name": {"t1": 1, "t2": 1}}
-        assert combined["pointkinds"]["total"] == \
-            len(tortoise_overview(section="pointkinds"))
+        # `pointkinds` folds in POINTS (magnitude), so `total` is the summed
+        # Point count, not the number of kinds in the section row list.
+        assert combined["pointkinds"]["total"] == sum(
+            r["count"] for r in tortoise_overview(section="pointkinds"))
         assert combined["structure_check"]["total"] == \
             len(tortoise_overview(section="structure_check"))
 
@@ -329,9 +331,10 @@ class TestOverviewSourcesSummary:
              "points": 0} for i in range(500)])
         summary = tortoise_overview()["sources"]
         assert summary["total"] == 500
-        assert len(summary["by_kind"]) == _OVERVIEW_SUMMARY_TOP + 1
-        assert summary["by_kind"]["other"] == 500 - _OVERVIEW_SUMMARY_TOP
-        assert sum(summary["by_kind"].values()) == 500
+        # #3510 P2: the remainder is a SIBLING field, never a key in the map
+        assert len(summary["by_kind"]) == _OVERVIEW_SUMMARY_TOP
+        assert summary["other"] == 500 - _OVERVIEW_SUMMARY_TOP
+        assert sum(summary["by_kind"].values()) + summary["other"] == 500
         assert len(json.dumps(summary)) < 900
 
     def test_sources_summary_passes_through_an_error_envelope(
@@ -385,18 +388,23 @@ class TestOverviewBoundedSections:
             default = tortoise_overview()
             summary = default[section]
             sizes[n] = len(json.dumps(summary))
+            # each row's magnitude is 1 here, so the magnitude-unit total is n
             assert summary["total"] == n
-            assert summary["with_points"] == n
-            # the fold is a COUNT of rows (a partition), never a list of rows
+            # a magnitude unit carries no row-count field beside the sum
+            assert "with_points" not in summary
+            # the fold is a count in the section's own unit (a partition),
+            # never a list of rows
             assert isinstance(summary[out_field], dict)
             assert all(isinstance(v, int) for v in summary[out_field].values())
-            assert sum(summary[out_field].values()) == n
-            # the group map is capped at top-N (+ "other") whatever n is
+            # the group map is capped at top-N whatever n is; the remainder is
+            # the sibling `other`, in the SAME unit
             if n > _OVERVIEW_SUMMARY_TOP:
-                assert len(summary[out_field]) == _OVERVIEW_SUMMARY_TOP + 1
-                assert summary[out_field]["other"] == n - _OVERVIEW_SUMMARY_TOP
+                assert len(summary[out_field]) == _OVERVIEW_SUMMARY_TOP
+                assert summary["other"] == n - _OVERVIEW_SUMMARY_TOP
             else:
                 assert len(summary[out_field]) == n
+                assert "other" not in summary
+            assert sum(summary[out_field].values()) + summary.get("other", 0) == n
             # the explicit opt-in is UNCHANGED — all rows, still unbounded
             assert len(tortoise_overview(section=section)) == n
         # 50,000 rows is still ONE top-N fold, not 50,000 rows: the whole
@@ -419,9 +427,9 @@ class TestOverviewBoundedSections:
             for i in range(500)])
         summary = tortoise_overview()[section]
         assert summary["total"] == 500
-        assert len(summary[out_field]) == _OVERVIEW_SUMMARY_TOP + 1
-        assert summary[out_field]["other"] == 500 - _OVERVIEW_SUMMARY_TOP
-        assert sum(summary[out_field].values()) == 500
+        assert len(summary[out_field]) == _OVERVIEW_SUMMARY_TOP
+        assert summary["other"] == 500 - _OVERVIEW_SUMMARY_TOP
+        assert sum(summary[out_field].values()) + summary["other"] == 500
 
     def test_tags_rank_the_top_n_by_usage(self, sdk, mcp_sdk, monkeypatch):
         """A tag name is its own group, so the fold must rank by the tag's
@@ -433,11 +441,81 @@ class TestOverviewBoundedSections:
         rows += [{"name": f"rare-{i}", "count": 1} for i in range(30)]
         monkeypatch.setattr(mcp_mod, "tortoise_list_tags", lambda: rows)
         summary = tortoise_overview()["tags"]
-        assert summary["total"] == _OVERVIEW_SUMMARY_TOP + 30
+        # magnitude unit: each popular tag keeps its own count (100..81), and
+        # `total` sums those magnitudes — it is not a count of tag names
+        assert summary["total"] == sum(range(81, 101)) + 30
         assert "rare-0" not in summary["by_name"]
-        assert summary["by_name"]["popular-00"] == 1
-        assert summary["by_name"]["other"] == 30
+        assert summary["by_name"]["popular-00"] == 100
+        assert summary["other"] == 30
+        assert sum(summary["by_name"].values()) + summary["other"] == \
+            summary["total"]
+
+    def test_tags_summary_reports_the_tag_magnitude_not_its_row_count(
+            self, sdk, mcp_sdk, monkeypatch):
+        """#3510 P1: a group is ONE tag row, so a row count would be a literal
+        1 for every group. The fold must report the tag's count of tagged
+        Points and keep `total` in that same unit."""
+        import tortoise.mcp_server as mcp_mod
+        from tortoise.mcp_server import tortoise_overview
+        monkeypatch.setattr(mcp_mod, "tortoise_list_tags", lambda: [
+            {"name": "hot", "count": 50}, {"name": "cold", "count": 30}])
+        summary = tortoise_overview()["tags"]
+        assert summary["by_name"] == {"hot": 50, "cold": 30}
+        assert summary["total"] == 80
         assert sum(summary["by_name"].values()) == summary["total"]
+
+    def test_pointkinds_summary_reports_point_counts_not_row_counts(
+            self, sdk, mcp_sdk, monkeypatch):
+        """#3510 P1: `pointkinds` rows are one per kind, so a row count is 1 for
+        every group; the summary must carry each kind's Point count."""
+        import tortoise.mcp_server as mcp_mod
+        from tortoise.mcp_server import tortoise_overview
+        monkeypatch.setattr(mcp_mod, "tortoise_list_pointkinds", lambda: [
+            {"kind": "statement", "count": 1234, "pack": ""},
+            {"kind": "decision", "count": 7, "pack": ""}])
+        summary = tortoise_overview()["pointkinds"]
+        assert summary["by_kind"] == {"statement": 1234, "decision": 7}
+        assert summary["total"] == 1241
+        assert sum(summary["by_kind"].values()) == summary["total"]
+
+    def test_overview_tag_magnitude_agrees_with_list_tags(self, sdk, mcp_sdk):
+        """On a live graph, overview()["tags"] must AGREE with list_tags()' own
+        magnitude — not report 1 per tag."""
+        from tortoise.mcp_server import tortoise_list_tags, tortoise_overview
+        for i in range(5):
+            sdk.create_point("statement", f"tagged {i}", tags=["hot"])
+        sdk.create_point("statement", "untagged")
+        legacy = {r["name"]: r["count"] for r in tortoise_list_tags()}
+        summary = tortoise_overview()["tags"]
+        assert legacy["hot"] == 5
+        assert summary["by_name"]["hot"] == legacy["hot"]
+        assert summary["total"] == sum(legacy.values())
+
+    def test_real_group_named_other_does_not_collide_with_the_remainder(
+            self, sdk, mcp_sdk, monkeypatch):
+        """#3510 P2: `sourceKind` is free-form, so a real kind named "other"
+        must stay a group of its own, never merged with the folded remainder."""
+        import tortoise.mcp_server as mcp_mod
+        from tortoise.mcp_server import (
+            _OVERVIEW_SUMMARY_OTHER,
+            _OVERVIEW_SUMMARY_TOP,
+            tortoise_overview,
+        )
+        rows = [{"url": f"https://example.com/o{i}", "sourceKind": "other",
+                 "points": 0} for i in range(3)]
+        distinct = _OVERVIEW_SUMMARY_TOP + 5
+        rows += [{"url": f"https://example.com/{i}", "sourceKind": f"k{i}",
+                  "points": 0} for i in range(distinct)]
+        monkeypatch.setattr(mcp_mod, "tortoise_list_sources", lambda: rows)
+        summary = tortoise_overview()["sources"]
+        # the 3 real rows are their own group — NOT inflated by the remainder
+        assert summary["by_kind"]["other"] == 3
+        # ranking keeps "other" (3 rows) plus 19 one-row kinds; the rest fold
+        assert summary[_OVERVIEW_SUMMARY_OTHER] == \
+            distinct - (_OVERVIEW_SUMMARY_TOP - 1)
+        assert summary["total"] == len(rows)
+        assert sum(summary["by_kind"].values()) + summary["other"] == \
+            summary["total"]
 
     def test_structure_check_summary_is_counts_by_rule(
             self, sdk, mcp_sdk, monkeypatch):
