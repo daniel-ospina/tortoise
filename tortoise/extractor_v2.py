@@ -6924,14 +6924,19 @@ def _classify_error(e: BaseException) -> str:
     carries the provider's key-limit signature is the SAME condition as a
     402 (this key's budget is spent), so it records ``fatal_402_billing`` —
     the class ``EXTRACTION_KILLER_CENSUS_CLASSES`` gates on — instead of
-    ``fatal_403_forbidden``. Without it a run aborted by an exhausted key
-    was counted under a class the extraction-killer gate does not read, so
-    the gate that exists to stop a billing-limited run from certifying never
-    fired (#4860: 7/7 captures aborted on a key-limit 403). The retry/abort
-    decision is unchanged — both classes are FATAL — and a signature-less
-    403 (a genuine permission failure) keeps ``fatal_403_forbidden``, so the
-    credential-vs-budget distinction survives. The key-limit test itself is
-    ``_is_key_limit_error`` above (its breadth caveat included).
+    ``fatal_403_forbidden``. Without it the billing signal was INVISIBLE on
+    the shape that matters: a key-limited question that still extracted SOME
+    points (an embed list present, so ``empty_embed_list`` is never bumped)
+    carried only ``fatal_403_forbidden`` — a class the killer gate does not
+    read — so the gate did not fire on the billing event and the run could
+    certify. (A FULLY aborted session additionally bumps ``empty_embed_list``,
+    which DOES fire the gate — so the carve-out's value is the partial shape,
+    not the abort. #4860: 7/7 captures aborted on a key-limit 403.) The
+    retry/abort decision is unchanged — both classes are FATAL — and a
+    signature-less 403 (a genuine permission failure) keeps
+    ``fatal_403_forbidden``, so the credential-vs-budget distinction survives.
+    The key-limit test itself is ``_is_key_limit_error`` above (its breadth
+    caveat included).
 
     The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``.
 
