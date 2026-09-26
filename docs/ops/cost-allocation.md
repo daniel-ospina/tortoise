@@ -154,11 +154,14 @@ Three read paths, no dashboard:
    production-readable path today (nothing scrapes `/metrics` in production).
    `attempted_window` is the window this refresh evaluated; `published_window`
    is the window the values READ BACK from the metric belong to. The two are
-   equal whenever the last successful publish is in the SAME window; they can
-   differ on an `unavailable` refresh only when the attempt falls in a LATER
-   window (the metric still carries the last-known-good window then). Naming
-   both means a reader can never attribute a stale figure to the attempted
-   period. The `published_cents` figure is read
+   equal whenever the last successful publish is in the SAME window; they
+   differ whenever the retained window differs from the attempted one —
+   including an `unavailable` refresh whose attempt falls in a LATER window
+   (the metric still carries the last-known-good window then), and the
+   never-published case where nothing has ever been published and
+   `published_window=unknown..unknown`. Naming both means a reader can never
+   attribute a stale figure to the attempted period. The `published_cents`
+   figure is read
    back from the METRIC itself (`allocation_by_org()`), not from the in-memory
    shares, so the reconciliation warning compares what was actually published
    against the declared totals and can fire.
@@ -203,10 +206,10 @@ declared total is 0 (unconfigured) or no org carries weight.
   (`_reset_for_tests` / `clear_team_cost`). A test asserts this on the METRIC,
   not on a function-name substring. The guard matches syntactic
   `Name`/`Attribute` occurrences of `TEAM_COST` and its mutators **anywhere
-  inside a `def`/`async def` subtree in `tortoise/*.py` outside
-  `monitoring.py`** — including a `lambda` or a class nested inside a function
-  body, which `ast.walk` inspects and attributes to that function — and every
-  such reference must sit inside `publish` or the test seam. What it does NOT
-  match is module-level and top-level class-body references, aliased imports,
-  and `getattr` string lookups; `monitoring.py` (the definitions) is skipped
-  wholesale.
+  inside a `def`/`async def` subtree in `tortoise/**/*.py` outside every file
+  named `monitoring.py`** — including a `lambda` or a class nested inside a
+  function body, which `ast.walk` inspects and attributes to that function —
+  and every such reference must sit inside `publish` or the test seam. What it
+  does NOT match is module-level and top-level class-body references, aliased
+  imports, and `getattr` string lookups; every file named `monitoring.py` (it
+  holds the definitions) is skipped wholesale.
