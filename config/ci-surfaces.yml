@@ -626,6 +626,7 @@ surfaces:
   # hand count. Same surface as its siblings test_merge_throughput.py /
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
+  - test_registry_integrity.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
