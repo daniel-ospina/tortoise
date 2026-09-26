@@ -2434,7 +2434,12 @@ class _EntityHandlers:
         full = dict(props)
         skip = self._META_KEYS | self._EVENT_HANDLED
         for k, v in inner.items():
-            if k not in skip and v is not None and k not in full:
+            # #2962: this inline site builds its own extras, so it must apply
+            # the SAME `_is_persistable_prop_value` filter `_persist_extra_props`
+            # uses — a dict/nested-valued unknown prop would otherwise reach
+            # the engine and crash `SET e += $props` (no crash, dropped).
+            if k not in skip and v is not None and k not in full \
+                    and _is_persistable_prop_value(v):
                 full[k] = v
         # (1) MERGE candidate — creates if absent, no-op if present (ON CREATE
         # SET is the supported directive; the props NEVER land on a colliding
