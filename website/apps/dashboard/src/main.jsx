@@ -101,6 +101,12 @@ import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus } from './d
 // #3485 remedy: 401 means signed out (may bounce), 503 means retryable
 // (render an error, NEVER a redirect).
 import { readSession, sessionGateAction } from './sessionGate.js'
+// #3930: the bounce carried the search and hash but never the PATHNAME, so an
+// unauthenticated deep link (/team?session_id=… — the Stripe return;
+// /welcome?reset=… — the recovery panel) was returned to the app root. Pure,
+// `node --test` unit-tested (authBounce.test.js), and mirrored by the /auth
+// page's return-to allowlist.
+import { authBounceTarget } from './authBounce.js'
 
 // #3501: the dashboard talks to its OWN origin. `functions/api/v1/[[path]].ts`
 // resolves the `__Host-session` cookie server-side and attaches the Bearer to
@@ -773,7 +779,13 @@ const secureAttr = () => (isLocal() ? '' : '; Secure')
 // be forwarded from here — under the BFF no fragment carries a credential, and
 // forwarding one would reintroduce the #1566 drop/loop.
 function bounceToAuth(search = "", hash = "") {
-  window.location.replace("/auth" + search + hash)
+  // #3930: carry the requested pathname (+ query) as /auth's `next`, so a
+  // signed-out deep link returns to the page asked for. Path-only, same-origin
+  // by construction — `authBounceTarget` reads this document's own pathname and
+  // the /auth page re-validates it against the mirrored allowlist.
+  window.location.replace(
+    authBounceTarget({ pathname: window.location.pathname, search, errorHash: hash }),
+  )
 }
 
 

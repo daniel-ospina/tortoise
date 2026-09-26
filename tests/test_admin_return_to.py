@@ -42,7 +42,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import pytest
 
@@ -51,6 +51,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SIGNUP = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "signup.html"
 # #4171: the gate moved to the app origin with the console itself.
 GATE = REPO_ROOT / "website" / "apps" / "dashboard" / "functions" / "admin" / "[[path]].ts"
+# #3930: the SPA's half of the return-to contract (main.jsx's bounceToAuth
+# delegates to this module) and the /welcome producer.
+APP_PROJECT = REPO_ROOT / "website" / "apps" / "dashboard"
+SPA_BOUNCE_JS = APP_PROJECT / "src" / "authBounce.js"
+WELCOME_FN = APP_PROJECT / "functions" / "welcome.ts"
 
 ORIGIN = "https://tortoise.premiselabs.co"
 APP_ORIGIN = "https://app.premiselabs.co"
@@ -797,3 +802,177 @@ def test_vite_base_is_the_console_public_path() -> None:
         "gate Function mounts the console at. A relative base re-breaks the "
         "extensionless /admin entry path (#3952)"
     )
+
+
+# ── #3930 — the app-origin bounce must carry the requested PATHNAME ────────
+#
+# #3080 pinned the /admin return-to. #3930 is the generalisation: an
+# unauthenticated deep link to ANY real app pathname must survive the bounce.
+# The bounce is emitted in two independent places — the dashboard SPA's
+# `bounceToAuth` (now delegating to `src/authBounce.js`) and the server
+# Functions (`welcome.ts`; the /admin gate above) — and all of them land on the
+# SAME consumer: the early return-to block in signup.html.
+#
+# These tests therefore join the REAL producer to the REAL consumer rather than
+# re-implementing either: the SPA target is computed by importing the shipped
+# module through node, and the consumer is the executed early block.
+
+# #3930: the app origin's real pathnames. /welcome and /team are single pages;
+# /admin is the console subtree the gate serves at any depth.
+_APP_RETURN_PATHS = [
+    "/team",
+    "/team/",
+    "/welcome",
+    "/welcome/",
+    "/admin",
+    "/admin/",
+    "/admin/blog",
+    "/admin/sub/deep/path",
+]
+
+
+def _spa_bounce_target(pathname: str, search: str) -> str:
+    """Run the SHIPPED SPA bounce for (pathname, search).
+
+    Imports `website/apps/dashboard/src/authBounce.js` through node — the module
+    `main.jsx::bounceToAuth` delegates to — so this is the producer itself, not a
+    Python restatement of it. A change to the module's rules reds these tests.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    script = (
+        "import { authBounceTarget } from " + json.dumps(SPA_BOUNCE_JS.as_uri()) + ";"
+        "process.stdout.write(authBounceTarget({ pathname: " + json.dumps(pathname)
+        + ", search: " + json.dumps(search) + ", errorHash: '' }));"
+    )
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"the SPA bounce module failed to load:\n{proc.stderr}"
+    return proc.stdout
+
+
+def test_app_return_to_survives_the_bounce() -> None:
+    """Every real app pathname is honoured, and its query rides along.
+
+    The query is load-bearing: `/team?session_id=…` is Stripe's return handoff
+    (the SPA reads it from `location.search`) and `/welcome?reset=…` names the
+    recovery panel.
+    """
+    cases = [
+        ("/team", "?session_id=abc", "/team?session_id=abc"),
+        ("/team/", "", "/team/"),
+        ("/welcome", "?reset=1", "/welcome?reset=1"),
+        ("/welcome/", "", "/welcome/"),
+        ("/admin/blog", "", "/admin/blog"),
+        ("/admin/sub/deep/path", "", "/admin/sub/deep/path"),
+    ]
+    rows = _run({"early": [["?next=" + quote(want, safe=""), ""] for _, _, want in cases]})["early"]
+    for (pathname, search, want), row in zip(cases, rows, strict=True):
+        assert row["ret"] == want, f"{pathname}{search} → ret {row['ret']!r}, want {want!r}"
+        assert row["base"] == ORIGIN + want, row
+
+
+def test_spa_producer_reaches_the_auth_page_end_to_end() -> None:
+    """The SPA's REAL bounce → the /auth page's REAL consumer → post-login nav.
+
+    Both halves are executed: the target comes from importing the shipped
+    `authBounce.js` through node, and the destination comes from executing
+    signup.html's early allowlist plus its real `claimRedirectTarget` /
+    `oauthNextPath`. A drift in either half (the #3930 symptom: a return-to
+    emitted but dropped) reds this test.
+    """
+    cases = [
+        ("/team", "?session_id=abc", "/team?session_id=abc"),
+        ("/welcome", "?reset=1", "/welcome?reset=1"),
+        ("/admin/blog", "", "/admin/blog"),
+    ]
+    targets = [_spa_bounce_target(pathname, search) for pathname, search, _ in cases]
+    for (pathname, _, _), target in zip(cases, targets, strict=True):
+        assert target.startswith("/auth"), f"{pathname}: the bounce is not a same-origin /auth target: {target}"
+        # A producer that named an ORIGIN would produce an absolute URL here.
+        assert "//" not in target.split("next=")[0] or target.startswith("/auth?"), target
+
+    searches = [t[len("/auth"):] for t in targets]
+    rows = _run({"early": [[s, ""] for s in searches]})["early"]
+    rets = [row["ret"] for row in rows]
+    destinations = _run({"claim": [[ret, ""] for ret in rets]})["claim"]
+
+    for (pathname, search, want), ret, dest in zip(cases, rets, destinations, strict=True):
+        assert ret == want, f"the /auth page dropped the SPA's return-to: {pathname}{search} → {ret!r}"
+        assert dest["nav"] == ORIGIN + want, f"post-login nav: {dest['nav']!r}, want {ORIGIN + want!r}"
+        assert dest["oauth"] == want, f"the OAuth next: {dest['oauth']!r}, want {want!r}"
+
+
+def test_welcome_producer_next_is_accepted_by_the_auth_page() -> None:
+    """`welcome.ts`'s REAL emitted return-to must survive the consumer.
+
+    The anonymous bounce in `functions/welcome.ts` is
+    `/auth?next=<encodeURIComponent(url.pathname + url.search)>&stale=1`. The
+    allowlist used to be /admin-only, so that value was emitted and then dropped
+    — the visitor landed on the app root instead of the page they asked for.
+    Pinning the producer's expression (not just its output) is what keeps this
+    pair honest: a producer that started sending only the pathname would
+    silently lose `/welcome?reset=1`.
+    """
+    src = WELCOME_FN.read_text(encoding="utf-8")
+    m = re.search(r"`/auth\?next=\$\{encodeURIComponent\(([^)]*)\)\}&stale=1`", src)
+    assert m, "welcome.ts's anonymous bounce shape changed — update this harness"
+    assert m.group(1) == "url.pathname + url.search", (
+        f"the welcome bounce no longer carries pathname+search: {m.group(1)!r}"
+    )
+    for path, search, want in (
+        ("/welcome", "?reset=1", "/welcome?reset=1"),
+        ("/welcome", "", "/welcome"),
+    ):
+        search_str = "?next=" + quote(path + search, safe="") + "&stale=1"
+        row = _run({"early": [[search_str, ""]]})["early"][0]
+        assert row["ret"] == want, f"welcome.ts emitted {want!r} and the /auth page read {row['ret']!r}"
+        assert row["base"] == ORIGIN + want, row
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        "?next=/team/x",              # a single page owns no sub-paths
+        "?next=/welcome/x",
+        "?next=/welcomex",            # prefix confusion
+        "?next=/administrator",
+        "?next=/",                    # the app root needs no return-to
+        "?next=/auth",                # a return-to to /auth would loop
+        "?next=/blog",                # off the allowlist
+        "?next=//evil.com",           # protocol-relative
+        "?next=/..//evil.com",        # resolves same-origin, serialises to //
+        "?next=/team/..//evil.com",
+        "?next=/team\\@evil.com",      # backslash authority trick
+        "?next=/%09/evil.example",    # TAB — WHATWG strips it, so it survives a leading-/ check
+        "?next=/team%0D%0ASet-Cookie:x=1",  # CRLF into the Location header
+        "?next=/admin/../blog",       # dot-segment escape out of the allowlist
+    ],
+)
+def test_app_hostile_or_off_allowlist_next_is_ignored(search: str) -> None:
+    """Anything outside the app allowlist leaves the default (the app root) alone.
+
+    These are the paths a forged `?next=` can take. None may change the
+    destination origin, and none may name a non-route on this origin.
+    """
+    (row,) = _run({"early": [[search, ""]]})["early"]
+    assert row["base"] is None, f"unsafe app return-to honoured: {search!r} → {row['base']!r}"
+    assert row["ret"] is None, f"unsafe app return-to recorded: {search!r}"
+
+
+def test_dot_segments_resolving_into_the_allowlist_are_accepted_same_origin() -> None:
+    """`..` that normalises to an ALLOWLISTED route is fine — it cannot escape.
+
+    The consumer resolves before matching, so `/welcome/../team` becomes `/team`
+    (same origin, a real route). Only a resolution that leaves the allowlist —
+    or the origin — is dropped. Pinned so the reject-side tests above are not
+    read as "any dot-segment is hostile".
+    """
+    (row,) = _run({"early": [["?next=/welcome/../team", ""]]})["early"]
+    assert row["ret"] == "/team", row
+    assert row["base"] == ORIGIN + "/team", row

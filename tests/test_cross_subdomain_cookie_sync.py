@@ -343,11 +343,16 @@ def test_auth_bounce_preserves_search_params() -> None:
     OAuth-error banner reads ?error=... — plus the #1909 error fragment.
 
     #4054 retarget: the bridge's global `window.bounceToAuth` is gone; main.jsx
-    now owns a local same-origin bounce (`window.location.replace("/auth" +
-    search + hash)`), and installs no cross-origin fallback. The
-    param-preservation intent is unchanged, so it is asserted on the two call
+    now owns a local same-origin bounce, and installs no cross-origin fallback.
+    The param-preservation intent is unchanged, so it is asserted on the two call
     sites that carry it; the old degraded `https://tortoise.premiselabs.co/auth`
     fallback assertion is REMOVED because that path no longer exists.
+
+    #3930 retarget: the destination literal moved into the pure `authBounceTarget`
+    module (which also carries the requested PATHNAME as `/auth`'s `next`). The
+    target is still a same-origin `/auth` navigation; the assertion follows the
+    shape so a revert of either half reds this test. `authBounce.test.js` and
+    `test_admin_return_to.py` own the behaviour.
     """
     dash = _read(DASHBOARD)
     # Both bounce sites (the 401-provision path and the mount gate) pass the
@@ -357,11 +362,16 @@ def test_auth_bounce_preserves_search_params() -> None:
         "(both the 401-provision and the mount-gate bounce)"
     )
     # The bounce target is same-origin now — the cross-origin bridge hop (and its
-    # separate fallback) is gone.
-    assert 'window.location.replace("/auth" + search + hash)' in dash, (
+    # separate fallback) is gone. It is built by the pure module from THIS
+    # document's pathname, so the destination can never name another origin.
+    norm = dash.replace('"', "'")
+    assert (
+        "authBounceTarget({ pathname: window.location.pathname, search, errorHash: hash })" in norm
+    ), (
         "the bounce must be the same-origin /auth navigation that consumes the "
-        "preserved search/hash"
+        "preserved search/hash (and, since #3930, the pathname)"
     )
+    assert "'/auth' + search" not in norm, "the pathname-dropping destination is back (#3930)"
 
 
 def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
