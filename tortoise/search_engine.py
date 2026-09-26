@@ -335,6 +335,29 @@ def search_provenance_enabled() -> bool:
     return is_truthy(os.environ.get(SEARCH_PROVENANCE_FLAG_ENV))
 
 
+def currency_status(remembered: str, current: str) -> str:
+    """#5199 — the currency of a ``sourceVersion`` note, as a **READ**.
+
+    ``current``  the note names the version the source holds NOW
+    ``stale``    it names a DIFFERENT version — the thing built from it may be
+                 out of date
+    ``unknown``  nothing was noted, or the source has no version. This is the
+                 HONEST answer and is deliberately NOT a synonym for ``current``:
+                 an absent note must never read as fresh, because "no recorded
+                 version" silently rendering as "up to date" is the precise
+                 false-current the note exists to expose.
+
+    A pure function of two strings, never a stored status field: the #5199
+    ruling keeps currency a read, so a source edit needs no backfill and no two
+    readers can disagree about the same link. The comparison is exact string
+    equality — the versions are content hashes, so there is no ordering to get
+    wrong and no "newer" to infer.
+    """
+    if not remembered or not current:
+        return "unknown"
+    return "current" if remembered == current else "stale"
+
+
 @dataclass
 class SearchResult:
     id: str
@@ -383,6 +406,13 @@ class SearchResult:
     # byte-identical to pre-change output.
     source_ref: Any = None  # Point.extractedFrom — the Source/document link
     captured_at: str = ""   # Point.createdAt — when the fact entered memory
+    # #5199 — the version note, read (never stored). ``source_version`` is the
+    # version this hit's link recorded it was read at; ``source_current_version``
+    # is the source's version now; ``to_dict`` derives ``currency`` from the pair
+    # via :func:`currency_status`. Additive and flag-gated like the two fields
+    # above: emitted only when present, so a default call is byte-identical.
+    source_version: str = ""          # the note itself (README: the link's anchor)
+    source_current_version: str = ""  # the source's version now (contentHash)
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -436,12 +466,20 @@ class SearchResult:
         # Provenance (#3837 owner decision: source + when learned). Additive —
         # emitted only when a value is present, so an unflagged call and an
         # unflagged empty-provenance hit both stay byte-identical.
-        if self.source_ref or self.captured_at:
+        if self.source_ref or self.captured_at or self.source_version or self.source_current_version:
             prov: dict[str, Any] = {}
             if self.source_ref:
                 prov["source"] = self.source_ref
             if self.captured_at:
                 prov["captured_at"] = self.captured_at
+            # #5199: the note and its currency. `currency` is DERIVED here (a
+            # read), never stored, and is the honest `unknown` whenever either
+            # version is missing — see `currency_status`.
+            if self.source_version or self.source_current_version:
+                prov["sourceVersion"] = self.source_version
+                prov["sourceCurrentVersion"] = self.source_current_version
+                prov["currency"] = currency_status(
+                    self.source_version, self.source_current_version)
             d["provenance"] = prov
         return d
 
