@@ -174,8 +174,19 @@ function scriptTags(html) {
     for (; i < html.length; i++) {
       const ch = html[i]
       if (quote !== null) { if (ch === quote) quote = null; continue }
-      if (ch === '"' || ch === "'") { quote = ch; continue }
       if (ch === '>') break
+      if (ch === '"' || ch === "'") {
+        // A quote opens a value ONLY in attribute-value position. HTML's
+        // unquoted-value state appends `"`/`'` to the value as ordinary
+        // characters, so `<script data-note=it's src="…">` ends at its `>` —
+        // treating that `'` as an opener ran the walk to EOF and let
+        // `firstAttr` return an EARLIER `src`, so a later off-origin
+        // `<script src>` was never emitted and clause 2(d) stayed green
+        // (review cycle 4, reproduced).
+        let j = i - 1
+        while (j >= 0 && /\s/.test(html[j])) j--
+        if (html[j] === '=') quote = ch
+      }
     }
     const attrs = html.slice(open.lastIndex, i)
     const rest = html.slice(i + 1)
@@ -306,6 +317,33 @@ function foldStringLiterals(text, passes = 6) {
     out = next
   }
   return out
+}
+// #3787: the character references a browser resolves BEFORE it runs a page. The
+// HTML parser decodes them in text and in attribute values, so a payload spelled
+// with references is a real loader while the raw text carries none of the probe
+// literals:
+//   <img src=x onerror="import('/ven&#100;or/supa&#98;ase-2.112.2.min.js')…">
+// shipped with this guard GREEN (review cycle 4, reproduced). Decoding numeric
+// references — decimal and hex, which can spell ANY ASCII character — plus the
+// ASCII-valued named references closes ASCII SPELLING rather than one more
+// syntactic form: the decoded texts are probed alongside the raw one. The named
+// table is `NAMED_ASCII` below, not the whole HTML5 entity list; a named
+// reference outside it is residual 7. Applied to PAGE documents only: a
+// `<script>` body is not entity-decoded by the HTML parser, so decoding a
+// script's text would invent a string the browser never sees.
+const NAMED_ASCII = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", Tab: '\t', NewLine: '\n', nbsp: ' ',
+  excl: '!', num: '#', dollar: '$', percnt: '%', lpar: '(', rpar: ')', ast: '*', plus: '+',
+  comma: ',', period: '.', sol: '/', colon: ':', semi: ';', equals: '=', quest: '?',
+  commat: '@', lsqb: '[', bsol: '\\', rsqb: ']', Hat: '^', lowbar: '_', grave: '`',
+  lcub: '{', verbar: '|', rcub: '}',
+}
+function decodeCharacterRefs(text) {
+  const cp = (n, all) => (n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : all)
+  return text
+    .replace(/&#x([0-9a-f]+);?/gi, (all, hex) => cp(parseInt(hex, 16), all))
+    .replace(/&#(\d+);?/g, (all, dec) => cp(Number(dec), all))
+    .replace(/&([a-zA-Z]+);/g, (all, name) => (name in NAMED_ASCII ? NAMED_ASCII[name] : all))
 }
 
 test('#2865: the built dist ships the key-less OAuth Claude connector recipe', () => {
@@ -570,13 +608,33 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //      The fold is also BOUNDED: `passes` is a finite constant, so a purely
   //      literal spelling nested more deeply than that cap allows needs more passes
   //      than it permits and evades both the raw probe and the fold. Raising the
-  //      cap narrows this but cannot close it — no finite pass count does.
+  //      cap narrows this but cannot close it — no finite pass count does. The same
+  //      bound covers statically-resolvable shapes the fold does not model at all:
+  //      `+=` accumulation of literals, and `.join()` over a VARIABLE holding the
+  //      separator.
   //   2. an off-origin bundle loaded from an opaque runtime-built URL inside a
   //      script (see (d));
   //   3. the allow-listed vendored library file is exempt from the CONTENT
   //      clauses — it must be, its own build contains `createClient(` — so what
   //      is pinned for it is reachability (clause 2), not content. Owner question
-  //      Q2 on #3787 tracks whether that file should ship at all.
+  //      Q2 on #3787 tracks whether that file should ship at all. The exemption
+  //      names an exact file, so RE-VENDORING the library under a new name needs a
+  //      deliberate one-line update here rather than inheriting the exemption.
+  //   5. clauses 1 and 2(c) are deliberately BROAD and will red legitimate
+  //      changes: any `create<Word>Client(` (the pattern must also cover
+  //      `createBrowserClient`/`createServerClient`), and any `vendor/` reference
+  //      at all — a future first-party `vendor/analytics.js` is not the supabase
+  //      library but reds, because the directory probe is what survives a split
+  //      literal. Accepted fail-closed false positives; each message names the file.
+  //   6. a `dist/` entry that is not a regular file (a symlink to a directory, a
+  //      special file, anything whose stat fails) is not scanned — there is no
+  //      content to scan for. Not a hole: a page that REFERENCES such a path still
+  //      reds by name through the dangling-reference assertion.
+  //   7. `decodeCharacterRefs` decodes numerics and the `NAMED_ASCII` table, not
+  //      the whole HTML5 named-entity list, and a reference may be written without
+  //      its terminating `;` in some legacy positions. A reference outside that
+  //      table, or a semicolon-less one, is not decoded and can therefore carry a
+  //      probe literal past the page-document context.
   //   4. a page's raw text is probed WHOLE, so prose or an HTML COMMENT in a
   //      shipped page naming a probe literal (`createClient(`, `vendor/`) reds a
   //      build that is in fact clean. That is the deliberate fail-closed side of
@@ -599,11 +657,19 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // left this guard GREEN (8/8), naming `vendor/` and the library verbatim in an
   // attribute. Closing that one syntactic form at a time is the loop cycles 1-2
   // already ran twice, so the closure is STRUCTURAL: every page's whole raw
-  // document becomes a probed context. It costs nothing on a clean build — every
-  // probe is 0-hit against all five shipped pages, verified before adding this —
-  // and it covers every attribute channel (event handlers, `javascript:` URLs,
-  // `<base href>`, meta refresh, data-*) plus any future one.
-  const pageContexts = pages.map((p) => ({ name: `${p.name}#document`, js: p.html, folded: foldStringLiterals(p.html) }))
+  // document becomes a probed context, TOGETHER WITH its character-reference
+  // DECODED form (`decodeCharacterRefs`) — the HTML parser resolves references in
+  // attribute values before they run, so the literal spelling is not the whole
+  // channel. It costs nothing on a clean build — every probe is 0-hit against all
+  // five shipped pages in BOTH spellings, verified before adding this — and it
+  // covers every attribute channel (event handlers, `javascript:` URLs,
+  // `<base href>`, meta refresh, data-*).
+  const pageContexts = pages.map((p) => ({
+    name: `${p.name}#document`,
+    js: p.html,
+    folded: foldStringLiterals(p.html),
+    decoded: foldStringLiterals(decodeCharacterRefs(p.html)),
+  }))
 
   // (3) COVERAGE FIRST. A scan that inspected nothing passes vacuously, and a
   // shipped file that escapes the scan is a silent hole. Every on-disk
@@ -704,6 +770,10 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
     ...inline.map((b) => ({ name: b.name, js: b.js, folded: foldStringLiterals(b.js) })),
     ...pageContexts,
   ]
+  // Every text a context is probed as: its raw text, the literal-folded text, and
+  // — for a PAGE, whose attribute values the HTML parser decodes — the
+  // character-reference-decoded text (review cycle 4).
+  const textsOf = (c) => (c.decoded === undefined ? [c.js, c.folded] : [c.js, c.folded, c.decoded])
 
   // (3) COVERAGE — asserted against the CONTEXTS the content clauses actually
   // probe, NOT against the set they were assembled from. Asserting that every
@@ -771,7 +841,7 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
 
   // (1) No fragment-ingesting client construction in a non-library context.
   for (const c of contexts) {
-    for (const text of [c.js, c.folded]) {
+    for (const text of textsOf(c)) {
       assert.doesNotMatch(text, FRAGMENT_CONSUMER,
         `dist/${c.name} builds a supabase-js client again. A fragment can only be ingested by a ` +
         'client that exists, and supabase-js DEFAULTS detectSessionInUrl to true, so a client ' +
@@ -794,7 +864,7 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
     '({…, detectSessionInUrl:!0}) turn fragment ingestion ON, so loading it re-arms the ' +
     '#3503 double-destroy on that page (#3787/#4054)')
   for (const c of contexts) {
-    for (const text of [c.js, c.folded]) {
+    for (const text of textsOf(c)) {
       // (b) a contiguous specifier/URL — a dynamic loader (createElement('script')/
       // document.write) must keep it in one of these contexts.
       assert.doesNotMatch(text, SUPABASE_SPECIFIER,
