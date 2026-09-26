@@ -1287,3 +1287,130 @@ class TestSensitiveRateLimit:
         assert tc.get("/v1/organizations/nope/export").status_code == 403  # budget 2
         assert tc.get("/v1/organizations/nope/export").status_code == 429  # exhausted
         ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_deferred_terminal_charging_three_cases(self, sb_client, as_user,
+                                                    monkeypatch):
+        """#2051: the sensitive-op budget is charged EXACTLY ONCE, at the
+        TERMINAL outcome.
+
+        success → 1 charge; a mid-flight 5xx → 0 charges (an outage must not
+        burn the hourly budget, nor mask itself with a stale 429 that
+        outlives recovery); a refusal (429) → no charge. RED before the
+        #1719 migration (check-time charging consumed the budget on 5xx).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 3)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        tc, fake, db_path = sb_client
+        _seed_supabase_team(fake)
+        seed_sdk = _seed_graph(db_path)  # noqa: F841
+        as_user()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        # (a) SUCCESS → charged exactly once, at the terminal point.
+        assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 200
+        assert _entries() == 1
+
+        # (b) MID-FLIGHT 5xx → charges NOTHING.
+        real_snapshot = ha_mod._export_graph_snapshot
+        monkeypatch.setattr(
+            ha_mod, "_export_graph_snapshot",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("graph down")))
+        for _ in range(2):
+            r = tc.get(f"/v1/organizations/{ORG_ID}/export")
+            assert r.status_code == 500, r.text
+        assert _entries() == 1, "a 5xx must not consume the sensitive-op budget"
+
+        # Recovery must not yield a spurious 429 (pre-#2051 the two 5xx had
+        # consumed the budget and this read 429).
+        monkeypatch.setattr(ha_mod, "_export_graph_snapshot", real_snapshot)
+        assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 200
+        assert _entries() == 2
+
+        # (c) REFUSAL (429) → nothing charged; the bucket stays at the limit.
+        assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 200
+        assert _entries() == 3  # at limit
+        r = tc.get(f"/v1/organizations/{ORG_ID}/export")
+        assert r.status_code == 429
+        assert "Retry-After" in r.headers
+        assert _entries() == 3, "a refusal must not charge"
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_client_error_still_charges(self, sb_client, as_user, monkeypatch):
+        """#2051 boundary: a 4xx client error IS terminal — it charges once.
+        Abusive callers keep the unchanged 429 boundary; only 5xx passes
+        through uncharged."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        tc, _, _ = sb_client
+        as_user()
+        # unknown team → 403 from the owner gate (a terminal client error)
+        assert tc.get("/v1/organizations/nope/export").status_code == 403
+        assert sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values()) == 1
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+
+class TestDeferredSensitiveOpCharging:
+    """#2051: `_deferred_sensitive_op` is the shared terminal-charge
+    mechanism for the whole family — lock its outcome table directly:
+    success and 4xx charge once; 5xx and a raw exception (rendered as 5xx by
+    the global handler) charge nothing."""
+
+    @staticmethod
+    def _request():
+        from starlette.requests import Request as _Request
+        return _Request({"type": "http", "method": "GET", "path": "/x",
+                         "headers": [], "query_string": b"",
+                         "client": ("203.0.113.5", 1234)})
+
+    def test_charge_outcome_table(self, monkeypatch):
+        import asyncio
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 10)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        @ha_mod._deferred_sensitive_op("export")
+        async def endpoint(request, mode):
+            if mode == "ok":
+                return {"ok": True}
+            if mode == "client":
+                raise ha_mod.HTTPException(status_code=403, detail="nope")
+            if mode == "server":
+                raise ha_mod.HTTPException(status_code=503, detail="down")
+            raise RuntimeError("boom")
+
+        req = self._request()
+
+        async def _call(mode):
+            try:
+                return await endpoint(request=req, mode=mode)
+            except Exception as exc:
+                return exc
+
+        async def _scenario():
+            # success → exactly one terminal charge
+            assert await _call("ok") == {"ok": True}
+            assert _entries() == 1
+            # 4xx client error → terminal → one more charge
+            assert isinstance(await _call("client"), ha_mod.HTTPException)
+            assert _entries() == 2
+            # 5xx server fault → UNCHARGED
+            assert isinstance(await _call("server"), ha_mod.HTTPException)
+            assert _entries() == 2
+            # raw exception (rendered 5xx by the global handler) → UNCHARGED
+            assert isinstance(await _call("raw"), RuntimeError)
+            assert _entries() == 2
+
+        # ONE loop for the whole table: a single asyncio.run keeps the
+        # module-global _SENSITIVE_LOCK bound to one loop (repeated
+        # asyncio.run calls would only pass while the lock stays
+        # uncontended — the acquire fast path skips _get_loop).
+        try:
+            asyncio.run(_scenario())
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
