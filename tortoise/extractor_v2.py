@@ -6943,8 +6943,7 @@ def _classify_error(e: BaseException) -> str:
     KNOWN DIVERGENCES from P2's retry taxonomy (both pre-existing, not
     introduced here, and both tracked on #5525, whose root was restated to
     cover the mapping as well as the status source). The list is what is
-    KNOWN — NOT an exhaustive claim, because a claim of exhaustiveness is
-    exactly what kept re-staling:
+    KNOWN — NOT an exhaustive claim:
 
     * the status is read from ``e.response.status_code`` ONLY, so a
       ``urllib.error.HTTPError`` (status on ``.code``, no ``.response`` — the
