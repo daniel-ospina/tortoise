@@ -477,6 +477,43 @@ def test_reconcile_reads_the_published_metric_and_can_fire(caplog):
         caplog.text)
 
 
+def test_reconcile_fires_when_the_published_metric_under_publishes(caplog):
+    """The reconciliation must catch a LOST share, not only an extra child.
+
+    The over-publish test above covers ``published > declared``; on its own it
+    leaves the guard satisfiable by ``if published > declared``, which silently
+    disables detection of an UNDER-publish — the direction an allocation bug
+    actually takes (a dropped or lost share collapsing the published sum below
+    the declared total). Publish a good snapshot over two orgs, remove one
+    published child, and assert the warning still fires.
+    """
+    snap = ca.evaluate_allocation(
+        ["org_a", "org_b"], weights_by_org={"org_a": 1, "org_b": 1})
+    assert snap.state == ca.STATE_MEASURED
+    ca.publish(snap)
+
+    declared = sum(ln.total_cents for ln in snap.lines)
+    published = ca.allocation_by_org()
+    assert declared > 0, "sanity: the declared total must be non-zero"
+    assert published.get("org_b", 0) > 0, (
+        "sanity: org_b must be published by the good snapshot")
+
+    # Drop ONE published child: the sum now falls BELOW the declared total.
+    monitoring.prune_team_cost(set(published) - {"org_b"})
+    under = ca.allocation_by_org()
+    assert sum(under.values()) < declared, (
+        "sanity: the metric must now be UNDER-published")
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="tortoise.cost_allocation"):
+        ca._reconcile_and_log(snap)
+    warnings = [r for r in caplog.records
+                if "does NOT reconcile" in r.getMessage()]
+    assert warnings, "an under-published metric must warn too"
+    assert f"delta={sum(under.values()) - declared}" in warnings[0].getMessage(), (
+        warnings[0].getMessage())
+
+
 def test_reconcile_is_silent_when_the_published_metric_matches(caplog):
     snap = ca.evaluate_allocation(["org_a"], weights_by_org={"org_a": 1})
     ca.publish(snap)
