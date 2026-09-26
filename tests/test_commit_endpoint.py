@@ -1159,8 +1159,12 @@ class TestRekeyedPointResolvedIds:
         """§6b — ``supersedes_by`` is a payload ``pt_<sha>`` id BY
         construction, so it shares the two-id-space hole: the successor point
         re-keyed onto a pre-existing node under another id and
-        ``apply_supersessions`` warned ``point supersession ref '<payload id>'
-        not found`` — the CORRECTS fold was lost. The §6b call now remaps
+        ``sdk.supersede(prior, '<payload id>')`` targeted a node that does not
+        exist — it RAISED and ``apply_supersessions`` swallowed it as
+        ``point supersede '<prior>' → '<payload id>' failed`` (not the
+        ``… ref '<payload id>' not found`` skip, which fires only when the
+        already-graph-id ``superseded`` side is absent) — so the CORRECTS fold
+        was lost. The §6b call now remaps
         through the same map the operators use (capture-path parity), while
         ``superseded`` — already a real graph id, and the record's lane
         discriminator — is untouched."""
@@ -1314,14 +1318,13 @@ class TestRekeyedPointResolvedIds:
                        params={"id": prior_id}).result_set[0][0] == "superseded"
 
     def test_supersede_mitigation_reason_is_the_payload_content(self, client):
-        """The §5 map keys BOTH ``pr.point.id`` (a payload point) and
-        ``pr.supersede_id`` (server-recomputed, with NO entry in
-        ``payload.points``) to the resolved successor — so the reverse-map
-        winner is LOAD-BEARING rather than cosmetic: if ``supersede_id`` won,
-        ``_point_content_by_id`` would find nothing and the MITIGATES reason
-        would degrade to the bare graph id. §5 inserts ``pr.point.id`` first;
-        this pins that ordering so a reorder reddens a test instead of
-        silently degrading mitigation reasons."""
+        """§5 keys the map by PAYLOAD point id ONLY (one id space), so the
+        reverse-map winner is a real ``payload.points`` entry and the MITIGATES
+        reason resolves to the payload CONTENT rather than degrading to the
+        bare graph id (#4716 review P1). On the supersede path §5's map value
+        for ``pr.point.id`` IS the resolved successor, and the reverse lookup
+        returns the payload id — never ``supersede_id``, which has no
+        ``payload.points`` entry."""
         prior_id = point_content_id("gym at 6pm")
         assert _commit(client, _raw_payload(1, points=[
             {"id": prior_id, "content": "gym at 6pm", "pointKind": "decision",
@@ -1359,6 +1362,77 @@ class TestRekeyedPointResolvedIds:
         assert "gym at 5pm" in content, content
         # never the bare graph id (neither the prior nor the successor)
         assert successor_id not in content and prior_id not in content, content
+
+    def test_payload_id_and_supersede_id_do_not_share_one_key_space(
+            self, client):
+        """#4970 review P2 — the §5 map is keyed by PAYLOAD point id ONLY.
+
+        ``point_content_id`` hashes CONTENT ONLY, while dedup matches
+        content+kind (#784), so two records in ONE payload can collide across
+        id spaces: a ``new`` point whose payload id is
+        ``pt_<hash("shared text")>`` and a ``supersede`` record whose NEW
+        content is that same text share the latter's server-recomputed
+        ``supersede_id``. Keying the map by ``supersede_id`` as well let the
+        second record OVERWRITE the first record's payload-id entry (last
+        writer wins), silently re-pointing the first record's aboutObject
+        edge at the SECOND record's successor. Here the first point dedup-hits
+        a pre-existing legacy node while the second's successor is minted at
+        the shared content-addressed id, so the two resolutions DIFFER and the
+        mis-route is observable rather than self-cancelling."""
+        shared = "shared text"
+        shared_id = point_content_id(shared)
+        # Pre-existing OBSERVATION holding the shared content under a legacy
+        # id: record A's write dedup-hits it, so A resolves to the legacy node
+        # (never to ``shared_id``).
+        legacy_observation = _team_sdk().create_point(
+            "observation", shared)["id"]
+        assert not legacy_observation.startswith("pt_"), legacy_observation
+        # Pre-existing DECISION to supersede, seeded at its own
+        # content-addressed id: the payload point below reuses that id with
+        # changed content, so reconcile takes the supersede path.
+        prior_old_id = point_content_id("old claim")
+        prior_decision = _team_sdk().create_point(
+            "decision", "old claim", id=prior_old_id)["id"]
+        assert prior_decision == prior_old_id
+
+        r = _commit(client, _raw_payload(
+            2, session_id="s1",
+            entities=[
+                {"name": "Alpha", "kind": "Project",
+                 "passes_frequency_gate": True},
+                {"name": "Beta", "kind": "Project",
+                 "passes_frequency_gate": True},
+            ],
+            points=[
+            {"id": shared_id, "content": shared, "pointKind": "observation",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            {"id": prior_old_id, "content": shared, "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Beta"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ]))
+        assert r.status_code == 200, r.text
+
+        g = _team_sdk()._get_proj().g
+        # A's aboutObject edge belongs on the legacy observation it RESOLVED
+        # to — the pre-fix map had ``shared_id`` overwritten by B and would
+        # route it onto B's successor node.
+        rows = g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN collect(o.name)",
+            params={"pid": legacy_observation},
+        ).result_set
+        assert rows and sorted(rows[0][0]) == ["Alpha"], rows
+        # B's successor — minted at the shared content-addressed id — carries
+        # B's own edge, and NOT A's.
+        rows = g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN collect(o.name)",
+            params={"pid": shared_id},
+        ).result_set
+        assert rows and sorted(rows[0][0]) == ["Beta"], rows
 
 
 # ── DE2E-7 — idempotency + budget + quota + Layer-1 ───────────────────────

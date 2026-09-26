@@ -105,12 +105,15 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     needing no change are returned as the original object, and the INPUTS are
     never mutated in place.
 
-    ⛔ Caller contract — the map MUST be keyed by PAYLOAD ids. The hosted §5
-    map also keys ``pr.supersede_id`` on a ``supersede`` reconcile action (the
-    server-recomputed successor id), so that action's payload id — which is
-    the PRIOR node's graph id — resolves to the SUCCESSOR. That is deliberate
-    and consistent with ``supersede_point``'s own edge transfer (an operator
-    edge on a superseded point belongs to its successor), and is pinned by
+    ⛔ Caller contract — the map MUST be keyed by PAYLOAD ids, and ONLY by
+    payload ids (ONE id space): a key the payload never named resolves
+    nothing, and a server-recomputed id (``supersede_id``) mixed into the map
+    could collide with another record's payload id (``point_content_id``
+    hashes content only). On a ``supersede`` reconcile action the payload
+    point id IS the PRIOR node's graph id, and the map keys it to the RESOLVED
+    successor — deliberate, and consistent with ``supersede_point``'s own edge
+    transfer (an operator edge on a superseded point belongs to its
+    successor); pinned by
     ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
     test_supersede_operator_ref_follows_the_successor``.
     """
@@ -160,22 +163,18 @@ def reverse_point_id_map(id_map: dict) -> dict:
 
     **FIRST payload id wins** when several ids resolved to one graph node
     (``setdefault`` over the map's insertion order). The rule is stated HERE,
-    once, so the two call sites cannot drift on it — and the rule is
-    LOAD-BEARING, not cosmetic:
-
-    * On the **capture** path the fold guarantees equal normalized content
-      when two payload points resolved to one node, so either winner yields
-      the same reason TEXT.
-    * On the **hosted supersede** path the two keys are ``pr.point.id`` (a
-      payload point) and ``pr.supersede_id`` (a server-recomputed id with NO
-      entry in ``payload.points``). There the winner CHANGES the reason text:
-      if ``supersede_id`` won, ``_point_content_by_id`` would find nothing and
-      the MITIGATES reason would degrade to the bare graph id — exactly the
-      #4716 review-P1 degradation this helper exists to prevent. So the
-      hosted §5 map MUST insert ``pr.point.id`` BEFORE ``pr.supersede_id``
-      (``hosted_api.py`` §5) — pinned by
-      ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
-      test_supersede_mitigation_reason_is_the_payload_content``.
+    once, so the two call sites cannot drift on it. Both write paths key the
+    map by PAYLOAD point id alone, so the winner is always a real
+    ``payload.points`` entry and the reason resolves: two ids resolve to one
+    node only when content+kind match (``_find_point_by_content``), so their
+    normalized content is equal and either winner yields the same reason
+    TEXT. ⛔ Do NOT add a non-payload key (e.g. the server-recomputed
+    ``supersede_id``) to a caller's map: it has no ``payload.points`` entry,
+    so if it won the lookup the reason would degrade to the bare graph id —
+    exactly the #4716 review-P1 degradation this helper exists to prevent —
+    and, being a second id space (``point_content_id`` hashes CONTENT only),
+    it could collide with another record's payload id. See the §5 note in
+    ``hosted_api._execute_commit_writes``.
     """
     reverse: dict[str, str] = {}
     for payload_id, resolved_id in (id_map or {}).items():
@@ -192,8 +191,12 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     ``supersedes_by`` (the NEW payload point's content-addressed ``pt_<sha>``
     id). A ``supersedes_by`` whose payload point resolved to an existing graph
     node under a different id is the SAME two-id-space mismatch the operators
-    had — ``apply_supersessions`` would warn ``point supersession ref '<payload
-    id>' not found — skipped (fail-open)`` and the CORRECTS fold would be lost.
+    had: ``sdk.supersede(prior, '<payload id>')`` targets a node that does not
+    exist, RAISES, and ``apply_supersessions`` swallows it as ``point
+    supersede '<prior>' → '<payload id>' failed: …`` — so the CORRECTS fold
+    would be lost. (It is NOT the ``point supersession ref '<payload id>' not
+    found — skipped (fail-open)`` warning: that fires only when the
+    already-graph-id ``superseded`` side is absent.)
 
     ``superseded`` is deliberately NOT remapped (code-review P2): it is the
     record's LANE DISCRIMINATOR downstream — ``apply_supersessions`` dispatches

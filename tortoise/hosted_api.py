@@ -11904,27 +11904,31 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # binder below to SKIP, never bind a requested-but-unconfirmed id (a
         # phantom link: ``link_entity`` matches no endpoint, returns 0, and the
         # binder's F7 path reads that as "already present"). When the gate is
-        # false every #4970 consumer degrades to identity via
-        # ``.get(pid, pid)`` — which is exactly the pre-fix behaviour, so no
-        # consumer regresses on that path.
+        # false every #4970 consumer degrades to identity — exactly the
+        # pre-fix target id, so no consumer regresses on that path.
         #
-        # #4970 keys the SAME entry by both the payload point id (what
-        # operator and supersession refs carry) and the id this branch wrote
-        # under (what §5 CONTAINS / §6 aboutObject use — the recomputed
-        # ``supersede_id`` on the supersede path, the payload id otherwise).
-        # ⛔ Insertion order is load-bearing: the payload id goes in FIRST so
-        # ``reverse_point_id_map``'s first-payload-id-wins ``setdefault``
-        # yields the payload point, not the supersede target. ⛔ On the
-        # ``supersede`` action the two keys differ and the payload id IS the
-        # PRIOR node's graph id (``reconcile_payload`` sets
-        # ``existing_id=pt.id``), so a payload operator ref naming that point
-        # resolves to the SUCCESSOR. Deliberate, and consistent with
-        # ``supersede_point``'s own edge transfer — an operator edge on a
-        # superseded point belongs to its successor; pinned by
+        # ⛔ ONE id space: keyed by the PAYLOAD point id ONLY. Every consumer
+        # names a payload point — §6b's ``supersedes_by`` and §7's operator
+        # endpoints are payload ``pt_<sha>`` ids BY construction, and §6
+        # resolves through ``pr.point.id`` below. Do NOT also key this
+        # branch's ``pid`` (the server-recomputed ``supersede_id`` on the
+        # supersede path): that is a second id space in one dict, and because
+        # ``point_content_id`` hashes CONTENT ONLY while dedup matches
+        # content+kind (#784), one record's payload id can EQUAL another's
+        # ``supersede_id`` — a ``supersede_id`` entry would then overwrite a
+        # payload-id entry (last writer wins) and silently re-point that
+        # record's aboutObject / supersession / binder lookups at the WRONG
+        # node.
+        #
+        # On the ``supersede`` action ``resolved_pid`` is the SUCCESSOR's
+        # resolved id and ``pr.point.id`` IS the PRIOR node's payload id
+        # (``reconcile_payload`` sets ``existing_id=pt.id``), so a payload ref
+        # naming that point resolves to the SUCCESSOR. Deliberate, and
+        # consistent with ``supersede_point``'s own edge transfer — an operator
+        # edge on a superseded point belongs to its successor; pinned by
         # ``test_supersede_operator_ref_follows_the_successor``.
         if isinstance(_rid, str) and _rid:
             point_resolved_ids[pr.point.id] = resolved_pid
-            point_resolved_ids[pid] = resolved_pid
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
             "MERGE (s)-[:CONTAINS]->(p)",
@@ -12002,8 +12006,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # #4970: same remap the capture path applies (#4716 Part 1, the
         # adjacent hole). ``supersedes_by`` is a payload ``pt_<sha>`` id BY
         # CONSTRUCTION and shares the operators' two-id-space hole — a
-        # re-keyed successor warned ``point supersession ref '<payload id>'
-        # not found`` and the CORRECTS fold was lost. ``superseded`` is
+        # re-keyed successor reached ``sdk.supersede(prior, '<payload id>')
+        # with the target missing, which RAISED and was swallowed by
+        # ``apply_supersessions`` as ``point supersede '<prior>' → '<payload
+        # id>' failed: …`` (NOT the ``… ref '<payload id>' not found`` skip,
+        # which fires only when the already-graph-id ``superseded`` side is
+        # absent) — so the CORRECTS fold was lost. ``superseded`` is
         # deliberately NOT remapped by the helper: it is already a graph id
         # and is the record's downstream LANE DISCRIMINATOR
         # (``startswith("pt_")``), so a map entry could silently flip a
@@ -12018,11 +12026,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             applied, len(payload.supersessions), session_id)
 
     for pr in reconcile.points:
+        # Pre-#4970 target: on the supersede action the edge belongs on the
+        # SUCCESSOR, whose id is the recomputed ``supersede_id``.
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
-        # #4970: the RESOLVED graph id — the payload id may name no node, in
+        # #4970: the RESOLVED graph id, looked up by the PAYLOAD point id
+        # (the map has one id space) — the payload id may name no node, in
         # which case the aboutObject MATCH below found nothing and the edge
-        # was silently absent.
-        pid = point_resolved_ids.get(pid, pid)
+        # was silently absent. On a supersede the map's value IS the
+        # successor, so the lookup target and the fallback agree; the fallback
+        # keeps the pre-fix id when §5's write gate found no confirmed id.
+        pid = point_resolved_ids.get(pr.point.id, pid)
         for name in pr.point.about_entities:
             if str(name) in subject_entity_names:
                 continue  # #1370: the gated binder owns aboutSubject
