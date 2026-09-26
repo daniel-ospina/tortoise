@@ -6894,10 +6894,13 @@ def _is_key_limit_error(e: BaseException) -> bool:
     the answer is False, so a 403 degrades to the PRE-#4959 credential class
     ``fatal_403_forbidden``: still ``fatal_*`` (the abort decision is
     unchanged and the integrity gate still grades it ``hard``), but NOT a
-    killer class — the extraction-killer gate does not fire on that branch.
-    That branch is a defensive fallback for an unimportable seam, not a
-    supported mode (``model_adapters`` is a first-class dependency of this
-    module's taxonomy — ``_is_fatal_error`` imports it too)."""
+    killer class — on the PARTIAL shape (an embed list present, so
+    ``empty_embed_list`` is not bumped) the extraction-killer gate does not
+    fire on that branch. A FULLY aborted session still fires it, via
+    ``empty_embed_list``. That branch is a defensive fallback for an
+    unimportable seam, not a supported mode (``model_adapters`` is a
+    first-class dependency of this module's taxonomy — ``_is_fatal_error``
+    imports it too)."""
     try:
         from tortoise.model_adapters import is_billing_exhausted
     except ImportError:  # pragma: no cover — P2 landed; defensive fallback
