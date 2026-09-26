@@ -25,8 +25,10 @@ the ancestry gate only vacuously (the named SHA *was* `origin/main`). Every loca
 against `a2a08beaa` on **2026-09-26** and is unchanged. Two things make that sound, and neither is an
 assumption:
 - The branch now contains `origin/main` (`git merge-base --is-ancestor origin/main HEAD` succeeds), so
-  the reported finding has not been overtaken by main. (An empty `git diff <a> <b> --
-  tools/edge_census.py` would NOT have shown this: absent at both ends also diffs empty.)
+  the reported finding has not been overtaken by main.
+- Because the instrument is branch-only, comparing it across two MAIN trees is not a check anyone can
+  run: an empty `git diff <a> <b> -- tools/edge_census.py` between two revisions that both lack the
+  file would mean absent at both ends, not unchanged.
 - The two commits between `99a98ddc5` and `a2a08beaa` change `tortoise/assembly.py`,
   `tortoise/commit_ops.py`, `tortoise/projection/entities.py` and tests. The only property they touch
   in the measured path is `supersedes_by` (a 200-char truncation fix), which `tools/edge_census.py`
@@ -80,7 +82,7 @@ count is not wrong, it is **absent**.
 
 | surface | what it counts | relationship term | evidence |
 |---|---|---|---|
-| **cap** | `count_org_usage(org, "points")` = non-episodic `Point` + `Object` + `Subject` **nodes** | ❌ none | `quota.py:699-704` — `MATCH (n) WHERE (n:Point AND …) OR n:Object OR n:Subject RETURN count(n)`. `_RESOURCE_LIMIT_KEYS` (`quota.py:174-181`) maps `points`/`api_keys`/`sessions`/`users`/`graphs` — **no resource names an edge**, and `documents` (`quota.py:651`) is a node count too. |
+| **cap** | `count_org_usage(org, "points")` = non-episodic `Point` + `Object` + `Subject` **nodes** | ❌ none | `quota.py:699-704` — `MATCH (n) WHERE (n:Point AND …) OR n:Object OR n:Subject RETURN count(n)`. `_RESOURCE_LIMIT_KEYS` (`quota.py:174-183`) maps `points`/`api_keys`/`sessions`/`users`/`graphs` — **no resource names an edge**, and `documents` (`quota.py:651`) is a node count too. |
 | **meter** | `write_ops` (API calls) + `nodes_written` (nodes) | ❌ none | `metering.py:42-59` — the `:MeteringRecord` shape. `nodes_written` is incremented from `plan.reconcile.net_new` (`hosted_api.py:11994`) — a **node** delta. |
 | **cost basis** | `billing.cost_basis = {falkordb_per_gb, bytes_per_node, dedup}` | ❌ none | Three keys, one unit. `grep -rn "falkordb_per_gb"` → **exactly one non-test hit: the declaration itself** (`product/pricing.json:20`; the second is `tests/e2e/hosted/fixtures/pricing-e2e.json:19`). `bytes_per_node` has **zero** readers. **The cost basis is a declaration nothing computes or enforces.** |
 
