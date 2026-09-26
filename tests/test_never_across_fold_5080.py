@@ -3,8 +3,12 @@ difference.
 
 The owner ruling of 2026-09-24 authorises merging near-duplicate claims and
 forbids a merge across a difference in a number/quantity, a named entity, a
-language, a negation, a condition, or a date/scope.  Both write-path fold sites
-enforce that boundary from ONE implementation
+language, a negation, a condition, a date/scope, or a load-bearing connective
+whose role changes across the pair (``#5139``).  The authoritative predicate is
+``extractor_v2._boundary`` — the connective class is enumerated by
+``_CONNECTIVE_SLOTS``/``_CONNECTIVE_MEMBERS``, and the labels it can report by
+``distinguishing_difference``; the prose below is a reading aid.  Both
+write-path fold sites enforce that boundary from ONE implementation
 (``extractor_v2.fold_allowed`` / ``supersede_allowed``):
 
 * ``classify_consolidation`` — the against-store classifier, and
@@ -13,8 +17,9 @@ enforce that boundary from ONE implementation
 
 A refused fold produces ADD / no hit, so both claims survive.  A differing
 NUMBER or DATE is a new value for one attribute and keeps superseding (UPDATE);
-a differing NEGATION, CONDITION, marker SCOPE, LANGUAGE or substituted content
-means the two are rival claims, which may be neither folded nor superseded.
+a differing NEGATION, CONDITION, marker SCOPE, LANGUAGE, substituted content or
+CONNECTIVE OPERATOR means the two are rival claims, which may be neither folded
+nor superseded.
 
 Every never-across pair in the tables below carries token overlap at or above
 ``NOOP_MIN_OVERLAP``, so the assertion is that the boundary refuses a fold the
@@ -60,6 +65,50 @@ NEVER_ACROSS = [
      "the cache is the problem, the lock is not", "scope"),
     ("we ship if the build passes and rollback if the tests fail",
      "we ship if the tests fail and rollback if the build passes", "scope"),
+    # #5139 — a load-bearing connective is FRAME by its commonest role, so a
+    # swap between two operators of ONE slot left the content multiset equal
+    # and the pair folded.  `and`/`or` are conjunctions (the role that keeps a
+    # coordinating paraphrase foldable) and they are also operators; the same
+    # holds for `then`/`else`, `than`/`as` and `to`/`from`, and for the clause
+    # relations `but`/`so`/`yet`, which the issue title does not list.
+    ("we ship and test", "we ship or test", "substituted_content"),
+    ("we ship then test", "we ship else test", "substituted_content"),
+    ("he is taller than bob", "he is taller as bob", "substituted_content"),
+    ("we ship to the store", "we ship from the store",
+     "substituted_content"),
+    ("it rained so we stayed", "it rained and we stayed",
+     "substituted_content"),
+    ("we tried and failed", "we tried but failed", "substituted_content"),
+    # `yet` is NOT in the frame set, so it is not dropped from the skeleton —
+    # and it still folded, because the one-sided rule reads it as a detail
+    # added to the prior rather than a rival operator.
+    ("we tried and failed", "we tried yet failed", "substituted_content"),
+    ("we shipped as the build passed", "we shipped and the build passed",
+     "substituted_content"),
+    # `for` is the causal conjunction here, not the preposition — the one slot
+    # member whose non-operator use is common, which is why the instrumental
+    # `for`/`as` rewording is a pinned residual rather than a reason to prune it.
+    ("we paused for the build failed", "we paused and the build failed",
+     "substituted_content"),
+    # A subordinating connective is not in the frame set, so the content
+    # skeleton keeps it — and the pair still folded, because a one-sided token
+    # is read as a detail added to the prior (the broadening case).
+    ("we paused because the build failed", "we paused and the build failed",
+     "substituted_content"),
+    # A SHARED slot member must not mask a swap in the same slot: both sides
+    # carry `as` AND each owns a differing clause relation, so the content
+    # multiset is equal and only the pair-level slot read can refuse it.
+    ("we ship as planned and test", "we ship as planned or test",
+     "substituted_content"),
+    # `as well as` IS `and`, canonicalised to its operator, so it still rivals
+    # `or` — deleting the phrase instead would have made it one-sided.
+    ("we ship the server as well as the client",
+     "we ship the server or the client", "substituted_content"),
+    # A member is read from the TOKENS, so a combining mark that does not
+    # compose with its neighbour must not hide it: the flattened read turned
+    # the mark into a separator and split the member in two before `_deaccent`
+    # could drop it, so the slot read empty and the pair folded.
+    ("we ship a\u0338nd test", "we ship or test", "substituted_content"),
     # An entity-bearing pronoun or possessive names the subject; changing it
     # re-subjects the claim.
     ("he won the race", "she won the race", "substituted_content"),
@@ -96,6 +145,15 @@ NEVER_ACROSS = [
     # A state pair: one side's "off" must not read as a detail added to "on".
     ("the flag is on", "the flag is off", "substituted_content"),
     ("the feature is on", "the feature is off", "substituted_content"),
+    # ... and the state word on ONE side is a state DROP, not a detail added
+    # (#5134): the boundary used to read every one-sided token as the
+    # documented broadening, so folding "the flag is off" into "the flag"
+    # destroyed the state.  The pair decides — a state word that IS the whole
+    # distinguishing content of a copula predicate is a rival claim, while a
+    # one-sided detail (or a prepositional `on`) stays the broadening case.
+    ("the flag is off", "the flag", "substituted_content"),
+    ("the feature is disabled", "the feature", "substituted_content"),
+    ("the gate is open", "the gate", "substituted_content"),
     # A name on one side only re-subjects the claim, like a pronoun does.  The
     # capital letter is the signal, so a sentence-initial token does not count —
     # "Workout at the gym" is capitalised by position, not by being a name, and
@@ -172,15 +230,21 @@ NEVER_ACROSS = [
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
-# value dimension is reported as the audit label (it is the first match), so a
-# caller that asked only for that label would let the value difference license
-# destroying the identity one.  The decision consults the full identity set.
+# label reports the IDENTITY one (it is matched first), so a caller that asked
+# only for a value dimension would miss the rival identity difference; the
+# decision consults the full identity set.
 MASKED_IDENTITY = [
     ("the deploy succeeded at 3pm", "the deploy failed at 5pm"),
     ("the build succeeded at 3pm", "the build did not succeed at 5pm"),
     ("we retried two times and it passed",
      "we retried 3 times and it did not pass"),
     ("he won the 5k in 27:12", "she won the 5k in 25:03"),
+    # A connective swap BESIDE a value difference: the number must not license
+    # terminalizing the rival operator swap.
+    ("we ship and test at 3pm", "we ship or test at 5pm"),
+    # A dropped state word BESIDE a value difference: the number must not
+    # license terminalizing the state drop as a value update.
+    ("we shipped 3 crates and the flag is off", "we shipped 5 crates and the flag"),
 ]
 
 # A differing value is a new value for one attribute — UPDATE is what records
@@ -448,7 +512,7 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("she'll ship the build", "shell ship the build")
 
     def test_a_script_list_gap_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5139).
+        """Documented residual, pinned so it cannot go silent (#5329).
 
         ``_SCRIPT_BLOCKS`` is finite, so a word in a script it does not name
         reaches no dimension and is a one-sided broadening.  This is the
@@ -461,7 +525,7 @@ class TestDistinguishingDifference:
             == "substituted_content"
 
     def test_a_word_list_gap_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5139).
+        """Documented residual, pinned so it cannot go silent (#5329).
 
         The marker lists are finite and a negator, condition or date word they
         do not name reaches no dimension: "hardly", "rarely", "seldom",
@@ -697,7 +761,7 @@ class TestDistinguishingDifference:
         splits, because a combining mark is not a word character.  Recovering
         the two parts needs the mark to carry separator semantics, which would
         split a legitimately accented word as well ("caf\u00e9"); that is a
-        modelling choice, and it is filed with the word-list gap (#5139).
+        modelling choice, and it is filed with the word-list gap (#5329).
         """
         for a, b in (("we ship the build", "we do\u0301not ship the build"),
                      ("we ship the build passes",
@@ -861,17 +925,356 @@ class TestDistinguishingDifference:
         assert not v2.supersede_allowed("we may ship friday",
                                         "we can ship friday")
 
-    def test_a_load_bearing_frame_connective_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent (#5139).
+    def test_a_coordinating_connective_still_folds(self):
+        """The FRAME use of a connective is still frame — the PAIR decides.
 
-        `and` and `or` are conjunctions — the role that makes them frame words
-        and keeps a coordinating paraphrase foldable — and they are also
-        operators.  Swapping them changes what the claim asserts, and a set of
-        content tokens cannot tell the two uses apart.
+        The role is read from the pair, not from the token list, so a frame
+        connective is refused only where it did OPERATOR work (#5139).  Three
+        shapes of legitimate fold must survive:
+
+        * ONE side only — a comma list owns no `and`, so a single side fills
+          the slot and the connective did no work;
+        * a SYNONYM in one slot — `with`/`by` assert the same relation, so
+          they are deliberately not one family and the rewording folds;
+        * a DIFFERENT slot — the phase-D seam's own restatement swaps `to`
+          (transfer direction) for `and` (clause relation), which is a
+          rewording, not a swap of one slot's member.
         """
-        assert v2.fold_allowed("we ship and test", "we ship or test")
-        assert v2.fold_allowed("we ship to the store", "we ship from the store")
-        assert v2.fold_allowed("we ship with the courier", "we ship by the courier")
+        for both, comma in (
+                ("we ship the server and the client",
+                 "we ship the server, the client"),
+                ("we ship the server or the client",
+                 "we ship the server, the client")):
+            assert v2.distinguishing_difference(both, comma) is None, both
+            assert v2.fold_allowed(both, comma)
+        # `and then` and `, then` are one claim: `and` and `then` sit in
+        # DIFFERENT slots, so the `and` side adds a member without rivaling
+        # `then` — the reason the two are not one family.
+        assert v2.fold_allowed("we ship the build and then test",
+                               "we ship the build, then test")
+        # A multi-word COORDINATION is canonicalised to its operator: `as well
+        # as` is `and`, so it folds against both the `and` and the comma form,
+        # and still rivals `or` (pinned in the table above).
+        assert v2.fold_allowed("we ship the server as well as the client",
+                               "we ship the server and the client")
+        assert v2.fold_allowed("we ship the server as well as the client",
+                               "we ship the server, the client")
+        # ... and a one-sided mate INSIDE a shared slot is the broadening case
+        # again, not a swap: both sides carry `for`, only one carries `and`.
+        assert v2.fold_allowed("we wait for the build and the tests",
+                               "we wait for the build, the tests")
+        # ... and a slot member on ONE side only, so the commonest spelling of
+        # `for` stays foldable.
+        assert v2.fold_allowed("we ship the build for the client",
+                               "we ship the build")
+        assert v2.fold_allowed("we ship with the courier",
+                               "we ship by the courier")
+        # A coordination phrase is matched on a phrase EDGE that is "not
+        # alphanumeric", so a word that merely ENDS in "as" before " well as"
+        # is not rewritten into `and`...
+        assert v2.fold_allowed("it was well as expected",
+                               "it was as expected")
+        assert v2.fold_allowed("the gas well as a fuel is fine",
+                               "the gas as a fuel is fine")
+        assert not v2.distinguishing_difference("the gas well as a fuel",
+                                                "the gas as a fuel")
+        # ... and the canonicalisation is spelling-INSENSITIVE, because the
+        # member pass below it is: a capital (sentence-initial or mid-sentence)
+        # and an underscore emphasis must read as the same phrase, and the
+        # comparison slot must be left EMPTY rather than holding a leaked `as`.
+        # The underscore miss was the old `\b` edge (`_` is a word character to
+        # `re`); the capital miss was the raw-text read.  Both are pinned here,
+        # in BOTH directions: the phrase is one operator, so it must fold
+        # against `and` AND still rival another operator.
+        for spelled in ("We ship the server As well as the client",
+                        "We ship the server _as well as_ the client",
+                        "As well as the client, we ship the server"):
+            assert v2._connective_slots(spelled)[0] == frozenset({"and"}), \
+                spelled
+            assert v2._connective_slots(spelled)[2] == frozenset(), spelled
+            assert v2.fold_allowed(spelled,
+                                   "We ship the server and the client.")
+            assert not v2.fold_allowed(
+                spelled, "We ship the server as well, or the client")
+        assert v2.fold_allowed(
+            "We ship the server _as well as_ the client",
+            "We ship the server, the client")
+        assert v2.fold_allowed(
+            "We should ship the web server first to unblock the mobile team.",
+            "We should ship the web server first and unblock the mobile "
+            "team now.")
+
+    def test_a_temporal_order_swap_is_caught_by_the_content_rule(self):
+        """`before`/`after` are NOT slot members — and need not be.
+
+        Neither is a frame word, so each side keeps its own ordering token and
+        the two-sided content-substitution rule already refuses the swap.  A
+        slot entry would be dead weight, which is why the table excludes them.
+        """
+        assert v2.distinguishing_difference(
+            "we ship before the tests pass",
+            "we ship after the tests pass") == "substituted_content"
+        assert not v2.fold_allowed("we ship before the tests pass",
+                                   "we ship after the tests pass")
+        assert "before" not in v2._CONNECTIVE_MEMBERS
+        assert "after" not in v2._CONNECTIVE_MEMBERS
+
+    def test_a_shared_member_cannot_mask_a_swap_in_the_same_slot(self):
+        """Both sides owning a differing member is a swap, shared member or not.
+
+        The one-sided reading is the broadening case; the TWO-sided reading is
+        not.  A slot that shares a member (`as` fills two slots, so it can be
+        shared) must not hide a differing extra on each side — otherwise the
+        guard fails OPEN on exactly the class it exists to close.
+        """
+        for prior, candidate in (
+                ("we ship as planned and test", "we ship as planned or test"),
+                ("we ship and test as agreed", "we ship or test as agreed"),
+                ("we ship and test but wait", "we ship and test so wait")):
+            assert v2._connective_swap(prior, candidate), (prior, candidate)
+            assert v2.distinguishing_difference(prior, candidate) \
+                == "substituted_content", (prior, candidate)
+            assert not v2.fold_allowed(prior, candidate)
+            assert not v2.supersede_allowed(prior, candidate)
+
+    def test_a_marked_member_spelling_does_not_hide_the_swap(self):
+        """A member carrying a non-composing mark is still that member.
+
+        `_deaccent` exists for exactly this, and it can only run on a token that
+        is still ONE token: the flattened read turned the mark into a separator
+        and split the member first, so the slot read empty and the pair folded.
+        The same reason forbids de-accenting the WHOLE claim, which would glue a
+        mark-SEPARATED member to its neighbour — so both spellings are pinned.
+
+        A pin that cannot fail on the old read is not coverage.
+        """
+        assert v2._connective_slots("we ship a\u0338nd test")[0] == \
+            frozenset({"and"})
+        assert v2._connective_slots("we ship o\u0338r test")[0] == \
+            frozenset({"or"})
+        # The mark as a SEPARATOR: the member is glued to the next word, and it
+        # must still be read as the member rather than fused into one token.
+        assert v2._connective_slots("we ship the server and\u0338the client") \
+            == (frozenset({"and"}), frozenset(), frozenset(), frozenset())
+        # The mark INSIDE the phrase: still the coordination, not a stray `as`.
+        assert v2._connective_slots("we ship as\u0338well as the client") == \
+            (frozenset({"and"}), frozenset(), frozenset(), frozenset())
+        # A mark or a diacritic inside a phrase WORD, too.  The phrase's `as`
+        # is a standalone token here, so left uncanonicalised it fills the
+        # clause AND comparison slots and MASKS the operator swap the phrase
+        # stands for — `as well as` (an `and`) folds into a bare comparison
+        # `as`, which is the fail-open class this boundary exists to close.
+        for spelled in ("as we\u0338ll as", "as w\u00e9ll as",
+                        # BOTH at once: a mark where the separator is AND a
+                        # diacritic in the word.  A pass that only deletes
+                        # marks reads these as "aswell as" and finds no
+                        # separator; a pass that only keeps them misses the
+                        # diacritic.  Only the two read together find them.
+                        "as\u0338w\u00e9ll as", "as\u0338we\u0338ll as"):
+            phrase = f"we ship the server {spelled} the client"
+            assert v2._connective_slots(phrase) == (frozenset({"and"}),
+                                                    frozenset(), frozenset(),
+                                                    frozenset()), spelled
+            assert v2._connective_swap(phrase,
+                                       "we ship the server as the client"), \
+                spelled
+            assert v2.distinguishing_difference(
+                phrase, "we ship the server as the client") \
+                == "substituted_content", spelled
+            assert not v2.fold_allowed(phrase,
+                                       "we ship the server as the client"), \
+                spelled
+        for prior, candidate in (("we ship a\u0338nd test", "we ship or test"),
+                                 ("we ship and test", "we ship o\u0338r test"),
+                                 ("we ship the server and\u0338the client",
+                                  "we ship the server or the client"),
+                                 ("we ship as we\u0338ll as the client",
+                                  "we ship as the client"),
+                                 ("we ship as w\u00e9ll as the client",
+                                  "we ship as the client"),
+                                 ("we ship as\u0338w\u00e9ll as the client",
+                                  "we ship as the client"),
+                                 ("we ship as\u0338we\u0338ll as the client",
+                                  "we ship as the client")):
+            assert v2._connective_swap(prior, candidate), (prior, candidate)
+            assert v2.distinguishing_difference(prior, candidate) \
+                == "substituted_content", (prior, candidate)
+            assert not v2.fold_allowed(prior, candidate)
+            assert not v2.supersede_allowed(prior, candidate)
+
+    def test_a_contraction_does_not_spell_a_phrase_word(self):
+        """The phrase's inner gap is the one a dropped MARK leaves (#5139).
+
+        A non-word interior would let a real token stand inside a phrase word:
+        `we'll` would spell `well`, so `as we'll, as` would canonicalise to
+        `and` — DELETING the comparison operators the swap guard needs to see,
+        which folds a comparison into a coordination (the claim-loss fail-open
+        this boundary exists to close, reached mark-free).  The gap therefore
+        admits only the sentinel a dropped mark produces.  Pinned beside the
+        mark spellings, because the two must hold at once.
+        """
+        for contraction in ("we ship the server as we'll, as the plan unfolds",
+                            "we ship the server as we'll as it goes"):
+            assert v2._connective_slots(contraction)[0] == frozenset({"as"}), \
+                contraction
+            assert not v2.fold_allowed(
+                contraction, "we ship the server and the plan unfolds"), \
+                contraction
+        for spelled in ("as\u0338w\u00e9ll as", "as\u0338we\u0338ll as"):
+            phrase = f"we ship the server {spelled} the client"
+            assert v2._connective_slots(phrase)[0] == frozenset({"and"}), \
+                spelled
+        # The gap's sentinel must ALSO be unproducible from the claim itself: a
+        # literal NUL is a character content can contain (a PDF or a JSON
+        # escape), and if it reached the phrase's word gap it would spell the
+        # same false `and` a contraction does.
+        for injected in ("we ship the server as we\x00ll, as the plan unfolds",
+                         "we ship the server as we\x00ll as it goes"):
+            assert v2._connective_slots(injected)[0] == frozenset({"as"}), \
+                injected
+            assert not v2.fold_allowed(
+                injected, "we ship the server and the plan unfolds"), injected
+
+    def test_a_connective_swap_between_two_slots_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5325).
+
+        The slot is the FAMILY, not the POSITION: comparing position in the
+        connective sequence would refuse the phase-D restatement above, whose
+        `to` and `and` sit in the same position in two different slots.  The
+        cost is that a swap BETWEEN slots is invisible — `and` (clause
+        relation) against `then` (branch/sequence) asserts a different
+        relation and still folds.  Grouping them would refuse `and then` /
+        `, then`, which is a real paraphrase.
+        """
+        assert v2.fold_allowed("we ship and test", "we ship then test")
+
+    def test_a_connective_permutation_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5325).
+
+        Within a slot the comparison is a SET, because a set is what keeps the
+        documented broadening case folding.  The cost is that a change of
+        ATTACHMENT carries one multiset in two groupings and folds — the same
+        shape as the role inversion (#5131), which needs syntax.
+        """
+        assert v2.fold_allowed("we ship and test or we wait",
+                               "we ship or test and we wait")
+
+    def test_a_one_sided_extra_operator_in_a_shared_slot_is_a_known_limit(
+            self):
+        """Documented residual, pinned so it cannot go silent (#5325).
+
+        A slot with a SHARED member and a member on ONE side only is read as
+        the documented broadening case — the rule that keeps the comma-list
+        coordination folding.  The cost is that a genuinely added operator
+        clause ("but we wait") is read as an added detail.  Closing it needs
+        syntax, and the shared-member rule cannot be tightened without
+        refusing "we wait for the build and the tests" ⇄ "… for the build, the
+        tests".
+        """
+        assert v2.fold_allowed("we ship and test",
+                               "we ship and test but we wait")
+
+    def test_a_within_relation_synonym_swap_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5325).
+
+        The clause-relation slot is deliberately COARSE: splitting it into
+        relation sub-families would make `and` against `but` a cross-slot
+        difference and fold it — reopening the class this table exists to
+        close.  The cost is that two members that happen to be near-synonyms
+        are refused.  A wrong keep is noise; a wrong drop is memory loss.
+        """
+        for member, mate in (("but", "yet"), ("because", "as")):
+            assert not v2.fold_allowed(f"we tried {member} failed",
+                                       f"we tried {mate} failed")
+
+    def test_an_instrumental_for_as_rewording_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5325).
+
+        `for` is the one slot member whose NON-operator use is common: as a
+        causal conjunction it rivals `and`, and as a preposition it does not.
+        Reading it as a slot member therefore refuses the instrumental
+        `for`/`as` rewording, and the refusal is KEPT deliberately — the
+        boundary's own asymmetry is that a wrong keep is noise while a wrong
+        drop is memory loss, so pruning `for` out would reopen the class this
+        table exists to close.
+        """
+        assert not v2.fold_allowed("we use the tool for a hammer",
+                                   "we use the tool as a hammer")
+
+    def test_the_connective_slots_are_pinned_against_the_sibling_tables(self):
+        """One token's role is declared in three sets; the overlaps are pinned.
+
+        `and` is a frame word AND a clause-relation operator, and `nor` is also
+        a negator — three answers to three different questions (syntactically
+        inert? load-bearing relation operator? negation marker?) which the
+        module keeps separate on purpose.  Unpinned, an edit to either sibling
+        set silently changes what the boundary can see; `yet` is the worked
+        example, in no sibling list at all.
+        """
+        assert {
+            "and", "or", "but", "so", "as", "for", "then", "else",
+            "than", "to", "from"} == v2._FRAME_STOPWORDS & v2._CONNECTIVE_MEMBERS
+        assert {"nor"} == v2._NEGATION_MARKERS & v2._CONNECTIVE_MEMBERS
+        # The condition vocabulary is empty against the slots today; pinned so
+        # a next lane adding a temporal/causal word to one and not the other is
+        # not silent (`when`/`while`/`once` are condition markers, `since` is
+        # neither, and `before`/`after` are ordinary content tokens).
+        assert frozenset() == v2._CONDITION_MARKERS & v2._CONNECTIVE_MEMBERS
+        assert "yet" not in v2._FRAME_STOPWORDS
+        assert "yet" not in v2._NEGATION_MARKERS
+
+    def test_the_slot_partition_is_pinned_literally(self):
+        """Which member sits in WHICH slot is pinned, not just the union.
+
+        A behavioural test alone cannot pin the partition, and the per-member
+        test below cannot either: it reads the same module constant the code
+        reads, so a mis-assignment is invisible to it.  Only a literal pin makes
+        the partition checkable.  `as` is the deliberate dual member.
+        """
+        assert tuple(tuple(sorted(slot))
+                     for slot in v2._CONNECTIVE_SLOTS) == (
+            ("although", "and", "as", "because", "but", "for", "nor",
+             "or", "so", "though", "whereas", "yet"),
+            ("else", "then"),
+            ("as", "than"),
+            ("from", "to"))
+        # The union is what the member lookup reads, so a member added to it
+        # but to NO slot would be invisible to `_connective_swap` and to the
+        # table pin above.
+        assert frozenset().union(*v2._CONNECTIVE_SLOTS) == \
+            v2._CONNECTIVE_MEMBERS
+        assert [i for i, slot in enumerate(v2._CONNECTIVE_SLOTS)
+                if "as" in slot] == [0, 2]
+        assert v2._COORDINATION_PHRASES == (("as well as", "and"),)
+
+    @pytest.mark.parametrize("slot", v2._CONNECTIVE_SLOTS,
+                             ids=lambda s: "+".join(sorted(s)))
+    def test_every_slot_member_is_exercised_against_a_slot_mate(self, slot):
+        """Class coverage, not exemplars: every member of every slot, spelled
+        the way the table spells it, and ATTRIBUTED to the slot predicate.
+
+        The mate is a FRAME-word member of the same slot wherever one OTHER
+        than the member exists, so a frame member's pair has no content token on
+        either side that the other lacks and no other dimension can refuse it —
+        only the slot read can.  The slot read is asserted directly as well as
+        through the label, because `nor` is also a negator and refuses the pair
+        on that ground whatever the slot read says.  The label is asserted
+        POSITIVELY: `unreadable` is the fail-closed sentinel, and an assertion
+        that merely admits "some identity dimension" passes when the comparison
+        crashes instead of detecting the swap.
+        """
+        frame = sorted(slot & v2._FRAME_STOPWORDS)
+        for member in sorted(slot):
+            mates = [f for f in frame if f != member] or sorted(
+                slot - {member})
+            assert mates, (member, slot)
+            mate = mates[0]
+            a, b = f"we ship {member} test", f"we ship {mate} test"
+            assert v2._connective_swap(a, b), (member, mate)
+            label = v2.distinguishing_difference(a, b)
+            assert label in {"substituted_content", "negation"}, \
+                (member, mate, label)
+            assert not v2.fold_allowed(a, b)
 
     def test_a_sentence_initial_name_is_a_known_limit(self):
         """Documented residual, pinned with the uncapitalised name (#5134).
@@ -898,17 +1301,348 @@ class TestDistinguishingDifference:
         assert v2.fold_allowed("the team meets weekly in main office",
                                "the team meets weekly")
 
-    def test_a_one_sided_antonym_is_a_known_limit(self):
+    def test_a_one_sided_state_word_is_a_rival_claim(self):
+        """The one-sided state drop is refused — the limit is CLOSED (#5134).
+
+        This replaces `test_a_one_sided_antonym_is_a_known_limit`, which
+        pinned the fold.  A state word on one side used to read as the
+        documented broadening case, so `the flag is off` folded into `the
+        flag` and the in-capture seam then `DETACH DELETE`d the rival.  A
+        polarity pass over the PAIR now refuses it: the state term is the
+        whole distinguishing content of a copula predicate, so dropping it
+        substitutes the claim instead of broadening it.  Both decisions are
+        asserted, because the boundary guards fold AND supersede from one
+        identity set — a fold that emptied the state out as a value update
+        would destroy the same claim.  The final row pins the
+        DISTINGUISHING-member read: a state that the two sides SHARE must not
+        mask a one-sided extra beside it.
+        """
+        for prior, candidate in (
+                ("the flag is off", "the flag"),
+                ("the flag is on", "the flag"),
+                ("the feature is disabled", "the feature"),
+                ("the feature is enabled", "the feature"),
+                ("the gate is open", "the gate"),
+                ("the gate is closed", "the gate"),
+                ("the account is locked", "the account"),
+                ("the service is available", "the service"),
+                # `am` is a `_CLOCK_UNITS` member, so the content skeleton
+                # drops it and the copula has to be declared in `_COPULAS`;
+                # without that this pair folded.
+                ("i am offline", "i am"),
+                # A one-sided state beside a SHARED state: the gate's `off`
+                # also appears on the flag, so subtracting every polarity
+                # member from one side would fail the equality and miss it.
+                ("the flag is off and the gate is on",
+                 "the flag is off and the gate is off")):
+            assert v2.distinguishing_difference(prior, candidate) \
+                == "substituted_content", (prior, candidate)
+            assert not v2.fold_allowed(prior, candidate), (prior, candidate)
+            assert not v2.supersede_allowed(prior, candidate), (prior, candidate)
+            # The drop reads the same pair either way round.
+            assert not v2.fold_allowed(candidate, prior), (candidate, prior)
+        # EVERY declared member must act as a one-sided drop, not only the
+        # rows above: a member that is also a frame/date stopword would be
+        # silently inert in the content skeleton, and the literal pin alone
+        # would not catch it.
+        for member in sorted(v2._POLARITY_MEMBERS):
+            assert not v2.fold_allowed(f"the thing is {member}", "the thing"), \
+                member
+        # The copulas the predicate read consults are a declared set too: a
+        # member dropped from it silently reopens the fold for that spelling.
+        # The set is pinned LITERALLY and the loop iterates a LITERAL sequence
+        # — iterating `v2._COPULAS` would simply skip a removed member, which
+        # is the vacuity this replaced.  `substituted_content` (not merely a
+        # refusal) is asserted so an accidental refusal through another
+        # dimension cannot mask a broken copula path.
+        assert frozenset({
+            "am", "is", "are", "was", "were", "be", "been", "being"}) \
+            == v2._COPULAS
+        for copula in ("am", "is", "are", "was", "were", "be", "been",
+                       "being"):
+            assert v2.distinguishing_difference(
+                f"the thing {copula} off", "the thing") \
+                == "substituted_content", copula
+
+    def test_a_one_sided_detail_is_still_the_documented_broadening(self):
+        """The one-sided allowance is load-bearing and must keep folding.
+
+        The state pass must not tighten the general rule: a one-sided token
+        that does NOT complete a copula predicate is still a detail added to
+        the prior, which the boundary deliberately allows.  The `#4652`
+        marker-free paraphrase itself is pinned by
+        `test_a_one_sided_detail_is_still_a_broadening` and by
+        `test_the_legitimate_folds_still_fold`; this test pins the
+        PREPOSITIONAL `on` boundary the state pass could plausibly break — an
+        `on` whose object is a token the content skeleton drops (`on friday`)
+        or keeps (`on quality`), which looks exactly like a one-sided state
+        word until the PAIR is read.
+        """
+        for detail, bare in (
+                ("we ship on friday", "we ship friday"),
+                ("the focus is on quality", "the focus is quality"),
+                # A copula + prepositional `on` whose OBJECT is a date token.
+                # The content skeleton drops the date, so the pair looks like a
+                # state drop unless the predicate read keeps the date as a
+                # blocker (`_TAIL_IGNORABLE`).  `today`/`yesterday` are the
+                # load-bearing case: they are ALSO frame stopwords, so only the
+                # subtraction keeps them blocking.
+                ("the release is on friday", "the release is friday"),
+                ("the release is on today", "the release is today"),
+                ("the demo is on tomorrow", "the demo is tomorrow"),
+                ("timeout is on macOS", "timeout is macOS"),
+                # A shared trailing state must not license refusing a dropped
+                # PREPOSITIONAL `on`: the qualifying copula here belongs to
+                # the trailing clause both sides carry, not to the dropped
+                # token.  Pinned because the pre-`targets` read refused it.
+                ("we ship on friday and the flag is off",
+                 "we ship friday and the flag is off")):
+            assert v2.distinguishing_difference(detail, bare) is None, \
+                (detail, bare)
+            assert v2.fold_allowed(detail, bare), (detail, bare)
+
+    def test_the_polarity_vocabulary_is_pinned_literally(self):
+        """The declared state vocabulary is pinned, not just exercised.
+
+        A behavioural test alone cannot pin the vocabulary: a member dropped
+        from the set changes recall silently, and a member the table does not
+        contain is exactly the residual class.  The pair structure is a flat
+        set by design (a DROP has no second side to match a slot against), so
+        the set is what is pinned.  `on` is the member with a common NON-state
+        use, and it was SUBTRACTED from `_CONTENT_STOPWORDS`: it IS a frame
+        stopword by its preposition use, and the STATE use is why it is carved
+        out to content (so the state pair is not lopsided).  Both facts are
+        pinned here so an edit to either side is not silent.
+        """
+        assert frozenset({
+            "on", "off", "enabled", "disabled", "open", "closed",
+            "active", "inactive", "available", "unavailable",
+            "locked", "unlocked", "muted", "unmuted", "online",
+            "offline", "valid", "invalid", "present", "absent"
+        }) == v2._POLARITY_MEMBERS
+        # `on` names a STATE, so it is content (the recorded decision the
+        # symmetric `on`/`off` row above rests on); `off` was never a frame
+        # word.  Either moving silently would make a state pair lopsided.
+        assert "on" not in v2._CONTENT_STOPWORDS
+        assert "off" not in v2._FRAME_STOPWORDS
+        # The vocabulary and the content skeleton are COUPLED: the predicate
+        # reads members out of `_content_tokens`, which drops every
+        # `_CONTENT_STOPWORDS`/`_DATE_WORDS` token.  A member added to the
+        # vocabulary that is ALSO a stopword or a date word would be silently
+        # dead — the literal pin would force a set edit, but nothing would
+        # exercise it.  `in` is the live trap (a natural state word and a
+        # frame stopword), so the invariant is asserted generally, not only
+        # for `on`.
+        assert not (v2._POLARITY_MEMBERS & v2._CONTENT_STOPWORDS)
+        assert not (v2._POLARITY_MEMBERS & v2._DATE_WORDS)
+        # The ignorable tail set is where the `on`-preposition distinction
+        # lives.  Only the date words that are ALSO frame stopwords are
+        # load-bearing there (`today`/`yesterday`): as frame they would be
+        # ignored in the tail, so `the release is on today` would read as the
+        # state `on` with an empty complement and a legitimate fold would be
+        # refused.  A non-frame date (`friday`) blocks the tail on its own, so
+        # pinning `friday` would be vacuous — it is pinned as such instead.
+        assert "today" not in v2._TAIL_IGNORABLE
+        assert "yesterday" not in v2._TAIL_IGNORABLE
+        assert "friday" in v2._DATE_WORDS
+        assert "friday" not in v2._CONTENT_STOPWORDS
+        assert "the" in v2._TAIL_IGNORABLE
+
+    def test_a_state_word_outside_the_polarity_table_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5134).
 
-        Antonymy is not one of the declared dimensions, and the general rule
-        allows a one-sided token because that is the broadening case.  A pair
-        where BOTH sides carry a differing state word IS caught (the
-        `the flag is on` / `the flag is off` rows above); a state word on one
-        side only is not, and telling an antonym from a detail needs a lexicon
-        or a model — it belongs to the contradiction classifier, not here.
+        The vocabulary is finite, so a state word it does not name reaches no
+        dimension and the pair is the one-sided broadening case again.  `shut`
+        and `down` are the worked examples: both are state words and neither is
+        in the vocabulary.  The asymmetry is the point — `closed`/`open` ARE
+        named, so `the door is closed` is refused while `the door is shut` is
+        not, and adding every English adjective is a lexicon problem rather
+        than a boundary rule.  The contrast is asserted beside the pin, so this
+        records the boundary and not a predicate that never fires.
         """
-        assert v2.fold_allowed("the flag is off", "the flag")
+        assert not v2.fold_allowed("the door is closed", "the door")
+        assert v2.fold_allowed("the door is shut", "the door")
+        assert v2.fold_allowed("the server is down", "the server")
+
+    def test_a_non_be_state_predicate_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        The predicate read names the be-copulas.  A non-be linking verb
+        (`seems`, `remains`) is a content token, so the two sides stop being
+        one claim minus a state and the pair folds.  This is the same
+        open-class residual the vocabulary pin above records: folding is the
+        FAIL-OPEN direction (one capture order can still drop the state-bearing
+        claim), not a wrong keep.  The be-copula contrast is asserted so the
+        pin cannot go vacuous.
+        """
+        assert not v2.fold_allowed("the flag is off", "the flag")
+        assert v2.fold_allowed("the flag seems off", "the flag")
+        assert v2.fold_allowed("the flag remains off", "the flag")
+
+    def test_a_predicate_with_a_second_content_token_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        The pass reads the state term as the ENTIRE predicate complement of a
+        copula.  A second content token in that complement — a passive/particle
+        form (`was turned off`), an adverb beside it (`currently off`), or a
+        following modifier (`off by default`, `off again`) — makes the state
+        no longer the WHOLE of what is dropped, so the pair folds.
+
+        This is the SAME condition that keeps the prepositional `on` folding
+        (its object is a second content token), so the cost is deliberate: the
+        refusal would otherwise have to fire on any one-sided member, which is
+        the over-block the copula condition exists to avoid.  Closing it needs
+        syntax.  Both directions are asserted — the bare state drop is still
+        refused — so this pin cannot go vacuous by a rule that stops firing.
+        """
+        assert not v2.fold_allowed("the flag is off", "the flag")
+        for a, b in (
+                ("the switch was turned off", "the switch"),
+                ("the flag is currently off", "the flag"),
+                ("the flag is off by default", "the flag"),
+                ("the flag is off again", "the flag")):
+            assert v2.fold_allowed(a, b), (a, b)
+
+    def test_a_state_drop_beside_another_subject_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        A claim holding a SECOND subject is not the one-sided case in either
+        direction: the removed text is a whole clause rather than one state, so
+        `content_a - polarity` is not the other side's skeleton.  The boundary's
+        one-sided allowance therefore reads it as broadening.  Closing it needs
+        to know which clause was dropped, which is syntax.
+        """
+        for a, b in (
+                ("the flag is off and the gate is closed", "the flag is off"),
+                # ... and the mirror: the FIRST state is the one dropped here.
+                ("the flag is off and the gate is closed",
+                 "the gate is closed")):
+            assert v2.fold_allowed(a, b), (a, b)
+        # The bare one-state drop is refused beside it, so the pin records the
+        # boundary rather than a predicate that never fires.
+        assert not v2.fold_allowed("the flag is off", "the flag")
+
+    def test_an_inverted_or_fused_state_predicate_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        `_state_predicate` reads a copula and then its complement, in order,
+        so two spellings put the state outside that read and the pair folds
+        again:
+
+        * a FRONTED copula — `is the flag off` carries the subject between the
+          copula and the state, so the complement is not the state alone.
+        * a state member FUSED to a separator — `on\u0338off` is one token, and
+          `_deaccent` collapses the mark, so no member is read.  That is the
+          same fused-token route PR #5320 (open, #5139) closes for the
+          load-bearing connective's own members; here it is not closed because
+          `_content_tokens` is a set and splits nothing, so closing it would
+          change what the skeleton IS for every dimension, not just this one.
+
+        Both are FAIL-OPEN residuals — the pair folds, so one capture order can
+        still drop the state-bearing claim.  Each pin asserts the declarative
+        drop is still refused beside it, so the pin records a precise boundary
+        rather than a predicate that never fires.
+        """
+        assert not v2.fold_allowed("the flag is off", "the flag")
+        assert v2.fold_allowed("is the flag off", "the flag")
+        assert v2.fold_allowed("the flag is on\u0338off", "the flag")
+
+    def test_a_state_drop_in_a_compound_clause_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        `_state_predicate` reads a copula's complement to the END of the token
+        sequence, so content in a FOLLOWING clause disqualifies an otherwise
+        bare one-sided state:
+
+            "the flag is off and the deploy failed"
+              vs "the flag and the deploy failed"       -> the state is dropped
+
+        The mirror puts the state in the final clause and IS refused, so the
+        guard is clause-ORDER dependent today.  Closing it means bounding the
+        complement at a clause boundary — a connective-role decision that
+        belongs with PR #5320 (#5139), not a polarity member; doing it here
+        would duplicate that mechanism.  Filed separately.  The refused mirror
+        is asserted beside the pin, so the pin cannot go vacuous.
+        """
+        assert not v2.fold_allowed("the build passed and the flag is off",
+                                   "the build passed and the flag")
+        for a, b in (
+                ("the flag is off and the deploy failed",
+                 "the flag and the deploy failed"),
+                ("the flag is off because the deploy failed",
+                 "the flag because the deploy failed")):
+            assert v2.fold_allowed(a, b), (a, b)
+
+    def test_an_attributive_state_member_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        `_state_predicate` reads a copula's predicate complement, so a state
+        member in ATTRIBUTIVE (pre-nominal) position is never visited and the
+        pair folds:
+
+            "the invalid token was rejected" vs "the token was rejected"
+              -> fold_allowed True, and rephrase_hit ('c1', 0.8) is above
+                 NOOP_MIN_OVERLAP, so the in-capture seam would delete the
+                 rival.
+
+        Telling an attributive adjective ("the invalid token") from a
+        preposition with a nominal object ("the focus is on quality") is a
+        part-of-speech decision: a rule that fired on "member followed by a
+        content token" would refuse the pinned prepositional `on` fold.  It is
+        the same POS/syntax root as #5139 and is recorded there, not closed
+        here.  The refused copula form is asserted beside it, so the pin
+        cannot go vacuous.
+        """
+        assert not v2.fold_allowed("the token is invalid", "the token")
+        for a, b in (
+                ("the invalid token was rejected", "the token was rejected"),
+                ("the off switch is broken", "the switch is broken"),
+                ("the offline node was drained", "the node was drained")):
+            assert v2.fold_allowed(a, b), (a, b)
+
+    def test_a_contracted_copula_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134).
+
+        `_apostrophe_free` turns "flag's" into "flags", so a contracted
+        be-copula is no `_COPULAS` member and `_state_predicate` sees no
+        copula:
+
+            "the flag's off" vs "the flag's"
+              -> fold_allowed True, and rephrase_hit ('c1', 0.667) is above
+                 NOOP_MIN_OVERLAP, so the seam would delete the rival.
+
+        Unlike `am` — a plain missing set member, closed here — the clitic is
+        ambiguous with the possessive ("bob's colour"), so telling the two
+        apart is a part-of-speech decision: the same POS root as #5139, where
+        it is recorded.  The uncontracted form is asserted beside it, so the
+        pin cannot go vacuous.
+        """
+        assert not v2.fold_allowed("the flag is off", "the flag")
+        for a, b in (("the flag's off", "the flag's"),
+                     ("it's offline", "it's")):
+            assert v2.fold_allowed(a, b), (a, b)
+
+    def test_a_multi_member_polarity_permutation_is_a_known_limit(self):
+        """Documented residual, pinned so it cannot go silent (#5134/#5139).
+
+        The skeleton is a SET, so a pair differing only by the ATTACHMENT of
+        two polarity members compares equal and no dimension sees a
+        difference:
+
+            "the flag is on and the gate is off"
+              vs "the flag is off and the gate is on"      -> folds
+
+        On main this folds too — it is the set-level / attachment blind spot
+        of the whole boundary, recorded on #5139 with the clause and
+        attributive shapes, and closing it needs the same syntax the fold
+        predicate lacks.  The one-sided form beside a SHARED member IS refused
+        (the `gate` row of `test_a_one_sided_state_word_is_a_rival_claim`), so
+        this pin records a boundary and not a predicate that never fires.
+        """
+        assert v2.fold_allowed("the flag is on and the gate is off",
+                               "the flag is off and the gate is on")
+        assert not v2.fold_allowed("the flag is off and the gate is on",
+                                   "the flag is off and the gate is off")
 
     def test_a_role_inversion_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent.
@@ -953,8 +1687,12 @@ class TestDistinguishingDifference:
         one that constrains the decision, and the decisions refuse on the set.
         """
         for prior, candidate in MASKED_IDENTITY:
-            assert v2.distinguishing_difference(prior, candidate) \
-                in v2._IDENTITY_DIMENSIONS
+            label = v2.distinguishing_difference(prior, candidate)
+            # `unreadable` is the fail-closed sentinel, so admitting it would
+            # let a comparison that CRASHED end-to-end pass as "the value
+            # difference did not mask an identity one".
+            assert label in v2._IDENTITY_DIMENSIONS and label != "unreadable" \
+                , (prior, candidate, label)
             # the value difference is genuinely there too
             assert (v2._value_signature(prior) != v2._value_signature(candidate)
                     or v2._value_bindings(prior)
@@ -1064,7 +1802,12 @@ class TestOneSharedBoundary:
 
     @pytest.mark.parametrize(
         ("prior", "candidate"),
-        [(a, b) for a, b, _ in NEVER_ACROSS if not v2.supersede_allowed(a, b)]
+        # A STATIC filter on the dimension, never a call to the predicate under
+        # test: filtering with `if not v2.supersede_allowed(a, b)` drops a row
+        # silently when the predicate flips, so the parametrization could not
+        # fail for the rows it exists to check.  Identity dimensions are the
+        # rows `supersede_allowed` must refuse.
+        [(a, b) for a, b, d in NEVER_ACROSS if d in IDENTITY_DIMENSIONS]
         + MASKED_IDENTITY)
     def test_the_classifier_cannot_supersede_what_supersede_allowed_refuses(
             self, prior, candidate):
