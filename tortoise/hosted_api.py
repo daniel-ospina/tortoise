@@ -5450,9 +5450,71 @@ def _control_plane_unavailable() -> HTTPException:
     )
 
 
+class _OffloadRefused:
+    """Sentinel for a REFUSED best-effort offload (#4456).
+
+    ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
+    when the pool refused the submission (backlog full — or, on a cancellable
+    lane, cancelled before any worker ran it): the work did NOT happen. A
+    plain bound miss still returns ``None``, because the worker that picked
+    the submission up runs it to completion (the seam abandons only the
+    await). Callers that ignore the return value are unaffected; a
+    delivery-sensitive caller can tell a real drop from a later-than-bound
+    completion instead of reading both as ``None``.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "OFFLOAD_REFUSED"
+
+
+#: Public discriminator returned by a REFUSED best-effort offload (#4456).
+OFFLOAD_REFUSED = _OffloadRefused()
+
+#: Rate limit for the ``BILLING_NOTIFY_REFUSED`` ERROR floor (#4456 plan §4).
+#: The shared telemetry pool is reachable by any tenant, so ONE saturation
+#: refuses a notify per billing webhook for EVERY tenant — the repo already
+#: ruled against per-drop alert amplification (``operator_alert._log_shed``),
+#: so the ERROR line is shed-logged too. One line per window is enough to see
+#: the outage; the suppressed count is deliberately not carried.
+_BILLING_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference
+#: point is undefined, so a fresh-boot clock would suppress every line).
+_LAST_BILLING_REFUSED_LOG: float | None = None
+_BILLING_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_billing_notify_refused(org_id: str | None,
+                                event_type: str | None) -> None:
+    """The rate-limited ERROR floor for a REFUSED billing notify (#4456 AC3).
+
+    Emitted BEFORE the incident escalation, so it survives the two reasons the
+    alert channel can be ABSENT (no ``DR_ISSUES_PAT``, or an unbuildable
+    object store — the documented residual): without it, a permanently-lost
+    billing notification reads only as the ``_cp_offload`` best-effort WARNING
+    plus ``alert_operator``'s "no alert channel" WARNING, indistinguishable
+    from routine telemetry noise. Never raises.
+    """
+    global _LAST_BILLING_REFUSED_LOG
+    with suppress(Exception):
+        now = time.monotonic()
+        with _BILLING_REFUSED_LOG_LOCK:
+            if (_LAST_BILLING_REFUSED_LOG is not None
+                    and now - _LAST_BILLING_REFUSED_LOG
+                    < _BILLING_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_BILLING_REFUSED_LOG = now
+        _logger.error(
+            "webhook: billing notify REFUSED by the control-plane offload "
+            "seam (org=%s event_type=%s) — the WebhookEvent marker is already "
+            "committed, so Stripe's retry sees is_first=False and this "
+            "notification is LOST", org_id, event_type)
+
+
 async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                       pool: str = "auth", timeout: float | None = None,
-                      unavailable=None):
+                      unavailable=None, cancel_on_timeout: bool = True):
     """#3498: run ONE blocking control-plane helper off the event loop.
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
@@ -5494,6 +5556,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     await, never the worker thread (CPython #87185), so abandoning a grant that
     is mid-write would claim a retryable state it cannot observe (#2863).
 
+    ``cancel_on_timeout=False`` (#4456) makes the bound DELIVERY-preserving:
+    the bound abandons only the AWAIT, so a submission still QUEUED when the
+    bound expires STILL RUNS (the default ``True`` cancels a queued submission
+    and the worker skips it — a silent DROP, not an abandonment). A
+    ``best_effort=True`` call then returns :data:`OFFLOAD_REFUSED` — instead
+    of ``None`` — when the pool genuinely REFUSED the submission, so the
+    caller can escalate a real drop instead of swallowing it as a success.
+
     The Auth/REST lane is the blast radius the issue names: a regression here
     is a total auth outage, so this seam is deliberately the ONLY new thing
     callers touch, and every routed site is covered by a behavioural test.
@@ -5503,13 +5573,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
     try:
         return await run_control_plane_call(
-            fn, op=op, pool=effective_pool, timeout=timeout)
+            fn, op=op, pool=effective_pool, timeout=timeout,
+            cancel_on_timeout=cancel_on_timeout)
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
-            return None
+            return OFFLOAD_REFUSED if exc.refused else None
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -24026,6 +24097,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     repos_count = await _cp_offload(
         lambda: _github_repos_count(token), op="github_repos_count",
         best_effort=True)
+    if repos_count is OFFLOAD_REFUSED:
+        # #4456: a REFUSED best-effort offload never ran; keep the pre-seam
+        # client-visible outcome for this display-only count (``None``)
+        # instead of leaking the seam's sentinel into the JSON body.
+        repos_count = None
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -27766,10 +27842,68 @@ async def webhooks_stripe(request: Request):
             # the webhook AND strand the notification — follow it. (#4352 had
             # already moved the analytics POST behind ``_cp_offload``; what
             # this change adds here is the notify-first order and the guards.)
-            notify_billing_event(
-                notify_kind, {"org_id": org_id, "tier": tier},
-                {"subscription_status": etype},
-            )
+            #
+            # #4456: the notify ITSELF is blocking sync HTTP — Resend via
+            # ``httpx.post(..., timeout=15.0)`` plus Telegram on its own 15 s
+            # timeout (tortoise/notify.py) — and ``hosted_api`` runs a SINGLE
+            # uvicorn worker, so calling it inline held the one event loop for
+            # up to ~30 s and stalled EVERY concurrent request (the #2988 /
+            # #3498 class). It is routed through the #3498 seam rather than
+            # the issue's proposed ``asyncio.to_thread`` DELIBERATELY:
+            # ``to_thread`` submits to the loop's SHARED default executor,
+            # whose workers are NON-daemon and are JOINED at shutdown (#2850),
+            # so a black-holed socket would delay uvicorn's shutdown — and a
+            # notify would park one of the six workers the /health probe and
+            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # on the capture-cost lane). The telemetry pool is a
+            # process-lifetime DAEMON pool with a bounded backlog, so a wedged
+            # notify is abandoned at the seam's wait bound instead of
+            # delaying shutdown, and it can never occupy an auth slot.
+            #
+            # #4456 P1: the wait bound must NOT cancel a QUEUED submission.
+            # ``wait_for`` cancels the awaitable, ``asyncio.wrap_future``
+            # propagates that to the concurrent future, and a queued
+            # ``Future.cancel()`` SUCCEEDS — the worker later SKIPS the
+            # callable (``set_running_or_notify_cancel()`` is False), so the
+            # notification is DROPPED, not abandoned. Because the
+            # ``WebhookEvent`` marker was committed BEFORE the notify
+            # (``is_first=True``), Stripe's retry sees ``is_first=False`` and
+            # the notification is lost PERMANENTLY. ``cancel_on_timeout=False``
+            # keeps the bound on the AWAIT — the loop is freed and the webhook
+            # still returns promptly — while guaranteeing the queued
+            # submission still runs.
+            #
+            # ``best_effort=True`` + the guard keep the never-raise contract
+            # AT THE HAND-OFF: an offload failure is swallowed by the seam —
+            # but a REFUSAL (backlog full: the callable never ran) is a REAL
+            # drop, so the seam returns ``OFFLOAD_REFUSED`` and it is escalated
+            # through the existing operator-alert path instead of being
+            # silently swallowed. Any raise is caught here rather than
+            # reaching the handler's ``except Exception`` → 500, which would
+            # strand a claimed event and cost the payment's ack.
+            try:
+                result = await _cp_offload(
+                    lambda: notify_billing_event(
+                        notify_kind, {"org_id": org_id, "tier": tier},
+                        {"subscription_status": etype}),
+                    op="billing_notify", best_effort=True,
+                    cancel_on_timeout=False)
+                if result is OFFLOAD_REFUSED:
+                    with suppress(Exception):
+                        from tortoise.operator_alert import (
+                            alert_billing_notify_refused,
+                        )
+
+                        # The ERROR line is emitted BEFORE the escalation and
+                        # the subject is platform-scoped ("") — see
+                        # ``_log_billing_notify_refused`` and
+                        # ``alert_billing_notify_refused`` (#4456).
+                        _log_billing_notify_refused(org_id, etype)
+                        alert_billing_notify_refused(org_id, etype)
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning(
+                    "webhook: billing notify failed (non-fatal): %s",
+                    _safe_log(exc))
             try:
                 await _async_audit(
                     request, org_id, notify_kind,
