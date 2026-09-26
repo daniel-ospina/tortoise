@@ -6057,12 +6057,25 @@ class FalkorProjection(
         behaviour. A probe that cannot PROVE the schema is current must never
         be able to skip the work.
 
-        The FTS contract is checked by FIELD SET, not by the
-        ``point_fts_v2``/``event_fts_v2`` Meta markers those migrations set.
-        Only a one-field index can still need the migration, and that shape
-        fails the field requirement below; a two-field index with a missing
-        marker is precisely the shape the marker exists to keep OUT of the
-        drop→recreate branch, so skipping it is the intended outcome.
+        The FTS contract is checked by FIELD SET, and — for Point — by the
+        ``point_fts_v2`` marker as well. A one-field legacy index fails the
+        field requirement below, so it takes the full path.
+
+        The reverse shape (two-field Point index present, ``point_fts_v2``
+        marker absent) is NOT proof the work is done: the ``if not done:``
+        block that marker guards also performs a ONE-TIME DATA FIXUP — it
+        flattens array-valued ``search_keys`` to a space-joined string, because
+        FalkorDB's fulltext index does not index array-valued properties. A
+        graph in that state (a node-only wipe that spares indexes, or a
+        swallowed marker MERGE) still has the fixup owed to it; skipping the
+        sweep would leave those nodes permanently invisible to FTS. So the
+        marker is part of the completeness contract for that shape.
+
+        ``event_fts_v2`` is deliberately NOT required: no data fixup rides it
+        (it guards only the drop→recreate churn), and a fresh graph sets the
+        Event two-field index WITHOUT setting that marker — only the
+        "already indexed" path sets it — so requiring it would disable the
+        fast path on every graph.
         """
         try:
             rows = self.g.query("CALL db.indexes()").result_set
@@ -6081,18 +6094,38 @@ class FalkorProjection(
             label, props, kinds = str(row[0]), row[1] or (), row[2]
             # #3154: a boolean is_operator index is never VALID — its presence
             # (single or composite, so either column can carry it) means the
-            # purge below still has work to do.
-            if any("is_operator" in str(p) for p in props):
+            # purge below still has work to do. Match the property name
+            # EXACTLY: a substring test also matches an unrelated property such
+            # as ``is_operator_flag``, and because a false positive returns
+            # False FOREVER for that graph the fast path would be permanently
+            # disabled — the exact churn #4465 exists to remove. The sibling
+            # detector this purge feeds (``hosted_backup
+            # ._audit_copied_boolean_indexes``) matches exactly for the same
+            # reason; the DROP below only targets the two exact forms.
+            if any(str(p) == "is_operator" for p in props):
                 return False
             for prop, prop_kinds in kinds.items():
-                if "is_operator" in str(prop):
+                if str(prop) == "is_operator":
                     return False
                 for kind in prop_kinds or ():
                     present.add((label, str(prop), str(kind).upper()))
         required = set(self._REQUIRED_RANGE_INDEXES)
         _ver = getattr(self, "_falkordb_version", None)
-        if _ver is None or _ver[0] >= 4:
+        fts_required = _ver is None or _ver[0] >= 4
+        if fts_required:
             required |= set(self._REQUIRED_FULLTEXT_INDEXES)
+        if required <= present and fts_required:
+            # The field set alone cannot distinguish "migrated" from "index
+            # present, fixup still owed" — see the docstring. Charge the extra
+            # round trip only on the otherwise-complete path, so the common
+            # all-indexes-present case pays 2 round trips instead of ~26.
+            try:
+                if not self.g.query(
+                    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
+                ).result_set:
+                    return False
+            except Exception:  # a probe that cannot run is not a pass
+                return False
         return required <= present
 
     def _ensure_indexes(self) -> None:

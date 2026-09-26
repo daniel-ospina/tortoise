@@ -600,6 +600,14 @@ _REDUNDANT_ON_INDEXED_GRAPH = (
 
 
 def _is_repeated_schema_work(cypher: str) -> bool:
+    # The `point_fts_v2` marker READ is excluded: the completeness guard
+    # performs it on every probe (#4465 review P1), so it is expected once on
+    # an already-indexed graph. Excluding it does not blind this helper — a
+    # guard-less sweep still trips `_REDUNDANT_ON_INDEXED_GRAPH` on its ~16
+    # CREATE INDEX statements, and the caller pins the marker read's own count
+    # at exactly 1, so a sweep's extra read is still caught.
+    if cypher == "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1":
+        return False
     return (cypher.startswith(_REDUNDANT_ON_INDEXED_GRAPH)
             or "fulltext.createNodeIndex" in cypher
             or "fulltext.drop" in cypher
@@ -751,6 +759,73 @@ def test_repeat_sweep_runs_no_already_satisfied_ddl(graph_factory):
         "bootstrap is repeated per construction again (#4465)")
     assert seen.count("CALL db.indexes()") == 1, (
         f"the guard must cost exactly one catalogue probe, got {seen}")
-    # One probe + at most the two vector-API attempts (procedure, then the
-    # Cypher-native fallback) — anything more is schema work coming back.
-    assert len(seen) <= 3, f"the repeat sweep is no longer a probe: {seen}"
+    assert seen.count("MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1") == 1, (
+        "the guard must read the fixup marker exactly once — more means the "
+        f"sweep's migration path ran again (#4465 review P1): {seen}")
+    # Two probes (the index catalogue, then the `point_fts_v2` marker the
+    # array-fixup contract requires — see `_schema_is_current`) plus at most
+    # the two vector-API attempts (procedure, then the Cypher-native
+    # fallback) — anything more is schema work coming back.
+    assert len(seen) <= 4, f"the repeat sweep is no longer a probe: {seen}"
+
+
+def test_schema_probe_requires_the_point_fts_marker(graph_factory):
+    """A two-field Point FTS index whose marker is gone is NOT current.
+
+    The `if not done:` block that marker guards does more than drop→recreate:
+    it flattens array-valued `search_keys` to a space-joined string, because
+    FalkorDB's fulltext index does not index array-valued properties. So
+    "index present, marker absent" still has that ONE-TIME DATA FIXUP owed to
+    it — treating the field set alone as completeness leaves those nodes
+    permanently invisible to FTS (silent unfindability, not a slow path).
+
+    Mutation check (must stay true): dropping the marker arm from
+    `_schema_is_current` fails the first assertion, and would leave
+    `search_keys` an ARRAY after the sweep.
+    """
+    proj = graph_factory()
+    assert proj._schema_is_current() is True
+
+    # The state a node-only wipe (indexes survive) or a swallowed marker
+    # MERGE leaves behind: two-field index present, marker gone.
+    proj.g.query("MATCH (m:Meta {key:'point_fts_v2'}) DELETE m")
+    assert proj._schema_is_current() is False, (
+        "the point_fts_v2 marker guards a one-time array fixup — a graph "
+        "without it must not read as current (#4465 review P1)")
+
+    # A pre-R2 node whose search_keys is still an array — the shape the fixup
+    # exists to repair.
+    proj.g.query(
+        "CREATE (n:Point {id:'l7-legacy-array', "
+        "search_keys:['fastest 5k','running pb']})")
+    proj._ensure_indexes()
+
+    sk = proj.g.query(
+        "MATCH (n:Point {id:'l7-legacy-array'}) RETURN n.search_keys"
+    ).result_set[0][0]
+    assert not isinstance(sk, (list, tuple)), (
+        "the sweep must flatten array-valued search_keys (FalkorDB does not "
+        f"index array-valued properties): {sk!r}")
+    assert proj._schema_is_current() is True, (
+        "the sweep must re-mint the marker it consumed")
+
+
+def test_schema_probe_ignores_a_similarly_named_boolean_property(graph_factory):
+    """`is_operator_flag` is NOT the forbidden `is_operator` index.
+
+    A substring test for `is_operator` matches any property whose name
+    contains it, so such a graph reads "not current" FOREVER and pays the
+    whole ~26-statement sweep on every construction — the exact churn #4465
+    removes. The sibling detector (`hosted_backup
+    ._audit_copied_boolean_indexes`) matches exactly for this reason.
+
+    Mutation check (must stay true): reverting to `"is_operator" in
+    str(prop)` fails the second assertion.
+    """
+    proj = graph_factory()
+    assert proj._schema_is_current() is True
+
+    proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator_flag)")
+    assert proj._schema_is_current() is True, (
+        "a differently-named property must not disable the fast path — the "
+        "substring arm made the guard permanently miss for such a graph")
