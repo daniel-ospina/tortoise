@@ -245,3 +245,48 @@ class TestHnswAutoUpdate:
         finally:
             g.query("MATCH (n:HnswPreIndexProbe {id: $id}) DETACH DELETE n",
                     params={"id": "hnsw247_pre"})
+
+    def test_index_score_is_a_similarity_not_the_engine_distance(self, _graph):
+        """#5583 — ``run_vector_query`` must CONVERT the engine's distance.
+
+        Two polarities meet here, and they are opposites:
+
+        * the engine's ``queryNodes`` score is a **distance** (smaller =
+          closer) — the caveat the class above already pins;
+        * ``run_vector_query``'s contract is a **similarity** (larger =
+          closer), because its two other branches derive one (``sig == "A"``:
+          ``1 - i/total``; the scan fallback: ``1/(1+distance)``) and because
+          ``min_similarity`` filters on ``>=``.
+
+        Passing the distance through unconverted made the reported score —
+        and therefore every relevance floor built on it — exactly inverted.
+
+        Selective: on the pre-#5583 pass-through this fails on both counts —
+        the identical vector scores 0.0 and the orthogonal one 1.0.
+        """
+        from tortoise.search_engine import run_vector_query
+
+        g = _graph
+        q = _vec([(0, 1.0)])
+        self._create(g, "hnsw247_5583_same", _vec([(0, 1.0)]))    # cos = 1.0
+        self._create(g, "hnsw247_5583_orth", _vec([(200, 1.0)]))  # cos = 0.0
+
+        # The engine's own value is a DISTANCE — the opposite polarity. If
+        # this assertion inverts, the ENGINE changed and the fix below needs
+        # re-deriving rather than deleting.
+        raw = dict(self._query(g, q, k=5))
+        assert raw["hnsw247_5583_same"] < raw["hnsw247_5583_orth"], (
+            "the engine score is expected to be a distance (smaller = "
+            f"closer); it did not behave as one: {raw}")
+
+        out = dict(run_vector_query(g, q, limit=5, is_embedded=False,
+                                    vector_index_api="cypher"))
+        assert out["hnsw247_5583_same"] > out["hnsw247_5583_orth"], (
+            "run_vector_query handed back the engine's distance as though it "
+            f"were a similarity — the score is inverted: {out}")
+        assert out["hnsw247_5583_same"] > 0.99, (
+            "an identical vector must score ~1.0, got "
+            f"{out['hnsw247_5583_same']}")
+        assert out["hnsw247_5583_orth"] < 0.01, (
+            "an orthogonal vector must score ~0.0 (never a high relevance), "
+            f"got {out['hnsw247_5583_orth']}")
