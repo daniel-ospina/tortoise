@@ -32,7 +32,7 @@ from tortoise.hosted_api import (  # noqa: I001
     get_current_user,
     ForwardedProtoMiddleware,
 )
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import SESSION_READ_FIELDS, TortoiseSDK
 
 # The autouse ``_reset_health_probe`` fixture replaces
 # ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
@@ -3175,6 +3175,48 @@ class TestSessionList:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["sessions"] == []
+
+    def test_sdk_session_read_parity_with_the_hosted_projection(self, client):
+        """#3557: the SDK's session read and the hosted read serve ONE
+        projection.
+
+        The capture lane writes a durable ``:Session`` node (plus a
+        ``sessionCaptured`` Event) and never an ``AgentSession`` Event, so
+        ``TortoiseSDK.get_session`` — which queried the indexer lane's Event
+        kind — returned ``None`` for every captured session: the read half of
+        the capture lane was missing. Both the list and the by-id hosted
+        surfaces must agree with it on the shared projection.
+
+        The assertion iterates ``SESSION_READ_FIELDS`` rather than a
+        hardcoded subset, so a field added to one read surface without the
+        other fails here instead of drifting silently.
+        """
+        captured = _ha_mod._make_sdk(namespace=TEST_ORG_ID).capture_session([
+            {"role": "user",
+             "content": "We decided to ship serve --http first."},
+        ])
+        session_id = captured["session_id"]
+
+        served = next(
+            row for row in client.get("/v1/sessions").json()["sessions"]
+            if row["id"] == session_id)
+        detail = client.get(f"/v1/sessions/{session_id}").json()
+
+        read = _ha_mod._make_sdk(namespace=TEST_ORG_ID).get_session(session_id)
+        assert read is not None, (
+            "the SDK session read must see a captured :Session — the capture "
+            "lane writes no AgentSession Event (#3557)")
+        for field in SESSION_READ_FIELDS:
+            assert read[field] == served[field], (
+                f"{field} diverges between the SDK read ({read[field]!r}) "
+                f"and GET /v1/sessions ({served[field]!r})")
+            assert read[field] == detail[field], (
+                f"{field} diverges between the SDK read ({read[field]!r}) "
+                f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
+        # The hosted surfaces and the SDK read one node, so the shared field
+        # list is one vocabulary. A zero count would make the parity
+        # assertion vacuous — the mock extractor mints a typed point.
+        assert read["extracted"] >= 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
