@@ -2302,6 +2302,70 @@ def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
 class TestVocabEdgeValidation:
     """#214: instantiates removed; dependsOn/reportsTo/related kept."""
 
+    def test_related_is_neutral_by_construction(self):
+        """#5025: `related` is the neutral association predicate — pinned.
+
+        `related` is a LIVE, agent-writable predicate — `tortoise_create_edge`
+        (`tortoise/tool_registry.py` tool def → `sdk.create_edge`), the ingest
+        `connections` path, and `security.KNOWN_REL_TYPES` all reach it — so its
+        neutrality is NOT emptiness. It is a property of the three maps it is
+        absent from, and the load-bearing one is SUPERSEDE:
+
+        * absent from ``SUPERSEDE_STRUCTURAL_RELS`` — a supersede does not
+          transfer it; it stays at the old point (also pinned behaviourally by
+          `test_dry_run_preview`, "in NO transfer leg").
+        * absent from ``DERIVABLE_STRUCTURAL_RELS`` — belt-and-braces. The SDK
+          emission path is SUPERSEDE-gated (it iterates
+          ``SUPERSEDE_STRUCTURAL_RELS`` and tests ``derivable = rel in
+          DERIVABLE_STRUCTURAL_RELS`` *inside* that loop), so DERIVABLE alone
+          emits nothing. It is NOT inert overall: the replay branch
+          (`projection/__init__.py`) routes journaled descriptors on
+          ``etype in DERIVABLE_STRUCTURAL_RELS`` with no SUPERSEDE reference,
+          and a raw producer can journal one directly. DERIVABLE is therefore a
+          live replay discriminator — and a rel in it that is missing from
+          ``STRUCTURAL_REL_LABELS`` fails there on lookup.
+        * absent from ``STRUCTURAL_REL_LABELS`` — it holds the target **label**;
+          the replay-**key** selection sits beside it in ``stub_key``, and #2489
+          requires the two to move together (a retargeted label with a stale key
+          resolves to nothing).
+
+        Do NOT read this test as "no belief path reads `related`". No path
+        **weights** it — ``ep``'s factor queries are ``IMPL|NAND``-filtered, and
+        the source-credibility prior lives in ``sdk._apply_source_inheritance``
+        (``extractedFrom``-filtered; ``ep.py`` itself never reads
+        ``extractedFrom``). But ``ep``'s affected-set BFS is unfiltered on the
+        relation (`MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point)`), so a
+        `related` edge onto an operator **does** pull the far endpoint into the
+        recompute set — and there a node with no ``IMPL|NAND`` factor *and no
+        run-level evidence* is recomputed as ``Beta(1,1)``, its prior discarded
+        (#5566). That is not specific to `related`, and this test does not cover
+        it.
+
+        This is a GUARD, not a policy. The transfer half is a tested decision;
+        the other two absences are mechanism, not decision. Adding `related` to
+        any of these maps — or giving it a producer or a weight — is an
+        ontology decision (owner-reserved), not a bug fix.
+        """
+        from tortoise.projection.edges import (
+            _VALID_EDGE_PREDICATES,
+            DERIVABLE_STRUCTURAL_RELS,
+            STRUCTURAL_REL_LABELS,
+        )
+        from tortoise.sdk import SUPERSEDE_STRUCTURAL_RELS
+
+        # It IS valid and creatable — the neutrality is not emptiness.
+        assert "related" in _VALID_EDGE_PREDICATES
+        # ...and yet it is in none of the three maps that would give it
+        # behaviour.
+        assert "related" not in SUPERSEDE_STRUCTURAL_RELS
+        assert "related" not in DERIVABLE_STRUCTURAL_RELS
+        assert "related" not in STRUCTURAL_REL_LABELS
+        # Non-vacuity: the assertions above also pass if a map were renamed
+        # away or emptied, so pin a member each must still carry.
+        assert "extractedFrom" in SUPERSEDE_STRUCTURAL_RELS
+        assert "extractedFrom" in DERIVABLE_STRUCTURAL_RELS
+        assert "extractedFrom" in STRUCTURAL_REL_LABELS
+
     def test_instantiates_rejected_by_create_edge(self):
         """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
         if _skip_if_no_falkor():
