@@ -127,6 +127,10 @@ def test_provenance_chain_exposes_the_note_and_says_stale():
 
 
 def test_provenance_chain_says_current_when_the_note_matches():
+    """FAILS IF the comparison is inverted or made unconditional: this note names
+    the version the source holds NOW (`h2` == the source's `contentHash`), so the
+    honest answer is `current` — a reader that always answered `stale` would be as
+    wrong as one that always answered `current`."""
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _point_and_source(sdk, current="h2")
@@ -270,16 +274,20 @@ def test_provenance_chain_order_is_stable_for_event_only_targets():
 
 def test_provenance_chain_orders_reference_less_sources_by_key():
     """REGRESSION (#5199 review P2). A source that references NOTHING yields a
-    self-terminal fallback row whose `ref` is NULL, so EVERY `ref`-based order
-    key evaluates to `''`. For a Point with several such sources the rows tied
-    end to end and insertion order decided which document a caller sees first —
-    the D10 legacy-document shape, reachable through the `api.add_document` sites
-    in `tortoise/ingest.py`,
-    which omits `source_url` at every site.
+    self-terminal fallback row whose `ref` is NULL, so the node key would be `''`
+    for every such row and source identity would drop out of the order — the
+    keys fall back to `src` precisely so it does not. (The hash/title keys also
+    fall back to `src`, so a full end-to-end tie needs hash AND title equal too;
+    this fixture gives the two sources distinct hashes and titles.) Without that
+    fallback the rows of a Point extracted from several reference-less sources
+    tie, and insertion order decides which document a caller sees first — the D10
+    legacy-document shape, reachable through the `api.add_document` sites in
+    `tortoise/ingest.py`, which omit `source_url` at every site.
 
-    FAILS IF the order keys ignore `src`: the two insertion orders below would
-    then disagree about `rows[0]`, which is not a benign tie — the rows are
-    different documents."""
+    FAILS IF `src` is dropped from every order key (the node key alone is masked
+    by the hash/title fallbacks): the two insertion orders below would then
+    disagree about `rows[0]`, which is not a benign tie — the rows are different
+    documents."""
     def _bare(reverse: bool):
         sdk = TortoiseSDK(_tmp("bare.db"))
         proj = sdk._get_proj()
@@ -388,6 +396,50 @@ def test_provenance_chain_separates_an_event_from_a_source_on_a_shared_key():
     assert _collide(False) == _collide(True) == ["Event", "Source"], (
         "an :Event and a :Source sharing a key must be separated by label"
     )
+
+
+def test_provenance_chain_prefers_a_resolved_reference_over_the_fallback():
+    """REGRESSION (#5199 review P2). The reader promises that a resolved
+    reference wins over the self-terminal fallback ("Rows that DO resolve a
+    reference are preferred, so a Point extracted from several sources keeps
+    returning a referenced entity whenever one exists") — and that promise had NO
+    test: dropping the `ref IS NULL` key left every test green while handing
+    `rows[0]` to the reference-less Source instead of the referenced entity.
+
+    FAILS IF the `ref IS NULL` key is dropped: the fallback row then sorts ahead
+    of the resolved one.
+
+    The resolved reference is deliberately left UNANNOTATED, so the
+    annotated-first key ties and only `ref IS NULL` decides the order — otherwise
+    the note key alone would carry the assertion and the mutation would survive."""
+    sdk = TortoiseSDK(_tmp("mixed.db"))
+    try:
+        # 'aaaa.txt' references nothing (fallback, node key 'aaaa.txt');
+        # 'zzzz.txt' references 'mmm' WITHOUT a note (node key 'mmm').
+        proj = _point_and_source(sdk, current="h1", source="aaaa.txt")
+        proj.g.query(
+            "CREATE (s:Source {url:'zzzz.txt', sourceKind:'corpus', title:'zzzz.txt', "
+            "contentHash:'h2', ingestedAt:'2024-01-01'})"
+        )
+        proj.g.query(
+            "MATCH (p:Point {id:'pt_1'}), (s:Source {url:'zzzz.txt'}) "
+            "CREATE (p)-[:extractedFrom]->(s)"
+        )
+        # Resolved but UNANNOTATED — the same shape `_annotate` builds, with no
+        # note set, so the annotated-first key ties and only `ref IS NULL`
+        # decides.
+        proj.g.query(
+            "MERGE (d:Source {url:'mmm'}) "
+            "WITH d MATCH (s:Source {url:'zzzz.txt'}) "
+            "CREATE (s)-[:references]->(d)"
+        )
+        rows = sdk.get_provenance_chain("pt_1")
+        assert [r["entity"].get("url") for r in rows] == ["mmm", "aaaa.txt"], (
+            f"the resolved reference must win over the fallback; got "
+            f"{[(r['entity'].get('url'), r['currency']) for r in rows]}"
+        )
+    finally:
+        sdk.close()
 
 
 # ── the deliberate cut ───────────────────────────────────────────────────────

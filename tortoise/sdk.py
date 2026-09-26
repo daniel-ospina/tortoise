@@ -22088,11 +22088,12 @@ class TortoiseSDK:
             #     legacy raw-Cypher Event carries no `url` and no `id`, so without
             #     it every such candidate keyed `''` and the tie-break did
             #     nothing. `src` is required for the same reason one level up: a
-            #     fallback row has `ref` NULL, so every ``ref``-based key is `''`
-            #     and the fallback rows of a Point with SEVERAL reference-less
-            #     sources (the D10 legacy-document shape — `tortoise/ingest.py`
-            #     omits `source_url` at every `api.add_document` site) would tie
-            #     end to end. label/hash/title then separate the shapes that share
+            #     fallback row has `ref` NULL, so the node key would be `''` for
+            #     EVERY fallback row, leaving source identity out of the order.
+            #     (The hash/title keys also fall back to `src` — what a full
+            #     end-to-end tie needs is hash AND title equal too, the
+            #     content-hash-mirror shape `tools/source_dedup_report.py`
+            #     measures.) label/hash/title then separate the shapes that share
             #     a key: an `:Event` colliding with a `:Source`, and two `:Source`
             #     nodes sharing a ``url`` whose hashes differ. (Same-``url``
             #     duplicates need a legacy/raw-Cypher write path: #5012's
