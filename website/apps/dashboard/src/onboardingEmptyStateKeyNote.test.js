@@ -752,7 +752,7 @@ test('#4637 wiring: each member arm RENDERS its fork’s lead-in (and never the 
     'the member notes must belong to their own cards, in file order')
 })
 
-test('#4637 wiring: the graph-missing card RENDERS the snippet and the live-key claim only for a gate that holds the key', async () => {
+test('#4637 wiring: the graph-missing card renders the snippet only with the gate\u2019s plaintext, and each role\u2019s live-key claim follows its own fact', async () => {
   // The text counts in the test above cannot see WHICH ARM an occurrence is in:
   // hoisting the live paragraph (or the snippet) out of the ternary into an
   // unconditional sibling kept every count at 1 while the card claimed a live key
@@ -764,6 +764,20 @@ test('#4637 wiring: the graph-missing card RENDERS the snippet and the live-key 
     'the sections with the graph-missing className')
   const card = sections[sections.length - 1]
   assert.ok(/GraphMissingEmptyStateActions/.test(card), 'the last section must be the graph-missing card')
+  // each card renders ITS OWN notes: a variant SEQUENCE cannot see a note moved
+  // into the other card (moving the graph-missing member arm into the re-entry
+  // card kept the sequence intact while the graph-missing card rendered an empty
+  // paragraph — an independent reviewer's mutation).
+  assert.equal((card.match(/<MemberEmptyStateKeyNote variant="graph-missing"/g) || []).length, 1,
+    'the graph-missing card renders its own member note')
+  assert.equal((card.match(/ownerCardProps\(\{ variant: 'graph-missing'/g) || []).length, 1,
+    'the graph-missing card renders its own owner note')
+  const reentryCard = sections[0]
+  assert.ok(/Continue setup →/.test(reentryCard), 'the first section must be the re-entry card')
+  assert.equal((reentryCard.match(/<MemberEmptyStateKeyNote variant="reentry"/g) || []).length, 2,
+    'the re-entry card renders its two member arms (keyed and no-key)')
+  assert.equal((reentryCard.match(/ownerCardProps\(\{ variant: 'reentry'/g) || []).length, 1,
+    'the re-entry card renders its own owner note')
   const SENTINEL = 'SENTINEL_SNIPPET_TEXT'
   for (const mode of GATE_MODES) {
     const gate = await gateValue(GATE_INPUTS[mode])
@@ -933,16 +947,27 @@ test('#4637 wiring: the snippet-branch call to action is fork-derived at the cal
 })
 
 test('#4637: keyTabAffordance is a function of the GATE, not the in-memory reveal', () => {
+  // The FULL table, over the gate's own modes x the in-memory reveal states. The
+  // first disjunct (`!snippetKey`) only has an observable cell when the gate
+  // holds a usable key, so a table that only probes `mint` cannot see it being
+  // deleted: `!ownerKeyLive(mode)` alone would take the keys-tab button away from
+  // a returning owner (`snippetKey` falsy, the Organization holding a durable row
+  // -> 'existing'), which is a reachable state (#2246: an authed session holds no
+  // apiKey, and `welcomeKey` is gone on return).
+  for (const mode of [...GATE_MODES, 'nonsense', null]) {
+    for (const snippetKey of [null, '', 'stale-reveal']) {
+      const expected = !snippetKey || !ownerKeyLive(mode)
+      assert.equal(keyTabAffordance({ snippetKey, connectGate: { mode } }), expected,
+        `snippetKey=${JSON.stringify(snippetKey)} mode=${String(mode)}: the gate decides whenever a reveal is held, and a falsy reveal always keeps the affordance`)
+    }
+  }
+  // the cells that carry the first disjunct, named:
   for (const mode of ['embed', 'existing']) {
+    assert.equal(keyTabAffordance({ snippetKey: null, connectGate: { mode } }), true,
+      `mode ${mode}: a session holding no reveal keeps the keys-tab affordance even though the Organization has a usable key`)
     assert.equal(keyTabAffordance({ snippetKey: 'stale-reveal', connectGate: { mode } }), false,
-      `mode ${mode}: the gate holds a usable key, so no keys-tab detour`)
+      `mode ${mode}: a usable key needs no keys-tab detour`)
   }
-  for (const mode of ['mint', 'loading', 'error', 'nonsense', null]) {
-    assert.equal(keyTabAffordance({ snippetKey: 'stale-reveal', connectGate: { mode } }), true,
-      `mode ${mode}: the gate holds no usable key, so the affordance must be there`)
-  }
-  assert.equal(keyTabAffordance({ snippetKey: null, connectGate: { mode: 'mint' } }), true,
-    'a key-less organization keeps the affordance')
 })
 
 test('#4637: ownerCardProps derives keyLive from the gate and nothing else', () => {
