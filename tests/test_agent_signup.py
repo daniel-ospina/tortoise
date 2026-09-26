@@ -382,6 +382,11 @@ class TestIpv6Normalization:
         assert _normalize_mapped_ipv6("::1") == "::1"  # not mapped
         assert _normalize_mapped_ipv6(None) is None
         assert _normalize_mapped_ipv6("::ffff:0") == "::ffff:0"  # degenerate
+        # #3124 review: ANY spelling/case of the mapped form — the old
+        # lowercase-prefix test let these hold a SECOND bucket identity for
+        # one IPv4 address (`::FFFF:` and the fully-expanded form).
+        assert _normalize_mapped_ipv6("::FFFF:1.2.3.4") == "1.2.3.4"
+        assert _normalize_mapped_ipv6("0:0:0:0:0:ffff:1.2.3.4") == "1.2.3.4"
 
     def test_limiter_hex_form_single_bucket(self, client, monkeypatch):
         """The limiter keys on the NORMALIZED ip — hex ::ffff:7f00:1 and

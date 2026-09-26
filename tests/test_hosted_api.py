@@ -9752,9 +9752,14 @@ class _BucketCountingStore(dict):
     ``scans`` counts wholesale iteration entry points (``.items()`` /
     ``.keys()`` / ``.values()`` — the O(n) surface the old code ran on every
     request once over ``max_entries``). ``yielded`` counts the KEYS produced
-    by ``__iter__``, so the O(1) one-head inspection reclaim does (one key) is
-    distinguishable from a full-store scan (n keys): counting CALLS would let
-    a `list(store)` full scan hide behind a single ``__iter__``.
+    by ``__iter__`` and ``__reversed__``, so the O(1) one-head inspection
+    reclaim does (one key) is distinguishable from a full-store scan (n
+    keys): counting CALLS would let a `list(store)` full scan hide behind a
+    single ``__iter__``. ``__reversed__`` is measured too because
+    `_bucket_touch` peeks at the insertion-order tail with
+    ``next(reversed(store))`` — a full scan written as
+    ``for k in reversed(store)`` must not bypass the seam (it did before,
+    #3124 review).
     """
 
     def __init__(self):
@@ -9764,6 +9769,11 @@ class _BucketCountingStore(dict):
 
     def __iter__(self):
         for key in super().__iter__():
+            self.yielded += 1
+            yield key
+
+    def __reversed__(self):
+        for key in super().__reversed__():
             self.yielded += 1
             yield key
 
@@ -9834,11 +9844,14 @@ class TestBoundedIpBucketStore:
 
         Fill the owned cap with ACTIVE keys, then admit a fresh key: it goes
         to the overflow (never evicting an active key). Only a fully-expired
-        head is reclaimable — then, and only then, room frees for a new key.
+        head is reclaimable — and while the overflow is still warm a fresh key
+        STAYS in it (sticky, see `test_sticky_overflow_blocks_a_second_budget`);
+        once the overflow drains, the freed slot admits a new key.
         """
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
 
         async def _run():
+            import time
             store, lock = {}, asyncio.Lock()
             keys = [f"k{i}" for i in range(8)]
             await _drive_bucket_check(store, lock, keys, max_entries=8,
@@ -9847,20 +9860,97 @@ class TestBoundedIpBucketStore:
             await _drive_bucket_check(store, lock, ["fresh-1"],
                                       max_entries=8, **self._KW)
             survived = [k for k in active if k in store]
-            # Now expire the head only; reclaim frees exactly that slot.
-            import time
+            # Expire the head only; reclaim frees exactly that slot.
             head = next(iter(store))
             store[head] = [time.time() - 10_000]
             await _drive_bucket_check(store, lock, ["fresh-2"],
                                       max_entries=8, **self._KW)
-            return store, active, survived, head
+            graduated_while_warm = "fresh-2" in store
+            # Drain the overflow; now the freed slot admits a new key.
+            store[_ha_mod._BUCKET_OVERFLOW_KEY] = [time.time() - 10_000]
+            await _drive_bucket_check(store, lock, ["fresh-3"],
+                                      max_entries=8, **self._KW)
+            return (store, active, survived, head, graduated_while_warm)
 
-        store, active, survived, head = asyncio.run(_run())
+        (store, active, survived, head,
+         graduated_while_warm) = asyncio.run(_run())
         assert survived == list(active), \
             f"reclaim evicted active keys: {set(active) - set(survived)}"
         assert head not in store, "an expired head must be reclaimable"
-        assert "fresh-2" in store, "a freed slot must admit a new key"
+        assert not graduated_while_warm, (
+            "a fresh key graduated to an owned bucket while the shared "
+            "overflow was still warm — that hands it a second budget")
+        assert "fresh-3" in store, "a freed slot must admit a new key"
         assert _ha_mod._bucket_owned_count(store) <= 8
+
+    def test_sticky_overflow_blocks_a_second_budget(self, monkeypatch):
+        """#3124 review P1: an overflow-routed key must not get a SECOND budget.
+
+        The shared overflow carries no per-key attribution, so if a key could
+        graduate to an owned bucket as soon as ANY slot freed, its overflow
+        charges would be orphaned and it would be admitted up to 2x its limit
+        in one window — a fail-open regression against the pre-#3124 per-key
+        behaviour, reachable for every client-keyed store. Reproduced against
+        the previous implementation at cap=1/limit=2/window=100: key B was
+        admitted at t=10,11 (overflow) and again at t=101,102 (owned) — 4
+        admissions for a limit of 2. This test fails on that implementation.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        clock = {"t": 0.0}
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: clock["t"])
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+
+            async def check(key, t):
+                clock["t"] = t
+                try:
+                    await _ha_mod._check_ip_bucket_rate_limit(
+                        _bucket_req(), buckets=store, lock=lock, key=key,
+                        limit=2, window_s=100, detail="x", max_entries=1)
+                    return 200
+                except _ha_mod.HTTPException as exc:
+                    return exc.status_code
+
+            a = await check("A", 1)        # A takes the only owned slot
+            b10 = await check("B", 10)     # B -> shared overflow
+            b11 = await check("B", 11)     # B -> shared overflow
+            b12 = await check("B", 12)     # overflow at limit=2 -> refused
+            b101 = await check("B", 101)   # A expired: B must NOT graduate
+            b102 = await check("B", 102)   # ...and must stay refused
+            b111 = await check("B", 111)   # window drained -> fresh budget
+            return store, (a, b10, b11, b12, b101, b102, b111)
+
+        store, codes = asyncio.run(_run())
+        assert codes == (200, 200, 200, 429, 429, 429, 200), codes
+        assert _ha_mod._bucket_owned_count(store) <= 1
+        assert len(store) <= 2
+
+    def test_sentinel_cannot_collide_with_a_client_key(self):
+        """The reserved overflow sentinel must be unreachable from a request.
+
+        If a client-controlled key could equal `_BUCKET_OVERFLOW_KEY` it could
+        address — and drain — the shared overflow directly. The middleware's
+        key is a prefixed `tt_`/`tk_` API key or `ip:<host>`; the primitive's
+        keys are IP strings, `(dimension, ...)` tuples, or server-side token
+        hashes; and a raw NUL cannot appear in an HTTP header value (h11
+        rejects it), so no request path can manufacture the sentinel.
+        """
+        sentinel = _ha_mod._BUCKET_OVERFLOW_KEY
+        assert sentinel == "\x00overflow"
+        mw = _ha_mod.RateLimitMiddleware(lambda *_: None, max_per_minute=100)
+        for auth in ("Bearer tt_abc", "Bearer tk_abc", "Bearer " + sentinel,
+                     "Bearer x", "Bearer ", ""):
+            for host in ("1.2.3.4", "2001:db8::1", "::ffff:1.2.3.4", None):
+                assert mw._bucket_key("/v1/x", auth, host) != sentinel, (
+                    auth, host)
+        # The prefix gate never treats the sentinel as an API key.
+        assert mw._bucket_key("/v1/x", "Bearer " + sentinel, None) is None
+        # The primitive's key shapes / normalization cannot manufacture it.
+        for key in ("1.2.3.4", "::ffff:1.2.3.4", "::1", "not-an-ip",
+                    ("invite-accept", "global"),
+                    ("invite-accept", "ip", "1.2.3.4")):
+            assert _ha_mod._normalize_mapped_ipv6(key) != sentinel, key
 
     def test_hot_path_does_not_scan_the_store(self, monkeypatch):
         """Per-request work must not scale with store size.
@@ -10096,6 +10186,55 @@ class TestBoundedIpBucketStore:
         assert len(before) == 1, before
         assert after == [], "the overflow charge was not rolled back"
 
+    def test_forget_invite_accept_does_not_refund_a_skipped_check(
+            self, monkeypatch):
+        """#3124 review: an accept whose check opted out must refund NOTHING.
+
+        `_check_ip_bucket_rate_limit` returns early — charging nothing — on
+        `RATE_LIMIT_DISABLED=1` and on a missing client host. If
+        `_forget_invite_accept` still ran, all three keys would be absent and
+        `_forget_bucket_charge` would pop an IN-WINDOW overflow entry belonging
+        to an unrelated key: a count-NEGATIVE refund, not the documented
+        count-neutral one. Fails on the shape with no guard in
+        `_forget_invite_accept`.
+        """
+        from starlette.requests import Request
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        stores = (_ha_mod._INVITE_ACCEPT_TOKEN_BUCKETS,
+                  _ha_mod._INVITE_ACCEPT_IP_BUCKETS,
+                  _ha_mod._INVITE_ACCEPT_GLOBAL_BUCKETS)
+        saved = [(s, dict(s)) for s in stores]
+
+        def _seed():
+            for s in stores:
+                s.clear()
+                s[_ha_mod._BUCKET_OVERFLOW_KEY] = [1.0, 2.0]
+
+        def _assert_untouched(label):
+            for s in stores:
+                assert s[_ha_mod._BUCKET_OVERFLOW_KEY] == [1.0, 2.0], (
+                    f"{label}: a skipped check's forget popped a foreign "
+                    f"overflow entry: {s}")
+
+        try:
+            # case 1 — no client host (the check's 2nd early return)
+            _seed()
+            no_client = Request({"type": "http", "method": "POST",
+                                 "path": "/x", "headers": [],
+                                 "query_string": b"", "client": None})
+            _ha_mod._forget_invite_accept(no_client, "tok")
+            _assert_untouched("no client")
+
+            # case 2 — limiter disabled (the check's 1st early return)
+            _seed()
+            monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+            _ha_mod._forget_invite_accept(_bucket_req(), "tok")
+            _assert_untouched("limiter disabled")
+        finally:
+            for s, snapshot in saved:
+                s.clear()
+                s.update(snapshot)
+
 
 class TestBoundedMiddlewareStore:
     """#3124 — `RateLimitMiddleware._buckets` gets a hard key cap."""
@@ -10153,6 +10292,12 @@ class TestBoundedMiddlewareStore:
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         mw, _next = self._middleware(monkeypatch, max_buckets=100)
         mw._buckets = _BucketCountingStore()
+        now = _ha_mod.time.time()
+        # Pre-seed several OTHER keys so a full reversed()/items() sweep would
+        # be visible (a 1-key store cannot distinguish a scan from the O(1)
+        # tail peek `_bucket_touch` does with next(reversed(store))).
+        for i in range(5):
+            mw._buckets[f"ip:9.9.9.{i}"] = [now - 10_000]
         keys = iter(["ip:1.1.1.1", "ip:1.1.1.1"])
         monkeypatch.setattr(mw, "_bucket_key", lambda *a, **kw: next(keys))
 
@@ -10164,6 +10309,8 @@ class TestBoundedMiddlewareStore:
             return mw._buckets.scans, mw._buckets.yielded
 
         scans, yielded = asyncio.run(_run())
-        assert scans == 0 and yielded == 0, (
-            f"middleware scanned the whole store: scans={scans} "
-            f"yielded={yielded}")
+        assert scans == 0, f"middleware scanned the whole store: scans={scans}"
+        assert yielded <= 1, (
+            f"middleware iterated {yielded} keys on the tracked hot path "
+            f"(store holds {len(mw._buckets)} keys) — a full reversed() scan "
+            "must not pass; only the O(1) tail peek may yield one key")

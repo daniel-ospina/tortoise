@@ -810,8 +810,12 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
         now = time.time()
         async with self._lock:
             # Periodic cleanup: filter stale timestamps from ALL buckets, then
-            # prune empty ones (code-review fix — mirrors hosted_api's
-            # RateLimitMiddleware pattern; prevents one-off-IP bucket growth)
+            # prune empty ones (code-review fix; prevents one-off-IP bucket
+            # growth). NOTE #3124/#5518: this is NO LONGER the hosted_api
+            # pattern — hosted_api's RateLimitMiddleware now caps its key space
+            # and has no periodic sweep. This store is still unbounded (and
+            # `self._buckets[key_id]` below still pre-inserts before the 429
+            # check) on a fully attacker-chosen key space: see #5518.
             if now - self._last_cleanup > 60:
                 stale = []
                 for k, v in list(self._buckets.items()):

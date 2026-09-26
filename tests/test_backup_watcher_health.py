@@ -306,3 +306,27 @@ def test_expected_is_present_in_all_five_states_and_mirrors_fly_app_name(
                 f"must report expected={hosted}: {block}")
             assert block["ok"] is want_ok, (name, block)
             assert body["status"] == want_status, (name, block, body["status"])
+
+
+def test_health_never_raises_when_the_expected_helper_raises(monkeypatch):
+    """#3124 review: `expected` must not sit OUTSIDE the never-raise guard.
+
+    The block's contract is "never raises and never 5xxes" (#338) and
+    `health()` calls it outside any try. Deriving `expected` above the guard
+    narrowed that promise to whatever the helper happens not to raise today.
+    Fails on the shape that had `expected = _watcher_expected_on_this_host()`
+    above the `try`.
+    """
+    monkeypatch.setenv("FLY_APP_NAME", "tortoise-hosted")
+
+    def _boom() -> bool:
+        raise RuntimeError("marker unreadable")
+
+    monkeypatch.setattr(hosted_api, "_watcher_expected_on_this_host", _boom)
+    hosted_api._WATCHER = _FakeWatcher(alive=True)
+    hosted_api._WATCHER_START_ERROR = None
+
+    block = _health_with_db_ok(monkeypatch)["backup_watcher"]
+    assert block["state"] == "running", block
+    assert block["expected"] is False, (
+        f"a helper failure must fall back to expected=False, not raise: {block}")

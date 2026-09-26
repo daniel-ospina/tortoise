@@ -3411,7 +3411,14 @@ def _backup_watcher_health() -> dict:
     operator's cue to read the boot log. The ``status`` rule is unchanged —
     ``disabled`` still stays ``ok`` (#4470's explicit acceptance).
     """
-    expected = _watcher_expected_on_this_host()
+    # #3124 review: keep the ``expected`` derivation INSIDE a guard. This
+    # block's contract is "never raises and never 5xxes" (#338) and the caller
+    # invokes it outside any try, so a statement above the guard narrowed the
+    # guarantee to whatever the helper happens not to raise today.
+    try:
+        expected = _watcher_expected_on_this_host()
+    except Exception:
+        expected = False
     try:
         watcher = _WATCHER
         if watcher is not None:
@@ -5335,18 +5342,26 @@ def _retain_feed_task(key: str, task: asyncio.Task) -> None:
 
 
 def _normalize_mapped_ipv6(ip):
-    """Return the IPv4 address for an IPv4-mapped IPv6 (::ffff:a.b.c.d or
-    ::ffff:7f00:1), else the input unchanged. Prevents a dual-stack client
-    from presenting two bucket keys for one address (#1081 review P4)."""
-    if isinstance(ip, str) and ip.startswith("::ffff:") and len(ip) > 7:
-        try:
-            import ipaddress as _ipa
-            mapped = _ipa.ip_address(ip).ipv4_mapped
-            if mapped is not None:
-                return str(mapped)
-        except ValueError:
-            pass
-    return ip
+    """Return the IPv4 address for ANY IPv4-mapped IPv6 spelling
+    (``::ffff:a.b.c.d``, ``::ffff:7f00:1``, ``::FFFF:...``,
+    ``0:0:0:0:0:ffff:...``), else the input unchanged. Prevents a dual-stack
+    client from presenting two bucket keys for one address (#1081 review P4).
+
+    #3124 review: the old form tested the literal lowercase ``::ffff:``
+    prefix, so ``::FFFF:1.2.3.4`` and ``0:0:0:0:0:ffff:1.2.3.4`` were NOT
+    normalized and one IPv4 address could still hold two bucket identities.
+    #3130 found exactly that and worked around it in the DCR path only, whose
+    docstring records the shared helper as still defective; normalizing by
+    ``ipv4_mapped`` regardless of case/spelling makes that claim true.
+    """
+    if not isinstance(ip, str) or ":" not in ip:
+        return ip
+    try:
+        import ipaddress as _ipa
+        mapped = _ipa.ip_address(ip).ipv4_mapped
+    except ValueError:  # not an address (e.g. a composite key string)
+        return ip
+    return str(mapped) if mapped is not None else ip
 
 
 # ── Bounded store policy for the shared per-IP bucket primitive (#3124) ──
@@ -5380,8 +5395,18 @@ def _normalize_mapped_ipv6(ip):
 # without a signature change); capacity counts owned keys only, so the stated
 # bound is owned <= max_entries and len(store) <= max_entries + 1.
 #
-# Accepted overflow-regime properties (deliberate, both fail-CLOSED — a lane
-# must not "fix" either without re-opening the capacity decision):
+# Sticky overflow (fail-closed, #3124 review). The overflow bucket carries no
+# per-key attribution, so a key admitted to it must NOT be given an owned
+# bucket while its overflow charges are still in-window: `_bucket_route` keeps
+# a fresh key in the overflow until the overflow has fully drained. Without
+# this, an overflow-routed key graduated to a fresh owned bucket as soon as
+# ANY slot freed and got a SECOND full budget — up to 2x its limit inside one
+# window, a fail-open regression against the pre-#3124 per-key behaviour and
+# reachable for every client-keyed store. Pinned by
+# ``test_sticky_overflow_blocks_a_second_budget``.
+#
+# Accepted overflow-regime properties (deliberate, both BOUNDED — a lane must
+# not "fix" either without re-opening the capacity decision):
 #   * Mixed-limit stores. One store may carry keys with different ``limit``s
 #     (``_SENSITIVE_BUCKETS`` is 20/5/5/5 per op; ``RateLimitMiddleware`` is
 #     300/100 per path). The overflow bucket is SHARED, so a high-limit key
@@ -5395,15 +5420,28 @@ def _normalize_mapped_ipv6(ip):
 #     successful accept keeps "successes consume no budget" true at the cost
 #     of the shared bucket admitting up to ``limit`` + (successful accepts)
 #     untracked charges. Accepts are themselves bounded by the per-token / IP
-#     / global dimensions, so the overflow stays bounded.
+#     / global dimensions, so the overflow stays bounded. This is the ONE
+#     bounded fail-OPEN relaxation in this block (the mixed-limit bullet above
+#     is fail-CLOSED): the shared bucket can admit up to ``limit`` +
+#     successful-accept untracked charges. The refund is attempted only when
+#     the check could have charged — `_forget_invite_accept` mirrors the
+#     check's own opt-out predicates — so it cannot pop a FOREIGN overflow
+#     entry for a request that was never charged (#3124 review).
 _BUCKET_OVERFLOW_KEY = "\x00overflow"
 
 
 def _bucket_prune_window(bucket: list, now: float, window_s: int) -> list:
-    """In-window entries of `bucket`. The ONE implementation of the
-    security-relevant window boundary (``now - t < window_s``): #2866's
-    ``_dcr_prune_window`` delegates here (#3124), and the D10 parity test
-    pins the primitive's observable window behaviour."""
+    """In-window entries of `bucket`. The one implementation of the
+    security-relevant window boundary (``now - t < window_s``) for the
+    hosted_api limiter family: #2866's ``_dcr_prune_window`` delegates here
+    (#3124). NOT the only copy in the repo — ``tortoise/cimd.py`` keeps its
+    own prune for a different (threading) module — so the claim is scoped to
+    this family.
+
+    The D10 parity test (``test_t_window_helper_parity_with_primitive``) can
+    no longer be an INDEPENDENT oracle now that both sides call this function
+    (#3124 review), so it asserts against a literal expected table: a mutation
+    of this boundary still fails it."""
     return [t for t in bucket if now - t < window_s]
 
 
@@ -5427,11 +5465,16 @@ def _bucket_reclaim(store, now: float, window_s: int, cap: int,
                     count=None) -> None:
     """Pop inactive insertion-order-head buckets until the count is below
     `cap` or the head is active. O(1) at the hot cap; never evicts an active
-    key (#2866 D3/D4 precedent). `count` selects the capacity metric: the
-    default counts OWNED keys (the shared-overflow layout, where the reserved
-    overflow bucket must not consume a slot); #2866's separate-store layout
-    passes ``len``."""
-    _count = _bucket_owned_count if count is None else count
+    key (#2866 D3/D4 precedent).
+
+    `count` selects the capacity metric and defaults to ``len`` — a NEUTRAL
+    metric that assumes no reserved key. A caller whose store reserves one
+    (the primitive's shared overflow) passes ``_bucket_owned_count`` so the
+    reserved key does not consume a slot; #2866's separate-store layout counts
+    every key and passes ``len``. The default must not encode one caller's
+    layout: an adopter with a DIFFERENT reserved key would silently inherit
+    the primitive's counting semantics and a wrong cap (#3124 review)."""
+    _count = len if count is None else count
     while _count(store) >= cap:
         head_key = next(iter(store), None)
         if head_key is None:
@@ -5453,19 +5496,26 @@ def _bucket_route(store, key, now: float, window_s: int, cap: int):
     store entry behind, #1719). A tracked key is pruned in place. A new key
     at a full owned store is routed to the single shared overflow bucket
     instead of growing the owned key space (#2866 reject-new/overflow), so
-    the owned count can never exceed `cap`."""
+    the owned count can never exceed `cap`. The overflow is STICKY while it
+    holds any in-window charge: a fresh key stays in it rather than graduating
+    to an owned bucket, so it can never be handed a second full budget."""
     bucket = store.get(key)
     if bucket is not None:
         bucket[:] = _bucket_prune_window(bucket, now, window_s)
         return bucket, False
-    _bucket_reclaim(store, now, window_s, cap)
+    _bucket_reclaim(store, now, window_s, cap, count=_bucket_owned_count)
+    # Sticky overflow (see the policy block): while the SHARED overflow holds
+    # any in-window charge, no fresh key may take an owned slot. The overflow
+    # has no per-key attribution, so graduating an overflow-routed key would
+    # orphan those charges and hand it a SECOND full budget. Strictly more
+    # restrictive, and free when the overflow is absent or drained.
+    overflow = store.get(_BUCKET_OVERFLOW_KEY)
+    if overflow is not None:
+        overflow[:] = _bucket_prune_window(overflow, now, window_s)
+        if overflow:
+            return overflow, True
     if _bucket_owned_count(store) >= cap:
-        bucket = store.get(_BUCKET_OVERFLOW_KEY)
-        if bucket is not None:
-            bucket[:] = _bucket_prune_window(bucket, now, window_s)
-        else:
-            bucket = []
-        return bucket, True
+        return (overflow if overflow is not None else []), True
     return [], False
 
 
@@ -5485,9 +5535,10 @@ async def _check_ip_bucket_rate_limit(
     #3124 capacity bound (policy block above the helpers): the store holds at
     most max_entries client-keyed buckets plus one shared overflow bucket. A
     new key arriving at a full store is charged to the overflow (capped at
-    `limit`/window) instead of growing the key space; reclaim drops only
-    fully-expired buckets and never evicts an active key; the hot path does
-    no store-wide iteration. Below the cap, behaviour — including the 429
+    `limit`/window) instead of growing the key space, and STAYS there until it
+    drains (sticky) so it can never be handed a second budget; reclaim drops
+    only fully-expired buckets and never evicts an active key; the hot path
+    does no store-wide iteration. Below the cap, behaviour — including the 429
     boundary at `limit` — is unchanged.
 
     P1-FIX-1: bucket key is the caller-supplied `key` (required at wrappers)
@@ -5507,8 +5558,9 @@ async def _check_ip_bucket_rate_limit(
         return
     ip = key if key is not None else request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
-    # cannot present two keys for one address. Handles both dotted-quad
-    # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
+    # cannot present two keys for one address. Handles every spelling/case of
+    # the mapped form (::ffff:1.2.3.4, ::ffff:7f00:1, ::FFFF:...,
+    # 0:0:0:0:0:ffff:...) via ipaddress (#3124 review).
     ip = _normalize_mapped_ipv6(ip)
     now = time.time()
     async with lock:
@@ -15550,6 +15602,10 @@ def _forget_bucket_charge(buckets, key) -> None:
     owned store was full of active keys) the owned key is absent, so the
     rollback removes one overflow entry instead — count-neutral, so the store
     bound and the "successful accepts consume no budget" invariant both hold.
+    The caller first mirrors `_check_ip_bucket_rate_limit`'s opt-out
+    predicates (`_forget_invite_accept`, #3124 review), so "charges exactly
+    one" is enforced by the call path rather than merely assumed — a request
+    that skipped the check cannot refund a foreign overflow entry.
     Because the overflow entries carry no per-key attribution, the popped
     entry may belong to another untracked key: the shared overflow's effective
     admission is therefore ``limit`` + (successful accepts), and accepts are
@@ -15576,7 +15632,18 @@ def _forget_invite_accept(request: Request, token: str) -> None:
     bound (#1228-review). Removes the newest entry of each bucket; under
     simultaneous accepts the most recent entry may belong to a concurrent
     request (over-removal is bounded and conservative at invite volume).
+
+    #3124 review: mirror `_check_ip_bucket_rate_limit`'s two early returns so
+    a refund is only attempted when a charge could have been recorded. Without
+    this, an accept whose check opted out (`RATE_LIMIT_DISABLED=1`, or no
+    client host) found all three keys absent and popped an IN-WINDOW charge
+    belonging to an unrelated key from the shared overflow — a count-NEGATIVE
+    refund, not the documented count-neutral one.
     """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    if not request.client or not request.client.host:
+        return
     import hashlib as _hashlib
     token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     ip = (getattr(request.state, "client_ip", None)
@@ -28056,7 +28123,11 @@ _OAUTH_DCR_TRUSTED_CIDRS_DEFAULT = "160.79.104.0/21"
 # Singleton store keys for the aggregate dimensions (malformed client IPs
 # share the constant below, never a per-raw-string bucket).
 _OAUTH_DCR_ANON_KEY = "\x00anon"
-_OAUTH_DCR_OVERFLOW_KEY = "\x00overflow"
+# Alias the shared sentinel rather than re-declaring the literal: the two
+# layouts count differently (in-store layout counts OWNED keys; the DCR
+# separate-store layout counts every key), so the KEY VALUE must not drift
+# (#3124 review).
+_OAUTH_DCR_OVERFLOW_KEY = _BUCKET_OVERFLOW_KEY
 _OAUTH_DCR_MALFORMED_KEY = "anonymous"
 
 _OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
@@ -28069,9 +28140,10 @@ _OAUTH_DCR_LOCK = asyncio.Lock()
 def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
     """In-window entries of `bucket` — delegates to the shared
     `_bucket_prune_window` (#3124): ONE implementation of the
-    security-relevant window boundary, kept under this name because the
-    primitive's observable window contract is pinned against it by the D10
-    parity test."""
+    security-relevant window boundary for this limiter family, kept under
+    this name because the DCR path reads it. The D10 parity test asserts
+    against a literal expected table rather than against this function, so
+    the delegation does not make that test a self-comparison."""
     return _bucket_prune_window(bucket, now, window_s)
 
 
@@ -28105,10 +28177,12 @@ def _oauth_dcr_normalized_addr(client_ip):
     """`ipaddress` address for `client_ip`, normalizing ANY IPv4-mapped IPv6
     spelling (or None for a malformed address).
 
-    `_normalize_mapped_ipv6` (shared primitive helper, byte-identical to
-    origin/main) matches the literal lowercase ``::ffff:`` prefix, so the
-    structural check here additionally covers ``::FFFF:1.2.3.4`` and
-    ``0:0:0:0:0:ffff:1.2.3.4``. Without it one IPv4 address could hold two
+    `_normalize_mapped_ipv6` (shared primitive helper) historically matched
+    the literal lowercase ``::ffff:`` prefix, so the structural check here
+    additionally covers ``::FFFF:1.2.3.4`` and ``0:0:0:0:0:ffff:1.2.3.4``.
+    #3124 normalizes the shared helper by ``ipv4_mapped`` regardless of
+    spelling, so this path is now a redundant belt-and-braces guard (kept — it
+    must not depend on another module's fix landing). Without it one IPv4 address could hold two
     bucket identities (its own plus the shared ``::/64``) and a non-canonical
     mapped client would collapse into ``::/64`` instead of being keyed — or
     trusted — as the address it actually is.

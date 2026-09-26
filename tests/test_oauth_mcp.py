@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import math
 import os
 import secrets
 import tempfile
@@ -2553,38 +2554,55 @@ class TestDcrCapacityPolicy:
 
     # ── (t) parity: the DCR window helpers vs the shared primitive ──────
     def test_t_window_helper_parity_with_primitive(self, monkeypatch):
+        """Literal-oracle boundary pin (#3124 review).
+
+        #3124 made `_dcr_prune_window` delegate to `_bucket_prune_window`, the
+        same helper the primitive uses. Asserting the pruned list against a
+        second call of `_dcr_prune_window` then compared the function with
+        itself, so a `<` -> `<=` mutation of the boundary PASSED. The
+        expectations below are literals, so that mutation fails again; and
+        both the DCR wrapper and `_dcr_retry_after_s` are pinned to the same
+        literal (the latter had no direct unit test).
+        """
         now = 1_800_000_000.0
         monkeypatch.setattr(_ha_mod.time, "time", lambda: now)
+        window = _ha_mod._OAUTH_DCR_WINDOW_S
+        # (ages, expected in-window ages) — entry ORDER is preserved.
         rows = (
-            [0.0],                       # just charged
-            [3600.0],                    # exactly at the boundary → pruned
-            [3599.5],                    # just inside
-            [0.0, 3599.75],              # two in-window entries
-            [3600.0, 3700.0],            # everything pruned
-            [3599.6666667, 100.0],       # non-integer remainder
-            [0.0, 1800.0, 3599.9],       # three in-window entries
+            ([0.0], [0.0]),                                  # just charged
+            ([3600.0], []),                                  # exactly at the boundary
+            ([3599.5], [3599.5]),                            # just inside
+            ([0.0, 3599.75], [0.0, 3599.75]),                # two in-window
+            ([3600.0, 3700.0], []),                          # everything pruned
+            ([3599.6666667, 100.0], [3599.6666667, 100.0]),  # non-integer remainder
+            ([0.0, 1800.0, 3599.9], [0.0, 1800.0, 3599.9]),  # three in-window
         )
-        for row in rows:
-            store = {"9.9.9.9": [now - age for age in row]}
+        for ages, expected_ages in rows:
+            raw = [now - age for age in ages]
+            expected = [now - age for age in expected_ages]
+            assert _ha_mod._dcr_prune_window(list(raw), now, window) == expected, \
+                (ages, _ha_mod._dcr_prune_window(list(raw), now, window))
+            store = {"9.9.9.9": list(raw)}
             req = Request({"type": "http", "method": "POST", "path": "/x",
                            "headers": [], "query_string": b"",
                            "client": ("9.9.9.9", 1234)})
-            pruned = _ha_mod._dcr_prune_window(list(store["9.9.9.9"]), now,
-                                               _ha_mod._OAUTH_DCR_WINDOW_S)
             try:
                 asyncio.run(_ha_mod._check_ip_bucket_rate_limit(
                     req, buckets=store, lock=asyncio.Lock(), limit=1,
-                    window_s=_ha_mod._OAUTH_DCR_WINDOW_S, detail="parity",
+                    window_s=window, detail="parity",
                     retry_after_s=None, defer_charge=True))
                 denied = False
             except HTTPException as exc:
                 denied = True
                 assert exc.status_code == 429
                 assert exc.headers["Retry-After"] == str(
-                    _ha_mod._dcr_retry_after_s(pruned, now,
-                                               _ha_mod._OAUTH_DCR_WINDOW_S))
-            assert denied == bool(pruned), (row, denied, pruned)
-            assert store["9.9.9.9"] == pruned, (row, store["9.9.9.9"], pruned)
+                    math.ceil(window - expected_ages[0])), (ages, exc.headers)
+            assert denied == bool(expected_ages), (ages, denied, expected_ages)
+            assert store["9.9.9.9"] == expected, (ages, store["9.9.9.9"], expected)
+            if expected_ages:
+                assert _ha_mod._dcr_retry_after_s(
+                    expected, now, window) == math.ceil(
+                        window - expected_ages[0]), ages
 
     # ── (u) concurrency: atomicity under interleaving ───────────────────
     @staticmethod
