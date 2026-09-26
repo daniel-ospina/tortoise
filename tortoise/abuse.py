@@ -7,8 +7,8 @@ that sees BOTH dashboard mints and the signup ``provision_org`` RPC).
 Rules (env-overridable thresholds):
 - R1  point_create: SUM(weight) > 500 / 1h   -> stage-1 flag, stage-2 suspend
 - R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 suspend
-- R3  reads:        > 100 / 5min per-key OR per-org -> notify Owner only
-- R4  geo:          first unseen CF-IPCountry per org -> notify Owner
+- R3  reads:        > 100 / 5min per-key OR per-org -> ops alert (Telegram-only, #3639)
+- R4  geo:          first unseen CF-IPCountry per org -> ops alert (Telegram-only)
 - R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
                      notify ops only (Telegram; never suspends)
 
@@ -32,6 +32,21 @@ self-heals on the next request).
 Everything here is best-effort on the request path: recording/evaluation
 failures are logged and swallowed — abuse telemetry must never break the
 write path. Kill-switch: ``TORTOISE_ABUSE_DISABLED=1``.
+
+Notification volume (#3631): an R1/R2 flag or suspend alert is emitted ONLY
+after the corresponding store write persists — a store read/write failure
+REDUCES notification volume, never increases it (the 2026-09-14 storm was a
+swallowed ``flag_org`` write failure that notified on every evaluation, 401
+alerts in 3h). The ALERT is also bounded to once per ``(org, rule)`` per
+STAGE per staging window in-process, so neither a read that raises nor one that
+returns a stale ``None`` (replica lag) can re-notify per evaluation (the stage
+distinction is what lets the stage-2 suspend alert still escalate a stage-1
+flag alert). The claim is released when the engine observes the episode end (a
+clean window), so a genuinely NEW episode alerts again. The durable store
+remains authoritative for staging; the in-process map bounds ONE process, so
+the honest ceiling across replicas is ``N replicas × 1`` per window — a global
+cap needs shared state (Redis/DB) and is deliberately out of scope here.
+(The notify-only rules R3/R4/R8 have no flag to persist.)
 """
 from __future__ import annotations
 
@@ -131,7 +146,10 @@ def _parse_ts(value) -> datetime | None:
 
 
 def _org_email(store, org_id: str) -> str | None:
-    """Best-effort owner email so R3/R4 notify the OWNER, not just ops."""
+    """Best-effort owner email. Retained for the caller shape only — abuse
+    alerts are Telegram-only since #3639, so ``notify_abuse`` no longer reads
+    the ``email`` key (removing the now-dead call sites is a #3646 follow-up).
+    """
     try:
         return store.org_email(org_id) if org_id else None
     except Exception:
@@ -474,6 +492,51 @@ class AbuseEngine:
 
     def __init__(self, store):
         self.store = store
+        # In-process alert dedup (#3631): (org, rule, stage) -> the instant the
+        # alert budget for that key re-opens. Bounds ONE process; the durable
+        # store remains authoritative for staging and is the cross-replica gate.
+        self._last_notified: dict[tuple[str, str, str], datetime] = {}
+        self._notify_lock = threading.Lock()
+
+    def _claim_notify(self, org_id: str, rule: str, stage: str,
+                      now: datetime, window_s: int) -> bool:
+        """True only if no alert of this ``stage`` for ``(org_id, rule)`` was
+        emitted within the last ``window_s`` seconds (#3631 target a).
+
+        Keyed by stage as well as ``(org, rule)``: the two-stage machine is
+        SUPPOSED to emit a stage-1 flag alert and, a window later, a stage-2
+        suspend alert — sharing one key would swallow the escalation. Each
+        entry stores its OWN expiry, so pruning never evicts a long-window
+        (R2, 24h) claim by a short-window (R1, 1h) caller's clock.
+        """
+        key = (org_id, rule, stage)
+        with self._notify_lock:
+            expires = self._last_notified.get(key)
+            if expires is not None and expires > now:
+                return False
+            self._last_notified[key] = now + timedelta(seconds=window_s)
+            if len(self._last_notified) > 10_000:
+                self._last_notified = {
+                    k: exp for k, exp in self._last_notified.items()
+                    if exp > now}
+            return True
+
+    def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
+        """Re-arm the alert budget for a stage when its episode ENDS, so a
+        genuinely NEW episode alerts again. The claim is per-EPISODE, not a
+        wall-clock cooldown (#3631) — without this release, a burst that
+        recycles inside the previous episode's window would re-flag durably but
+        stay silent to ops.
+
+        An out-of-band un-suspend (the ``abuse_unsuspend`` RPC writes a
+        ``flag_clear`` with no in-process caller here) is not observed until the
+        next clean window, so a re-breach before then may be muted for up to
+        ``window_s``. That is the deliberate conservative side: releasing on a
+        bare ``None`` would re-open the stale-read storm this claim exists to
+        stop.
+        """
+        with self._notify_lock:
+            self._last_notified.pop((org_id, rule, stage), None)
 
     def point_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
@@ -525,20 +588,32 @@ class AbuseEngine:
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
             # later burst starts fresh (re-flag, never a stale-flag suspend).
+            ended = False
             try:
                 if self.store.latest_flag_at(org_id, rule) is not None:
                     self.store.flag_clear(org_id, rule, now=now)
+                ended = True
             except Exception:
                 logger.debug("abuse flag_clear failed for %s/%s", org_id, rule)
+            if ended:
+                # Episode CONFIRMED over: re-arm the alert budget so a NEW
+                # episode alerts again (#3631 — per-episode, not a wall-clock
+                # cooldown). NOT released when the episode-end read/write
+                # FAILED — a store failure must reduce alert volume, never
+                # increase it, so the claim is left to expire on its own.
+                self._release_notify(org_id, rule, EVENT_FLAG)
+                self._release_notify(org_id, rule, EVENT_SUSPEND)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
         try:
             flagged_at = self.store.latest_flag_at(org_id, rule)
         except Exception:
+            # Unreadable anchor → treat as a fresh episode for STAGING, but the
+            # alert itself stays bounded by _claim_notify (#3631 target a).
             flagged_at = None
         if flagged_at is None:
-            return self._flag(org_id, rule, details, now)
+            return self._flag(org_id, rule, details, now, window_s)
         flagged_at = _ensure_aware(flagged_at)
         age_s = (now - flagged_at).total_seconds()
         if age_s < window_s:
@@ -554,22 +629,40 @@ class AbuseEngine:
         except Exception:
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
-            return self._flag(org_id, rule, details, now)
+            return self._flag(org_id, rule, details, now, window_s)
         try:
             self.store.suspend_org(org_id, details, now=now)
         except Exception:
             logger.debug("abuse suspend_team failed for %s", org_id)
             return "breach"
         mark_suspended(org_id)
-        self._notify("abuse_suspended", org_id, details)
+        if self._claim_notify(org_id, rule, EVENT_SUSPEND, now, window_s):
+            self._notify("abuse_suspended", org_id, details)
         return "suspend"
 
-    def _flag(self, org_id: str, rule: str, details: dict,
-              now: datetime) -> str:
+    def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
+              window_s: int) -> str:
+        """Stage-1 flag. The notification is CONTINGENT on the flag having
+        been persisted (#3631 target b): a store write failure must reduce
+        alert volume, never increase it — the pre-fix swallow notified on
+        every evaluation, because a never-persisted flag also reads as None.
+
+        The alert is ALSO bounded to once per ``(org, rule)`` per staging
+        window (#3631 target a) even when the durable anchor is unreliable —
+        a read that returns a stale ``None`` (replica lag) or raises would
+        otherwise re-flag and re-notify on every evaluation. Staging is still
+        store-authoritative; this bounds the ALERT only.
+        """
         try:
             self.store.flag_org(org_id, rule, details, now=now)
         except Exception:
-            logger.debug("abuse flag_team failed for %s", org_id)
+            logger.warning(
+                "abuse: flag NOT persisted for %s/%s — suppressing the abuse "
+                "notification (a store failure must never amplify alerts, "
+                "#3631)", org_id, rule)
+            return "flag"
+        if not self._claim_notify(org_id, rule, EVENT_FLAG, now, window_s):
+            return "flag"  # alert budget for this (org, rule)/window is spent
         self._notify("abuse_flag", org_id, details)
         return "flag"
 
@@ -941,8 +1034,8 @@ def resolve_country(headers) -> str | None:
 def check_new_country(org_id: str, country: str | None, store,
                       now: float | None = None) -> bool:
     """True when the country is new for the org (records auth_ip + notifies
-    the OWNER, flood-capped). Seen-set cached in-process (24h TTL); durable
-    lookup on cache miss."""
+    ops, flood-capped). Seen-set cached in-process (24h TTL); durable lookup
+    on cache miss."""
     if abuse_disabled() or not org_id or not country:
         return False
     now = now if now is not None else time.time()

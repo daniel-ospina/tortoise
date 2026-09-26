@@ -544,6 +544,238 @@ class TestFakeTrigger:
         assert alerts and alerts[0]["type"] in ("suspend", "flag")
 
 
+# ── #3631: alert volume is bounded and gated on persistence ─────────────
+
+class _FlagWriteFailingStore(MemoryAbuseStore):
+    """flag_org always fails — the 2026-09-14 storm mechanism: the flag is
+    never persisted, so latest_flag_at can never observe it."""
+
+    def __init__(self):
+        super().__init__()
+        self.flag_attempts = 0
+
+    def flag_org(self, org_id, rule, details=None, now=None):
+        self.flag_attempts += 1
+        raise RuntimeError("flag write failed")
+
+
+class _FlakyFlagStore(MemoryAbuseStore):
+    """flag_org fails for the first ``fail_times`` attempts, then works."""
+
+    def __init__(self, fail_times):
+        super().__init__()
+        self.remaining = fail_times
+
+    def flag_org(self, org_id, rule, details=None, now=None):
+        if self.remaining > 0:
+            self.remaining -= 1
+            raise RuntimeError("flag write failed")
+        super().flag_org(org_id, rule, details, now=now)
+
+
+class _BlindReadStore(MemoryAbuseStore):
+    """flag_org persists, but latest_flag_at ALWAYS raises — a write-healthy,
+    read-blind store (read outage)."""
+
+    def latest_flag_at(self, org_id, rule):
+        raise RuntimeError("flag read failed")
+
+
+class _StaleNoneStore(MemoryAbuseStore):
+    """flag_org persists, but latest_flag_at always returns a stale ``None``
+    (replica lag) — the issue's other named mechanism, and the case a
+    raise-only guard used to miss."""
+
+    def latest_flag_at(self, org_id, rule):
+        return None
+
+
+class _FlagClearFailingStore(MemoryAbuseStore):
+    """`flag_clear` always raises — the episode-end write fails."""
+
+    def flag_clear(self, org_id, rule, now=None):
+        raise RuntimeError("clear write failed")
+
+
+class _FakeResendResponse:
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"id": "msg_1"}
+
+
+class TestFlagNotificationBudget:
+    """#3631 (a)/(b): repeated evaluations of one episode cannot alert
+    repeatedly, and a flag that was not persisted alerts at all."""
+
+    def test_storm_in_one_window_notifies_once(self, notified):
+        """Durable-path regression guard: with a healthy store the anchor
+        itself bounds the alert (this is pre-existing behaviour, kept so a
+        future change to _evaluate cannot silently reintroduce the storm)."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)
+        for i in range(40):
+            eng.record_point_create("t1", 100,
+                                    now=T0 + timedelta(seconds=30 * (i + 1)))
+        assert [c[0] for c in notified].count("abuse_flag") == 1
+
+    def test_read_blind_store_does_not_refire_per_evaluation(self, notified):
+        """(a): with the durable anchor unreadable, repeated evaluations of
+        ONE episode must not alert per evaluation."""
+        eng = AbuseEngine(_BlindReadStore())
+        for i in range(50):
+            eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
+        assert [c[0] for c in notified] == ["abuse_flag"]
+
+    def test_stale_none_read_does_not_refire_per_evaluation(self, notified):
+        """(a): a read that returns a stale ``None`` (replica lag — no
+        exception) must be bounded exactly like a raising read. A guard
+        conditioned on the read RAISING missed this and stormed."""
+        eng = AbuseEngine(_StaleNoneStore())
+        for i in range(50):
+            eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
+        assert [c[0] for c in notified] == ["abuse_flag"]
+
+    def test_claim_prune_respects_each_entrys_window(self):
+        """R1 (1h) and R2 (24h) share the dedup map: a flood of expired
+        short-window claims must not evict a still-live long-window claim."""
+        eng = AbuseEngine(MemoryAbuseStore())
+        now = T0
+        eng._last_notified[("o", "key_create", "flag")] = now + timedelta(hours=24)
+        for i in range(10_001):  # exceed the threshold; all already expired
+            eng._last_notified[("o", f"r{i}", "flag")] = now - timedelta(seconds=1)
+        assert eng._claim_notify("o", "point_create", "flag", now, 3600) is True
+        # the 24h entry survived its own expiry, not the 1h caller's window
+        assert ("o", "key_create", "flag") in eng._last_notified
+
+    def test_new_episode_after_clean_window_alerts_again(self, notified):
+        """The claim is per-EPISODE, not a wall-clock cooldown. A heavy event
+        early plus a small one inside the window flags LATE, so the flag's
+        claim outlives the window in which the heavy event ages out: a clean
+        evaluation then ends the episode and the claim must be RELEASED, or the
+        next (new) burst 1s later would be durably flagged but silent."""
+        eng = AbuseEngine(MemoryAbuseStore())
+        eng.record_point_create("t1", 500, now=T0)                    # no flag
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(seconds=3000)) == "flag"       # claim→3600s
+        assert [c[0] for c in notified].count("abuse_flag") == 1
+        # +3601: the 500-weight event ages out → clean → episode ends
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(seconds=3601)) is None
+        # new burst 1s later is INSIDE the old claim's window, but a NEW episode
+        assert eng.record_point_create(
+            "t1", 501, now=T0 + timedelta(seconds=3602)) == "flag"
+        assert [c[0] for c in notified].count("abuse_flag") == 2
+
+    def test_clean_window_does_not_release_when_episode_end_fails(self):
+        """A failed `flag_clear` must NOT re-arm the alert budget — a store
+        failure must reduce alert volume, never increase it (#3631)."""
+        store = _FlagClearFailingStore()
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)          # flag + claim
+        assert ("t1", "point_create", "flag") in eng._last_notified
+        # the window is clean, but the episode-end write fails → no release
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(seconds=3601)) is None
+        assert ("t1", "point_create", "flag") in eng._last_notified
+
+    def test_no_notification_when_flag_not_persisted(self, notified):
+        """(b): a store write failure emits ZERO abuse alerts — the pre-fix
+        swallow notified on every evaluation (401 alerts in 3h)."""
+        store = _FlagWriteFailingStore()
+        eng = AbuseEngine(store)
+        for i in range(20):
+            eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
+        assert notified == []
+        assert store.flag_attempts == 20  # the flag path WAS reached 20 times
+
+    def test_notification_resumes_once_write_recovers(self, notified):
+        """(b): suppressing while the write is broken must NOT permanently
+        mute the alert — recovery resumes it exactly once."""
+        store = _FlakyFlagStore(fail_times=3)
+        eng = AbuseEngine(store)
+        for i in range(3):
+            eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
+        assert notified == []
+        eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=3))
+        assert [c[0] for c in notified] == ["abuse_flag"]
+        assert store.latest_flag_at("t1", "point_create") is not None
+
+    def test_suspend_alert_not_repeated_each_evaluation(self, notified):
+        """(a): the stage-2 alert is bounded per window too — a sustained
+        breach re-evaluates on every request."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        eng.record_point_create("t1", 501, now=T0)
+        eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
+        assert eng.record_point_create(
+            "t1", 501, now=T0 + timedelta(minutes=90)) == "suspend"
+        for i in range(5):
+            eng.record_point_create(
+                "t1", 501, now=T0 + timedelta(minutes=91 + i))
+        assert [c[0] for c in notified].count("abuse_suspended") == 1
+
+
+class TestAbuseStormDoesNotStarveTransactional:
+    def test_invite_send_succeeds_during_abuse_storm(self, monkeypatch):
+        """(c): the abuse path never consumes the Resend budget, so a storm
+        cannot starve a transactional invite/OTP send."""
+        import tortoise.notify as notify_mod
+        from tortoise import email_notify as en
+
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABC")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+        monkeypatch.setenv("RESEND_API_KEY", "re_test")
+        monkeypatch.delenv("RESEND_SEND_BUDGET_DAILY", raising=False)
+        monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
+        monkeypatch.setattr(notify_mod, "_skip_logged", set())
+        monkeypatch.setattr(en, "_skip_logged", set())
+        # monkeypatch (not bare assignment) so the budget globals are restored.
+        monkeypatch.setattr(en, "_send_counts_day", 0)
+        monkeypatch.setattr(en, "_send_counts_month", 0)
+        monkeypatch.setattr(en, "_send_counts_day_period", "")
+        monkeypatch.setattr(en, "_send_counts_month_period", "")
+
+        telegram_sent: list[str] = []
+        # Real notify_abuse (Telegram-only, #3639) — only the transport faked.
+        monkeypatch.setattr(
+            notify_mod, "telegram_send",
+            lambda bot, chat, text, **k: telegram_sent.append(text))
+        # The sync Resend path notify.py would use if the abuse leg were ever
+        # restored: it must stay untouched for the whole storm.
+        abuse_resend: list[str] = []
+        monkeypatch.setattr(
+            notify_mod.httpx, "post",
+            lambda url, **kw: abuse_resend.append(url))
+
+        eng = AbuseEngine(_StaleNoneStore())
+        for i in range(60):
+            eng.record_point_create("t1", 501, now=T0 + timedelta(seconds=i))
+        assert len(telegram_sent) == 1  # bounded storm — not 60
+        assert abuse_resend == [], "the abuse path must never touch Resend"
+
+        posts: list[str] = []
+
+        async def fake_post(self, url, **kwargs):
+            posts.append(url)
+            return _FakeResendResponse()
+
+        monkeypatch.setattr(en.httpx.AsyncClient, "post", fake_post)
+
+        async def _main():
+            en.send_invite_email("Acme", "invitee@example.com", "member",
+                                 "tok", "inv_1")
+            await asyncio.sleep(0.05)
+            if en._pending_email_tasks:
+                await asyncio.wait(list(en._pending_email_tasks), timeout=1.0)
+
+        asyncio.run(_main())
+        assert posts == [en.RESEND_URL]
+        assert en._send_counts_day == 1
+
+
 # ── notify_abuse (Task 4) ───────────────────────────────────────────────────
 
 class TestNotifyAbuse:
