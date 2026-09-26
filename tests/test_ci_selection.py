@@ -3988,24 +3988,25 @@ def test_every_changed_set_diff_disables_rename_detection():
     * The non-vacuity floor (`checked >= 3`) is a FLOOR, not a pin of exactly
       three. It is counted from the PARSED commands above — measured today as
       FOUR: two on `python-ci.yml`'s "Tiered selection" step, one on `ci.yml`'s
-      "Compute per-surface path gates (#2149)" step, and one on the dead step
-      below. So a comment cannot satisfy it (and a comment mentioning the flag
-      cannot inflate it). Because the other THREE commands satisfy the floor by
-      themselves, deleting the dead step alone leaves `checked == 3` and needs NO
-      floor change; the floor has to come down to 2 only if a SECOND command is
-      removed, once just two remain.
-    * The dead FOURTH command — from the "Get changed markdown files" step in
-      `ci.yml` (cited by step name, not line number, because line numbers drift)
-      — is INERT today. That step builds a lint-target list, and the `docs` job
-      checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
-      the diff fails, `|| true` leaves `FILES` empty and the consuming
-      markdownlint/lychee steps are skipped. The `docs` job's own "Conflict-marker
-      check (#2802)" step comment records this. Do not let the floor drift above
-      the number of live commands.
+      "Compute per-surface path gates (#2149)" step, and one on `ci.yml`'s
+      "Get changed markdown files" step. So a comment cannot satisfy it (and a
+      comment mentioning the flag cannot inflate it). The floor is 3 so removing
+      one command does not require a floor change; it has to come down to 2 only
+      if a SECOND command is removed, once just two remain.
+    * The FOURTH command — from the "Get changed markdown files" step in `ci.yml`
+      (cited by step name, not line number, because line numbers drift) — is
+      LIVE. #2386: it was INERT because the `docs` job checked out at depth 1, so
+      `github.event.pull_request.base.sha` was absent from the object store, the
+      three-dot diff died with `fatal: Invalid symmetric difference expression`,
+      `|| true` swallowed it, `FILES` came out empty and the consuming
+      markdownlint/lychee steps were skipped (job 100109903325). The job now
+      checks out at full depth and the step carries no `|| true`, so the diff
+      resolves against a real base and a bad base fails the step. Do not let the
+      floor drift above the number of live commands.
     * The same step's `--no-renames` is still deliberate and the rule applies to
       it uniformly: it IS a changed-set computation, and feeding markdownlint/lychee
       the DELETED source path of a `.md`->`.md` rename is tolerated —
-      `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
+      `npx markdownlint-cli2 <nonexistent.md>` exits 0, and plain `.md` deletions
       already put nonexistent paths into this list.
     * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
       That script deliberately runs
