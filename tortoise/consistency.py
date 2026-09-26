@@ -1115,9 +1115,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
             if onboarding_unknown:
                 result["onboarding_state_unknown"] = True
                 result["reason"] += (
-                    "; WARNING: the pending pre-wipe snapshot predates "
-                    "onboarding preservation, so this graph's onboarding "
-                    "state is UNKNOWN (not confirmed absent) — see #4641")
+                    "; WARNING: the pending pre-wipe snapshot does not "
+                    "carry a usable onboarding record — it either predates "
+                    "onboarding preservation, carries only one of the two "
+                    "onboarding sections, or inherits a state-UNKNOWN marker "
+                    "from an earlier interrupted rebuild — so this graph's "
+                    "onboarding state is UNKNOWN (not confirmed absent) — "
+                    "see #4641")
         return result
 
     if not files:

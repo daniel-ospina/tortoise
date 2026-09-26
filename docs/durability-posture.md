@@ -89,6 +89,25 @@ is **not** a completeness gate — a class nobody enrolled still recurs, and
 **#2296 contributes its indicators into this subsection** rather than creating
 a rival artifact.
 
+**Rescue-file version reservation.** The pre-wipe sidecar's `version` is a
+FORMAT gate, and it is a **cross-build contract**, not an in-repo detail: a
+build that does not recognise a version must **refuse the rebuild** rather than
+accept the file and wipe over a class it cannot see. The reserved numbers are
+`1` base (`:Batch`/`:Session` only), `2` = `1` + `config_snapshot` (#2814),
+`3` **contested** (#5327 claims it for `event_meta` and #5241 for
+`graph_identity`), and `4` = `3` + `onboarding_snapshot` / `onboarding_step_links`
+(#4641). Two rules follow. **The constant may only increase**, and a payload
+shape that is not a superset of the previous one takes a **new integer** —
+reusing a number for a disjoint payload is the failure the gate exists to
+prevent, and a build that reuses one reopens the wipe on a class it cannot see.
+Because the version check protects only the build that *reads* it, the
+section-set refusal in `_validate_prewipe_snapshot` is not optional: a build
+that cannot restore a section key must refuse the file whatever the version
+says. The two guards are what make the gate symmetric across siblings that land
+at different times. This is the #2814 rollout window one generation on — a
+**retired** (entry-less) artifact is stamped with the *current* version, so a
+build whose read set excludes it refuses on a retired file until it is deleted.
+
 <!-- config-registry:preserved -->
 | Preserved class (authoritative) | Identity property |
 |---|---|

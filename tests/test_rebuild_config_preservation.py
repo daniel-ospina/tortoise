@@ -2329,3 +2329,39 @@ def test_preservation_unknown_is_a_gap_for_recover_from_log(graph):
     assert rec.get("onboarding_gap"), (
         "a pre-onboarding rescue file must not read as a clean recovery")
     assert "onboarding" in rec["reason"]
+
+
+def test_unknown_reason_names_both_derivations_not_just_pre_preservation(
+        graph):
+    """The UNKNOWN `reason` clause must not assert ONE cause.
+
+    `onboarding_unknown` has three shapes (a file predating preservation, one
+    carrying only one of the two onboarding sections, and this build's own
+    `onboarding_unknown` marker). The marker case is a file written by THIS
+    build that carries BOTH sections, so "predates onboarding preservation"
+    is false for it — and this clause is what the automatic-recovery callers
+    (`_auto_health_recover`, `_recover_or_raise`) log verbatim (#4641 review
+    round 9).
+    """
+    from tortoise.consistency import recover_from_log
+
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-m", fork="build",
+                            steps=("harness-connected",))
+    payload = _sidecar_payload(
+        onboarding_snapshot=[{"org_id": "org-m", "status": "active"}],
+        onboarding_step_links=[["org-m", "harness-connected"]])
+    payload["onboarding_unknown"] = True
+    _plant(Path(_sidecar_path(events)), payload)
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    rec = recover_from_log(str(events), sdk._get_proj())
+
+    assert rec["recovered"] is True
+    assert rec.get("onboarding_state_unknown") is True
+    reason = rec["reason"]
+    assert "onboarding state is UNKNOWN" in reason, reason
+    assert "marker" in reason, (
+        f"the UNKNOWN reason names a single cause that is false for the marker "
+        f"derivation (the file carries both sections): {reason}")

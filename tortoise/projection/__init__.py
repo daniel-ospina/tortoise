@@ -309,9 +309,10 @@ _PREWIPE_SNAPSHOT_VERSION = 4
 # `_validate_prewipe_snapshot` therefore ALSO refuses a file carrying any
 # section key outside this build's `_SNAPSHOT_SECTIONS`: a build that cannot
 # restore a section must not wipe over it, whatever the version says. The two
-# guards are complementary — the distinct version refuses a file from a build
-# that does not know our sections; the section refusal rejects a foreign
-# payload that claims a version we read.
+# guards are complementary, and each covers the direction the other cannot:
+# the section refusal rejects a foreign payload that claims a version we
+# read; the distinct version makes a not-yet-updated build refuse OUR payload
+# instead of accepting it and wiping over the sections it cannot see.
 _PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4)
 # Top-level keys that are METADATA, never a preserved class. The
 # unknown-section refusal below subtracts these so it cannot mistake the
@@ -5762,7 +5763,8 @@ class FalkorProjection(
             logger.error(
                 "rebuild: the leftover pre-wipe snapshot at %s does not "
                 "carry a usable onboarding record — it either predates "
-                "onboarding preservation or carries a state-UNKNOWN marker "
+                "onboarding preservation, carries only one of the two "
+                "onboarding sections, or carries a state-UNKNOWN marker "
                 "from an earlier interrupted rebuild — so whether the "
                 "destroyed graph held any onboarding state CANNOT be "
                 "determined. This is a state-UNKNOWN signal, not proof the "

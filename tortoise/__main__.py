@@ -128,11 +128,12 @@ def _cmd_rebuild(args):
             print(
                 "Onboarding: the leftover pre-wipe snapshot does not carry a "
                 "usable onboarding record — it either predates onboarding "
-                "preservation or carries a state-UNKNOWN marker from an "
-                "earlier interrupted rebuild — so whether the destroyed "
-                "graph held any onboarding state CANNOT be determined "
-                "(UNKNOWN, not absent). Re-run onboarding for any org whose "
-                "onboarding state is uncertain (#4641).",
+                "preservation, carries only one of the two onboarding "
+                "sections, or carries a state-UNKNOWN marker from an earlier "
+                "interrupted rebuild — so whether the destroyed graph held "
+                "any onboarding state CANNOT be determined (UNKNOWN, not "
+                "absent). Re-run onboarding for any org whose onboarding "
+                "state is uncertain (#4641).",
                 file=sys.stderr,
             )
         if onboarding_missing_total:
