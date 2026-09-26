@@ -1219,7 +1219,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
     operator ``--upgrade-all`` path (projection maps ``source_path`` →
-    ``d.sourcePath`` via ``_DOCUMENT_HANDLED``); a tenant setting them turns the
+    ``d.sourcePath`` via ``_SOURCE_HANDLED``/``_DOC_RETIRED``); a tenant setting them turns the
     graph into a file-read oracle. ``id`` overrides on entity surfaces mutate
     node identity / mint tenant-chosen Document ids. Both are rejected with a
     clear ValueError (fail-closed). ``api.add_document``'s explicit
@@ -5300,9 +5300,9 @@ class TortoiseSDK:
             warnings.append(
                 f"{len(event_failures)} extracted event(s) failed to write")
 
-        # ── operators (IMPL/NAND + MITIGATES — shared commit semantics,
-        #    #1532 D3: same artifact + deep-miss drop as the commit path via
-        #    apply_payload_operators) ──
+        # ── operators (IMPL/NAND kinds; a payload's MITIGATES entry is a
+        #    bridge-attack record routed to mitigate_operator — #4937; shared
+        #    commit semantics, #1532 D3 — apply_payload_operators) ──
         ops = payload.get("operators", []) or []
         if ops:
             from tortoise.commit_ops import (
@@ -5816,6 +5816,75 @@ class TortoiseSDK:
                 f"{method} cannot terminalize a dead {role}")
         return {"id": point_id, "status": status, "outdated": outdated}
 
+    def _assert_window_start_not_inverted(self, point_id: str, now: str) -> None:
+        """#5358: refuse an INVERTED predecessor window BEFORE any mutation.
+
+        The stamp block in ``invalidate_point`` writes ``validTo = now`` from
+        an independent fact and never reads the point's window START, so a
+        future-dated predecessor (``validFrom > now`` — reachable,
+        ``create_point`` / ``update_point`` accept a caller ``validFrom``)
+        would persist ``validTo < validFrom``; ``restore_point_at``'s
+        ``_covers`` then covers NO instant and the point silently disappears
+        from every temporal query while the system reports honest absence
+        (#4021's sibling, separate root).
+
+        The comparison reuses the READ path's measure — ``_created_sort_key``,
+        the SAME key ``_covers`` orders with — and its PRESENCE predicate
+        (``is not None``, NOT truthiness: a falsey-but-present ``validFrom``
+        such as ``0`` is a real window start; #3985 owns the truthiness
+        divergence elsewhere). Refusal fires only on a DECIDABLE inversion:
+        both the stored start and ``now`` must be parseable to an instant.
+        An unparseable stored ``validFrom`` (e.g. ``""``) buckets LAST in
+        ``_created_sort_key`` (``(1, text)`` vs a parseable ``(0, epoch)``),
+        which would read as "greater than now" purely as an ordering-fallback
+        artifact — refusing on that would be a guess, not a comparison, so it
+        proceeds and stamps as before (that point's window already covers no
+        PARSEABLE instant, so the write cannot newly hide it from any
+        parseable query instant). EVERY matching node is examined, not just
+        the first: the writer's stamp block MATCHes **EVERY** node carrying
+        the id, and point ids are not unique (the duplicate fan-out is a
+        tested shape), so a first-row-only read could pass the guard and still
+        stamp an inverted window on a sibling node. Equality is NOT an
+        inversion: ``>`` is strict, so a zero-length ``[now, now]`` window is
+        fine.
+
+        Shared by the writer (``invalidate_point``) and the MCP dry-run
+        preview (``_preview_invalidate``) so the two cannot drift — the
+        preview contract is that a preview over an input the write would
+        reject must reject it too (#4057).
+        """
+        proj = self._get_proj()
+        vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+            params={"id": point_id},
+        ).result_set
+        if not vf_rows:
+            return
+        from .search_engine import _created_sort_key
+        k_now = _created_sort_key(now)
+        if k_now[0] != 0:
+            return  # `now` is a fresh ISO stamp; defensive symmetry
+        # The writer's stamp block MATCHes and stamps EVERY node carrying this
+        # id — point ids are not unique (the duplicate fan-out is a tested
+        # shape: test_dry_run_preview's count tests), so the guard must refuse
+        # on ANY parseable stored start after `now`, never merely the first
+        # row the server happens to return (row order is server-dependent).
+        for row in vf_rows:
+            stored_vf = row[0]
+            if stored_vf is None:
+                continue
+            k_vf = _created_sort_key(stored_vf)
+            if k_vf[0] == 0 and k_vf[1] > k_now[1]:
+                raise ValueError(
+                    f"invalidate_point: cannot invalidate {point_id!r} — its "
+                    f"validFrom {stored_vf!r} is AFTER now ({now!r}), so "
+                    f"stamping validTo=now would persist an inverted window "
+                    f"(validTo < validFrom) and the point would disappear "
+                    f"from every temporal query. retract_point is the "
+                    f"window-agnostic route (it does not touch the window): "
+                    f"call retract_point({point_id!r}) instead."
+                )
+
     def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
@@ -5833,6 +5902,15 @@ class TortoiseSDK:
         - corrected_by point missing, an OPERATOR, or already terminal →
           ValueError (structural failure: would orphan an outdated point, or
           wire a CORRECTS edge from an operator / a dead claim).
+        - the predecessor's ``validFrom`` is AFTER ``now`` → ValueError
+          (#5358). The stamp block writes ``validTo = now`` unconditionally,
+          so a future-dated predecessor would persist an INVERTED window
+          (``validTo < validFrom``); ``restore_point_at``'s ``_covers`` then
+          covers no instant and the point silently vanishes from every
+          temporal query. Fail-closed refusal BEFORE any mutation (no partial
+          write, no journal event), naming ``retract_point`` — the
+          window-agnostic route — as the caller's way forward. Equality is
+          well-formed (a zero-length ``[now, now]`` window is legal).
         Because ``outdated=true`` is itself terminal, repeating an invalidate
         now raises (#2498) instead of re-asserting: the old #330 "re-assert"
         contract let a dead claim's ``expiredAt`` move forward and minted one
@@ -5860,6 +5938,10 @@ class TortoiseSDK:
         self._assert_lifecycle_guard(
             corrected_by_id, method="invalidation", role="corrector")
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #5358: refuse an INVERTED predecessor window BEFORE any mutation.
+        # The check is shared with the MCP dry-run preview
+        # (`_preview_invalidate`) so the writer and its preview cannot drift.
+        self._assert_window_start_not_inverted(id, now)
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
         # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
@@ -7199,7 +7281,11 @@ class TortoiseSDK:
         """Create an operator Point with optional semantic label.
 
         Semantic-epistemic edge model (#7801):
-          - op_type: IMPL or NAND (epistemic mechanism)
+          - op_type: IMPL or NAND (epistemic mechanism). ⛔ ``MITIGATES`` is
+            NOT an operator kind (#4937 — the F1 ruling recorded on #2552):
+            a mitigation is a SEPARATE Point that attacks the operator bridge
+            it damps, so it can express neither an op_type nor a bridge. It is
+            created by ``mitigate_operator`` AFTER the operator exists.
           - label: domain verb — "addresses", "hasPart", "opposes" (semantic layer)
           - direction: "bidirectional" (default) or "unidirectional" — explicit
             flag controlling EP back-propagation (ONTOLOGY v3.1 §3.1, §8).
@@ -7218,6 +7304,21 @@ class TortoiseSDK:
             draft status so JSONL replay preserves it
             (projection/entities.py coalesce default is 'live').
         """
+        # #4937 (F1 ruling on #2552, 2026-09-23): MITIGATES is NOT an operator
+        # kind — a mitigation damps the operator bridge it attacks
+        # ((op:Point {is_operator:true})-[:mitigated_by]->(m:Point),
+        # w_eff = w × (1 − strength), weights.py::compute_operator_weight). It
+        # has no op_type and no bridge, so it cannot be spelled as an operator
+        # here. Refuse loudly and NAME the correct path — a bare
+        # "invalid op_type" leaves the caller with no route to the mechanism.
+        if op_type == "MITIGATES":
+            raise ValueError(
+                "MITIGATES is not an operator kind (#4937). A mitigation damps "
+                "the operator bridge it attacks — create the IMPL/NAND operator "
+                "first, then call sdk.mitigate_operator(id=<operator id>, "
+                "reason=..., strength=0.10..0.50) (MCP: "
+                "tortoise_mitigate_operator) to attach the dampener."
+            )
         if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
@@ -7246,7 +7347,11 @@ class TortoiseSDK:
             declared = set()
             if reg is not None:
                 declared = {r.get("predicate") for r in reg.list_relations()}
-            if label not in declared and label not in ("IMPL", "NAND", "MITIGATES"):
+            # #4937: the generic operator menu is IMPL/NAND (+ pack-declared
+            # relations) — MITIGATES is NOT a built-in operator label. A
+            # caller spelling it here gets the undeclared-relation warning
+            # instead of a silent peer spelling of mitigation.
+            if label not in declared and label not in ("IMPL", "NAND"):
                 warnings.append(warning_for_relation(label))
                 emit_violation(code="undeclared_relation", relation=label,
                                detail=f"op_type={op_type}")
@@ -7855,10 +7960,19 @@ class TortoiseSDK:
         return result
 
     def list_sources(self) -> list[dict]:
-        """All Sources with point counts. Returns [{url, sourceKind, points}]."""
+        """All PROVENANCE Sources with point counts.
+
+        Returns [{url, sourceKind, points}]. D10 (ONTOLOGY v3.15 §4.4): a
+        run-endpoint `doc_<rel>` document is also a `:Source`, but it is NOT a
+        provenance source — it carries `documentKind` and NO `sourceKind`, so
+        including it would (a) add a `sourceKind=None` row to a
+        `sourceKind`-keyed vocabulary and (b) double-count every indexed file
+        (its corpus Source AND its document node). Filtering keeps the
+        pre-D10 observable row set byte-identical (see #5082).
+        """
         proj = self._get_proj()
         rows = proj.g.query(
-            "MATCH (s:Source) "
+            "MATCH (s:Source) WHERE s.documentKind IS NULL "
             "OPTIONAL MATCH (p:Point)-[:extractedFrom]->(s) "
             "RETURN s.url, s.sourceKind, count(p) AS points "
             "ORDER BY points DESC"
@@ -7957,6 +8071,9 @@ class TortoiseSDK:
 
     # Operator vocabularies accepted by connection specs (create_operator's
     # op_type whitelist — kept in sync with create_operator's validation).
+    # #4937: MITIGATES is deliberately NOT here — it is not an operator KIND,
+    # so it is never a `conn["operator"]` value. A connection spec expresses a
+    # mitigation in its `mitigation` dict (see `_connection_route`).
     _INGEST_OPERATOR_TYPES = frozenset(
         ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
     )
@@ -8290,11 +8407,22 @@ class TortoiseSDK:
         if has_op:
             op_type = conn["operator"]
             if op_type not in self._INGEST_OPERATOR_TYPES:
+                # #4937: an actionable refusal for the one spelling a caller
+                # is most likely to reach for — name the correct path rather
+                # than only listing the permitted vocabulary.
+                _hint = (
+                    " — MITIGATES is not an operator kind (#4937): a "
+                    "mitigation damps the operator bridge it attacks; create "
+                    "the IMPL/NAND connection, then call "
+                    "sdk.mitigate_operator(id=<operator id>, reason=..., "
+                    "strength=0.10..0.50)"
+                    if op_type == "MITIGATES" else ""
+                )
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] operator must "
                                f"be one of {sorted(self._INGEST_OPERATOR_TYPES)}, "
-                               f"got {op_type!r}",
+                               f"got {op_type!r}{_hint}",
                 })
             frm = conn.get("from")
             to_list = tos if isinstance(tos, list) else [tos]
@@ -8559,7 +8687,7 @@ class TortoiseSDK:
             conns.append((i, conn, route, [frm] + to_list))  # noqa: RUF005
         node_info = self._fetch_endpoint_info(external)
         entity_labels = {"subject": "Subject", "object": "Object",
-                         "event": "Event", "document": "Document"}
+                         "event": "Event", "document": "Source"}
         for i, conn, route, vals in conns:  # noqa: B007
             # #2062: the operator route (reify/mitigation/part-whole →
             # create_operator) accepts Point OR Event endpoints — the direct
@@ -10010,10 +10138,13 @@ class TortoiseSDK:
                 f"Cannot file human approval: Subject {approver_id!r} does not exist"
             )
 
-        # 2. Validate artifact exists (Object or Document)
+        # 2. Validate artifact exists (Object, or a document Source — a
+        #    document is a :Source since D10, ONTOLOGY v3.15 §4.4).
         r = proj.g.query(
-            "MATCH (n) WHERE (n:Object OR n:Document) "
-            "AND (n.id = $id OR n.name = $id) RETURN labels(n), n.id",
+            "MATCH (n) WHERE (n:Object OR "
+            "  (n:Source AND n.documentKind IS NOT NULL)) "
+            "AND (n.id = $id OR n.name = $id OR n.url = $id) "
+            "RETURN labels(n), n.id",
             params={"id": artifact_id},
         ).result_set
         if not r:
@@ -10243,9 +10374,11 @@ class TortoiseSDK:
             name, eid = row[0], row[1]
             if name:
                 entities[name.lower()] = eid
-        # Document: matched by title (primary display name) or name
+        # Document: a document is a :Source (D10); matched by title, restricted
+        # to document-bearing Sources.
         for row in proj.g.query(
-            "MATCH (d:Document) WHERE d.title IS NOT NULL RETURN d.title, d.id"
+            "MATCH (s:Source) WHERE s.title IS NOT NULL "
+            "AND s.documentKind IS NOT NULL RETURN s.title, s.id"
         ).result_set:
             title, did = row[0], row[1]
             if title:
@@ -13248,7 +13381,7 @@ class TortoiseSDK:
                         # YAML types (bool/int) must not leak into string fields
                         # (regression vs old line-by-line parser). Coerce known
                         # string fields to str.
-                        for _k in ("doc_status", "format", "version", "title",
+                        for _k in ("format", "version", "title",
                                    "sessionId", "session_id", "agent"):
                             if _k in frontmatter and frontmatter[_k] is not None:
                                 frontmatter[_k] = str(frontmatter[_k])
@@ -13516,7 +13649,6 @@ class TortoiseSDK:
                     "owned_by": frontmatter.get("ownedBy", ""),
                     "managed_by": frontmatter.get("managedBy", ""),
                     "governing_agreement": frontmatter.get("governedBy", frontmatter.get("governingAgreement", "")),
-                    "doc_status": frontmatter.get("doc_status", "draft"),
                     "format": "markdown",
                     "version": frontmatter.get("version", ""),
                     "createdAt": frontmatter.get("created", now),
@@ -14178,6 +14310,14 @@ class TortoiseSDK:
         fusion_weights: dict | None = None,
         fusion_k: int = 60,
         w4_enrich: bool = True,
+        # C6 (#2520, #2513): time-aware query expansion — the query-side
+        # date anchor. ``time_aware`` gates the C6 branch; ``query_date``
+        # is the question's date (YYYY-MM-DD, or a timestamp truncated to
+        # it). Default OFF (the #1745 fail-safe decision, matching
+        # ``entity_key_expansion``): the branch is never entered and the
+        # output is byte-identical.
+        query_date: str | None = None,
+        time_aware: bool = False,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -14288,6 +14428,22 @@ class TortoiseSDK:
         fusion_k (A3 #2070): the RRF damping constant override (the
             historical Cormack k=60). Default 60 = unchanged. Ask lane
             threads its TORTOISE_ASK_FUSION_K knob through this slot.
+        query_date / time_aware (C6 #2520, #2513): the query-side date
+            anchor. When ``time_aware`` is on, ``query_date`` is a valid
+            date, and ``tortoise.time_aware.detect_temporal_intent`` reads
+            the query as PREFER-LATEST ("now", "currently", "did I switch
+            X"), the DENSE-leg embedding is computed over
+            ``inject_query_date(query, query_date)`` = "<query> (as of
+            <date>)" — so the embedding can express "which version was
+            current on X", which the bare question cannot. The FTS and
+            structural legs keep the ORIGINAL query (date tokens would
+            dilute the sparse OR-union). A DATE-PINNED query ("where did I
+            live in 2024?") is deliberately NOT anchored and gets no fresh
+            bias (the invert-recency guard). Rank-time prefer-latest is a
+            caller concern (the eval applies it on its final pool — see
+            ``tools.longmem_eval.retrieve``): a stable reorder layered here
+            would be discarded by the eval's RRF re-sort. Default
+            ``time_aware=False`` → byte-identical, zero extra work.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -14324,7 +14480,11 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         graph = proj.g
-        label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+        # D10 (ONTOLOGY v3.15 §4.4): a document IS a :Source — there is no
+        # :Document graph label, so post-retrieval Cypher must never address
+        # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
+        # entity_type stays "document").
+        label = "Source" if entity_type == "document" else entity_type.capitalize()  # point→Point, event→Event, subject→Subject
         # Operator: Point nodes with is_operator=true, kind=op_type
         # Source: Source nodes, kind=sourceKind
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind", "operator": "op_type", "source": "sourceKind"}[entity_type]
@@ -14335,6 +14495,17 @@ class TortoiseSDK:
 
         # Expand kind early for pack-aware structural query + kind filter
         expanded_kinds = self._expand_kind(kind) if kind else None
+
+        # C6 (#2520): resolve the freshness intent ONCE and derive the
+        # DENSE-leg query. The anchor touches the embedding only — the
+        # sparse/structural legs keep the original query. ``query=None``
+        # (full-scan) is safe: the detector is None-safe. Off path: no
+        # import, no scan, byte-identical.
+        _dense_query = query
+        if time_aware:
+            from .time_aware import dense_query_for
+            _dense_query = dense_query_for(query, time_aware=True,
+                                           query_date=query_date)
 
         # 2. Get query vector if needed (all core entity types now have embeddings #7845)
         # R3 (#1542) D4: no_embedder vs encode_failed are distinguished —
@@ -14355,7 +14526,7 @@ class TortoiseSDK:
                 _vec_reason = "no_embedder"
             else:
                 try:
-                    query_vec = model.encode([query])[0].tolist()
+                    query_vec = model.encode([_dense_query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
         if _vec_reason is not None and leg_trace is not None:
@@ -14610,7 +14781,10 @@ class TortoiseSDK:
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
-        if entity_type == "source":
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source resolving by
+        # `url` (#149's canonical key), not by `id` — the same three-way
+        # id_field search_engine's legs use.
+        if entity_type in ("source", "document"):
             id_field = "url"
         elif entity_type == "event":
             id_field = "eventId"
@@ -14840,7 +15014,8 @@ class TortoiseSDK:
                     }
             elif entity_type == "document":
                 rows = graph.query(
-                    "MATCH (n:Document) WHERE n.id IN $ids "
+                    "MATCH (n:Source) WHERE n.url IN $ids "
+                    "AND n.documentKind IS NOT NULL "
                     "RETURN n.id, n.title, n.documentKind, n.topics, n.summary, "
                     "n.sessionId, n.eventId, n.sourcePath",
                     params={"ids": result_ids},
@@ -16065,7 +16240,10 @@ class TortoiseSDK:
         Returns ``{nodes, edges, stats}``:
             nodes: [{id, type, content, kind, is_operator?, status?,
                 confidence?}] — type is the lowercased graph label
-                (point/object/subject/event/source/document).
+                (point/object/subject/event/source). D10 (ONTOLOGY v3.15
+                §4.4): a document is a `:Source`, so a document node's
+                ``type`` is ``source``; its genre is the ``kind`` field
+                (``documentKind``), not a separate label.
             edges: [{source, type, target}] — every edge with BOTH endpoints
                 in the node set (the subgraph is closed over its edges).
             stats: {node_count, edge_count, depth, seed_count, truncated}.
@@ -16106,7 +16284,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             "MATCH (n) WHERE (n.id = $seed OR n.url = $seed) "
             "AND labels(n)[0] IN ['Point', 'Object', 'Subject', 'Event', "
-            "                      'Source', 'Document'] "
+            "                      'Source'] "
             "RETURN n.id",
             params={"seed": seed.strip()},
         ).result_set
@@ -17687,8 +17865,15 @@ class TortoiseSDK:
             event["subject_kind"] = props["subjectKind"]
         if label == "Object" and "objectKind" in props:
             event["object_kind"] = props["objectKind"]
-        if label == "Document" and "documentKind" in props:
-            event["document_kind"] = props["documentKind"]
+        if label == "Document":
+            # D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is
+            # a :Source keyed ``url = id``. This is a DEPRECATED ALIAS: the
+            # doc-kind key is normalized here, then the node write routes as a
+            # Source. The journaled event type stays "DocumentCreated" (rebuild
+            # compatibility — the event vocabulary is unchanged).
+            if "documentKind" in props:
+                event["document_kind"] = props["documentKind"]
+            label = "Source"
         if label == "Event" and "eventKind" in props:
             event["eventKind"] = event.get("eventKind", props.get("eventKind"))
             if "eventId" not in event:
@@ -17987,6 +18172,42 @@ class TortoiseSDK:
             from tortoise.commit_schema import validate_span
             validate_span(props.get("span_start"), props.get("span_end"))
         proj = self._get_proj()
+        # #5026/D10 (B6, third door — #5135): the retired document fields must
+        # not re-enter through THIS generic surface either. `_sanitize_props`
+        # deliberately ACCEPTS them, because they are legitimate on other
+        # labels (`objectKind` is the canonical Object kind, ONTOLOGY §5), so
+        # the denial has to be TARGET-AWARE: refuse them only when the mutation
+        # lands on a document `:Source`. Without this,
+        # `update_entity(<doc_id>, content=...)` wrote the retired keys and the
+        # non-Point branch below JOURNALED them as `state` — which the fold
+        # re-applies through `SET n += $s` — so they survived `rebuild_all`:
+        # a retired-field re-write that the document-path deny-sets cannot see.
+        #
+        # ⛔ The document test is `documentKind IS NOT NULL`, deliberately
+        # WITHOUT the `documents` meter's `<> 'transcript'` clause. The meter
+        # excludes transcripts because they are not counted against the
+        # `documents` cap; the RETIREMENT is not quota-scoped. The document
+        # path denies these fields on EVERY document —
+        # `_upsert_document`'s passthrough is `_SOURCE_HANDLED | _DOC_RETIRED`
+        # with no transcript filter — so copying the meter's narrower predicate
+        # here left a transcript document `:Source` as an open third door (the
+        # same field denied by one path and writable by the other on the SAME
+        # node). The parity that matters is with the retirement, not the cap.
+        _retired_hit = proj._DOC_RETIRED_KEYS.intersection(props)
+        if _retired_hit:
+            _is_doc = proj.g.query(
+                "MATCH (s:Source) WHERE (s.url = $id OR s.id = $id) "
+                "AND s.documentKind IS NOT NULL "
+                "RETURN count(s)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _is_doc:
+                raise ValueError(
+                    "retired document field(s) "
+                    f"{sorted(_retired_hit)} cannot be set through "
+                    "update_entity: D10 (#5026) retired "
+                    "content/doc_status/objectKind on a document, which is a "
+                    ":Source keyed by url, not a :Document node.")
         # W5 Phase F (#2104, review r4): eventId is the EVENT node's identity
         # (the projection MERGEs on it; capture Events carry the DETERMINISTIC
         # _session_capture_event_id(session_id) id — ev_<sha256("sessionCaptured:"
@@ -18386,8 +18607,7 @@ class TortoiseSDK:
                     "create_entity(type='document') requires documentKind")
             did = self.ulid()
             node = self._create_entity("Document", did, {
-                "title": name, "documentKind": documentKind,
-                "objectKind": "document", "status": "draft", **props},
+                "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
         else:
             raise ValueError(
@@ -18481,7 +18701,7 @@ class TortoiseSDK:
           (Event)-[:aboutSubject]->(Subject)
           (Event)-[:aboutObject]->(Object)
           (Event)-[:aboutPoint]->(Point)
-          (Event)-[:aboutDocument]->(Document)
+          (Event)-[:aboutDocument]->(Source)   # D10: a document IS a :Source
         rather than stored as string properties.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -19126,8 +19346,11 @@ class TortoiseSDK:
                 g["marker"] = rows[0][1]
                 g["stored_source_file"] = rows[0][2]
         elif doc_id:
+            # D10: a document is a :Source (ONTOLOGY v3.15 §4.4) — the
+            # unit-completeness `entity` clause reads the document Source.
             rows = proj.g.query(
-                "MATCH (d:Document {id:$did}) RETURN 1",
+                "MATCH (s:Source {url:$did}) "
+                "WHERE s.documentKind IS NOT NULL RETURN 1",
                 params={"did": doc_id},
             ).result_set
             g["entity"] = bool(rows)
@@ -19497,9 +19720,10 @@ class TortoiseSDK:
                     else:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
                         repair_work = not base_complete or merge_outcome == "updated"
-                    # wire (Source)-[:references]->(Event|Document) — plain edge
+                    # wire (Source)-[:references]->(Event|Source) — plain edge
+                    # (D10: a document is a :Source, so the doc target is Source)
                     target = event_id if classifier != "doc" else doc_id
-                    label = "Event" if classifier != "doc" else "Document"
+                    label = "Event" if classifier != "doc" else "Source"
                     proj.link_source_to_entity(url, target, label)
 
             # ── embedding repair (sessions; extract_metadata=True) — runs only
@@ -19873,7 +20097,6 @@ class TortoiseSDK:
             "id": doc_id,
             "title": title,
             "document_kind": doc_kind or "brief",  # §8.3 flag 1 fallback
-            "doc_status": str(frontmatter.get("doc_status") or "draft"),
             "format": "markdown",
             "source_path": str(abs_path),
             "source_url": source_url,
@@ -20677,11 +20900,12 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
 
         did = self.ulid()
-        result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, "objectKind": "document", "status": "draft", **props}, "DocumentCreated")
-        # #394: provenance parity with create_point — link Document → Source
-        # via extractedFrom (Ontology v3.3) when the caller passes a source ref.
+        result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, **props}, "DocumentCreated")
+        # #394: provenance parity with create_point — link the document Source
+        # → Source via extractedFrom (Ontology v3.3) when the caller passes a
+        # source ref. D10: the entity label is Source (a document is a :Source).
         if props.get("extractedFrom"):
-            self._get_proj()._link_source(did, props["extractedFrom"], label="Document")
+            self._get_proj()._link_source(did, props["extractedFrom"], label="Source")
         return result
 
     def _resolve_source_url(self, url: str) -> str:
@@ -21322,11 +21546,31 @@ class TortoiseSDK:
         return [dict(row[0]) for row in r.result_set]
 
     def get_provenance_chain(self, point_id: str) -> list:
-        """Return full provenance chain for a Point."""
+        """Return full provenance chain for a Point.
+
+        Layered provenance (ONTOLOGY §3.4) is ``(Point)-[:extractedFrom]->
+        (Source)-[:references]->(Entity)``. D10 (v3.15 §4.4) makes a document
+        a ``:Source``, so for a document written WITHOUT a distinct corpus
+        ``source_url`` — the legacy ``tortoise/ingest.py`` path, where every
+        ``add_document`` site omits it — the document node and its Source are
+        ONE node: there is no second node to carry a ``references`` hop, and
+        minting one from the node to itself would be a degenerate self-loop
+        (the reason ``_upsert_document`` suppresses it). The ``references``
+        hop is therefore OPTIONAL here: when it resolves, its target is
+        returned as ``entity`` exactly as before; when the source references
+        nothing, the source ITSELF is the terminal provenance and is returned
+        as ``entity`` rather than dropping the row. Rows that DO resolve a
+        reference are preferred, so a Point extracted from several sources
+        keeps returning a referenced entity whenever one exists.
+        """
         proj = self._get_proj()
         r = proj.g.query(
-            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source)-[:references]->(entity) "
-            "RETURN properties(src) as source, properties(entity) as entity, labels(entity) as labels LIMIT 1",
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
+            "OPTIONAL MATCH (src)-[:references]->(ref) "
+            "WITH src, ref ORDER BY ref IS NULL LIMIT 1 "
+            "RETURN properties(src) as source, "
+            "properties(coalesce(ref, src)) as entity, "
+            "labels(coalesce(ref, src)) as labels",
             params={"pid": point_id},
         )
         return [{"source": dict(row[0]), "entity": dict(row[1]), "labels": list(row[2])} for row in r.result_set]
@@ -21339,12 +21583,14 @@ class TortoiseSDK:
 
         Args:
             source_url: the Source node's url (auto-created if missing)
-            entity_id: the Document/Event/Object node id the source references
-            entity_label: the entity label (Document|Event|Object) for the MATCH
+            entity_id: the Source/Event/Object node id the source references
+            entity_label: the entity label (Source|Event|Object) for the MATCH.
+                The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
+                resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
         Raises:
-            ValueError: if entity_label is not one of Document, Event, Object
+            ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
         """
         proj = self._get_proj()
@@ -21651,8 +21897,8 @@ def _summary_to_payload(summary: dict, session_id: str,
                        stream: dict | None = None) -> dict:
     """Map the summary to the derived-commit payload. When a constructed
     stream (Step 2 output) is provided, its wired structure (argument points
-    with about_entities + IMPL/NAND/MITIGATES operators + decision events) is
-    used directly; otherwise the loose mapping is applied."""
+    with about_entities + IMPL/NAND operators, a MITIGATES payload entry
+    routed to mitigate_operator (#4937) + decision events) is used directly; otherwise the loose mapping is applied."""
     if stream and (stream.get("points") or stream.get("events")):
         return _stream_to_payload(summary, session_id, stream)
     """Map the summary stream to the derived-commit payload (#1013 shape):

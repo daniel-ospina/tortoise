@@ -11331,12 +11331,12 @@ async def session_install_probe(body: InstallProbeRequest,
 # local path never leaves the machine. The session Source's IDENTITY is the
 # canonical ``session:<session_id>`` (ONTOLOGY §4.6, #4005) — the same url the
 # capture path materializes and ``delete_session`` deletes; the W-7 basename
-# rides as a PROPERTY (``sourcePath`` on the Source/Document), never in the url.
+# rides as a PROPERTY (``sourcePath`` on the Source), never in the url.
 
 
 def _document_source_basename(payload: CommitPayload) -> str:  # noqa: F821
     """The payload's W-7 basename (FIRST provenance_ref) — the value written
-    to ``Document.sourcePath``. NOT the session Source identity (that is the
+    to ``Source.sourcePath``. NOT the session Source identity (that is the
     canonical ``session:<session_id>``, #4005). Empty when the payload has no
     provenance_refs (valid empty commit). Derived through the ONE shared
     ``file_indexer.provenance_basename`` primitive — the same one Layer-1 uses
@@ -11524,14 +11524,17 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "drafts": drafts},
     )
 
-    # ── 2. Document transcript (deterministic id — replay-safe MERGE). NO
-    # content on the derived path (§4.1: summary/story_arc/sessionId only). ──
+    # ── 2. Document transcript (D10, ONTOLOGY v3.15 §4.4: a document is a
+    # :Source) — deterministic id, replay-safe MERGE. NO content on the
+    # derived path (§4.1: summary/story_arc/sessionId only); doc_status is
+    # retired (§9.5 Q3). ──
     proj.g.query(
-        "MERGE (d:Document {id:$did}) "
-        "SET d.documentKind='transcript', d.title=$title, d.summary=$summary, "
-        "    d.story_arc=$arc, d.sessionId=$sid, d.eventId=$eid, "
-        "    d.sourcePath=$srcpath, d.doc_status='extracted', d.is_episodic=true, "
-        "    d.updatedAt=$now",
+        "MERGE (s:Source {url:$did}) "
+        "SET s.id=coalesce(s.id, $did), "
+        "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
+        "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
+        "    s.sourcePath=$srcpath, s.is_episodic=true, "
+        "    s.updatedAt=$now",
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,
                 "sid": session_id, "eid": event_id,
@@ -11557,8 +11560,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "kw": [session_id], "now": now},
     )
     proj.g.query(
-        "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
-        "MERGE (e)-[:produces]->(d)",
+        "MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) "
+        "MERGE (e)-[:produces]->(s)",
         params={"eid": event_id, "did": doc_id},
     )
 
@@ -11578,8 +11581,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "now": now},
         )
         proj.g.query(
-            "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
-            "MERGE (e)-[:produces]->(d)",
+            "MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) "
+            "MERGE (e)-[:produces]->(s)",
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
@@ -11651,7 +11654,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             contentHash=src.contentHash or "", is_episodic=True,
         )
     for url in session_urls:
-        sdk.link_source_to_entity(url, doc_id, "Document")
+        sdk.link_source_to_entity(url, doc_id, "Source")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(
@@ -25220,19 +25223,18 @@ def _legacy_bucket_map(rows: list[dict], legacy: list[dict]) -> dict[str, str]:
             if str(m.get("graph_name") or "") in ns_to_gid}
 
 
-def _incident_subject(inc: dict) -> str:
-    """#2313: alert-store subject for a sweep incident.
+# #3030: the sweep-emitted guard kinds a conclusive clear run resolves, and the
+# subject rule that keys them, are both owned by ``tortoise.backup_sweep``
+# (``sweep_resolutions`` / ``graph_subject`` / ``incident_subject``) — nothing
+# sweep-domain is duplicated here.
 
-    Default-graph and org-level incidents keep the bare org subject (the
-    pre-#2313 alert surface). Custom-graph incidents use the per-graph
-    subject "{org}:{gid}" — the SAME key the watcher uses — so re-baseline
-    and the watcher can open/resolve coherently.
-    """
-    gid = inc.get("graph_id")
-    tid = inc.get("org_id", "")
-    if gid and gid != "default":
-        return f"{tid}:{gid}"
-    return tid
+
+def _incident_subject(inc: dict) -> str:
+    """#2313: alert-store subject for a sweep incident — thin alias for
+    ``backup_sweep.incident_subject``."""
+    from tortoise.backup_sweep import incident_subject
+
+    return incident_subject(inc)
 
 
 # #4144: the public backups family is ALSO served under `/v1/`. The dashboard
@@ -25899,6 +25901,64 @@ async def backups_sweep(request: Request):
                 alerts_failed.append(inc.get("kind"))
         if alerts_failed:
             result["alerts_failed"] = alerts_failed
+
+        # ── #3030: producer-side resolution for the sweep's guard kinds. ──
+        # The sweep is the authority on its own guards: a conclusive run that did
+        # NOT emit a kind, with POSITIVE evidence the guard ran/looked, is the
+        # "condition cleared" evidence — closed through the same delete-to-resolve
+        # lifecycle the watcher uses. `sweep_resolutions` owns that decision
+        # (degraded runs and un-checked graphs clear nothing).
+        #
+        # Review: the candidate list is intersected with what is actually OPEN —
+        # one LIST per kind, never an R2 GET per graph, so an hourly sweep over a
+        # few thousand graphs does not serialise thousands of reads while holding
+        # the sweep lock (nor does a listing failure close anything).
+        from tortoise.backup_sweep import sweep_resolutions
+
+        candidates = sweep_resolutions(result)
+        resolved: list[str] = []
+        failed: list[str] = []
+        open_cache: dict[str, set[str]] = {}
+        for kind, subject in candidates:
+            try:
+                if kind not in open_cache:
+                    # strict: a failed LIST must not be indistinguishable from
+                    # "nothing open" (it would make an R2 outage read as a clean
+                    # sweep — final-cycle review P2). The raise lands below.
+                    open_cache[kind] = await asyncio.to_thread(
+                        alerts.open_subjects, kind, strict=True
+                    )
+                # A platform subject has two spellings in the store: `_` (what
+                # `_key()` writes for an empty subject) and a literal `global`
+                # (the restore-drill path files that one). They are DIFFERENT
+                # objects, so match whichever is open and resolve BOTH when both
+                # are (resolving only the matched one left the other open forever
+                # — cycle-3/4 review).
+                spellings = [subject] if subject else ["", "global"]
+                targets = [
+                    t for t in spellings
+                    if (t or "_") in open_cache[kind]
+                ]
+                if not targets:
+                    continue
+                for target in targets:
+                    if await asyncio.to_thread(alerts.resolve_incident, kind, target):
+                        resolved.append(f"{kind}/{target}" if target else kind)
+            except Exception as e:
+                # A raised close (incident still open) OR a failed listing. Do not
+                # report it as resolved; surface it so the run does not read as a
+                # clean sweep.
+                failed.append(f"{kind}/{subject}" if subject else kind)
+                _logger.warning(
+                    "incident resolve failed for %s/%s: %s", kind, subject or "global", e
+                )
+        # `incidents_resolved` means "dedup objects CLEARED", which includes
+        # placeholders and tombstones — not necessarily issues closed (cycle-3
+        # review). `incidents_unresolved` is the honest counterpart.
+        if resolved:
+            result["incidents_resolved"] = resolved
+        if failed:
+            result["incidents_unresolved"] = failed
         return result
 
 
@@ -26254,10 +26314,32 @@ async def backups_rebaseline(request: Request):
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
     alerts = _alert_store_from(_backup_config_safe())
-    alerts.resolve_incident("DATA_LOSS_CANDIDATE", subject)
-    alerts.resolve_incident("SIZE_GUARD_ABORT", subject)
-    return {"status": "rebaselined", "org_id": org_id,
-            "graph_id": graph_id, "node_count": count}
+    # The state write above already succeeded, so a resolve failure must NOT fail
+    # the request (cycle-2 review P2: `resolve_incident` now RAISES on a failed
+    # close instead of returning silently — an unguarded call here would 500 the
+    # re-baseline AFTER the operator's verdict was persisted, and the caller would
+    # reasonably retry a state write that already happened).
+    #
+    # But NOTHING else resolves these two kinds, so a failed close leaves the
+    # incident open with no retry — the response and the log must say so rather
+    # than implying a poll will retry (cycle-3 review P1). The outcome is reported
+    # per kind so the operator can re-run re-baseline after GitHub recovers.
+    incidents_failed: list[str] = []
+    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
+        try:
+            alerts.resolve_incident(kind, subject)
+        except Exception:
+            incidents_failed.append(f"{kind}/{subject}")
+            _logger.warning(
+                "%s resolve failed on re-baseline of %s — the incident is STILL OPEN "
+                "and only another re-baseline (or a manual close) clears it; re-run "
+                "once the GitHub API recovers", kind, subject, exc_info=True,
+            )
+    out = {"status": "rebaselined", "org_id": org_id,
+           "graph_id": graph_id, "node_count": count}
+    if incidents_failed:
+        out["incidents_unresolved"] = incidents_failed
+    return out
 
 
 def _drill_record(
@@ -26577,13 +26659,20 @@ async def backups_drill_scheduled(request: Request):
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
     else:
-        # success (or no eligible archive) closes any open incident
+        # success (or no eligible archive) closes any open incident. A failed
+        # close has NO retry until the next monthly drill, so report it in the
+        # response (final-cycle review P2 — the runbook claimed this field).
         try:
             await asyncio.to_thread(
                 alerts.resolve_incident, _DRILL_FAILED_KIND, "global"
             )
         except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED resolve failed", exc_info=True)
+            result["incidents_unresolved"] = [f"{_DRILL_FAILED_KIND}/global"]
+            _logger.warning(
+                "RESTORE_DRILL_FAILED resolve failed — the incident is STILL OPEN "
+                "and only another drill (or a manual close) clears it",
+                exc_info=True,
+            )
     return result
 
 

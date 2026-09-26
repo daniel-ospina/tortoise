@@ -18,6 +18,7 @@ Runnable with:
 """
 from __future__ import annotations
 
+import datetime as _dt
 import inspect
 import os
 import sys
@@ -790,6 +791,45 @@ class TestDryRunKeepsValidation:
         before = _graph_counts(sdk)
         result = mcp.tortoise_invalidate("no-such-id", b, dry_run=True)
         assert result["invalidated"] is False
+        assert _graph_counts(sdk) == before
+
+    def test_invalidate_preview_rejects_an_inverted_predecessor_window(
+            self, mcp, sdk):
+        """#5358 parity: the writer refuses a future-dated predecessor, so the
+        preview must refuse it too — otherwise `dry_run=True` reports "would
+        invalidate" for an operation the write raises on (the preview's own
+        contract). The shared `_assert_window_start_not_inverted` is what
+        makes the two agree; this is the differential that keeps it shared.
+        """
+        future = (_dt.datetime.now(_dt.UTC)
+                  + _dt.timedelta(days=30)).replace(microsecond=0)
+        old = sdk.create_point(
+            "statement", "future claim", validFrom=future.isoformat())["id"]
+        new = _seed_point(sdk, "replacement")
+        before = _graph_counts(sdk)
+
+        preview = mcp.tortoise_invalidate(old, new, dry_run=True)
+        assert preview.get("error"), preview
+        assert "retract_point" in str(preview["error"])
+        # the write path refuses the SAME input, identically
+        with pytest.raises(ValueError, match="retract_point"):
+            sdk.invalidate_point(old, new)
+        assert _graph_counts(sdk) == before
+
+    def test_supersede_preview_transfer_false_rejects_an_inverted_window(
+            self, mcp, sdk):
+        """`tortoise_supersede(transfer_edges=False)` reuses the invalidate
+        preview, so it inherits the #5358 refusal — pinned, because a
+        re-divergence of the two previews would otherwise be silent."""
+        future = (_dt.datetime.now(_dt.UTC)
+                  + _dt.timedelta(days=30)).replace(microsecond=0)
+        old = sdk.create_point(
+            "statement", "future claim", validFrom=future.isoformat())["id"]
+        new = _seed_point(sdk, "replacement")
+        before = _graph_counts(sdk)
+        result = mcp.tortoise_supersede(
+            old, new, transfer_edges=False, dry_run=True)
+        assert result.get("error"), result
         assert _graph_counts(sdk) == before
 
 

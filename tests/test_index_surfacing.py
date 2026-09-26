@@ -51,10 +51,19 @@ def _sdk(db: str | None = None) -> TortoiseSDK:
 
 
 def _required_sweep(g) -> int:
-    """§7 harness pin: no ontology-REQUIRED violation on any Source."""
+    """§7 harness pin: no ontology-REQUIRED violation on any Source.
+
+    D10 (#5026): a run-endpoint document Source carries ``documentKind`` +
+    ``url`` + ``ingestedAt`` but NO ``sourceKind``/``contentHash`` (its
+    version anchor lives on the corpus Source). The contentHash half is
+    therefore scoped to provenance Sources; ``url`` + ``ingestedAt`` hold for
+    EVERY Source. Whether a document Source should also carry sourceKind is
+    open in #5082 (plan-faithful today).
+    """
     return g.query(
-        "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.sourceKind IS NULL "
-        "OR s.contentHash IS NULL OR s.contentHash='' OR s.ingestedAt IS NULL "
+        "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR "
+        "s.ingestedAt IS NULL OR (s.sourceKind IS NOT NULL AND "
+        "(s.contentHash IS NULL OR s.contentHash='')) "
         "RETURN count(s)").result_set[0][0]
 
 
@@ -295,12 +304,14 @@ def test_e2e6_recall_subgraph_seed_by_url(corpus):
             and e.get("target") == "meeting_2026-08-05-team-sync"
             for e in sub.get("edges", []))
 
-        # Doc Source seed → Source + its Document.
+        # Doc Source seed → its document :Source. D10 (#5026): a document is
+        # a :Source, so the node's `type` is "source" (the lowercased graph
+        # label) — its genre rides the `kind` field (documentKind).
         sub2 = sdk.recall_subgraph(seed=doc, completeness="full")
         nodes2 = sub2.get("nodes", [])
         assert any(n.get("id") == doc and n.get("type") == "source"
                    for n in nodes2)
-        assert any(n.get("type") == "document"
+        assert any(n.get("type") == "source"
                    and n.get("id") == "doc_strategy.md" for n in nodes2)
 
         # The seed-by-url resolution is exact: a Source url never resolves to
