@@ -1109,8 +1109,8 @@ class TestRunnerWiring:
         """The stdio transport has NO org (``_enforce_quota`` says so), and every
         sibling writer exempts ``not org_id``. Arming a tally with no org would
         make every stdio write that encodes fire an UNMETERED_INCREMENT incident
-        telling the operator to investigate a window that was never
-        unresolvable.
+        on a lane that has no tenant BY DESIGN — a permanent false alarm about
+        attribution, on a transport where nothing is wrong.
 
         Mutation: arming unconditionally → alerts fires → RED.
         """
