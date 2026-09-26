@@ -34,7 +34,9 @@
 #          --jq '.required_status_checks.contexts[]'
 #      Re-read it when it changes; a stale list is a silent deadlock.
 #   3. `check-success` is deliberate, never `check-pending` or `-check-failure`:
-#      a skipped or neutral check must not read as a pass.
+#      a skipped or neutral check must not read as a pass. This holds for THESE
+#      LISTS only — the conditions Mergify injects under `merge` (point 4) accept
+#      neutral or skipped, so do not rely on injection to enforce them.
 #   4. `branch_protection_injection_mode` DECIDES WHAT THE ENTRY GATE IS, and
 #      this rule sets it to `merge` (see the queue rule below). Mergify injects
 #      branch-protection rules as conditions itself, so the mode is load-bearing:
@@ -98,13 +100,16 @@ queue_rules:
     # group, so a single CI cycle can certify several merges.
     #
     # Raised 2 -> 4 (2026-09-26), deliberately NOT higher. The two observed batch
-    # failures (#5293, #5335) were each a batch of ONE, both for #4617, and they
-    # failed on a GREEN base: at #5335's base main's own run was fully green while
-    # the batch failed `test_dashboard_client_paths_resolve.py::…` and
-    # `test_oauth_token_fault.py::…` (and #5293 failed a different test-(b) case).
-    # So these are COMPOSITION failures — the thing a queue exists to catch — not
-    # base red, and they are therefore NOT evidence that a larger batch is safe.
-    # An earlier draft of this comment claimed the opposite; it was wrong.
+    # failures (#5293, #5335) were each a batch of ONE, both for #4617:
+    #   * #5335's base was fully green in main's own push run, yet the batch failed
+    #     `test_dashboard_client_paths_resolve.py::…` and
+    #     `test_oauth_token_fault.py::…` — a COMPOSITION failure, the thing a queue
+    #     exists to catch;
+    #   * #5293's base was NOT green: main's push run at 6c48cf561 failed test (b)
+    #     on `tests/test_kind_eval_set.py` (g-015 'core:document', the stale
+    #     fixture #5308 later fixed), and its batch failed different cases again.
+    # So one is a composition failure and the other a red base. Neither is evidence
+    # that a larger batch is safe, which is why this stops at 4.
     #
     # Sizing: a full CI cycle is ~37 min measured on recent green runs (`test (a)`
     # 36.4 and 37.2 min; `python-ci-gate` ~36.8 min after `changes`), so batch 4
