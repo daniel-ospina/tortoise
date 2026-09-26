@@ -174,13 +174,54 @@ def compile_vocab(packs_dir: Path | str | None = None,
     so the set the extractor is *offered* and the set it may *write* are
     derived from one decision.
 
-    ⚠️ Accepting the resolver's output is not the same as RECEIVING it: the
-    prompt side is wired in production (``tenant_view`` threads the gate
-    into ``compile_value_brief``), but **no production caller passes this
-    argument yet** — ``get_vocab``/``refresh_vocab`` still compile the union,
-    so Layer-1 does not enforce per-graph approval on the live commit path.
-    The remaining plumbing is filed as #5163 (see also #2728).
+    ``get_vocab``/``refresh_vocab`` still compile the union (a process-global
+    default), but the PRODUCTION callers now pass a graph-scoped vocab
+    explicitly (#5163): the hosted commit door
+    (``hosted_api.commit_session``) compiles
+    ``compile_vocab(installed_namespaces=graph_installed_namespaces(sdk))``
+    before ``validate_payload_dict``, and the SDK's client-side pre-check
+    (``TortoiseSDK._commit_session_v2``) does the same — so Layer-1 enforces
+    per-graph approval on the live commit path. What remains is the
+    per-graph pack SELECTION surface (#2728).
+
+    **Scope of that claim — verified by the #5339 security review, do NOT
+    read it as "object kinds are gated":** Layer-1 gates
+    ``points[].pointKind``, ``events[].eventKind`` and
+    ``sources[].sourceKind``. It does **not** gate ``entities[].kind``, which
+    the hosted door persists verbatim (``hosted_api``:
+    ``objectKind=er.entity.kind``) — an off-vocabulary object kind is still
+    written (#5202). Separately, the approval set this gate is handed is
+    itself writable through the unvalidated ``objectKind`` field on
+    ``POST /v1/objects`` (#5475), so it is not (yet) an authorization
+    boundary. This function gates the vocab it is GIVEN; it does not make the
+    write path's object kinds closed-vocab.
+
+    Memoized per gate (#5163 review, P1). ``compile_vocab`` runs
+    ``PackRegistry.load_all()`` — a filesystem walk + YAML parse of every
+    manifest, measured at ~40 ms — and the hosted commit door is
+    ``async``, so calling it per request puts that work INLINE ON THE EVENT
+    LOOP. That is the #3086/#3060 regression class ("nothing heavy on the
+    loop"); the door previously reached the memoized ``get_vocab()`` and so
+    paid ~0 ms. The memo is keyed by the installed-namespace gate, with
+    ``None`` as a real key for the ungated union, and is invalidated by
+    ``refresh_vocab`` (packs installed/updated at runtime).
     """
+    if packs_dir is None:
+        key = (None if installed_namespaces is None
+               else frozenset(installed_namespaces))
+        cached = _vocab_gate_cache.get(key)
+        if cached is not None:
+            return cached
+        vocab = _compile_vocab_uncached(None, installed_namespaces)
+        with _vocab_lock:
+            _vocab_gate_cache.setdefault(key, vocab)
+        return _vocab_gate_cache[key]
+    return _compile_vocab_uncached(packs_dir, installed_namespaces)
+
+
+def _compile_vocab_uncached(packs_dir: Path | str | None,
+                            installed_namespaces: Collection[str] | None) -> Vocab:
+    """The raw compile — see ``compile_vocab`` for the contract."""
     if packs_dir is None:
         from tortoise.pack_registry import default_packs_dir
         packs_dir = default_packs_dir()
@@ -208,6 +249,19 @@ def compile_vocab(packs_dir: Path | str | None = None,
 _vocab_lock = threading.Lock()
 _vocab_cache: Vocab | None = None
 
+#: Gate-keyed memo (#5163 review, P1): without it the hosted commit door pays
+#: ~40 ms of registry load + YAML parse per request ON THE EVENT LOOP. ``None``
+#: is a real key — the ungated catalogue union. Cleared by ``refresh_vocab``.
+#:
+#: !! UNBOUNDED — one entry per distinct installed-namespace set and nothing
+#: evicts it (#5339 security review, P2). The key space is tenant-growable
+#: (``graph_kind_namespaces`` unions namespaces found in the graph's data), so
+#: this needs a cap in the style of ``pack_manifest_store._MAX_TENANT_VIEWS``.
+#: The same applies to ``value_extractor._VOCAB_CACHE`` /
+#: ``_KIND_SPEC_CACHE`` and ``extractor_v2._PACK_OBJECT_FORMS`` /
+#: ``_PACK_EVENT_FORMS``.
+_vocab_gate_cache: dict[frozenset[str] | None, Vocab] = {}
+
 
 def get_vocab() -> Vocab:
     """Lazily compiled closed vocab (thread-safe). Runtime, not snapshotted."""
@@ -215,7 +269,7 @@ def get_vocab() -> Vocab:
     if _vocab_cache is None:
         with _vocab_lock:
             if _vocab_cache is None:
-                _vocab_cache = compile_vocab()
+                _vocab_cache = _compile_vocab_uncached(None, None)
     return _vocab_cache
 
 
@@ -223,7 +277,9 @@ def refresh_vocab() -> Vocab:
     """Recompile the vocab (packs installed/updated at runtime)."""
     global _vocab_cache
     with _vocab_lock:
-        _vocab_cache = compile_vocab()
+        # Every gated entry is stale once the packs change (#5163 review).
+        _vocab_gate_cache.clear()
+        _vocab_cache = _compile_vocab_uncached(None, None)
     return _vocab_cache
 
 
