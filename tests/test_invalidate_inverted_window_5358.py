@@ -340,3 +340,55 @@ def test_duplicate_id_group_refuses_when_ANY_node_is_future_dated(sdk):
     out = sdk.restore_point_at(
         "dup5358", (future + _dt.timedelta(days=15)).isoformat())
     assert out["found"] is True
+    # NOTE: which duplicate is row[0] is server-unspecified, so this black-box
+    # test only DISCRIMINATES a first-row-only guard when the non-triggering
+    # node is returned first. The order-independent contract is pinned
+    # deterministically by `test_all_rows_semantics_are_order_independent`.
+
+
+def test_all_rows_semantics_are_order_independent(sdk, monkeypatch):
+    """The guard examines EVERY matching row, whatever the DB row order.
+
+    The black-box duplicate-id test above depends on the server's unspecified
+    row order; this feeds the guard the exact row sequences instead, so the
+    every-row contract and the `None`-start handling are pinned without a
+    row-order assumption.
+
+    The `None` case is load-bearing: a leading UNDATED node must NOT
+    short-circuit the scan (`continue`, never `return`) or a future-dated
+    sibling is silently missed.
+    """
+    now = _dt.datetime.now(_dt.UTC)
+    past = (now - _dt.timedelta(days=30)).replace(microsecond=0).isoformat()
+    future = (now + _dt.timedelta(days=30)).replace(microsecond=0).isoformat()
+
+    class _Rows:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    class _G:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def query(self, _cypher, params=None):
+            return _Rows(self._rows)
+
+    class _Proj:
+        def __init__(self, rows):
+            self.g = _G(rows)
+
+    def _guard(rows):
+        monkeypatch.setattr(sdk, "_get_proj", lambda: _Proj(rows))
+        sdk._assert_window_start_not_inverted("any-id", now.isoformat())
+
+    # no rows / no stored start / only past starts -> proceed
+    _guard([])
+    _guard([(None,)])
+    _guard([(past,)])
+    # ANY future start refuses, whatever the order
+    for rows in ([(future,)], [(past,), (future,)], [(future,), (past,)]):
+        with pytest.raises(ValueError, match="retract_point"):
+            _guard(rows)
+    # a leading UNDATED node must not short-circuit the scan
+    with pytest.raises(ValueError, match="retract_point"):
+        _guard([(None,), (future,)])
