@@ -8074,11 +8074,14 @@ class TortoiseSDK:
             })
         # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it
         # is read from the :Source by `resolve_source_versions` and carried in
-        # the Point's journaled snapshot). A bundle item carrying it would
-        # splat-bind `create_point` below (the key binds the kwarg before
-        # `_sanitize_props` ever sees props) and forge provenance. Rejected at
-        # shape time, on every spelling, and — like batch_id/is_episodic — for
-        # EVERY section so the **item splats below can never bind it.
+        # the Point's journaled snapshot). NOTE, unlike `_server_id` above: these
+        # keys are NOT declared parameters of `create_point`, so they would land
+        # in `**props` where `_sanitize_props` DOES reject them — the sanitizer is
+        # the backstop, not the gap. This shape-time check is what makes the
+        # refusal a Phase-1 abort (zero mutation, evaluated before any write)
+        # rather than a mid-write one, and it covers EVERY section, including the
+        # ones that never reach `_sanitize_props` at all. Rejected on every
+        # spelling.
         for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
             if _svk in item:
                 violations.append({

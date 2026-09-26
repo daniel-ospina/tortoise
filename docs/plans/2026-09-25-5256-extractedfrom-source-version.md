@@ -263,6 +263,20 @@ Every test names the input that makes it FAIL.
      graph is seeded through `rebuild_all`.)
   6b. the shared `_valid_transit_pairs` non-empty rule (drop it) → test 14c's
      `bad-empty-hash`/`bad-blank-hash` halves.
+
+**Equivalent (un-killable) branches — recorded, NOT claimed as mutation-covered.** These guards in the
+#5256 diff have no reachable discriminating input, so no test can kill them, and none is a robustness
+hole (verified by applying each: all 33 green):
+
+- `_point_source_transit`'s `if not refs: return None` — with no `extractedFrom` the own-ref filter's
+  ref set is empty and drops every pair anyway (the same fact 5b records);
+- `_valid_transit_pairs`' `not value` empty-sequence half — the `kept or None` tail collapses `[]` to
+  `None` regardless;
+- `_point_source_refs`' `[r for r in refs if r]`, and `_link_source`'s `if not ref:` / `if not raw_ref:`
+  — a falsy/blank ref can never name a hash-bearing `:Source` (`create_source` refuses blank urls;
+  stubs carry `''`);
+- the `is not None` property-writes in `_upsert_point_props` (`_sv_transit`) and `create_point`
+  (`_source_version_sv`) — `SET n.x = null` REMOVES the property, so emitted-null == absent.
   7. `EventAPI.add_point`'s graph guard → test 7;
   8. the #4042 recreate wipe (`n.sourceVersionTransit = NULL`) → test 8b.
 
