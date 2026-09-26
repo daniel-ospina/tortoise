@@ -23899,6 +23899,39 @@ async def _exchange_github_token(code: str) -> str:
     return access_token
 
 
+async def _revoke_github_token(token: str) -> tuple[bool, str]:
+    """Revoke an OAuth token at GitHub (#4946) → ``(revoked, reason)``.
+
+    ``DELETE /applications/{client_id}/token`` (Basic auth with the app's
+    client id/secret) is GitHub's own revocation endpoint for a token an
+    OAuth app issued; GitHub documents exactly two outcomes for it, 204 No
+    Content and 422 Validation failed. ONLY 204 is a confirmed revocation.
+    Every other outcome — including 404/422, where an already-revoked or
+    otherwise unrecognised token may surface — is ``revoked=False`` with a
+    short machine-readable reason, because a non-204 leaves the token's
+    liveness unconfirmed and reporting it as gone would be exactly the
+    cosmetic lie this endpoint exists to remove. Missing app credentials and
+    transport failures are reported the same way.
+    """
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return False, "not_configured"
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.delete(
+                f"{_GITHUB_API}/applications/{client_id}/token",
+                json={"access_token": token},
+                auth=(client_id, client_secret),
+                headers={"Accept": "application/vnd.github+json"})
+    except Exception:
+        return False, "network"
+    if r.status_code == 204:
+        return True, "revoked"
+    return False, f"http_{r.status_code}"
+
+
 def _github_repos_count(token: str) -> int | None:
     """Best-effort repo count for a connected token (None on any failure).
 
@@ -24066,6 +24099,67 @@ async def github_callback(code: str | None = None, state: str | None = None,
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
+@app.post("/v1/onboarding/github/disconnect")
+async def github_disconnect(org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
+    """Disconnect GitHub: revoke the stored OAuth token, clear it locally,
+    and flip ``github_connected`` (#4946).
+
+    The pre-#1924 "disconnect" only wrote ``github_connected: false`` while
+    leaving the stored token live, so server-side indexing kept working.
+    This is the real path: it attempts GitHub revocation FIRST, then ALWAYS
+    clears the local ciphertext and writes ``github_connected: false`` — a
+    revocation failure must never leave the token stored.
+
+    ``revoked``/``revoke_reason`` report the outcome honestly:
+
+    - ``revoked`` is True when no live token remains — GitHub CONFIRMED the
+      revocation (204), or there was no stored token to revoke at all (an
+      idempotent no-op);
+    - otherwise ``revoked`` is False and ``revoke_reason`` names why: the
+      token was already-invalid/unrecognised (a non-204 from GitHub), the
+      ciphertext could not be decrypted, the app credentials are unset, or
+      the GitHub call failed. ``revoke_reason == "revoked"`` is the only
+      GitHub-confirmed case; ``"not_connected"`` means no call was needed.
+
+    The local credential is ALWAYS cleared and ``github_connected`` always
+    written false, even when the outcome is not a confirmed revocation.
+
+    #1828 review P3: same non-gated dual-auth as the other onboarding
+    endpoints; #2300 parity: graph-bound keys rejected.
+    """
+    # #2300: clears the ORG's control-plane GitHub credential — graph-bound
+    # keys rejected (MCP/onboarding-github family parity). A per-graph key
+    # must never tear down the org's GitHub connection.
+    _reject_graph_bound_org_surface(org, "github disconnect")
+    org_id = org["org_id"]
+    encrypted, _gh_org = _github_credentials(org_id)
+    revoked = False
+    revoke_reason = "not_connected"
+    if encrypted:
+        from tortoise.crypto import decrypt_token
+        try:
+            token = decrypt_token(encrypted)
+        except ValueError:
+            # A stored-but-undecryptable ciphertext gives us nothing to send
+            # GitHub — the plaintext token may still be live there, so this
+            # is NOT a confirmed revocation. Clearing it below is still the
+            # right local action; the outcome is reported honestly.
+            revoke_reason = "undecryptable"
+        else:
+            revoked, revoke_reason = await _revoke_github_token(token)
+    else:
+        # Nothing stored: the idempotent no-op. There is no live token to
+        # revoke, so there was nothing to fail.
+        revoked = True
+    # Always clear locally, then flip the connection flag — a disconnect
+    # that leaves the ciphertext (or the flag) behind is the cosmetic
+    # behaviour this endpoint replaces.
+    _clear_github_credentials(org_id)
+    _update_onboarding_state(org_id, github_connected=False)
+    return {"connected": False, "revoked": revoked,
+            "revoke_reason": revoke_reason}
+
+
 async def _heal_github_org(org_id: str, encrypted: str,
                           org: str | None) -> str | None:
     """#1845 self-heal: return the REAL org/login for a connected token.
@@ -24126,6 +24220,33 @@ def _store_github_org(org_id: str, encrypted: str, org: str) -> None:
             "MATCH (t:Team {id: $id}) SET t.github_org = $org",
             params={"id": org_id, "org": org},
         )
+
+
+def _clear_github_credentials(org_id: str) -> None:
+    """Clear the stored GitHub token + org (#4946 disconnect).
+
+    Seam-aware mirror of the callback's store path: Supabase mode PATCHes
+    both columns to NULL via the service-role seam (github_token_enc is
+    column-REVOKEd from anon/authenticated, so the seam is the only writer);
+    registry mode SETs them to null on the Org node. Fail-closed: a write
+    failure raises rather than silently leaving the ciphertext in place.
+    """
+    from tortoise.supabase_control import (
+        clear_github_credentials as _sb_clear,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        _sb_clear(get_control_plane(), org_id)
+        return
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) "
+        "SET t.github_token_enc = null, t.github_org = null",
+        params={"id": org_id},
+    )
 
 
 def _cleanup_legacy_docs_corpus(org_id: str,
