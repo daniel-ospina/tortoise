@@ -10,9 +10,11 @@
   path). Never derived through operator chains.
 - Bindings are **journaled** (auditable, replayable, fixable via the existing
   edge/supersede machinery). A refusal is recorded, never silently dropped
-  — **for journal-configured SDKs**. ``_emit_event`` is a no-op on the hosted
-  lane (``hosted_api._make_sdk`` / ``_data_sdk`` set no ``event_log_path``),
-  so there refusals are live-only and NOT recorded: the same qualifier
+  — **for journal-configured SDKs**. ``_emit_event`` is a no-op on a
+  journal-less SDK; the hosted lane becomes journal-configured when
+  ``TORTOISE_EVENT_LOG_BASE_DIR`` is set (#4240), and stays journal-less
+  otherwise (``hosted_api._make_sdk`` / ``_data_sdk``). On a journal-less
+  lane refusals are live-only and NOT recorded: the same qualifier
   ``session_link.py`` carries for #3664 applies here. ``live == rebuild`` is
   likewise scoped to journal-configured SDKs.
 

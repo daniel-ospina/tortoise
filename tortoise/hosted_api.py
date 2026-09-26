@@ -561,6 +561,52 @@ def _resolve_embedded_db_path() -> str:
     return db_path
 
 
+#: #4240 — base dir for the hosted lane's per-graph JSONL rebuild journal.
+#: Unset ⇒ **no journal** (byte-identical to pre-#4240: the lane journals
+#: nothing). Set ⇒ every hosted data SDK is built with an ``event_log_path``,
+#: so the JSONL-only reassembly records (``EntityLinked``, ``SessionRecorded``,
+#: ``ObjectRegistered``, ``PointAdded``, ``EntityMutated``) actually land and
+#: ``rebuild_all`` / ``rebuild`` / ``recover_from_log`` can reconstruct the
+#: capture — closing the #2296 live-only-edge hazard for this lane.
+#: ⚠️ The JSONL is a DOMAIN EVENT LOG, **never the durability mechanism**
+#: (``docs/durability-posture.md``): it makes the derived graph REBUILDABLE,
+#: it does not keep it alive.
+_HOSTED_EVENT_LOG_ENV = "TORTOISE_EVENT_LOG_BASE_DIR"
+
+
+def _resolve_event_log_path(*, namespace: str | None,
+                            graph_name: str | None) -> str | None:
+    """Per-graph JSONL rebuild journal path for the hosted lane (#4240).
+
+    ONE file per graph under ``TORTOISE_EVENT_LOG_BASE_DIR``, so a rebuild of a
+    graph replays exactly its own journal and two orgs can never share one. The
+    key mirrors the lane's own graph-name derivation for the shapes
+    ``_data_sdk`` constructs: an explicit ``graph_name`` verbatim, otherwise
+    ``org_{namespace}`` (the convention already used at ``provision_tenant`` /
+    ``signup`` and the write-ahead mint seam).
+
+    Returns ``None`` when the base dir is unset — no journal (the pre-#4240
+    behaviour; embedded/dev/CI stay journal-less) — and for the registry
+    control plane / the unnamed default graph, which are not org data graphs
+    and are never rebuilt from this journal.
+
+    Charset: the SDK already validates ``namespace``/``graph_name``, but the
+    path key is re-sanitized because a journal path must never escape the base
+    dir (a ``..``/``/`` in a future caller would otherwise write outside it).
+    """
+    base = os.environ.get(_HOSTED_EVENT_LOG_ENV)
+    if not base:
+        return None
+    if graph_name is not None:
+        key = graph_name
+    elif namespace and namespace != "registry":
+        key = f"org_{namespace}"
+    else:
+        return None
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key) or "default"
+    return os.path.join(base, safe, "events.jsonl")
+
+
 def _make_sdk(*, namespace: str | None = None,
               graph_name: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
@@ -570,6 +616,12 @@ def _make_sdk(*, namespace: str | None = None,
     graph-name seam — never a namespace (which would prepend ``org_``).
     Exactly one of namespace/graph_name is set by callers.
 
+    #4240: the SDK is built with the per-graph JSONL rebuild journal
+    (``_resolve_event_log_path``) whenever ``TORTOISE_EVENT_LOG_BASE_DIR`` is
+    set. Every hosted data write then lands in the journal, so the derived
+    graph is ``replay(journal)`` — the property the rebuild engines need. When
+    the base dir is unset the SDK is journal-less, byte-identical to pre-#4240.
+
     Embedded fallback: when no URI is configured (fly.toml default), the SDK
     previously received no path and FalkorProjection raised
     "Either path or host must be provided" — every /internal/provision call
@@ -577,8 +629,11 @@ def _make_sdk(*, namespace: str | None = None,
     until a production FalkorDB instance is provisioned (#7722).
     """
     key = graph_name if graph_name is not None else (namespace or "")
+    event_log_path = _resolve_event_log_path(
+        namespace=namespace, graph_name=graph_name)
     if os.environ.get("TORTOISE_DB_URI"):
-        return TortoiseSDK(namespace=namespace, graph_name=graph_name)
+        return TortoiseSDK(namespace=namespace, graph_name=graph_name,
+                           event_log_path=event_log_path)
     # The anchor AND the per-request SDK must agree on this path or the anchor
     # pins a stray server while requests close-on-GC the real one (the #1475
     # regression silently persists). _resolve_embedded_db_path is the single
@@ -616,7 +671,8 @@ def _make_sdk(*, namespace: str | None = None,
                 anchor = None
             if anchor is None:
                 anchor = TortoiseSDK(db_path=db_path, namespace=namespace,
-                                     graph_name=graph_name)
+                                     graph_name=graph_name,
+                                     event_log_path=event_log_path)
                 try:  # noqa: SIM105
                     anchor._get_proj()  # eager: hold the connection so the server survives
                 except Exception:
@@ -626,7 +682,8 @@ def _make_sdk(*, namespace: str | None = None,
                     pass
                 _FALLBACK_KEEPALIVE.setdefault(key, anchor)
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace,
-                      graph_name=graph_name)
+                      graph_name=graph_name,
+                      event_log_path=event_log_path)
     return sdk
 
 
@@ -24722,13 +24779,14 @@ def _relink_sessions_after_index(org_id: str) -> None:
     """
     try:
         from .session_link import link_session_entities
-        # #3664: pass the SDK so the re-linked edges CAN be journaled — but on
-        # this lane _make_sdk/_data_sdk set no `event_log_path` and
-        # `EntityLinked` is JSONL-only (absent from _GRAPH_EVENT_TYPES), so
-        # `sdk._emit_event` is a no-op here (the same lane limit the turn
-        # record's note in _capture_session_impl documents). The re-linked
-        # edges are therefore live-only on the hosted lane; the JSONL-journal
-        # gap is filed as #4240. Do NOT read the `sdk=` argument as journaling.
+        # #3664/#4240: pass the SDK so the re-linked edges ARE journaled. The
+        # journal path comes from ``_make_sdk`` → ``_resolve_event_log_path``:
+        # when ``TORTOISE_EVENT_LOG_BASE_DIR`` is set the SDK carries an
+        # ``event_log_path`` and each new edge emits an ``EntityLinked`` record
+        # that the projection folds back on replay. When the base dir is unset
+        # the SDK is journal-less and ``sdk._emit_event`` is a no-op on
+        # ``EntityLinked`` (JSONL-only, absent from ``_GRAPH_EVENT_TYPES``), so
+        # the edges stay live-only — the documented unconfigured-lane bound.
         _link_sdk = _make_sdk(namespace=org_id)
         proj = _link_sdk._get_proj()
         rows = proj.g.query(

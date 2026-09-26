@@ -41,9 +41,15 @@ back on replay — so the capture's entity attachment survives
 ``rebuild_all``/``recover_from_log`` (the #2296 live-only-edge hazard is
 closed for this edge class). ``EntityLinked`` is NOT in
 ``_GRAPH_EVENT_TYPES``, so the record rides the JSONL journal alone: on an
-``sdk`` built WITHOUT an ``event_log_path`` (every hosted-lane SDK —
-``hosted_api._make_sdk`` / ``_data_sdk``) ``_emit_event`` is a no-op and
+``sdk`` built WITHOUT an ``event_log_path`` ``_emit_event`` is a no-op and
 the edges stay live-only. Passing ``sdk=None`` is likewise live-only.
+
+Hosted lane (#4240): ``hosted_api._make_sdk`` / ``_data_sdk`` wire the
+per-graph journal (``hosted_api._resolve_event_log_path``) whenever
+``TORTOISE_EVENT_LOG_BASE_DIR`` is set, so the hosted capture and the
+index-completion re-link are journal-backed too. When that base dir is
+unset those SDKs are journal-less and this edge class is live-only on the
+hosted lane — the configured/unconfigured switch, not a separate path.
 """
 from __future__ import annotations
 

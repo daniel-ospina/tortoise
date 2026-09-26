@@ -87,6 +87,15 @@ export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-/app/model}"
 # refuses to run without this set.
 export TORTOISE_INGEST_BASE_DIR="${TORTOISE_INGEST_BASE_DIR:-/data/ingest}"
 
+# #4240: the hosted lane's per-graph JSONL REBUILD journal. Off-box durability
+# is unchanged (docs/durability-posture.md — the JSONL is a domain event log,
+# never the durability mechanism); this makes the derived graph
+# `replay(journal)` so `rebuild_all` can reconstruct the capture instead of
+# silently losing its live-only aboutObject edges. /data is the persistent Fly
+# volume (fly.toml mounts), one file per graph under
+# {TORTOISE_EVENT_LOG_BASE_DIR}/{graph}/events.jsonl.
+export TORTOISE_EVENT_LOG_BASE_DIR="${TORTOISE_EVENT_LOG_BASE_DIR:-/data/events}"
+
 # Fast-fail if the pre-downloaded model cache is missing (code-review P3, #160)
 # — the build-time bake in Dockerfile.hosted is the ONLY source; a missing
 # cache means a broken image, not a retryable condition. #1349: the bake is
@@ -126,6 +135,10 @@ if [ "$_IS_SERVER" = "1" ]; then
     # at startup if the persistent volume is missing/unwritable). Only in
     # server mode — the release/guard invocations never mount /data.
     mkdir -p "$TORTOISE_INGEST_BASE_DIR"
+    # #4240: pre-create the journal base dir beside the ingest sandbox — it is
+    # on the same persistent volume and a missing/unwritable volume is a
+    # misconfigured machine, not a retryable condition.
+    mkdir -p "$TORTOISE_EVENT_LOG_BASE_DIR"
     echo "tortoise: uvicorn server — embedding pre-warm runs in-app (non-blocking, degraded-but-alive)"
 else
     echo "tortoise: skipping embedding pre-warm (non-server command: release check)"

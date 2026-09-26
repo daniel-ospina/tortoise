@@ -186,6 +186,14 @@ primary_region = "iad"
   # dir on the persistent volume (entrypoint.sh defaults to this too).
   # Fail-closed: /v1/index/docs refuses to run without it.
   TORTOISE_INGEST_BASE_DIR = "/data/ingest"
+  # #4240: the hosted lane's per-graph JSONL rebuild journal (server-owned, on
+  # the same persistent volume). With it set, every hosted data SDK carries an
+  # `event_log_path`, so the capture's `(Session|Point)-[:aboutObject]->(Object)`
+  # edges (and the rest of the write surface) are journal-backed and
+  # `tortoise rebuild --dir` reconstructs them; unset, the lane journals
+  # nothing (pre-#4240) and a rebuild silently loses the live-only edges.
+  # NOT a durability claim — see docs/durability-posture.md.
+  TORTOISE_EVENT_LOG_BASE_DIR = "/data/events"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)
   TORTOISE_BACKUP_KEY = ""
   R2_ACCOUNT_ID = ""
