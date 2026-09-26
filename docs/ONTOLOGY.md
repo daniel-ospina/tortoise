@@ -198,12 +198,12 @@ doc_status: live
 >   `startedAt`; Event's transaction-time start is `capturedAt`.
 > - §4.7 (correction): Point supersession is `status='superseded'` — the
 >   `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do
->   not distinguish the two. §4.7's `validFrom` start is ⚠️ (populated by the
->   date-carrying write paths — hosted commit `when`; mining W-4 session date —
->   but the legacy mining W-4 post-pass falls back to the **wall clock** when the
->   session carries no date, so a clock-stamped start is a real, reachable write;
->   **absent ⇒ open start**), and `when` documented as the occurrence-date input
->   that fills `validFrom` on the commit path, not a second slot.
+>   not distinguish the two. §4.7's `validFrom` start is ⚠️ — populated by the
+>   date-carrying write paths only (hosted commit `when`; mining W-4 session
+>   date); an **undated** session stamps no `validFrom` at all, so
+>   **absent ⇒ open/unbounded start** (#3654 — the ingest wall clock is never
+>   borrowed as a valid-time start), and `when` documented as the occurrence-date
+>   input that fills `validFrom` on the commit path, not a second slot.
 > - §4.7 (correction): the Document column carries explicit per-cell markers,
 >   not "inherits Object" — Document inheritance of the Object column is
 >   **conceptual** (`objectKind: document`); Documents carry `:Document` and not
@@ -615,7 +615,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
-| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`) falls back to the **wall clock** when the session carries no date, so a clock-stamped start is possible though not the intent; **absent ⇒ open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
+| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths only (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). Mining W-4's undated leg (`ConversationMiner._temporal_wire`, #3654) writes **no** `validFrom` — **absent ⇒ open/unbounded start** (`restore_point_at`), never a start synthesized from the write wall clock. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
 | `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358). A `valid_from` **kwarg** is refused when it disagrees with a successor that **carries** a stored `validFrom` (same instant required, else `ValueError` before any write — §4.7). §4.7 |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
@@ -766,7 +766,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
-| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`, mining.py) falls back to the **wall clock** (`_now()`) when the session carries no `date`/`startedAt`, so a clock-stamped start is a real, reachable write — though not the intent. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start, and an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
+| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`) — the write wall clock is never borrowed as a start. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
 | end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg stays the **sole** source for an undated successor. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) |
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
@@ -814,9 +814,9 @@ declared, not built (implementation is tracked separately):
 > † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** `_upsert_source` writes no `validFrom`/`validTo`/`expiredAt`. **⚠️ A re-fetched source whose content changed currently mutates in place (`updatedAt`, `version`) with no journal record (`#5024`).**
 
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
-> paths, with the legacy mining W-4 post-pass falling back to the wall clock when
-> the session carries no date (a clock-stamped start is reachable, though not the
-> intent); an absent `validFrom` is an **open start**, and `validFrom` → `createdAt`
+> paths only; an undated session (mining W-4) stamps no `validFrom` at all
+> (#3654), so an absent `validFrom` is an **open start** and the write wall
+> clock is never borrowed as a start. `validFrom` → `createdAt`
 > is a *render* fallback (`_render_date`), not a stamp. The open start is why the
 > supersession **end** is conditional too: an undated successor contributes its
 > `createdAt` (fallback chain above), not a `validFrom`, so its overlap with the

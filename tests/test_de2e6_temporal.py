@@ -2,8 +2,9 @@
 
 Epic plan §7 DE2E-6: dated NAND chain (D1/D2), CORRECTS branch via
 supersede_point (D3), live-prior variant (wire at promotion), no-date
-fallback (validFrom == ingestedAt). #438 carve-out: TemporalWire runs
-only inside the mining post-pass with source_session provenance.
+leg (no validFrom at all ⇒ open/unbounded start, §4.7 — never the ingest
+wall clock, #3654). #438 carve-out: TemporalWire runs only inside the
+mining post-pass with source_session provenance.
 """
 from __future__ import annotations
 
@@ -148,13 +149,67 @@ class TestDe2e6:
         ).result_set
         assert rows[0][0] >= 1, "CORRECTS edge must exist after supersede"
 
-    def test_no_date_falls_back_to_ingested(self, sdk, tmp_path):
-        """No frontmatter date → validFrom == ingestedAt (documented)."""
-        r = _mine(sdk, D1_TX, "s-n-d1", None, str(tmp_path))  # noqa: F841
-        pts = _decision_points(sdk)
-        d1 = [p for p in pts if p[1].startswith("We decided to use port")][0]  # noqa: RUF015
-        assert d1[2], "validFrom must be stamped (fallback ingestedAt)"
-        assert d1[2] != T1  # not the fake session date — the ingest timestamp
+    def test_no_date_leaves_valid_from_absent(self, sdk, tmp_path):
+        """No frontmatter date → NO ``validFrom`` property at all.
+
+        §4.7: an absent ``validFrom`` is an **open/unbounded start** — the
+        honest representation when the session date is unknown. The code
+        must NOT stamp the ingest wall clock into the valid-time slot
+        (#3654); the ingest instant stays on the transaction-time axis as
+        ``createdAt``, so no information is lost.
+        """
+        r1 = _mine(sdk, D1_TX, "s-n-d1", None, str(tmp_path))  # noqa: F841
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {pointKind:'decision'}) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN n.id, n.content, n.validFrom, n.createdAt, "
+            "       [k IN keys(n) WHERE k = 'validFrom']"
+        ).result_set
+        d1 = next(r for r in rows
+                  if r[1].startswith("We decided to use port"))
+        assert d1[2] is None, (
+            "undated session must stamp no validFrom — absent is an open "
+            "start (§4.7), not the ingest wall clock (#3654)"
+        )
+        assert d1[4] == [], (
+            "validFrom must be ABSENT from the node, not merely NULL"
+        )
+        assert d1[3], "createdAt must still carry the ingest instant"
+        assert d1[3] != T1, "createdAt is the ingest time, not a session date"
+        # The undated leg must not change the wiring: a second undated
+        # decision with refute cues still wires the draft-to-draft NAND.
+        r2 = _mine(sdk, D2_TX, "s-n-d2", None, str(tmp_path))
+        assert r2["temporal_wired"] >= 1, r2
+        pts = {p[1]: p for p in _decision_points(sdk)}
+        d2 = pts["We decided to revert to port 16380 because the port "
+                 "16379 decision was wrong."]
+        assert d2[2] is None, d2[2]
+        assert _nand_between(sdk, d2[0], d1[0]) >= 1, (
+            "undated decisions must still be wired by the draft-to-draft NAND"
+        )
+
+    def test_timeline_undated_is_oldest_not_newest(self, sdk, tmp_path):
+        """#3654: an undated point (absent validFrom ⇒ open start) sorts
+        FIRST — it must never be presented as the newest belief.
+
+        The old bucketing keyed ``None`` last, and ``entries[-limit:]`` took
+        the tail, so an undated point came back as the CURRENT belief and
+        evicted the genuinely newest dated one.
+        """
+        _mine(sdk, D1_TX, "s-o-d1", None, str(tmp_path))   # undated ⇒ NULL
+        _mine(sdk, D2_TX, "s-o-d2", T2, str(tmp_path))     # dated T2
+        full = sdk.belief_timeline("port 16379")
+        assert len(full) >= 2, full
+        assert full[0]["validFrom"] is None, (
+            f"undated (open start) must sort first: {full}"
+        )
+        assert full[-1]["validFrom"] == T2, full
+        newest = sdk.belief_timeline("port 16379", limit=1)
+        assert len(newest) == 1
+        assert newest[0]["validFrom"] == T2, (
+            "the newest belief must be the dated point — an undated point "
+            f"must not be served as current (#3654): {newest}"
+        )
 
     def test_source_session_provenance(self, sdk, tmp_path):
         """#438 carve-out audit: temporal candidates carry source_session."""

@@ -7355,6 +7355,11 @@ class TortoiseSDK:
         linked_by is the temporal edge (NAND via an operator, or CORRECTS via
         supersede_point) to the NEXT point in the chain, and related holds
         the linked point ids.
+
+        An undated point (absent ``validFrom`` ⇒ open/unbounded start, §4.7)
+        sorts FIRST — before every dated entry — never as the newest belief
+        (#3654): with a limit, undated points are the first to fall out of
+        the newest-end window, not the ones presented as the current belief.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
@@ -7386,7 +7391,11 @@ class TortoiseSDK:
                 if r[0] not in known:
                     entries.append(list(r))
             # Globally ordered by validFrom (superseded priors appended).
-            entries.sort(key=lambda e: (e[2] is None, e[2] or ""))
+            # `not is None` puts an absent validFrom (open start, §4.7) FIRST
+            # — undated is the oldest, never the newest (#3654): the old
+            # `is None` key sorted them last, and the `[-limit:]` tail then
+            # presented an undated point as the current belief.
+            entries.sort(key=lambda e: (e[2] is not None, e[2] or ""))
         out = []
         ids = [e[0] for e in entries]
         for pid, content, vf, status, outdated in entries[-limit:]:
