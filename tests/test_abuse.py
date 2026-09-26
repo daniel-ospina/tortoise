@@ -688,25 +688,39 @@ class TestTurnstile:
 # ── #4872: the enforcement decision path's failures are observable ──────────
 
 class _FaultStore:
-    """A ``MemoryAbuseStore`` with exactly ONE method forced to raise (#4872).
+    """A ``MemoryAbuseStore`` with a method forced to raise (#4872).
 
     ``tests/fake_control_plane.FakeControlPlane`` has no ``rpc()`` fault
     injector (``fail_query`` covers ``query()`` only, and nothing in this file
     guards against an unfired fault), so a store call must be faulted at the
     store method to reach the engine's handlers.
+
+    ``times=None`` (the default) faults the method PERMANENTLY. ``times=1``
+    faults it ONCE and then delegates to the real store — which is what lets a
+    test observe what a failed call LEFT BEHIND (both "toward suspension" lanes
+    are about retained state, not about the one return value) and still
+    evaluate the same rule again. A permanent fault would make the follow-up
+    read fail for an unrelated reason, so the retained-state claim would pass
+    vacuously.
     """
 
     class _Boom(Exception):
         pass
 
-    def __init__(self, method: str, message: str = "postgrest: PGRST202"):
+    def __init__(self, method: str, message: str = "postgrest: PGRST202",
+                 times: int | None = None):
         self._inner = MemoryAbuseStore()
         self._method = method
         self._exc = self._Boom(message)
+        self._times = times
+        self._fired = 0
 
     def __getattr__(self, name):
         if name == self._method:
             def boom(*_a, **_k):
+                if self._times is not None and self._fired >= self._times:
+                    return getattr(self._inner, name)(*_a, **_k)
+                self._fired += 1
                 raise self._exc
             return boom
         return getattr(self._inner, name)
@@ -758,8 +772,9 @@ class TestDecisionPathObservability:
     fault(...)`` call leaves ``store.calls == []`` and REDs the lane's test.
     """
 
-    def _engine(self, method: str) -> tuple[_FaultStore, AbuseEngine]:
-        fs = _FaultStore(method)
+    def _engine(self, method: str,
+                times: int | None = None) -> tuple[_FaultStore, AbuseEngine]:
+        fs = _FaultStore(method, times=times)
         return fs, AbuseEngine(fs)
 
     def _detail(self, store: _RecordingOperatorStore) -> tuple[str, str, dict]:
@@ -786,6 +801,67 @@ class TestDecisionPathObservability:
         _kind, _subject, detail = self._detail(operator_store)
         assert detail["lane"] == "clean_window_episode_end"
         assert detail["fallback"] == "return_none"
+
+    def test_clean_window_guard_read_fault_leaves_the_episode_armed(
+            self, operator_store):
+        """The guard-read half of ``clean_window_episode_end``'s TOWARD lane.
+
+        A failure here must NOT end the episode, and the fact asserted is the
+        RETAINED STATE — the stale anchor survives and a later over-threshold
+        evaluation on the SAME rule still suspends — not the lane token alone
+        (which ``DECISION_FAULT_LANES`` restates back at itself). The fault is
+        ONE-SHOT for exactly that reason: the follow-up evaluation must be able
+        to read the anchor the failed call left behind.
+        """
+        fs, eng = self._engine("latest_flag_at", times=1)
+        fs._inner.flag_org("org-12", abuse.EVENT_POINT_CREATE,
+                           now=T0 - timedelta(hours=2))
+        # Clean window (no point_create event) → the episode-end GUARD READ raises
+        assert eng._evaluate("org-12", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert fs._inner.latest_flag_at(
+            "org-12", abuse.EVENT_POINT_CREATE) is not None  # anchor SURVIVED
+        # Independent fact: the surviving anchor is load-bearing — a LATER
+        # over-threshold evaluation on the same rule still reaches suspend.
+        fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=1,
+                               created_at=T0 - timedelta(hours=1))
+        assert eng._evaluate("org-12", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        assert fs._inner.org_suspended("org-12") is True
+
+    def test_clean_window_clear_write_fault_leaves_the_episode_armed(
+            self, operator_store):
+        """The clear-WRITE half of the lane — the sub-case no test exercised.
+
+        The pre-existing ``test_clean_window_episode_failure_reports`` faults
+        the guard READ with NO flag seeded, so the clear write is unreachable.
+        Here a flag IS seeded, so the clean branch reaches the write, the write
+        raises, and the episode must stay ARMED: the return is ``None``, the
+        anchor survives, and a later over-threshold evaluation still suspends.
+        """
+        fs, eng = self._engine("flag_clear")
+        fs._inner.flag_org("org-13", abuse.EVENT_POINT_CREATE,
+                           now=T0 - timedelta(hours=2))
+        assert fs._inner.latest_flag_at(
+            "org-13", abuse.EVENT_POINT_CREATE) is not None
+        # Clean window → guard read succeeds → the CLEAR WRITE raises
+        assert eng._evaluate("org-13", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert fs._inner.latest_flag_at(
+            "org-13", abuse.EVENT_POINT_CREATE) is not None  # anchor SURVIVED
+        fs._inner.record_event("org-13", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        fs._inner.record_event("org-13", abuse.EVENT_POINT_CREATE, weight=1,
+                               created_at=T0 - timedelta(hours=1))
+        assert eng._evaluate("org-13", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        assert fs._inner.org_suspended("org-13") is True
 
     def test_anchor_read_failure_reflags_and_reports(self, operator_store):
         fs, eng = self._engine("latest_flag_at")
