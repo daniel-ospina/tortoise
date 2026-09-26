@@ -33,12 +33,18 @@ import { overviewConnection, overviewDigest, overviewNextAction } from './overvi
 // hash→tab deep-link resolver, and the focus mover. Extracted so the suite
 // can RENDER the live action (react-dom/server) and execute the handler
 // instead of grepping source text.
-import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
+import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
 // #3729: the member empty-state key note — the key requirement stated as
 // CONDITIONAL plus the chooser-reachable key-less route, extracted as a
 // createElement component so the suite RENDERS it (react-dom/server) instead
 // of grepping the two inline strings (onboardingEmptyStateKeyNote.test.js).
-import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
+// #4637: the OWNER note and the five empty-state lead-ins live in the same
+// module — the lead-in is where the chooser route is named, so the owner arms
+// consume the same lead-in constants the member arms do instead of deciding for
+// themselves what the fork offers.
+import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote, ownerCardProps, keyTabAffordance, graphMissingCta,
+  REENTRY_BUILD_LEAD_IN, REENTRY_SELF_LEAD_IN, REENTRY_KEYED_LEAD_IN,
+  GRAPH_MISSING_BUILD_LEAD_IN, GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub } from './wizardFlow.js'
@@ -6880,8 +6886,9 @@ function claimIntentInFlight() {
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
   // The build-fork re-entry lead-in is used by BOTH re-entry arms (existing-key
-  // and no-key) — one literal, so they cannot drift.
-  const REENTRY_BUILD_LEAD_IN = 'Your Organization is live — finish the setup below. '
+  // and no-key) — one literal, so they cannot drift. #4637: it now lives in
+  // `onboardingEmptyStateKeyNote.js` beside the notes (and the owner arms) that
+  // consume it, together with the other four lead-ins.
   // #1831 P2-1 / #2246: the wizard's setup commands embed the user's key —
   // never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
@@ -6911,6 +6918,21 @@ function claimIntentInFlight() {
   // same source) said an existing key was usable. Consumed by
   // `wizardKeyAffordance` below.
   const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
+  // #4637: the Overview empty-state cards' "the Organization's key is already
+  // live" state is NOT decided here. `ownerCardProps` (note module) derives it
+  // from the gate — ONE authority — and `keyTabAffordance` derives the re-entry
+  // card's API Keys affordance from the same fact, so both are values the note
+  // module's render tests execute. This file supplies the gate and the
+  // in-memory `snippetKey` (welcomeKey || apiKey, below) and holds no key-state
+  // branch of its own: `snippetKey` is NOT accepted as a live-key signal (the
+  // in-memory `welcomeKey` reveal is truthy after its row is
+  // revoked/disabled/rotated, while `durableConnectKey`'s row-truth check drops
+  // it and the gate resolves 'mint'/'existing' — so the card could claim a key
+  // was live while the connect step had none to offer). The graph-missing
+  // card's snippet branch reads the gate's held plaintext (`connectGate.key`)
+  // instead: `keyIsLive` is true in mode 'existing', where the gate deliberately
+  // holds no plaintext at all. (No localStorage is involved: the legacy key slot
+  // was removed in #2246 and mintTripwire.test.js pins its absence.)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -7557,7 +7579,7 @@ function claimIntentInFlight() {
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                               {wizardConnectBusy ? 'Checking…' : "I've set it up — Continue →"}
                             </button>
-                            <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">
+                            <a className="ghost" href={SDK_DOCS_HREF} target="_blank" rel="noreferrer">
                               SDK documentation →
                             </a>
                           </div>
@@ -8293,7 +8315,7 @@ function claimIntentInFlight() {
                       </div>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
-                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                        <a className="ghost" href={SDK_DOCS_HREF} target="_blank" rel="noreferrer">Read the docs</a>
                       </div>
                       {welcomeKey && team && (
                         <div className="welcome-plans" style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border,#1e293b)' }}>
@@ -8892,23 +8914,37 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey || connectGate.mode === 'existing'
-                ? (isOwnerAdmin
-                    ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
+              {/* #4637: the OWNER arm's key state and the fork both come from
+                  `ownerCardProps` (note module) — one derivation, executed by
+                  the note module's render tests. The member arm keeps its own
+                  key-state branch to SELECT copy: its two lead-ins assert
+                  nothing about which key is usable (its live arm says "You're
+                  in"), so it never needs the owner's derivation. */}
+              {isOwnerAdmin
+                ? <OwnerEmptyStateKeyNote {...ownerCardProps({ variant: 'reentry', isBuildFork, connectGate })} />
+                : (snippetKey || connectGate.mode === 'existing'
+                    ? <>{isBuildFork
+                        ? REENTRY_BUILD_LEAD_IN
+                        : REENTRY_KEYED_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>
                     : <>{isBuildFork
                         ? REENTRY_BUILD_LEAD_IN
-                        : "You're in — finish the setup below to connect your agent. "}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)
-                : (isOwnerAdmin
-                    ? "Your Organization is live — finish the setup below to connect your agent. No API key yet? One is created on the connect step when you get there."
-                    : <>{isBuildFork
-                        ? REENTRY_BUILD_LEAD_IN
-                        : 'Your Organization is live — finish the setup below to connect your agent. '}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
+                        : REENTRY_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
             </p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
-              {!snippetKey && (
+              {keyTabAffordance({ snippetKey, connectGate }) && (
+                // #4637: the gate, not `snippetKey`, decides this affordance too
+                // — `keyTabAffordance` (note module) is the one derivation, and
+                // its verdict is executed by the note module's tests. The owner
+                // MINT clause names the API Keys tab, and the button must be
+                // there whenever the gate says no key is live, including the
+                // stale reveal case (`snippetKey` truthy, gate says 'mint'),
+                // where the old `!snippetKey` gate withheld it in the same
+                // render that told the owner to go there. The `!snippetKey` half is kept so the
+                // pre-existing affordance for a key-less organization is
+                // unchanged.
                 <button type="button" className="ghost" onClick={() => setTab('keys')}>
                   Go to API Keys →
                 </button>
@@ -8921,17 +8957,36 @@ function claimIntentInFlight() {
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
             <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
-            {snippetKey ? (
+            {connectGate.key ? (
               // #1831 P2-1: only show the copyable snippet when a real key
               // exists — after a recoverable mint failure (#1830) the state
               // is '' and the snippet would render `Bearer ` with an empty
               // key (and the "key is live" copy would be false). #2246: the
               // key source is snippetKey (welcomeKey || apiKey) — the
               // first-timer's in-memory reveal, never a localStorage read.
+              // #4637: the condition is the GATE's own held plaintext,
+              // `connectGate.key` — ONE fact, not the conjunction of two. It is
+              // exactly the key `firstDataSnippet` prints: `connectKeyGate`
+              // returns the validated `welcomeKey` here and nothing in any other
+              // mode, so `snippetKey` (welcomeKey || apiKey) equals it whenever
+              // this branch renders. Keying the branch on `snippetKey` alone
+              // printed "Your Organization and API key are live" over a reveal
+              // whose row was revoked/rotated, and even `snippetKey &&
+              // keyIsLive` let that through whenever the Organization happened
+              // to hold a DIFFERENT usable row (mode 'existing'): the gate then
+              // holds no plaintext at all, so any truthy `snippetKey` is stale.
+              // If the gate holds no plaintext the card renders the note below,
+              // which takes its own live/no-key arm from the same gate mode.
+              // The reveal path itself: `welcomeKey` truthy ⇒ the gate resolves
+              // 'embed' while the rows are unloaded, so the snippet is not
+              // flickered away while the keys GET is in flight.
               <>
                 <p className="dim">
+                  {/* #4637: the call to action names the connect route too, so it
+                      is fork-derived from the same shared source as the arms
+                      above (the build fork sets up the SDK and has no chooser). */}
                   Your Organization and API key are live — the graph is created the moment
-                  you add data. Connect your agent, or add a memory yourself:
+                  you add data. {graphMissingCta(isBuildFork)}
                 </p>
                 <div className="snippet-wrap">
                   <pre className="snippet">{firstDataSnippet}</pre>
@@ -8953,23 +9008,32 @@ function claimIntentInFlight() {
               // a second fresh create would 402 once the 2-key allowance is
               // used. Members get the ask-owner path; the keys tab is still
               // one click away for owners (their only first-party surface).
+              // ⚠️ The gate-mode clause below is NOT cap-aware (#4637): the
+              // allowance check (`capNotice`/`wizardDurableCapped`) is the
+              // wizard affordance's, not this card's — the same blind spot the
+              // pre-change string had. See OWNER_NO_KEY_AT_STEP in the note
+              // module.
+              // #4637: the owner's key state comes from `ownerCardProps` (note
+              // module) — the same gate-derived fact the re-entry arm uses, not
+              // this card's `snippetKey` branch.
               <p className="dim">
                 {isOwnerAdmin
-                  ? (connectGate.mode === 'existing'
-                      ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
-                      : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
+                  ? <OwnerEmptyStateKeyNote {...ownerCardProps({ variant: 'graph-missing', isBuildFork, connectGate })} />
                   : <>{isBuildFork
-                      ? 'Your Organization is live. '
-                      : 'Your Organization is live — connect your agent below. '}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}
+                      ? GRAPH_MISSING_BUILD_LEAD_IN
+                      : GRAPH_MISSING_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}
               </p>
             )}
             <div className="empty-actions">
-              <button type="button" className="btn-primary" onClick={() => setTab('keys')}>
-                Go to API Keys →
-              </button>
-              <a className="ghost" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
-                Connect your agent →
-              </a>
+              {/* #4637: the second action names a ROUTE — the agent-connection
+                  route, whose destination for the self fork is the onboarding
+                  funnel URL (overviewEmptyAction.js documents that it is not a
+                  chooser for a signed-in user; that dead end is #3890's). The
+                  BUILD fork renders no such route at all. The action set is a
+                  component (overviewEmptyAction.js), derived from the same
+                  `isBuildFork` the notes consume, so a build-fork organization
+                  is offered the SDK route its own step 2 offers. */}
+              <GraphMissingEmptyStateActions buildFork={isBuildFork} onGoToKeys={() => setTab('keys')} />
             </div>
           </section>
         )}
