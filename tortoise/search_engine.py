@@ -1676,7 +1676,37 @@ def _created_sort_key(value):
     if s and s[0].isdigit() and len(s) >= 10 and ("-" in s or "T" in s):
         try:
             from datetime import datetime
-            return (0, datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+            iso = s.replace("Z", "+00:00")
+            # #3982: a DATE-ONLY value carries no offset, and
+            # ``datetime.fromisoformat`` returns a NAIVE datetime whose
+            # ``.timestamp()`` reads it in the READER'S LOCAL ZONE — so the
+            # instant a stored fact occupies, and therefore whether a query
+            # finds it, depended on the machine doing the asking. Anchoring is
+            # not a preference here; it is settled normatively. ECMA-262
+            # §21.4.3.2 (published also as ISO/IEC 16262): "When the UTC offset
+            # representation is absent, date-only forms are interpreted as a
+            # UTC time and date-time forms are interpreted as a local time."
+            # That is exactly this distinction, so a date-only value is pinned
+            # to UTC midnight below, while a date-TIME with no offset keeps the
+            # LOCAL reading the same clause prescribes. W3C XML Schema 1.1
+            # corroborates the reasoning from the other side: a zone-less value
+            # is not one moment (a calendar day spans up to 52 hours), so it
+            # must be anchored rather than resolved against the reader.
+            #
+            # Measured before this change (TZ=UTC vs TZ=EST): date-only and the
+            # same date stated as UTC midnight were EQUAL on a UTC host and 5h
+            # apart elsewhere. #153 already set "no zone given means UTC" for a
+            # sibling date field; this makes the primitive agree with it.
+            if len(iso) == 10 and iso[4] == "-" and iso[7] == "-":
+                # ⚠️ The offset alone is NOT enough: Python's
+                # ``fromisoformat("2026-06-10+00:00")`` SILENTLY DROPS the
+                # offset and returns a NAIVE datetime — no error raised. The
+                # full time component must be supplied for the zone to stick.
+                # Verified on this interpreter: the bare-offset form parses to
+                # tz=None and .timestamp() reads LOCAL again, i.e. the bug this
+                # change exists to fix would have survived a green test suite.
+                iso += "T00:00:00+00:00"
+            return (0, datetime.fromisoformat(iso).timestamp())
         except ValueError:
             pass
     return (1, s)
