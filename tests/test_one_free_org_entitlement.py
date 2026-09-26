@@ -585,7 +585,7 @@ class TestWebhookProvisioning:
         from tortoise.supabase_control import owned_free_org_ids
         assert owned_free_org_ids(fake, _U1) == ["team-free-a"]
         # and the free-org gate still behaves exactly as before the attempt
-        assert tc.post("/v1/teams", json={"name": "nope"}).status_code == 402
+        assert tc.post("/v1/organizations", json={"name": "nope"}).status_code == 402
 
     def test_unresolvable_paid_tier_is_not_acked(self, monkeypatch, user_client):
         """#2789 (code-review): a paying customer must never be ACKed (200) onto
@@ -702,7 +702,7 @@ class TestNewOrgStripePayload:
         assert params["customer_email"] == "owner@example.com"
         assert params["client_reference_id"] == org_id
         assert params["metadata[new_org]"] == "1"
-        assert params["metadata[team_id]"] == org_id
+        assert params["metadata[org_id]"] == org_id
         assert params["metadata[user_id]"] == _U1
         assert params["metadata[org_name]"] == "Second Org"
         assert params["metadata[tier]"] == "pro"

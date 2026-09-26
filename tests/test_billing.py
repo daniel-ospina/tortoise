@@ -259,7 +259,7 @@ class TestStripeClient:
         assert params["mode"] == "subscription"
         assert params["customer"] == "cus_1"
         assert params["client_reference_id"] == "team_1"
-        assert params["metadata[team_id]"] == "team_1"
+        assert params["metadata[org_id]"] == "team_1"
 
     def test_create_portal_session(self, monkeypatch):
         monkeypatch.setattr("httpx.Client", _FakeHttpxClient)

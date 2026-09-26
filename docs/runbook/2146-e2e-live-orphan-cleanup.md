@@ -177,7 +177,7 @@ Live FK catalog (`pg_constraint`, 2026-09-02):
 | `metering_records` (0014) / `oauth` (0016) / `agent_signup_tokens` (20260814000001) / `graphs` (20260901000001) | `team_id → teams(id) ON DELETE CASCADE` | die with the teams row — no explicit delete needed |
 
 There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
-/v1/teams/{team_id}` (`hosted_api.py` — the delete route) is JWT-owner-gated
+/v1/organizations/{org_id}` (`hosted_api.py` — the delete route) is JWT-owner-gated
 (soft delete → 24 h grace → purge) and the orphan users are gone — an
 operator cannot act as an owner. The sanctioned **purge machinery** is
 `purge_team_control_plane` (`supabase_control.py` — deletes

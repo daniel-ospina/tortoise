@@ -2,8 +2,8 @@
 account/team deletion (E2E-6-D), on BOTH control planes.
 
 Supabase mode (FakeControlPlane, mirroring test_auth_flip):
-- GET /v1/teams/{id}/export — owner-only JSON export (graph + control plane)
-- DELETE /v1/teams/{id} — owner-only soft delete → 24h grace → hard purge
+- GET /v1/organizations/{id}/export — owner-only JSON export (graph + control plane)
+- DELETE /v1/organizations/{id} — owner-only soft delete → 24h grace → hard purge
 
 Registry mode (temp FalkorDBLite, mirroring test_dr_endpoints): the same
 surface over registry Membership/APIKey/Team nodes.
@@ -460,21 +460,21 @@ def _registry_count(db_path: str, label: str, team_id: str) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GET /v1/teams/{team_id}/export — Supabase mode
+# GET /v1/organizations/{org_id}/export — Supabase mode
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestExportSupabase:
     def test_export_requires_session_auth(self, sb_client):
         tc, _, _ = sb_client
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 401
 
     def test_export_requires_owner(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, role="member")
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 403
         assert "owner" in r.json()["detail"]
 
@@ -483,14 +483,14 @@ class TestExportSupabase:
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, role="admin")
         as_user()
-        assert tc.get(f"/v1/teams/{TEAM_ID}/export").status_code == 403
+        assert tc.get(f"/v1/organizations/{TEAM_ID}/export").status_code == 403
 
     def test_export_unknown_team_403(self, sb_client, as_user):
         """AuthZ-first: a non-member gets 403 for an unknown team (no
         existence oracle — security review, PR #873)."""
         tc, _, _ = sb_client
         as_user()
-        r = tc.get("/v1/teams/nope/export")
+        r = tc.get("/v1/organizations/nope/export")
         assert r.status_code == 403
 
     def test_export_deleted_team_410(self, sb_client, as_user):
@@ -498,7 +498,7 @@ class TestExportSupabase:
         _seed_supabase_team(
             fake, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 410
 
     def test_export_deleted_team_non_owner_403(self, sb_client, as_user):
@@ -508,7 +508,7 @@ class TestExportSupabase:
         _seed_supabase_team(
             fake, role="member", deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 403
 
     def test_export_events_truncated(self, sb_client, as_user, monkeypatch):
@@ -518,7 +518,7 @@ class TestExportSupabase:
         _seed_supabase_team(fake)
         seed_sdk = _seed_graph(db_path, n_events=5)  # noqa: F841
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["summary"]["events"] == 3
@@ -533,7 +533,7 @@ class TestExportSupabase:
         _seed_supabase_team(fake)
         seed_sdk = _seed_graph(db_path)  # noqa: F841
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["schema_version"] == 1
@@ -573,7 +573,7 @@ class TestExportSupabase:
         _seed_supabase_team(fake)
         seed_sdk = _seed_graph(db_path)  # noqa: F841
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 200
         ops = [e["operation"] for e in capture_audit]
         assert "team_export" in ops
@@ -584,28 +584,28 @@ class TestExportSupabase:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DELETE /v1/teams/{team_id} — Supabase mode
+# DELETE /v1/organizations/{org_id} — Supabase mode
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestDeleteSupabase:
     def test_delete_requires_session_auth(self, sb_client):
         tc, _, _ = sb_client
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{TEAM_ID}")
         assert r.status_code == 401
 
     def test_delete_requires_owner(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, role="admin")  # admin ≠ owner
         as_user()
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{TEAM_ID}")
         assert r.status_code == 403
 
     def test_delete_unknown_team_403(self, sb_client, as_user):
         """AuthZ-first: unknown team → 403 for non-members (no oracle)."""
         tc, _, _ = sb_client
         as_user()
-        assert tc.delete("/v1/teams/nope").status_code == 403
+        assert tc.delete("/v1/organizations/nope").status_code == 403
 
     def test_delete_cascade(self, sb_client, as_user, capture_audit):
         """Soft delete: deleted_at stamp + keys revoked + memberships
@@ -613,7 +613,7 @@ class TestDeleteSupabase:
         tc, fake, _ = sb_client
         _seed_supabase_team(fake, with_invite=True)
         as_user()
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{TEAM_ID}")
         assert r.status_code == 202, r.text
         body = r.json()
         assert body["status"] == "delete_scheduled"
@@ -641,7 +641,7 @@ class TestDeleteSupabase:
         tc, fake, _ = sb_client
         _seed_supabase_team(fake)
         as_user()
-        assert tc.delete(f"/v1/teams/{TEAM_ID}").status_code == 202
+        assert tc.delete(f"/v1/organizations/{TEAM_ID}").status_code == 202
         r = tc.get("/v1/team/keys", headers={"Authorization": f"Bearer {TOKEN}"})
         assert r.status_code == 401
 
@@ -652,21 +652,21 @@ class TestDeleteSupabase:
         _seed_supabase_team(fake, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
         # owner replay still works (removed-owner state accepted)
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{TEAM_ID}")
         assert r.status_code == 200
         assert r.json()["already"] is True
         # non-owner → 403
         app.dependency_overrides[get_current_user] = lambda: {"user_id": _U4}
-        r2 = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r2 = tc.delete(f"/v1/organizations/{TEAM_ID}")
         assert r2.status_code == 403
 
     def test_delete_idempotent(self, sb_client, as_user, capture_audit):
         tc, fake, _ = sb_client
         _seed_supabase_team(fake)
         as_user()
-        first = tc.delete(f"/v1/teams/{TEAM_ID}")
+        first = tc.delete(f"/v1/organizations/{TEAM_ID}")
         assert first.status_code == 202
-        second = tc.delete(f"/v1/teams/{TEAM_ID}")
+        second = tc.delete(f"/v1/organizations/{TEAM_ID}")
         assert second.status_code == 200
         body = second.json()
         assert body["already"] is True
@@ -678,7 +678,7 @@ class TestDeleteSupabase:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# #1903 — dashboard-created teams (POST /v1/teams): stored graph_name must
+# #1903 — dashboard-created teams (POST /v1/organizations): stored graph_name must
 # equal the data-plane namespace (team_{team_id}) so export/delete resolve
 # the REAL graph. The old mint (team_{name}) made export empty and delete
 # orphan the real graph.
@@ -687,12 +687,12 @@ class TestDeleteSupabase:
 
 class TestDashboardCreatedTeamRoundTrip:
     def test_dashboard_created_team_export_returns_points(self, sb_client, as_user):
-        """#1903 Indicator 1+2: POST /v1/teams mints graph_name=team_{team_id}
+        """#1903 Indicator 1+2: POST /v1/organizations mints graph_name=team_{org_id}
         and a dashboard-created team's export returns its points (the stored
         name resolves the real data graph)."""
         tc, fake, db_path = sb_client
         as_user()
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         body = r.json()
         team_id = body["team_id"]
@@ -702,7 +702,7 @@ class TestDashboardCreatedTeamRoundTrip:
         assert p["p_graph_name"] == f"team_{team_id}"
         # data-plane write (the real write path: namespace=team_id)
         seed_sdk = _seed_graph(db_path, team_id=team_id, n_points=1, n_events=0)  # noqa: F841
-        r2 = tc.get(f"/v1/teams/{team_id}/export")
+        r2 = tc.get(f"/v1/organizations/{team_id}/export")
         assert r2.status_code == 200, r2.text
         assert r2.json()["summary"]["points"] == 1  # Indicator 2
 
@@ -717,14 +717,14 @@ class TestDashboardCreatedTeamRoundTrip:
         # grace_hours and the purge honors stored grace over env
         # (_past_grace): a 24h stamp would skip the just-deleted team.
         monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "0")
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         team_id = r.json()["team_id"]
         assert r.json()["graph_name"] == f"team_{team_id}"
         dropped = []
         monkeypatch.setattr(ha_mod, "_drop_team_graph_strict",
                             lambda tid, gn=None: dropped.append((tid, gn)))
-        r = tc.delete(f"/v1/teams/{team_id}")
+        r = tc.delete(f"/v1/organizations/{team_id}")
         assert r.status_code == 202, r.text
         assert r.json()["grace_hours"] == 0  # env->stored promise pinned
         ha_mod._purge_deleted_teams()
@@ -747,7 +747,7 @@ class TestExportDeleteRegistry:
         _seed_registry(db_path)
         seed_sdk = _seed_graph(db_path, team_id="reg-team-1")  # noqa: F841
         as_user(user_id=_U2)
-        r = tc.get("/v1/teams/reg-team-1/export")
+        r = tc.get("/v1/organizations/reg-team-1/export")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["summary"]["points"] == 2
@@ -764,7 +764,7 @@ class TestExportDeleteRegistry:
         # self-verify pattern).
         assert _registry_count(db_path, "Team", "reg-team-1") == 1
         as_user(user_id=_U3)  # no membership at all
-        assert tc.get("/v1/teams/reg-team-1/export").status_code == 403
+        assert tc.get("/v1/organizations/reg-team-1/export").status_code == 403
 
     def test_export_uses_stored_graph_name(self, reg_client, as_user):
         """Teams created via sdk.team_create store graph_name=team_{name} —
@@ -782,7 +782,7 @@ class TestExportDeleteRegistry:
         )
         seed_sdk = _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)  # noqa: F841
         as_user(user_id=_U2)
-        r = tc.get("/v1/teams/reg-named/export")
+        r = tc.get("/v1/organizations/reg-named/export")
         assert r.status_code == 200, r.text
         assert r.json()["summary"]["points"] == 1
 
@@ -790,7 +790,7 @@ class TestExportDeleteRegistry:
         tc, db_path = reg_client
         _seed_registry(db_path, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user(user_id=_U2)
-        r = tc.get("/v1/teams/reg-team-1/export")
+        r = tc.get("/v1/organizations/reg-team-1/export")
         assert r.status_code == 410
 
     def test_delete_cascade_registry(self, reg_client, as_user):
@@ -803,7 +803,7 @@ class TestExportDeleteRegistry:
             "email:'bob@example.com', role:'member', status:'pending'})"
         )
         as_user(user_id=_U2)
-        r = tc.delete("/v1/teams/reg-team-1")
+        r = tc.delete("/v1/organizations/reg-team-1")
         assert r.status_code == 202, r.text
         assert r.json()["status"] == "delete_scheduled"
 
@@ -831,8 +831,8 @@ class TestExportDeleteRegistry:
         tc, db_path = reg_client
         _seed_registry(db_path)
         as_user(user_id=_U2)
-        assert tc.delete("/v1/teams/reg-team-1").status_code == 202
-        second = tc.delete("/v1/teams/reg-team-1")
+        assert tc.delete("/v1/organizations/reg-team-1").status_code == 202
+        second = tc.delete("/v1/organizations/reg-team-1")
         assert second.status_code == 200
         assert second.json()["already"] is True
 
@@ -855,7 +855,7 @@ class TestExportDeleteRegistry:
             "team_id:'reg-team-1', role:'owner', status:'active'})"
         )
         as_user(user_id=_U2)
-        assert tc.delete("/v1/teams/reg-team-1").status_code == 202
+        assert tc.delete("/v1/organizations/reg-team-1").status_code == 202
         r = tc.get("/v1/team", headers={"Authorization": f"Bearer {TOKEN}"})
         assert r.status_code == 401
 
@@ -1091,9 +1091,9 @@ class TestSensitiveRateLimit:
         tc, _, _ = sb_client
         as_user()
         for _ in range(5):
-            r = tc.delete("/v1/teams/nope")  # unknown team → 403, not 429
+            r = tc.delete("/v1/organizations/nope")  # unknown team → 403, not 429
             assert r.status_code == 403
-        r = tc.delete("/v1/teams/nope")
+        r = tc.delete("/v1/organizations/nope")
         assert r.status_code == 429
         assert "Retry-After" in r.headers
         ha_mod._SENSITIVE_BUCKETS.clear()
@@ -1109,8 +1109,8 @@ class TestSensitiveRateLimit:
         as_user()
         # burn the delete budget first — export must be unaffected
         for _ in range(5):
-            assert tc.delete("/v1/teams/nope").status_code == 403
-        assert tc.get("/v1/teams/nope/export").status_code == 403  # budget 1
-        assert tc.get("/v1/teams/nope/export").status_code == 403  # budget 2
-        assert tc.get("/v1/teams/nope/export").status_code == 429  # exhausted
+            assert tc.delete("/v1/organizations/nope").status_code == 403
+        assert tc.get("/v1/organizations/nope/export").status_code == 403  # budget 1
+        assert tc.get("/v1/organizations/nope/export").status_code == 403  # budget 2
+        assert tc.get("/v1/organizations/nope/export").status_code == 429  # exhausted
         ha_mod._SENSITIVE_BUCKETS.clear()

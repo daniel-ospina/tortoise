@@ -542,14 +542,14 @@ class TestOnboardingTeam:
                         headers={"Authorization": f"Bearer {key}"})
         assert r3.status_code == 200, r3.text
         assert r3.json()["team_id"] == sub_team_id
-        # listable by the owner (GET /v1/teams)
+        # listable by the owner (GET /v1/organizations)
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": "user-1", "email": "user-1@example.com"}
-        r4 = client.get("/v1/teams")
+        r4 = client.get("/v1/organizations")
         assert r4.status_code == 200, r4.text
         assert any(t["team_id"] == sub_team_id for t in r4.json())
-        # deletable by the owner (DELETE /v1/teams/{id})
-        r5 = client.delete(f"/v1/teams/{sub_team_id}")
+        # deletable by the owner (DELETE /v1/organizations/{id})
+        r5 = client.delete(f"/v1/organizations/{sub_team_id}")
         assert r5.status_code in (200, 202), r5.text
 
     def test_create_team_requires_session_user_registry(self, client):

@@ -184,7 +184,7 @@ def _wire_welcome_flow(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(API_HOST):
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 # First-timer: NO teams → the welcome card + wizard render
                 # (no auto-provision at mount — #2323 Option B).
                 route.fulfill(status=200, content_type="application/json",

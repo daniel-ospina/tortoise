@@ -1,4 +1,4 @@
-"""HTTP tests for the #1230 graph import endpoint — POST /v1/teams/{team_id}/import.
+"""HTTP tests for the #1230 graph import endpoint — POST /v1/organizations/{org_id}/import.
 
 Integration-layer matrix (plan Integration Surface Map S4–S6):
 - Auth: no session 401; member/admin 403; unknown team 403 (no existence
@@ -298,7 +298,7 @@ def _post_import(tc, artifact: bytes, key: bytes, *, headers: dict | None = None
             IMPORT_KEY_HEADER: _key_b64(key)}
     if headers:
         hdrs.update(headers)
-    return tc.post(f"/v1/teams/{TEAM_ID}/import", content=artifact, headers=hdrs)
+    return tc.post(f"/v1/organizations/{TEAM_ID}/import", content=artifact, headers=hdrs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -309,7 +309,7 @@ def _post_import(tc, artifact: bytes, key: bytes, *, headers: dict | None = None
 class TestImportAuth:
     def test_import_requires_session_auth(self, sb_client):
         tc, _, _ = sb_client
-        r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+        r = tc.post(f"/v1/organizations/{TEAM_ID}/import", content=b"x")
         assert r.status_code == 401
 
     def test_import_requires_owner(self, sb_client, as_user):
@@ -331,7 +331,7 @@ class TestImportAuth:
         """AuthZ-first: no existence oracle for unknown teams."""
         tc, _, _ = sb_client
         as_user()
-        r = tc.post("/v1/teams/nope/import", content=b"x",
+        r = tc.post("/v1/organizations/nope/import", content=b"x",
                     headers={IMPORT_KEY_HEADER: _key_b64(os.urandom(32))})
         assert r.status_code == 403
 
@@ -380,7 +380,7 @@ class TestImportCaps:
         artifact = _build_artifact(_build_payload(), key)
         chunks = [artifact[i:i + 64] for i in range(0, len(artifact), 64)]
         r = tc.post(
-            f"/v1/teams/{TEAM_ID}/import", content=iter(chunks),
+            f"/v1/organizations/{TEAM_ID}/import", content=iter(chunks),
             headers={"Content-Type": "application/vnd.tortoise.export.v1",
                      IMPORT_KEY_HEADER: _key_b64(key)},
         )
@@ -406,9 +406,9 @@ class TestImportCaps:
             as_user()
             for _ in range(2):
                 # unknown team → 403 (authz-first), budget consumed either way
-                r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+                r = tc.post(f"/v1/organizations/{TEAM_ID}/import", content=b"x")
                 assert r.status_code == 403
-            r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+            r = tc.post(f"/v1/organizations/{TEAM_ID}/import", content=b"x")
             assert r.status_code == 429
             assert "Retry-After" in r.headers
         finally:
@@ -423,10 +423,10 @@ class TestImportCaps:
         try:
             tc, _, _ = sb_client
             as_user()
-            assert tc.get(f"/v1/teams/{TEAM_ID}/export").status_code == 403
-            assert tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x").status_code == 403
+            assert tc.get(f"/v1/organizations/{TEAM_ID}/export").status_code == 403
+            assert tc.post(f"/v1/organizations/{TEAM_ID}/import", content=b"x").status_code == 403
             # export didn't consume the import bucket → still budget left
-            r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+            r = tc.post(f"/v1/organizations/{TEAM_ID}/import", content=b"x")
             assert r.status_code == 429
         finally:
             ha_mod._SENSITIVE_BUCKETS.clear()
@@ -1231,7 +1231,7 @@ class TestImportHappyPath:
         payload = _build_payload(n_points=2, n_edges=1)
         artifact = _build_artifact(payload, key)
         r = tc.post(
-            f"/v1/teams/{TEAM_ID}/import",
+            f"/v1/organizations/{TEAM_ID}/import",
             json={"artifact": base64.b64encode(artifact).decode(),
                   "key": _key_b64(key)},
         )

@@ -2247,7 +2247,7 @@ function claimIntentInFlight() {
   // Supabase lane decides on `subscription_status` alone, so a paid-tier row
   // without an active status is counted free there and this pre-check would
   // open the NAME dialog: harmless, because the server stays authoritative and
-  // its structured 402 flips the same dialog to limit mode. /v1/teams carries
+  // its structured 402 flips the same dialog to limit mode. /v1/organizations carries
   // role + tier + subscription_status on every row, so this needs no extra
   // request — advisory UX only.
   const ownedFreeOrgs = (teams || []).filter((t) => t && t.role === 'owner'
@@ -2332,7 +2332,7 @@ function claimIntentInFlight() {
   // #2789: the paid-new-org flow returns to
   // ?session_id=...&new_org=<id>&new_org_name=<name> — the org does not exist
   // until the webhook provisions it, so the loop waits for it to appear in
-  // /v1/teams and then switches to it (instead of polling the CURRENT org's
+  // /v1/organizations and then switches to it (instead of polling the CURRENT org's
   // subscription_status, which is a different org). It matches the id OR the
   // intended name because the pre-minted id is not always the real id: on the
   // registry (selfhost) lane `team_create` mints its own.
@@ -2494,7 +2494,7 @@ function claimIntentInFlight() {
       // has no stale-closure trap (the mount effect closes over the
       // first-render [], so teamsList.length would wrongly swallow cross-team
       // 403s for returning users). Suspended teams return a dict detail →
-      // e.suspended is set, and a successful /v1/teams with a still-403
+      // e.suspended is set, and a successful /v1/organizations with a still-403
       // onboarding leaves teamIdRef set — both fall through to the normal
       // error state (honest, retryable card) below: keeping the loading
       // state leaves the panel in its initial state;
@@ -3476,7 +3476,7 @@ function claimIntentInFlight() {
         let teamsList = []
         let teamsSuspendDetail = null
         try {
-          const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
+          const teamsRes = await fetch(`${API_BASE}/v1/organizations`, {
             headers: { Authorization: `Bearer ${session.access_token}` },
           })
           if (teamsRes.ok) {
@@ -3575,7 +3575,7 @@ function claimIntentInFlight() {
         // reads go out pinned (q = '?team_id=...') — without the pin a
         // multi-membership user whose FIRST membership is suspended would 403
         // into the error card on every reload (the old 5b-adopt also pinned).
-        // An ALL-suspended session 403s the /v1/teams fetch itself and renders
+        // An ALL-suspended session 403s the /v1/organizations fetch itself and renders
         // the appeal card there (round-2 reviewer F1) — the teams-fetch catch
         // above is that mechanism; no probe belt is needed.
         if (!teamIdRef.current && teamsList.length) {
@@ -4060,12 +4060,12 @@ function claimIntentInFlight() {
   // ── E6/E7: team + graph switcher (session JWT authed) ──
   // #2789: returns the loaded list (or null when not loaded) so the
   // paid-new-org success-return poll can wait for the webhook-provisioned org
-  // to appear without a second /v1/teams fetch.
+  // to appear without a second /v1/organizations fetch.
   async function loadTeams() {
     const tok = sessionTokenRef.current
     if (!tok) return null
     try {
-      const res = await fetch(`${API_BASE}/v1/teams`, {
+      const res = await fetch(`${API_BASE}/v1/organizations`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
       if (res.ok) {
@@ -4138,7 +4138,7 @@ function claimIntentInFlight() {
 
   // #2789: open the create dialog in the RIGHT mode. The account-menu item
   // pre-checks the entitlement from the teams list (role + subscription_status
-  // ride every /v1/teams row), so a user already at the cap sees the
+  // ride every /v1/organizations row), so a user already at the cap sees the
   // three-option dialog IMMEDIATELY — never after typing a name and being
   // rejected (the pre-#2789 gate-on-submit flow). A user with no owned free org
   // (including a pure collaborator) gets the ordinary name dialog.
@@ -4218,7 +4218,7 @@ function claimIntentInFlight() {
   }
 
   async function handleCreateTeam() {
-    // #1877: create-team dialog submit — validation mirrors POST /v1/teams
+    // #1877: create-team dialog submit — validation mirrors POST /v1/organizations
     // (≤64 chars, free text — spaces and dashes are fine). The organization's
     // ID is minted opaquely server-side and never derived from this name, so
     // there is nothing to slug: the name is display-only and renameable.
@@ -4236,7 +4236,7 @@ function claimIntentInFlight() {
     setCreateTeamBusy(true)
     setCreateTeamError('')
     try {
-      const res = await api('/v1/teams', {
+      const res = await api('/v1/organizations', {
         method: 'POST', useSession: true,
         body: JSON.stringify({ name }),
       })
@@ -5083,7 +5083,7 @@ function claimIntentInFlight() {
     const tok = sessionTokenRef.current
     if (!tok || !teamId) return
     try {
-      const res = await fetch(`${API_BASE}/v1/teams/${teamId}/members`, {
+      const res = await fetch(`${API_BASE}/v1/organizations/${teamId}/members`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
       // P3 (code-review): staleness guard — a newer team switch may have
@@ -5153,7 +5153,7 @@ function claimIntentInFlight() {
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
-      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members/${userId}`, {
+      const res = await fetch(`${API_BASE}/v1/organizations/${currentTeamId}/members/${userId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${tok}` },
       })
@@ -5181,7 +5181,7 @@ function claimIntentInFlight() {
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
-      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members/${userId}`, {
+      const res = await fetch(`${API_BASE}/v1/organizations/${currentTeamId}/members/${userId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
         body: JSON.stringify({ role }),

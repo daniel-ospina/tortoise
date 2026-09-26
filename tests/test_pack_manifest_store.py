@@ -317,8 +317,8 @@ class TestUploadRateLimit:
             # is still a terminal outcome, so the progression holds there
             # too — only moving export's check AFTER authz breaks it (a
             # real doctrine regression worth catching).
-            assert tc.get("/v1/teams/nope/export").status_code == 403
-            assert tc.get("/v1/teams/nope/export").status_code == 429
+            assert tc.get("/v1/organizations/nope/export").status_code == 403
+            assert tc.get("/v1/organizations/nope/export").status_code == 429
             # export didn't consume the pack bucket → budget still left
             r = tc.post("/v1/packs/manifests",
                         json={"manifest_yaml": VALID_MANIFEST})

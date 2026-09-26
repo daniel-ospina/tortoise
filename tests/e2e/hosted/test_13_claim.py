@@ -9,8 +9,8 @@ surface (JWKS + PostgREST over the FakeControlPlane row store + GoTrue
   2. Pre-claim: GET /v1/team with the key → 200 (anon team, key auths)
   3. Claim: POST /v1/claim with a fresh provider-verified session JWT + the
      pasted key → 200, same team_id
-  4. Post-claim session plane: GET /v1/teams (JWT) lists the claimed team,
-     GET /v1/teams/{team_id}/members shows the linked owner — the claimed
+  4. Post-claim session plane: GET /v1/organizations (JWT) lists the claimed team,
+     GET /v1/organizations/{org_id}/members shows the linked owner — the claimed
      user sees graphs+members (indicator 2). Same key still auths (indicator
      1) and reads the same graph (indicator 3).
   5. First-claim-wins: a second user's claim → 409 (indicator 5).
@@ -375,16 +375,16 @@ class TestClaimE2E:
         assert status == 200, claim
         assert claim["team_id"] == team_id
 
-        # 5. post-claim: /v1/teams (JWT) lists the claimed team — the claimed
+        # 5. post-claim: /v1/organizations (JWT) lists the claimed team — the claimed
         #    user sees the team in the session plane (indicator 2)
-        status, teams = _get(base, "/v1/teams",
+        status, teams = _get(base, "/v1/organizations",
                              headers={"Authorization": f"Bearer {jwt_a}"})
         assert status == 200, teams
         assert any(t["team_id"] == team_id for t in teams), teams
 
         # 6. members listing shows the linked owner (indicator 2)
         status, members = _get(
-            base, f"/v1/teams/{team_id}/members",
+            base, f"/v1/organizations/{team_id}/members",
             headers={"Authorization": f"Bearer {jwt_a}"})
         assert status == 200, members
         assert any(m["user_id"] == _U_CLAIM_A and m["role"] == "owner"

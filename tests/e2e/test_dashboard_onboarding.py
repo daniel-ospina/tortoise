@@ -125,7 +125,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
     capture dict ({objects, points, state_patches, org_create, checkpoint,
     mint}).
 
-    `role` mirrors the /v1/teams membership role — the connect step branches on
+    `role` mirrors the /v1/organizations membership role — the connect step branches on
     it (owner/admin → harness tabs + prompt cards; member → paste escape only).
     Omitting it (the pre-#2710 shape) is the MEMBER path.
     `key_rows` is the org's key table — durableConnectKey resolves a pasted
@@ -149,7 +149,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
         # query-stripped path so /v1/team/keys?team_id=… still resolves.
         path = url.split("?", 1)[0]
         if "api.premiselabs.co" in url:
-            if path.endswith("/v1/teams") and method == "GET":
+            if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_row]))
                 return

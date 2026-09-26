@@ -1,7 +1,7 @@
 """HTTP-layer tests for invites + RBAC — E3/E4/E8 (#748).
 
 Issue #748 (P1): test_invites.py covers SDK primitives only; the actual
-endpoints (/v1/invites, /v1/invites/accept, /v1/teams/{id}/members
+endpoints (/v1/invites, /v1/invites/accept, /v1/organizations/{id}/members
 GET/DELETE/PATCH) were untested. Revenue gates (402/409) and the member-role
 invite path (#743) could ship broken with green CI.
 
@@ -651,7 +651,7 @@ class TestInviteAcceptRateLimit:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# E8 — GET/DELETE/PATCH /v1/teams/{team_id}/members
+# E8 — GET/DELETE/PATCH /v1/organizations/{org_id}/members
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -705,7 +705,7 @@ class TestMembersRbac:
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
         _as_user(_U2, "member@example.com")
-        r = client.get("/v1/teams/team-t/members")
+        r = client.get("/v1/organizations/team-t/members")
         assert r.status_code == 403
         assert "owner or admin" in r.json()["detail"]
 
@@ -715,7 +715,7 @@ class TestMembersRbac:
         inv = client.post("/v1/invites",
                           json={"team_id": "team-t", "email": "bob@example.com"})
         assert inv.status_code == 200
-        r = client.get("/v1/teams/team-t/members")
+        r = client.get("/v1/organizations/team-t/members")
         assert r.status_code == 200, r.text
         by_user = {m["user_id"]: m for m in r.json()}
         assert by_user[_U1]["role"] == "owner"
@@ -728,7 +728,7 @@ class TestMembersRbac:
         assert invited[0]["email"] == "bob@example.com"
 
     def _ghost_rows(self, client, team_id="team-t"):
-        r = client.get(f"/v1/teams/{team_id}/members")
+        r = client.get(f"/v1/organizations/{team_id}/members")
         assert r.status_code == 200, r.text
         return [m for m in r.json() if m["user_id"].startswith("invite-")]
 
@@ -859,19 +859,19 @@ class TestMembersRbac:
         """Owner protection: the owner cannot be removed."""
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.delete(f"/v1/teams/team-t/members/{_U1}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U1}")
         assert r.status_code == 409
         assert "Owner cannot be removed" in r.json()["detail"]
 
     def test_remove_member_404(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
-        r = client.delete(f"/v1/teams/team-t/members/{_U_GHOST}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U_GHOST}")
         assert r.status_code == 404
 
     def test_remove_member_sets_status_removed(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.delete(f"/v1/teams/team-t/members/{_U2}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U2}")
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "removed"
         assert _U2 not in _active_roles(reg, "team-t")
@@ -881,13 +881,13 @@ class TestMembersRbac:
         _seed_membership(reg, "team-t", _U2, "member")
         _seed_membership(reg, "team-t", _U3, "member")
         _as_user(_U3, "member3@example.com")
-        r = client.delete(f"/v1/teams/team-t/members/{_U2}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U2}")
         assert r.status_code == 403
 
     def test_change_role_owner_409(self, client, reg):
         """Owner protection: the owner role cannot be changed."""
         _seed_team_with_owner(reg, "team-t")
-        r = client.patch(f"/v1/teams/team-t/members/{_U1}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U1}",
                          json={"role": "member"})
         assert r.status_code == 409
         assert "Owner role cannot be changed" in r.json()["detail"]
@@ -895,14 +895,14 @@ class TestMembersRbac:
     def test_change_role_invalid_role_422(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "superuser"})
         assert r.status_code == 422
 
     def test_change_role_member_to_admin(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "admin"})
         assert r.status_code == 200, r.text
         assert _active_roles(reg, "team-t")[_U2] == "admin"
@@ -910,7 +910,7 @@ class TestMembersRbac:
     def test_change_role_admin_to_member(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "admin")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "member"})
         assert r.status_code == 200, r.text
         assert _active_roles(reg, "team-t")[_U2] == "member"
@@ -920,13 +920,13 @@ class TestMembersRbac:
         _seed_membership(reg, "team-t", _U2, "admin")
         _seed_membership(reg, "team-t", _U3, "member")
         _as_user(_U3, "member3@example.com")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "member"})
         assert r.status_code == 403
 
     def test_change_role_unknown_member_404(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
-        r = client.patch(f"/v1/teams/team-t/members/{_U_GHOST}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U_GHOST}",
                          json={"role": "member"})
         assert r.status_code == 404
 
@@ -976,7 +976,7 @@ class TestPendingInvites:
         assert _active_roles(reg, "team-t")[_U_BOB] == "member"
         # ghost row gone (#1880) — members list is owner/admin-only
         _as_user(_U1, "owner@example.com")
-        ghost = [m for m in client.get("/v1/teams/team-t/members").json()
+        ghost = [m for m in client.get("/v1/organizations/team-t/members").json()
                  if m["user_id"].startswith("invite-")]
         assert ghost == []
 
@@ -1004,7 +1004,7 @@ class TestPendingInvites:
         assert r.json()["revoked"] is True
         # ghost cleaned (#1880) — members list is owner/admin-only
         _as_user(_U1, "owner@example.com")
-        ghost = [m for m in client.get("/v1/teams/team-t/members").json()
+        ghost = [m for m in client.get("/v1/organizations/team-t/members").json()
                  if m["user_id"].startswith("invite-")]
         assert ghost == [], "decline must clean the ghost membership row"
 
@@ -1089,7 +1089,7 @@ class TestExpiredInviteGhostCleanup:
     for pre-#1880 ghosts (idempotent, dry-run safe)."""
 
     def _ghost_rows(self, client, team_id="team-t"):
-        r = client.get(f"/v1/teams/{team_id}/members")
+        r = client.get(f"/v1/organizations/{team_id}/members")
         assert r.status_code == 200, r.text
         return [m for m in r.json() if m["user_id"].startswith("invite-")]
 

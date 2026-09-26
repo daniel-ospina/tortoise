@@ -296,7 +296,7 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"portal_url": "https://billing.stripe.com/p/session/test_123"}))
                 return
-            if path.endswith("/v1/teams") and route.request.method == "GET":
+            if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_row]))
                 return

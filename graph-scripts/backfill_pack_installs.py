@@ -44,7 +44,7 @@ def _iter_teams() -> list[dict]:
 
     Supabase control-plane mode: ``teams`` table rows (graph_name recorded
     via the provision_team RPC's p_graph_name). Registry mode: ``Team``
-    nodes (graph_name property when present — legacy /v1/teams + onboarding
+    nodes (graph_name property when present — legacy /v1/organizations + onboarding
     recorded team_{name}; hosted provisioning has none → team_{id} derivation).
     """
     try:

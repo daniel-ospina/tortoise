@@ -22,13 +22,13 @@ skip_unless_hosted_e2e()
 
 def _create_team(api, jwt_headers, name_suffix):
     name = f"e2e8d-{name_suffix}-{uuid.uuid4().hex[:6]}"
-    r = api.post("/v1/teams", headers=jwt_headers, data={"name": name})
+    r = api.post("/v1/organizations", headers=jwt_headers, data={"name": name})
     assert r.status == 200, f"team create: {r.status} {r.text()}"
     return r.json()
 
 
 def test_multi_team_ownership_and_listing(api, session_jwt):
-    """One session user creates two teams; GET /v1/teams lists both.
+    """One session user creates two teams; GET /v1/organizations lists both.
 
     The #1877 free-team entitlement gate (402) only applies to FREE plans —
     bump the first team to tier=team so the second create passes."""
@@ -38,12 +38,12 @@ def test_multi_team_ownership_and_listing(api, session_jwt):
     bump_team_tier(api, t1.get("id") or t1.get("team_id"), "team")
     t2 = _create_team(api, h, "beta")
 
-    r = api.get("/v1/teams", headers=h)
+    r = api.get("/v1/organizations", headers=h)
     assert r.status == 200, r.text()
     ids = {t.get("id") or t.get("team_id") for t in r.json()}
     for created in (t1, t2):
         cid = created.get("id") or created.get("team_id")
-        assert cid in ids, f"created team {cid} missing from /v1/teams: {ids}"
+        assert cid in ids, f"created team {cid} missing from /v1/organizations: {ids}"
 
 
 def test_invite_accept_flow_with_rbac(api, session_jwt):
@@ -68,13 +68,13 @@ def test_invite_accept_flow_with_rbac(api, session_jwt):
     r = api.post("/v1/invites/accept", headers=hm, data={"token": token})
     assert r.status == 200, f"invite accept: {r.status} {r.text()}"
 
-    r = api.get(f"/v1/teams/{team_id}/members", headers=ho)
+    r = api.get(f"/v1/organizations/{team_id}/members", headers=ho)
     assert r.status == 200, r.text()
     member_ids = {m.get("user_id") for m in r.json()}
     assert member_id in member_ids, f"accepted member missing: {member_ids}"
 
     # RBAC: a plain member cannot remove members (owner/admin only)
-    r = api.delete(f"/v1/teams/{team_id}/members/{owner_id}", headers=hm)
+    r = api.delete(f"/v1/organizations/{team_id}/members/{owner_id}", headers=hm)
     assert r.status == 403, f"member removing owner must 403, got {r.status}"
 
 

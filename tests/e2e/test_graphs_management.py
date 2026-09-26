@@ -175,7 +175,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/teams") and route.request.method == "GET":
+            if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_row]))
                 return
@@ -675,7 +675,7 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "loud 500 — zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/teams") and method == "GET":
+            if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_a, team_b]))
                 return

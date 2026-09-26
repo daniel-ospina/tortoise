@@ -58,7 +58,7 @@ empty-keys tests untouched"):
   the prod parent-domain cookie so intercepted prod-origin paths stay coherent.
   #2246: the mount NEVER probes and NEVER mints; POST /v1/session/key is a
   loud-500 zero-mint tripwire.
-- Mocked /v1/teams rows carry role:'owner' (no existing dashboard e2e mock
+- Mocked /v1/organizations rows carry role:'owner' (no existing dashboard e2e mock
   supplies role -> isOwnerAdmin would be false -> every action assertion
   vacuous).
 - Fixture rows carry UNIQUE key_prefixes — the row-scoped selectors depend on
@@ -108,7 +108,7 @@ TEAM_ROW = {
     "tier": "free",
     "anon": False,
     # #2166: the keys-table action cells are isOwnerAdmin-gated (myRole from
-    # the /v1/teams rows) — no existing dashboard e2e mock supplies role, so
+    # the /v1/organizations rows) — no existing dashboard e2e mock supplies role, so
     # this suite MUST (scope §S5): without it every toggle/trash/rename/rotate
     # assertion is vacuous.
     "role": "owner",
@@ -272,7 +272,7 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/teams") and route.request.method == "GET":
+            if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([TEAM_ROW]))
                 return
@@ -519,7 +519,7 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"revoked": True, "key_id": ROT_HELD_ID}))
                 return
-            if path.endswith("/v1/teams") and method == "GET":
+            if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([TEAM_ROW]))
                 return
@@ -629,7 +629,7 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/teams") and route.request.method == "GET":
+            if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_a, team_b]))
                 return
@@ -743,7 +743,7 @@ def test_two_team_key_writes_pin_selected_team(page: Page) -> None:
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/teams") and method == "GET":
+            if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_a, team_b]))
                 return

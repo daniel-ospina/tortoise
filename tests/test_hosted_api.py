@@ -5845,7 +5845,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs",
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
                         json={"name": "acme-prod",
                               "scopes": ["graphs:read", "graphs:write"]},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
@@ -5892,7 +5892,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs",
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
                         json={"name": "g1",
                               "scopes": ["graphs:read", "graphs:create",
                                          "keys:manage"]},
@@ -5913,9 +5913,9 @@ class TestProvisioningService:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             hdr = {"Authorization": f"Bearer {key['api_key']}"}
-            assert tc.post(f"/v1/teams/{tid}/graphs", json={"name": "dup"},
+            assert tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "dup"},
                            headers=hdr).status_code == 201
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "dup"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "dup"},
                         headers=hdr)
             assert r.status_code == 409, r.text
             assert "already exists" in r.json()["detail"]
@@ -5928,7 +5928,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "x"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 402, r.text
             assert "Upgrade" in r.json()["detail"]
@@ -5944,10 +5944,10 @@ class TestProvisioningService:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             hdr = {"Authorization": f"Bearer {key['api_key']}"}
-            r1 = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "c1"},
+            r1 = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "c1"},
                          headers=hdr)
             assert r1.status_code == 201, r1.text
-            r2 = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "c2"},
+            r2 = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "c2"},
                          headers=hdr)
             assert r2.status_code == 409, r2.text  # 2 of 2 reached
             assert r2.headers.get("X-Graph-Quota") == "2/2"
@@ -5955,13 +5955,13 @@ class TestProvisioningService:
             gen.close()
 
     def test_cross_team_key_404(self, tmp_path):
-        """P1 #6: a team-A key hitting /v1/teams/B/graphs → 404 (no
+        """P1 #6: a team-A key hitting /v1/organizations/B/graphs → 404 (no
         existence oracle, no privilege confusion)."""
         gen = self._setup(tmp_path, "pro", None)
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post("/v1/teams/team-other-000/graphs",
+            r = tc.post("/v1/organizations/team-other-000/graphs",
                         json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 404, r.text
@@ -5987,7 +5987,7 @@ class TestProvisioningService:
                 params={"id": "minted-key", "tid": tid,
                         "kh": hash_api_key(token), "kp": token[:10]},
             )
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "x"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {token}"})
             assert r.status_code == 403, r.text
         finally:
@@ -6205,7 +6205,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "orphan-test"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "orphan-test"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 409, r.text
             graphs = sdk.graph_list(tid)
@@ -6221,7 +6221,7 @@ class TestProvisioningService:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             sdk.apikey_revoke(key["id"])
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "x"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code in (401, 403), r.text
         finally:
@@ -6259,7 +6259,7 @@ class TestProvisioningService:
             monkeypatch.setattr(ha_mod.TortoiseSDK, "apikey_create",
                                 _failing_mint)
             try:
-                r = tc.post(f"/v1/teams/{tid}/graphs",
+                r = tc.post(f"/v1/organizations/{tid}/graphs",
                             json={"name": "doomed"},
                             headers={"Authorization":
                                      f"Bearer {key['api_key']}"})
@@ -6290,7 +6290,7 @@ class TestGraphLifecycle:
     + default-guard; GET /v1/graphs status/key_count."""
 
     def _provision(self, tc, tid, key, name):
-        return tc.post(f"/v1/teams/{tid}/graphs", json={"name": name},
+        return tc.post(f"/v1/organizations/{tid}/graphs", json={"name": name},
                        headers={"Authorization": f"Bearer {key['api_key']}"})
 
     def test_delete_cascade_release_reuse(self, tmp_path):
@@ -6500,7 +6500,7 @@ class TestProvisioningConcurrency:
 
         def _mint(i):
             return tc.post(
-                f"/v1/teams/{tid}/graphs", json={"name": f"c{i}"},
+                f"/v1/organizations/{tid}/graphs", json={"name": f"c{i}"},
                 headers={"Authorization": f"Bearer {key['api_key']}"})
 
         with ThreadPoolExecutor(max_workers=n) as ex:
@@ -6516,7 +6516,7 @@ class TestProvisioningConcurrency:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             # Fill the free slot: 1st custom (2 of 2)
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "full"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "full"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 201, r.text
 

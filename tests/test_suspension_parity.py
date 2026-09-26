@@ -223,7 +223,7 @@ class TestSuspendedTeamLockdown:
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         as_user()
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         _assert_suspended(r)
 
     def test_list_my_teams_all_suspended_403(self, sb_client, as_user):
@@ -233,14 +233,14 @@ class TestSuspendedTeamLockdown:
         _seed_team(fake, suspended=True)
         _seed_team(fake, suspended=True, team_id=_TEAM2)
         as_user()
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         _assert_suspended(r)
 
     def test_export_403(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         _assert_suspended(r)
 
     def test_import_403(self, sb_client, as_user):
@@ -249,28 +249,28 @@ class TestSuspendedTeamLockdown:
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         as_user()
-        r = tc.post(f"/v1/teams/{TEAM_ID}/import", json={})
+        r = tc.post(f"/v1/organizations/{TEAM_ID}/import", json={})
         _assert_suspended(r)
 
     def test_list_members_403(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/members")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/members")
         _assert_suspended(r)
 
     def test_remove_member_403(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         as_user()
-        r = tc.delete(f"/v1/teams/{TEAM_ID}/members/some-user")
+        r = tc.delete(f"/v1/organizations/{TEAM_ID}/members/some-user")
         _assert_suspended(r)
 
     def test_change_member_role_403(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         as_user()
-        r = tc.patch(f"/v1/teams/{TEAM_ID}/members/some-user", json={"role": "member"})
+        r = tc.patch(f"/v1/organizations/{TEAM_ID}/members/some-user", json={"role": "member"})
         _assert_suspended(r)
 
     def test_list_invites_403(self, sb_client, as_user):
@@ -287,7 +287,7 @@ class TestSuspendedTeamLockdown:
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         as_user()
-        r = tc.delete(f"/v1/teams/{TEAM_ID}")
+        r = tc.delete(f"/v1/organizations/{TEAM_ID}")
         _assert_suspended(r)
 
     def test_accept_invite_403(self, sb_client, as_user):
@@ -348,7 +348,7 @@ class TestSuspendedTeamLockdown:
         # resolve its default graph.
         fake.tables["teams"][1]["graph_name"] = "default"
         as_user()
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
         by_id = {t["team_id"]: t for t in r.json()}
         assert set(by_id) == {TEAM_ID, _TEAM2}
@@ -365,7 +365,7 @@ class TestSuspendedTeamLockdown:
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False)
         as_user()
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
         assert len(r.json()) == 1
         assert r.json()[0]["suspended_at"] is None
@@ -386,7 +386,7 @@ class TestSuspendedTeamLockdownRegistry:
         tc, db_path = reg_client
         _seed_registry(db_path, suspended=True)
         as_user()
-        r = tc.get("/v1/teams/reg-team-1/export")
+        r = tc.get("/v1/organizations/reg-team-1/export")
         _assert_suspended(r)
 
     def test_list_my_teams_mixed_healthy_listable(self, reg_client, as_user):
@@ -396,7 +396,7 @@ class TestSuspendedTeamLockdownRegistry:
         _seed_registry(db_path, suspended=True, team_id="reg-team-1")
         _seed_registry(db_path, suspended=False, team_id="reg-team-2", m_id="m-2")
         as_user()
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
         by_id = {t["team_id"]: t for t in r.json()}
         assert set(by_id) == {"reg-team-1", "reg-team-2"}
@@ -412,7 +412,7 @@ class TestSuspendedTeamLockdownRegistry:
             "CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim', confidence:0.8})"
         )
         as_user()
-        r = tc.get("/v1/teams/reg-team-1/export")
+        r = tc.get("/v1/organizations/reg-team-1/export")
         assert r.status_code == 200, r.text
         assert r.json()["summary"]["points"] == 1
 
@@ -496,7 +496,7 @@ class TestHealthyTeamControl:
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False)
         as_user()
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
         assert r.json()[0]["team_id"] == TEAM_ID
 
@@ -505,7 +505,7 @@ class TestHealthyTeamControl:
         403 must not fire on an empty list — all() of [] is True)."""
         tc, _, _ = sb_client
         as_user()
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
         assert r.json() == []
 
@@ -529,6 +529,6 @@ class TestHealthyTeamControl:
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True, role="member")
         as_user()
-        r = tc.get(f"/v1/teams/{TEAM_ID}/export")
+        r = tc.get(f"/v1/organizations/{TEAM_ID}/export")
         assert r.status_code == 403
         assert "owner" in r.json()["detail"]

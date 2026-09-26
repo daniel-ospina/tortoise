@@ -11,7 +11,7 @@ per retry). That froze the SINGLE event loop, so:
 2. ``tortoise-y4mjjq`` runs one machine, so the proxy found no healthy
    candidate and dropped ALL traffic
    (``[PR01] no known healthy instances found for route tcp/443``);
-3. every dashboard boot call (``/v1/user/identity``, ``/v1/teams``,
+3. every dashboard boot call (``/v1/user/identity``, ``/v1/organizations``,
    ``/v1/onboarding/state``) failed together → the user-visible
    "Failed to fetch".
 

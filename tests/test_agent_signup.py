@@ -7,7 +7,7 @@ dashboard/Supabase account. Per-identity rate limit (3/hour).
 x-device-id are ignored (a client-chosen identity trivially bypasses the
 per-identity rate limit).
 #740: /internal/provision must write Membership with status:'active' so the
-E6 /v1/teams listing (active-membership query) includes the provisioned team.
+E6 /v1/organizations listing (active-membership query) includes the provisioned team.
 #770 (plan Task 2 — identity path): the server-side anon identity is the
 anchor for the Supabase control-plane row. When the agent writer flips to
 Supabase (plan Task 8/#765), provision_team stores it as team_memberships.identity
@@ -219,7 +219,7 @@ class TestSignupIpRateLimit:
 
 class TestProvisionMembershipStatus:
     """#740 — /internal/provision must write Membership status:'active' so
-    the E6 /v1/teams listing (which filters on status='active') shows it."""
+    the E6 /v1/organizations listing (which filters on status='active') shows it."""
 
     def test_provisioned_team_lists_in_teams_e6(self, client, monkeypatch):
         # #880: _check_internal reads FASTAPI_INTERNAL_KEY lazily (was a
@@ -241,7 +241,7 @@ class TestProvisionMembershipStatus:
             assert r.status_code == 200, r.text
             team_id = r.json()["team_id"]
 
-            # E6 (GET /v1/teams) is session-JWT gated — override the FastAPI
+            # E6 (GET /v1/organizations) is session-JWT gated — override the FastAPI
             # dependency with the provisioned user (the established pattern in
             # test_hosted_api.py; not timing-sensitive like monkeypatching the
             # underlying verify_session_jwt, which flakes under load).
@@ -250,7 +250,7 @@ class TestProvisionMembershipStatus:
                 "email": "prov@test.dev",
             }
             try:
-                r2 = client.get("/v1/teams")
+                r2 = client.get("/v1/organizations")
                 assert r2.status_code == 200, r2.text
                 teams = r2.json()
                 assert any(t["team_id"] == team_id for t in teams), (

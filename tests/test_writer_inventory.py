@@ -6,7 +6,7 @@ FakeControlPlane (zero network), with a registry SPY asserting the FalkorDB
 registry is never touched:
 
 - writers: POST /v1/team/keys, GET/DELETE /v1/team/keys/{id}, POST
-  /v1/agent/signup, POST /v1/register, POST /v1/teams, members DELETE/PATCH,
+  /v1/agent/signup, POST /v1/register, POST /v1/organizations, members DELETE/PATCH,
   POST /v1/internal/reconcile, POST /v1/onboarding/team, /internal/provision
   (disabled), create_graph/_graph_create + graph_list (env-gated in sdk.py).
 - readers: member listing, graph_list, quota counts (api_keys/users/graphs).
@@ -602,12 +602,12 @@ class TestRegister:
         assert r.status_code == 500
 
 
-# ── POST /v1/teams (create_team — user path via provision_team RPC) ────────
+# ── POST /v1/organizations (create_team — user path via provision_team RPC) ────────
 
 class TestCreateTeam:
     def test_create_team_user_path(self, user_client):
         tc, fake, _ = user_client
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["name"] == "acme"
@@ -631,14 +631,14 @@ class TestCreateTeam:
         assert len(mem) == 1 and mem[0]["role"] == "owner"
 
     def test_create_team_keyless_no_api_keys_row(self, user_client):
-        """#1921: POST /v1/teams provisions KEYLESS — no tt_ mint, no
+        """#1921: POST /v1/organizations provisions KEYLESS — no tt_ mint, no
         api_keys row. The old per-call mint persisted only the hash and
         never returned the plaintext — a dead key permanently counted
         against max_api_keys (2 free teams exhausted the cap with zero
         usable keys). Mirror of create_onboarding_team's #1716 keyless
         provision: all-NULL key params → teams + membership, NO key row."""
         tc, fake, _ = user_client
-        r = tc.post("/v1/teams", json={"name": "keyless"})
+        r = tc.post("/v1/organizations", json={"name": "keyless"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert "key" not in body  # the response never carries a key
@@ -657,7 +657,7 @@ class TestCreateTeam:
     def test_duplicate_name_409(self, user_client):
         tc, fake, _ = user_client
         fake.seed("teams", [{"id": "t-acme", "name": "acme"}])
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 409
 
     def test_duplicate_name_race_maps_rpc_409(self, user_client):
@@ -686,7 +686,7 @@ class TestCreateTeam:
         old = sc.get_control_plane
         sc.get_control_plane = lambda: _UniqueViolation(fake)
         try:
-            r = tc.post("/v1/teams", json={"name": "acme"})
+            r = tc.post("/v1/organizations", json={"name": "acme"})
         finally:
             sc.get_control_plane = old
         assert r.status_code == 409, r.text
@@ -706,7 +706,7 @@ class TestCreateTeam:
              "status": "active", "created_at": since}
             for i in range(3)
         ])
-        r = tc.post("/v1/teams", json={"name": "mine"})
+        r = tc.post("/v1/organizations", json={"name": "mine"})
         assert r.status_code == 200, r.text
 
     def test_rate_limit_3_per_hour(self, user_client):
@@ -718,7 +718,7 @@ class TestCreateTeam:
                               created_at=since)
             for i in range(3)
         ])
-        r = tc.post("/v1/teams", json={"name": "fourth"})
+        r = tc.post("/v1/organizations", json={"name": "fourth"})
         assert r.status_code == 429
 
     def test_rate_limit_ignores_old_rows(self, user_client):
@@ -728,12 +728,12 @@ class TestCreateTeam:
         fake.seed("team_memberships", [
             _owner_membership(id="m-old", team_id="team-old", created_at=old),
         ])
-        r = tc.post("/v1/teams", json={"name": "fresh"})
+        r = tc.post("/v1/organizations", json={"name": "fresh"})
         assert r.status_code == 200, r.text
 
     def test_never_touches_registry(self, user_client, spy):
         tc, _, _ = user_client
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         spy.assert_clean()
 
@@ -758,7 +758,7 @@ class TestCreateTeam:
         monkeypatch.setattr(
             _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         team_id = r.json()["team_id"]
         assert r.json()["graph_name"] == f"team_{team_id}"
@@ -829,7 +829,7 @@ class TestMembers:
             {"id": "mem-4", "user_id": _USER4, "team_id": "team-free-001",
              "role": "member", "status": "removed", "identity": None},
         ])
-        r = tc.get("/v1/teams/team-free-001/members")
+        r = tc.get("/v1/organizations/team-free-001/members")
         assert r.status_code == 200, r.text
         rows = r.json()
         assert len(rows) == 3  # removed excluded
@@ -842,7 +842,7 @@ class TestMembers:
     def test_remove_member(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete(f"/v1/teams/team-free-001/members/{_USER2}")
+        r = tc.delete(f"/v1/organizations/team-free-001/members/{_USER2}")
         assert r.status_code == 200, r.text
         assert r.json() == {"status": "removed"}
         mem = next(m for m in fake.tables["team_memberships"]
@@ -853,7 +853,7 @@ class TestMembers:
         """Identity rows are removable via their surfaced user_id."""
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete("/v1/teams/team-free-001/members/anon-abc123")
+        r = tc.delete("/v1/organizations/team-free-001/members/anon-abc123")
         assert r.status_code == 200, r.text
         mem = next(m for m in fake.tables["team_memberships"]
                    if m["id"] == "mem-3")
@@ -862,19 +862,19 @@ class TestMembers:
     def test_remove_owner_409(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete(f"/v1/teams/team-free-001/members/{_USER1}")
+        r = tc.delete(f"/v1/organizations/team-free-001/members/{_USER1}")
         assert r.status_code == 409
 
     def test_remove_unknown_404(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete("/v1/teams/team-free-001/members/ghost")
+        r = tc.delete("/v1/organizations/team-free-001/members/ghost")
         assert r.status_code == 404
 
     def test_change_role(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.patch(f"/v1/teams/team-free-001/members/{_USER2}",
+        r = tc.patch(f"/v1/organizations/team-free-001/members/{_USER2}",
                      json={"role": "admin"})
         assert r.status_code == 200, r.text
         assert r.json() == {"user_id": _USER2, "role": "admin"}
@@ -885,16 +885,16 @@ class TestMembers:
     def test_change_owner_role_409(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.patch(f"/v1/teams/team-free-001/members/{_USER1}",
+        r = tc.patch(f"/v1/organizations/team-free-001/members/{_USER1}",
                      json={"role": "member"})
         assert r.status_code == 409
 
     def test_never_touches_registry(self, user_client, spy):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        assert tc.get("/v1/teams/team-free-001/members").status_code == 200
-        assert tc.delete(f"/v1/teams/team-free-001/members/{_USER2}").status_code == 200
-        assert tc.patch(f"/v1/teams/team-free-001/members/{_USER2}",
+        assert tc.get("/v1/organizations/team-free-001/members").status_code == 200
+        assert tc.delete(f"/v1/organizations/team-free-001/members/{_USER2}").status_code == 200
+        assert tc.patch(f"/v1/organizations/team-free-001/members/{_USER2}",
                         json={"role": "member"}).status_code == 200
         spy.assert_clean()
 
@@ -1045,7 +1045,7 @@ class TestGraphSurface:
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
         fake.seed("team_memberships", [_owner_membership()])
-        r = tc.get("/v1/teams")
+        r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
         rows = r.json()
         assert len(rows) == 1
@@ -1084,7 +1084,7 @@ class TestGraphSurface:
             "team_id": "team-free-001",
             "name": "research"}).status_code == 201
         assert tc.get("/v1/graphs?team_id=team-free-001").status_code == 200
-        assert tc.get("/v1/teams").status_code == 200
+        assert tc.get("/v1/organizations").status_code == 200
         spy.assert_clean()
 
 
@@ -1239,14 +1239,14 @@ class TestOnboardingTeam:
         r3 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r3.status_code == 200, r3.text
         assert r3.json()["team_id"] == sub_team_id
-        # the sub-team is LISTABLE by the owner (GET /v1/teams)
+        # the sub-team is LISTABLE by the owner (GET /v1/organizations)
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "user-1@example.com"}
-        r4 = tc.get("/v1/teams")
+        r4 = tc.get("/v1/organizations")
         assert r4.status_code == 200, r4.text
         assert any(t["team_id"] == sub_team_id for t in r4.json())
-        # and DELETABLE by the owner (DELETE /v1/teams/{id})
-        r5 = tc.delete(f"/v1/teams/{sub_team_id}")
+        # and DELETABLE by the owner (DELETE /v1/organizations/{id})
+        r5 = tc.delete(f"/v1/organizations/{sub_team_id}")
         assert r5.status_code in (200, 202), r5.text
         # the key is revoked by the delete cascade → auth fails closed
         app.dependency_overrides.clear()
@@ -1276,8 +1276,8 @@ _INVENTORY_ENDPOINTS = [
     ("post", "/v1/register",
      {"email": "sweep@example.com", "password": "hunter2secret"},
      None, "register writer"),
-    ("post", "/v1/teams", {"name": "sweep-team"}, None, "create_team writer"),
-    ("get", "/v1/teams/team-free-001/members", None, None, "member listing"),
+    ("post", "/v1/organizations", {"name": "sweep-team"}, None, "create_team writer"),
+    ("get", "/v1/organizations/team-free-001/members", None, None, "member listing"),
     ("post", "/v1/internal/reconcile", None, _INTERNAL_HEADERS, "reconcile"),
     ("post", "/v1/onboarding/team", {"name": "sweep-sub"}, None, "onboarding"),
     ("get", "/v1/graphs?team_id=team-free-001", None, None, "graph_list"),

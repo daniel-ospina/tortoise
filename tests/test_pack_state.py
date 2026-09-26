@@ -503,12 +503,12 @@ class TestProvisioningHooks:
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
 
     def test_create_team_activates_packs_supabase_mode(self, supabase_client):
-        """Site 2 (/v1/teams): activation rides the provision_team RPC hook."""
+        """Site 2 (/v1/organizations): activation rides the provision_team RPC hook."""
         from tortoise.hosted_api import app, get_current_user
         tc, fake, db_path = supabase_client
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U1, "email": "user-1@example.com"}
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         team_id = r.json()["team_id"]
         assert fake.rpc_calls[0][0] == "provision_team"

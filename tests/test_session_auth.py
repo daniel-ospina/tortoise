@@ -57,7 +57,7 @@ def make_request(token: str) -> Request:
         {
             "type": "http",
             "method": "GET",
-            "path": "/v1/teams",
+            "path": "/v1/organizations",
             "headers": Headers({"authorization": f"Bearer {token}"}).raw,
         }
     )

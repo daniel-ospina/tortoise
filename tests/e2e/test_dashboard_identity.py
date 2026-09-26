@@ -96,7 +96,7 @@ def _wire(page: Page, *, inv: dict | None = None,
           mint_calls: list | None = None,
           keys_rows: dict | None = None, created_keys: list | None = None) -> None:
     """Intercept api.premiselabs.co — mock the identity endpoints + the
-    shell's /v1/teams (the mount NEVER mints a bootstrap key since #2167 —
+    shell's /v1/organizations (the mount NEVER mints a bootstrap key since #2167 —
     POST /v1/session/key is a loud-500 zero-mint tripwire). ``inv_factory``
     (callable) lets a test flip the inventory response AFTER a mutation (e.g.
     post-commit refetch shows banner gone). ``teams`` (list of team dicts)
@@ -166,7 +166,7 @@ def _wire(page: Page, *, inv: dict | None = None,
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"sent": True}))
             return
-        if path.endswith("/v1/teams") and method == "GET":
+        if path.endswith("/v1/organizations") and method == "GET":
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(teams))
             return
@@ -219,7 +219,7 @@ def _wire(page: Page, *, inv: dict | None = None,
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"sessions": [], "backups": []}))
             return
-        if "/v1/teams/" in path and path.endswith("/members") and method == "GET":
+        if "/v1/organizations/" in path and path.endswith("/members") and method == "GET":
             # members tab: one owner row (the seeded user)
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps([{"user_id": "u-e2e-identity",
@@ -499,10 +499,10 @@ def test_create_team_success(page: Page):
     def handle_create(route):
         # Tight path match (the loadTeams GET + the create POST); NEVER
         # continue_() — the handler-chain fall-through hangs in this
-        # Playwright build (the #1874 gotcha). /v1/teams/{id}/members etc.
+        # Playwright build (the #1874 gotcha). /v1/organizations/{id}/members etc.
         # don't match the exact path and fall to _wire directly.
         path = route.request.url.split("?", 1)[0]
-        if path.endswith("/v1/teams"):
+        if path.endswith("/v1/organizations"):
             if route.request.method == "POST":
                 name = (json.loads(route.request.post_data or "{}").get("name") or "newteam")
                 teams.append({"team_id": "team_new", "team_name": name, "tier": "free"})
@@ -514,7 +514,7 @@ def test_create_team_success(page: Page):
                               body=json.dumps(teams))
             return
         route.continue_()
-    page.route("**/v1/teams", handle_create)
+    page.route("**/v1/organizations", handle_create)
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
@@ -542,7 +542,7 @@ def test_create_team_success(page: Page):
 
 
 def test_create_team_free_capped_gate(page: Page):
-    """#1877/#2789: a 402 from POST /v1/teams surfaces the gated dialog. The
+    """#1877/#2789: a 402 from POST /v1/organizations surfaces the gated dialog. The
     server drives it with a STRUCTURED detail (`one_free_org_limit`) — the
     three-option gate (#2789) — never by string-matching the message.
 
@@ -556,7 +556,7 @@ def test_create_team_free_capped_gate(page: Page):
         # Same tight-path + no-continue pattern as test_create_team_success
         # (the handler-chain fall-through hangs in this Playwright build).
         path = route.request.url.split("?", 1)[0]
-        if path.endswith("/v1/teams"):
+        if path.endswith("/v1/organizations"):
             if route.request.method == "POST":
                 route.fulfill(status=402, content_type="application/json",
                               body=json.dumps({"detail": {
@@ -570,7 +570,7 @@ def test_create_team_free_capped_gate(page: Page):
                                                 "tier": "free"}]))
             return
         route.continue_()
-    page.route("**/v1/teams", handle_create)
+    page.route("**/v1/organizations", handle_create)
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
@@ -599,7 +599,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
     list (role + subscription_status) and opens the three-option dialog
     immediately — the user never types a name and gets rejected.
 
-    No POST /v1/teams is stubbed/allowed here: reaching the dialog without one
+    No POST /v1/organizations is stubbed/allowed here: reaching the dialog without one
     IS the assertion.
     """
     _seed(page)
@@ -614,7 +614,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
 
     def handle_create(route):
         path = route.request.url.split("?", 1)[0]
-        if path.endswith("/v1/teams"):
+        if path.endswith("/v1/organizations"):
             if route.request.method == "POST":
                 posted.append(route.request.url)
                 route.fulfill(status=500, content_type="application/json",
@@ -628,7 +628,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
                                                                         "pro": "price_200proMM"}}]))
             return
         route.continue_()
-    page.route("**/v1/teams", handle_create)
+    page.route("**/v1/organizations", handle_create)
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
@@ -638,7 +638,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
     # The name input is NOT shown — no rejection-after-typing flow.
     expect(dialog.get_by_label("Organization name")).to_have_count(0)
     expect(dialog.get_by_role("button", name="Purchase subscription for a new organization")).to_be_visible()
-    assert posted == [], "the pre-check must not POST /v1/teams"
+    assert posted == [], "the pre-check must not POST /v1/organizations"
     # The third option opens the paid-new-org flow (name + plan), not a checkout.
     dialog.get_by_role("button", name="Purchase subscription for a new organization").click()
     dialog = page.get_by_role("dialog", name="Purchase a subscription for a new organization")

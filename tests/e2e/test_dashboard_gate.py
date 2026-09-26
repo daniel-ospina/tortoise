@@ -238,7 +238,7 @@ def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> 
                 route.fulfill(status=500, content_type="application/json",
                               body=_json.dumps({"detail": "#2167 zero-mint tripwire"}))
                 return
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
                               body=_json.dumps([{"team_id": "team_m429", "name": "M429"}]))
                 return
@@ -304,7 +304,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 # First-timer: no teams → the app provisions.
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
@@ -424,7 +424,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             route.fulfill(status=500, content_type="application/json",
                           body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
             return
-        if url.endswith("/v1/teams"):
+        if url.endswith("/v1/organizations"):
             # #1885: returning visit — the team EXISTS now; the shared handle
             # mocks teams→[] (first-timer), which would re-trigger provisioning.
             route.fulfill(status=200, content_type="application/json",
@@ -491,7 +491,7 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
                 else:
                     route.fulfill(status=200, content_type="application/json", body="{}")
                 return
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             if url.endswith("/v1/user/identity") and route.request.method == "GET":
@@ -567,7 +567,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
@@ -619,7 +619,7 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
@@ -689,7 +689,7 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
             # #1828: loadAll pins ?team_id= on overview reads — match on the
             # query-stripped path so /v1/team/keys?team_id=… still resolves.
             path = urllib.parse.urlsplit(url).path
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([{"team_id": "team_frag", "name": "Frag Team"}]))
                 return
@@ -739,7 +739,7 @@ def _mock_session_shell(route, url: str, json_mod, mint_calls: list | None = Non
     identity inventory, keys/sessions/backups (query-tolerant #1828) — 200
     empty so the chrome renders on the session JWT alone. POST /v1/session/key
     is a loud-500 + counter zero-mint tripwire. Returns True if handled (the
-    caller's /v1/teams + /v1/team branches run first)."""
+    caller's /v1/organizations + /v1/team branches run first)."""
     path = url.split("?", 1)[0]
     if path.endswith("/v1/session/key"):
         if mint_calls is not None:
@@ -789,7 +789,7 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([{"team_id": "team_ok", "name": "OK", "tier": "free"}]))
                 return
@@ -833,7 +833,7 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
 
 def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> None:
     """#2167 rule 9 + F8 (the ACTUAL fresh-login suspension mechanism): an
-    ALL-suspended membership set makes the server 403 the /v1/teams LIST
+    ALL-suspended membership set makes the server 403 the /v1/organizations LIST
     with the _suspended_detail() dict (list_my_teams — hosted_api.py).
     #2246: the mount NEVER probes stored keys — the session-mount residue
     purge runs at session resolution (before the teams fetch), so even a
@@ -858,7 +858,7 @@ def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> 
             path = url.split("?", 1)[0]
             if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
                 key_authed.append(url)
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 # the REAL contract: every membership suspended → 403 dict
                 route.fulfill(status=403, content_type="application/json",
                               body=json.dumps({"detail": {"code": "SUSPENDED",
@@ -893,7 +893,7 @@ def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> 
 
 def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
     """#2167 rule 9 + F8 (fresh login, NO stored key): an ALL-suspended
-    membership set 403s the /v1/teams LIST with the _suspended_detail() dict
+    membership set 403s the /v1/organizations LIST with the _suspended_detail() dict
     (list_my_teams) — the session-authed teams fetch IS the fresh-login
     suspension vector post-mint-removal. The catch parses the dict → the
     appeal banner renders. (Distinct from the stored-durable test above.)"""
@@ -910,7 +910,7 @@ def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 # the REAL contract: every membership suspended → 403 dict
                 route.fulfill(status=403, content_type="application/json",
                               body=json.dumps({"detail": {"code": "SUSPENDED",
@@ -957,7 +957,7 @@ def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> 
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 # suspended FIRST membership + healthy second (#1912)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([
@@ -1029,7 +1029,7 @@ def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) ->
             path = url.split("?", 1)[0]
             if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
                 key_authed.append(url)
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([
                                   {"team_id": "team_sus", "name": "Suspended Co",

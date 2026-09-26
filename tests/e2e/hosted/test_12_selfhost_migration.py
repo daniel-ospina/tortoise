@@ -182,7 +182,7 @@ def _provision_owner_tenant(api, user_id: str) -> dict:
     """Team + APIKey + owner Membership via /internal/provision (the E2E-6-D
     pattern): register-created teams have no Membership node, but the import
     endpoint is owner-scoped session auth — the parity journey needs a real
-    owner tenant to POST /v1/teams/{team_id}/import and read the export."""
+    owner tenant to POST /v1/organizations/{org_id}/import and read the export."""
     team_id = f"e2e12p-{uuid.uuid4().hex[:10]}"
     r = api.post("/internal/provision",
                  headers={"Authorization": f"Bearer {INTERNAL_KEY}"},
@@ -261,7 +261,7 @@ def test_parity_export_import(api, session_jwt, tmp_path):
     Beats the E2E-12-D baseline (test_migration_journey_selfhost_to_hosted
     asserts content-presence only): selfhost graph (points + operator + edges)
     → `tortoise export` subprocess (real CLI, encrypt-by-default) → fresh
-    hosted team → POST /v1/teams/{team_id}/import → structure counts, Point
+    hosted team → POST /v1/organizations/{org_id}/import → structure counts, Point
     IDs, and edge topology all match the source.
 
     Pinned name — referenced by the `-k parity` CI selector.
@@ -299,7 +299,7 @@ def test_parity_export_import(api, session_jwt, tmp_path):
 
     # 3. Import the artifact into the fresh team graph.
     r = api.post(
-        f"/v1/teams/{team_id}/import",
+        f"/v1/organizations/{team_id}/import",
         data=Path(out).read_bytes(),
         headers={**h,
                  "Content-Type": "application/vnd.tortoise.export.v1",
@@ -314,7 +314,7 @@ def test_parity_export_import(api, session_jwt, tmp_path):
     #    the E2E-12-D baseline). The owner export snapshot surfaces the same
     #    `MATCH (n) RETURN count(n)` / `MATCH ()-[r]->() RETURN count(r)`
     #    counts that back `tortoise_check_structure`.
-    snapshot = api.get(f"/v1/teams/{team_id}/export", headers=h)
+    snapshot = api.get(f"/v1/organizations/{team_id}/export", headers=h)
     assert snapshot.status == 200, snapshot.text()
     exp = snapshot.json()
     assert exp["summary"]["nodes"] == ref["nodes"]
