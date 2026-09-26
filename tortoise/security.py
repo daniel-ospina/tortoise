@@ -310,7 +310,11 @@ def redact_error(e: BaseException) -> str:
 #     an underscore and (b) lets a greedy body BACKTRACK to an internal ``-``
 #     and replace only the token's prefix, leaving the secret body in cleartext
 #     while the count says it was redacted — a false assurance. The lookbehind
-#     forms likewise exclude ``_`` where a real key can begin against one.
+#     forms are ``(?<![A-Za-z0-9])``: they exclude a token that merely
+#     continues an alphanumeric run, but deliberately NOT ``_`` or ``-``, which
+#     are body characters — a real token glued after one must still match.
+#     Narrowing a lookbehind to buy scan speed is a RECALL bug, not a fix; see
+#     **Linear** below for the measured instance.
 #   * **Visible marker, never a silent cut.** A matched span is replaced by
 #     ``[REDACTED:<kind>]``, so a reader of a stored turn can tell a secret was
 #     there and that the text is incomplete. Silent loss of fidelity on this
@@ -321,23 +325,37 @@ def redact_error(e: BaseException) -> str:
 #     deletion).
 #   * **Ordered.** ``sk-ant-…`` is tried before the generic ``sk-…``, or every
 #     Anthropic key would be labelled an OpenAI one.
-#   * **Linear.** No rule may scan the text once per candidate start. The
-#     private-key rule is a single lazy body with an END-or-end-of-text
-#     alternation, so every match consumes to its own END (or to the end of the
-#     text) and the scan resumes AFTER it: total cost is O(text). A rule that
-#     instead failed from every header would be O(headers × text) — measured
-#     40-96 ms on a single 5,000-char adversarial turn (#5296), which a
-#     whole-session transcript multiplies into minutes.
+#   * **Linear.** No rule may do work proportional to the TEXT once per
+#     candidate start; every rule must bound its per-candidate work by a
+#     CONSTANT, so the total is O(text) however many candidates the text holds.
+#     Three concrete ways to violate it, all measured in this table:
 #
-#     The SECOND way a rule goes superlinear is a lookbehind that admits a
-#     character the rule's OWN body class also matches. A body run then
-#     contains fresh candidate starts, each of which re-consumes the run from
-#     its own position — O(candidates × text). Measured on the ``jwt`` rule
-#     (#4911 cycle 1): a lookbehind of ``(?<![A-Za-z0-9])`` let ``_eyJ…``
-#     survive against a body class containing ``_``, and 55k chars cost
-#     0.85 s, 110k cost 2.83 s, 220k cost 10.50 s. Every lookbehind here
-#     therefore excludes its own body characters (``_`` and ``-`` for the
-#     base64url shapes), and a binding test asserts the scaling.
+#       1. **Restarting from every header.** The private-key rule is a single
+#          lazy body with an END-or-end-of-text alternation, so every match
+#          consumes to its own END (or to the end of the text) and the scan
+#          resumes AFTER it. A rule that instead failed from every header would
+#          be O(headers × text) — 40-96 ms on one 5,000-char adversarial turn
+#          (#5296), which a whole-session transcript multiplies into minutes.
+#       2. **An unbounded class in front of a REQUIRED suffix.**
+#          ``-----BEGIN [A-Za-z0-9 ._-]*PRIVATE KEY-----`` is quadratic when the
+#          suffix is absent: the label class consumes the tail and then
+#          backtracks for the suffix at every start (measured 0.018 s @11k →
+#          5.752 s @88k). Bounded at 40 characters it is linear (0.0024 s for
+#          the same input).
+#       3. **An unbounded first segment behind a REQUIRED delimiter.** The
+#          ``jwt`` rule's FIRST segment is bounded at 512 characters for this
+#          reason: a dotless ``_eyJ…`` run otherwise had every candidate
+#          consume the whole remaining run (0.85 s @55k → 2.83 s @110k →
+#          10.50 s @220k).
+#
+#     ⛔ A NEGATIVE LOOKBEHIND IS NOT A LINEARITY GUARD — cycle 1 of #4911
+#     shipped one believing it was, and had to be reverted. Excluding a rule's
+#     own body characters from its lookbehind does remove the overlapping
+#     candidates, but those body characters are exactly what a real GLUED token
+#     looks like, so it buys linearity by DROPPING RECALL: ``(?<![A-Za-z0-9_-])``
+#     stopped matching a JWT pasted after ``-``/``_`` (measured ``pre='_' ->
+#     {}`` where the pre-change rule returned ``{'jwt': 1}``). Bound the
+#     per-candidate WORK; never narrow the lookbehind to buy speed.
 #
 # Deliberately NOT included: a gitleaks ``generic-api-key``-style rule (context
 # match on ``api``/``token``/``secret``/``key`` plus an entropy gate). It would
@@ -494,22 +512,38 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # and the sentence segmenter the session transcript runs through splits on
     # the dots — without it both turn one credential into three unmatched
     # fragments whose concatenation is still the key.
-    # ⛔ THE LOOKBEHIND, NOT THE QUANTIFIERS, IS WHAT MAKES THIS LINEAR — and it
-    # was wrong until review measured it (#4911 cycle 1). ``_`` and ``-`` are
-    # BODY characters of a base64url token, so ``(?<![A-Za-z0-9])`` admitted
-    # ``_eyJ…`` / ``-eyJ…``: the whole string became ONE body run with a fresh
-    # candidate at every ``_``, each possessively consuming the entire tail,
-    # failing on the absent dot, and retrying one character on — quadratic
-    # (0.85 s @55k → 2.83 s @110k → 10.50 s @220k, measured). Excluding the
-    # body's own characters from the lookbehind leaves no surviving candidate
-    # inside a run, so the scan is a single pass. The possessive quantifiers are
-    # KEPT as a second guard — they stop backtracking *within* a candidate that
-    # does start — but they never fixed the run-restart cost, and the test that
-    # was supposed to bind it (`("eyJ"+"A"*10)*n`) could not: every `eyJ` after
-    # the first is preceded by `A`, so the lookbehind rejected it before any
-    # body work happened.
+    # ⛔ LINEARITY COMES FROM THE BOUNDED FIRST SEGMENT, NOT THE LOOKBEHIND —
+    # cycle 2 proved both halves of that the hard way (#4911).
+    #
+    # The lookbehind must ADMIT ``_`` and ``-``: both are base64url body
+    # characters, so a JWT pasted straight after one is a real credential that
+    # must be redacted. Cycle 1 excluded them to kill a quadratic scan and
+    # thereby STOPPED MATCHING those JWTs — a leak (measured ``pre='_' -> {}``
+    # where the pre-change rule gave ``{'jwt': 1}``). Recall is restored here.
+    #
+    # The quadratic it was trying to kill came from the first segment being
+    # UNBOUNDED: in a dotless run every ``eyJ`` candidate possessively consumed
+    # the entire remaining run, failed on the absent dot, and the engine retried
+    # one character on — O(candidates × text) (0.85 s @55k → 2.83 s @110k →
+    # 10.50 s @220k). Bounding that ONE segment caps each candidate at 512
+    # characters, which makes the total O(text) however many candidates occur
+    # (measured 1.24 s for 1.6 MB of the pathological ``_eyJ``×400 000 input,
+    # and the cost tracks the CANDIDATE COUNT, so it is linear in the text).
+    # Segments 2-3 stay unbounded: they are reached only after a real dot, so a
+    # candidate that scans far consumes text no later candidate re-scans.
+    #
+    # 512 bounds the HEADER segment. Real JWT headers are base64url JSON — 36
+    # chars for ``{"alg","typ"}``, ~60 with ``kid``, and a header carrying a
+    # full embedded ``jwk``/``x5c`` can exceed 512; that is a known recall
+    # residual, recorded in the scoping doc and pinned by a test, and it is a
+    # far narrower miss than dropping every ``-``/``_``-glued token.
+    #
+    # The possessive quantifiers remain as a third guard (no backtracking
+    # *within* a candidate), and the test that was supposed to bind this earlier
+    # could not: ``("eyJ"+"A"*10)*n`` has every ``eyJ`` after the first
+    # preceded by ``A``, so the lookbehind rejected it before any body work.
     ("jwt",
-     re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}+"
+     re.compile(r"(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{10,512}+"
                 r"\s*\.\s*[A-Za-z0-9_-]{10,}+"
                 r"\s*\.\s*[A-Za-z0-9_-]{10,}+"),
      _REDACTION_VALUE.format(kind="jwt")),
@@ -528,10 +562,22 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # linear in the text. The cost of the fail-closed branch is over-redaction
     # (everything from the dangling header onward), which is the safe direction
     # and is visible in the marker.
+    #
+    # ⛔ THE LABEL CLASS IS BOUNDED ({0,40}) FOR THE SAME REASON — it was
+    # unbounded until cycle 2 measured it (#4911). An unbounded label class in
+    # front of a REQUIRED ``PRIVATE KEY-----`` suffix is quadratic whenever the
+    # suffix is absent: at every ``-----BEGIN `` the class consumes the whole
+    # tail and then backtracks looking for the suffix (measured on
+    # ``("-----BEGIN "*n)``: 0.018 s @11k → 0.242 s @22k → 1.276 s @44k →
+    # 5.752 s @88k — 4.4 s for 88 k chars). Bounding it caps each candidate at
+    # 40 characters, which is linear (0.0024 s for the same 88 k input). Real
+    # PEM labels are short — ``RSA``, ``EC``, ``OPENSSH``, ``DSA``, ``ENCRYPTED``,
+    # ``PRIVATE KEY`` — so 40 is generous; a "label" longer than that is not one
+    # we can recognise anyway.
     ("private_key",
-     re.compile(r"-----BEGIN [A-Za-z0-9 ._-]*PRIVATE KEY-----"
+     re.compile(r"-----BEGIN [A-Za-z0-9 ._-]{0,40}PRIVATE KEY-----"
                 r"[\s\S]*?"
-                r"(?:-----END [A-Za-z0-9 ._-]*PRIVATE KEY-----|\Z)"),
+                r"(?:-----END [A-Za-z0-9 ._-]{0,40}PRIVATE KEY-----|\Z)"),
      _REDACTION_VALUE.format(kind="private_key")),
     # `Authorization: Bearer <token>` — the header NAME is KEPT so the record
     # stays diagnostic; only the credential goes.
@@ -562,15 +608,15 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
     non-secret turn is returned byte-identical, and the text around a matched
     span is preserved.
 
-    Idempotent: no rule's ANCHOR can be satisfied inside a ``[REDACTED:<kind>]``
-    marker — no vendor prefix, no header/parameter keyword, no ``BEGIN …
-    PRIVATE KEY`` label appears in one — so re-running over already-redacted
-    text changes nothing and adds no counts. (The reason is the anchor, not the
-    body: the ``private_key`` body matches everything, including ``[``/``:``/
-    ``]``; it is the ``-----BEGIN … PRIVATE KEY-----`` anchor a marker cannot
-    provide.) That matters because the capture path redacts the
-    stored text once for the embedding batch and once at the write — the same
-    bytes must come out both times (#4194).
+    Idempotent: no rule's anchor GROUP can be satisfied inside a
+    ``[REDACTED:<kind>]`` marker, so re-running over already-redacted text
+    changes nothing and adds no counts. The reason is the anchor, not the body:
+    the ``private_key`` body matches everything (including ``[``/``:``/``]``),
+    and the AWS/bearer markers DO contain their anchor keyword but never the
+    separator or whitespace that keyword's anchor group requires. That matters
+    because the capture path redacts the stored text once for the embedding
+    batch and once at the write — the same bytes must come out both times
+    (#4194).
     """
     if not isinstance(text, str) or not text:
         return text, {}

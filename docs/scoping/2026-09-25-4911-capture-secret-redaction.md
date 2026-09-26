@@ -133,6 +133,30 @@ reuse the result. **No capture-path scrub runs on the event loop.** The scrub it
 (measured 0.97 s @220k, 1.51 s @440k); its 2x-input cost ratio is ~2, and the binding test asserts
 that scaling rather than a wall-clock threshold.
 
+**Residual — cycle 2, MEASURED and PINNED: the `jwt` rule will not match a token whose HEADER
+segment exceeds 512 characters.** Cycle 1 made the rule linear by excluding `_`/`-` from its
+lookbehind, which also stopped matching a JWT glued after one of those characters — a LEAK against a
+shape that was covered before the change, caught by cycle 2 (`pre='_' -> {}` where the pre-change
+rule returned `{'jwt': 1}`). The fix bounds the FIRST segment at 512 characters instead: that
+restores the recall and keeps the scan linear (the per-candidate work is capped, so the total is
+O(text) however many candidates occur). The price is this bound — a JWT whose base64url header
+exceeds 512 chars (a header carrying an embedded `jwk`/`x5c`) is not matched. Real headers are 36
+chars (`{"alg","typ"}`) to ~60 with `kid`.
+
+**Residual — cycle 2, MEASURED and PINNED: the `private_key` label class is bounded at 40
+characters.** An unbounded label class in front of a REQUIRED `PRIVATE KEY-----` suffix is quadratic
+whenever the suffix is absent — at every `-----BEGIN ` the class consumed the tail and backtracked
+for the suffix (0.018 s @11k → 0.242 s @22k → 1.276 s @44k → 5.752 s @88k). Bounded at 40 it is
+linear (0.0024 s for the same 88 k input). Real PEM labels are `RSA`/`EC`/`OPENSSH`/`DSA`/`ENCRYPTED`,
+so 40 is generous.
+
+Both are bound by `test_every_rule_scans_linearly_on_adversarial_input`, which asserts the SCALING of
+the three adversarial families (2x input < 3x time) *and* the leading `_`/`-` recall — so neither
+half of the linearity-vs-recall trade can be undone silently. That test replaces
+`test_the_jwt_rule_scans_linearly_on_adversarial_input`, which cycle 1 shipped and which could not
+discriminate: its input's every `eyJ` after the first is preceded by `A`, so the lookbehind rejected
+it before any body work ran, and it passed with the guard reverted.
+
 **Residual, FILED not fixed (outside the declared T1–T7 surface): the confirmation comparison is
 version-sensitive.** `session_confirm.expected_turns` builds the expected stored text with the
 CLIENT's redaction table and `confirm_capture` requires an exact match. Before this change the stored
@@ -211,7 +235,7 @@ neutralizing the scrubber and watching the class red), plus green CI:
 | **T4** | **Cap / ordering bypass** — `cap` must bound the RESULT (not only the scanned text), and client and server must cut-then-scrub identically or the #4675 confirmation never files | `test_a_capped_scan_truncates_the_text_it_returns`, `test_an_over_long_turn_matches_between_client_and_server` |
 | **T5** | **Non-string content coerced past the scrubber** and later `str()`-ed by a downstream consumer | `test_the_source_sink_scans_a_bounded_window` |
 | **T6** | **Re-match / double-count on the second pass** — the visible marker re-matched, so wording or the recorded count depends on how many times the helper ran | `test_redaction_is_idempotent_under_the_capture_double_pass` |
-| **T7** | **Scanner self-DoS** — a superlinear rule makes the control too costly to run on client-controlled text | `test_the_jwt_rule_scans_linearly_on_adversarial_input` |
+| **T7** | **Scanner self-DoS** — a superlinear rule makes the control too costly to run on client-controlled text | `test_every_rule_scans_linearly_on_adversarial_input` (all three adversarial families, with a 2x-input scaling assertion and a recall check) |
 
 **Explicitly OUT of scope** (declared and named, so they are not chased inside the bound): rotating
 the already-pasted key (owner); the capture **consent** mechanism (#3615); a password-bearing

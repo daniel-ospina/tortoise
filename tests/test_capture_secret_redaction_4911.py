@@ -348,10 +348,12 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     """The Source scrub is bounded, and a non-str content cannot dodge it.
 
     Both halves are the same defect seen from two directions: the Source
-    transcript builder runs on the hosted EVENT LOOP, so an unbounded scan over a
-    client-controlled turn is a loop blocker; and a ``content`` that is not a str
-    used to be skipped by the scrubber and then stringified by that same builder
-    — the credential landed in ``Source.summary`` while the receipt said 0.
+    transcript builder receives the RAW, client-controlled conversation, so an
+    unbounded scan is seconds of CPU per capture (the hosted caller runs it off
+    the event loop on ``_CAPTURE_EXECUTOR`` — the bound is window parity and
+    cost, not loop protection, #4911); and a ``content`` that is not a str used
+    to be skipped by the scrubber and then stringified by that same builder —
+    the credential landed in ``Source.summary`` while the receipt said 0.
 
     ⛔ The assertion on the non-str turn is the marker's PRESENCE, not merely the
     secret's ABSENCE. Absence alone is satisfied VACUOUSLY by any arrangement in
@@ -613,6 +615,19 @@ def test_a_credential_touching_a_word_character_is_still_redacted():
             "terminator let a greedy body backtrack to an internal `-`")
         assert counts.get(kind), f"{case}: not counted"
 
+        # #4911 cycle 2: the boundary must hold on the LEADING side too. `_`
+        # and `-` are body characters, so a real token can be glued straight
+        # after one. Narrowing the lookbehind to exclude them was tried to buy
+        # scan speed and silently stopped matching these — a LEAK, not a
+        # tightening (measured `pre='_' -> {}` where the old rule gave
+        # `{'jwt': 1}`). Pin both directions so the trade cannot be re-made.
+        for pre in ("_", "-"):
+            lead_out, lead_counts = redact_secrets(f"key {pre}{value}")
+            assert value not in lead_out, (
+                f"{case}: still stored after a leading {pre!r} — the "
+                "lookbehind was narrowed past a real body character")
+            assert lead_counts.get(kind), f"{case}: not counted after {pre!r}"
+
     # Context-anchored form: the JSON/YAML shape a pasted config actually has,
     # where the key's closing quote sits between the name and the separator.
     secret = _synth("wJalrXUtnFEMI", "/K7MDENG", "/bPxRfiCYEXAMPLEKEY")
@@ -742,57 +757,70 @@ def test_a_caller_supplied_summary_is_scrubbed():
     assert isinstance(_redact_summary_strings(deep), dict)
 
 
-def test_the_jwt_rule_scans_linearly_on_adversarial_input():
-    """A failing ``eyJ`` start must not rescan the tail (the #5296 class).
+def test_every_rule_scans_linearly_on_adversarial_input():
+    """No rule may re-scan the tail from every candidate start (T7, #5296).
 
-    TWO families, because the one this test used to assert did NOT bind the
-    guard (#4911 cycle 1 — review proved it stayed green with the lookbehind
-    reverted):
+    ``test_the_jwt_rule_scans_linearly_on_adversarial_input`` was the original
+    name; it is generalised because TWO rules shipped superlinear the same way
+    and only one of them was covered (#4911 cycles 1 and 2). Three families,
+    each a run whose candidate cannot complete its required delimiter:
 
-      * ``("eyJ" + "A"*10) * n`` — every ``eyJ`` after the first is preceded by
-        ``A``, so ``(?<![A-Za-z0-9])`` rejected it before any body work ran.
-      * ``("_eyJ" + "A"*50 + "_") * n`` — ``_`` is a BASE64URL BODY character,
-        so a lookbehind that admits ``_`` turns the whole string into ONE body
-        run with a fresh candidate at every ``_``: each candidate possessively
-        consumes the entire tail, fails on the absent dot, and the engine
-        retries one character on. Quadratic — 55k chars measured 0.85 s, 110k
-        2.83 s, 220k 10.50 s. Excluding ``_``/``-`` from the lookbehind leaves
-        no surviving candidate inside a run, so the scan is a single pass.
+      * ``("eyJ" + "A"*10) * n`` — the shipped input. Every ``eyJ`` after the
+        first is preceded by ``A``, so the lookbehind rejects it before any body
+        work: it CANNOT discriminate, which is why the historical test passed
+        with the guard reverted.
+      * ``("_eyJ" + "A"*50 + "_") * n`` — the ``jwt`` first segment is what
+        made this quadratic: unbounded, every candidate consumed the whole run
+        (0.85 s @55k → 2.83 s @110k → 10.50 s @220k). Bounding that segment at
+        512 characters — NOT narrowing the lookbehind, which dropped recall —
+        makes it linear.
+      * ``"-----BEGIN " * n`` — the ``private_key`` label class in front of a
+        REQUIRED ``PRIVATE KEY-----`` suffix: unbounded it consumed the tail and
+        backtracked for the suffix at every start (0.018 s @11k → 1.276 s @44k
+        → 5.752 s @88k). Bounded at 40 characters it is linear.
 
-    Both a wall-clock bound AND a scaling assertion, because a generous
-    threshold alone cannot certify linearity (and did not: the reverted rule
-    passed the shipped 5.0 s bound at 520k).
+    Scaling, not just a wall-clock threshold: a generous absolute bound alone
+    cannot certify linearity (and did not — the reverted `jwt` rule passed the
+    shipped 5.0 s bound). 2x input may not cost more than 3x time.
     """
     import time
 
-    def _scan(chars: int) -> tuple[float, dict]:
-        text = ("_eyJ" + "A" * 50 + "_") * (chars // 54)
+    families = (
+        ("shipped eyJ", lambda n: ("eyJ" + "A" * 10) * n),
+        ("glued _eyJ", lambda n: ("_eyJ" + "A" * 50 + "_") * n),
+        ("PEM label, no suffix", lambda n: "-----BEGIN " * n),
+    )
+    def scan(name: str, build, n: int) -> float:
+        text = build(n)
         started = time.perf_counter()
         redacted, counts = redact_secrets(text)
-        assert redacted == text, "no dot ⇒ no JWT ⇒ the text is untouched"
-        return time.perf_counter() - started, counts
+        elapsed = time.perf_counter() - started
+        # None of these runs contains a complete credential: nothing may be
+        # redacted and the text must come back byte-identical. That also
+        # keeps the timing about the SCAN, not about replacement work.
+        assert counts == {}, f"{name}: redacted a non-credential"
+        assert redacted == text, f"{name}: text was modified"
+        return elapsed
 
-    # The family the previous version used. Kept because it is the documented
-    # regression input, even though it alone cannot discriminate.
-    shipped = ("eyJ" + "A" * 10) * 40_000            # ~520k chars, no dots
-    started = time.perf_counter()
-    redacted, counts = redact_secrets(shipped)
-    elapsed = time.perf_counter() - started
-    assert counts == {} and redacted == shipped
-    assert elapsed < 8.0, f"superlinear scan: {elapsed:.2f}s for 520k chars"
+    for name, build in families:
+        one = scan(name, build, 20_000)
+        two = scan(name, build, 40_000)
+        assert two < max(one * 3.0, 1.0), (
+            f"{name}: scan does not scale linearly — {one:.3f}s for 20k units "
+            f"→ {two:.3f}s for 2x input (a rule is re-scanning the tail from "
+            "every candidate start)")
 
-    # The binding family. Fixed ~1.0 s at 220k; the quadratic form measured
-    # 10.5 s there, so this bound discriminates both ways with margin.
-    one, counts_one = _scan(220_000)
-    assert counts_one == {}
-    assert one < 4.0, f"superlinear JWT scan: {one:.2f}s for 220k chars"
-
-    # Scaling: 2x input may not cost more than 3x time (linear ~2x, quadratic
-    # ~4x+). A generous absolute bound cannot certify this.
-    two, _ = _scan(440_000)
-    assert two < one * 3.0, (
-        f"JWT scan does not scale linearly: {one:.3f}s → {two:.3f}s for 2x "
-        "input — a lookbehind that admits a body character re-scans the run")
+    # And the recall half of the same trade: bounding per-candidate work must
+    # NOT be bought by narrowing a lookbehind past a real body character. A JWT
+    # glued after `_`/`-` is a real credential (cycle 1 dropped it).
+    jwt = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+           ".eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "A" * 43)
+    for pre in ("_", "-", " ", "=", '"'):
+        out, counts = redact_secrets(f"token {pre}{jwt}")
+        assert jwt not in out, (
+            f"a JWT glued after {pre!r} leaked — the lookbehind was narrowed "
+            "past a real base64url body character to buy scan speed")
+        assert counts.get("jwt") == 1, pre
 
 
 def test_redaction_is_idempotent_under_the_capture_double_pass():

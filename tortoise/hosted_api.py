@@ -10258,16 +10258,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
     # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
-    # HERE — ONCE, off the event loop, on the capture pool — and the writer
-    # below REUSES this exact result instead of recomputing it. The scrub is
-    # ~3 s/MB of client-controlled text (measured: 0.97 s @220k, linear), and a
-    # legal-maximum 500x5,000 capture is 2.5 MB, so the four independent passes
-    # it replaced cost ~10 s of CPU for one capture. It must not run on the
-    # loop at all: `_capture_turn_texts` used to be an O(n) f-string loop, but
-    # it now scrubs, so calling it bare here would put seconds of CPU on the
-    # loop — the #3060/#3086 freeze class this file is built around (and which
+    # HERE, off the event loop, on the capture pool, and the writer below and
+    # the linker further down REUSE this exact result instead of recomputing it.
+    # The scrub is ~3 s/MB of client-controlled text (measured: 0.97 s @220k,
+    # linear), and a legal-maximum 500x5,000 capture is 2.5 MB. Reuse removes
+    # the two passes this lane used to pay for the SAME window — the embedding
+    # batch's and the linker's. It must not run on the loop at all:
+    # `_capture_turn_texts` used to be an O(n) f-string loop, but it now scrubs,
+    # so calling it bare here would put seconds of CPU on the loop — the
+    # #3060/#3086 freeze class this file is built around (and which
     # `test_capture_loop_responsiveness` cannot see: it counts on-loop QUERIES,
-    # and a scrub issues none).
+    # and a scrub issues none). See the scoping doc for the pass COUNT this lane
+    # still pays (the extractor and the session `:Source` each scrub the same
+    # window for their own consumers; idempotence keeps the count correct).
     _turn_texts, _redaction_counts = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_texts_with_redactions, windowed)
     _turn_embs = await _run_off_loop(
@@ -10730,8 +10733,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #4194/#4911: the shared `_capture_turn_texts_with_redactions` is the
         # ONE stored-text definition — the link trigger, the stored turn, and
         # the embedded text cannot drift (#1532 D1/D2). The texts were already
-        # computed off the loop above; reusing them keeps the scrub to ONE pass
-        # per capture.
+        # computed off the loop above, so the linker adds NO scrub pass of its
+        # own.
         link_texts = _turn_texts
         link_result = link_session_entities(
             proj, session_id, link_texts,

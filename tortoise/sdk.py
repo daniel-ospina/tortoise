@@ -598,9 +598,11 @@ def _redact_turn_contents(
     callers there pass nothing; the session-``:Source``/extractor consumers get
     the RAW conversation and MUST pass the same window the persisted text uses
     (``_capture_turn_window``'s 5,000), because a client-controlled turn of a few
-    MB otherwise costs seconds of scanning on a path that runs on the hosted
-    event loop (measured: 2 MB → ~6.9 s), and because the value beyond that
-    window is never persisted anyway.
+    MB otherwise costs seconds of scanning (measured: 2 MB → ~6.9 s at
+    ~3 s/MB), and because the value beyond that window is never persisted
+    anyway. The bound is a CPU-cost and window-parity bound, NOT loop
+    protection: in the hosted lane every capture-path caller of this is now off
+    the event loop (#4911 cycle 1).
 
     Idempotent: a marker contains no character class any pattern matches, so
     re-scrubbing already-scrubbed text returns it unchanged with zero counts —
@@ -5747,7 +5749,10 @@ class TortoiseSDK:
         # the assembled string cannot see a credential the segmenter split (a
         # JWT becomes three space-separated fragments). ``cap`` bounds the scan
         # to the window the persisted text uses — this sink receives the RAW
-        # conversation, and this call runs on the hosted event loop.
+        # conversation, so the bound is what keeps its cost proportional to what
+        # is actually persisted. (The hosted caller runs this OFF the event
+        # loop, on ``_CAPTURE_EXECUTOR``; the bound is window parity and CPU
+        # cost, not loop protection — #4911 cycle 1.)
         redacted, _ = _redact_turn_contents(
             conversation or [], cap=_CAPTURE_TURN_CAP)
         transcript, _ = _session_llm_transcript(redacted)
