@@ -1933,7 +1933,10 @@ def build_report(
     # | truncated > 0            | cap too low for the stage → raise the    |
     # |                          | stage cap (TORTOISE_EXTRACTOR_MAX_TOKENS) |
     # | fatal_401_auth /         | key rotation / provider config — pre-    |
-    # | fatal_403_forbidden      | flight (M2) should have caught           |
+    # | fatal_403_forbidden      | flight (M2) should have caught (a 403    |
+    # |                          | whose BODY matches a key-limit signature |
+    # |                          | is the BILLING condition and lands in    |
+    # |                          | fatal_402_billing instead, #4959)        |
     # ───────────────────────────────────────────────────────────────────────
 
     # ── M7 (D2): leg-mix — match_source aggregation, never re-derived ──

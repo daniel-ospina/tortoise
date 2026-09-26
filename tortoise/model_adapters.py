@@ -485,8 +485,12 @@ def is_billing_exhausted(exc: BaseException) -> bool:
     the run continues; with no alternative lane it raises loud
     (``RotatingModel`` n==1 guard). Deliberately NOT part of the M2/M3
     taxonomy export contract — ``is_fatal``/``classify_llm_error`` semantics
-    are unchanged for the retry/abort consumers (run.py M3, extractor_v2);
-    only the rotation pool consults this hook."""
+    are unchanged for the retry/abort consumers (run.py M3, extractor_v2).
+    TWO consumers consult this hook: the rotation pool, and the extractor's
+    census classifier (``extractor_v2._classify_error``, #4959), which maps
+    a key-limit 403 to the census's billing class so the extraction-killer
+    gate fires on a key-limited run — one seam, so the rotation decision and
+    the census class can never disagree."""
     status = _http_status(exc)
     if status == 402:
         return True

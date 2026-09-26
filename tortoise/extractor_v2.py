@@ -6849,6 +6849,25 @@ def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
     return {}
 
 
+def _is_key_limit_error(e: BaseException) -> bool:
+    """True → this HTTP rejection is the provider's OWN key-budget condition
+    (a spent quota), not a credential/authorization failure.
+
+    Delegates to ``tortoise.model_adapters.is_billing_exhausted`` (#4860 /
+    #4951) — the SINGLE seam that owns the key-limit body signatures — so the
+    census class and the rotation decision can never disagree (#4959).
+    Lazily imported (the extractor stays free of a hard ``model_adapters`` /
+    ``requests`` import), mirroring ``_is_fatal_error``; if the seam is
+    unimportable the answer is False — a 403 stays ``fatal_403_forbidden``
+    (fail-closed to the credential class, never a silent billing-lenient
+    pass)."""
+    try:
+        from tortoise.model_adapters import is_billing_exhausted
+    except ImportError:  # pragma: no cover — P2 landed; defensive fallback
+        return False
+    return is_billing_exhausted(e)
+
+
 def _classify_error(e: BaseException) -> str:
     """Granular census class for one LLM-call exception (D3 vocabulary).
 
@@ -6860,7 +6879,19 @@ def _classify_error(e: BaseException) -> str:
 
     Duck-typed (``e.response.status_code``) so the extractor stays free of a
     hard ``requests`` import — semantically identical to P2's taxonomy table
-    (#1530: 401/402/403 fatal, 429/5xx transient, other 4xx fatal)."""
+    (#1530: 401/402/403 fatal, 429/5xx transient, other 4xx fatal).
+
+    #4959 — the ONE body-sensitive carve-out: a 403 whose response BODY
+    carries the provider's key-limit signature is the SAME condition as a
+    402 (this key's budget is spent), so it records ``fatal_402_billing`` —
+    the class ``EXTRACTION_KILLER_CENSUS_CLASSES`` gates on — instead of
+    ``fatal_403_forbidden``. Without it a run aborted by an exhausted key
+    was counted under a class the extraction-killer gate does not read, so
+    the gate that exists to stop a billing-limited run from certifying never
+    fired (#4860: 7/7 captures aborted on a key-limit 403). The retry/abort
+    decision is unchanged — both classes are FATAL — and a signature-less
+    403 (a genuine permission failure) keeps ``fatal_403_forbidden``, so the
+    credential-vs-budget distinction survives."""
     st = getattr(getattr(e, "response", None), "status_code", None)
     if st is not None:
         if st == 429:
@@ -6872,7 +6903,8 @@ def _classify_error(e: BaseException) -> str:
         if st == 402:
             return "fatal_402_billing"
         if st == 403:
-            return "fatal_403_forbidden"
+            return ("fatal_402_billing" if _is_key_limit_error(e)
+                    else "fatal_403_forbidden")
         if 400 <= st < 500:
             return "fatal_4xx"
         return "transient_unknown"
