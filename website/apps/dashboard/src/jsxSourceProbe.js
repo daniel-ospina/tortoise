@@ -138,19 +138,38 @@ export function extractAll(source, pattern, label) {
  * refuses a probed name that is locally bound anywhere: a local
  * `const ownerCardProps = …` inside App() SHADOWS the import, so the application
  * renders the shadowing helper while a probe bound to the module would certify
- * the imported one (a reviewer's green-with-the-defect mutation). Every spelling
- * the language allows is checked — a statement-starting declaration (including
- * one that follows another statement on the same line), a destructuring pattern,
- * a parameter list, and a class — because a guard that only sees
- * `^\s*const name` is evaded by `; const name = …`.
+ * the imported one (a reviewer's green-with-the-defect mutation).
+ *
+ * The patterns below cover, and are each pinned by a case in
+ * `onboardingEmptyStateKeyNote.test.js`: a declaration keyword followed by the
+ * name (`const`/`let`/`var`/`function`/`async function`/`function*`/`class`),
+ * including one that follows another statement on the same line; a later
+ * declarator of a multi-declarator statement; object and array destructuring
+ * (where the name is the bound one, not a property key); a parameter list; and a
+ * bare arrow parameter. NOT covered (declared residual, fail-closed direction
+ * unknown — an exotic spelling not listed here would not be detected by this
+ * helper; the semantic guard remains the executed render/probe suite): bindings
+ * introduced by `for`/`catch` heads of unusual shape, `eval`, or a `with` scope.
  */
 export function localBindingHits(source, name) {
   const src = stripComments(source)
   const n = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const patterns = [
-    new RegExp(`(?:^|[;{}])\\s*(?:const|let|var|function|class)\\s+${n}\\b`, 'm'),
-    new RegExp(`(?:^|[;{}])\\s*(?:const|let|var)\\s*\\{[^}]*\\b${n}\\b[^}]*\\}`, 'm'),
+    // a declaration keyword then the name: `const NAME`, `let NAME`, `var NAME`,
+    // `function NAME`, `async function NAME`, `function* NAME`, `class NAME`
+    new RegExp(`(?:^|[;{}])\\s*(?:async\\s+)?(?:const|let|var|function|class)\\s*\\*?\\s*${n}\\b`, 'm'),
+    // a LATER declarator of a const/let/var statement: `const a = 1, NAME = …`
+    new RegExp(`(?:^|[;{}])\\s*(?:const|let|var)\\s+[^;\\n]*?\\b${n}\\b\\s*(?==)`, 'm'),
+    // ARRAY destructuring: `const [NAME] = […]`
+    new RegExp(`(?:^|[;{}]|\\()\\s*(?:const|let|var)\\s*\\[[^\\]]*\\b${n}\\b`, 'm'),
+    // OBJECT destructuring, only where the name is BOUND — `const { NAME } = …` or
+    // `const { a: NAME } = …`. A property key (`{ NAME: alias }`) binds `alias`,
+    // not `NAME`, and must not be reported.
+    new RegExp(`(?:^|[;{}]|\\()\\s*(?:const|let|var)\\s*\\{[^}]*\\b${n}\\b\\s*(?!:)`, 'm'),
+    // a PARAMETER: `(… NAME …) =>` / `function f(… NAME …) {`
     new RegExp(`\\([^()]*\\b${n}\\b[^()]*\\)\\s*(?:=>|\\{)`, 'm'),
+    // a bare arrow parameter: `NAME => …`
+    new RegExp(`(?:^|[;(,{])\\s*${n}\\s*=>`, 'm'),
   ]
   for (const re of patterns) {
     const hit = src.match(re)

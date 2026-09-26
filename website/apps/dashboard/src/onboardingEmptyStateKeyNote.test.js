@@ -555,10 +555,21 @@ test('#4637 wiring: every probed name is imported by main.jsx and locally unshad
     ['ownerCardProps', 'const { ownerCardProps } = mod'],
     ['keyTabAffordance', 'function f(keyTabAffordance) { return keyTabAffordance }'],
     ['graphMissingCta', 'class graphMissingCta {}'],
+    ['ownerCardProps', 'const a = 1, ownerCardProps = (a) => ({ keyLive: true })'],
+    ['ownerCardProps', 'const [ownerCardProps] = [(a) => ({ keyLive: true })]'],
+    ['keyTabAffordance', 'async function keyTabAffordance() {}'],
+    ['graphMissingCta', 'function* graphMissingCta() {}'],
+    ['keyTabAffordance', 'const { show: keyTabAffordance } = mod'],
+    ['graphMissingCta', 'const graphMissingCta = () => {}\ngraphMissingCta()'],
+    ['keyTabAffordance', 'const g = (keyTabAffordance) => keyTabAffordance'],
+    ['graphMissingCta', 'graphMissingCta => graphMissingCta'],
   ]) {
     assert.throws(() => importsFromMain(`import { ${name} } from './m.js'\n${shadowSource}`, [name]),
       `a local ${name} binding must be refused: ${shadowSource}`)
   }
+  // …and a property-KEY rename binds the other name, not the probed one
+  assert.equal(importsFromMain("import { ownerCardProps } from './m.js'\nconst { ownerCardProps: alias } = mod", ['ownerCardProps']).ownerCardProps,
+    './m.js', 'a rename position must not be reported as a shadow of the probed name')
   assert.throws(() => importsFromMain("import { other } from './m.js'", ['ownerCardProps']),
     'a name main.jsx does not import must be refused')
   // A quoted decoy import (the shape that re-bound the module before the mask)
@@ -582,17 +593,81 @@ test('#4637 wiring: every probed name is imported by main.jsx and locally unshad
 // live key over a gate that holds none, and this fails.
 const WIRING_BINDINGS = { snippetKey: "'stale-reveal'", setTab: '() => {}' }
 
+// main.jsx's OWN derivations, executed here — not bindings this test chooses.
+// `isBuildFork` is extracted and evaluated for each `wizardFork` state, and the
+// gate is extracted and executed against the real claim inputs, so a mutation of
+// either derivation (`wizardFork !== 'build'`, a swapped gate argument) changes
+// what the probes receive instead of being certified by a test-supplied value.
+const FORK_STATEMENT = extractOne(stripComments(mainJsxSource), /const isBuildFork = [^\n]+/,
+  'the build-fork derivation')
+const FORK_EXPRESSION = FORK_STATEMENT.replace(/^const isBuildFork =\s*/, '')
+const GATE_STATEMENT = extractOne(stripComments(mainJsxSource),
+  /const connectGate = connectKeyGate\([^\n]*\)/, 'the connect-gate derivation')
+const GATE_EXPRESSION = GATE_STATEMENT.replace(/^const connectGate =\s*/, '')
+const GATE_IMPORT = importsFromMain(mainJsxSource, ['connectKeyGate'])
+const GATE_INPUTS = {
+  embed: { welcomeKey: "'wk_live'", keys: '[]', keysLoaded: 'true', keysLoadError: 'false' },
+  existing: { welcomeKey: "''", keys: "[{ key_prefix: 'wk_live2', enabled: true }]", keysLoaded: 'true', keysLoadError: 'false' },
+  mint: { welcomeKey: "''", keys: '[]', keysLoaded: 'true', keysLoadError: 'false' },
+  loading: { welcomeKey: "''", keys: '[]', keysLoaded: 'false', keysLoadError: 'false' },
+  error: { welcomeKey: "''", keys: '[]', keysLoaded: 'false', keysLoadError: 'true' },
+}
+
+async function forkValue(wizardForkSource) {
+  const [result] = await evalExpressions(FORK_EXPRESSION, { bindings: { wizardFork: wizardForkSource } })
+  return result.value
+}
+
+async function gateValue({ welcomeKey, keys, keysLoaded, keysLoadError }) {
+  const [result] = await evalExpressions(GATE_EXPRESSION, {
+    imports: GATE_IMPORT,
+    bindings: { welcomeKey, keys, keysLoaded, keysLoadError },
+  })
+  return result.value
+}
+
+test('#4637 wiring: main.jsx’s fork derivation is executed, and only ‘build’ is a build fork', async () => {
+  assert.equal(await forkValue("'build'"), true, 'wizardFork build must be the build fork')
+  assert.equal(await forkValue("'self'"), false, 'wizardFork self must not be the build fork')
+  assert.equal(await forkValue('undefined'), false, 'an undecided fork must not be the build fork')
+  assert.equal(await forkValue('null'), false, 'a null fork must not be the build fork')
+})
+
+test('#4637 wiring: main.jsx’s connect-gate derivation is executed against the claim inputs', async () => {
+  for (const input of Object.values(GATE_INPUTS)) {
+    const actual = await gateValue(input)
+    const expected = connectKeyGate(eval(`(${input.welcomeKey})`), eval(`(${input.keys})`),
+      eval(`(${input.keysLoaded})`), eval(`(${input.keysLoadError})`))
+    assert.deepEqual(actual, expected,
+      `the gate main.jsx hands the cards must be connectKeyGate's own verdict for ${JSON.stringify(input)}`)
+  }
+  // …and it is never re-assigned or mutated after that statement (a
+  // `connectGate.mode = 'existing'` would make the owner card claim a live key
+  // over a gate that resolved 'mint')
+  const src = stripComments(mainJsxSource)
+  assert.ok(!/(?<!const )\bconnectGate\s*=(?!=)/.test(src),
+    'connectGate may only be bound by its own const statement')
+  assert.ok(!/connectGate\.(?:mode|key|existing)\s*=(?!=)/.test(src),
+    'the gate object must not be mutated after it is derived')
+})
+
 test('#4637 wiring: each owner arm’s EFFECTIVE props and rendered copy come from the real call site', async () => {
-  for (const mode of GATE_MODES) {
-    for (const buildFork of ['true', 'false']) {
+  for (const [wizardFork, expectedFork] of [["'build'", true], ["'self'", false], ['undefined', false]]) {
+    const fork = await forkValue(wizardFork)
+    assert.equal(fork, expectedFork, `wizardFork ${wizardFork} must derive buildFork=${expectedFork}`)
+    const buildFork = String(fork)
+    for (const mode of GATE_MODES) {
+      // the gate main.jsx itself derives for that mode, executed here
+      const gate = await gateValue(GATE_INPUTS[mode])
+      assert.equal(gate.mode, mode, `GATE_INPUTS must produce mode ${mode}`)
       const arms = await probeTags(mainJsxSource, {
         tag: 'OwnerEmptyStateKeyNote',
         imports: MAIN_IMPORTS,
-        bindings: { ...WIRING_BINDINGS, isBuildFork: buildFork, connectGate: `{ mode: '${mode}', key: null }` },
+        bindings: { ...WIRING_BINDINGS, isBuildFork: buildFork, connectGate: JSON.stringify(gate) },
       })
       assert.equal(arms.length, 2, `two owner arms expected — got ${arms.length}`)
       for (const arm of arms) {
-        const expectedLive = ownerKeyLive(mode)
+        const expectedLive = ownerKeyLive(gate.mode)
         assert.equal(arm.props.keyLive, expectedLive,
           `${arm.props.variant}/${mode}/buildFork=${buildFork}: keyLive must be ownerKeyLive(gate.mode) — effective props were ${JSON.stringify({ buildFork: arm.props.buildFork, connectGateMode: arm.props.connectGateMode, keyLive: arm.props.keyLive })}`)
         assert.equal(arm.props.connectGateMode, mode, 'the gate mode must reach the card unchanged')
@@ -618,7 +693,8 @@ test('#4637 wiring: each member arm RENDERS its fork’s lead-in (and never the 
     'the member fork fragments')
   assert.equal(fragments.length, 3, `three member arms expected — got ${fragments.length}`)
   for (const fragment of fragments) {
-    for (const buildFork of ['true', 'false']) {
+    for (const wizardFork of ["'build'", "'self'"]) {
+      const buildFork = String(await forkValue(wizardFork))
       const [rendered] = await evalExpressions(fragment, {
         imports: MAIN_IMPORTS,
         bindings: { isBuildFork: buildFork },
@@ -702,6 +778,14 @@ test('#4637 wiring: the graph-missing snippet branch opens iff the gate holds th
   // rather than give the real (broken) guard a second chance to match.
   assert.equal((card.match(/\?\s*\(/g) || []).length, 1,
     'exactly one branch decision governs the snippet')
+  // The snippet and the live-key paragraph belong to the gate-TRUE arm only: a
+  // duplicate of either in the false arm would render `Bearer ` with an empty key
+  // (the #1831 P2-1 regression this branch's own comment forbids) while the
+  // predicate still evaluated correctly.
+  assert.equal((card.match(/<pre className="snippet">/g) || []).length, 1,
+    'the copyable snippet must render in exactly one arm of the card')
+  assert.equal((card.match(/API key are live/g) || []).length, 1,
+    'the live-key paragraph must appear in exactly one arm of the card')
   const testMatch = card.match(/\{([^{}]+?)\s*\?\s*\(/)
   assert.ok(testMatch, 'the snippet branch truth test must be extractable')
   const truthTest = testMatch[1]
@@ -741,7 +825,7 @@ test('#4637 wiring: the snippet-branch call to action is fork-derived at the cal
   const [rendered] = await evalExpressions(call,
     { imports: MAIN_IMPORTS, bindings: { ...bindings, isBuildFork: 'true' } })
   assert.ok(!/Connect your agent/.test(String(rendered.value)),
-    `the snippet-branch CTA on a self fork must not offer the build fork's own route — got ${rendered.value}`)
+    `on a build fork the snippet-branch CTA must not offer the self fork's connect route — got ${rendered.value}`)
 })
 
 test('#4637: keyTabAffordance is a function of the GATE, not the in-memory reveal', () => {
