@@ -170,12 +170,30 @@ def test_distribution_distinct_sessions_dedupes_a_retry():
 
 
 # ── integration: a real capture reports a non-zero, phase-attributed count ──
-def test_capture_reports_nonzero_phase_attributed_ops(tmp_path):
+def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
+    from tortoise.projection import _GuardedGraph
+
+    # An INDEPENDENT ORACLE for the headline number. ``total`` is BY
+    # CONSTRUCTION ``sum(by_phase)``, so comparing those two can never detect a
+    # double count — doubling every op moves both sides together, and an
+    # earlier version of this test could not fail for that reason. Counting the
+    # guarded queries ACTUALLY ISSUED does: if the choke point recorded one op
+    # twice, ``total`` would be 2x this number.
+    issued = {"n": 0}
+    _real_query = _GuardedGraph.query
+
+    def _counting_query(self, cypher, *args, **kwargs):
+        issued["n"] += 1
+        return _real_query(self, cypher, *args, **kwargs)
+
+    monkeypatch.setattr(_GuardedGraph, "query", _counting_query)
+
     sdk = TortoiseSDK(db_path=str(tmp_path / "gops.db"))
     try:
         # warm-up: index creation etc. is NOT a captured session and must not
         # leak into any capture's count.
         sdk.capture_session(CONV, session_id="warmup_000")
+        issued["n"] = 0  # measure ONLY the capture below
         res = sdk.capture_session(CONV, session_id="gops_000")
     finally:
         sdk.close()
@@ -199,8 +217,36 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path):
         "commit phase unattributed — extraction writes are not reaching the "
         "commit bucket")
     assert ops["by_phase"]["belief"]["total"] > 0
-    # per-phase totals sum to the overall total (no op is double-counted)
-    assert sum(p["total"] for p in ops["by_phase"].values()) == ops["total"]
+    # No op is double-counted — checked against the guarded queries ACTUALLY
+    # ISSUED, not against a restatement of the counter's own definition.
+    assert ops["total"] == issued["n"], (
+        f"{ops['total']} ops recorded for {issued['n']} guarded queries — a "
+        "double count at the choke point shows exactly here")
+
+
+def test_record_graph_op_is_fail_soft_on_an_unknown_phase():
+    """The choke point must not turn a metering bug into a FAILED GRAPH WRITE.
+
+    ``GraphOpsCounter.record`` deliberately RAISES on an unknown phase (it must
+    not mint a bucket ``as_dict`` omits), and ``record_graph_op`` runs BEFORE
+    the caller's query executes — so an uncaught raise would abort a valid
+    write. ``capture_phase`` validates, but ``_PHASE`` is a ContextVar any
+    caller could set directly, so the hazard is one typo away.
+
+    Falsified by removing the guard in ``record_graph_op``: this call raises
+    ValueError and the test fails.
+    """
+    import tortoise.graph_ops as graph_ops
+
+    counter = GraphOpsCounter()
+    with count_graph_ops(counter):
+        token = graph_ops._PHASE.set("typo_phase")
+        try:
+            # must NOT raise, and must NOT count anything
+            record_graph_op("MATCH (n) RETURN count(n)")
+        finally:
+            graph_ops._PHASE.reset(token)
+    assert counter.total == 0
 
 
 # ── hosted: the analytics row is allowlisted and readable ──────────────
