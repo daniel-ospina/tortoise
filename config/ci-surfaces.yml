@@ -683,6 +683,14 @@ surfaces:
   # (`tortoise/embeddings.py`). Note `tortoise/sdk.py` is a SHARED_MODULE, so an
   # sdk.py-only change already runs the full matrix.
   - test_turn_embedding_write_path_4194.py
+  # #3519: the named acceptance test for semantic retrieval of captured
+  # session content. It pins the unpatterned engine module
+  # `tortoise/search_engine.py` (recall_state's leg trace via the SDK) and the
+  # `tortoise/sdk.py` capture write, so it belongs to the `core` fallback like
+  # the #4194 file above; `tortoise/embeddings.py` dual-registers it with
+  # `eval`. It does NOT exercise the hosted copy of the turn loop, so it is
+  # deliberately NOT registered under `api`.
+  - test_session_semantic_retrieval.py
   - test_capture_session_supersession_e2e.py
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_rebuild_turn_points_3947.py
@@ -1491,6 +1499,11 @@ surfaces:
   # that module selects `eval`, so this file is dual-registered here and in
   # `core`/`api`.
   - test_turn_embedding_write_path_4194.py
+  # #3519: the read-side acceptance for the same embeddings — a paraphrase of
+  # captured session content must retrieve the turn. A change to
+  # `tortoise/embeddings.py` selects `eval`, so it is dual-registered here and
+  # in `core` (same #2938 convention as the #4194 file above).
+  - test_session_semantic_retrieval.py
   - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
   # #2938: direct unit tests of eval-mapped sources — tortoise/embeddings.py
