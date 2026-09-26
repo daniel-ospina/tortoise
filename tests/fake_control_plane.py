@@ -972,6 +972,20 @@ class FakeControlPlane:
                 # escalation decomposition's sweep/health tests.
                 raise RuntimeError(
                     f"Supabase control-plane query failed ({table}): HTTP 400")
+            if (self.missing_columns and table in self.missing_columns
+                    and order_terms
+                    and self.missing_columns[table]
+                    & {f for f, _, _ in order_terms}):
+                # Ordering by an absent column is the SAME PostgREST rejection as
+                # the `select`/`filter` drift above: real PostgREST 400s on an
+                # undefined column (PGRST204) rather than returning the rows
+                # unordered. Left accepted, it reintroduces the exact #4037 mask
+                # — an invalid order term that 400s in production but is masked
+                # in CI, with a fail-soft consumer reading `rows[0]` after
+                # `limit=1`. The user-facing outcome is identical, so the fake
+                # must not be the one place it stays invisible.
+                raise RuntimeError(
+                    f"Supabase control-plane query failed ({table}): HTTP 400")
             # #4037: order BEFORE the projection — PostgREST orders server-side
             # before projecting, so an ordered column need not be in `select`
             # (the old fake sorted after the projection, silently no-oping any

@@ -175,6 +175,23 @@ def test_order_null_placement_follows_postgres_defaults() -> None:
             "a", "null"]
 
 
+def test_order_by_a_missing_column_is_refused_like_select_and_filter() -> None:
+    """Ordering by an absent column is the SAME PostgREST rejection as the
+    ``select``/``filter`` drift (#1001/#302): real PostgREST 400s on an
+    undefined column rather than returning the rows unordered. Left accepted,
+    it is the #4037 mask again — an invalid order term that 400s in production
+    and stays invisible in CI, with a fail-soft consumer reading ``rows[0]``."""
+    f = FakeControlPlane(
+        tables={"events": [
+            {"id": "a", "created_at": "2026-01-01T00:00:00+00:00"}]},
+        missing_columns={"events": {"ghost"}})
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        f.query("events", select=["id"], order="ghost.desc")
+    # Not a blanket refusal: the declared column still orders.
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at.desc")] == ["a"]
+
+
 def test_order_multi_term_is_stable() -> None:
     """``a.desc,b.asc`` — ties on ``a`` resolve by ``b``, and the relative
     order of ``a``-ties is preserved (successive stable per-term sorts)."""

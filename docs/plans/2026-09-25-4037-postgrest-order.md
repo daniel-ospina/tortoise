@@ -150,12 +150,18 @@ docstring frame is "CI green while prod 500s"):
 - `test_order_dot_desc_sorts_newest_first` — `created_at.desc` really orders
   (the old fake silently no-op'd it).
 - `test_order_bare_column_and_dot_asc_ascend` — `col` and `col.asc` agree.
-- `test_order_nullsfirst_and_nullslast_are_honoured` — the explicit tokens are
-  honoured, not ignored.
+- `test_order_null_placement_follows_postgres_defaults` — the explicit tokens are
+  honoured, not ignored, and the bare `asc`/`desc` defaults follow Postgres
+  (NULLs last on `asc`, first on `desc`).
 - `test_order_multi_term_is_stable` — `a.desc,b.asc` resolves `a`-ties by `b`.
 - `test_order_unparseable_term_raises` (parametrized: `"-x"`, `"a b"`,
-  `"a.desc.desc"`, `"a.asc.nullslast.desc"`, `""`) — any permissive fallback
-  reds.
+  `"a.desc.desc"`, `"a.asc.nullslast.desc"`) — any permissive fallback reds.
+  An **empty/absent** order is NOT in this list: it is deliberately accepted,
+  because the real seam guards with `if order:` — pinned separately by
+  `test_falsy_order_is_accepted_like_the_real_seam`.
+- `test_order_by_a_missing_column_is_refused_like_select_and_filter` — ordering
+  by an absent column is the same PostgREST 400 as the `select`/`filter` drift
+  (#1001/#302), so the fake is not the one place that rejection stays invisible.
 - `test_order_validation_is_method_agnostic` — PATCH with `-created_at` raises.
 - `test_every_order_form_used_in_the_repo_is_accepted` — the four spellings the
   repo actually transmits (`created_at`, `created_at.asc`, `created_at.desc`,
