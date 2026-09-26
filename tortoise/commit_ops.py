@@ -183,7 +183,7 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
 
 
 def apply_payload_operators(proj, sdk, operators: list, *,
-                            point_content_by_id=None) -> None:
+                            point_content_by_id=None) -> list[str]:
     """Apply Layer-1 payload operators with commit semantics (#1532 D3).
 
     IMPL/NAND first via ``sdk.create_operator`` (promote_source=False, #780);
@@ -218,8 +218,30 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     Passing payload ids here is not an error the function can detect: the
     operator write is swallowed as ``operator write skipped (inputs
     missing?)``.
+
+    Returns the ids of the IMPL/NAND operator Points THIS call CREATED, in
+    creation order (#4936). A capture must stamp exactly those nodes with its
+    ``sessionCaptured`` eventId: joining on the MINTED point set instead
+    misses every operator whose endpoint RE-KEYED to a pre-existing graph
+    node (#4716 Part 1) — a folded-only capture has no minted ids at all,
+    so the operator topology was left unstamped and invisible to the
+    eventId-keyed retrievable layer (``operator_counts == {}``). Only
+    CREATED nodes are returned: the MITIGATES Cypher fallback can resolve an
+    operator this call did not write, and a caller stamping provenance must
+    never claim a node a prior session created. The derived-commit call site
+    (``hosted_api._execute_commit_writes`` §7) ignores the value — it has no
+    capture eventId to stamp.
+
+    ⛔ The return is a plain LIST, never ``target_op_ids.values()``: that
+    dict is the MITIGATES same-call lookup and is keyed on
+    ``(src, dst, op_type)``, while ``create_operator`` mints unconditionally
+    (#4971) — two payload records that re-key onto the SAME graph triple each
+    create their own node, and a dict keyed on the triple would silently drop
+    the earlier node's id from the provenance set, leaving it unstamped and
+    invisible (the very #4936 defect this return exists to close).
     """
     target_op_ids: dict[tuple, str] = {}
+    created_ids: list[str] = []
     for op in operators:
         op_type = _op_attr(op, "op_type")
         if op_type == "MITIGATES":
@@ -240,6 +262,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
                 "operator write skipped (inputs missing?): %s", e)
             continue
         target_op_ids[(src, dst, op_type)] = result["id"]
+        created_ids.append(result["id"])
     for op in operators:
         if _op_attr(op, "op_type") != "MITIGATES":
             continue
@@ -278,6 +301,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             reason = str(src)
         sdk.mitigate_operator(op_id, reason=reason,
                               strength=_op_attr(op, "strength") or 0.5)
+    return created_ids
 
 
 # ── Supersession application (#2164 Task 3) ────────────────────────────

@@ -4581,6 +4581,42 @@ class TortoiseSDK:
                                     "eid": event_id, "sid": session_id,
                                     "harness": source_harness, "ing": now},
                         )
+                    # #4936: the minted-point join above CANNOT reach an
+                    # operator whose endpoint RE-KEYED to a pre-existing
+                    # graph node (#4716 Part 1): the payload point resolved
+                    # to the existing node, so it is NOT in ``minted_ids``
+                    # (and a folded-only capture mints nothing at all, leaving
+                    # ``minted_ids`` empty and the join above unreached). The
+                    # operator node was created and wired correctly but stayed
+                    # unstamped — invisible to the eventId-keyed retrievable
+                    # layer (the #2552 ``operator_counts == {}`` signature).
+                    # Stamp exactly the operator ids THIS capture created
+                    # (meta["operator_ids"], the apply_payload_operators
+                    # return) — the topology's own provenance handle, whereas
+                    # the minted join has none. ``eventId IS NULL`` is the
+                    # no-clobber guard. The minted join's ``draft`` guard is
+                    # deliberately NOT repeated: these ids are Points created
+                    # by THIS call (fresh ULIDs, draft at creation), so
+                    # re-checking status only adds a race — a concurrent
+                    # capture's ``_apply_capture_ingest_ep`` promotion can
+                    # flip one to 'live' before this stamp runs, and the stamp
+                    # must still land. The join is KEPT because it is the only
+                    # surface covering operators created outside
+                    # apply_payload_operators (the M2 projection path —
+                    # test_capture_session_stamps_operator_event_ids).
+                    operator_ids = list(meta.get("operator_ids") or [])
+                    if operator_ids:
+                        proj.g.query(
+                            "MATCH (o:Point {is_operator:true}) "
+                            "WHERE o.id IN $ids "
+                            "AND o.eventId IS NULL "
+                            "SET o.eventId=$eid, o.source_session=$sid, "
+                            "    o.source_harness=$harness, "
+                            "    o.ingested_at=$ing",
+                            params={"ids": operator_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now},
+                        )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
                         # failed first attempt's provenance gap. The retry's
@@ -5686,6 +5722,12 @@ class TortoiseSDK:
         #    bridge-attack record routed to mitigate_operator — #4937; shared
         #    commit semantics, #1532 D3 — apply_payload_operators) ──
         ops = payload.get("operators", []) or []
+        # #4936: the ids of the operator Points this capture CREATED — the
+        # provenance stamp's own handle on the operator topology. Surfaced on
+        # ``meta`` for the capture assembly (below), which mints the
+        # sessionCaptured eventId AFTER extraction returns. Empty when the
+        # payload carried no operators.
+        operator_ids: list[str] = []
         if ops:
             from tortoise.commit_ops import (
                 _payload_point_content_by_id,
@@ -5721,7 +5763,7 @@ class TortoiseSDK:
                 for _n in noops
                 if _n.get("point_id") and _n.get("content")}
             ops = remap_operator_endpoint_refs(ops, capture_point_id_map)
-            apply_payload_operators(
+            operator_ids = apply_payload_operators(
                 proj, self, ops,
                 point_content_by_id=lambda pid: (
                     _payload_point_content_by_id(
@@ -5772,6 +5814,14 @@ class TortoiseSDK:
             "errors": errors,
             "warnings": warnings,
             "mode": "error" if errors else "v2",
+            # #4936: ids of the IMPL/NAND operator Points this capture CREATED
+            # (``apply_payload_operators`` return) — the capture's provenance
+            # stamp MUST use these, not a join on the minted point set: an
+            # operator whose endpoint re-keyed to a pre-existing graph node
+            # (#4716 Part 1) is absent from the minted set, and a folded-only
+            # capture has no minted id at all, so the join left the operator
+            # unstamped and invisible to the eventId-keyed memory layer.
+            "operator_ids": operator_ids,
             # #2335 WI-1a: surface the extractor_v2 telemetry (recovery
             # per-seam tokens / llm / chunks) on the product-lane meta —
             # eval lane already surfaces it via ingest_v2; the product
