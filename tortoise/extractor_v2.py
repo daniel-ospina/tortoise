@@ -325,9 +325,16 @@ def _desc(brief: dict, key: str) -> str:
 
 _MASTER_LIST_CACHE: dict | None = None
 
+#: Sentinel for ``_build_master_from_brief(installed_namespaces=...)``:
+#: means "this master carries NO gate" — distinct from an explicit ``None``
+#: gate ("the graph has no :PackInstall records"). Both mean no gate today;
+#: keeping them distinct is what lets the default path stay ungated (#5163).
+_NO_GATE = object()
+
 
 def _build_master_from_brief(brief: dict,
-                             pack_prefixes: tuple[str, ...] = PACK_NS) -> dict:
+                             pack_prefixes: tuple[str, ...] = PACK_NS,
+                             installed_namespaces: object = _NO_GATE) -> dict:
     """The master-list sections from a compiled value brief (#2031 refactor
     of the build_master_list loop body — the section semantics are
     byte-identical to pre-#2031). ``pack_prefixes`` is the namespace
@@ -344,7 +351,7 @@ def _build_master_from_brief(brief: dict,
         if not k.startswith(pack_prefixes):
             continue
         pack_kinds[k] = _desc(brief, k)
-    return {
+    master = {
         "objects": objects,
         "subjects": dict(SUBJECTS),
         "points": dict(POINTS),
@@ -358,6 +365,22 @@ def _build_master_from_brief(brief: dict,
         # it); rendered into S2/S4 prompt context only.
         "user_personal_state": dict(USER_PERSONAL_STATE),
     }
+    if installed_namespaces is not _NO_GATE:
+        # #5163 review (P2): carry the graph's AUTHORITATIVE installed set —
+        # resolved once by ``pack_state.graph_installed_namespaces`` — rather
+        # than letting the write gate re-infer it from ``pack_kinds``, which
+        # is LOSSY: a namespace declaring only kindDefs-less kinds contributes
+        # no ``pack_kinds`` key, so inferring from that section DROPS it and
+        # over-gates a kind the classifier's graph-gated index can still
+        # assign (FIX L synthesis). An allow-list is fail-CLOSED: absent ⇒
+        # denied, so "invisible here" can never be the safe direction.
+        #   absent key ⇒ no gate (the pre-#5163 union) — the default path;
+        #   explicit None ⇒ the graph has no :PackInstall records (#2714
+        #   indicator 3) — also no gate.
+        master["_installed_namespaces"] = (
+            None if installed_namespaces is None
+            else frozenset(installed_namespaces))
+    return master
 
 
 def build_master_list(sdk=None) -> dict:
@@ -395,7 +418,9 @@ def build_master_list(sdk=None) -> dict:
     from tortoise.pack_manifest_store import tenant_view
     view = tenant_view(sdk)
     tenant_prefixes = tuple(f"{m['namespace']}:" for m in view["tenant"])
-    return _build_master_from_brief(view["brief"], PACK_NS + tenant_prefixes)
+    return _build_master_from_brief(
+        view["brief"], PACK_NS + tenant_prefixes,
+        installed_namespaces=view["installed_namespaces"])
 
 
 def master_kind_forms(master: dict) -> set[str]:
@@ -4561,28 +4586,30 @@ _POINT_FALLBACK = {"kind": "statement"}
 #: exactly the premise #2714/#5163 invalidated — the S5 write gate admitted
 #: EVERY pack's declared kinds on EVERY graph, so a graph with only `dev:`
 #: installed could still mint `marketing:*`.
-_PACK_EVENT_FORMS: dict[frozenset[str], set[str]] = {}
+_PACK_EVENT_FORMS: dict[frozenset[str] | None, set[str]] = {}
 
 
-def _installed_pack_ns(master: dict) -> frozenset[str]:
-    """The pack namespaces this master was built for, in ``"ns:"`` form.
+def _installed_pack_ns(master: dict) -> frozenset[str] | None:
+    """The graph's AUTHORITATIVE installed namespaces, in ``"ns:"`` form.
 
-    Read off the master's OWN ``pack_kinds`` section: ``_build_master_from_brief``
-    filters that section by the same prefix allowlist the gate must respect, so
-    it is the authoritative signal already in hand — no signature change, and
-    no way for the two to disagree.
+    ``None`` means **NO GATE** — the caller must fall back to the catalogue
+    union (the pre-#5163 behaviour). That is the meaning for every master that
+    carries no ``_installed_namespaces`` (the default/ungated path via
+    ``build_master_list()``) and for an explicit ``None`` (a graph with no
+    ``:PackInstall`` records — #2714 indicator 3).
 
-    A namespace that declares NO kindDefs at all leaves no ``pack_kinds`` key
-    and is therefore invisible here. That direction is deliberately fail-open
-    (it reproduces pre-#5163 behaviour for that shape) — it can never
-    over-gate a kind the graph legitimately installs.
+    The value is carried on the master by ``_build_master_from_brief`` from the
+    resolver's answer (``view["installed_namespaces"]``). It is deliberately
+    NOT re-inferred from ``pack_kinds``: that section is lossy, so a namespace
+    declaring only kindDefs-less kinds would be dropped and its kinds
+    over-gated — an allow-list filter denies what it cannot see.
     """
-    ns: set[str] = set()
-    for key in master.get("pack_kinds", {}):
-        head, _, _kind = key.rpartition(":")
-        if head:
-            ns.add(f"{head.lower()}:")
-    return frozenset(ns)
+    if "_installed_namespaces" not in master:
+        return None
+    ns = master["_installed_namespaces"]
+    if ns is None:
+        return None
+    return frozenset(f"{str(n).lower().rstrip(':')}:" for n in ns)
 
 
 def _event_kind_forms(master: dict) -> set[str]:
@@ -4607,7 +4634,7 @@ def _event_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
-                if f"{ns.lower()}:" not in gate:
+                if gate is not None and f"{ns.lower()}:" not in gate:
                     continue
                 for k in (pack.event_kinds or []):
                     pack_forms.add(f"{ns}:{k}".lower())
@@ -4626,7 +4653,7 @@ def _event_kind_forms(master: dict) -> set[str]:
 #: lane's FIX A mirror). Full + bare forms, case-folded. Cached per INSTALLED
 #: namespace set, never once per process (see ``_PACK_EVENT_FORMS`` — the
 #: same #5163 review P1: an unkeyed global admitted every pack on every graph).
-_PACK_OBJECT_FORMS: dict[frozenset[str], set[str]] = {}
+_PACK_OBJECT_FORMS: dict[frozenset[str] | None, set[str]] = {}
 
 
 def _object_kind_forms(master: dict) -> set[str]:
@@ -4653,7 +4680,7 @@ def _object_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
-                if f"{ns.lower()}:" not in gate:
+                if gate is not None and f"{ns.lower()}:" not in gate:
                     continue
                 for k in (pack.object_kinds or []) + \
                         (pack.document_kinds or []):

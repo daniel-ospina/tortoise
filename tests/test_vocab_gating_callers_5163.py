@@ -382,10 +382,19 @@ class TestS5WritePathGateIsGraphScoped:
 
     @staticmethod
     def _master(installed):
+        """A master built the way the REAL path builds one: the brief gated on
+        the graph's installed set, and the SAME set carried onto the master
+        (``build_master_list(sdk)`` passes ``view["installed_namespaces"]``).
+
+        ``None`` carries an explicit no-gate marker (a graph with no
+        :PackInstall records); omitting the argument entirely leaves the key
+        off (the default/ungated path).
+        """
         from tortoise.extractor_v2 import PACK_NS, _build_master_from_brief
         from tortoise.value_extractor import compile_value_brief
         return _build_master_from_brief(
-            compile_value_brief(installed_namespaces=installed), PACK_NS)
+            compile_value_brief(installed_namespaces=installed), PACK_NS,
+            installed_namespaces=installed)
 
     def test_dev_only_graph_excludes_another_packs_declared_kinds(self):
         from tortoise.extractor_v2 import _event_kind_forms, _object_kind_forms
@@ -443,8 +452,10 @@ class TestS5WritePathGateIsGraphScoped:
         from tortoise.extractor_v2 import _object_kind_forms
 
         sections = {"objects": {}, "subjects": {}, "points": {}, "events": {}}
-        dev_master = dict(sections, pack_kinds={"dev:api": {}})
-        mkt_master = dict(sections, pack_kinds={"marketing:campaign": {}})
+        dev_master = dict(sections, pack_kinds={"dev:api": {}},
+                          _installed_namespaces={"dev"})
+        mkt_master = dict(sections, pack_kinds={"marketing:campaign": {}},
+                          _installed_namespaces={"marketing"})
 
         dev_forms = {f.lower() for f in _object_kind_forms(dev_master)}
         mkt_forms = {f.lower() for f in _object_kind_forms(mkt_master)}
@@ -461,3 +472,49 @@ class TestS5WritePathGateIsGraphScoped:
             "kinds — the cache is not keyed by the graph's namespace set")
         assert "marketing:keyword" not in dev_forms, (
             "a dev-only graph must not inherit the marketing graph's cached kinds")
+
+    def test_a_kinddefs_less_namespace_is_still_gated_in(self):
+        """Regression for the review's P2 — do NOT re-infer the gate from
+        ``pack_kinds``.
+
+        A namespace that declares kinds but has NO kindDefs contributes no
+        ``pack_kinds`` key, so inferring the gate from that section DROPS it
+        and over-gates its kinds: an allow-list filter denies what it cannot
+        see. Meanwhile the classifier's graph-gated kind index still
+        synthesises those declared kinds (FIX L), so classifier and write gate
+        disagree. The carried, resolver-supplied gate is lossless.
+        """
+        from tortoise.extractor_v2 import _event_kind_forms, _object_kind_forms
+
+        sections = {"objects": {}, "subjects": {}, "points": {}, "events": {}}
+        # agent-ops is INSTALLED (carried gate) but leaves no pack_kinds keys.
+        m = dict(sections, pack_kinds={}, _installed_namespaces={"agent-ops"})
+
+        obj = {f.lower() for f in _object_kind_forms(m)}
+        ev = {f.lower() for f in _event_kind_forms(m)}
+        assert "agent-ops:rule" in obj, (
+            "an installed namespace with no kindDefs must still have its "
+            "declared object kinds admitted — the gate may not be re-inferred "
+            "from the lossy pack_kinds section")
+        assert "agent-ops:rulerevised" in ev, (
+            "...and its declared event kinds")
+        # ...and it is still a gate: an uninstalled pack stays excluded.
+        assert "dev:apispec" not in obj
+
+    def test_a_master_without_the_carried_gate_is_ungated(self):
+        """The default path (``build_master_list()``, no SDK) carries no gate
+        key at all, so the forms are the catalogue union — byte-identical to
+        pre-#5163. This is the back-compat arm of #2714 indicator 3."""
+        from tortoise.extractor_v2 import (
+            PACK_NS,
+            _build_master_from_brief,
+            _object_kind_forms,
+        )
+        from tortoise.value_extractor import compile_value_brief
+
+        m = _build_master_from_brief(compile_value_brief(), PACK_NS)
+        assert "_installed_namespaces" not in m, (
+            "the ungated path must not carry a gate key at all")
+        obj = {f.lower() for f in _object_kind_forms(m)}
+        assert "marketing:keyword" in obj, "the ungated path is the full union"
+        assert "dev:apispec" in obj
