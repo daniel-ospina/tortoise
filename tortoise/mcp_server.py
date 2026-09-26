@@ -3047,6 +3047,128 @@ _OVERVIEW_SECTIONS = (
 )
 
 
+#: #3510 — the no-arg combined summary reports DATA-PROPORTIONAL orient
+#: sections as bounded counts, never as their full row array. A section is
+#: data-proportional when it yields one row per graph row rather than one row
+#: per graph-shape token (a fixed vocabulary) AND IS UNCAPPED — four qualify:
+#: `sources` (one row per registered URL), `tags` (one row per :Tag node),
+#: `pointkinds` (one row per pointKind PRESENT) and `structure_check` (one row
+#: per violating Point). `stale` is also one row per graph row, but it is
+#: CAPPED by the caller's `limit` (default 50 rows; still only ~3,000 rows at
+#: limit=5000), so it is not folded here. Returning any of the four wholesale
+#: made the orientation call more expensive than the list_* calls it was built
+#: to replace — measured on an embedded graph: `sources` 35,190 of 36,498 bytes
+#: (96.4%) at 300 sources, `tags` 14,000 of 15,187 bytes (92.2%) at 400 tags,
+#: `structure_check` 73,490 of 93,829 bytes (78.3%) at 400 orphaned drafts,
+#: `pointkinds` 19,200 bytes at 400 distinct kinds. Each wrapped section keeps
+#: its full array reachable via its own section=.
+_OVERVIEW_SUMMARY_TOP = 20
+
+
+#: #3510 review (P2) — the folded remainder is a SIBLING field of the summary,
+#: never a key inside the group map. `group_field` is free-form graph text (a
+#: tag name, a `sourceKind` string), so there is no in-map sentinel string a
+#: real group cannot produce: a genuine group named "other" used to be merged
+#: with the remainder (3 real `sourceKind="other"` rows reported 14). Kept out
+#: of the map, the collision is impossible by construction.
+_OVERVIEW_SUMMARY_OTHER = "other"
+
+
+def _overview_summary(rows: Any, group_field: str, out_field: str,
+                      count_field: str | None = None, *,
+                      unit: str = "rows") -> Any:
+    """Bounded summary of a data-proportional orient section (#3510).
+
+    Returns {total, <out_field>[, with_points][, other]} — never the rows.
+    `<out_field>` groups the rows by `group_field`, keeps the
+    _OVERVIEW_SUMMARY_TOP largest groups and reports the folded remainder as the
+    sibling `other`. The bound is _OVERVIEW_SUMMARY_TOP, NOT the group
+    vocabulary: `group_field` is graph text a caller can invent on every row, so
+    the vocabulary is unbounded and the top-N cut is what bounds the map (see
+    tests/test_orient_direct_consolidation.py::
+    test_fold_is_bounded_when_the_group_vocabulary_is_unbounded).
+
+    THE UNIT IS THE POINT — `unit` fixes what every number means (each
+    `<out_field>` value, `total` and `other`), or the summary misinforms:
+
+    * ``unit="magnitude"`` — the group's summed `count_field`. Used by `tags`
+      and `pointkinds`, where a group is exactly ONE row, so a row count would
+      report a literal 1 for every group while throwing away the count the row
+      carries (`tortoise_list_tags` reports {"hot": 50}; the summary must say
+      50, not 1).
+    * ``unit="rows"`` — the group's row count. Used by `sources`, where a group
+      aggregates many registered Sources, so the row count (how many sources of
+      this kind) is a real magnitude and keeps the registry's mostly-`points:0`
+      emptiness visible; and by `structure_check`, whose rows carry no separate
+      magnitude, so a violation row's count IS its count of violations.
+
+    The fold is a partition in that unit:
+    ``sum(<out_field>.values()) + other == total``, always.
+
+    `with_points` is emitted only when the unit is rows and a `count_field` was
+    given: it counts rows whose magnitude is positive — the SAME row unit as
+    `total` (e.g. "how many registered sources actually extracted points"). It
+    is omitted for a magnitude section, where a row count stranded beside a
+    magnitude `total` would be the very unit confusion this parameter exists to
+    stop.
+
+    A non-list input is an error envelope from _safe (or a mocked shape) and is
+    passed through unchanged.
+    """
+    if not isinstance(rows, list):
+        return rows
+    if unit not in ("rows", "magnitude"):
+        raise ValueError(f"_overview_summary: unknown unit {unit!r}")
+    if unit == "magnitude" and count_field is None:
+        raise ValueError("_overview_summary: unit='magnitude' needs a count_field")
+    with_points = 0
+    groups: dict[str, list[int]] = {}
+    for row in rows:
+        row = row if isinstance(row, dict) else {}
+        magnitude = 0
+        if count_field is not None:
+            value = row.get(count_field)
+            if isinstance(value, (int, float)) and value > 0:
+                with_points += 1
+                magnitude = int(value)
+        raw = row.get(group_field)
+        # "" is the group key for a row whose group value is absent or blank —
+        # a real blank value and a missing one describe the same thing, so they
+        # are the same group. (The previous "unknown" fallback was a synthetic
+        # key a real group literally named "unknown" merged into: the same
+        # collision class as the `other` remainder this function now keeps out
+        # of the map.)
+        key = raw if isinstance(raw, str) and raw else ""
+        bucket = groups.setdefault(key, [0, 0])
+        bucket[0] += 1
+        bucket[1] += magnitude
+
+    def _unit_value(bucket: list[int]) -> int:
+        return bucket[1] if unit == "magnitude" else bucket[0]
+
+    # The section's own unit ranks first: for `sources` the row count decides
+    # (how many sources of this kind), for `tags`/`pointkinds` the row counts all
+    # tie at 1 so the summed magnitude is the only thing that can order them
+    # (most-used tags first).
+    if unit == "magnitude":
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][0], kv[0]))
+    else:
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][1], kv[0]))
+    bounded = {k: _unit_value(b) for k, b in top[:_OVERVIEW_SUMMARY_TOP]}
+    other = sum(_unit_value(b) for _, b in top[_OVERVIEW_SUMMARY_TOP:])
+    total = sum(_unit_value(b) for _, b in top)
+    summary: dict[str, Any] = {"total": total}
+    if unit == "rows" and count_field is not None:
+        summary["with_points"] = with_points
+    summary[out_field] = bounded
+    # SIBLING field, never a key in `<out_field>` — see _OVERVIEW_SUMMARY_OTHER.
+    if other:
+        summary[_OVERVIEW_SUMMARY_OTHER] = other
+    return summary
+
+
 def _overview_section(section: str, entity_id: str | None,
                       days: int, limit: int) -> Any:
     """Dispatch one overview section to its original tool body."""
@@ -3093,7 +3215,19 @@ def tortoise_overview(section: str | None = None,
     Each section returns exactly what the legacy tool returned.
 
     Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id).
+    section except topics (which requires entity_id). The UNCAPPED sections
+    whose size grows with the graph's ROWS rather than its shape (a fixed
+    vocabulary) are reported as bounded counts, never as rows, so the summary
+    stays compact as the graph grows (#3510). Each number in a section's
+    summary is in that section's OWN unit:
+      `sources`         → {total, with_points, by_kind} in SOURCES (a group is
+                          many source rows, so `by_kind` counts sources)
+      `tags`            → {total, by_name} in TAGGED-POINT counts
+      `pointkinds`      → {total, by_kind} in POINT counts
+      `structure_check` → {total, by_rule} in VIOLATIONS
+    Each `by_*` map keeps its top 20 groups and reports the folded remainder as
+    the sibling `other`, in the same unit. Pass the matching section= for the
+    full array.
 
     topics: entityProfile lite for an entity — requires entity_id.
     stale: Points not updated in N days — honors days/limit.
@@ -3103,7 +3237,24 @@ def tortoise_overview(section: str | None = None,
         for sec in _OVERVIEW_SECTIONS:
             if sec == "topics":
                 continue  # requires entity_id — not part of the default summary
-            combined[sec] = _overview_section(sec, entity_id, days, limit)
+            result = _overview_section(sec, entity_id, days, limit)
+            # #3510: every data-proportional section is folded to bounded
+            # counts here — the rows themselves stay behind the explicit
+            # section= calls. `tags`/`pointkinds` fold in their section's own
+            # magnitude (each group is one row, so a row count would be a
+            # literal 1); `sources`/`structure_check` fold in rows.
+            if sec == "sources":
+                result = _overview_summary(result, "sourceKind", "by_kind",
+                                           "points")
+            elif sec == "tags":
+                result = _overview_summary(result, "name", "by_name", "count",
+                                           unit="magnitude")
+            elif sec == "pointkinds":
+                result = _overview_summary(result, "kind", "by_kind", "count",
+                                           unit="magnitude")
+            elif sec == "structure_check":
+                result = _overview_summary(result, "type", "by_rule")
+            combined[sec] = result
         return combined
     if not isinstance(section, str):
         return {"error": f"overview: section must be a string, got {type(section).__name__}"}
