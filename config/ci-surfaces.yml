@@ -285,6 +285,7 @@ surfaces:
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
   - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
   - test_pricing_tiers.py
+  - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
   - test_quota.py
   # #4010: the session-cap removal — drives the hosted capture path + the
@@ -987,6 +988,7 @@ surfaces:
   - test_postmerge_verdict.py
   - test_pre_migration_safety.py
   - test_probe_json_mode.py
+  - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (dual-registered with api)
   - test_projection.py
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
@@ -2186,6 +2188,7 @@ durations:
   test_secret_store.py: 0.6
   test_security.py: 0.4
   test_session_key.py: 0.1
+  test_probe_reset_inflight_4608.py: 36.0
   test_sparse.py: 0.6
   test_subgraph_pure.py: 0.6
   test_supplementary.py: 0.2

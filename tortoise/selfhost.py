@@ -27,7 +27,7 @@ import logging
 import os
 import sys
 import threading
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -250,6 +250,75 @@ def _submit_probe(pool, fn):
 _PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
 _PROBE_SDK_LOCK = threading.Lock()
 
+# ── #4608: a displaced probe handle is RETIRED, never closed under a live probe
+#
+# ``_probe_db`` fetches the cached handle, releases ``_PROBE_SDK_LOCK`` and then
+# queries it with NO lock held, so a ``_probe_sdk_reset()`` or a target change
+# landing in that window used to CLOSE the handle underneath the live query.
+# The query then failed and its ``{ok: False}`` was recorded as the CURRENT
+# generation — a spurious ``degraded`` for a reachable graph. The coordinator's
+# ``seq == self._seq`` check discards a SUPERSEDED worker's write; it cannot
+# stop the close from landing under a current-generation worker that already
+# holds the handle.
+#
+# The same fix as ``hosted_api`` (#4608 owns both surfaces): the close is
+# DEFERRED while any probe is in flight. ``_PROBE_SDK_EPISODES`` is taken under
+# ``_PROBE_SDK_LOCK`` BEFORE the handle is fetched — the same lock the
+# retirement decision takes — so no reset or rebuild can observe "no probe in
+# flight" while a probe sits between its fetch and its release.
+_PROBE_SDK_EPISODES = 0
+_PROBE_SDK_DEFERRED: list = []
+
+
+def _retire_probe_sdk_locked(sdk):
+    """Displace ``sdk`` from the cache and decide who closes it (#4608).
+
+    Returns ``sdk`` when the CALLER must close it (no probe is in flight), or
+    ``None`` when the close is deferred to the last in-flight probe. A
+    displaced handle is never handed out again, so exactly one path closes each
+    one. Caller holds ``_PROBE_SDK_LOCK``.
+    """
+    if sdk is None:
+        return None
+    if _PROBE_SDK_EPISODES == 0:
+        return sdk
+    _PROBE_SDK_DEFERRED.append(sdk)
+    return None
+
+
+def _close_probe_sdks(sdks) -> None:
+    """Close displaced probe handles, out of the lock, never raising."""
+    for sdk in sdks:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+@contextmanager
+def _probe_episode():
+    """Account for ONE probe execution against the cached handle (#4608).
+
+    Held across the whole of ``_probe_db`` — handle acquisition AND query — so
+    a reset/rebuild landing at any point in between defers the close instead of
+    pulling the connection out from under this probe. Opened under
+    ``_PROBE_SDK_LOCK`` before the handle is fetched; the last episode to
+    finish performs any deferred close.
+    """
+    global _PROBE_SDK_EPISODES
+    with _PROBE_SDK_LOCK:
+        _PROBE_SDK_EPISODES += 1
+    try:
+        yield
+    finally:
+        with _PROBE_SDK_LOCK:
+            _PROBE_SDK_EPISODES -= 1
+            deferred = (list(_PROBE_SDK_DEFERRED)
+                        if _PROBE_SDK_EPISODES == 0 else [])
+            if deferred:
+                _PROBE_SDK_DEFERRED.clear()
+        _close_probe_sdks(deferred)
+
 
 def _probe_sdk_key() -> tuple:
     """Identity of the DB target the cached probe SDK is bound to.
@@ -264,16 +333,19 @@ def _probe_sdk_key() -> tuple:
 
 
 def _probe_sdk_reset() -> None:
-    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    """Close + drop the cached probe SDK (app startup / tests / ops).
+
+    #4608: the close is DEFERRED while a probe is in flight — the handle is
+    dropped from the cache immediately, but a live query keeps the connection
+    it is using until it releases it.
+    """
     with _PROBE_SDK_LOCK:
         sdk = _PROBE_SDK_CACHE.get("sdk")
         _PROBE_SDK_CACHE["sdk"] = None
         _PROBE_SDK_CACHE["key"] = None
-    if sdk is not None:
-        try:  # noqa: SIM105 — a stale temp DB may already be gone
-            sdk.close()
-        except Exception:
-            pass
+        close_now = _retire_probe_sdk_locked(sdk)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
 
 
 def _probe_sdk():
@@ -295,13 +367,11 @@ def _probe_sdk():
         sdk = TortoiseSDK(namespace="selfhost")
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
-    if old is not None:
-        # Closed after the lock is released; a probe worker may still be
-        # querying the displaced handle (see #4608).
-        try:  # noqa: SIM105
-            old.close()
-        except Exception:
-            pass
+        # #4608: a target change displaces ``old``; close it only when no probe
+        # is still querying it.
+        close_now = _retire_probe_sdk_locked(old)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
     return sdk
 
 
@@ -319,14 +389,16 @@ def _probe_db() -> dict:
     """
     from tortoise.monitoring import probe_db, probe_setup_timeout  # lazy
 
-    try:
-        sdk = _probe_sdk()
-    except Exception as exc:  # noqa: BLE001, RUF100 — probe_db never raises
-        # Mirrors ``hosted_api._probe_db``; shares the close/query residual
-        # tracked by #4608.
-        _probe_sdk_reset()
-        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return probe_db(sdk, setup_timeout=probe_setup_timeout())
+    # #4608: the episode spans the handle fetch AND the query, so a reset or a
+    # target change cannot close this handle mid-query.
+    with _probe_episode():
+        try:
+            sdk = _probe_sdk()
+        except Exception as exc:  # noqa: BLE001, RUF100 — probe_db never raises
+            # Mirrors ``hosted_api._probe_db``.
+            _probe_sdk_reset()
+            return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
+        return probe_db(sdk, setup_timeout=probe_setup_timeout())
 
 
 def _liveness_probe_hard_timeout() -> float:
@@ -512,8 +584,10 @@ async def _lifespan(app: FastAPI):
     # Drop the cached connection before resetting the coordinator:
     # ``_probe_sdk_reset`` clears the cache before closing, so a probe starting
     # in between rebuilds rather than receiving a handle about to be closed.
-    # ``hosted_api._lifespan`` resets its coordinators first; the close/query
-    # residual in this area is #4608.
+    # ``hosted_api._lifespan`` resets its coordinators first. #4608 closed the
+    # close/query residual on both surfaces: a handle a probe is still
+    # querying is retired and closed by that probe's own release, never under
+    # it.
     _probe_sdk_reset()
     _HEALTH_PROBE.reset()
     refresher = asyncio.get_running_loop().create_task(_health_probe_loop())
