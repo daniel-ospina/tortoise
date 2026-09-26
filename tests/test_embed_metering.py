@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -335,6 +336,47 @@ class TestFlush:
         monkeypatch.setattr(em, "_LOCK", _ProbeLock())
         assert em.flush_tally(tally, ORG) is None      # writer returns None
         assert observed == [("enter", False), ("exit", True)], observed
+
+    def test_note_encode_takes_the_same_lock_the_snapshot_uses(self,
+                                                              monkeypatch):
+        """The snapshot is only consistent if the WRITER is locked too.
+
+        `flush_tally` claims the consumed transition and the counter snapshot
+        share ONE critical section, so a concurrent note cannot land "in
+        between". That was true of the READER and false of the WRITER:
+        `note_encode` mutated `calls`/`texts`/`chars`/`wall_ms` with no lock at
+        all. In the declared cancellation-residual window — a pool thread still
+        running when the boundary flushes — the tally could be read
+        mid-increment and produce an internally inconsistent row
+        (`embed_calls` up, `embed_texts` not). Found in review.
+
+        Deterministic, not timing-based: `_LOCK` is replaced by a probe that
+        counts acquisitions, so the assertion is "did the writer take the lock",
+        not "did it look slow".
+        """
+        import threading
+
+        class _ProbeLock:
+            def __init__(self):
+                self._real = threading.Lock()
+                self.acquired = 0
+
+            def __enter__(self):
+                self.acquired += 1
+                return self._real.__enter__()
+
+            def __exit__(self, *exc):
+                return self._real.__exit__(*exc)
+
+        probe = _ProbeLock()
+        monkeypatch.setattr(em, "_LOCK", probe)
+
+        em.EmbedTally().note_encode(texts=2, chars=20, wall_ms=4.0)
+
+        assert probe.acquired == 1, (
+            "note_encode mutated the counters outside the lock the snapshot "
+            "holds — the two are not one critical section, so a concurrent "
+            "flush can read a half-applied encode")
 
     def test_the_counter_snapshot_is_taken_inside_the_critical_section(
             self, monkeypatch):
@@ -680,6 +722,32 @@ class TestRegistryLane:
 
 MIGRATION = (Path(__file__).resolve().parents[1] / "supabase" / "migrations"
              / "20260925000003_metering_embedding_columns.sql")
+MIGRATIONS_DIR = MIGRATION.parent
+
+
+def _sql_function_bodies(sql: str, name: str) -> list[str]:
+    """EVERY ``CREATE ... FUNCTION public.<name>(`` body in one migration file.
+
+    Plural on purpose, and the reason this helper exists: a function can be
+    ``DROP``ped and re-``CREATE``d by a later migration, so an earlier body is
+    DEAD. A guard that reads only the first definition — or only one file —
+    checks something that is not deployed, and goes green while the live
+    ceiling is edited. That is what a first version of the SQL guard below did.
+
+    Anchored on ``CREATE``: ``REVOKE ALL ON FUNCTION public.<name>(...)`` and
+    ``GRANT EXECUTE ON FUNCTION public.<name>(...)`` name the same function, and
+    matching those ran the body search past the real definition into whatever
+    function came next.
+    """
+    pattern = re.compile(
+        rf"CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+public\.{re.escape(name)}\s*\(")
+    bodies: list[str] = []
+    for m in pattern.finditer(sql):
+        end = sql.find("$$;", m.start())
+        if end == -1:
+            break
+        bodies.append(sql[m.start():end])
+    return bodies
 
 
 class TestMigrationShape:
@@ -709,6 +777,41 @@ class TestMigrationShape:
         assert "coalesce(public.metering_records.embed_calls, 0) + p_calls" in sql
         # Degenerate window is refused, not minted as an unmatchable row.
         assert "IF p_period_end <= p_period_start THEN" in sql
+
+    def test_every_sql_spend_ceiling_definition_avoids_the_embed_columns(self):
+        """The OTHER half of the scope guard — the registry lane is the first.
+
+        `test_spend_ceiling_cannot_see_the_embed_columns` asserts on
+        `metering.get_cohort_spend_usd`, the REGISTRY lane. The Supabase lane is
+        the SQL function `metering_cohort_spend`, and nothing pinned it.
+
+        ⛔ It is checked in EVERY migration that defines it, not in one chosen
+        file. `metering_cohort_spend` is defined twice: the 2-arg body in
+        `20260917000001` is DROPPED by `20260918000001:313` and replaced by the
+        3-arg overlap-window version that is actually deployed. A first version
+        of this test read only the first file — so adding an `embed_*` term to
+        the LIVE ceiling reddened nothing at all, which is precisely the hole
+        it was written to close. Found in review, twice.
+        """
+        checked: list[str] = []
+        for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            sql = path.read_text(encoding="utf-8")
+            for body in _sql_function_bodies(sql, "metering_cohort_spend"):
+                # The guard must be ABLE to fail on this body: it really does
+                # aggregate the two cost columns, so an assertion that stopped
+                # matching the function entirely cannot pass vacuously.
+                assert ("ask_cost_usd" in body and "capture_cost_usd" in body), (
+                    path.name, body)
+                assert "embed" not in body.lower(), (
+                    f"{path.name} defines a metering_cohort_spend that reads an "
+                    "embed column — the embed figure is workload, never "
+                    f"spend: {body}")
+                checked.append(path.name)
+        # ...and we really did see both the superseded and the live definition.
+        # Without this the guard could silently cover one body again.
+        assert len(checked) >= 2, (
+            f"expected the superseded AND the live metering_cohort_spend "
+            f"definition across the migrations; found {checked}")
 
     def test_rpc_is_security_definer_and_service_role_only(self):
         sql = MIGRATION.read_text(encoding="utf-8")
@@ -806,6 +909,27 @@ class TestMiddleware:
 
         asyncio.run(mw(scope, _receive, _send))
         return seen
+
+    def test_the_middleware_is_actually_installed_on_the_app(self):
+        """A guard that cannot fail is not a guard.
+
+        `app.add_middleware(_EmbedMeteringMiddleware)` is the ONLY thing that
+        puts the HTTP lane on the ledger. Deleting that one line left the whole
+        suite green — every test in this class builds its OWN app, so nothing
+        would notice. Every HTTP-lane encode, and the capture-lane attribution
+        the module docstring describes, would then go unmeasured with no red
+        anywhere. Found in review.
+        """
+        import tortoise.embed_metering as embed_mod
+        import tortoise.hosted_api as ha_mod
+
+        classes = [m.cls for m in ha_mod.app.user_middleware]
+        assert embed_mod.EmbedMeteringMiddleware in classes, (
+            "the embed metering middleware is not installed — the HTTP lane "
+            f"would record nothing. Installed: {classes}")
+        # ...and a neighbour, so this cannot pass by the stack being replaced
+        # wholesale with something that happens to contain the class.
+        assert ha_mod.InFlightMiddleware in classes
 
     def test_post_arms_and_flushes_binding_the_scope_org(self, monkeypatch):
         # Mutation: reading only the tally's org (never scope["state"]) → the

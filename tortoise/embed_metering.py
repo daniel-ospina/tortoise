@@ -114,28 +114,50 @@ class EmbedTally:
     _identity_seen: bool = field(default=False, repr=False)
 
     def note_encode(self, *, texts: int, chars: int, wall_ms: float) -> None:
-        """Accumulate one real model encode. Total — never raises."""
-        self.calls += 1
-        self.texts += texts
-        self.chars += chars
-        self.wall_ms += wall_ms
+        """Accumulate one real model encode. Total — never raises.
+
+        ⛔ The mutation holds :data:`_LOCK`, and ``_resolve_identity`` is called
+        OUTSIDE it. That is the whole point of the split: the resolver may
+        import and consult the embeddings module, and holding the lock across
+        that would put unrelated work inside a section :func:`flush_tally` also
+        needs. The four counters and the identity fields are then updated as ONE
+        section — which is exactly the property ``flush_tally``'s snapshot
+        depends on. Without it the snapshot's claim is only half true: the
+        reader is locked but the WRITER was not, so a pool thread still running
+        at boundary time (the declared cancellation residual) could be read
+        mid-increment and produce an internally inconsistent row —
+        ``embed_calls`` up and ``embed_texts`` not. Found in review.
+        """
         model, revision = _resolve_identity()
-        if not self._identity_seen:
-            self._identity_seen = True
-            self.model, self.revision = model, revision
-        elif (model, revision) != (self.model, self.revision):
-            # Keep the FIRST identity: the writer compares the incoming pair
-            # against the STORED one, and this flag carries the in-tally change.
-            self.identity_mixed = True
+        with _LOCK:
+            self.calls += 1
+            self.texts += texts
+            self.chars += chars
+            self.wall_ms += wall_ms
+            if not self._identity_seen:
+                self._identity_seen = True
+                self.model, self.revision = model, revision
+            elif (model, revision) != (self.model, self.revision):
+                # Keep the FIRST identity: the writer compares the incoming
+                # pair against the STORED one, and this flag carries the
+                # in-tally change.
+                self.identity_mixed = True
 
     def note_skip(self, n: int = 1) -> None:
         """Count encode attempts that ran no model work (model unavailable)."""
-        self.skipped += n
+        with _LOCK:
+            self.skipped += n
 
     def bind_org(self, org_id: str | None) -> None:
-        """Attach the org this work belongs to. No-op for a falsy id."""
+        """Attach the org this work belongs to. No-op for a falsy id.
+
+        Locked for the same reason as :meth:`note_encode`: ``flush_tally``
+        reads the org, and an unlocked bind could land between its snapshot and
+        that read.
+        """
         if org_id:
-            self.org_id = org_id
+            with _LOCK:
+                self.org_id = org_id
 
     def is_empty(self) -> bool:
         """True when this tally carries nothing worth a ledger row."""
@@ -242,10 +264,13 @@ def flush_tally(tally: EmbedTally | None, org_id: str | None = None) -> dict | N
             "model": tally.model,
             "revision": tally.revision,
             "identity_mixed": tally.identity_mixed,
+            # Read INSIDE the section: `bind_org` also takes the lock, so a
+            # late bind can no longer land between the snapshot and its use.
+            "org_id": tally.org_id,
         }
     if not (snap["calls"] or snap["skipped"]):
         return None
-    org = org_id or tally.org_id
+    org = org_id or snap["org_id"]
     if not org:
         # A non-empty tally with no org is a BOOKKEEPING fault of ours: the
         # work happened and cannot be attributed. Same lane, same alert.
