@@ -464,6 +464,29 @@ def is_fatal(exc: BaseException) -> bool:
     return classify_llm_error(exc) in (LlmErrorClass.FATAL, LlmErrorClass.FATAL_CONFIG)
 
 
+def is_key_limit_403(exc: BaseException) -> bool:
+    """True → an HTTP 403 whose body carries a provider key-limit signature.
+
+    The NARROW half of ``is_billing_exhausted`` — it deliberately EXCLUDES
+    HTTP 402. It is a named predicate because ``RoutingModel`` and
+    ``RotatingModel`` must use DIFFERENT classes on purpose: the key-limit
+    403 carve-out is the #4960 fix, while a bare 402 on ``RoutingModel``
+    stays fatal per the recorded #1987/#1509 reader-lane failover decision
+    (docs/plans/2026-08-29-1987-ask-reader.md; E2E-8 in #1509). Do NOT
+    "restore symmetry" by pointing ``RoutingModel`` at ``is_billing_exhausted``
+    — see the comment on ``RoutingModel.complete``'s gate.
+
+    The BODY, not the status, is the discriminator (``_KEY_LIMIT_SIGNATURES``):
+    OpenRouter reports an exhausted key budget as 403
+    ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``, NOT
+    402. A 403 whose body carries no limit signature stays FATAL (owner
+    constraint: never blanket-treat 403)."""
+    if _http_status(exc) != 403:
+        return False
+    body = _http_response_body(exc)
+    return any(sig in body for sig in _KEY_LIMIT_SIGNATURES)
+
+
 def is_billing_exhausted(exc: BaseException) -> bool:
     """True → the provider's OWN budget/limit for THIS key is spent.
 
@@ -471,29 +494,26 @@ def is_billing_exhausted(exc: BaseException) -> bool:
     mid-run), not config-inherent: a wrong credential (401, or a signature-
     less 403), and a config 4xx, mean the bug is the same on every leg —
     rotation would retry it and mask the real cause. Two statuses are
-    provider-specific and rotation-eligible:
+    provider-specific on the FULL class:
 
       * **HTTP 402** (Payment Required) — credits ran out (#1951).
       * **HTTP 403 carrying a key-limit body signature** (#4860) —
-        OpenRouter reports an exhausted key budget as 403
-        ``{"error":{"message":"Key limit exceeded (monthly limit)."}}``,
-        NOT 402. The BODY, not the status, is the discriminator
-        (``_KEY_LIMIT_SIGNATURES``); a 403 whose body carries no limit
-        signature stays FATAL (owner constraint: never blanket-treat 403).
+        ``is_key_limit_403``; the BODY, not the status, is the discriminator.
 
-    ``RotatingModel`` cooldowns the lane and rotates to an alternative so
-    the run continues; with no alternative lane it raises loud
-    (``RotatingModel`` n==1 guard). Deliberately NOT part of the M2/M3
-    taxonomy export contract — ``is_fatal``/``classify_llm_error`` semantics
-    are unchanged for the retry/abort consumers (run.py M3, extractor_v2);
-    only the rotation pool consults this hook."""
-    status = _http_status(exc)
-    if status == 402:
+    CONSULTED BY TWO CALLERS, ON DELIBERATELY DIFFERENT SCOPES:
+    ``RotatingModel`` uses the FULL class (402 and the key-limit 403 both
+    rotate to an alternative), while ``RoutingModel`` uses only the NARROW
+    ``is_key_limit_403`` — a bare 402 stays fatal there by the recorded
+    #1987/#1509 decision, and must not be "tidied" into symmetry. The
+    predicate itself is unchanged and remains the rotation contract.
+
+    With no alternative lane ``RotatingModel`` raises loud (its n==1
+    guard). Deliberately NOT part of the M2/M3 taxonomy export contract —
+    ``is_fatal``/``classify_llm_error`` semantics are unchanged for the
+    retry/abort consumers (run.py M3, extractor_v2)."""
+    if _http_status(exc) == 402:
         return True
-    if status == 403:
-        body = _http_response_body(exc)
-        return any(sig in body for sig in _KEY_LIMIT_SIGNATURES)
-    return False
+    return is_key_limit_403(exc)
 
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
@@ -765,12 +785,13 @@ class RoutingModel:
 
     ``complete()`` tries the primary; the exception class decides (D4).
     Auth (401/403) and FATAL_CONFIG (400/404/unknown 4xx) re-raise
-    immediately — no retry, NO failover. The provider-specific class
-    (HTTP 402, or a 403 carrying the provider's key-limit body) fails over
-    to the fallback exactly as ``RotatingModel`` rotates to an alternative
-    (#1951/#4860) — with no fallback configured it still raises (fail loud,
-    mirrors the rotation pool's n==1 guard); TRANSIENT/UNKNOWN fails over to
-    the fallback when configured. Stickiness (D5): once an in-complete call
+    immediately — no retry, NO failover. **Failover rule (one line): a 403
+    carrying the provider's key-limit body (#4860) fails over; a bare HTTP
+    402 stays FATAL and does NOT fail over (#1987/#1509 pinned decision),
+    unlike ``RotatingModel`` which rotates on both (#1951).** With no
+    fallback configured it still raises (fail loud, mirrors the rotation
+    pool's n==1 guard); TRANSIENT/UNKNOWN fails over to the fallback when
+    configured. Stickiness (D5): once an in-complete call
     fails over, ``last_route``/``route`` flip to the fallback and STAY there
     for the rest of this extraction (forward-only, never back
     mid-extraction). The DEADLINE-abort path (``note_stall``) is separate:
@@ -848,10 +869,26 @@ class RoutingModel:
                               max_tokens=max_tokens)
         except BaseException as e:  # noqa: BLE001, RUF100 — classify first
             self.errors.append(f"{type(e).__name__}: {e}")
-            billing = is_billing_exhausted(e)
-            if (is_fatal(e) and not billing) or self.fallback is None:
+            # #4960, in one line: RoutingModel fails over ONLY on the 403
+            # key-limit class; a bare HTTP 402 stays FATAL here.
+            #
+            # ⛔ DELIBERATELY ASYMMETRIC with RotatingModel's gate (which uses
+            # the FULL is_billing_exhausted and therefore rotates on 402 too,
+            # #1951). This is NOT an oversight and must NOT be "restored to
+            # symmetry": the ask/reader lane's failover policy is a RECORDED
+            # decision authored AFTER #1951 — #1987 Task 3 pins "RoutingModel
+            # re-raises 401/402/403 as fatal … no failover → 502
+            # reader_unavailable" (docs/plans/2026-08-29-1987-ask-reader.md,
+            # Steps (f)/(c)) and #1509 owns it as E2E-8's negative "fatal 4xx
+            # (401/402/403) → must NOT trigger failover". Adopting the broad
+            # predicate here would silently reverse that decision; reversing a
+            # recorded decision is a REOPEN in its own home, not a fix. The
+            # #4960 defect is the key-limit 403 (#4860), so the carve-out is
+            # scoped to exactly that.
+            if (is_fatal(e) and not is_key_limit_403(e)) or self.fallback is None:
                 # auth (401/403) + config 4xx — never fail over; the no-fallback
-                # case raises regardless (#1951/#4860, mirrors RotatingModel)
+                # case raises regardless. A 402 is fatal by the #1987/#1509
+                # decision (RotatingModel still rotates on it, #1951).
                 raise
             _note_failure(self.primary.provider, self.cooldown_s)
             self._failed_over = True
