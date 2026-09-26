@@ -602,7 +602,10 @@ def cotenant_holds_server(client) -> bool:
       connection (it has not pinged), so it is invisible to ``_owner_records``
       and to a raw CLIENT LIST alike. The construction publishes its claim on
       disk before it can attach, in the same owner-record store this branch
-      reads.
+      reads. It is also RE-READ as the last evidence before any teardown
+      (``_late_claim_holds``), so a peer that publishes during the probes
+      below is still seen; the decision is a snapshot, not a barrier — full
+      mutual exclusion is #4921.
     - cross-process: the #3599 per-server owner RECORDS name every owning
       process; ``live_owners > 1`` -> another process holds a co-tenant.
     - an uninstrumented spawn (no owner-record dir) cannot be reasoned about
@@ -682,13 +685,27 @@ def cotenant_holds_server(client) -> bool:
     # without an age heuristic: drop THIS client's pool first, then a raw
     # CLIENT LIST sees exactly one connection of our own (the transient
     # probe). More than one means a live co-tenant of ANY age.
+    # #4926 review: the claim above is read BEFORE the probes below
+    # (`_owner_records` forks `ps`; `_client_list` is a socket round-trip), so
+    # a peer that publishes DURING them would be missed. A claim's lifetime
+    # strictly covers the window in which its peer has neither an owner record
+    # nor a connection, so re-reading it here — as the LAST evidence before the
+    # teardown — catches exactly those peers. This narrows the window; it does
+    # NOT close it: the decision is a SNAPSHOT, not a barrier (full mutual
+    # exclusion is #4921).
+    def _late_claim_holds() -> bool:
+        try:
+            return _inflight_claim_holds(key)
+        except Exception:
+            return True  # cannot reason about the claim -> fail closed
+
     disconnect_only(client)
     try:
         clients = _client_list(key)
     except Exception:
         return True
     if clients:
-        return len(clients) > 1
+        return len(clients) > 1 or _late_claim_holds()
     # The probe failed, or reported zero clients while accepting our own
     # connection (the server is going down). Fall back to a raw socket
     # verdict: only a provably dead/missing socket means nothing live is
@@ -697,7 +714,7 @@ def cotenant_holds_server(client) -> bool:
         verdict = _probe_socket_any(key)
     except Exception:
         return True
-    return verdict not in ("dead", "missing")
+    return verdict not in ("dead", "missing") or _late_claim_holds()
 
 
 # ── #3653: reclaim a partially-initialized client's orphaned server ────────
@@ -1823,10 +1840,9 @@ def _publish_inflight_claim(socket_key: str) -> None:
     transition, BEFORE ``original(...)`` can block inside the replay, so
     another process's last-client decision sees the construction while it
     attaches. Never raises: a claim we cannot publish is a missing
-    cross-process signal (this process's own guard still reads
-    `_in_flight_replays`, and the caller's `_owner_records` branch fails
-    closed on an absent record dir) and must never break a client
-    construction. `ENOENT` from the `open` is retried ONCE — it is the one
+    cross-process signal — the module note above states the residual, and the
+    in-memory claim still protects same-process co-tenants — so it must never
+    break a client construction. `ENOENT` from the `open` is retried ONCE — it is the one
     race that can lose a claim outright, a peer's `_retract`/`forget_owner`
     `rmdir` landing between our `makedirs` and our `open`.
     """
@@ -2076,8 +2092,12 @@ def _install_owner_record_patch() -> None:
             if claimed and release_claim:
                 # #4926: the decrement and the on-disk retract are one atomic
                 # step (see the increment above), so a concurrent construction
-                # on this socket can neither lose the file nor keep a stale
-                # one. No `except` is needed and none is used: the dict ops
+                # in THIS process on this socket can neither lose the file nor
+                # keep a stale one — `_inflight_claim_lock` is a `threading.Lock`,
+                # so a PEER process races it exactly as before; what keeps a
+                # peer's file safe is the pid-prefix + socket-digest match in
+                # `_retract_inflight_claim`. No `except` is needed and none is
+                # used: the dict ops
                 # cannot raise and `_retract_inflight_claim` is never-raise.
                 # An `except` that popped unconditionally HERE would drop a
                 # live co-construction's count and unlink its claim OUTSIDE

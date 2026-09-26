@@ -3200,6 +3200,11 @@ def test_owner_handoff_failure_keeps_the_in_flight_claim(
     first = TortoiseSDK(db_path=db_path)
     second = None
     key = None
+    # #4926 review: initialise the captured server BEFORE the `try`, so a
+    # failure above the capture cannot turn the `finally` into an
+    # `UnboundLocalError` that masks the real failure and skips the explicit
+    # stop.
+    server_pid = None
     try:
         first.org_create("HandoffCo")
         sock = _json.loads(
@@ -3284,6 +3289,9 @@ def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
     first = TortoiseSDK(db_path=db_path)
     second = None
     key = None
+    # #4926 review: see the sibling raise-path test — initialise BEFORE the
+    # `try` so the `finally` can never raise `UnboundLocalError`.
+    server_pid = None
     try:
         first.org_create("HandoffFalseCo")
         sock = _json.loads(
@@ -3620,11 +3628,15 @@ def test_inflight_claim_transition_and_disk_ops_share_one_critical_section(
     functions (`_in_flight_replays[key] == 1` while
     `_inflight_claim_holds(key) is False`), which re-opens the fail-open
     window this PR closes. A two-thread reproduction is not deterministic, so
-    the contract is pinned by COUNTING critical-section entries: a
-    construction's increment+publish is entry 1 and its decrement+retract is
-    entry 2, so a mutant that splits either pair into two adjacent `with`
-    blocks (leaving a window another construction can interleave) changes the
-    count and reddens this test.
+    the contract is pinned TWO ways, and the SECOND is the load-bearing one:
+    (a) by counting critical-section entries (a construction's
+    increment+publish is entry 1, its decrement+retract is entry 2), and (b)
+    by asserting the claim lock is actually HELD at the moment each on-disk op
+    runs. (b) is what catches the harmful mutant — moving
+    `_publish_inflight_claim` (or `_retract_inflight_claim`) OUTSIDE the
+    `with` block leaves the entry COUNT unchanged (still 1 and 2) while
+    re-opening the fail-open window, in which the map says count > 0 and no
+    file exists (or a peer reuses a file this retract then unlinks).
     """
     import tortoise.embedded_lifecycle as _lifecycle
     from tortoise.projection import FalkorProjection
@@ -3654,10 +3666,12 @@ def test_inflight_claim_transition_and_disk_ops_share_one_critical_section(
 
     def _publish(key):
         calls["publish_entries"] = counter.entries
+        calls["publish_locked"] = counter.locked()
         return real_publish(key)
 
     def _retract(key):
         calls["retract_entries"] = counter.entries
+        calls["retract_locked"] = counter.locked()
         return real_retract(key)
 
     monkeypatch.setattr(_lifecycle, "_publish_inflight_claim", _publish)
@@ -3674,9 +3688,17 @@ def test_inflight_claim_transition_and_disk_ops_share_one_critical_section(
         assert calls.get("publish_entries") == 1, (
             "#4926: the publish must run in the SAME critical section as the "
             "0 -> 1 transition (entry 1)")
+        assert calls.get("publish_locked") is True, (
+            "#4926: the publish must run while the claim lock is HELD — moved "
+            "outside the `with`, the map says count > 0 while no file exists "
+            "(the fail-open window), and the entry COUNT alone cannot see it")
         assert calls.get("retract_entries") == 2, (
             "#4926: the retract must run in the SAME critical section as the "
             "1 -> 0 transition (entry 2)")
+        assert calls.get("retract_locked") is True, (
+            "#4926: the retract must run while the claim lock is HELD — moved "
+            "outside the `with`, a same-process construction can reuse the "
+            "file this retract then unlinks")
         assert counter.entries == 2, (
             "#4926: a construction must enter the claim lock exactly twice "
             "(increment+publish, decrement+retract) — a split critical "
@@ -3687,6 +3709,88 @@ def test_inflight_claim_transition_and_disk_ops_share_one_critical_section(
                 second.close()
         with contextlib.suppress(Exception):
             first.close()
+
+
+def test_late_claim_recheck_sees_a_peer_that_publishes_during_the_probes(
+        tmp_path, monkeypatch):
+    """#4926: the claim is RE-READ as the LAST evidence before teardown.
+
+    The early claim check runs before the two slow probes (`_owner_records`
+    forks `ps`; `_client_list` is a socket round-trip). A peer that publishes
+    its claim DURING them is invisible to every other signal — no owner record
+    (``_owner_records`` still reports only the holder) and no connection yet
+    (it has not pinged) — so without the re-read the destructive verdict runs
+    against a live peer. A claim's lifetime strictly covers that window, so
+    reading it again immediately before the verdict catches exactly those
+    peers.
+
+    RED mutant: return straight from the probe verdict — `cotenant_holds_server`
+    answers False (last client) and the server is torn down under the peer.
+    """
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise import embedded_reaper as _reaper
+
+    sock = str(tmp_path / "redis.socket")
+    key = os.path.abspath(sock)
+    # An `unknown` start stamp makes `_inflight_claim_holds` count the pid LIVE
+    # (fail closed), so the claim holds for a race-free reason.
+    claim = _claim_file_name(_lifecycle, key, os.getpid(), "unknown")
+
+    def _owner_records_publishing_peer(probed_key):
+        # A peer publishes its mid-construction claim WHILE we are probing.
+        record_dir = _lifecycle.owner_record_dir(probed_key)
+        os.makedirs(record_dir, exist_ok=True)
+        Path(os.path.join(record_dir, claim)).write_text("")
+        return (1, 1)  # only the holder has an owner record
+
+    monkeypatch.setattr(_reaper, "_owner_records",
+                        _owner_records_publishing_peer)
+    # One client only -> the CLIENT LIST branch would otherwise say "last".
+    monkeypatch.setattr(_reaper, "_client_list", lambda _key: [{"id": 1}])
+    monkeypatch.setattr(_lifecycle, "disconnect_only", lambda _client: None)
+
+    class _Client:
+        socket_file = sock
+        connection_pool = None
+
+    assert _lifecycle._inflight_claim_holds(key) is False, (
+        "test setup: the peer has not published yet")
+    assert _lifecycle.cotenant_holds_server(_Client()) is True, (
+        "#4926: a claim published during the slow probes must still hold the "
+        "server — the decision is re-read before the destructive verdict")
+
+
+def test_late_claim_recheck_treats_a_read_failure_as_a_hold(
+        tmp_path, monkeypatch):
+    """#4926: the late re-read fails CLOSED, like every neighbouring signal.
+
+    RED mutant: let the re-read's exception propagate (or treat it as "no
+    claim") — an unreadable claim store would then authorize a teardown.
+    """
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise import embedded_reaper as _reaper
+
+    sock = str(tmp_path / "redis.socket")
+    real = _lifecycle._inflight_claim_holds
+    calls = {"n": 0}
+
+    def _flaky(probed_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real(probed_key)  # the early read still works
+        raise OSError("cannot read the claim store")
+
+    monkeypatch.setattr(_lifecycle, "_inflight_claim_holds", _flaky)
+    monkeypatch.setattr(_reaper, "_owner_records", lambda _key: (1, 1))
+    monkeypatch.setattr(_reaper, "_client_list", lambda _key: [{"id": 1}])
+    monkeypatch.setattr(_lifecycle, "disconnect_only", lambda _client: None)
+
+    class _Client:
+        socket_file = sock
+        connection_pool = None
+
+    assert _lifecycle.cotenant_holds_server(_Client()) is True, (
+        "#4926: a late re-read that cannot be performed must HOLD the server")
 
 
 def test_inflight_claim_publish_never_breaks_construction_and_retries_enoent(
