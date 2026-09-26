@@ -16,8 +16,10 @@ is an EP-weight delta on the operator it is attached to:
 Every assertion below therefore reads an observable the propagation path
 PRODUCES: the tuple ``TortoiseEP._affected_factors`` returns (the same list
 ``run()`` folds), the posterior propagation settles, or the graph's own
-node/edge counts being unchanged across a read-only resolution. No assertion
-here asserts that a mitigation edge exists — an edge-existence assertion would
+node/edge counts being unchanged across a read-only resolution. The two AC3
+``pytest.raises`` assertions read a different observable — the *writer's*
+refusal contract — because that case is decided before any propagation runs.
+No assertion here asserts that a mitigation edge exists — an edge-existence assertion would
 stay green for a mitigation whose strength was never applied, which is exactly
 the defeat this module exists to prevent.
 

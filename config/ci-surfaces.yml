@@ -2286,7 +2286,7 @@ durations:
   test_website_static.py: 0.4
   test_weights.py: 0.1
   test_weights_mitigation.py: 0.2
-  test_3815_mitigation_moves_weight.py: 24.8  # local 3-run max (19.1/24.8/24.3), pending CI junit sweep
+  test_3815_mitigation_moves_weight.py: 24.8  # unmeasured — #3815: local 3-run max (19.1/24.8/24.3); refresh from CI junit
   test_build_cohorts_2517.py: 0.1
   test_eval_reinjection_cap_resume.py: 0.5
   test_guard_measured_revision.py: 3.5
