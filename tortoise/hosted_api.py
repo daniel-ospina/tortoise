@@ -693,16 +693,62 @@ mcp_http_app = create_http_app(
 )
 
 
-def _iter_registered_orgs() -> list[dict]:
+#: #4493: the explicit row bound for the Supabase org enumeration, set EQUAL to
+#: the project's PostgREST ``max_rows`` (``supabase/config.toml`` → ``[api]
+#: max_rows = 1000``). ``SupabaseControlPlane.query`` neither paginates nor
+#: reads ``Content-Range``, and PostgREST silently caps a row LIST at
+#: ``max_rows`` — so a truncated page arrives as a non-empty PARTIAL list with
+#: no error. Requesting ``limit`` equal to the cap is the smallest containment:
+#: a result that FILLS it is treated as possibly-truncated.
+#:
+#: The two callers need opposite things from that signal, so completeness is
+#: EXPLICIT via ``require_complete`` rather than encoded as an empty list
+#: (#5388):
+#:   * ``_refresh_cost_allocation`` passes ``require_complete=True`` — a partial
+#:     fleet must never PRUNE orgs from the published metric, so a filled page
+#:     returns ``None`` and the refresh keeps last-known-good.
+#:   * ``_sweep_events`` uses the default — a partial page is still worth
+#:     sweeping, so it processes the rows it received. Returning ``[]`` here
+#:     (the previous shape) silently skipped fleet-wide event retention at
+#:     >=1000 orgs.
+#:
+#: RESIDUAL LIMITATION (#5388): a genuinely COMPLETE 1000-org fleet is
+#: indistinguishable from a truncated page, so the cost refresh treats it as
+#: unavailable (fail closed — freezing the metric is safer than pruning). The
+#: general fix reads ``Content-Range`` or paginates in ``supabase_control`` (or
+#: uses an ``array_agg`` RPC, the #3665 pattern).
+_ORG_ENUMERATION_MAX_ROWS = 1000
+
+
+def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | None:
     """List registered orgs from the control plane (best-effort).
 
     Used by the event-retention sweep (#432 Task 7) — the boot pass and the
-    hourly interval in _lifespan (this is its only production caller).
+    hourly interval in _lifespan — AND, since #4493, by the fixed-cost
+    allocation refresh (``_refresh_cost_allocation``), which is a second
+    production caller on the same hourly interval. The two share the one
+    offload pool below.
+
+    ⚠️ ``[]`` is returned on ANY failure, so it is NOT proof of an empty
+    fleet; the allocation caller treats a falsy result as "enumeration
+    unavailable" and fails closed rather than reading it as "no orgs, no cost".
     Supabase mode (post-#669 flip): enumerates from Supabase orgs via the
     seam — the registry is DELETED and querying it would auto-recreate the
     empty graph. Registry mode: the Org nodes from the
     registry_control_plane graph via _make_sdk(namespace="registry").
     Returns [] on any failure — the sweep is best-effort.
+
+    #4493/#5388: the Supabase branch requests an explicit ``limit`` and cannot
+    distinguish a complete page from a server-truncated one (no
+    ``Content-Range`` read, no pagination). Completeness is therefore an
+    EXPLICIT contract, not encoded as emptiness:
+
+    * ``require_complete=True`` (the cost-allocation caller) returns ``None``
+      when the page FILLS the limit — "the fleet could not be confirmed",
+      which the caller maps to its unavailable/last-known-good path.
+    * the default returns the rows received even when the page filled — the
+      best-effort retention sweep must process a partial page rather than
+      purge nothing for the whole fleet.
     """
     try:
         from tortoise.supabase_control import (
@@ -713,8 +759,22 @@ def _iter_registered_orgs() -> list[dict]:
             rows = get_control_plane().query(
                 "organizations", select=["id", "name"],
                 filters=[("deleted_at", "is", None)],
+                limit=_ORG_ENUMERATION_MAX_ROWS,
             )
-            return [{"org_id": r["id"], "name": r.get("name")} for r in rows]
+            parsed = [{"org_id": r["id"], "name": r.get("name")} for r in rows]
+            if len(rows) >= _ORG_ENUMERATION_MAX_ROWS:
+                # A filled page may be truncated (#5388): PostgREST caps a row
+                # list silently. Fail CLOSED for a caller that needs the whole
+                # fleet; let a best-effort caller process what it got.
+                _logger.warning(
+                    "org enumeration filled its explicit limit (%d rows) — a "
+                    "possibly-truncated page; require_complete=%s (fail-closed "
+                    "for the cost metric: a truncated page must never prune "
+                    "orgs)",
+                    _ORG_ENUMERATION_MAX_ROWS, require_complete)
+                if require_complete:
+                    return None
+            return parsed
 
         # #2251 (was #2179 follow-up): the old bare TortoiseSDK() read the
         # ns-less control_plane graph on resolve_db_path()'s ~/.tortoise DB
@@ -985,6 +1045,67 @@ def _sweep_oauth_retention() -> None:
                          total, counts)
     except Exception as exc:  # a GC sweep must never crash the loop
         _logger.warning("oauth retention sweep failed: %s", exc)
+
+
+def _measured_write_ops_basis(orgs: list[str]) -> dict[str, int] | None:
+    """Measured per-org write-ops for the PROPORTIONAL allocation lines (#4493).
+
+    FAIL-CLOSED by construction: the first unreadable org returns ``None``,
+    which makes every proportional line ``unavailable`` for this refresh. A
+    partial map would silently redistribute the unreadable org's share, and a
+    zero would assert a measurement that was never taken — the distinction
+    ``metering.measure_write_ops`` exists to preserve (unlike
+    ``get_current_usage``, which degrades an unreadable read to 0).
+    """
+    from tortoise.metering import measure_write_ops
+    basis: dict[str, int] = {}
+    for org_id in orgs:
+        try:
+            basis[org_id] = measure_write_ops(org_id)
+        except Exception as exc:  # noqa: BLE001, RUF100 — unreadable basis is a state, not a crash
+            _logger.warning(
+                "cost allocation basis unreadable for org %s (%s) — proportional "
+                "lines will report 'unavailable' rather than a silent zero",
+                org_id, exc)
+            return None
+    return basis
+
+
+async def _refresh_cost_allocation() -> None:
+    """#4493: apply the declared fixed/shared SaaS allocation, per org.
+
+    The SINGLE production write path for the per-team cost metric
+    (``tortoise_team_cost_cents``, which had no production caller at all before
+    this). It is module-level ON PURPOSE: the periodic seam that arms it,
+    ``_event_retention_loop``, is a CLOSURE inside ``_lifespan`` and cannot be
+    called from a test, so a test that asserts the PRODUCTION call site needs
+    this half to be directly invocable.
+
+    Best-effort by construction: ``_event_retention_loop`` has NO per-iteration
+    guard, so a raise here would kill event retention AND the deleted-org purge
+    for the process's lifetime. Every non-cancellation exception is swallowed
+    with a warning.
+    """
+    from tortoise.cost_allocation import refresh_and_publish
+
+    def _run() -> None:
+        rows = _iter_registered_orgs(require_complete=True)
+        if rows is None:
+            # The page filled its bound and ``query`` cannot tell a complete
+            # 1000-org fleet from a truncated one (#5388): the fleet is
+            # UNKNOWN, so publish an unavailable snapshot and leave the metric
+            # at last-known-good rather than pruning orgs beyond the page.
+            refresh_and_publish([])
+            return
+        orgs = [o["org_id"] for o in rows if o.get("org_id")]
+        refresh_and_publish(orgs, weights_by_org=_measured_write_ops_basis(orgs))
+
+    try:
+        await run_on_daemon_worker(_run, name="tortoise-cost-allocation")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001, RUF100 — must never kill the retention loop
+        _logger.warning("cost allocation refresh failed: %s", exc)
 
 
 async def _run_boot_sweeps() -> None:
@@ -1453,6 +1574,10 @@ async def _lifespan(app):
                     # #3036: GC dead OAuth rows (sync DB work off the loop)
                     await run_on_daemon_worker(_sweep_oauth_retention,
                                                name="tortoise-boot-sweep")
+                    # #4493: allocated fixed/shared SaaS cost per org — the
+                    # production write path for tortoise_team_cost_cents.
+                    # Swallows internally (see _refresh_cost_allocation).
+                    await _refresh_cost_allocation()
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
@@ -5314,7 +5439,7 @@ def _normalize_mapped_ipv6(ip):
 
 
 async def _check_ip_bucket_rate_limit(
-    request: Request, *,
+    request: Request | None = None, *,
     buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
     detail: str | dict, retry_after_s: int | None = None,
     key: Hashable | None = None, max_entries: int = 10_000,
@@ -5334,6 +5459,17 @@ async def _check_ip_bucket_rate_limit(
     test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
     computes time-until-oldest-entry-expires (sliding-window precision).
 
+    #2050: widening this helper for a Request-FREE caller (the MCP dispatch
+    point, key-authenticated per team — no client address exists there) must
+    not widen it for the HTTP callers that already pass a Request. The
+    Request is therefore consulted FIRST: a Request with no client address
+    has no identity to bucket on and returns, exactly as before #2050. Only
+    when NO Request is passed does an explicit `key` stand alone as the
+    bucket identity. An HTTP caller's `key` is a composite that CONTAINS the
+    client IP, so admitting it on a client-less Request would collide the
+    per-IP dimension of invite-accept / invite-otp into one shared
+    (…, "ip", None) bucket across unrelated callers (#5397 review).
+
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
     outcome (success/401/403), so a server fault (5xx) never consumes the
@@ -5341,13 +5477,25 @@ async def _check_ip_bucket_rate_limit(
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if not request.client or not request.client.host:
-        return
-    ip = key if key is not None else request.client.host
+    if request is None:
+        # Request-free arm (#2050): `key` alone is the bucket identity. There
+        # is no client address to fall back to, so a missing key is the only
+        # reason to return.
+        if key is None:
+            return
+    else:
+        # Pre-#2050 guard, restored for EVERY Request-carrying caller: a
+        # client-less request has no identity to bucket on, whether or not a
+        # `key` was supplied. This is what keeps every existing caller's
+        # behaviour identical to the merge-base.
+        if not request.client or not request.client.host:
+            return
+        if key is None:
+            key = request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles both dotted-quad
     # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
         bucket = buckets[ip]
@@ -5776,12 +5924,33 @@ def _check_dashboard_key_login(org: dict, request: Request) -> None:
         )
 
 
+def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
+    """Admission kwargs for `_check_ip_bucket_rate_limit`, keyed by `bucket_key`.
+
+    The op → limit / window / refusal-copy mapping is stated ONCE, here. Both
+    arms of the budget — the REST per-IP arm and the MCP per-team arm (#2050)
+    — pass their own bucket identity through this seam, so the limit and the
+    refusal contract cannot drift between the two surfaces that enforce it.
+    Two implementations of one limit is how a budget stops being one.
+
+    Returns None when the op carries no budget: `_SENSITIVE_OP_LIMITS` is the
+    only authority for what is budgeted.
+    """
+    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
+    if max_per_hour is None:
+        return None
+    return {
+        "buckets": _SENSITIVE_BUCKETS, "lock": _SENSITIVE_LOCK,
+        "limit": max_per_hour, "window_s": 3600,
+        "key": bucket_key,
+        "detail": f"Rate limit exceeded for {op}. Please try again later.",
+        "retry_after_s": 3600,
+    }
+
+
 async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     """Per-IP hourly budget for sensitive org ops (export / org_delete /
     import / pack_manifest)."""
-    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
-    if max_per_hour is None:
-        return
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -5790,12 +5959,42 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
     _ip = _normalize_mapped_ipv6(_ip)
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_SENSITIVE_BUCKETS, lock=_SENSITIVE_LOCK,
-        limit=max_per_hour, window_s=3600,
-        key=(_ip, op),
-        detail=f"Rate limit exceeded for {op}. Please try again later.",
-        retry_after_s=3600)
+    # An unknown client has no identity to bucket on, and this composite key
+    # must never be built around a None IP. _check_ip_bucket_rate_limit
+    # enforces the same requirement for every Request-carrying caller (#5397
+    # review restored it); stated here as well so the invariant is explicit
+    # at the one place this key is formed.
+    if _ip is None:
+        return
+    kwargs = _sensitive_op_budget(op, (_ip, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(request, **kwargs)
+
+
+async def _check_sensitive_op_budget(op: str, scope_key: Hashable) -> None:
+    """#2050: the SAME sensitive-op budget, keyed by an explicit identity.
+
+    The MCP dispatch point (``mcp_server._wrapped_call_tool``) has no Request:
+    it is authenticated per TEAM, and a per-IP frame would be wrong there even
+    if one existed — an MCP caller is an agent server whose egress address is
+    shared with unrelated tenants (the #2866 DCR trusted-CIDR discussion). So
+    the MCP arm passes ``(scope_key, op)`` — the team id — as the bucket key
+    into the SAME shared ``_SENSITIVE_BUCKETS`` store, under the SAME
+    ``_SENSITIVE_OP_LIMITS`` entry and the SAME refusal contract, via the SAME
+    ``_check_ip_bucket_rate_limit`` implementation. One budget per op, enforced
+    on BOTH first-class pack-install surfaces.
+
+    ``scope_key`` must never be None: a None key would collapse to a single
+    shared bucket across every tenant. Callers without a scope (stdio, the
+    selfhost placeholder) must skip the call rather than pass one.
+    """
+    if scope_key is None:
+        raise ValueError("scope_key is required — a None key merges tenants")
+    kwargs = _sensitive_op_budget(op, (scope_key, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(None, **kwargs)
 
 
 async def _check_signup_ip_rate_limit(request: Request) -> None:

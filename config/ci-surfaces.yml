@@ -247,6 +247,12 @@ surfaces:
   # REPLACES the `core` fallback, so a core-only registration would never run
   # on an api-only PR. Same #2938 dual-membership convention.
   - test_cohort_cost_cap.py
+  # #4493: the fixed/shared SaaS ALLOCATION rule + the revived per-team cost
+  # metric. Dual-registered with `core`: the file pins `tortoise/monitoring.py`
+  # (core) AND the production write path in `tortoise/hosted_api.py`, which
+  # SELECTS `api` — a named-surface match REPLACES the `core` fallback, so a
+  # core-only registration would never run on an api-only PR.
+  - test_cost_allocation.py
   # #4194: the turn-write embedding path. Dual-registered with `core` (the
   # SDK capture loop owns there) and `eval` (tortoise/embeddings.py selects
   # eval) because the hosted copy of the same loop lives in the api-owned
@@ -287,6 +293,13 @@ surfaces:
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #4503: the EDGE class is outside every accounting surface. This
+  # file pins the cap's invariance to edge-state growth, so it is
+  # registered under `api` -- the surface `tortoise/quota.py`
+  # selects. A `core`-only entry would leave a quota.py-only PR
+  # selecting `api` with this guard never run (the #1349 class), the
+  # same reason tests/test_quota.py is registered here.
+  - test_4503_edge_relationship_accounting.py
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
@@ -720,6 +733,11 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #4503: dual-registered -- the file also pins the EP edge-flush /
+  # rebuild behaviour of `tortoise/ep.py` + the projection replay
+  # (no named surface matches `tortoise/projection/entities.py`, so
+  # those fall to the `core` fallback).
+  - test_4503_edge_relationship_accounting.py
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py
@@ -976,6 +994,9 @@ surfaces:
   # on — a sdk.py-only PR must run it (dual-registered with battery).
   - test_battery_parity_vector_guard.py
   - test_monitoring.py
+  # #4493: the allocation rule, the fail-closed basis reader and the revived
+  # per-team Gauge — dual-registered with `api` (see that block).
+  - test_cost_allocation.py
   - test_navigation.py
   # #5080: the D12/O4 never-across boundary. Both write-path fold sites — the
   # against-store classifier and the in-capture band — resolve it from one
@@ -1921,6 +1942,7 @@ durations:
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7
   test_ci_selection.py: 18.8
+  test_4503_edge_relationship_accounting.py: 53.0  # unmeasured — #4503: locally measured (28 tests; ~41s wall-pytest, ~53s process, in BOTH the embedded carve-out and the docker lane); earlier revisions of this file read 14-21s, so the figure is variable and errs high; refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5
@@ -2147,6 +2169,7 @@ durations:
   test_joint_index_ingest.py: 0.5
   test_mcp_telemetry.py: 0.4
   test_monitoring.py: 24.3
+  test_cost_allocation.py: 20.3
   test_operator_source_search.py: 0.6
   test_pack_shipping.py: 0.7
   test_query_suggestions.py: 0.4

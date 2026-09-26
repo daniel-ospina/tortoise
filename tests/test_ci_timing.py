@@ -503,3 +503,107 @@ def test_find_step_warns_when_no_eligible_run(
     assert proc.returncode == 0, f"find step failed:\n{proc.stdout}\n{proc.stderr}"
     assert gh_output.read_text() == "run_id=\n"
     assert "::warning::no completed push-to-main python-ci run found in the last 10" in proc.stdout
+
+
+# ── The empty-durations bug (#5050): cross-run fetch + its observability ──
+
+
+def _measure_step(name_prefix: str) -> dict:
+    wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
+    for step in wf["jobs"]["measure"]["steps"]:
+        if (step.get("name") or "").startswith(name_prefix):
+            return step
+    raise AssertionError(f"ci-timing.yml measure job no longer has a {name_prefix!r} step")
+
+
+def test_download_step_passes_a_cross_run_token() -> None:
+    """The pytest-log artifacts belong to the SAMPLED run, not this one, and
+    actions/download-artifact@v4 scopes its default credentials to the CURRENT
+    run — so `run-id` without `github-token` fetches nothing while
+    `continue-on-error` reports success.
+
+    Measured on run 36201658543: the sampled run had 8 unexpired pytest-log-*
+    artifacts, and the generated ci-timing.json still recorded "files": {} with
+    an all-zero `counts`. Nothing failed, for five weeks of weekly runs — which
+    made the durations map the selection packer wants permanently empty (#5050).
+    """
+    download = _measure_step("Download pytest log")
+    assert download["uses"].startswith("actions/download-artifact@"), download["uses"]
+    with_ = download["with"]
+    assert "run-id" in with_, "the download must target the SAMPLED run"
+    assert "github-token" in with_, (
+        "cross-run artifact download needs an explicit token — without it the "
+        "step silently fetches nothing (the #5050 empty-durations bug)"
+    )
+    # `continue-on-error` is deliberate (artifacts CAN be absent) and must stay,
+    # because the assert step below is what distinguishes the two cases.
+    assert download.get("continue-on-error") is True
+
+
+def test_assert_step_is_gated_on_a_sampled_run() -> None:
+    """Without a sampled run there is nothing to compare against, and the find
+    step has already warned — the assert must not double-report."""
+    assert_step = _measure_step("Assert the download")
+    assert "steps.find.outputs.run_id" in str(assert_step.get("if", "")), (
+        "the assert must be skipped when no run was sampled"
+    )
+
+
+def _fake_gh_artifacts(bin_dir: Path, names: list[str]) -> None:
+    """PATH stub for `gh api …/artifacts`: emits the count when --jq is passed,
+    otherwise an artifacts response. No network."""
+    script = bin_dir / "gh"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"NAMES = {names!r}\n"
+        "if '--jq' in sys.argv:\n"
+        "    print(len([n for n in NAMES if n.startswith('pytest-log-')]))\n"
+        "else:\n"
+        "    print(json.dumps({'artifacts': [{'name': n} for n in NAMES]}))\n"
+    )
+    script.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("artifact_names", "download_a_log", "expected_rc"),
+    [
+        # The sampled run owns logs and we fetched none → a FETCH failure.
+        (["pytest-log-test-a"], False, 1),
+        # Logs present and fetched → pass.
+        (["pytest-log-test-a"], True, 0),
+        # No logs exist at all → a legitimate absence, not a failure.
+        ([], False, 0),
+    ],
+)
+def test_assert_step_distinguishes_fetch_failure_from_absent_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_names: list[str],
+    download_a_log: bool,
+    expected_rc: int,
+) -> None:
+    """Executes the assert step body as the runner would, with the run_id
+    substituted (GitHub expands `${{ }}` before bash sees it)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _fake_gh_artifacts(bin_dir, artifact_names)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "daniel-ospina/tortoise")
+
+    if download_a_log:
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "pytest.log").write_text("1 passed\n")
+
+    body = _measure_step("Assert the download")["run"].replace(
+        "${{ steps.find.outputs.run_id }}", "303"
+    )
+    proc = subprocess.run(["bash", "-e", "-c", body],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode == expected_rc, (
+        f"expected rc={expected_rc}, got {proc.returncode}\n{proc.stdout}\n{proc.stderr}"
+    )
+    if expected_rc == 1:
+        assert "::error::" in proc.stdout, proc.stdout
+        assert "not an absent artifact" in proc.stdout, proc.stdout
