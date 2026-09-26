@@ -17,6 +17,10 @@ response_fields:
   field: why
   emitted_when: 'TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)'
   unchanged_when_off: 'yes — the response is byte-identical when the flag is off'
+- response: tortoise_session_capture
+  field: capture_redactions
+  emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'
+  unchanged_when_off: 'n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)'
 counts:
   tools: 82
   sdk_public_methods: 150
