@@ -39,6 +39,44 @@
 #   pricing-artifact, docs, test-isolation, license-surface, legal-e2e,
 #   python-ci-gate
 
+# ── Parallel speculative checks — test several batches at once ────────────────
+#
+# The queue is otherwise SERIAL: one batch per full CI cycle, so throughput is
+# capped at (batch_size / cycle_time) no matter what else is tuned. Measured
+# 2026-09-26, that was ~3 merges/hour against a ~37 min cycle on 46 queued PRs.
+#
+# `max_parallel_checks` tests predicted merge states concurrently. Mergify's own
+# worked example: with batch_size 3 and max_parallel_checks 2, six of seven
+# queued PRs merge in ONE CI cycle instead of six cycles. The docs put the
+# overall gain at 3-5x merge throughput.
+#
+# 3 is a deliberate starting point, not a ceiling. The limit that actually binds
+# is CI capacity, not Mergify: this repo has already seen jobs fail to start
+# because runners could not be acquired, so raising this multiplies CONCURRENT
+# CI RUNS (~10 jobs each). Raise it only after watching the runner queue at 3.
+#
+# This is NOT "parallel mode". Parallel mode gives independent scopes their own
+# queues; this speeds up the single ordered queue. They compose.
+merge_queue:
+  max_parallel_checks: 3
+
+# ── Priority — let the changes that unblock others jump the queue ─────────────
+#
+# Mergify picks PRs for batching by PRIORITY FIRST, then by queue order, so a
+# high-priority PR is never held behind lower-value work. Anything unmatched is
+# `medium` (2000); this rule lifts a labelled PR to `high` (3000).
+#
+# `allow_checks_interruption: true` lets it interrupt checks already running.
+# That is deliberate and it does spend CI time already paid for — the queue's
+# own RCV trade (reliability + velocity, accepting wasted runs). Use the label
+# only for changes that unblock others, never for preference.
+priority_rules:
+  - name: queue accelerator
+    conditions:
+      - label = queue-accelerator
+    priority: high
+    allow_checks_interruption: true
+
 queue_rules:
   - name: main
     # Entry gate — evaluated against the PR, before it is queued.
@@ -113,6 +151,13 @@ queue_rules:
 #   else. It is enforced on local land paths only, never on a queue merge.
 merge_protections_settings:
   auto_merge_conditions: true
+
+# NOTE: `batch_size` is deliberately NOT mutated here. Raising it and this
+# change are separate levers and separate reviews; PR #5384 owns batch_size.
+# Once both land, consider Mergify's DYNAMIC batch sizing
+# (`batch_size: {min: 1, max: N}`), which spreads queued PRs across the
+# available parallel checks — small batches when the queue is quiet, growing
+# toward max only when it backs up.
 
 pull_request_rules:
   - name: queue ready PRs onto main
