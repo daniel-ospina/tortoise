@@ -1414,3 +1414,62 @@ class TestDeferredSensitiveOpCharging:
             asyncio.run(_scenario())
         finally:
             ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_cancelled_mid_flight_charges(self, monkeypatch):
+        """#2051 review P2: a request cancelled mid-flight (client
+        disconnect / server shutdown) raises ``asyncio.CancelledError`` — a
+        ``BaseException``, so it never reached the ``HTTPException`` branch
+        and charged 0. That is an evasion path: a client can disconnect
+        before every response and run the heavy ``import``/``export``
+        uncharged without bound, and the pre-migration check-time behaviour
+        charged this class. It MUST charge exactly once (delta 0 or 1 — no
+        double-charge), and the cancellation must still propagate."""
+        import asyncio
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 10)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        @ha_mod._deferred_sensitive_op("export")
+        async def endpoint(request, mode):
+            if mode == "cancel_raise":
+                # the cancellation boundary a disconnect/shutdown delivers
+                raise asyncio.CancelledError()
+            # a genuinely in-flight body, cancelled at its own await
+            await asyncio.Event().wait()
+            return {"ok": True}
+
+        req = self._request()
+
+        async def _scenario():
+            # (a) CancelledError raised from the endpoint body → 1 charge.
+            try:
+                await endpoint(request=req, mode="cancel_raise")
+            except asyncio.CancelledError:
+                pass
+            else:  # pragma: no cover
+                raise AssertionError("cancellation must propagate")
+            assert _entries() == 1, (
+                "a mid-flight cancellation must charge exactly once")
+
+            # (b) a REAL task.cancel() while the endpoint hangs at its
+            # await → still exactly one charge, delivered despite the
+            # cancellation (shielded), and the task stays cancelled.
+            task = asyncio.ensure_future(endpoint(request=req, mode="hang"))
+            await asyncio.sleep(0)  # let it reach the hang await
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:  # pragma: no cover
+                raise AssertionError("the task must end cancelled")
+            assert _entries() == 2, (
+                "a cancelled task must charge exactly once")
+
+        try:
+            asyncio.run(_scenario())
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()

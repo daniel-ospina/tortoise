@@ -5765,13 +5765,15 @@ def _deferred_sensitive_op(op: str):
     Factors the exact #1719 (Task 5) sequence session_login established —
     prune + 429-check on admission (``defer_charge=True``), then charge ONCE
     at the TERMINAL outcome — over the whole sensitive-op family. Charge iff
-    the endpoint returned normally or raised a non-5xx ``HTTPException`` (a
-    client error is terminal); a 5xx — including an unhandled exception the
-    global handler renders as one — passes through UNCHARGED, so a
-    control-plane/graph fault cannot burn the caller's hourly budget and
-    mask the underlying 5xx with a stale 429 (#1719 Task 5). The admission
-    check still runs BEFORE the body (cheapest rejection), and a 429 raised
-    by it is a refusal and charges nothing.
+    the endpoint returned normally, raised a non-5xx ``HTTPException`` (a
+    client error is terminal), or was CANCELLED mid-flight (a disconnect /
+    shutdown is a terminal non-5xx outcome, and an uncharged one is an
+    evasion path — see the ``CancelledError`` branch); a 5xx — including an
+    unhandled exception the global handler renders as one — passes through
+    UNCHARGED, so a control-plane/graph fault cannot burn the caller's
+    hourly budget and mask the underlying 5xx with a stale 429 (#1719
+    Task 5). The admission check still runs BEFORE the body (cheapest
+    rejection), and a 429 raised by it is a refusal and charges nothing.
     """
     def decorator(fn):
         @functools.wraps(fn)
@@ -5789,6 +5791,23 @@ def _deferred_sensitive_op(op: str):
             except HTTPException as exc:
                 if exc.status_code < 500:
                     await _charge_sensitive_op_rate_limit(key, op)
+                raise
+            except asyncio.CancelledError:
+                # #2051 (review P2): a request cancelled mid-flight (client
+                # disconnect, server shutdown) is a terminal NON-5xx
+                # outcome and MUST charge. Left uncharged, a client could
+                # disconnect before every response and obtain unlimited
+                # uncharged executions of the heavy ``import``/``export``
+                # ops; the pre-migration check-time behaviour charged this
+                # class, so charging here restores parity (it REMOVES a
+                # limits change, it is not one). ``shield`` runs the charge
+                # in its own task so a SECOND cancellation cannot drop it
+                # while it waits on the bucket lock; the best-effort guard
+                # keeps a charge-side fault from masking this cancellation
+                # (a charge is telemetry, never a failure path).
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(
+                        _charge_sensitive_op_rate_limit(key, op))
                 raise
             await _charge_sensitive_op_rate_limit(key, op)
             return result
