@@ -9,6 +9,7 @@ installed, audit operates in JSONL-only mode (Tier 2).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -147,8 +148,16 @@ class AuditLogger:
         if not self._dsn:
             return False
         if not self._dsn.startswith(("postgresql://", "postgres://")):
+            # #2903 (same leak class as #2796): a malformed DSN is still secret
+            # material — this error is rendered into logs and telemetry (the
+            # unhandled-exception handler, the purge sweep's exc_info warning),
+            # and a raw prefix can carry a password head. Report a
+            # non-reversible 8-hex identity instead (secret_store contract:
+            # fingerprints are the ONLY key identity that may reach logs).
+            got = hashlib.sha256(self._dsn.strip().encode()).hexdigest()[:8]
             raise ValueError(
-                f"TORTOISE_AUDIT_DSN must start with postgresql:// or postgres://, got: {self._dsn[:20]}..."
+                "TORTOISE_AUDIT_DSN must start with postgresql:// or "
+                f"postgres:// (got <{got}>...)"
             )
         if not _HAS_PSYCOPG2:
             _logger.debug("psycopg2 not installed — audit in JSONL-only mode")
