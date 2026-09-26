@@ -46,7 +46,7 @@ from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + term
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
-                        resolve_pool_size)
+                        is_turn_echo_row, resolve_pool_size)
 from . import monitoring
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
@@ -14713,6 +14713,12 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        # #4509: the OPT-IN pre-truncation turn-echo exclusion. A caller that
+        # names the capture session it is extracting for (the S3
+        # link-before-create prior lookup) drops that session's own turn
+        # echoes from the candidate set BEFORE ``limit`` — same seam as
+        # ``exclude_status``. Default None = byte-identical to pre-#4509.
+        exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
@@ -14777,6 +14783,18 @@ class TortoiseSDK:
             silently shrink the result count — epic #898 recall_state). Default None =
             no filtering (existing behavior unchanged; retracted is already excluded at
             the retrieval layer, #689). Points with no status property are kept.
+        exclude_turn_echo_session (#4509): the OPT-IN turn-echo exclusion — the
+            capture session whose OWN transcript echoes (``{session_id}_t{i}`` turn
+            Points; ``retrieval.is_turn_echo_row``) must NOT be treated as memory
+            priors. Applied to the fused Point candidate set at the SAME
+            pre-truncation point as ``exclude_status``, so ``limit`` applies to the
+            already-filtered set — a session holding up to ``MAX_SESSION_TURNS``
+            (500) echoes can otherwise consume every slot and hide a real prior
+            ranked below them (the defect #4509 fixes; a caller-side drop after the
+            cut cannot be made sound). Only ``entity_type == "point"`` is affected;
+            default None = no exclusion, byte-identical to pre-#4509 output. Do NOT
+            pass the retrieval-pool session when you WANT the session's transcript
+            (audit/history reads) — this is a memory-prior seam.
         _elevated_timeout_ms: PRIVATE — benchmark-only (#316). Threads an elevated
             collective-cap override into degradation_chain to measure uncensored
             true-completion latency. Default None = production 500ms cap. Never
@@ -15049,6 +15067,10 @@ class TortoiseSDK:
                         query, _snap, limit=limit, kind=kind,
                         exclude_status=exclude_status,
                         include_terminal=include_terminal,
+                        # #4509: parity with the primary path's pre-truncation
+                        # turn-echo exclusion — a degraded read must not leak a
+                        # capture's own transcript echoes as S3 priors.
+                        exclude_turn_echo_session=exclude_turn_echo_session,
                     )
                     if leg_trace is not None:
                         leg_trace.append(_trace_entry(
@@ -15064,6 +15086,15 @@ class TortoiseSDK:
                     # dicts carrying the status property.
                     points = [p for p in points
                               if (p.get("status") or "") not in set(exclude_status)]
+                if exclude_turn_echo_session and points:
+                    # #4509 parity (same reasoning as the snapshot tier above):
+                    # drop the session's own echoes BEFORE ``fallback_tfidf``
+                    # truncates to ``limit``.
+                    points = [p for p in points if not is_turn_echo_row(
+                        exclude_turn_echo_session,
+                        {"id": p.get("id"),
+                         "point_kind": p.get("pointKind"),
+                         "content": p.get("content")})]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
                 if leg_trace is not None:
                     leg_trace.append(_trace_entry(
@@ -15317,6 +15348,39 @@ class TortoiseSDK:
                     result_ids = [pid for pid in result_ids if pid not in status_excluded_ids]
             except Exception:
                 _logger.warning("exclude_status filter failed — pass-through", exc_info=True)
+
+        # 5d-bis (#4509). Apply the OPT-IN turn-echo exclusion at the SAME
+        #     pre-truncation seam as exclude_status (#898): a caller that names
+        #     its capture session drops that session's own transcript echoes
+        #     from the fused Point candidate set BEFORE ``result_ids[:limit]``,
+        #     so ``limit`` counts already-filtered candidates. Doing this
+        #     AFTER the cut (the previous caller-side drop) could not be made
+        #     sound — up to ``MAX_SESSION_TURNS`` (500) echoes could outnumber
+        #     any caller-side refill window and starve a real prior ranked
+        #     below them, ADDing a duplicate memory Point instead of folding.
+        #     Opt-in by construction: the branch is not entered when the
+        #     parameter is None, so every existing caller is byte-identical.
+        if (exclude_turn_echo_session and result_ids
+                and graph_label == "Point"):
+            try:
+                echo_rows = graph.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN n.id, n.pointKind, n.content",
+                    params={"ids": result_ids},
+                ).result_set
+                echo_ids = {
+                    row[0] for row in echo_rows
+                    if is_turn_echo_row(exclude_turn_echo_session, {
+                        "id": row[0],
+                        "point_kind": row[1] if len(row) > 1 else None,
+                        "content": row[2] if len(row) > 2 else None,
+                    })
+                }
+                if echo_ids:
+                    result_ids = [pid for pid in result_ids if pid not in echo_ids]
+            except Exception:
+                _logger.warning(
+                    "turn-echo exclusion failed — pass-through", exc_info=True)
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]

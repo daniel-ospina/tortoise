@@ -1807,7 +1807,7 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     return queries
 
 
-# #2552: a capture's OWN turn echoes are TRANSCRIPT, not memory.
+# #2552 / #4509: a capture's OWN turn echoes are TRANSCRIPT, not memory.
 # capture_session writes the turn Points (deterministic ids ``{session_id}_t{i}``,
 # ``is_episodic=true``, content ``[role] <text>`` via ``sdk._capture_turn_texts``)
 # BEFORE extraction runs, so on a fresh capture they are the ONLY content in the
@@ -1819,102 +1819,31 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # it from_content_missing / to_content_missing / edge_missing. S3 must never
 # dedup the extraction against the transcript it is extracting.
 #
-# The row test is the extractor's OWN predicate (not a copy of the graded
-# layer's): an id ANCHORED on the capture's ``session_id``
-# (``\A{session_id}_t\d+\Z`` — the same identity ``runner._turn_id_pattern``
-# builds, applied more strictly: ``fullmatch`` rejects the trailing newline that
-# its ``.match`` + ``$`` would accept) AND a turn marker on the row (the
-# production ``pointKind == "event"``, or the ``[role] …`` content leg
-# ``retrieval._is_turn_point`` uses). The graded layer's two legs are
-# independently sufficient (a union); here the id is deliberately conjoined with
-# a marker (an intersection), because ``create_point`` accepts explicit caller
-# ids, ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}``
-# prefix "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read
-# as a session … the shape of an id is not evidence that a capture happened",
-# and a caller-minted Point whose id merely collides with the session's turn
-# namespace (the class ``tests/test_d3_session_identity.py`` documents as
-# reachable) must survive the prior set. With no session id the filter is a
-# NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory loss.
-#
-# Scope and its bound — two things this does NOT do, both tracked in #4509:
-#   * other ingest lanes' transcript rows with different id shapes (the longmem
-#     lane's ``lme:{qid}:s{si}:t{ti}`` episodic points) do not match; and
-#   * ``tortoise_fts_query`` truncates to ``limit`` internally — i.e. BEFORE this
-#     drop runs — so asking for exactly ``limit`` lets the echoes consume every
-#     slot and hide a real prior ranked below them (the "filtering after the
-#     limit cut silently shrinks the result" defect epic #898 fixed for
-#     ``exclude_status``). The point leg over-fetches ``_PRIOR_OVERFETCH`` and
-#     refills to ``limit``, absorbing up to that many echoes; a session whose
-#     echoes exceed the pool (a capture can hold ``MAX_SESSION_TURNS`` = 500) can
-#     still starve a prior. The durable fix is a pre-truncation exclusion in the
-#     retrieval layer (#4509) — this bound is deliberately local and pinned by a
-#     test rather than pretended away.
-_PRIOR_OVERFETCH = 12
-
-#: Mirror of ``tortoise.retrieval._ROLE_PREFIX_RE`` (keep-in-sync — that is the
-#: production "is this a transcript turn" content leg). Pinned structurally by
-#: ``tests/test_extractor_v2.py::test_turn_echo_content_pattern_matches_retrieval``.
-_TURN_ECHO_CONTENT_RE = re.compile(
-    r"^\[(user|assistant|system|tool|unknown)\]\s*", re.IGNORECASE)
-
-#: ``tortoise_fts_query``'s documented ``limit`` bound (tortoise/sdk.py). The
-#: point leg's over-fetch must not push the call past it — ``limit=9990`` would
-#: otherwise ask for 10002 and raise ``ValueError``.
-_FTS_LIMIT_MAX = 10000
-
-
-def _is_turn_echo_id(session_id, point_id) -> bool:
-    r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
-
-    The anchored ID leg only — pair it with :func:`_is_turn_echo_row`. The match
-    is ``\A{session_id}_t\d+\Z`` (``re.fullmatch``) — NOT a shape test, and NOT
-    ``str.isdigit``: ``isdigit()`` also accepts category-No numerics such as
-    ``²``, and ``fullmatch`` is deliberately stricter than the graded layer's
-    ``_turn_id_pattern`` + ``.match`` (whose ``$`` accepts one trailing
-    newline). Stricter can only MISS a drop, never lose a real prior. False
-    whenever the session id is unknown, so a caller that cannot name its session
-    never drops a row."""
-    if not session_id or not point_id:
-        return False
-    return bool(re.fullmatch(
-        rf"{re.escape(str(session_id))}_t\d+", str(point_id)))
-
-
-def _is_turn_echo_row(session_id, row: dict) -> bool:
-    """This session's turn ID **and** a turn marker on the row.
-
-    The id is the reliable turn/claim discriminator (``runner._turn_id_pattern``'s
-    identity). The marker is EITHER the production turn kind
-    (``pointKind == "event"`` — what ``capture_session`` stamps on every turn
-    Point, ``tortoise/sdk.py``) OR the ``[role] …`` transcript prefix
-    (``retrieval._is_turn_point``'s content leg). The kind leg is what keeps a
-    capture whose role is not in the prefix allowlist from silently retaining
-    its own echoes: ``_normalize_turn_role`` passes ANY role string through, so
-    a ``[developer] …`` / ``[human] …`` turn matches no alternation.
-
-    Requiring a marker at all is what keeps a caller-minted Point — whose id
-    merely sits in the session's turn namespace, the class
-    ``tests/test_d3_session_identity.py`` documents as reachable — in the
-    prior set."""
-    if not _is_turn_echo_id(session_id, row.get("id")):
-        return False
-    if row.get("point_kind") == "event":
-        return True
-    content = row.get("content")
-    return bool(_TURN_ECHO_CONTENT_RE.match(str(content or "").strip()))
+# #2552 dropped the echoes HERE, after ``tortoise_fts_query`` had already
+# truncated to ``limit`` — an unsound seam, because the exclusion could only
+# refill from a finite caller-side over-fetch window. #4509 moves it to the
+# retrieval layer's OWN pre-truncation seam (``exclude_turn_echo_session``,
+# alongside ``exclude_status``; the predicate is
+# ``retrieval.is_turn_echo_row``): ``limit`` now counts the ALREADY-FILTERED
+# candidate set, so no over-fetch and no refill are needed — a session holding
+# up to ``MAX_SESSION_TURNS`` (500) echoes can no longer starve a real prior
+# ranked below them. The ``_PRIOR_OVERFETCH`` window this comment used to
+# document is DELETED, not merely widened.
 
 
 def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
               session_id: str | None = None) -> list[dict]:
-    # Only the point leg over-fetches, and only when there is a session to filter
-    # by and a `limit` in the callee's valid range; every other call keeps the
-    # exact ``limit`` window it always had (so an out-of-range `limit` still
-    # raises from the callee, on every leg, as before). The over-fetch is clamped
-    # to the callee's documented bound so it cannot itself raise.
-    fetch = (min(limit + _PRIOR_OVERFETCH, _FTS_LIMIT_MAX)
-             if (entity_type == "point" and session_id
-                 and 0 < limit <= _FTS_LIMIT_MAX) else limit)
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
+    # #4509: the point leg names its capture session so the callee excludes this
+    # capture's own turn echoes from the fused candidate set BEFORE its
+    # ``[:limit]`` cut (the same pre-truncation contract as ``exclude_status``).
+    # No over-fetch, no caller-side drop, and every other leg keeps the exact
+    # ``limit`` window it always had. The kwarg is passed ONLY when there is a
+    # session to exclude, so a caller that cannot name its session sends the
+    # pre-#4509 call shape verbatim.
+    extra = ({"exclude_turn_echo_session": session_id}
+             if entity_type == "point" and session_id else {})
+    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit,
+                                  **extra)
     out = []
     for r in rows or []:
         # #4511: the callee returns ``SearchResult.to_dict()`` rows, which key
@@ -1927,9 +1856,6 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
                         "kind": row_kind})
-        elif entity_type == "point" and _is_turn_echo_row(session_id, r):
-            # #2552: this capture's transcript echo — never a memory prior.
-            continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
                         "kind": row_kind})
@@ -1993,7 +1919,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
 
     ``session_id`` is the capture being extracted: it is the anchor that lets
     the point leg drop the capture's OWN turn echoes from the prior set
-    (#2552 — see ``_is_turn_echo_id``). Callers that cannot name their session
+    (#2552, moved to the retrieval layer's pre-truncation seam by #4509 — see
+    ``retrieval.is_turn_echo_row``). Callers that cannot name their session
     pass nothing and get the unfiltered priors.
 
     Returns:
