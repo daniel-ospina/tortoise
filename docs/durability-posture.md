@@ -93,7 +93,8 @@ a rival artifact.
 FORMAT gate, and it is a **cross-build contract**, not an in-repo detail: a
 build that does not recognise a version must **refuse the rebuild** rather than
 accept the file and wipe over a class it cannot see. The reserved numbers are
-`1` base (`:Batch`/`:Session` only), `2` = `1` + `config_snapshot` (#2814),
+`1` base (`synthetic_events`, plus the `:Batch`/`:Session` sections that
+#3947 added to v1 without a bump), `2` = `1` + `config_snapshot` (#2814),
 `3` **contested** (#5327 claims it for `event_meta` and #5241 for
 `graph_identity`), and `4` = `2` + `onboarding_snapshot` / `onboarding_step_links`
 (#4641) — a **distinct** integer taken *because* `3` is contested, deliberately

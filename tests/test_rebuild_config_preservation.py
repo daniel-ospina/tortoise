@@ -1635,6 +1635,39 @@ def test_post_restore_verification_failure_says_unverified(graph, caplog):
     assert "NOT observed gone" in rendered, rendered
 
 
+def test_unverified_restore_is_a_gap_even_with_nothing_expected(graph):
+    """UNVERIFIED is a gap on its own, not only when a count was expected.
+
+    Gating the gap on the expected sets made the reporting surfaces disagree
+    about ONE completed rebuild: the projection logged its UNVERIFIED ERROR and
+    the CLI printed its UNVERIFIED line, while `onboarding_gap` stayed 0 — so
+    `consistency.recover_from_log` and both automatic-recovery callers
+    (`_auto_health_recover`, `_recover_or_raise`) reported a clean success for
+    a rebuild whose verification never ran (#4641 review round 11).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    calls = {"n": 0}
+
+    def _fail_on_second_capture(cypher):
+        if "MATCH (n:OnboardingState)" in cypher and "properties(n)" in cypher:
+            calls["n"] += 1
+            return calls["n"] >= 2
+        return False
+
+    patcher, injected = _inject_query_failure(sdk, _fail_on_second_capture)
+    with patcher:
+        result = sdk._get_proj().rebuild_all(str(events))
+
+    assert injected, "the verification-read failure was never injected"
+    assert result["onboarding_verified"] is False
+    assert result["onboarding_expected"] == 0, (
+        "this is the shape with nothing to verify")
+    assert result["onboarding_gap"] >= 1, (
+        "an unverifiable restore must reach the gap-triggered consumers, not "
+        "only the projection's own ERROR log and the CLI")
+
+
 def test_onboarding_capture_refuses_a_non_str_step_id(graph):
     """A non-str `step_id` must REFUSE, not be dropped (#4641 round 5).
 

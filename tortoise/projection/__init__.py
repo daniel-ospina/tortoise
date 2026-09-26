@@ -5749,12 +5749,18 @@ class FalkorProjection(
                                     + len(onboarding_missing_links)
                                     + len(onboarding_missing_onboards))
         onboarding_gap = onboarding_missing_total
-        if not onboarding_verified and (
-                onboarding_expected_orgs or onboarding_expected_links
-                or onboarding_expected_onboards):
-            # "Could not confirm" is itself a gap: the missing sets are empty
-            # because the verification READ failed, not because nothing was
-            # missing.
+        if not onboarding_verified:
+            # "Could not confirm" is itself a gap, gated on the verification
+            # result ALONE — never on the expected counts (#4641 review round
+            # 11). Gating it on the expected sets made the reporting surfaces
+            # disagree about ONE completed rebuild: the projection still
+            # logged the UNVERIFIED ERROR and the CLI still printed its
+            # UNVERIFIED line, while `onboarding_gap` stayed 0 — so
+            # `consistency.recover_from_log` and both automatic-recovery
+            # callers reported a clean success. A failed verification read
+            # means the class was not confirmed intact. With nothing expected
+            # that is a weak signal, which is why the expected-count nuance
+            # belongs in the MESSAGE, not in the trigger.
             onboarding_gap = max(onboarding_gap, 1)
         if onboarding_unknown:
             onboarding_gap = max(onboarding_gap, 1)
