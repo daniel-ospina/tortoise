@@ -519,6 +519,29 @@ def test_reconcile_log_names_the_window_the_published_values_belong_to(caplog):
     assert f"published_window={snap.window_start}..{snap.window_end}" in msg, msg
 
 
+def test_reconcile_log_marks_the_never_published_window_unknown(caplog):
+    """The no-prior-publish path: with nothing ever published the retained
+    window is the literal placeholder, so the INFO line must report
+    ``published_window=unknown..unknown`` — NOT echo the attempted window into
+    the published slot, which would attribute a figure that does not exist to
+    the period that was attempted (the misstatement the field exists to
+    prevent)."""
+    # The autouse ``_clean_metric`` fixture leaves ``_last_published_window``
+    # at None, so this is a genuine first-ever refresh.
+    attempted = ca.evaluate_allocation(
+        [], now=datetime(2026, 10, 3, tzinfo=UTC))
+    assert attempted.state == ca.STATE_UNAVAILABLE
+    with caplog.at_level("INFO", logger="tortoise.cost_allocation"):
+        ca._reconcile_and_log(attempted)
+    msg = next(r.getMessage() for r in caplog.records
+               if "kind=allocation" in r.getMessage())
+    assert "published_window=unknown..unknown" in msg, msg
+    assert (
+        f"published_window={attempted.window_start}..{attempted.window_end}"
+        not in msg
+    ), msg
+
+
 def test_unavailable_warning_names_the_retained_window_not_the_attempted_one(caplog):
     """Across a month rollover the metric still holds September's values while
     the refresh attempts October. The warning must name SEPTEMBER — the window
@@ -537,6 +560,15 @@ def test_unavailable_warning_names_the_retained_window_not_the_attempted_one(cap
     msg = next(r.getMessage() for r in caplog.records
                if "unavailable" in r.getMessage()
                and "last-known-good" in r.getMessage())
+    # Framing, capitalization-INSENSITIVE: the retained window is named as the
+    # published one (the PREVIOUS successful window) and the attempted window as
+    # NOT published. Asserting on the lowercase text pins the framing without
+    # coupling to the message's capitalization; without these two a warning that
+    # named the retained window while implying the attempt WAS published would
+    # still pass — the misstatement the field exists to prevent.
+    lower = msg.lower()
+    assert "previous successful window" in lower, msg
+    assert "not published" in lower, msg
     assert good.window_start in msg and good.window_end in msg, msg
 
 
@@ -843,15 +875,16 @@ def test_publish_is_the_only_writer_of_the_team_cost_metric():
 
     SCOPE (exactly what this guard enforces, and no more): it matches syntactic
     ``Name``/``Attribute`` occurrences of ``TEAM_COST`` and its mutators
-    ANYWHERE inside a ``def``/``async def`` subtree in ``tortoise/*.py`` outside
-    ``monitoring.py`` — INCLUDING a ``lambda`` or a class nested inside a
-    function body, which ``ast.walk`` inspects and attributes to that function.
-    Every such reference must sit inside ``publish`` (the one production writer)
-    or ``_reset_for_tests`` (the explicit test seam). What it does NOT match is
-    module-level and top-level class-body references, aliased imports, and
-    ``getattr`` string lookups; ``monitoring.py`` is skipped wholesale (it holds
-    the definitions) — a NEW mutator defined there would not be caught. The
-    claim is stated at this strength, not a broader one, in
+    ANYWHERE inside a ``def``/``async def`` subtree in ``tortoise/**/*.py``
+    outside every file named ``monitoring.py`` — INCLUDING a ``lambda`` or a
+    class nested inside a function body, which ``ast.walk`` inspects and
+    attributes to that function. Every such reference must sit inside
+    ``publish`` (the one production writer) or ``_reset_for_tests`` (the
+    explicit test seam). What it does NOT match is module-level and top-level
+    class-body references, aliased imports, and ``getattr`` string lookups;
+    every file named ``monitoring.py`` is skipped wholesale (it holds the
+    definitions) — a NEW mutator defined there would not be caught. The claim is
+    stated at this strength, not a broader one, in
     ``docs/ops/cost-allocation.md``."""
     offenders: dict[str, set[str]] = {}
     for path in (REPO / "tortoise").rglob("*.py"):

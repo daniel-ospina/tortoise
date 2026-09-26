@@ -716,11 +716,13 @@ def _reconcile_and_log(snapshot: AllocationSnapshot) -> None:
                 if k not in (RESIDUAL_ORG, ORG_OVERFLOW)])
     # ``attempted_window`` is the window this refresh evaluated;
     # ``published_window`` is the window the values READ BACK from the metric
-    # belong to. They are equal whenever the last successful publish is in the
-    # SAME window; they can differ on an unavailable refresh only when the
-    # attempt falls in a LATER window (the metric still carries the
-    # last-known-good values then). Naming both means a reader can never
-    # attribute a stale figure to the attempted period.
+    # belong to. The two are equal whenever the last successful publish is in
+    # the SAME window; they differ whenever the retained window differs from
+    # the attempted one — including an ``unavailable`` refresh whose attempt
+    # falls in a LATER window (the metric still carries the last-known-good
+    # values then), and the never-published case where nothing has ever been
+    # published and ``published_window=unknown..unknown``. Naming both means a
+    # reader can never attribute a stale figure to the attempted period.
     attempted_start, attempted_end = snapshot.window_start, snapshot.window_end
     retained_start, retained_end = _retained_window()
     logger.info(
