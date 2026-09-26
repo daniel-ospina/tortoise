@@ -692,6 +692,13 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # re-detected.
             "superseded_by": h.get("superseded_by"),
             "supersedes": h.get("supersedes") or [],
+            # C6 (#2520): the Point status rides the annotated surface — the
+            # ONLY stale clause that catches a status-only row
+            # (``retract_point`` writes status='retracted' and no window and
+            # no CORRECTS edge). Sourced from the search PAYLOAD (which
+            # carries it), never from ``point_props_for_hits`` (which does
+            # not fetch it). Additive key — the annotated key set is 18.
+            "status": h.get("status") or "",
             # E6 (#1538) D7: promoted validity-window fields — additive,
             # only when present (undated hits render no [valid …] marker).
             "valid_from": h.get("valid_from") or "",
@@ -708,7 +715,7 @@ def annotate_pool_additions(hits: list[dict], props: dict, dates: list[str],
     needs the eval lane's annotation readers, so a product home would force
     a product→harness import).
 
-    Delegates to :func:`_annotate_hits` (all 17 annotated keys — including
+    Delegates to :func:`_annotate_hits` (all 18 annotated keys — including
     ``session_date``, which is derived from the QUESTION's ``haystack_dates``
     and is not derivable from ``proj`` or the point props, hence the
     required ``dates`` argument) and then stamps ``match_source`` — the
@@ -848,7 +855,9 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
                    recency_boost: float = 0.0,
                    leg_trace: list[dict] | None = None,
                    retrieval_budget_ms: int | None = None,
-                   entity_key_expansion: bool = False) -> list[dict]:
+                   entity_key_expansion: bool = False,
+                   query_date: str | None = None,
+                   time_aware: bool = False) -> list[dict]:
     """Hybrid retrieval over the question's ingested graph.
 
     R5 (#1544) D4: ``entity_types`` selects the retrieval pool — TR
@@ -898,6 +907,13 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     passes the resolved bool — the product's ``tortoise_fts_query`` owns the
     mechanism (default OFF there too).
     """
+    # C6 (#2520, #2513): the query-side date anchor rides the ON path only
+    # (the off path passes NO new kwarg — byte-identical, and hermetic
+    # `tortoise_fts_query` stubs with strict signatures stay compatible).
+    _sdk_kwargs: dict = {}
+    if time_aware:
+        _sdk_kwargs["time_aware"] = True
+        _sdk_kwargs["query_date"] = query_date
     merged: dict[str, dict] = {}
     for et in entity_types:
         for h in sdk.tortoise_fts_query(
@@ -914,6 +930,7 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
             # #2518 (C2 #2513): the entity/fact-augmented key expansion
             # sparse-leg pass (default False — byte-identical when off).
             entity_key_expansion=entity_key_expansion,
+            **_sdk_kwargs,
         ):
             merged[h["id"]] = h
     # deterministic union: RRF score desc, then id (no namespace collision
@@ -1160,6 +1177,18 @@ def retrieve_for_question(
     # deltas on the two C2 context-flooding regressions (qids b6025781 /
     # 4f54b7c9) recovering under the arms.
     evidence_assembly: bool | None = None,
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (True/False
+    # explicit, None = env ``TORTOISE_LME_TIME_AWARE_QE``; only
+    # 1/true/yes/on enables — fail-safe OFF, the #1745 default decision).
+    # Arming it (a) anchors the DENSE-leg query with the question date for a
+    # PREFER-LATEST question, (b) applies a bounded recency weight for a
+    # non-TR PREFER-LATEST question, and (c) reorders the FINAL pool
+    # live-before-stale from the promoted supersession state. Non-TR only —
+    # TR keeps its R5 #1544 stack untouched. ``time_aware_recency_weight``
+    # is a TEST/measurement seam (default = the product constant); it is not
+    # a harness knob.
+    time_aware_qe: bool | None = None,
+    time_aware_recency_weight: float | None = None,
     # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
     # eval passes EVAL_RETRIEVAL_BUDGET_MS (1500); None = SDK default
     # 500 ms. Threads ONLY the hybrid arm (``hybrid_search`` →
@@ -1330,9 +1359,49 @@ def retrieve_for_question(
     # (byte-identical, and hermetic hybrid_search stubs with strict
     # signatures stay compatible, matching the off-path conventions of the
     # R5/R6 retrieval knobs above).
+    # C6 (#2520, #2513): resolve the time-aware arm tri-state (explicit flag
+    # > env ``TORTOISE_LME_TIME_AWARE_QE`` > OFF — fail-safe: only
+    # 1/true/yes/on enables, the #1745 default decision) and the freshness
+    # intent ONCE. The arm is non-TR only (TR keeps the R5 stack untouched).
+    if time_aware_qe is not None:
+        time_aware_qe_on = time_aware_qe
+    else:
+        from .rerank import _TRUTHY as _TA_TRUTHY
+        _ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe_on = _ta_env.strip().lower() in _TA_TRUTHY
+    time_aware_intent = None
+    time_aware_armed = bool(time_aware_qe_on and not is_tr)
+    if time_aware_qe_on:
+        from tortoise.time_aware import detect_temporal_intent
+        time_aware_intent = detect_temporal_intent(question["question"])
+    # C6: hoist the question date ABOVE the retrieval call. It was
+    # previously bound only inside the TR branch and again for the reader
+    # header; the non-TR arm needs it, so bind it once here and reuse it
+    # everywhere (a single source — the TR branch and the header no longer
+    # re-read it).
+    question_date = question.get("question_date", "") or None
+
     _hybrid_kwargs: dict = {}
     if entity_key_expansion_on:
         _hybrid_kwargs["entity_key_expansion"] = True
+    # C6: the anchor + recency weight ride the ON path only (blank off path
+    # → the off-path output and the strict hermetic stubs are unchanged).
+    _ta_recency_fields = None
+    _ta_recency_boost = 0.0
+    if time_aware_armed:
+        _hybrid_kwargs["time_aware"] = True
+        _hybrid_kwargs["query_date"] = question_date
+        if (time_aware_intent is not None
+                and time_aware_intent.kind == "prefer-latest"):
+            from tortoise.time_aware import (
+                DEFAULT_TIME_AWARE_RECENCY_WEIGHT,
+            )
+            _ta_recency_fields = {"point": "createdAt",
+                                  "event": "startedAt"}
+            _ta_recency_boost = (
+                DEFAULT_TIME_AWARE_RECENCY_WEIGHT
+                if time_aware_recency_weight is None
+                else time_aware_recency_weight)
     hits = hybrid_search(
         sdk, question["question"],
         limit=pool_limit,
@@ -1341,8 +1410,8 @@ def retrieve_for_question(
         else ("point",),
         recency_fields=(
             {"point": "createdAt", "event": "startedAt"}
-            if is_tr else None),
-        recency_boost=tr_date_weight if is_tr else 0.0,
+            if is_tr else _ta_recency_fields),
+        recency_boost=tr_date_weight if is_tr else _ta_recency_boost,
         # #1786 (R5): the eval's elevated hybrid-arm deadline (None keeps
         # the SDK-default 500 ms collective cap byte-identical).
         retrieval_budget_ms=retrieval_budget_ms,
@@ -1385,7 +1454,9 @@ def retrieve_for_question(
     tr_constraint = None
     tr_window_fallback = False
     if is_tr:
-        question_date = question.get("question_date", "") or None
+        # C6: ``question_date`` was hoisted above the retrieval call — one
+        # binding for the whole function (the TR branch no longer re-reads
+        # it; the non-TR time-aware arm needs the same value).
         try:
             year = int(question_date[:4]) if question_date else None
         except ValueError:
@@ -1985,6 +2056,34 @@ def retrieve_for_question(
     elif (rerank_pool is not None) and not rerank_on:
         pool = pool[:top_k]              # pool-only arm: reader sees top_k
 
+    # ── C6 (#2520, #2513): rank-time prefer-latest ── ─────────────────
+    # Applied to the FINAL ``pool``, immediately before the metrics read it,
+    # so it is the LAST order-owner of the measured surface: every earlier
+    # pool-mover (C3-1 merge, C4 merge, C2 boost, R6 rerank) has already
+    # run, and — with the R6 reranker applied — the reorder happens within
+    # the reranker's selected set. ``prefer_latest_order`` is a stable
+    # membership-preserving reorder (never-starve by construction) gated on
+    # a PREFER-LATEST intent, so the off path pays one bool and the arm is
+    # a pure order change. A DATE-PINNED query:
+    # ("where did I live in 2024?") is deliberately NOT reordered — the
+    # invert-recency guard. ``time_aware_stats`` is recorded only under the
+    # arm (the off path keeps today's exact outcome shape, D2).
+    time_aware_stats: dict | None = None
+    if time_aware_qe_on and not is_tr:
+        from tortoise.time_aware import prefer_latest_order as _prefer_latest
+        pool, time_aware_stats = _prefer_latest(
+            pool, intent=time_aware_intent, question_date=question_date)
+        time_aware_stats = dict(time_aware_stats)
+        time_aware_stats["tr_excluded"] = False
+        time_aware_stats["intent"] = (
+            time_aware_intent.kind if time_aware_intent else None)
+    elif time_aware_qe_on and is_tr:
+        # armed run, TR question: recorded for attribution, never applied
+        # (TR keeps its R5 stack untouched — no regression).
+        time_aware_stats = {"applied": False, "reason": "tr-excluded",
+                            "live": 0, "stale": 0, "tr_excluded": True,
+                            "intent": None}
+
     # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
     # (on the applied path, ``pool`` is the rerank-selected list — recall
     # measures what the reader could actually see; ``rerank_pass["pool_recall@k"]``
@@ -2012,7 +2111,7 @@ def retrieve_for_question(
     # reader window (the measured surface is reader_evidence@k /
     # reader_surface@k below). TR questions keep the R5 time-ascending date
     # machinery and skip the arm (the same exclusion as the C3-1 loop).
-    question_date = question.get("question_date", "") or None
+    # C6: ``question_date`` was resolved ONCE above the retrieval call.
     evidence_assembly_stats: dict[str, Any] = {
         "on": evidence_assembly_on,
         "applied": False,
@@ -2225,6 +2324,14 @@ def retrieve_for_question(
         # Reconstructs which arm a question ran on for the shared-question
         # A/B deltas (identical questions, expansion ON vs OFF).
         "entity_key_expansion": entity_key_expansion_on,
+        # C6 (#2520, #2513): the time-aware query expansion arm — the
+        # resolved tri-state bool + the per-outcome reorder stats
+        # (applied / reason / live / stale / tr_excluded / intent).
+        # ``time_aware_stats`` is present ONLY under the arm (D2 doctrine:
+        # the off-path dict keeps today's exact shape).
+        "time_aware_qe": time_aware_qe_on,
+        **({"time_aware_stats": time_aware_stats}
+           if time_aware_qe_on else {}),
         # C3-1 (#2519, #2567): the coverage-completeness loop arm — the
         # resolved tri-state bool + the §8 per-outcome markers
         # (loop_iterations / loop_fired_facet / loop_merged_added — the

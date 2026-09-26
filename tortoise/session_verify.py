@@ -72,6 +72,11 @@ is loaded and fired by the node probe in
 ``tests/test_pi_capture_hooks.py`` (into a temp ``HOME``); the residual (a real
 ``pi`` process loading the installed extension against the live API) is
 manual-only.  A link is only ever ``PROVEN`` when the path actually ran.
+
+UNVERIFIABLE is NOT "unjudgeable": the static leg still runs, and since #4680
+Pi's installed artifact is graded by the same version contract as the shell
+seams, so a missing / unmarkered / stale / edited Pi seam is a hard ``FAIL``
+here — it is only the LIVE-FIRE leg that stays ``UNVERIFIABLE-IN-CI``.
 """
 from __future__ import annotations
 
@@ -226,16 +231,18 @@ def resolve_install_root(harness: str,
     the harness's own default, resolved through the ONE shared resolver
     ``tortoise hook_install.default_root`` — Codex's ``$CODEX_HOME`` (default
     ``~/.codex``), Cursor's ``~/.cursor`` (no env override — Cursor has none),
-    Claude's cwd (project-scoped).  Pi has no ``HarnessLayout`` (its seam is
-    not a scripted hook), so its root is the extension directory
-    ``~/.pi/agent/extensions`` — DELEGATED to ``capture_install.pi_home``, the
-    module that WRITES the seam, so the verifier and the installer cannot
-    disagree about where it lives.
+    Claude's cwd (project-scoped).  A harness with no ``HarnessLayout`` (its
+    seam is not a scripted hook) is looked up in ``hook_install``'s
+    ``ARTIFACT_CONTRACTS`` instead and resolved through
+    ``hook_install.artifact_root`` — the SAME registry entry ``_static_findings``
+    and ``doctor`` grade it by, so root resolution cannot be registry-driven in
+    one place and literal in another (#4680 review).
     """
     if install_dir is not None:
         return Path(install_dir)
-    if harness == "pi":
-        return capture_install.pi_home(Path(home))
+    artifact = hook_install.artifact_root(harness, Path(home))
+    if artifact is not None:
+        return artifact
     layout = hook_install.get_layout(harness)
     return hook_install.default_root(layout, Path(home))
 
@@ -247,18 +254,24 @@ def _static_findings(harness: str, root: Path) -> list[dict[str, Any]]:
     """The install's on-disk drift, through the shared detector.
 
     Claude/Codex/Cursor delegate to ``hook_install.detect_install`` (the same
-    read-only detector ``tortoise hooks status`` uses).  Pi has no layout, so
-    its single artifact is checked directly.
+    read-only detector ``tortoise hooks status`` uses).  A harness whose seam
+    is a non-shell artifact (Pi) has no layout to hand that detector, so it
+    delegates to the ARTIFACT half — ``hook_install.detect_artifact_install``
+    — which is why a stale Pi seam is now reportable rather than only its
+    absence (#4680).  Keyed on the registry, never on a literal ``"pi"``, so a
+    seam registered in ``ARTIFACT_CONTRACTS`` is graded here with no edit; a
+    seam class the registry does not know still falls through to
+    ``detect_install`` (and its repair path may equally carry its own
+    hard-coded harness names — ``resolve_install_root`` does that for ``pi``
+    today — so registry membership is what keeps THIS branch generic, not a
+    guarantee about every branch downstream).
     """
-    if harness == "pi":
-        dst = root / capture_install.PI_EXTENSION_NAME
-        if not dst.is_file():
-            return [{
-                "kind": "missing-extension",
-                "detail": f"{dst} is not installed",
-                "blocking": True,
-            }]
-        return []
+    if harness in hook_install.ARTIFACT_CONTRACTS:
+        return [
+            {"kind": f.kind, "detail": f.detail, "script": f.script,
+             "event": f.event, "blocking": f.blocking}
+            for f in hook_install.detect_artifact_install(root, harness)
+        ]
     return [
         {"kind": f.kind, "detail": f.detail, "script": f.script,
          "event": f.event, "blocking": f.blocking}

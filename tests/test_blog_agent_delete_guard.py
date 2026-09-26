@@ -120,7 +120,11 @@ CASES: dict[str, dict] = {
 def results() -> dict[str, dict]:
     node = shutil.which("node")
     if not node:
-        pytest.skip("node not available")
+        pytest.fail(
+            "no node runtime for the blog agent DELETE guard — need node >= 22.6 "
+            "(--experimental-strip-types); refusing to skip, because a skipped "
+            "guard looks like a passing one"
+        )
     import tempfile
 
     order = list(CASES)

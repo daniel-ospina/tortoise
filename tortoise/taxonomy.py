@@ -9,8 +9,12 @@ from typing import Any  # noqa: F401
 
 
 def taxonomy(proj) -> dict[str, int]:
-    """Count entities by node label. Returns {Point: N, Event: N, ...}."""
-    labels = ("Point", "Event", "Subject", "Object", "Document")
+    """Count entities by node label. Returns {Point: N, Event: N, ...}.
+
+    D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is a :Source,
+    so the count is reported under ``Source``.
+    """
+    labels = ("Point", "Event", "Subject", "Object", "Source")
     result: dict[str, int] = {}
     for label in labels:
         n = proj.g.query(f"MATCH (n:{label}) RETURN count(n)").result_set[0][0]

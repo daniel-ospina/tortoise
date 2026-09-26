@@ -20,7 +20,8 @@ ENTITY_LABELS: dict[str, tuple[str, str]] = {
     "point":    ("Point",    "pointKind"),
     "subject":  ("Subject",  "subjectKind"),
     "event":    ("Event",    "eventKind"),
-    "document": ("Document", "documentKind"),
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source.
+    "document": ("Source", "documentKind"),
     "source":   ("Source",   "sourceKind"),
 }
 

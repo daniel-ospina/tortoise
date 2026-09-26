@@ -58,16 +58,16 @@ WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 # #3400: this is now the FALLBACK invariant, used only when the manifest
 # carries no `durations` map at all. Once measured durations exist the
 # balance invariant is DURATION (below) — LPT packs by weight, and a correct
-# pack can legitimately carry very different file counts (the real pool
-# splits 195/325 while both halves weigh 28.0m: one 855s file on one side,
-# ~130 sub-second files on the other).
+# pack can legitimately carry very different file counts: a few multi-minute
+# files on one side against the long tail of sub-second ones on the other.
 HALF_IMBALANCE_TOLERANCE = 3
 
 # #3400: with measured durations, the halves must stay DURATION-balanced
-# within this ratio. Index parity on the same pool leaves a=18.8m vs b=37.1m
-# (1.97x); the LPT pack lands at 1.00x. 1.25 is loose enough for run-to-run
-# noise and
-# tight enough that a reversion to parity (1.97x on the real pool) reds.
+# within this ratio. Index parity on the same pool leaves a tilt far above it —
+# which files land on even vs odd indices has nothing to do with what they cost
+# — while the LPT pack balances the same pool. 1.25 is loose enough for noise
+# and tight enough that a reversion to parity reds. (Do not restate either
+# figure here: both move whenever the pool does.)
 HALF_DURATION_IMBALANCE_RATIO = 1.25
 
 # #1473: weight for a fast file with no measured duration. The pack can only
@@ -78,12 +78,10 @@ DEFAULT_FAST_WEIGHT = 2.0
 # the flat default), which silently degenerated the duration-aware pack into
 # a count-based one. Floor the coverage so it cannot rot back. The check is
 # skipped entirely for an ABSENT/EMPTY map (a repo that has not adopted
-# durations is not failed) and bites once the map is populated: 90% leaves
-# ~52 files of headroom on the current 520-file pool (actual: 96.5%, after the
-# merge of main grew the pool from 500 — the 18 unmeasured files carry no hand
-# entry: 16 are main-added tests, 2 (test_helpers.py,
-# test_provenance_extractedfrom_3263.py) were already unmeasured on the branch.
-# They pack at DEFAULT_FAST_WEIGHT).
+# durations is not failed) and bites once the map is populated. Do not restate
+# the pool size or the current percentage here — the durations map's own header
+# carries the sweep that measures them, and a figure copied into this comment is
+# what went stale before (it read "520 files / 96.5%" while the pool had grown).
 DURATION_COVERAGE_MIN = 0.90
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
@@ -469,6 +467,17 @@ SOURCE_PATTERNS = {
             # its pinning tests are registered across api, core AND ep, so the
             # named-surface match must not drop `core` (see CORE_ALSO).
             "tortoise/api.py",
+            # #3036: tortoise/oauth.py is the hosted OAuth implementation, and
+            # its pinning tests are `api`-registered (test_oauth_mcp.py,
+            # test_oauth_token_fault.py, test_3036_oauth_retention.py,
+            # test_attribution_actor.py, test_user_identity_authority.py) plus
+            # `api`+`core` (test_control_plane_offload_3498.py). Without this
+            # entry an oauth.py-only change selected no named surface and fell
+            # through to `core`, silently skipping ALL of those — the
+            # #2938/#3154/#4367 silent-drop class, on the file a retention- or
+            # token-flow fix must change. Paired with CORE_ALSO so the
+            # core-registered half is not dropped by the named-surface match.
+            "tortoise/oauth.py",
             # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
             # and `test_bridge_table.py` (registered in `api`) is the drift gate
             # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
@@ -562,7 +571,12 @@ SOURCE_PATTERNS = {
 # tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
-             "tools/tmpdir_sweep.py")
+             "tools/tmpdir_sweep.py",
+             # #3036: oauth.py is pinned by BOTH api-registered tests
+             # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
+             # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
+             # `api` match must not drop the core half.
+             "tortoise/oauth.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -1109,11 +1123,11 @@ def push_legs(manifest: dict) -> dict:
     fast = fast_pool(manifest)
     # #3400: pack the push halves by measured duration (#1473 LPT) instead of
     # the duration-blind index-parity split this used to be (`fast[0::2]` /
-    # `fast[1::2]`). Parity on the real pool put 37.1m of work in half (b)
-    # against 18.8m in half (a) — 1.97x — and blew the 55m watchdog. LPT is
-    # deterministic (ties break on name) and lands the same pool at 28.0m /
-    # 28.0m. split_fast_gate returns `tests/`-prefixed names; the workflow's
-    # matrix format is bare, so strip the prefix.
+    # `fast[1::2]`). Parity on the real pool leaves a tilt far above the ratio
+    # below — the pool's cost is not index-uniform — and blew the 55m watchdog;
+    # LPT is deterministic (ties break on name) and balances the same pool.
+    # split_fast_gate returns `tests/`-prefixed names;
+    # the workflow's matrix format is bare, so strip the prefix.
     fast_a, fast_b = split_fast_gate(fast,
                                      _durations_map(manifest))
     half_a = [f[len("tests/"):] for f in fast_a]
@@ -1275,7 +1289,7 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
     # #3400: the balance invariant is DURATION once measured weights exist.
     # LPT packs by weight, so a heavy file dumped entirely on one half is
     # caught even when the counts look even — and a correct duration pack may
-    # legitimately carry very different counts (195 vs 325 on the real pool).
+    # legitimately carry very different counts.
     # The ±3 count check would red that correct split, so it now applies only
     # to manifests with no durations map at all (e.g. the small test
     # fixtures, or a repo that has not adopted durations).
