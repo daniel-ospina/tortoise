@@ -75,8 +75,11 @@ const MASKED = '\u0000'
  * Replace the CONTENTS of string and template literals with a sentinel,
  * preserving every offset. Quote rule matches the shared comment stripper:
  * `'` and `"` end at the closing quote or at a raw newline (JSX prose is full of
- * apostrophes), backticks run to the closing backtick (and their `${…}`
- * expressions are treated as literal text — a real call site never lives there).
+ * apostrophes), backticks run to the closing backtick. A template's `${…}`
+ * interpolation bodies are masked WITH the surrounding text BY DESIGN: a call
+ * site written inside an interpolation is invisible to these probes (a guard
+ * that fails closed, and one more shape in the declared residual — not a claim
+ * that such a site cannot occur).
  */
 export function maskLiterals(src) {
   const out = src.split('')
@@ -131,6 +134,32 @@ export function extractAll(source, pattern, label) {
 }
 
 /**
+ * How `name` is declared as a LOCAL binding in `source`, or null. `importsFromMain`
+ * refuses a probed name that is locally bound anywhere: a local
+ * `const ownerCardProps = …` inside App() SHADOWS the import, so the application
+ * renders the shadowing helper while a probe bound to the module would certify
+ * the imported one (a reviewer's green-with-the-defect mutation). Every spelling
+ * the language allows is checked — a statement-starting declaration (including
+ * one that follows another statement on the same line), a destructuring pattern,
+ * a parameter list, and a class — because a guard that only sees
+ * `^\s*const name` is evaded by `; const name = …`.
+ */
+export function localBindingHits(source, name) {
+  const src = stripComments(source)
+  const n = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const patterns = [
+    new RegExp(`(?:^|[;{}])\\s*(?:const|let|var|function|class)\\s+${n}\\b`, 'm'),
+    new RegExp(`(?:^|[;{}])\\s*(?:const|let|var)\\s*\\{[^}]*\\b${n}\\b[^}]*\\}`, 'm'),
+    new RegExp(`\\([^()]*\\b${n}\\b[^()]*\\)\\s*(?:=>|\\{)`, 'm'),
+  ]
+  for (const re of patterns) {
+    const hit = src.match(re)
+    if (hit) return hit[0].trim()
+  }
+  return null
+}
+
+/**
  * The import map main.jsx ITSELF declares, for the names a probe needs.
  *
  * A probe must bind the module the application actually uses. Injecting the
@@ -146,18 +175,37 @@ export function extractAll(source, pattern, label) {
  * app does not use).
  */
 export function importsFromMain(source, names) {
-  const found = new Map()
+  const stripped = stripComments(source)
+  const masked = maskLiterals(stripped)
   const importRe = /import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2/g
-  for (const m of stripComments(source).matchAll(importRe)) {
+  const found = new Map()
+  for (const m of stripped.matchAll(importRe)) {
+    // A match that STARTS inside a string/template literal is a quoted decoy, not
+    // an import statement — without this, a later decoy re-binds the name (a
+    // reviewer's green-with-the-defect mutation: the real import points at a
+    // lying module and a string supplies the real-looking one).
+    if (masked[m.index] === MASKED) continue
     for (const raw of m[1].split(',')) {
-      const name = raw.trim().split(/\s+as\s+/).pop().trim()
-      if (name) found.set(name, m[3])
+      const parts = raw.trim().split(/\s+as\s+/)
+      const name = parts.pop().trim()
+      if (!name) continue
+      const spec = m[3]
+      if (found.has(name) && found.get(name) !== spec) {
+        throw new Error(`main.jsx imports ${name} from both ${found.get(name)} and ${spec}`)
+      }
+      found.set(name, spec)
     }
   }
   const out = {}
   for (const name of names) {
     if (!found.has(name)) {
       throw new Error(`main.jsx does not import ${name} — a probe may not bind a module the application does not use`)
+    }
+    // Fail closed on a local binding of the same name: it shadows the import, so
+    // the app renders the shadow while the probe asserts the import.
+    const shadow = localBindingHits(stripped, name)
+    if (shadow) {
+      throw new Error(`main.jsx declares ${name} locally (${shadow}) — it would shadow the import a probe binds`)
     }
     out[name] = found.get(name)
   }

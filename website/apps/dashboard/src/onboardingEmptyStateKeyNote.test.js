@@ -538,21 +538,43 @@ const mainJsxSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)),
 // App() shadows the import, so asserting against a test-chosen module would
 // certify props the application does not render. The pin below forbids that
 // shadowing outright.
-const NOTE_IMPORTS = { OwnerEmptyStateKeyNote: NOTE_MODULE, MemberEmptyStateKeyNote: NOTE_MODULE }
 const NOTE_NAMES = ['OwnerEmptyStateKeyNote', 'MemberEmptyStateKeyNote', 'ownerCardProps',
-  'keyTabAffordance', 'graphMissingCta']
+  'keyTabAffordance', 'graphMissingCta', 'REENTRY_BUILD_LEAD_IN', 'REENTRY_SELF_LEAD_IN',
+  'REENTRY_KEYED_LEAD_IN', 'GRAPH_MISSING_BUILD_LEAD_IN', 'GRAPH_MISSING_SELF_LEAD_IN']
 const MAIN_IMPORTS = importsFromMain(mainJsxSource, NOTE_NAMES)
 
-test('#4637 wiring: main.jsx declares no local binding of the note-module derivations', () => {
-  const src = stripComments(mainJsxSource)
-  for (const name of NOTE_NAMES) {
-    const declaration = new RegExp(`(?:^|\\n)\\s*(?:const|let|var|function)\\s+${name}\\b`)
-    assert.ok(!declaration.test(src),
-      `main.jsx may not re-declare ${name} — a local binding shadows the import the app is supposed to render`)
+test('#4637 wiring: every probed name is imported by main.jsx and locally unshadowed', () => {
+  // `importsFromMain` fails CLOSED on both failure modes, so this test documents
+  // the contract the probes rely on: a name main.jsx does not import, and a name
+  // it imports but ALSO declares locally (which shadows the import — the app then
+  // renders the shadow while a probe certified the import). Every legal spelling
+  // of a shadow is covered, not just a line-leading `const` (a reviewer's
+  // mutation put `; const ownerCardProps = …` after another statement).
+  for (const [name, shadowSource] of [
+    ['ownerCardProps', '; const ownerCardProps = (a) => ({ keyLive: true })'],
+    ['ownerCardProps', 'const { ownerCardProps } = mod'],
+    ['keyTabAffordance', 'function f(keyTabAffordance) { return keyTabAffordance }'],
+    ['graphMissingCta', 'class graphMissingCta {}'],
+  ]) {
+    assert.throws(() => importsFromMain(`import { ${name} } from './m.js'\n${shadowSource}`, [name]),
+      `a local ${name} binding must be refused: ${shadowSource}`)
   }
-  // and the two derivations are imported from the ONE module the probe binds
-  assert.equal(MAIN_IMPORTS.ownerCardProps, MAIN_IMPORTS.keyTabAffordance,
-    'the two derivations come from the same module')
+  assert.throws(() => importsFromMain("import { other } from './m.js'", ['ownerCardProps']),
+    'a name main.jsx does not import must be refused')
+  // A quoted decoy import (the shape that re-bound the module before the mask)
+  // must not win: the real import is the one in code position.
+  const decoyed = [
+    "import { ownerCardProps } from './real.js'",
+    'const d = "import { ownerCardProps } from \'./evil.js\'"',
+    'const e = `import { ownerCardProps } from "./evil.js"`',
+  ].join('\n')
+  assert.equal(importsFromMain(decoyed, ['ownerCardProps']).ownerCardProps, './real.js',
+    'a quoted import decoy must not re-bind the probed module')
+  // …and the real main.jsx passes, from the modules the probe then binds
+  assert.equal(MAIN_IMPORTS.OwnerEmptyStateKeyNote, NOTE_MODULE,
+    'the owner note is imported from the note module')
+  assert.equal(MAIN_IMPORTS.ownerCardProps, NOTE_MODULE, 'the prop derivation comes from the note module')
+  assert.equal(MAIN_IMPORTS.keyTabAffordance, NOTE_MODULE, 'the affordance derivation comes from the note module')
 })
 
 // `snippetKey` is a truthy STALE reveal in every binding set below on purpose: if
@@ -565,7 +587,7 @@ test('#4637 wiring: each owner arm’s EFFECTIVE props and rendered copy come fr
     for (const buildFork of ['true', 'false']) {
       const arms = await probeTags(mainJsxSource, {
         tag: 'OwnerEmptyStateKeyNote',
-        imports: { ...MAIN_IMPORTS, ...NOTE_IMPORTS },
+        imports: MAIN_IMPORTS,
         bindings: { ...WIRING_BINDINGS, isBuildFork: buildFork, connectGate: `{ mode: '${mode}', key: null }` },
       })
       assert.equal(arms.length, 2, `two owner arms expected — got ${arms.length}`)
@@ -598,9 +620,7 @@ test('#4637 wiring: each member arm RENDERS its fork’s lead-in (and never the 
   for (const fragment of fragments) {
     for (const buildFork of ['true', 'false']) {
       const [rendered] = await evalExpressions(fragment, {
-        imports: { ...MAIN_IMPORTS, REENTRY_BUILD_LEAD_IN: NOTE_MODULE, REENTRY_SELF_LEAD_IN: NOTE_MODULE,
-          REENTRY_KEYED_LEAD_IN: NOTE_MODULE, GRAPH_MISSING_BUILD_LEAD_IN: NOTE_MODULE,
-          GRAPH_MISSING_SELF_LEAD_IN: NOTE_MODULE },
+        imports: MAIN_IMPORTS,
         bindings: { isBuildFork: buildFork },
       })
       const html = String(rendered.html)
@@ -669,11 +689,13 @@ test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivat
 })
 
 test('#4637 wiring: the graph-missing snippet branch opens iff the gate holds the plaintext', async () => {
-  // Anchored on the graph-missing card's OWN section marker (the shared
-  // `<h2>Continue setting up` text also opens the re-entry card, so a region
-  // anchored on it spans a second card and a decoy could sit inside the match).
+  // Card-scoped, and the scope is enforced structurally: the className
+  // `overview empty-state graph-missing` is used by BOTH cards (the re-entry card
+  // comes first), so a plain lazy match starts in the WRONG card and can read a
+  // decoy branch of it. The negative lookahead forbids crossing another section
+  // opener, so the match must be the card that actually contains the snippet.
   const card = extractOne(stripComments(mainJsxSource),
-    /<section className="overview empty-state graph-missing">[\s\S]*?<pre className="snippet">/,
+    /<section className="overview empty-state graph-missing">(?:(?!<section className="overview empty-state graph-missing">)[\s\S])*?<pre className="snippet">/,
     'the graph-missing snippet region')
   // ONE branch decision between the card heading and the snippet: a planted decoy
   // condition would have to sit inside this region and would trip this count
@@ -717,7 +739,7 @@ test('#4637 wiring: the snippet-branch call to action is fork-derived at the cal
   assert.equal(asSelf.value, false,
     `the CTA argument must be the fork fact — ${arg} evaluated to ${asSelf.value} on a self fork`)
   const [rendered] = await evalExpressions(call,
-    { imports: { graphMissingCta: NOTE_MODULE }, bindings: { ...bindings, isBuildFork: 'true' } })
+    { imports: MAIN_IMPORTS, bindings: { ...bindings, isBuildFork: 'true' } })
   assert.ok(!/Connect your agent/.test(String(rendered.value)),
     `the snippet-branch CTA on a self fork must not offer the build fork's own route — got ${rendered.value}`)
 })
