@@ -545,7 +545,7 @@ class TestDocsPageAndSkillConfig:
             "Scan Tools",           # 4 — OAuth enrolment
             "Authorize",            # 4 — consent (key-less connect completes here)
             "paste it into that chat",  # 5 — the hand-off to the agent
-            "to verify the connection",  # 6 — verification is still instructed
+            "to verify the connection",  # 6 — the row names the verification hand-off
             "file your first memory",  # 6 — the journey's outcome
             "plan-dependent",       # 6 — which tools appear is plan-dependent
         ):

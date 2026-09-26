@@ -469,7 +469,10 @@ Guide the human through:
      fact — you have **no chooser surface at all** (#2912), so the dashboard's
      connect step offers you nothing to pick. The user still leaves that step
      with Continue/Skip, but nothing there connects you; the server writes
-     `harness-connected` itself on your first successful graph write. This
+     `harness-connected` itself on your first successful graph write. Verify
+     with the ADVERTISED `tortoise_overview(section="health")` — the legacy
+     `tortoise_health` name in step 1 is retired, so it is absent from
+     `tools/list` and will not appear in your tool grant (#3883). This
      document is your live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —
