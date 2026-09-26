@@ -190,6 +190,14 @@ test('tolerates a non-string or absent search and a null options bag', () => {
  * a correct decoy above an evasive broken body would satisfy the pin. */
 function functionBody(src, name) {
   const start = src.lastIndexOf(`function ${name}(`)
+  // Uniqueness: the pin must read the ONE declaration that runs. A nested-scope
+  // duplicate (inside a later top-level function) would otherwise be picked by
+  // lastIndexOf while the effective top-level function stayed broken.
+  assert.equal(
+    (src.match(new RegExp(`function ${name}\\(`, 'g')) || []).length,
+    1,
+    `main.jsx declares ${name} more than once — the pin cannot tell which one runs`,
+  )
   assert.ok(start !== -1, `${name} not found in main.jsx`)
   const open = src.indexOf('{', start)
   assert.ok(open !== -1, `no body for ${name}`)

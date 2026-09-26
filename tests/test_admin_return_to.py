@@ -132,14 +132,21 @@ def _blocks() -> dict[str, str]:
         "TS annotations remain in the extracted returnToPath — update this harness"
     )
     return {
-        "early": _script_after(html, _EARLY),
+        # The dashboard-origin validator lives in the FIRST inline script, which
+        # both the early block and claimCardUrl call — prepend it (and the base
+        # composer) to each extracted block.
+        "early": _function(html, "dashboardOrigin") + "\n" + _script_after(html, _EARLY),
         "headGate": _script_after(html, _HEAD_GATE),
         # #3501: `gotrueRedirectTarget` (a GoTrue `redirect_to`) is retired — the
         # BFF `/auth/start` owns the redirect. `oauthNextPath` is the same-origin
         # PATH handed to it as `next`. #3930: the claim helpers
         # (claimCardUrl/isConsoleReturnTo/claimPending) are extracted too — the
         # return-to no longer wins over a pending claim outside the console.
-        "claim": "\n".join(
+        "claim": _function(html, "dashboardOrigin")
+        + "\n"
+        + _function(html, "dashboardBase")
+        + "\n"
+        + "\n".join(
             _function(html, name)
             for name in (
                 "claimCardUrl",
@@ -209,11 +216,14 @@ function mkEnv(search, cookie, session, origin) {
   return { win: win, doc: doc, cleared: cleared, navigations: navigations, cookie: function () { return doc.cookie; } };
 }
 
-function runEarly(search, cookie, origin) {
+function runEarly(search, cookie, origin, seam) {
   // #3930: /auth lives on the APP origin (#4054). The app-host cases pass it
-  // explicitly; the legacy /admin cases keep the tortoise origin so their
-  // pre-existing expectations stay meaningful.
+  // explicitly. `seam` pre-sets the #2744 __DASHBOARD_BASE_URL so the early
+  // block's own origin-validation and composition are exercised too.
+  // `seam` pre-sets the #2744 __DASHBOARD_BASE_URL so the early block's own
+  // origin-validation and composition are exercised (they were not before).
   const e = mkEnv(search, cookie, undefined, origin || ORIGIN);
+  if (seam !== undefined && seam !== null) e.win.__DASHBOARD_BASE_URL = seam;
   new Function('window', 'document', 'URLSearchParams', early)(e.win, e.doc, URLSearchParams);
   return { base: e.win.__DASHBOARD_BASE_URL || null, ret: e.win.__ADMIN_RETURN_TO || null, cookie: e.cookie() };
 }
@@ -232,12 +242,28 @@ function runHeadGate(search, cookie, session) {
            stale: e.win.__ADMIN_STALE || false, probe: !!e.win.__SESSION_PROBE, fetched: fetched };
 }
 
+// The page sets `WELCOME_URL = dashboardBase(window.__DASHBOARD_BASE_URL)` and
+// `DASHBOARD_URL = WELCOME_URL` at the top of its main script; those statements
+// are NOT part of the extracted helpers, so the driver reproduces them here — by
+// CALLING the shipped `dashboardBase`, not by restating it. Otherwise the
+// harness would inject a value the page can never compute and the validation
+// would be untested (review cycle 4).
+function pageBase(e, rawBase) {
+  const pre = new Function(
+    'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
+    claimSrc + '\\nreturn { base: dashboardBase, origin: dashboardOrigin };',
+  );
+  const helpers = pre(e.win, e.doc, URLSearchParams, '', '');
+  return helpers.base(rawBase);
+}
+
 // Mimic the async post-session bounce: whatever claimRedirectTarget() returns is
 // assigned to window.location.href, so it must be a NAVIGATION target.
 function runTargets(ret, cookie, seamBase) {
   // #3930/#4054: the /auth page IS on the app origin, and `claimCardUrl()`
-  // builds from `window.location.origin` — so the mock must be the app origin
-  // or the claim-card assertion would pin the mock, not production.
+  // reduces `window.__DASHBOARD_BASE_URL` to its ORIGIN — so the mock's origin
+  // must be the app origin (or the seam under test), never a tortoise-origin
+  // value the page could not compute.
   const e = mkEnv('', cookie, undefined, APP);
   e.win.__ADMIN_RETURN_TO = ret || null;
   // PRODUCTION FIDELITY (#3930 review): signup.html computes
@@ -247,8 +273,9 @@ function runTargets(ret, cookie, seamBase) {
   // produce, so a wrong-origin regression could not fail the tests below.
   // `claimCardUrl()` reads THIS window property, so it must be set too —
   // otherwise only its fallback branch is ever executed.
-  const DASHBOARD_URL = seamBase || (APP + (ret || ''));
-  e.win.__DASHBOARD_BASE_URL = DASHBOARD_URL;
+  const rawBase = seamBase || (APP + (ret || ''));
+  e.win.__DASHBOARD_BASE_URL = rawBase;
+  const DASHBOARD_URL = pageBase(e, rawBase);
   const WELCOME_URL = DASHBOARD_URL;
   const make = new Function(
     'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
@@ -270,8 +297,9 @@ function runConsumer(status, ret, cookie, opts) {
   // PRODUCTION FIDELITY (#3930 review): see runTargets — the page's
   // __DASHBOARD_BASE_URL is `location.origin + ret` on the APP origin, and
   // `claimCardUrl()` reads that window property.
-  const DASHBOARD_URL = opts.seamBase || (APP + (ret || ''));
-  e.win.__DASHBOARD_BASE_URL = DASHBOARD_URL;
+  const rawBase = APP + (ret || '');
+  e.win.__DASHBOARD_BASE_URL = rawBase;
+  const DASHBOARD_URL = pageBase(e, rawBase);
   const WELCOME_URL = DASHBOARD_URL;
   const make = new Function(
     'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
@@ -287,7 +315,7 @@ function runConsumer(status, ret, cookie, opts) {
 }
 
 const out = { early: [], headGate: [], claim: [], consumer: [], gate: [] };
-for (const c of cases.early) out.early.push(runEarly(c[0], c[1], c[2]));
+for (const c of cases.early) out.early.push(runEarly(c[0], c[1], c[2], c[3]));
 for (const c of cases.headGate) out.headGate.push(runHeadGate(c[0], c[1], c[2]));
 for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1], c[2]));
 for (const c of cases.consumer) out.consumer.push(runConsumer(c[0], c[1], c[2], c[3]));
@@ -1021,11 +1049,73 @@ def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
     })["claim"]
     assert rows[0]["nav"] == APP_ORIGIN + "/admin/blog", rows[0]
     assert rows[1]["nav"] == APP_ORIGIN + "/admin/blog", rows[1]
+    # The console branch of `oauthNextPath` is non-redundant ONLY in this row
+    # (console return-to AND a pending claim): without it the visitor is routed
+    # to the claim card instead of the console. Asserted, or deleting the branch
+    # leaves the suite green (review cycle 4).
+    assert rows[1]["oauth"] == "/admin/blog", rows[1]
     assert rows[2]["nav"] == APP_ORIGIN + "/?claim=1", rows[2]
     assert rows[2]["oauth"] == "/?claim=1", rows[2]
     assert rows[3]["nav"] == APP_ORIGIN + "/?claim=1", rows[3]
     assert rows[4]["nav"] == APP_ORIGIN + "/team?session_id=abc", rows[4]
     assert rows[4]["oauth"] == "/team?session_id=abc", rows[4]
+
+
+def test_early_block_validates_and_composes_the_dashboard_base() -> None:
+    """The early block's OWN base composition is validated on every path.
+
+    `__DASHBOARD_BASE_URL` is page-controlled (never read from the URL), but the
+    early block is what composes a return-to onto it, and it used to use
+    `window.location.origin` — discarding the #2744 preview port. Both the
+    composition and the origin validation live here, so they are driven here
+    rather than only through `claimCardUrl`.
+    """
+    loopback = "http://127.0.0.1:8790"
+    # A real return-to rides the seam's origin (the preview keeps its port).
+    rows = _run({"early": [
+        ["?next=/team?session_id=abc", "", APP_ORIGIN, loopback],
+        ["?next=/team", "", APP_ORIGIN, None],
+        ["?next=/team", "", APP_ORIGIN, "https://app.premiselabs.co"],
+    ]})["early"]
+    assert rows[0]["base"] == loopback + "/team?session_id=abc", rows[0]
+    assert rows[0]["ret"] == "/team?session_id=abc", rows[0]
+    assert rows[1]["base"] == APP_ORIGIN + "/team", rows[1]
+    assert rows[2]["base"] == APP_ORIGIN + "/team", rows[2]
+    # Hostile bases must fall back to THIS document's origin — the value is what
+    # every later navigation sink reads. `blob:` is the case an "opaque origin"
+    # rule alone misses: it carries the INNER url's origin.
+    for hostile in (
+        "//evil.com",
+        "/\\evil.com",
+        "\\\\evil.com",
+        "\t//evil.com",
+        " //evil.com",
+        "http://evil.com",
+        "https://evil.com/x",
+        "https://user:pass@evil.com",
+        "blob:https://evil.com/x",
+        "javascript:alert(1)",
+        "data:text/html,x",
+        "about:blank",
+        "not a url",
+    ):
+        (row,) = _run({"early": [["?next=/team", "", APP_ORIGIN, hostile]]})["early"]
+        assert row["base"] == APP_ORIGIN + "/team", (hostile, row)
+        assert row["ret"] == "/team", (hostile, row)
+
+
+def test_early_block_sanitises_the_base_without_a_return_to() -> None:
+    """With no `next` the early block returns before composing — the base it
+    leaves behind is still read by `DASHBOARD_URL`/`WELCOME_URL`, so a hostile
+    value must not survive to a navigation sink. The consumer reduces it."""
+    for hostile in ("javascript:alert(1)", "blob:https://evil.com/x", "//evil.com"):
+        (row,) = _run({"early": [["", "", APP_ORIGIN, hostile]]})["early"]
+        assert row["ret"] is None, (hostile, row)
+        # The early block leaves the raw value in place; the consumers reduce it.
+        (nav,) = _run({"claim": [[None, "tt_claim_pending=1", hostile]]})["claim"]
+        assert nav["nav"] == APP_ORIGIN + "/?claim=1", (hostile, nav)
+        (plain,) = _run({"claim": [[None, "", hostile]]})["claim"]
+        assert plain["nav"] == APP_ORIGIN, (hostile, plain)
 
 
 def test_claim_card_honours_the_dashboard_seam_origin() -> None:

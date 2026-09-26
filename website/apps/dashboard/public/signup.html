@@ -15,6 +15,38 @@
        loopback session cookie the local dashboard reads is sent. -->
   <script>
     window.__DASHBOARD_BASE_URL = window.__DASHBOARD_BASE_URL || "https://app.premiselabs.co";
+    // #1566/#2744: the DASHBOARD base. In production the dashboard and /auth are
+    // the same origin; in the split-origin local preview the dashboard is a
+    // different loopback PORT. It is a trusted, page-controlled value — written
+    // by this page only, never read from the URL — but every consumer below
+    // still reduces it to an ALLOWED ORIGIN: this document's own origin, or a
+    // loopback one. Everything else falls back to this document's origin rather
+    // than becoming a navigation target — a protocol-relative host, a
+    // backslash/whitespace-obfuscated host, an absolute foreign host, and a
+    // `blob:`/`javascript:`/`data:` URL (whose origin is another host or the
+    // opaque string "null").
+    function dashboardOrigin(raw) {
+      var own = window.location.origin;
+      if (typeof raw !== "string") return own;
+      var u;
+      try { u = new URL(raw, own); } catch (e) { return own; }
+      if (!u.origin || u.origin === "null") return own;
+      if (u.origin === own) return own;
+      if (u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]") return u.origin;
+      return own;
+    }
+    // The validated base, KEEPING the path (a return-to) only when it rides the
+    // allowed origin, so a bad value cannot contribute a path either.
+    function dashboardBase(raw) {
+      var own = window.location.origin;
+      var origin = dashboardOrigin(raw);
+      var path = "";
+      try {
+        var u = new URL(raw, own);
+        if (u.origin === origin && u.pathname !== "/") path = u.pathname + u.search;
+      } catch (e) { path = ""; }
+      return origin + path;
+    }
   </script>
   <!-- #3080: admin return-to. #3930 generalises it: an unauthenticated deep
        link to ANY real app pathname must survive the bounce. The /admin gate
@@ -89,23 +121,14 @@
         // load-bearing control.
         if (ret.charAt(0) !== "/" || ret.indexOf("//") === 0) return;
         window.__ADMIN_RETURN_TO = ret;
-        // #3930 review: compose the return-to onto the ORIGIN of whatever base
-        // is in force — the #2744 seam when the split-origin preview set it,
-        // else this document's own origin. Using `window.location.origin`
-        // directly here discarded the seam whenever a return-to was present,
-        // which sent the claim card to the /auth port instead of the
-        // dashboard. In production both are the app origin, so the value is
-        // unchanged.
-        var seam = window.__DASHBOARD_BASE_URL;
-        // A protocol-relative seam (`//evil.com`, `/\evil.com`) resolves to
-        // ANOTHER host. The seam must name an absolute origin, so reject it
-        // here: this value is what claimCardUrl() later reduces to an origin.
-        if (typeof seam !== "string" || /^\/[\\/]/.test(seam)) seam = window.location.origin;
-        var seamOrigin = new URL(seam, window.location.href || window.location.origin).origin;
-        // A non-special scheme (`javascript:`, `data:`) has the OPAQUE origin
-        // "null" — a base of "null/team" would resolve to `<host>/null/team`.
-        if (!seamOrigin || seamOrigin === "null") seamOrigin = window.location.origin;
-        window.__DASHBOARD_BASE_URL = seamOrigin + ret;
+        // #3930 review: compose the return-to onto the DASHBOARD origin, not onto
+        // this document's origin — the split-origin preview (#2744) puts the
+        // dashboard on another loopback port, and `window.location.origin` sent
+        // the claim card and the post-login nav to the /auth port instead. The
+        // origin is validated (see dashboardOrigin): only this document's origin
+        // or a loopback origin survives. In production both are the app origin,
+        // so the value is unchanged.
+        window.__DASHBOARD_BASE_URL = dashboardOrigin(window.__DASHBOARD_BASE_URL) + ret;
       } catch (e) { /* best-effort — fall back to the app root */ }
     })();
   </script>
@@ -657,14 +680,20 @@
        /auth/* or /api/*, and no raw token ever reaches this page. -->
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
-    const WELCOME_URL = window.__DASHBOARD_BASE_URL;  // #1566: post-login target — first-timers get provisioned (welcome mode), returning users get the dashboard home
+    // #1566: post-login target — first-timers get provisioned (welcome mode), returning users get the dashboard home.
+    // Validated (see dashboardBase): with a return-to the early block has
+    // already composed a checked base; without one this is still whatever the
+    // page (or the #2744 preview) set, so it is checked again here — the early
+    // block returns before composing when there is no `next`, and a raw
+    // `javascript:`/`blob:` value must not reach a navigation sink.
+    const WELCOME_URL = dashboardBase(window.__DASHBOARD_BASE_URL);
     // #1082 (PR1): claim-intent routing — when a claim is IN FLIGHT
     // (non-secret tt_claim_pending marker set by the dashboard claim card
     // on app.premiselabs.co — the raw tt_ key never leaves app-origin
     // sessionStorage, P1-2), OAuth must land on the dashboard CLAIM ROUTE
     // (?claim=1), NEVER welcome.html (its Phase-2 mint would orphan the
     // claimable anon team).
-    const DASHBOARD_URL = window.__DASHBOARD_BASE_URL;
+    const DASHBOARD_URL = WELCOME_URL;
     // #1511: the app-ROOT claim card. Built from the ORIGIN of the dashboard
     // base, never from the base itself — since #3930 the base may carry a
     // path+query (/team?session_id=…), so appending "/?claim=1" to the raw
@@ -672,18 +701,10 @@
     // The __DASHBOARD_BASE_URL SEAM (#2744) is honoured — its ORIGIN only — so
     // the split-origin local preview lands the claim card on the dashboard.
     function claimCardUrl() {
-      // `__DASHBOARD_BASE_URL` is page-controlled (the seam above), never taken
-      // from the URL — but a protocol-relative value would resolve to ANOTHER
-      // host, so it is rejected rather than reduced.
-      var base = window.__DASHBOARD_BASE_URL;
-      if (typeof base !== "string" || /^\/[\\/]/.test(base)) base = window.location.origin;
-      try {
-        var origin = new URL(base, window.location.href || window.location.origin).origin;
-        // A non-special scheme (javascript:, data:) yields the OPAQUE origin
-        // "null"; the string would then resolve to `<this host>/null/…`.
-        if (origin && origin !== "null") return origin + "/?claim=1";
-      } catch (e) { /* malformed base → fall through to this document */ }
-      return window.location.origin + "/?claim=1";
+      // Only the ORIGIN of the (validated) base: since #3930 the base may carry a
+      // path+query, so appending "/?claim=1" to the raw value would produce
+      // `…/team?session_id=abc/?claim=1`.
+      return dashboardOrigin(window.__DASHBOARD_BASE_URL) + "/?claim=1";
     }
     // #3080: the CONSOLE return-to. /admin has no claim card, so its return-to
     // wins unconditionally — appending ?claim=1 would land the user on a dead
