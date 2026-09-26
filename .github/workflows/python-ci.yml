@@ -189,7 +189,26 @@ jobs:
           else
             BASE="${{ github.event.pull_request.base.sha }}"
             [ -n "$BASE" ] || BASE="origin/main"
-            CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || git diff --no-renames --name-only "$BASE" HEAD)
+            # #3442: ONE canonical question — the merge-base diff — asked of a
+            # base commit we have PROVEN is present. The old construction took
+            # this diff behind a silenced error and fell back to a two-ref diff
+            # of `$BASE` directly. That fallback is a DIFFERENT question — it
+            # folds in the base branch's own advances (and, with no merge base,
+            # an unrelated history) — so the SAME head could select DIFFERENT
+            # tests, and a swallowed failure left the changed set empty, which
+            # `select()` maps to the tier-1 smoke set (full=false,
+            # slow_run=false, carve_out_run=false): a SILENTLY STRIPPED suite
+            # that still reports green. Both holes are closed by failing LOUDLY
+            # here instead of selecting on a diff we could not compute.
+            if ! git rev-parse --verify --quiet "$BASE^{commit}" > /dev/null; then
+              echo "::error::base commit '$BASE' is not present in the checkout — refusing to select on a diff that cannot be computed (#3442)"
+              exit 1
+            fi
+            CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD")
+            if [ -z "$CHANGED" ]; then
+              echo "::error::'$BASE...HEAD' produced an EMPTY changed set — refusing to certify this head on the tier-1 smoke alone (#3442)"
+              exit 1
+            fi
             echo "changed files:"
             echo "$CHANGED"
             SEL=$(printf '%s\n' "$CHANGED" | python3 tools/ci_selection.py --changed-files - --event pull_request)
