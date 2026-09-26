@@ -48,10 +48,34 @@ the edges stay live-only. Passing ``sdk=None`` is likewise live-only.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any
 
 _logger = logging.getLogger("tortoise.session_link")
+
+
+def coerce_confidence(value: Any) -> float | None:
+    """Coerce a confidence to a finite float in ``[0, 1]``, or ``None``.
+
+    Fail-closed and SHARED (#1370 / #3722): a ``bool`` is rejected (``True``
+    is not a confidence), as are non-numerics, ``NaN``/``±inf``, values that
+    overflow ``float`` (e.g. ``10**400``), and out-of-[0, 1] magnitudes. The
+    write path must never hand an unusable value to a Cypher parameter — a
+    ``NaN``/overflow parameter makes FalkorDB reject the query, and on the
+    replay folds that raise would abort ``rebuild_all`` AFTER the wipe.
+    ``None`` means "no confidence": the caller must skip the ``SET`` and
+    omit the field from the emitted record (never clear an existing value).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        f = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(f) or f < 0.0 or f > 1.0:
+        return None
+    return f
 
 # github.com/{org}/{repo}/issues/{n}
 _URL_RE = re.compile(
@@ -280,10 +304,17 @@ ENTITY_LINKED_TRIPLES = frozenset({
 
 def link_entity(proj, source_label: str, source_id: str, target_id: str,
                 edge_type: str = "aboutObject", target_label: str = "Object",
-                sdk=None) -> int:
+                sdk=None, confidence: float | None = None) -> int:
     """Mint ONE ``about*`` edge from (source) to (target); returns 1 when an
     edge was CREATED (0 when it already existed OR when an endpoint is
     absent, so nothing was created).
+
+    ``confidence`` (#1370): the optional binding-confidence the edge carries.
+    When present, the live MERGE also ``SET r.confidence`` and the emitted
+    ``EntityLinked`` record carries the value, so the replay fold reproduces
+    it (live == rebuild). A pre-existing edge short-circuits (returns 0)
+    and is NOT re-SET — a later no-confidence link therefore never clears an
+    earlier confident one, live or on replay.
 
     The MERGE is read back (``RETURN count(s)``) and the result decides the
     return value and the journal write: a MERGE whose MATCH found no endpoint
@@ -319,6 +350,10 @@ def link_entity(proj, source_label: str, source_id: str, target_id: str,
             f"link_entity: ({source_label})-[:{edge_type}]->({target_label}) "
             "is not a permitted ONTOLOGY §3.2 combination "
             f"({sorted(ENTITY_LINKED_TRIPLES)})")
+    # #1370/#3722: fail-closed, SHARED coercion. A bool/NaN/±inf/overflow/
+    # out-of-range value becomes None, so it is never bound as a Cypher param
+    # and never enters the journaled record.
+    confidence = coerce_confidence(confidence)
     pre = proj.g.query(
         f"MATCH (s:{source_label} {{id:$sid}})-[:{edge_type}]->"
         f"(t:{target_label} {{id:$tid}}) RETURN count(s)",
@@ -326,32 +361,63 @@ def link_entity(proj, source_label: str, source_id: str, target_id: str,
     ).result_set
     if pre and pre[0][0]:
         return 0
-    created = proj.g.query(
-        f"MATCH (s:{source_label} {{id:$sid}}), "
-        f"(t:{target_label} {{id:$tid}}) "
-        f"MERGE (s)-[:{edge_type}]->(t) RETURN count(s)",
-        params={"sid": source_id, "tid": target_id},
-    ).result_set
+    if confidence is None:
+        created = proj.g.query(
+            f"MATCH (s:{source_label} {{id:$sid}}), "
+            f"(t:{target_label} {{id:$tid}}) "
+            f"MERGE (s)-[:{edge_type}]->(t) RETURN count(s)",
+            params={"sid": source_id, "tid": target_id},
+        ).result_set
+    else:
+        created = proj.g.query(
+            f"MATCH (s:{source_label} {{id:$sid}}), "
+            f"(t:{target_label} {{id:$tid}}) "
+            f"MERGE (s)-[r:{edge_type}]->(t) SET r.confidence=$conf "
+            "RETURN count(s)",
+            params={"sid": source_id, "tid": target_id,
+                    "conf": float(confidence)},
+        ).result_set
     if not created or not created[0][0]:
         # The MATCH found no endpoint pair, so the MERGE created nothing.
         # Return 0 and journal nothing: an edge that does not exist must
         # neither be reported nor replayed.
         return 0
-    if sdk is not None:
-        # JSONL-only (not in _GRAPH_EVENT_TYPES) — the durable carrier the
-        # rebuild fold consumes. Best-effort: _emit_event never raises, and a
-        # journal-less SDK no-ops.
-        try:
-            sdk._emit_event(
-                "EntityLinked", id=source_id, source_id=source_id,
-                source_label=source_label, target_label=target_label,
-                target_id=target_id, edge_type=edge_type)
-        except Exception:  # noqa: BLE001, RUF100 — journaling is best-effort
-            _logger.warning(
-                "session_link: EntityLinked journal emit failed for "
-                "%s:%s -[:%s]-> %s:%s", source_label, source_id, edge_type,
-                target_label, target_id, exc_info=True)
+    emit_entity_linked(
+        sdk, source_label=source_label, source_id=source_id,
+        target_id=target_id, target_label=target_label, edge_type=edge_type,
+        confidence=confidence)
     return 1
+
+
+def emit_entity_linked(sdk, *, source_label: str, source_id: str,
+                       target_id: str, target_label: str, edge_type: str,
+                       confidence: Any = None) -> None:
+    """Emit the JSONL-only ``EntityLinked`` record (the durable carrier the
+    rebuild fold consumes). Best-effort: ``_emit_event`` never raises and a
+    journal-less SDK no-ops.
+
+    Shared by ``link_entity`` (a CREATED edge) and the binder's
+    already-present path (#1370 F7: a legacy ``about_entities`` edge written
+    BEFORE the binder ran still needs the confidence applied live AND
+    journaled so live == rebuild) so the record shape cannot drift.
+    """
+    if sdk is None:
+        return
+    conf = coerce_confidence(confidence)
+    try:
+        sdk._emit_event(
+            "EntityLinked", id=source_id, source_id=source_id,
+            source_label=source_label, target_label=target_label,
+            target_id=target_id, edge_type=edge_type,
+            # #1370: the binding confidence rides the SAME journaled record —
+            # the fold re-SETs it, so live == rebuild. Absent for the legacy
+            # (un-confidenced) producers.
+            **({} if conf is None else {"confidence": conf}))
+    except Exception:  # noqa: BLE001, RUF100 — journaling is best-effort
+        _logger.warning(
+            "session_link: EntityLinked journal emit failed for "
+            "%s:%s -[:%s]-> %s:%s", source_label, source_id, edge_type,
+            target_label, target_id, exc_info=True)
 
 
 def _link(proj, source_label: str, source_id: str, target_id: str,
