@@ -154,38 +154,46 @@ function firstAttr(attrs, name) {
 }
 
 // #3787: the index of the `>` that ENDS a start tag beginning at `from`, or -1.
-// The tag's end is decided by the HTML tokenizer's STATE, not by the shape of its
-// characters, and two earlier attempts got that wrong in ways that CHANGED a
-// verdict (review cycles 3 and 5, both reproduced):
+// The tag's end is decided by the HTML tokenizer's STATE, never by the shape of
+// its characters, and every earlier attempt got that wrong in a way that CHANGED
+// a verdict (review cycles 3, 5 and 6 — each reproduced against a browser):
 //   * `[^>]*` stopped at a `>` inside a QUOTED value, so
 //     `<script data-x=">" src="https://cdn.example.com/app.js">` parsed as an
 //     inline body with NO src — the loaded script vanished from `p.srcs`, taking
 //     clause 2(a) and the 2(d) off-origin refusal with it;
-//   * "the previous non-space character is `=`" still opened a quote inside an
-//     UNQUOTED value — `<script data-x=a='b src="…">` — because an unquoted value
-//     may itself contain `=`, so the walk ran to EOF and `firstAttr` returned an
-//     EARLIER `src`, hiding a later off-origin `<script src>` from clause 2(d).
-// A quote therefore opens a value only in the state immediately after `=`, and
-// inside an unquoted value `"`, `'` and `=` are ordinary characters.
+//   * "the previous non-space character is `=`" opened a quote inside an UNQUOTED
+//     value — `<script data-x=a='b src="…">` — because an unquoted value may
+//     itself contain `=`;
+//   * and "previous non-space char is `=`" is also why `=` BETWEEN attributes
+//     phantom-quoted: `<script src="a.js" ="y></script><script src="…evil…">`
+//     — where `=` is not an assignment at all. Per the tokenizer it starts an
+//     attribute NAME, so the tag ends at the first `>` instead of swallowing the
+//     next element.
+// So the states are modelled: a `=` is an assignment only in `name`/`afterName`;
+// in `beforeName` it starts a name; a quoted value returns to `beforeName`; and
+// whitespace is HTML's `[\t\n\f\r ]`, not JS `\s`, which also matches `\v` and
+// NBSP and ended an unquoted value early (cycle 6, reproduced).
+const HTML_WS = /[\t\n\f\r ]/
 function tagEnd(html, from) {
-  let mode = 'before' // 'before' = between attributes; 'value' = inside an unquoted value
+  let state = 'beforeName' // beforeName | name | afterName | beforeValue | unquoted
   let quote = null
-  let afterEq = false
   for (let i = from; i < html.length; i++) {
     const ch = html[i]
-    if (quote !== null) { if (ch === quote) quote = null; continue }
+    if (quote !== null) { if (ch === quote) { quote = null; state = 'beforeName' } continue }
     if (ch === '>') return i
-    if (mode === 'value') {
-      if (/\s/.test(ch)) { mode = 'before'; afterEq = false }
+    if (state === 'unquoted') {
+      if (HTML_WS.test(ch)) state = 'beforeName'
       continue
     }
-    if (/\s/.test(ch)) continue
-    if (ch === '=') { afterEq = true; continue }
-    if (afterEq) {
-      afterEq = false
+    if (HTML_WS.test(ch)) { if (state === 'name') state = 'afterName'; continue }
+    if (state === 'beforeValue') {
       if (ch === '"' || ch === "'") quote = ch
-      else mode = 'value'
+      else state = 'unquoted'
+      continue
     }
+    if (ch === '=' && state !== 'beforeName') { state = 'beforeValue'; continue }
+    if (ch === '/' && state !== 'name') continue // the self-closing marker
+    state = 'name'
   }
   return -1
 }
@@ -197,14 +205,16 @@ function tagEnd(html, from) {
 // is discarded here too, because that is what the browser does.
 function scriptTags(html) {
   const out = []
-  const open = /<script(?=[\s/>])/gi
+  const open = /<script(?=[\t\n\f\r />])/gi
   let m
   while ((m = open.exec(html)) !== null) {
     const end = tagEnd(html, open.lastIndex)
     if (end === -1) {
-      // No `>` closes the tag, so the browser loads nothing and the rest of the
-      // document is not this element's text.
-      out.push({ src: firstAttr(html.slice(open.lastIndex), 'src'), body: '' })
+      // No `>` closes the tag, so the BROWSER emits no element and loads
+      // nothing — report no src rather than one the browser never sees (cycle 6:
+      // any dangling/off-origin/`supabase`-looking value in an unterminated tag
+      // used to red an inert page).
+      out.push({ src: null, body: '' })
       break
     }
     const attrs = html.slice(open.lastIndex, end)
@@ -656,12 +666,19 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // this. A CHARACTER-REFERENCE-spelled payload is residual 7: the browser decodes
   // `&#100;` in an attribute value and the raw text carries no literal, so it
   // evades. A decoder for it was built in cycle 4 and WITHDRAWN in cycle 5,
-  // because its own fidelity became the next unbounded surface — it red a clean
-  // build on a `<script>` body (which the HTML parser does NOT entity-decode),
-  // double-decoded `&#38;sol;`, and over-decoded a semicolon-less numeric
-  // reference that an attribute leaves literal. Three reproduced false positives
-  // on clean builds — the failure mode this file treats as fatal — to close a
-  // deliberately obfuscated spelling no legitimate page writes.
+  // because its own fidelity became the next unbounded surface — it red pages that
+  // merely mention the library through an entity: inside a `<script>` body (which
+  // the HTML parser does NOT entity-decode), through a CHAINED `&#38;sol;`, or
+  // through a semicolon-less numeric reference an attribute leaves literal. Three
+  // false positives, each reproduced against the guard, to close a deliberately
+  // obfuscated spelling no legitimate page writes.
+  //
+  // `p.srcs` is deliberately NOT pinned non-empty by a count assertion: the
+  // cheap check that would do it (parsed elements vs `</script>` closers) reds a
+  // page carrying a literal `</script>` inside a quoted attribute value, and a
+  // false positive on a clean build is the failure mode this file treats as
+  // fatal. What clause 2(d) consumes is instead made CORRECT at the source, in
+  // `tagEnd`.
   const pageContexts = pages.map((p) => ({ name: `${p.name}#document`, js: p.html, folded: foldStringLiterals(p.html) }))
 
   // (3) COVERAGE FIRST. A scan that inspected nothing passes vacuously, and a
