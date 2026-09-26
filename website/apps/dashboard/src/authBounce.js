@@ -35,7 +35,11 @@
 // value the consumer must accept (serving is the Function's business, not this
 // list's). The exported list is therefore the CONSUMER allowlist — what a
 // return-to may NAME — which is why it also carries the two Function-owned
-// routes. The asymmetry is deliberate and is asserted by the drift test.
+// routes. The asymmetry is deliberate; what the drift test
+// (`src/authBounce.test.js`) asserts is that the two LITERALS in `signup.html`
+// equal these exports — it does not assert what this module can PRODUCE, so the
+// `PRODUCED` vs `NAMED` asymmetry is a documented reasoning step, not a pinned
+// invariant.
 //
 // PATH-ONLY AND SAME-ORIGIN BY CONSTRUCTION
 // -----------------------------------------

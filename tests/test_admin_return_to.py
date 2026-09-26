@@ -68,13 +68,47 @@ _HEAD_GATE = "#1494/#3501: session probe"
 
 
 def _script_after(html: str, marker: str) -> str:
+    """The first `<script>` body after `marker`.
+
+    UNIQUENESS IS ASSERTED (#3930 cycle-7 review): without it, a SECOND copy of a
+    block — an easy accident when merging, and the one the browser executes LAST —
+    is invisible to the whole suite because this helper keeps returning the
+    first. Proven: duplicating the early block with a broken composition line
+    left the file at 72 passed while the page's effective
+    `__DASHBOARD_BASE_URL` was the broken copy. The marker must also appear
+    exactly once, or `find` could anchor on a decoy.
+    """
+    assert html.count(marker) == 1, (
+        f"marker {marker!r} appears {html.count(marker)} times in signup.html — "
+        "the block was duplicated and this helper would silently pin the first one"
+    )
     i = html.find(marker)
     assert i != -1, f"block gone from signup.html: {marker!r}"
     start = html.find("<script>", i)
     assert start != -1, f"no <script> after marker {marker!r}"
     end = html.find("</script>", start)
     assert end != -1, f"unterminated <script> after marker {marker!r}"
-    return html[start + len("<script>") : end]
+    body = html[start + len("<script>") : end]
+    # A duplicated <script> BODY (same marker, one count) is not covered by the
+    # count above — the body must itself be unique in the page.
+    assert html.count(body) == 1, (
+        f"the script body after marker {marker!r} is not unique — the page "
+        "contains a second copy the browser would execute after this one"
+    )
+    return body
+
+
+def _strip_js_line_comments(src: str) -> str:
+    """Drop `//`-to-EOL comments so a PIN cannot be satisfied by a comment that
+    merely QUOTES the pinned line (cycle-7 review: the static call-site pin —
+    `window.location.href = claimFunnelUrl();` — stayed green when the call site
+    was reverted and a comment quoting that string was left behind).
+
+    Deliberately NOT quote-aware: it can only ever REMOVE text, so the worst case
+    is a missed match, and these anchors are whole code lines that contain no
+    `//` before the anchor.
+    """
+    return "\n".join(line.split("//")[0] for line in src.splitlines())
 
 
 def _strip_comments(html: str) -> str:
@@ -324,11 +358,13 @@ function runTargets(ret, cookie, seamBase) {
 
 // A TEST-SIDE MODEL of the seam's origin rule, used ONLY to compose the value the
 // early block would have left in `window.__DASHBOARD_BASE_URL` when it has a
-// return-to. It is NOT a second copy of `dashboardOrigin` and it is NOT kept in
-// step by the tests in this file — a foreign-origin seam alongside a return-to is
-// what `test_early_block_validates_and_composes_the_dashboard_base` drives
-// directly against the SHIPPED helper. This model is exercised by
-// `test_claim_card_honours_the_dashboard_seam_origin`.
+// return-to. It IS a second copy of `dashboardOrigin` (same rule, `own` rebound to
+// APP) — an earlier comment claimed otherwise and was false (cycle-7 review). No
+// test can keep the two in step: they are compared only indirectly, because
+// `runTargets` feeds the shipped helper the MODEL's output. The shipped helper is
+// driven directly by `test_early_block_validates_and_composes_the_dashboard_base`,
+// which passes `localhost` and `[::1]` so the whole loopback allowlist — not just
+// `127.0.0.1` — is pinned there.
 function seamOrigin(raw) {
   const own = APP;
   if (typeof raw !== "string") return own;
@@ -776,15 +812,20 @@ def test_console_spa_carries_the_return_to() -> None:
     assert "window.location.replace(AUTH_URL)" not in src, (
         "the SPA still bounces to a bare /auth — re-login lands on the app root, not the console (#3080)"
     )
-    # The helper must send the PATHNAME only. /auth rejects a `next` containing
-    # ':' or '\\' anywhere, so pathname+search silently drops the return-to for
-    # e.g. /admin?t=12:00 — the #3080 symptom again.
+    # The helper must send the PATHNAME only — parity with the server gate's own
+    # `returnToPath()` (functions/admin/[[path]].ts), which is pathname-only. NOTE:
+    # this is NOT because `/auth` rejects ':' — an earlier version of this comment
+    # said so and it is false (`signup.html` rejects only '\' plus a non-leading
+    # '/', and explicitly ACCEPTS ':' because the gate emits colon paths; the same
+    # false claim was corrected in blog-admin's useAuth.ts). Pathname-only is the
+    # gate-parity choice; its cost is that /admin?t=12:00 loses the query.
     i = src.find("function authUrlWithReturn")
     assert i != -1, "authUrlWithReturn was removed"
     body = src[i : i + 700]
     assert "window.location.pathname" in body, "the helper does not use the pathname"
     assert "window.location.search" not in body, (
-        "the helper appends the query, which /auth rejects — dropping the return-to (#3080)"
+        "the helper appends the query; the gate's returnToPath() is pathname-only, "
+        "so the two halves would disagree (#3080)"
     )
 
 
@@ -1168,7 +1209,7 @@ def test_the_anon_team_funnel_prefers_the_console_return_to() -> None:
     # STATIC half: the extracted helper is only load-bearing if the CALL SITE
     # still calls it. Without this, reverting line ~1424 to the pre-#3930 inline
     # ternary leaves the helper as dead code and the rows above still pass.
-    callsite = _strip_comments(SIGNUP.read_text(encoding="utf-8"))
+    callsite = _strip_js_line_comments(_strip_comments(SIGNUP.read_text(encoding="utf-8")))
     assert "window.location.href = claimFunnelUrl();" in callsite, (
         "the ANON_TEAM_NO_OWNER funnel must navigate via the extracted "
         "claimFunnelUrl() — an inline expression puts the decision back inside "
@@ -1177,6 +1218,10 @@ def test_the_anon_team_funnel_prefers_the_console_return_to() -> None:
     assert "window.location.href = isConsoleReturnTo() ?" not in callsite, (
         "the console-vs-claim-card decision must not be re-inlined as a "
         "`location.href =` ternary — that is the pre-#3930 form this pins"
+    )
+    assert "window.location.href = window.__ADMIN_RETURN_TO ||" not in callsite, (
+        "the pre-#3930 `__ADMIN_RETURN_TO || claimCardUrl()` expression is back at "
+        "a `location.href =` site"
     )
 
 
@@ -1198,6 +1243,12 @@ def test_early_block_validates_and_composes_the_dashboard_base() -> None:
         ["?next=/team", "", APP_ORIGIN, 42],
         ["?next=/team", "", APP_ORIGIN, []],
         ["?next=/team", "", APP_ORIGIN, loopback + "/prior"],
+        # The whole loopback allowlist, driven through the SHIPPED `dashboardOrigin`
+        # (not the driver's model): dropping `localhost` or `[::1]` from the page
+        # must red here (cycle-7 review).
+        ["?next=/team", "", APP_ORIGIN, "http://localhost:8790"],
+        ["?next=/team", "", APP_ORIGIN, "http://[::1]:8790"],
+        ["?next=/team", "", APP_ORIGIN, "https://localhost:8790"],
     ]})["early"]
     assert rows[0]["base"] == loopback + "/team?session_id=abc", rows[0]
     assert rows[0]["ret"] == "/team?session_id=abc", rows[0]
@@ -1210,6 +1261,11 @@ def test_early_block_validates_and_composes_the_dashboard_base() -> None:
     # the prior path is replaced, never concatenated (no accretion).
     assert rows[5]["base"] == loopback + "/team", rows[5]
     assert loopback + "/prior" not in rows[5]["base"], rows[5]
+    # Every loopback spelling is honoured (a hole here is the #2744 preview
+    # landing on the auth origin instead of the dashboard).
+    assert rows[6]["base"] == "http://localhost:8790/team", rows[6]
+    assert rows[7]["base"] == "http://[::1]:8790/team", rows[7]
+    assert rows[8]["base"] == "https://localhost:8790/team", rows[8]
     # Hostile bases must fall back to THIS document's origin — the value is what
     # every later navigation sink reads. `blob:` is the case an "opaque origin"
     # rule alone misses: it carries the INNER url's origin.

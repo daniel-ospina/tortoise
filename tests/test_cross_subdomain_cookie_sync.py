@@ -293,12 +293,18 @@ def test_adapters_share_host_conditional_attribute_logic() -> None:
     """
     helpers = ("isLocal", "isPremiselabsHost", "domainAttr", "secureAttr")
     copies = [("shared", _read(SHARED)), ("dash", _read(DASHBOARD)), ("oauth", _read(OAUTH))]
-    # NON-VACUITY SELF-GUARD (cycle-6 review): the extraction and the normalizer
-    # are the test's own machinery, and nothing here asserts either works —
-    # stubbing `_extract_helper` to `return ""` or `_normalize_helper` to a
-    # constant left all 14 tests green, so every drift could pass unnoticed.
+    # NON-VACUITY SELF-GUARD (cycle-6 review; tightened in cycle 7): the
+    # extraction and the normalizer are the test's own machinery, and nothing here
+    # asserted either works — stubbing `_extract_helper` to `return ""` left all 14
+    # tests green, and a stub returning a NON-EMPTY constant still did, because the
+    # loop compares each copy against the first. So also assert the extractor
+    # TRACKS the requested name: two different helpers must extract differently.
     probe = _extract_helper(copies[0][1], "domainAttr")
     assert probe.strip(), "_extract_helper returned nothing — this test would be vacuous"
+    assert _extract_helper(copies[0][1], "domainAttr") != _extract_helper(copies[0][1], "secureAttr"), (
+        "_extract_helper ignores the requested name — the parity loop would compare "
+        "the same string to itself and could never see drift"
+    )
     assert _normalize_helper(probe) != _normalize_helper(probe.replace("Domain", "Nope")), (
         "_normalize_helper does not distinguish semantic drift — this test would be vacuous"
     )
@@ -680,17 +686,49 @@ def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
     # presence checks above pass on a REORDERED template, which is the drift
     # named here (a reader parsing `Name=Value; Domain=…; Path=…` breaks on a
     # different order even when every attribute is present).
+    # SCOPED TO THE `document.cookie` STATEMENTS (cycle-7 review): matching the
+    # whole file also picked up `domainAttr`'s own `'; Domain='`, and then an
+    # unrelated `; Foo=1` in a COMMENT shifted the slice and false-red the guard.
+    def _cookie_templates(text: str) -> list[str]:
+        """The `document.cookie` statements, joined across their wrapped lines."""
+        out: list[str] = []
+        lines = text.splitlines()
+        for n, line in enumerate(lines):
+            if "document.cookie =" in line:
+                # join the wrapped statement up to its terminating `;` (statements
+                # span 2-3 lines in these files)
+                parts: list[str] = []
+                for nxt in lines[n : n + 5]:
+                    parts.append(nxt)
+                    if nxt.rstrip().endswith(";"):
+                        break
+                out.append(" ".join(parts))
+        return out
+
     attr_pat = re.compile(r";\s*([A-Za-z-]+)=")
-    seq_shared = attr_pat.findall(shared)
-    seq_oauth = attr_pat.findall(oauth)
-    want_seq = ["Domain", "Path", "SameSite", "Expires", "Path", "SameSite", "Max-Age"]
-    assert seq_shared[:7] == want_seq, f"shared write/remove attribute order drifted: {seq_shared[:7]}"
-    assert seq_oauth == want_seq, f"oauth write/remove attribute order drifted: {seq_oauth}"
-    # The Path VALUE must still be the COOKIE_PATH CONSTANT on both sides: an
-    # inlined literal (`+ "; Path=/admin" +`) leaves the constant (and the
-    # presence check above) intact while writing a path no sibling reads.
-    assert "' + COOKIE_PATH" in shared, "shared must compose Path from COOKIE_PATH, not a literal"
-    assert '" + COOKIE_PATH' in oauth, "oauth must compose Path from COOKIE_PATH, not a literal"
+    tpl_shared = _cookie_templates(_strip_js_comments(shared))
+    tpl_oauth = _cookie_templates(_strip_js_comments(oauth))
+    assert tpl_shared and tpl_oauth, "no document.cookie templates found — this guard is vacuous"
+    for label, templates in (("shared", tpl_shared), ("oauth", tpl_oauth)):
+        for t in templates:
+            is_remove = "Max-Age=0" in t
+            want = ["Path", "SameSite", "Max-Age"] if is_remove else ["Path", "SameSite", "Expires"]
+            seq = attr_pat.findall(t)
+            assert seq == want, (
+                f"{label}: attribute order drifted in a {'remove' if is_remove else 'write'} "
+                f"template: {seq} != {want} — {t!r}"
+            )
+            # Domain is appended by the helper call, so its POSITION is asserted
+            # rather than its literal: it must come before the first `; Path=`.
+            assert t.index("domainAttr()") < t.index("; Path="), (
+                f"{label}: Domain must be appended before Path — {t!r}"
+            )
+            # Path must be composed from the CONSTANT in EVERY template, not an
+            # inlined literal in one of them (cycle-7 review).
+            assert "COOKIE_PATH" in t, (
+                f"{label}: Path must be composed from COOKIE_PATH, not an inlined "
+                f"literal — {t!r}"
+            )
 
 
 def test_shared_script_syntax() -> None:

@@ -17,14 +17,19 @@
     window.__DASHBOARD_BASE_URL = window.__DASHBOARD_BASE_URL || "https://app.premiselabs.co";
     // #1566/#2744: the DASHBOARD base. In production the dashboard and /auth are
     // the same origin; in the split-origin local preview the dashboard is a
-    // different loopback PORT. It is a trusted, page-controlled value — written
-    // by this page only, never read from the URL — but every consumer below
-    // still reduces it to an ALLOWED ORIGIN: this document's own origin, or a
-    // loopback one. Everything else falls back to this document's origin rather
-    // than becoming a navigation target — a protocol-relative host, a
-    // backslash/whitespace-obfuscated host, an absolute foreign host, and a
-    // `blob:`/`javascript:`/`data:` URL (whose origin is another host or the
-    // opaque string "null").
+    // different loopback PORT. It is a trusted, PAGE-CONTROLLED value — never
+    // read from the URL — but it is not set by this page alone: the `||` below
+    // exists because a local-preview e2e harness assigns it BEFORE this script
+    // runs (tests/e2e/test_session_login_flow.py, test_signup_form_safety_e2e.py,
+    // test_legal_pages.py). Every consumer below still reduces it to an ALLOWED
+    // ORIGIN: this document's own origin, or a loopback one. Everything else falls
+    // back to this document's origin rather than becoming a navigation target — a
+    // protocol-relative host, a backslash/whitespace-obfuscated host, an absolute
+    // foreign host, and an opaque-scheme URL (`blob:`/`filesystem:`/`javascript:`/
+    // `data:`). NOTE: an opaque scheme is not automatically foreign —
+    // `blob:https://app.premiselabs.co/x` carries THIS page's own origin, which is
+    // why the rule is `new URL(raw)` in ONE argument (absolute only, inner context
+    // ignored) rather than a base-relative parse.
     // Provenance, precisely: the ORIGIN is page-controlled. The VALUE is not —
     // the early block below appends the URL-derived, allowlist-checked `ret` to
     // it — which is exactly why every read goes through these two helpers.
@@ -65,9 +70,10 @@
        went to the app ROOT, so the blog admin console was unreachable by
        navigation — and the same was true of /team and /welcome?reset=… once
        those producers emitted a return-to the allowlist below would not accept.
-       Runs BEFORE the hard gate below (which uses __DASHBOARD_BASE_URL as its
-       destination), so overriding the base URL here covers every post-login path
-       at once.
+       Runs BEFORE the async session probe below (which navigates to
+       __DASHBOARD_BASE_URL + the return-to), so overriding the base URL here
+       covers every post-login path at once. NOTE: since #3501 there is no
+       synchronous hard gate in this page — the probe below replaced it.
        Allowlist-only: we never echo an arbitrary `next` — anything that is not a
        same-origin PATH on the list is ignored (open-redirect guard).
        The query is the ONLY carrier: oauthNextPath() hands the return-to to
