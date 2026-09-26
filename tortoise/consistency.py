@@ -211,6 +211,19 @@ _ONE_SIDED_REASONS: dict[str, str] = {
 # Statically excluded + separately handled.
 _NOT_COMPARED: frozenset[str] = frozenset(_EXCLUSION_REASONS)
 
+# #5256: `sourceVersionTransit` (the `extractedFrom` read-version carrier —
+# the EDGE scalar `sourceVersion` is the model; this node prop is the replay
+# transit) is deliberately NOT added to `_EXCLUSION_REASONS`. It is a declared
+# node property that the live writer resolves from the :Source and carries in
+# the Point's own journaled snapshot (`get_point` → the `PointAdded` payload),
+# and pass 2 re-stamps the SAME value from that snapshot. Both sides therefore
+# carry it and it MUST be compared; excluding it would be a blind spot. It is
+# symmetric-absent for an un-sourced Point or one whose Source has no recorded
+# hash; a one-sided presence is reported as a **divergence** (the mismatch
+# channel names it: `_uncarried` skips it because it IS `_POINT_HANDLED`, and it
+# is not in `_ONE_SIDED_REASONS`) — never silenced here. (`_upsert_point_edges`
+# never reads the Source, so the replay can only reproduce what the payload states.)
+
 # #548: operators store NO `content`/`pointKind` as node properties (the live
 # writer creates the node without them). The journal SEAM synthesizes both
 # (`sdk.py` — "Operators may not store 'content' as a node property (#548);

@@ -1317,6 +1317,25 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             "'outdated' is a server-managed lifecycle flag — use "
             "invalidate_point() or supersede_point() to terminalize a claim."
         )
+    # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it is
+    # read from the :Source node by `resolve_source_versions` on the LIVE path
+    # and carried in the Point's journaled snapshot), so a tenant must never be
+    # able to set it. Accepting it would let a caller forge provenance — claim
+    # a Point was read from a different version than the one recorded — and,
+    # because the value persists live while the replay re-derives it, it is
+    # also a live/replay parity break. Rejected on EVERY spelling
+    # (`sourceVersion`, `sourceVersions`, `sourceVersionTransit`): the plural
+    # spelling is the natural caller guess (mirrors `extractedFrom`'s own
+    # accepts-list/str shape) and must not slip through as an unknown prop.
+    _source_version_keys = [k for k in
+                            ("sourceVersion", "sourceVersions",
+                             "sourceVersionTransit")
+                            if k in props]
+    if _source_version_keys:
+        raise ValueError(
+            f"{_source_version_keys} are server-managed provenance fields and "
+            "cannot be set via props."
+        )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -3401,6 +3420,23 @@ class TortoiseSDK:
         # the pre-#2952 code applied props in a post-CREATE `SET n += $props`
         # (so props won), and `createdAt` is a normal caller prop — api.py,
         # ingest.py and the source-inheritance path all pass one.
+        #
+        # #5256: the extractedFrom read-version is resolved from the :Source
+        # HERE, on the LIVE path only, and carried in the CREATE map — i.e. in
+        # the Point's OWN journaled snapshot (`get_point` rides it into the
+        # PointAdded payload below). The replay must never re-read the Source:
+        # `_upsert_source`'s in-place contentHash bump is unjournalled (#5024),
+        # so a Source read at rebuild time may hold a NEWER hash than the one
+        # this Point was actually read from. A Source that does not exist yet
+        # (or has an empty hash) contributes nothing — honest-absent, and the
+        # stub `_link_source` mints below has no hash either way.
+        _source_versions: dict[str, str] = {}
+        _source_version_sv = None
+        if props.get("extractedFrom"):
+            from .projection.edges import _source_version_transit, resolve_source_versions
+            _source_versions = resolve_source_versions(
+                proj.g, props["extractedFrom"])
+            _source_version_sv = _source_version_transit(_source_versions)
         _create_map: dict[str, str] = {
             "id": "$id", "content": "$c", "pointKind": "$k",
             "is_operator": "false", "status": "$st",
@@ -3409,6 +3445,9 @@ class TortoiseSDK:
         if not _born_terminal:
             _create_map["ep_dirty"] = "true"
             _create_map["ep_dirty_at"] = "$_epv"
+        if _source_version_sv is not None:
+            _create_map["sourceVersionTransit"] = "$sv"
+            _create_params["sv"] = _source_version_sv
         if _create_baseline is not None:
             _create_params.update(_baseline_create_params(_create_baseline))
             _create_map.update(_baseline_create_fields())
@@ -3489,7 +3528,8 @@ class TortoiseSDK:
             self._sync_tags(proj, pid, tags)
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
-            proj._link_source(pid, props["extractedFrom"])
+            proj._link_source(pid, props["extractedFrom"],
+                              source_versions=_source_versions)
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
             # #2952: a born point carries no `inherited_at` stamp, so the
@@ -8032,6 +8072,23 @@ class TortoiseSDK:
                 "message": f"ingest: {section}[{index}] _server_id is "
                            f"server-managed and cannot be set on bundle items",
             })
+        # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it
+        # is read from the :Source by `resolve_source_versions` and carried in
+        # the Point's journaled snapshot). NOTE, unlike `_server_id` above: these
+        # keys are NOT declared parameters of `create_point`, so they would land
+        # in `**props` where `_sanitize_props` DOES reject them — the sanitizer is
+        # the backstop, not the gap. This shape-time check is what makes the
+        # refusal a Phase-1 abort (zero mutation, evaluated before any write)
+        # rather than a mid-write one, and it covers EVERY section, including the
+        # ones that never reach `_sanitize_props` at all. Rejected on every
+        # spelling.
+        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+            if _svk in item:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: {section}[{index}] {_svk} is "
+                               f"server-managed and cannot be set on bundle items",
+                })
         if section == "points":
             # kind is OPTIONAL (CYCLE-25: kind-absent defaults to
             # 'statement'); content is required.
@@ -20767,6 +20824,20 @@ class TortoiseSDK:
                     f"{_k!r} is a server-managed field and cannot be set via "
                     f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
+                )
+        # #5256: the `extractedFrom` read-version anchor and its node carrier
+        # are server-derived. `create_source` is the one writer that BYPASSES
+        # `_sanitize_props` (`_create_entity(..., _skip_sanitize=True)`), so it
+        # needs this reject itself — otherwise a caller-supplied `sourceVersion`
+        # would persist on the Source node (unjournalled-value mismatch: the
+        # value means nothing there, but it is a forged-looking provenance
+        # field the tenant never owned). Same key family as the Point reject.
+        for _svk in ("sourceVersion", "sourceVersions",
+                     "sourceVersionTransit"):
+            if _svk in props:
+                raise ValueError(
+                    f"{_svk!r} is a server-managed provenance field and cannot "
+                    f"be set via props."
                 )
         ev = {
             "url": url,

@@ -259,6 +259,89 @@ _DERIVATION_ANCHOR_SET = _anchor_on_create("s.contentHash")
 _BACKFILL_ANCHOR_SET = _anchor_on_create("e.file_hash")
 
 
+def resolve_source_versions(g, source_ref) -> dict[str, str]:
+    """LIVE-only: map each source ref to its :Source's non-blank ``contentHash``.
+
+    #5256 — the create-path ``extractedFrom`` read-version anchor. This is the
+    ONLY place a version is read from a Source; it runs on the LIVE write path
+    and its result is carried in the Point's own journaled snapshot, so the
+    REPLAY never re-reads the Source. That distinction is load-bearing:
+    ``_upsert_source``'s in-place ``contentHash`` bump is unjournalled (#5024),
+    so a Source read at replay time can have advanced since the Point was read —
+    a FALSE current.
+
+    Keys are the **raw ``extractedFrom`` ref** — the journal-stable spelling —
+    NOT ``resolve_source_key(g, ref)``'s live-time resolution. ``_link_source``
+    at replay looks the raw ref up directly, and a value keyed by a
+    *resolution* is unstable: the Source node's stored ``url`` can differ
+    between live and replay (an unjournaled stub minted by an earlier Point is
+    absent when pass-1 builds the Source, so the same ref resolves to a
+    different key), and the lookup then misses and leaves the edge bare with no
+    error. The raw ref is the one spelling both lanes share — it is the Point's
+    own payload key. ``resolve_source_key`` is still called for every ref, but
+    ONLY to FIND the Source node whose ``contentHash`` to read; it is never
+    this dict's key. Empty / missing / ``''`` / blank
+    hashes are OMITTED: ``''`` compares equal to a Source's ``''`` and reads as
+    a false CURRENT, so absent is the honest value (ONTOLOGY §4.6). The same
+    rule is applied on the replay side by ``_valid_transit_pairs`` — this
+    function must agree with it or a blank hash is live-only (a live≠replay
+    divergence).
+
+    ``source_ref`` is normalized exactly as ``_link_source`` does — a bare
+    ``str`` is ONE ref, never iterated character-wise.
+
+    Side effect: ``resolve_source_key``'s idempotent adopt-on-touch (it stamps
+    ``canonicalUrl``/``urlAliases`` on an EXISTING pre-canonical node) — the
+    same side effect ``_link_source``/``_mint_source_stub`` already has. It
+    never mints a Source.
+    """
+    refs = [source_ref] if isinstance(source_ref, str) else list(source_ref)
+    out: dict[str, str] = {}
+    for ref in refs:
+        if not ref:
+            continue
+        key = resolve_source_key(g, ref)
+        rows = g.query(
+            "MATCH (s:Source {url:$url}) RETURN s.contentHash",
+            params={"url": key}).result_set
+        if not rows:
+            continue
+        h = rows[0][0]
+        # #5256: blank is ABSENT, exactly as the replay-side
+        # `_valid_transit_pairs` treats it. A truthiness test would admit a
+        # whitespace-only `contentHash` ("   " is truthy): the LIVE writers
+        # would then stamp `r.sourceVersion="   "` (`_anchor_on_create` only
+        # nulls `''`) and carry `[['url','   ']]` on the node, while the
+        # REPLAY predicate drops the pair — a live≠replay divergence reachable
+        # from `create_source(url, kind, contentHash="   ")`.
+        if isinstance(h, str) and h.strip():
+            # Keyed by the RAW ref, not `key`: see the docstring — the
+            # resolution is a live-time fact, the raw ref is journal-stable.
+            out[ref] = h
+    return out
+
+
+def _source_version_transit(versions: dict[str, str] | None):
+    """The Point-node transit for the ``extractedFrom`` read version (#5256).
+
+    A list of ``[raw_ref, contentHash]`` pairs, keyed by the Point's own
+    ``extractedFrom`` spelling (journal-stable — see ``resolve_source_versions``)
+    — the EDGE carries the
+    per-link scalar ``r.sourceVersion``; this list is the prop-as-transit that
+    puts the value into the Point's own journaled snapshot (``get_point`` →
+    ``ev["point"]``) so pass-2 can re-stamp the edge without reading the
+    Source. Nested arrays of scalars are persistable (#2894), so this is a
+    legal node property.
+
+    Returns ``None`` when there is nothing to record, so the key is OMITTED
+    entirely — never ``[]`` and never ``''``: an absent anchor must be ABSENT,
+    not an empty value the replay/gate would compare as present.
+    """
+    if not versions:
+        return None
+    return [[ref, h] for ref, h in versions.items()]
+
+
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
 
@@ -454,7 +537,7 @@ class _EdgeHandlers:
                     created = True
         return created
 
-    def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point") -> None:
+    def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:
         """Link entity → Source via extractedFrom edge (Ontology v3.3).
 
         Creates stub Source if missing, keyed on url. ``source_kind`` defaults
@@ -478,20 +561,52 @@ class _EdgeHandlers:
         flag-less Source would otherwise keep matching the one-time backfill
         (issue #1486). Non-session Sources (documents, connectors) are
         untouched.
+
+        ``source_versions`` (#5256) maps a source ref — keyed by the Point's
+        own RAW ``extractedFrom`` spelling, the journal-stable key — to the
+        ``contentHash`` the Point was read from. It is **handed** to this writer
+        by the caller — the LIVE create path resolves it from the Source; the
+        REPLAY passes the value from the Point's own journaled snapshot
+        (``sourceVersionTransit``, whose pairs are raw-ref keyed by the same
+        contract). This method therefore NEVER
+        reads ``s.contentHash`` itself: pass-2 resurrection calls the same
+        writer, and the Source's hash may have advanced since live time
+        (``_upsert_source``'s in-place bump is unjournalled, #5024), so reading
+        it here would record a FALSE current. Absent / empty ⇒ no property at
+        all (``ON CREATE SET r.sourceVersion = NULL`` is a no-op), never ``''``.
         """
         refs = [source_ref] if isinstance(source_ref, str) else list(source_ref)
-        for ref in refs:
-            if not ref:
+        versions = source_versions or {}
+        for raw_ref in refs:
+            if not raw_ref:
                 continue
             # #2489: Source stub creation routed through the SHARED resolver helper
             # (_mint_source_stub — mirror query text, incl. the session: is_episodic
             # clause) so live wiring and rebuild replay mint byte-identical stubs
             # (one create path).
-            ref = _mint_source_stub(self.g, ref, source_kind)
+            ref = _mint_source_stub(self.g, raw_ref, source_kind)
+            # The carrier is keyed by the RAW ref (the Point's journal-stable
+            # `extractedFrom` spelling), so the raw lookup is the one that must
+            # hit on BOTH lanes; the resolved-key lookup covers a caller that
+            # keyed by `_mint_source_stub`'s return instead. (`ref` is that
+            # return, and it is NOT stable across a rebuild — see
+            # `resolve_source_versions`; a URL variant resolves to the node's
+            # stored url, which can differ between live and replay.) `$v` is
+            # ALWAYS bound so the bare callers
+            # (create_document, the ingest connection leg, direct test calls)
+            # never miss a parameter.
+            v = versions.get(ref)
+            if v is None:
+                v = versions.get(raw_ref)
+            # #5199's shared guard: `ON CREATE` only, and `''`/NULL ⇒ NULL. A
+            # re-link must not ADVANCE a recorded version, and the empty string
+            # is never written (it compares equal to a Source's `''` — a false
+            # current).
             self.g.query(
                 f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
-                "MERGE (n)-[:extractedFrom]->(s)",
-                params={"pid": point_id, "url": ref},
+                "MERGE (n)-[r:extractedFrom]->(s) "
+                + _anchor_on_create("$v"),
+                params={"pid": point_id, "url": ref, "v": v},
             )
 
     def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:

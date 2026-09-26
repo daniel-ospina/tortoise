@@ -324,6 +324,93 @@ def _warned_set(handler) -> set:
     return warned
 
 
+def _valid_transit_pairs(value):
+    """#5256: the ONE shape check for the `extractedFrom` read-version carrier.
+
+    Returns the value when it is a non-empty list/tuple of 2-element
+    ``[str, str]`` pairs whose members are BOTH non-empty/non-blank, else
+    ``None``. BOTH the node-prop clause (`_upsert_point_props`) and the edge
+    fold (`_upsert_point_edges`) call THIS through the shared
+    `_point_source_transit` selector (which adds the own-ref gate/filter) — an
+    all-or-nothing predicate shared by both writers.
+
+    Why one predicate and all-or-nothing: the two writers must agree on a
+    corrupt payload. With a partial filter on the edge side, a
+    partially-malformed carrier (``[[DOC,'h9'], {"bad":1}]``) stamped
+    ``r.sourceVersion`` from the one valid pair while the node clause wrote NO
+    carrier — an edge anchor with no gate-compared record, the exact opposite
+    of "a corrupt journal contributes no anchor". A body value that is a dict
+    (or a list containing one) is also what would make Falkor raise mid-replay.
+
+    Why the non-empty member rule: an empty (or blank) hash is an ABSENT read
+    version, and ``resolve_source_versions`` now omits both (``h.strip()``),
+    while ``_anchor_on_create`` nulls ``''`` on the edge — so a blank member is
+    never a legitimate value. Enforcing it here keeps the two writers in
+    lockstep even on a hand-written or foreign journal line: without the rule,
+    ``[[DOC, '']]`` left the node carrier claiming a per-link pair for DOC
+    while the authoritative edge carried NULL (and a blank ``'   '`` stamped
+    garbage on the edge, since the CASE only matches ``''``) — a gate-invisible
+    disagreement between the two writers, re-derived from the same journal line
+    so `check_consistency` saw no divergence. (Note: the LIVE writers write the
+    carrier straight from ``_source_version_transit`` and do NOT run this
+    predicate; the agreement is a property of both sides applying the SAME
+    absent rule, which is why ``resolve_source_versions`` must strip-test too.)
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    for pair in value:
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and isinstance(pair[0], str) and pair[0].strip()
+                and isinstance(pair[1], str) and pair[1].strip()):
+            return None
+    return value
+
+
+def _point_source_refs(extracted_from) -> list:
+    """The Point's OWN ``extractedFrom`` refs, normalized exactly as
+    ``_link_source`` fans them out: a bare ``str`` is ONE ref (never iterated
+    character-wise), any other value is a sequence, and falsy members are
+    skipped. ``[]`` when the Point has no ``extractedFrom`` at all."""
+    if not extracted_from:
+        return []
+    refs = ([extracted_from] if isinstance(extracted_from, str)
+            else list(extracted_from))
+    return [r for r in refs if r]
+
+
+def _point_source_transit(p: dict):
+    """#5256: the carrier to WRITE for a journal payload — the shape-validated
+    ``sourceVersionTransit`` pairs, gated on the Point OWNING an
+    ``extractedFrom`` and filtered to that Point's own raw refs.
+
+    ``None`` when there is nothing to record. The gate matters because the
+    carrier is a transit for an edge that will be written: without it a
+    hand-written/foreign journal line plants a stray carrier with no
+    ``extractedFrom`` edge at all. (Before this gate the stray made the node equal
+    its own journal payload, so the #5011 gate stayed GREEN and the corruption was
+    invisible; after it the graph is unfaithful to that line and the gate REPORTS
+    the divergence — a deliberate behaviour change, pinned by
+    ``test_carrier_without_an_extractedfrom_is_not_written``.) The filter matters
+    because the pairs are keyed by the RAW ref (see ``resolve_source_versions``),
+    so a pair whose key is not one of the Point's own refs is not one the edge
+    fold can consume — writing it would record an anchor for an edge this Point
+    never has. BOTH writers (``_upsert_point_props`` and ``_upsert_point_edges``)
+    use THIS selector, so the two writers always select the same pair SET. (That
+    is a claim about the SET, not about per-pair VALUES: a foreign/hand-written
+    carrier may list two raw refs that resolve to ONE Source node with different
+    hashes, and the edge fold stamps the resolved-first value while the node keeps
+    both pairs.)
+    """
+    pairs = _valid_transit_pairs(p.get("sourceVersionTransit"))
+    if pairs is None:
+        return None
+    refs = _point_source_refs(p.get("extractedFrom"))
+    if not refs:
+        return None
+    kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]
+    return kept or None
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -467,6 +554,21 @@ class _EntityHandlers:
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
         "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # #5256: a DECLARED node property (own conditional clause below), the
+        # extractedFrom READ-VERSION transit. It rides on the NODE because
+        # `extractedFrom` is a replay-derived projection (the `#4042` recreate
+        # wipe clears only node props, and pass 2 boots edges from scratch) —
+        # the edge is authoritative, but the value must survive in the Point's
+        # own journaled snapshot for pass 2 to re-stamp it without reading the
+        # Source (whose in-place contentHash bump is unjournalled, #5024).
+        # Handled because its own clause owns it — the open-set passthrough
+        # must not also write it.
+        # DELIBERATELY NAMED `sourceVersionTransit`, not `sourceVersion`: the
+        # latter is the EDGE scalar (ONTOLOGY §4.6). A Point read returns this
+        # list-of-pairs carrier, so reusing the canonical name would hand a
+        # consumer a value of a different TYPE than §4.6 documents. The name
+        # states the role: the edge is the model, this is the replay carrier.
+        "sourceVersionTransit",
         # #2958 review: written by its own explicit clause in
         # `_upsert_point_props` (`SET n.provenanceSource=$sid`), gated on
         # provenance.source_id — the open passthrough must not supply it when
@@ -771,6 +873,35 @@ class _EntityHandlers:
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
             "now": _now_iso(),
         }
+        # #5256: the extractedFrom read-version transit. Written ONLY when the
+        # Point OWNS an `extractedFrom` AND the payload carries a well-formed
+        # non-empty list of [raw_ref, contentHash] pairs whose two members are
+        # non-blank strings, kept to that Point's own refs — the SAME shape
+        # check + own-ref filter (the SHARED `_point_source_transit` selector)
+        # `_upsert_point_edges` uses.
+        # An un-sourced Point, or one whose Source has no recorded hash, carries
+        # NO property (never '' and never []: honest-absent, because '' compares
+        # equal to a Source's '' and reads as a false CURRENT). A payload that
+        # carries a shape-valid carrier but NO `extractedFrom` ALSO carries
+        # nothing: the carrier is a transit for an edge, and without the edge it
+        # is a stray record (the node would otherwise equal its own journal
+        # payload and `check_consistency` would stay green). `coalesce` is
+        # deliberately NOT used: the value is a recorded FACT of the reading,
+        # not a derived value to preserve across re-emits.
+        # The shape guard is the SHARED `_valid_transit_pairs` predicate (via
+        # `_point_source_transit`), the same one the edge fold uses — so a
+        # corrupt/foreign journal line
+        # contributes NO anchor on EITHER writer rather than one of them. This
+        # clause is the only writer of a value that came off a journal line, and
+        # a malformed one (a dict/set/bytes, or a list containing one) would
+        # otherwise reach `SET n.sourceVersionTransit=$sv` and raise a Falkor
+        # ResponseError — which, mid-`rebuild_all`, leaves the graph WIPED. A
+        # corrupt/foreign journal must contribute NO anchor, not abort the
+        # recovery path.
+        _sv_transit = _point_source_transit(p)
+        if _sv_transit is not None:
+            set_clauses.append("n.sourceVersionTransit=$sv")
+            params["sv"] = _sv_transit
         # A10 operator-scoped replay extension (cycle-22/23): the OperatorAdded
         # point snapshot carries `direction` (stored ALWAYS) + `label` (stored
         # when truthy) on the node — the fixed SET list above drops them,
@@ -914,9 +1045,28 @@ class _EntityHandlers:
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
         # out to N edges (ontology §3.3 amended to many→many).
+        # #5256: the read-version anchor travels in the SAME payload as the
+        # ref, on the node's own `sourceVersionTransit` carrier list. We hand it
+        # to the writer as a {raw_ref: hash} map (the journal-stable key — see
+        # `resolve_source_versions`) — this fold NEVER reads
+        # `s.contentHash` (the Source may have advanced since live time). A
+        # malformed/falsy payload contributes NO anchor rather than crashing
+        # `dict(...)` or stamping a non-str value.
         source_ref = p.get("extractedFrom")
         if source_ref:
-            self._link_source(p["id"], source_ref)
+            # The SHARED `_point_source_transit` selector: the all-or-nothing
+            # `_valid_transit_pairs` shape check — a non-empty list of
+            # 2-element `[str, str]` pairs whose members are BOTH non-blank —
+            # PLUS the Point's own-ref filter, so a
+            # partially-malformed carrier cannot stamp an edge while the node
+            # clause writes no record, and a pair for a source this Point does
+            # not reference is dropped by BOTH writers alike.
+            _svlist = _point_source_transit(p)
+            source_versions = (
+                {pair[0]: pair[1] for pair in _svlist}
+                if _svlist is not None else None)
+            self._link_source(p["id"], source_ref,
+                              source_versions=source_versions)
         # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
         # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
         # member of the deferred generic direct-edge replay (#1048: caller-

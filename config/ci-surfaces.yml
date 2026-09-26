@@ -625,6 +625,19 @@ surfaces:
   # select the `core` surface, so the guard for the anchor runs with the code it
   # guards. Hermetic (embedded DB per test, no URI).
   - test_source_version_references_5199.py
+  # #5256 (extracted from #5038): the `extractedFrom` READ-VERSION anchor —
+  # `sourceVersion` on the Point's provenance edge, carried in the node's own
+  # journaled snapshot. Registered under `core` because every changed source
+  # file selects it (`tortoise/projection/edges.py` → `sdk`+`CORE_ALSO`,
+  # `entities.py`/`consistency.py` → `core`, `api.py` → `api`+`core`;
+  # `sdk.py`, `projection/__init__.py` and `mcp_server.py` are SHARED_MODULEs
+  # and already force the full matrix), so no `ep` entry is needed — the anchor
+  # path contains no `ep`-pattern file. Lane: DOCKER (the #1647 default) — a
+  # URI-less run FAILS at the session fixture unless `TORTOISE_TEST_CARVE_OUT=1`,
+  # and this file is deliberately NOT carve_out-registered (it is not
+  # embedded-only). Under a URI lane the #1647 test-mode redirect sends it to
+  # the docker server as a per-path derived graph.
+  - test_source_version_extractedfrom_5038.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -2523,6 +2536,7 @@ durations:
   test_product_rerank.py: 0.2
   test_projection_maxmemory_message.py: 0.1
   test_provenance_extractedfrom_3263.py: 2.6
+  test_source_version_extractedfrom_5038.py: 38.5  # #5256: 33 tests; docker lane (#1647 default) — not carve_out-registered; locally measured
   test_rebuild_turn_points_3947.py: 4.4
   test_journal_embedding_5004.py: 24.0  # #5004: 32 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
