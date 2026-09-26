@@ -2588,9 +2588,20 @@ def _install_capture_seam(args, install_capture) -> int:
     """
     from pathlib import Path as _P
 
+    # The resolved home travels explicitly so `install_capture` can record the
+    # module dir the hook was installed FROM (#4314) — an installed hook lives
+    # at `~/.<harness>/hooks/…`, not in a checkout, and cannot derive it.  An
+    # unresolvable `~` must not turn a working project-scoped install into a
+    # refusal (the HOME-scoped harnesses resolve `$HOME` themselves and report
+    # their own refusal), so `None` is passed and only the record is skipped.
+    try:
+        home: _P | None = _P.home()
+    except (RuntimeError, OSError):
+        home = None
     result = install_capture(
         args.harness,
         root=_P(getattr(args, "dir", ".")),
+        home=home,
         dry_run=getattr(args, "dry_run", False),
     )
     if not result.ok:

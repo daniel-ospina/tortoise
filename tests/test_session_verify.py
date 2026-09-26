@@ -865,15 +865,19 @@ def test_guard_oserror_after_spawn_is_not_reported_as_never_launched(
 
 def test_guard_capture_refused_reds_captured(hosted, setup):
     """Mutation: the API refuses the capture POST (HTTP 500) — the seam fires
-    but the receipt never advances and no session exists, so ``captured`` and
-    ``memory`` FAIL."""
+    and returns rc=0, but the receipt never advances and no session exists, so
+    ``captured`` and ``memory`` FAIL and ``installed`` is **INERT**, never
+    PROVEN: rc=0 is what an inert seam returns too (#4314).
+
+    The guard this pins: `installed` keyed on the command's return code alone
+    re-labels an inert seam PROVEN — exactly the false-PROVEN this test REDs."""
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
     graph.fail_post = True
     report = _verify(hosted, home, "claude", root)
     assert report["exit_code"] == EXIT_BROKEN
-    assert report["links"]["installed"]["status"] == "PROVEN"
+    assert report["links"]["installed"]["status"] == "INERT"
     assert report["links"]["captured"]["status"] == "FAIL"
     assert report["links"]["memory"]["status"] == "FAIL"
 
@@ -907,6 +911,48 @@ def test_guard_receipt_not_advanced_reds_captured(hosted, setup):
     assert report["exit_code"] == EXIT_BROKEN, report
     assert report["links"]["captured"]["status"] == "FAIL"
     assert "did not advance" in report["links"]["captured"]["detail"]
+
+
+def test_guard_inert_when_the_hook_fires_but_the_receipt_does_not_advance(
+        hosted, setup):
+    """The live failure shape (#4314): the seam is present, registered,
+    executable and FIRES (rc=0), and the probe session even exists — but the
+    hook was INERT and captured nothing, so the receipt never advanced.
+
+    ``installed`` must be **INERT**, not PROVEN: ``rc=0`` is exactly what the
+    hook returns when it declines to capture, which is why the instrument could
+    not RED on an inert seam.  When the hook left its local capture-error
+    breadcrumb, its ``detail`` is surfaced so the operator sees WHY it was
+    inert rather than only THAT it was.
+
+    Mutations that RED: key ``installed`` on the fired command's exit code (the
+    pre-fix code) — the INERT assertion REDs.  Drop the breadcrumb from the
+    detail — the breadcrumb assertion REDs.  Drop ``STATUS_INERT`` from
+    ``_exit_code`` — the exit-code assertion REDs."""
+    from tortoise.__main__ import _capture_error_file
+
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.no_receipt = True
+    # The hook's own breadcrumb, at the writer's exact path (`sessions import`
+    # and the installed hooks use the same convention).
+    breadcrumb = _capture_error_file("claude")
+    breadcrumb.parent.mkdir(parents=True, exist_ok=True)
+    breadcrumb.write_text(json.dumps({
+        "harness": "claude",
+        "detail": "the hook could not resolve a tortoise entry (test)",
+        "recorded_at": "2026-09-20T00:00:00Z",
+    }), encoding="utf-8")
+    try:
+        report = _verify(hosted, home, "claude", root)
+    finally:
+        breadcrumb.unlink()
+    assert report["links"]["installed"]["status"] == "INERT", report["links"]
+    assert report["exit_code"] == EXIT_BROKEN, report
+    assert "could not resolve a tortoise entry (test)" in \
+        report["links"]["installed"]["detail"], report["links"]["installed"]
+    assert report["links"]["captured"]["status"] == "FAIL"
 
 
 def test_guard_missing_source_node_reds_memory(hosted, setup):

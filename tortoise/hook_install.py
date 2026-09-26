@@ -145,6 +145,46 @@ def _atomic_write_text(dst: Path, text: str) -> None:
         raise
 
 
+#: The install-time record of the module directory a harness hook was installed
+#: FROM — one line, the path that CONTAINS ``tortoise/``.  A SIDECAR rather than
+#: anything in the hook bytes: the ``tortoise-hook-version`` copy/upgrade
+#: contract keys on the shipped bytes, so baking a machine-specific path into
+#: them would make every install look modified.  The installed hook reads it at
+#: fire time (see ``tortoise/codex-hooks/session-end.sh`` and
+#: ``tortoise/cursor-hooks/session-end.sh``), because the hook does NOT live
+#: inside a checkout — the installer places it at ``~/.<harness>/hooks/…``,
+#: where ``dirname(BASH_SOURCE)/../..`` is ``$HOME``, not a repo (#4314).
+HOOK_SRC_DIR_SIDECAR = ".tortoise/hook-src-dir"
+
+
+def module_dir() -> Path:
+    """The directory that CONTAINS the ``tortoise`` package.
+
+    Derived from this file's own location (``<module>/tortoise/
+    hook_install.py``), so it is the checkout a source install runs from and
+    the site-packages root of a wheel install — either way, something an
+    installed hook can put on ``sys.path``.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def record_hook_src_dir(home: str | os.PathLike[str]) -> None:
+    """Record where this package's module dir is, for the installed hooks.
+
+    Writes :data:`HOOK_SRC_DIR_SIDECAR` under ``home`` atomically and
+    idempotently.  BEST-EFFORT: a hook that cannot be recorded must never
+    fail an install (the install itself is the user's request; this file is
+    an aid to the hook that the install just wrote), so any ``OSError`` is
+    swallowed rather than turned into a refusal.
+    """
+    dst = Path(home).expanduser() / HOOK_SRC_DIR_SIDECAR
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(dst, str(module_dir()) + "\n")
+    except OSError:
+        pass
+
+
 def _looks_like_our_script(path: Path) -> bool:
     """Heuristic ownership sniff for the *doctor* install signal.
 

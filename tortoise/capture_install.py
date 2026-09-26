@@ -1077,16 +1077,16 @@ def install_capture(
             f"no capture seam for harness {harness!r} (known: {known})"))
     if harness == "claude":
         try:
-            return _install_claude(Path(root), dry_run=dry_run)
+            result = _install_claude(Path(root), dry_run=dry_run)
         except MemoryError:
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
-    if harness in ("codex", "cursor"):
+    elif harness in ("codex", "cursor"):
         # HOME-scoped harnesses share ONE installer; the layout supplies every
         # harness-specific fact (#3818, #3819).
         try:
-            return _install_home_scoped(
+            result = _install_home_scoped(
                 harness,
                 Path(home) if home is not None else Path.home(),
                 dry_run=dry_run)
@@ -1094,13 +1094,28 @@ def install_capture(
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
-    try:
-        return _install_pi(Path(home) if home is not None else Path.home(),
-                           dry_run=dry_run)
-    except MemoryError:
-        raise  # resource exhaustion is not a refusal; the handler allocates
-    except Exception as e:
-        return _install_failed(harness, e)
+    else:
+        try:
+            result = _install_pi(
+                Path(home) if home is not None else Path.home(),
+                dry_run=dry_run)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            return _install_failed(harness, e)
+
+    # ── record the module dir for the hooks this install just wrote (#4314) ──
+    # The installed hook lives at `~/.<harness>/hooks/…`, NOT inside a
+    # checkout, so it cannot derive the module dir from its own location; this
+    # one-line sidecar is the install-time answer.  Recorded ONLY when the
+    # caller named a `home`: a library caller that did not must not have a
+    # machine-global file written under whatever ambient `$HOME` the process
+    # happens to carry (the CLI passes its resolved home explicitly —
+    # `tortoise/__main__._install_capture_seam`).  Best-effort and idempotent;
+    # a re-run repairs a missing record.
+    if result.ok and not dry_run and home is not None:
+        hook_install.record_hook_src_dir(Path(home))
+    return result
 
 
 __all__ = [

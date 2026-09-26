@@ -8,7 +8,11 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
 1. **installed** — the seam is present AND the harness's own registration
    loader resolves it, AND the installed artifact actually FIRES (the
    registered command is executed with the harness's documented event
-   payload);
+   payload) AND the fire produced an OBSERVABLE capture effect.  ``rc=0``
+   alone is deliberately NOT proof: it is exactly what an INERT seam
+   (present, registered, firing, and capturing nothing) returns, so a fire
+   with no downstream effect reports ``INERT`` — a distinct verdict — never
+   ``PROVEN`` (#4314);
 2. **captured** — a ``session_capture_receipt_<harness>`` advanced and the
    session is retrievable by id with the expected turns;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
@@ -51,6 +55,15 @@ faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
 TypeScript extension the Pi process loads in-process — neither can be fired by
 this command, so their links report ``UNVERIFIABLE-IN-CI`` with the reason.  A
 link is only ever ``PROVEN`` when the path actually ran.
+
+A FIRE IS NOT A CAPTURE.  The shipped hooks are fail-open and return ``rc=0``
+whether they captured a session or declined to, so the ``installed`` link keys
+on the seam's DOWNSTREAM EFFECT (the per-harness receipt advanced), not on the
+return code: a hook that is present, registered, executable, fires and does
+nothing reports ``INERT`` (#4314).  When the local capture-failure breadcrumb
+(``tortoise/__main__._capture_error_file``, written by ``sessions import`` and
+by a hook that cannot resolve its entry) exists, its ``detail`` is surfaced in
+the report so the operator sees WHY.
 """
 from __future__ import annotations
 
@@ -78,6 +91,7 @@ __all__ = [
     "EXIT_UNVERIFIABLE",
     "HARNESSES",
     "STATUS_FAIL",
+    "STATUS_INERT",
     "STATUS_PROVEN",
     "STATUS_UNVERIFIABLE",
     "render_report",
@@ -93,6 +107,12 @@ HARNESSES: tuple[str, ...] = tuple(capture_install.CAPTURE_SEAM)
 STATUS_PROVEN = "PROVEN"
 STATUS_FAIL = "FAIL"
 STATUS_UNVERIFIABLE = "UNVERIFIABLE-IN-CI"
+#: Present, registered, executable, and FIRED — and the fire produced no
+#: downstream effect (the capture receipt did not advance).  This is the
+#: failure mode the original three-way vocabulary could not express, which is
+#: why an inert hook earned ``PROVEN`` on its own ``rc=0`` (#4314).  It is a
+#: FAILURE verdict: it takes the same exit path as ``STATUS_FAIL``.
+STATUS_INERT = "INERT"
 
 #: Exit codes.  0 = every link PROVEN; 1 = a link is BROKEN (the install is
 #: wrong, or the capture/memory leg failed); 2 = nothing is provably broken,
@@ -562,6 +582,59 @@ def _session_detail(api_url: str, api_key: str, session_id: str,
         raise
 
 
+# ── the local capture-failure breadcrumb ──────────────────────────────────
+
+
+def _capture_error_file(harness: str) -> Path:
+    """The local capture-failure breadcrumb for ``harness``.
+
+    DELEGATES to ``tortoise.__main__._capture_error_file`` — the ONE
+    definition the WRITER side uses (``tortoise sessions import`` on a failed
+    capture, and an installed hook that cannot resolve its entry, the shell
+    hooks).  A reader that re-derived the path could silently disagree with
+    the writer and report an inert seam with no reason for it (#4314).
+    """
+    from tortoise.__main__ import _capture_error_file as main_capture_error_file
+    return main_capture_error_file(harness)
+
+
+def _capture_error_detail(harness: str) -> str | None:
+    """The ``detail`` of the local breadcrumb, or ``None`` when absent.
+
+    The breadcrumb is how an inert seam says WHY locally (the server's
+    ``session_capture_last_error_{harness}`` is never reached by a failure
+    that happens before the POST).  Surfacing it here is the difference
+    between reporting "the seam did nothing" and reporting what went wrong.
+    """
+    path = _capture_error_file(harness)
+    if not path.is_file():
+        return None
+    try:
+        body = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"{path} exists but could not be read (a capture failure was recorded)"
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail:
+        return detail
+    return f"{path} exists (a capture failure was recorded)"
+
+
+def _inert_detail(fired: FireResult, harness: str, why: str) -> str:
+    """Why the fired seam is INERT — never merely that it ran.
+
+    ``rc=0`` is what the shipped hooks return whether or not they captured
+    (fail-open by contract), so the detail must name the missing DOWNSTREAM
+    effect and, when one exists, the local breadcrumb that says why.
+    """
+    detail = (f"present, registered, and fired ({fired.detail}), but INERT: "
+              f"{why} — rc=0 is what the hook returns whether or not it "
+              "captures")
+    breadcrumb = _capture_error_detail(harness)
+    if breadcrumb:
+        detail += f"; the local capture-error breadcrumb says: {breadcrumb}"
+    return detail
+
+
 # ── the chain ─────────────────────────────────────────────────────────────
 
 
@@ -693,9 +766,17 @@ def verify_session_capture(harness: str,
                 STATUS_FAIL,
                 "not reachable — the capture was not observed on this run")
             return report
+        # ── link 1 (final): installed is PROVEN only on a DOWNSTREAM EFFECT.
+        # A successful return is set provisionally INERT and upgraded below
+        # only when the seam's capture effect is actually observed.  `rc=0` is
+        # exactly what an INERT hook returns (the shipped hooks are fail-open
+        # by contract), so keying `installed` on it let a present, registered,
+        # executing, capturing-nothing seam earn the BEST verdict — the false
+        # PROVEN #4314 exists to remove.
         report["links"]["installed"] = _link(
-            STATUS_PROVEN,
-            f"present, registered, and fired: {fired.detail}")
+            STATUS_INERT,
+            _inert_detail(fired, harness,
+                          "the capture effect has not been observed"))
 
         # ── link 2: captured ─────────────────────────────────────────────
         deadline = time.monotonic() + max(1.0, timeout)
@@ -711,6 +792,23 @@ def verify_session_capture(harness: str,
         except _ApiError:
             receipt_after = None
 
+        # The receipt is the harness's own capture-effect signal — the one
+        # observable that is causally DOWNSTREAM of the seam, unlike the
+        # command's return code.
+        receipt_ok = (receipt_after is not None
+                      and receipt_after != receipt_before)
+        if receipt_ok:
+            report["links"]["installed"] = _link(
+                STATUS_PROVEN,
+                "present, registered, and fired, and the fired seam's effect "
+                f"was observed ({capture_receipt_key(harness)} advanced): "
+                f"{fired.detail}")
+        else:
+            report["links"]["installed"] = _link(
+                STATUS_INERT,
+                _inert_detail(fired, harness,
+                              "the capture receipt did not advance"))
+
         expected_turns = len(_PROBE_TURNS)
         if detail is None:
             report["links"]["captured"] = _link(
@@ -721,8 +819,6 @@ def verify_session_capture(harness: str,
         else:
             turn_points = detail.get("turn_points") or []
             turn_count_ok = len(turn_points) == expected_turns
-            receipt_ok = (receipt_after is not None
-                          and receipt_after != receipt_before)
             if not receipt_ok:
                 report["links"]["captured"] = _link(
                     STATUS_FAIL,
@@ -893,7 +989,9 @@ def _local_import_receipt(probe_id: str) -> Path | None:
 
 def _exit_code(report: dict[str, Any]) -> int:
     statuses = [link["status"] for link in report["links"].values()]
-    if STATUS_FAIL in statuses:
+    # INERT is a FAILURE verdict, not a softer FAIL: the seam ran and produced
+    # nothing, so it takes the same exit path (#4314).
+    if STATUS_FAIL in statuses or STATUS_INERT in statuses:
         return EXIT_BROKEN
     # A leaked write is a BROKEN link, not an unverifiable one: exit 2 means
     # "nothing provably broken", and a failed DELETE proves the opposite.  A
@@ -920,6 +1018,7 @@ def render_report(report: dict[str, Any]) -> str:
     icons = {
         STATUS_PROVEN: "✅",
         STATUS_FAIL: "❌",
+        STATUS_INERT: "❌",
         STATUS_UNVERIFIABLE: "⚠️ ",
     }
     for link in ("installed", "captured", "memory"):

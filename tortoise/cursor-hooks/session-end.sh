@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 1
+# tortoise-hook-version: 2
 # Tortoise session capture for Cursor — sessionEnd hook (#3819).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
 # for this hook (see tortoise/hook_install.py): column-0, one per file, bumped
-# on ANY behavioural edit. #3819 is the first generation for the Cursor seam.
+# on ANY behavioural edit. #3819 is the first generation for the Cursor seam;
+# #4314 is the second — the entry resolution no longer trusts a candidate that
+# is not a checkout, consults the installer's `$HOME/.tortoise/hook-src-dir`
+# record, and writes a breadcrumb instead of exiting silently.
 #
 # Fires when a Cursor agent session ends. Cursor delivers the event as JSON on
 # stdin (verified against the installed bundle, Cursor 3.20.21:
@@ -159,17 +162,52 @@ for pattern in cands:
   [ -n "$TRANSCRIPT_PATH" ] || exit 0
   [ -f "$TRANSCRIPT_PATH" ] || exit 0
 
-  # ── Resolve the capture entry (PATH install → repo .venv → module) ─────
+  # ── Resolve the capture entry (PATH install → module venv → module) ─────
+  # The module dir is the root that CONTAINS `tortoise/`.  This hook does NOT
+  # live inside a checkout once installed — the installer places it at
+  # `~/.cursor/hooks/…`, where `dirname(BASH_SOURCE)/../..` is `$HOME`, not a
+  # checkout — so every candidate is accepted ONLY when it really contains
+  # `tortoise/`: the first such candidate wins, and a non-empty value that is
+  # not a checkout is SKIPPED, never trusted by position.  The installer
+  # records the module dir it installed FROM in `$HOME/.tortoise/hook-src-dir`
+  # (tortoise/hook_install.py), which is what makes an installed hook
+  # resolvable with no `tortoise` on PATH.
+  _tortoise_capture_error() {
+    # The SAME local breadcrumb `sessions import` writes for a failed capture
+    # (tortoise/__main__.py `_capture_error_file`: `$HOME/.tortoise/
+    # capture-errors/<harness>.json`), so a hook that cannot capture is
+    # OBSERVABLE instead of silent.  Best-effort only: a breadcrumb must never
+    # break the fail-open exit.
+    _T_DIR="$(dirname "${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-}/.tortoise/import-receipts}")/capture-errors"
+    mkdir -p "$_T_DIR" 2>/dev/null || return 0
+    _T_ESC="$(printf '%s' "$2" | tr '\n\r' '  ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' || true)"
+    printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s"\n}\n' \
+      "$1" "$_T_ESC" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$_T_DIR/$1.json" 2>/dev/null || true
+    return 0
+  }
+
   TORTOISE_BIN="$(command -v tortoise || true)"
   TORTOISE_MODULE=""
   if [ -z "$TORTOISE_BIN" ]; then
-    TORTOISE_MODULE="${TORTOISE_SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)}"
+    for _T_CAND in \
+      "${TORTOISE_SRC_DIR:-}" \
+      "$(head -n 1 "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
+      "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"
+    do
+      if [ -n "$_T_CAND" ] && [ -d "$_T_CAND/tortoise" ]; then
+        TORTOISE_MODULE="$_T_CAND"
+        break
+      fi
+    done
     if [ -n "$TORTOISE_MODULE" ] && [ -x "$TORTOISE_MODULE/.venv/bin/tortoise" ]; then
       TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
     elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/tortoise" ]; then
       TORTOISE_BIN="$VIRTUAL_ENV/bin/tortoise"
-    elif [ -z "$TORTOISE_MODULE" ] || [ ! -d "$TORTOISE_MODULE/tortoise" ]; then
-      exit 0  # no tortoise install or checkout — clean silence
+    elif [ -z "$TORTOISE_MODULE" ]; then
+      _tortoise_capture_error cursor \
+        "session capture skipped: the hook ($0) could not resolve a tortoise install or checkout — no 'tortoise' on PATH, no \$TORTOISE_SRC_DIR checkout, no \$HOME/.tortoise/hook-src-dir record, and no checkout above the hook's own directory"
+      exit 0  # recorded above, then fail-open: never a silent no-capture
     fi
   fi
 
@@ -183,7 +221,11 @@ for pattern in cands:
     else
       PYTHON_BIN="$(command -v python3 || true)"
     fi
-    [ -z "$PYTHON_BIN" ] && exit 0
+    if [ -z "$PYTHON_BIN" ]; then
+      _tortoise_capture_error cursor \
+        "session capture skipped: resolved the module dir $TORTOISE_MODULE but found no python interpreter to run it"
+      exit 0  # recorded above, then fail-open
+    fi
   fi
 
   # `sessions import --harness cursor` is the canonical Cursor capture step:

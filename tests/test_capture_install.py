@@ -2197,6 +2197,39 @@ def test_cli_install_codex_installs_capture_into_the_codex_home(tmp_path):
     assert "TRUST" in r.stdout, r.stdout
 
 
+def test_cli_install_codex_records_the_module_dir_for_the_installed_hook(
+        tmp_path):
+    """The CLI install must record the module dir the hook was installed FROM
+    in ``$HOME/.tortoise/hook-src-dir``: the installed hook lives at
+    ``$CODEX_HOME/hooks/`` — NOT inside a checkout — so that one-line record is
+    the only way it can resolve a capture entry on a box with no ``tortoise``
+    on PATH (#4314).
+
+    Mutation: drop ``home=`` from the ``install_capture`` call in
+    ``_install_capture_seam`` (or ``record_hook_src_dir`` from
+    ``install_capture``) — the sidecar is absent and this REDs."""
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex"
+    root.mkdir()
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+
+    r = _run(("install", "codex", "--dir", str(root)), env, root)
+
+    assert r.returncode == 0, r.stderr
+    record = home / ".tortoise" / "hook-src-dir"
+    assert record.is_file(), r.stdout + r.stderr
+    recorded = Path(record.read_text(encoding="utf-8").strip())
+    assert (recorded / "tortoise").is_dir(), recorded
+
+
 def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
         tmp_path):
     """`tortoise install cursor` installs the HOME-scoped capture seam and

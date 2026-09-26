@@ -17,17 +17,19 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import time
 from pathlib import Path
 
+from tortoise import hook_install
 from tortoise.capture_install import install_capture
 from tortoise.hook_install import count_canonical_markers, read_hook_version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "codex-hooks" / "session-end.sh"
-VERSION_MARKER = "# tortoise-hook-version: 1"
+VERSION_MARKER = "# tortoise-hook-version: 2"
 
 #: A VERBATIM copy of the live Codex rollout captured on 2026-09-18:
 #: ~/.codex/sessions/2026/09/18/
@@ -98,11 +100,11 @@ def _run_hook(stdin_json: str, *, home: Path, bindir: Path, timeout: float = 15)
 def test_hook_artifact_carries_the_version_marker():
     """The install contract is one marker, column-0, one per file.
 
-    Mutation: delete ``# tortoise-hook-version: 1`` from the shipped hook — the
+    Mutation: delete ``# tortoise-hook-version: 2`` from the shipped hook — the
     install then has no generation to compare and this REDs."""
     text = HOOK.read_text(encoding="utf-8")
     assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), text[:120]
-    assert read_hook_version(HOOK) == 1
+    assert read_hook_version(HOOK) == 2
     assert count_canonical_markers(HOOK) == 1, (
         "exactly one column-0 marker (an in-body mention is not a declaration)")
 
@@ -436,3 +438,174 @@ def test_reinstall_repairs_a_hook_that_lost_its_exec_bit(tmp_path):
     assert again.ok, again.error
     assert again.changed is True, again.actions
     assert installed.stat().st_mode & stat.S_IXUSR
+
+
+# ── #4314: resolving the module dir from an INSTALLED (checkout-less) hook ──
+
+
+def _installed_hook(home: Path) -> Path:
+    """The hook exactly where the installer puts it: ``~/.codex/hooks/``.
+
+    Running the REPO copy instead would hide the defect — its
+    ``dirname(BASH_SOURCE)/../..`` is a real checkout.
+    """
+    installed = home / ".codex" / "hooks" / "tortoise-session-end.sh"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HOOK, installed)
+    installed.chmod(0o755)
+    return installed
+
+
+def test_install_records_the_module_dir_the_hook_was_installed_from(tmp_path):
+    """``install_capture`` records the module dir at
+    ``$HOME/.tortoise/hook-src-dir`` — one line, idempotent, and NEVER written
+    by a dry run (#4314).  That record is what
+    ``test_installed_hook_resolves_the_module_dir_from_the_installer_record``
+    consumes.
+
+    Mutation: drop ``record_hook_src_dir`` from ``install_capture`` — the
+    record is absent and this REDs.  Mutation: write it on a dry run — the
+    dry-run assertion REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    record = home / ".tortoise" / "hook-src-dir"
+
+    dry = install_capture("codex", home=home, dry_run=True)
+    assert dry.ok, dry.error
+    assert not record.exists(), "a dry run must not write the record"
+
+    assert install_capture("codex", home=home).ok
+    assert record.is_file()
+    recorded = record.read_text(encoding="utf-8").strip()
+    assert recorded == str(hook_install.module_dir()), recorded
+    assert (Path(recorded) / "tortoise").is_dir(), recorded
+
+    # Idempotent: a re-run (the upgrade path) rewrites the same one line.
+    assert install_capture("codex", home=home).ok
+    assert record.read_text(encoding="utf-8").strip() == recorded
+
+
+def _run_installed_hook(installed: Path, stdin_json: str, *,
+                        home: Path, bindir: Path, timeout: float = 30):
+    """Same controlled env as ``_run_hook``, but executing ``installed``."""
+    _install_fake_nohup(bindir)
+    env = {
+        "HOME": str(home),
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        # A NON-checkout: the fix must SKIP it, never trust it by position.
+        "TORTOISE_SRC_DIR": str(home / "no-checkout"),
+        "TMPDIR": str(home / "tmp"),
+    }
+    (home / "tmp").mkdir(parents=True, exist_ok=True)
+    return subprocess.run(
+        ["/bin/bash", str(installed)],
+        input=stdin_json, text=True, capture_output=True, env=env,
+        timeout=timeout,
+    )
+
+
+def _wait_for_done(log: Path, timeout: float = 12) -> None:
+    """Wait for the DETACHED worker to finish appending (reading earlier would
+    race the two appends)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"the detached capture did not complete: {log}")
+
+
+def _module_dir_with_entry(tmp_path: Path, log: Path) -> Path:
+    """A fake module dir: ``<mod>/tortoise/`` plus a recording
+    ``<mod>/.venv/bin/tortoise`` — the entry a real checkout resolves to."""
+    mod = tmp_path / "mod"
+    (mod / "tortoise").mkdir(parents=True)
+    entry = mod / ".venv" / "bin" / "tortoise"
+    entry.parent.mkdir(parents=True)
+    entry.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$@" >> {log}\n'
+        f'echo DONE >> {log}\n',
+        encoding="utf-8")
+    entry.chmod(0o755)
+    return mod
+
+
+def _event(transcript: Path, session_id: str = "sid-4314") -> str:
+    return json.dumps({"session_id": session_id,
+                       "transcript_path": str(transcript),
+                       "cwd": "/tmp", "hook_event_name": "SessionEnd",
+                       "reason": "other"})
+
+def test_installed_hook_resolves_the_module_dir_from_the_installer_record(
+        tmp_path):
+    """The EXACT live failure (#4314): the hook is installed at
+    ``~/.codex/hooks/``, there is no ``tortoise`` on PATH, ``TORTOISE_SRC_DIR``
+    is not a checkout, and ``dirname(BASH_SOURCE)/../..`` is ``$HOME`` — not a
+    checkout.  The installer's ``$HOME/.tortoise/hook-src-dir`` record is what
+    makes the seam resolvable, and the capture must run from
+    ``<mod>/.venv/bin/tortoise``.
+
+    Mutations that RED: drop the sidecar candidate (nothing is captured);
+    accept a candidate merely for being non-empty (``TORTOISE_SRC_DIR`` and
+    ``$HOME`` are both non-empty and neither is a checkout)."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    installed = _installed_hook(home)
+    mod = _module_dir_with_entry(tmp_path, log)
+    sidecar = home / ".tortoise" / "hook-src-dir"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(str(mod) + "\n", encoding="utf-8")
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("{}\n", encoding="utf-8")
+
+    proc = _run_installed_hook(installed, _event(rollout), home=home,
+                               bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+    _wait_for_done(log)
+    argv = [t for t in log.read_text(encoding="utf-8").split()
+            if t != "DONE"]
+    assert argv == ["sessions", "import", "--file", str(rollout),
+                    "--harness", "codex", "--session-id", "sid-4314"], argv
+    assert not (home / ".tortoise" / "capture-errors" / "codex.json").exists(), (
+        "a resolvable seam must not leave a failure breadcrumb")
+
+
+def test_unresolvable_hook_records_a_breadcrumb_and_still_exits_zero(tmp_path):
+    """No candidate resolves ⇒ the failure is RECORDED, then the hook exits 0.
+
+    Capture must stay fail-open (a memory write never blocks a session), but
+    the previous bare ``exit 0`` made the inert seam unobservable — the local
+    breadcrumb is what ``tortoise session verify`` and an operator can read.
+
+    Mutations that RED: restore the silent ``exit 0`` branch (no breadcrumb);
+    drop the trailing ``exit 0`` (a fatal hook)."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    home.mkdir()
+    bindir.mkdir()
+    installed = _installed_hook(home)
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("{}\n", encoding="utf-8")
+
+    proc = _run_installed_hook(installed, _event(rollout), home=home,
+                               bindir=bindir)
+    assert proc.returncode == 0, (
+        f"capture must never fail a session (rc={proc.returncode})")
+
+    breadcrumb = home / ".tortoise" / "capture-errors" / "codex.json"
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline and not breadcrumb.is_file():
+        time.sleep(0.1)
+    assert breadcrumb.is_file(), (
+        "an unresolvable hook exited silently — the inert seam is "
+        "unobservable")
+    body = json.loads(breadcrumb.read_text(encoding="utf-8"))
+    assert body["harness"] == "codex", body
+    assert "could not resolve" in body["detail"], body
+    assert set(body) == {"harness", "detail", "recorded_at"}, (
+        "the breadcrumb must match tortoise/__main__._capture_error_file's "
+        "JSON shape so the existing readers keep working")
