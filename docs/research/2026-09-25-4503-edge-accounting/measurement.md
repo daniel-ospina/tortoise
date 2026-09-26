@@ -86,9 +86,15 @@ belief properties **on the relationship** (`r.msg_alpha`, `r.msg_beta`, `r.back_
 relationship **density** rather than node **volume** is uncapped, unmetered and unpriced — and,
 unlike the node-resident EP state that #2884 fixed, it is **never journaled** (#5380).
 
-**⇔ Two independent axes of divergence, not one.** #4333 measured the node axis (3.59× — the cap
-counts 24,978 of 89,701 resident nodes). This report measures the **relationship** axis, where the
-count is not wrong, it is **absent**.
+**⇔ Two independent axes of divergence, not one.** This lane read the node axis live on 2026-09-25 —
+the cap counted **24,978** of **89,701** nodes, **3.59×** — and the denominator there is *every* node
+(`MATCH (n)`), the same definition §3 uses below. #4333's own brief reads the same axis as
+**24,965** of the **51,012 _labelled_** nodes, **2.04 : 1**
+(`docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md:94-101`), because its
+"resident" is the labelled set rather than all nodes. Both readings are real and they are not in
+conflict — they count different sets — but the two figures must not be swapped for one another, and the
+24,978/89,701 pair is **this lane's** reading, not #4333's. This report measures the **relationship**
+axis, where the count is not wrong, it is **absent**.
 
 ---
 
@@ -239,8 +245,11 @@ exists to expose.
 ### 3.1 Gap: the live hosted graph is **not** re-measured here
 
 `fly ssh console -a tortoise-y4mjjq` timed out from this lane, so the live relationship denominator is
-a **dated reading** from `#4333` (§11.1 ≈27,310 edges; §11.3 14,567 `extractedFrom`; 4,748
-operator-joining), not a fresh one. The **per-element** figures above are unaffected (they are
+a **dated reading**, not a fresh one, and the three figures come from two different artifacts:
+`docs/architecture/STORAGE-ARCHITECTURE.md` §11.1 for ≈27,310 edges and its §11.3 for the 4,748
+operator-joining edges, and #4333's brief for the 14,567 `extractedFrom` edges
+(`docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md:115`). The **per-element**
+figures above are unaffected (they are
 isolated-container measurements), and `tools/edge_census.py census --uri <hosted uri>` makes the
 re-measurement one command for the lane that holds the credential. **Stated as a gap, not papered
 over.**
@@ -313,7 +322,9 @@ by shape (bare / attrs-only / EP-bearing) — a `relations` block beside its `by
   model is a **pricing-and-limits** question and the issue says so explicitly. Recorded as the owner
   question on #4503, protocol shape — **not** answered here.
 - **It does not re-open D11** (hosted FalkorDB) or O2 (no volume target), and it does not propose
-  shrinking the connection layer (`STORAGE-ARCHITECTURE.md` §11 `OVERRIDES:`).
+  shrinking the connection layer — the ruling itself is in `STORAGE-ARCHITECTURE.md` §11, and its
+  literal `OVERRIDES:` marker is recorded on #4333
+  (`docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md:54`).
 - **It does not fix the journaling gap.** That is #5380 — a separate, owner-visible change with its
   own parity contract (the #330 pure-fold/graph-fold parity; the #6761 batched-flush boundary). This
   lane measures it; it does not quietly patch `ep.py`.
