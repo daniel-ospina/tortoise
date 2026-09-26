@@ -32,7 +32,7 @@ from .idempotency import document_key
 from .log import EventLog
 from .models import OllamaModel, OpenAICompatModel
 from .projection import FalkorProjection, fold, split
-from .ids import ulid
+from .ids import content_hash, ulid
 from .render import render
 
 # OpenAI-compatible providers (Ollama is handled separately via its native API).
@@ -237,6 +237,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
             governing_agreement=fm.get("governedBy", fm.get("governingAgreement", "")),
             format=_infer_format(transcript),
             version=fm.get("version", ""),
+            content_hash=content_hash(text),
             createdAt=fm.get("created", None),
             updatedAt=fm.get("updated", None),
             topics=topics,
@@ -382,6 +383,7 @@ def _do_upgrade_all(proj, api, args):
                 governing_agreement=fm.get("governedBy", fm.get("governingAgreement", "")),
                 format=_infer_format(filepath),
                 version=fm.get("version", ""),
+                content_hash=content_hash(text),
                 createdAt=fm.get("created", None),
                 updatedAt=fm.get("updated", None),
                 topics=topics,
@@ -575,6 +577,13 @@ def main(argv=None):
                     governing_agreement=fm.get("governedBy", fm.get("governingAgreement", "")),
                     format=_infer_format(args.transcript),
                     version=fm.get("version", ""),
+                    # #5422: the version anchor is written on the path that
+                    # actually EXTRACTS. `--capture-metadata` deliberately
+                    # skips extraction (it emits no Points to anchor), so it
+                    # passes no hash and the fold's preserve gate leaves any
+                    # existing anchor exactly as it was.
+                    content_hash=(None if args.capture_metadata
+                                  else content_hash(text)),
                     createdAt=fm.get("created", None),
                     updatedAt=fm.get("updated", None),
                     topics=topics,
