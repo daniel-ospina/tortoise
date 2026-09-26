@@ -73,6 +73,7 @@ from tools.edge_census import (
     _org_capped_points,
     accounting_view,
     assert_subset_ratio_available,
+    derive_marginals,
     node_census,
     probe_marginals,
     relationship_census,
@@ -1172,3 +1173,199 @@ def test_main_maps_bad_target_input_to_exit_2(monkeypatch, capsys):
 
     assert rc == 2
     assert "unsupported URI scheme" in capsys.readouterr().err
+
+
+def test_embedded_ignores_a_uri_inherited_from_the_environment(monkeypatch):
+    """`--embedded` must win over an ambient `TORTOISE_DB_URI`. (P0)
+
+    The ambient variable was folded into `uri` even when `--embedded` named the
+    database, and the SDK open preferred `uri` — so `--embedded /tmp/local.db`
+    on a box with `TORTOISE_DB_URI` set opened the URI reader instead. Two
+    failures from that one root: `_ensure_indexes()` ran on a graph the user
+    never named (with no consent flag), and the census then reported THAT
+    graph's counts rather than the file's.
+
+    The load-bearing assertion is `uri is None`: the point is not merely that
+    the embedded path is taken, but that no URI reaches the opener at all.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@prod-host:6379/prod")
+    opened: list[Any] = []
+
+    def record(uri, graph, embedded):
+        opened.append((uri, embedded))
+        raise CensusError("stop here — the opener's arguments are the test")
+
+    monkeypatch.setattr(edge_census, "_open_sdk", record)
+
+    rc = edge_census.main(["census", "--embedded", "/tmp/local.db", "--json"])
+
+    assert rc == 2, "the stub raises CensusError, which main maps to exit 2"
+    assert opened == [(None, "/tmp/local.db")], (
+        "an ambient TORTOISE_DB_URI reached the SDK opener on the --embedded "
+        f"path: {opened} — that runs _ensure_indexes() on the ambient graph")
+
+
+def test_the_embedded_handle_wins_when_both_are_given(monkeypatch):
+    """`_open_sdk` itself must prefer the embedded path. (P0, second half)
+
+    The test above pins `main()`'s side — that no ambient URI is folded in.
+    This pins the OPENER's own precedence, so a future caller passing both
+    cannot silently get the URI reader. That reader is what ran
+    `_ensure_indexes()` on a graph the user never named, so either half lost
+    on its own should be visible rather than masked by the other.
+    """
+    import tortoise.sdk as sdk_mod
+
+    built: list[Any] = []
+
+    class _FakeSDK:
+        def __init__(self, *a, **k):
+            built.append({"args": a, "kwargs": k})
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@prod-host:6379/prod")
+
+    edge_census._open_sdk("docker://:pw@prod-host:6379/prod", None,
+                          "/tmp/local.db")
+
+    assert built and built[0]["args"] == ("/tmp/local.db",), (
+        f"the URI reader won over the named embedded database: {built} — that "
+        "is the handle that runs _ensure_indexes() on the ambient graph")
+
+
+def test_embedded_and_uri_together_are_refused(capsys):
+    """Two databases named at once is contradictory, not a precedence puzzle.
+
+    Silently resolving it in either direction is how the ambient-URI bug
+    above worked; naming both is refused outright.
+    """
+    rc = edge_census.main(["census", "--embedded", "/tmp/x.db",
+                           "--uri", "docker://:pw@h:6379/g", "--json"])
+
+    assert rc == 2
+    assert "exactly one" in capsys.readouterr().err
+
+
+def test_the_report_sanitises_graph_sourced_names(capsys):
+    """Pins the WIRING of `_printable`, not just the helper. (P2)
+
+    `test_printable_neutralises_a_terminal_control_sequence` exercises
+    `_printable` in isolation, so deleting its CALL from `_print_census` —
+    which ships the ANSI/OSC-52 sequence and the forged row straight into the
+    report a human reads — left the whole suite green.
+    """
+    evil = "IMPL\x1b]52;c;aGF4\x07\n  by slot  back_msg_alpha            -1"
+    view = {
+        "edges": {"total": 1, "by_type": {evil: 1},
+                  "by_slot": {s: 0 for s in EP_EDGE_SLOTS},
+                  "ep_bearing": 0, "all_four_slots": 0},
+        "nodes": {"resident": 1, "point_label": 1, "capped_points": None},
+        "ratios": {},
+    }
+
+    edge_census._print_census(view, as_json=False)
+    hostile = capsys.readouterr().out
+
+    view["edges"]["by_type"] = {"IMPL": 1}
+    edge_census._print_census(view, as_json=False)
+    benign = capsys.readouterr().out
+
+    assert "\x1b" not in hostile and "\x07" not in hostile, (
+        "an ESC/OSC sequence from the graph reached the report")
+    assert "\\x1b" in hostile, (
+        "the name was not sanitised at all — the helper is not wired in")
+    assert hostile.count("\n") == benign.count("\n"), (
+        "the embedded newline forged an extra report row: a stored name can "
+        "fabricate readings, which is worse than it looking ugly")
+
+
+def _stages(*, n: int, edges: int, baseline: int, node_delta: int,
+            kw_delta: int, bare_edge: int, attrs_delta: int, ep_delta: int):
+    """Six synthetic probe stages in the order `run_probe` produces them."""
+    m = baseline
+    out = [Stage("baseline (fresh instance)", m)]
+    m += node_delta
+    out.append(Stage("bare :Point node (label + id only)", m, n))
+    m += kw_delta
+    out.append(Stage("+ keyword-only Point props", m, n))
+    m += bare_edge
+    out.append(Stage("bare :IMPL edge (no properties)", m, edges))
+    m += attrs_delta
+    out.append(Stage("+ real IMPL attrs "
+                     "(direction,confidence,weight,label,batch_id)", m, edges))
+    m += ep_delta
+    out.append(Stage("+ the four EP message slots", m, edges))
+    return out
+
+
+def test_each_marginal_is_divided_by_its_own_element_count():
+    """The divisors are the artifact's whole claim to reproducibility. (P2)
+
+    The module says a per-element figure without its n is not reproducible —
+    but the arithmetic lived inside `run_probe`, which needs a container, so
+    swapping `/ edges` for `/ n` left every test green. n and edges are chosen
+    here so the two divisors are far apart and cannot be confused.
+    """
+    n, edges = 1000, 500
+    stages = _stages(n=n, edges=edges, baseline=1_000_000,
+                     node_delta=100_000, kw_delta=80_000, bare_edge=5_000,
+                     attrs_delta=50_000, ep_delta=100_000)
+
+    summary = derive_marginals(stages, n=n, edges=edges)["summary_bytes"]
+
+    # / n — the keyword-only stage holds n NODES.
+    assert summary["keyword_only_point_total"] == 180.0, (
+        "80,000 over 1,000 nodes is 80 on top of the node's own 100")
+    # / edges — the EP-slot figure is measured from the KEYWORD-ONLY stage to
+    # the fully dressed edge, so it spans the bare edge (5,000) + attrs
+    # (50,000) + slots (100,000) = 155,000 over 500 edges. Over 1,000 nodes the
+    # wrong divisor would give 155.0 — half the answer, and a plausible number.
+    assert summary["ep_bearing_edge_total"] == 310.0, (
+        "155,000 over 500 edges is 310; over 1,000 nodes it would be 155.0")
+    assert summary["bare_node"] == 100.0
+    assert summary["bare_edge"] == 10.0
+    assert summary["edge_attrs_delta"] == 100.0
+
+    ratios = derive_marginals(stages, n=n, edges=edges)["ratios"]
+    assert ratios["ep_bearing_edge_over_keyword_only_point"] == 1.722
+
+
+def test_a_zero_keyword_only_total_reports_no_ratio_rather_than_a_crash(monkeypatch):
+    """A denominator that cannot be divided must be omitted, not invented.
+
+    `assert_subset_ratio_available` and the report both treat `None` as
+    "undefined"; a ratio computed over a zero denominator would instead
+    present a fabricated relationship between two measured quantities.
+
+    `probe_marginals` REFUSES a stage whose reading did not move — a 0.0
+    marginal there would itself be a false measurement — so a zero
+    keyword-only total is unreachable through real readings. The derived list
+    is stubbed to exercise `derive_marginals`' OWN guard, which is the code
+    that must not divide here.
+    """
+    n, edges = 1000, 500
+    stages = _stages(n=n, edges=edges, baseline=1_000_000, node_delta=50_000,
+                     kw_delta=0, bare_edge=5_000, attrs_delta=50_000,
+                     ep_delta=100_000)
+
+    stubbed = [
+        {"label": "bare :Point node (label + id only)",
+         "used_memory": 1_050_000, "delta": 50_000, "marginal_bytes": 50.0},
+        {"label": "+ keyword-only Point props",
+         "used_memory": 1_000_000, "delta": 0, "marginal_bytes": 0.0},
+        {"label": "bare :IMPL edge (no properties)",
+         "used_memory": 1_005_000, "delta": 5_000, "marginal_bytes": 10.0},
+        {"label": "+ real IMPL attrs "
+                  "(direction,confidence,weight,label,batch_id)",
+         "used_memory": 1_055_000, "delta": 50_000, "marginal_bytes": 100.0},
+        {"label": "+ the four EP message slots",
+         "used_memory": 1_155_000, "delta": 100_000,
+         "marginal_bytes": 200.0},
+    ]
+    monkeypatch.setattr(edge_census, "probe_marginals", lambda _s: stubbed)
+
+    result = derive_marginals(stages, n=n, edges=edges)
+
+    assert result["summary_bytes"]["keyword_only_point_total"] == 0.0
+    assert result["ratios"]["ep_bearing_edge_over_keyword_only_point"] is None, (
+        "a ratio over a zero denominator is undefined, not a number")
