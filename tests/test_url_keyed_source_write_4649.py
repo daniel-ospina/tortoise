@@ -279,6 +279,48 @@ class TestDeletePreviewAgreesWithTheWriter:
             "the dispatcher and the leaf preview must agree on the blast radius")
         assert _graph_shape(sdk) == before, "a dry run must never write"
 
+    def test_preview_does_not_underreport_a_multilabel_source(self, env):
+        """The fall-through must be the WRITER's, not "did this key match
+        anything". `_delete_entity` breaks on the DETACH DELETE's count, so a
+        primary key whose only match was ALREADY removed by an earlier label
+        returns 0 and falls through to the secondary key. A preview that
+        breaks on a raw match stops one label early.
+
+        Graph: `(:Object:Source {id:X})` plus a DISTINCT `(:Source {url:X})`.
+        The writer deletes BOTH (Object/id takes the first, Source/id returns 0
+        because it is gone, Source/url takes the second).
+
+        (1) Failing value is `nodes_removed == 1` where the writer removes 2 —
+        an UNDER-report, the dangerous direction on an irreversible op;
+        (2) reachable: `:Object:Source` is a shape the codebase itself
+        constructs (`_preview_delete_entity`'s own comment,
+        `tests/test_hosted_backup.py`), and the url-only `:Source` is the
+        `extractedFrom` stub.
+        """
+        from tortoise.mcp_server import _preview_delete, _preview_delete_entity
+
+        sdk, _ = env
+        proj = sdk._get_proj()
+        addr = "https://example.com/multilabel"
+        sdk.create_point("statement", "the claim", extractedFrom=addr)
+        proj.g.query("CREATE (n:Object:Source {id:$v})", params={"v": addr})
+
+        nodes_before = _graph_shape(sdk)[0]
+        preview = _preview_delete(sdk, addr)
+
+        assert preview["nodes_removed"] == 2, (
+            "the dispatcher preview under-reported the blast radius: the "
+            "writer removes the multi-label node AND the url-only Source, the "
+            f"preview claimed {preview['nodes_removed']} (#4649)")
+        assert _preview_delete_entity(sdk, addr)["nodes_removed"] == 2, (
+            "the leaf preview stops one label early — its fall-through is "
+            "gated on a raw match, not on the key having CONTRIBUTED a node")
+
+        # Ground truth: the preview must equal the writer's own node delta.
+        assert sdk.delete(addr) is True
+        assert nodes_before - _graph_shape(sdk)[0] == preview["nodes_removed"], (
+            "the dry run and the write disagree on the blast radius")
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # The fold honours the same OR-set (replay parity)
@@ -355,6 +397,49 @@ class TestFoldHonoursTheOrSet:
         assert _fold_warnings(caplog) == [], _fold_warnings(caplog)
         assert not _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=url), (
             "the deleted url-keyed corpus Source resurrected on rebuild_all")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The journalled state is read in the SAME statement as the write
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestTheStateReadBackIsTheSameStatement:
+    """A url-keyed ``:Source`` is addressed BY ``url`` — and ``url`` is a
+    WRITABLE prop. The ``name`` branch of ``_update_entity`` wrote and then
+    read the journalled state back with a SEPARATE ``MATCH`` by the key that
+    matched; when the same call re-keys the node, that second query runs AFTER
+    the ``SET`` and misses, so the write lands and NO ``EntityMutated`` record
+    is emitted at all — ``rebuild_all`` then silently reverts the ``url``, and
+    there is no fold-miss warning because there is no record to miss. The
+    generic branch below it already applied and read in ONE statement.
+    """
+
+    def test_a_name_update_that_rekeys_a_url_source_still_journals(
+            self, env, tmp_path):
+        """(1) Failing values are `len(records) == 0` and the reverted `url`
+        after rebuild; (2) reachable via the JOURNALED corpus Source, so the
+        node exists at fold time and the missing record is the ONLY defect (a
+        pass-2-minted stub would confuse this with the #5048 residual).
+        """
+        sdk, events = env
+        proj = sdk._get_proj()
+        old = "https://corpus.example.com/rekey-before"
+        new = "https://corpus.example.com/rekey-after"
+        _corpus_source(sdk, tmp_path, old, "doc_rekey")
+        assert _stub(proj, old)[0] is None, "corpus Source must be url-only"
+
+        sdk.update_entity(old, name="Renamed", url=new)
+
+        recs = [r for r in _mutations(events) if r.get("label") == "Source"]
+        assert recs, (
+            "the `name` branch re-keyed the node (url is a writable prop on the "
+            "identity itself) and journalled NOTHING — a separate post-write "
+            "read-back by the old url cannot find the re-keyed node (#4649)")
+        assert recs[0]["state"] == {"url": new}, recs[0]
+
+        proj.rebuild_all(str(events))
+        assert _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=new), (
+            "rebuild_all reverted the re-key: the state write had no record")
 
 
 # ══════════════════════════════════════════════════════════════════════════
