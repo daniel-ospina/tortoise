@@ -341,7 +341,7 @@ class SupabaseAbuseStore:
             filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", EVENT_FLAG),
                      ("rule", "eq", rule)],
-            order="-created_at", limit=1,
+            order="created_at.desc", limit=1,
         )
         if not rows:
             return None
@@ -351,7 +351,7 @@ class SupabaseAbuseStore:
             filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", EVENT_FLAG_CLEAR),
                      ("rule", "eq", rule)],
-            order="-created_at", limit=1,
+            order="created_at.desc", limit=1,
         )
         if clears:
             newest_clear = _parse_ts(clears[0].get("created_at"))
@@ -442,7 +442,7 @@ class SupabaseAbuseStore:
             select=["event_type", "created_at", "country", "key_id",
                     "details"],
             filters=[("org_id", "eq", org_id)],
-            order="-created_at", limit=100,
+            order="created_at.desc", limit=100,
         )
         out = [_alert_dict(r) for r in rows
                if r.get("event_type") in ALERT_TYPES]
