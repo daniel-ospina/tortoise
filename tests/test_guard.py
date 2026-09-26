@@ -178,3 +178,65 @@ def test_memory_branch_forwards_original_args():
     from tortoise import FalkorDB
     db = FalkorDB(":memory:")
     db.close()
+
+
+def _run_in_subprocess(code: str) -> str:
+    """Run `code` in a fresh interpreter rooted at this checkout.
+
+    #5386: the assertions below are about what `import tortoise` pulls in, and
+    `sys.modules` is process-global — by the time this module's tests run, the
+    session has already imported redislite (and so has every other test file).
+    Only a fresh interpreter can answer the question.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ)
+    # The venv's editable install points at whatever worktree last ran
+    # `pip install -e .`; put THIS checkout first so the subprocess imports the
+    # code under test rather than that one.
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=repo_root, env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert proc.returncode == 0, f"subprocess failed:\n{proc.stderr}"
+    return proc.stdout.strip()
+
+
+def test_import_tortoise_does_not_import_redislite():
+    """#5386: `import tortoise` must not pay redislite's import cost.
+
+    `tortoise.FalkorDB` is built lazily on first access, and the embedded
+    lifecycle's redislite patches are triggered by redislite's OWN import — so
+    no part of `import tortoise` needs to import redislite.
+    """
+    assert _run_in_subprocess(
+        "import sys, tortoise; print('redislite' in sys.modules)") == "False"
+
+
+def test_lazy_falkordb_returns_the_same_guarded_subclass():
+    """#5386: deferral changes WHEN redislite loads, never WHICH class
+    `tortoise.FalkorDB` is — it is still the guarded subclass (not a
+    monkeypatch of redislite) and still rejects a relative path."""
+    import redislite.falkordb_client as rfc  # noqa: I001
+    from tortoise import FalkorDB
+    assert issubclass(FalkorDB, rfc.FalkorDB)
+    assert FalkorDB is not rfc.FalkorDB
+    with pytest.raises(RuntimeError):
+        FalkorDB("relative.db")
+
+
+def test_redislite_import_alone_installs_the_lifecycle_guards():
+    """#4487/#5386: the lifecycle patches must be installed by redislite's OWN
+    import — not by access to `tortoise.FalkorDB` — so a RAW redislite
+    construction that never reaches the guarded class is still instrumented."""
+    assert _run_in_subprocess(
+        "import tortoise, redislite.client as c;"
+        "print(getattr(c.RedisMixin, '_tortoise_owner_record_patch', False),"
+        " getattr(c.RedisMixin, '_tortoise_partial_init_guard', False),"
+        " getattr(c.RedisMixin, '_tortoise_dead_socket_guard', False))"
+    ) == "True True True"
