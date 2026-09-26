@@ -6725,8 +6725,9 @@ class FalkorProjection(
 
         The replay counterpart of the SDK's live ``_delete_entity`` (#3299).
         The id predicate is the identity as written (``id`` for
-        Point/Subject/Object/Document/Source, ``eventId`` for Event) — never
-        re-derived from a live node (the node is already gone). Returns the
+        Point/Subject/Object, ``id``|``url`` for Source — its OR-set, #4649 —
+        and ``eventId`` for Event) — never re-derived from a live node (the
+        node is already gone). Returns the
         node count deleted (0 = a fold-miss: the entity was already absent).
 
         #3860: identity is (kind, id). When ``label`` is one of the canonical

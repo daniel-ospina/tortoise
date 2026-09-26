@@ -4270,8 +4270,18 @@ def _preview_delete_entity(sdk, id: str) -> dict:
 
 def _preview_delete(sdk, id: str) -> dict:
     """Preview `tortoise_delete` — resolve the label first, exactly as
-    `TortoiseSDK.delete` does, then preview the branch it would take."""
-    resolved = sdk._get_proj()._resolve_entity(id, by_id=True, by_eventId=True)
+    `TortoiseSDK.delete` does, then preview the branch it would take.
+
+    #4649: the resolution is the SAME OR-set as the writer's — `by_url=True`
+    included. Without it a url-keyed `:Source` (no `id`, minted by
+    `_link_source`) previewed as `found=False, nodes_removed=0` while
+    `tortoise_delete(url)` DELETED the node and all its edges, so the
+    destructive tool's only blast-radius surface under-reported (the leaf
+    preview `_preview_delete_entity` was already OR-set-aware; this dispatcher
+    is what routes to it).
+    """
+    resolved = sdk._get_proj()._resolve_entity(
+        id, by_id=True, by_eventId=True, by_url=True)
     if not resolved:
         return _preview_result(
             "tortoise_delete", "delete",

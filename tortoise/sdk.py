@@ -18161,7 +18161,11 @@ class TortoiseSDK:
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
         # matched them via id/eventId but no caller relies on it.
-        # Per-label indexed writes (id OR eventId — original predicate; no url).
+        # Per-label indexed writes — the label's PRIMARY key (id | eventId)
+        # first, then its SECONDARY key on a miss (`Source` only, by `url`;
+        # #4649). The original #327 predicate was id OR eventId with no url;
+        # the read path always resolved a url-only `:Source`, so the write
+        # path must too or the write silently no-ops.
         # UNION cannot carry SET, so run each branch sequentially (#327).
         #
         # #3689 P1 (#4094): the generic Point branch applied caller props with
