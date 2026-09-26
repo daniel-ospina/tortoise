@@ -6853,10 +6853,8 @@ def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
 #: (the #1787 ``llm_error_census`` emission contract that also names it has no
 #: code presence — #5526) so a future add/rename is detectable; #4959 reroutes
 #: a 403 WITHIN this set rather than adding a 10th class. This is the
-#: CLASSIFIER's vocabulary only — the report, the integrity grader and the
-#: extraction-health gate ALSO branch on stage-producer census classes
-#: (``parse_error``, ``truncated``, ``truncated_parse_error``,
-#: ``partial_parse``, ``s1_chunk_summary``, ``empty_embed_list``).
+#: CLASSIFIER's vocabulary ONLY — the census also carries stage-producer
+#: classes outside this set, so never treat it as the census's full vocabulary.
 _LLM_ERROR_CENSUS_CLASSES = frozenset({
     "fatal_401_auth",
     "fatal_402_billing",
@@ -6935,9 +6933,11 @@ def _classify_error(e: BaseException) -> str:
 
     The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``.
 
-    KNOWN DIVERGENCES from P2's retry taxonomy (pre-existing, not introduced
-    here; tracked as #5525). The list is what is KNOWN — NOT an exhaustive
-    claim, because a claim of exhaustiveness is exactly what kept re-staling:
+    KNOWN DIVERGENCES from P2's retry taxonomy (both pre-existing, not
+    introduced here, and both tracked on #5525, whose root was restated to
+    cover the mapping as well as the status source). The list is what is
+    KNOWN — NOT an exhaustive claim, because a claim of exhaustiveness is
+    exactly what kept re-staling:
 
     * the status is read from ``e.response.status_code`` ONLY, so a
       ``urllib.error.HTTPError`` (status on ``.code``, no ``.response`` — the
