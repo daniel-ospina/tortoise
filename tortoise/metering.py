@@ -860,8 +860,10 @@ def get_ask_usage(org_id: str) -> dict:
 
 def record_capture_usage(org_id: str | None, *, calls: int = 1,
                          cost_usd: float = 0.0,
+                         tokens_in: int = 0, tokens_out: int = 0,
                          _selfhost_transport: bool = False) -> dict | None:
-    """Record the MEASURED cost of one capture extraction attempt.
+    """Record the MEASURED cost and TOKEN WORKLOAD of one capture extraction
+    attempt.
 
     Window resolution RAISES on an unresolvable anchor (#3825) rather than
     keying the row to a calendar month. That raise is a SIGNAL, not a refusal
@@ -875,6 +877,12 @@ def record_capture_usage(org_id: str | None, *, calls: int = 1,
     Records a row even when ``cost_usd == 0.0`` — ``capture_calls`` is the
     denominator that keeps a genuinely-free capture distinguishable from a
     capture whose cost was never measured (#3359's silent-zero lesson).
+
+    ``tokens_in``/``tokens_out`` are the extraction prompt/completion token
+    counts the caller ALREADY measured (``hosted_api._capture_cost_props``
+    reads them from ``meta["stats"]["llm"]``); they are carried verbatim onto
+    the same row, never re-derived from cost (#5045). They are WORKLOAD, never
+    price: nothing on the spend ceiling reads them.
 
     A NON-FINITE ``cost_usd`` is dropped to 0.0 (with a warning) before it can
     reach the ledger. This is the spend ceiling's own substrate: a ``nan`` on
@@ -895,12 +903,16 @@ def record_capture_usage(org_id: str | None, *, calls: int = 1,
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     with _ask_meter_lock(org_id):
         return _record_capture_usage_locked(org_id, period, now_iso,
-                                            calls=calls, cost_usd=cost_usd)
+                                            calls=calls, cost_usd=cost_usd,
+                                            tokens_in=tokens_in,
+                                            tokens_out=tokens_out)
 
 
 def _record_capture_usage_locked(org_id: str, period: MeteringPeriod,
                                  now_iso: str, *,
-                                 calls: int, cost_usd: float) -> dict | None:
+                                 calls: int, cost_usd: float,
+                                 tokens_in: int = 0,
+                                 tokens_out: int = 0) -> dict | None:
     """The serialized capture increment body."""
     try:
         if _supabase_mode():
@@ -910,11 +922,15 @@ def _record_capture_usage_locked(org_id: str, period: MeteringPeriod,
             metering_increment_capture_cost(get_control_plane(), org_id,
                                             period.start_iso, period.end_iso,
                                             calls=calls,
+                                            tokens_in=tokens_in,
+                                            tokens_out=tokens_out,
                                             cost_usd=cost_usd)
             return {"period": period.label,
                     "period_start": period.start_iso,
                     "period_end": period.end_iso,
                     "capture_calls": calls,
+                    "capture_tokens_in": tokens_in,
+                    "capture_tokens_out": tokens_out,
                     "capture_cost_usd": cost_usd}
         sdk = _reg_sdk()
         reg = sdk._get_registry()
@@ -922,16 +938,21 @@ def _record_capture_usage_locked(org_id: str, period: MeteringPeriod,
             "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
             "SET m.period = $label, m.period_end = $pend, "
             "    m.capture_calls = coalesce(m.capture_calls, 0) + $calls, "
+            "    m.capture_tokens_in = coalesce(m.capture_tokens_in, 0) + $tin, "
+            "    m.capture_tokens_out = coalesce(m.capture_tokens_out, 0) + $tout, "
             "    m.capture_cost_usd = coalesce(m.capture_cost_usd, 0) + $cost, "
             "    m.updated_at = $now",
             params={"tid": org_id, "pstart": period.start_iso,
                     "pend": period.end_iso, "label": period.label,
-                    "calls": calls, "cost": cost_usd, "now": now_iso},
+                    "calls": calls, "tin": tokens_in, "tout": tokens_out,
+                    "cost": cost_usd, "now": now_iso},
         )
         return {"period": period.label,
                 "period_start": period.start_iso,
                 "period_end": period.end_iso,
                 "capture_calls": calls,
+                "capture_tokens_in": tokens_in,
+                "capture_tokens_out": tokens_out,
                 "capture_cost_usd": cost_usd}
     except Exception as e:
         _logger.warning(

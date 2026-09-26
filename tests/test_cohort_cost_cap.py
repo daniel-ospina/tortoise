@@ -822,24 +822,92 @@ def test_supabase_cohort_reader_rejects_a_non_finite_aggregate():
 
 def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
     """The capture lane reaches the durable ledger through the ATOMIC RPC (not
-    a read-modify-write), carrying the measured charge.
+    a read-modify-write), carrying the measured charge AND (#5045) the
+    extraction token workload.
 
     REDs on: swapping the RPC for a plain table write (``plane.rpcs`` would be
-    empty) or dropping the charge from the body (``p_cost_usd`` → 0.0).
+    empty) or dropping any of ``p_cost_usd`` / ``p_tokens_in`` /
+    ``p_tokens_out`` from the body.
 
-    GREEN legitimate form: the measured charge, verbatim."""
+    GREEN legitimate form: the measured charge and tokens, verbatim."""
     from tortoise.supabase_control import metering_increment_capture_cost
 
     plane = _StubPlane()
     metering_increment_capture_cost(plane, "cohort-a", *WINDOW,
-                                    calls=1, cost_usd=0.004321)
+                                    calls=1, tokens_in=321, tokens_out=45,
+                                    cost_usd=0.004321)
 
     assert plane.rpcs == [("metering_increment_capture_cost", {
         "p_org_id": "cohort-a", "p_period_start": WINDOW[0],
         "p_period_end": WINDOW[1], "p_calls": 1,
+        "p_tokens_in": 321, "p_tokens_out": 45,
         "p_cost_usd": 0.004321})], plane.rpcs
     assert plane.queries == [], (
         "the ledger write must be the atomic RPC, never a read-modify-write")
+
+
+def test_spend_ceiling_is_blind_to_the_capture_token_columns():
+    """#5045 CONSTRAINT 1: the token counters are WORKLOAD, never price. The
+    spend ceiling must not be able to see them — BY CONSTRUCTION, not by
+    convention.
+
+    Enumerates EVERY definition of ``metering_cohort_spend`` in EVERY migration
+    file and asserts NONE reads a token column. This is deliberately not a
+    single-file read: the function is defined in 20260917000001 and
+    **DROPPED/replaced** by the LIVE body in 20260918000001, and a guard that
+    reads only the first file is blind to the deployed body — a trap already
+    sprung in this lane (an ``embed_*`` term added to the LIVE body once left
+    138 tests green). The ``len(defs) > 1`` assertion below is the guard
+    against this test silently narrowing to one file.
+
+    Also pins the EMBEDDED twin (``get_cohort_spend_usd``'s Cypher), so the
+    two substrates cannot drift apart on the ceiling.
+
+    REDs on: adding a token term to the LIVE body of ``metering_cohort_spend``
+    (or to any other definition), or to the embedded cohort Cypher.
+    """
+    from pathlib import Path
+
+    migdir = (Path(__file__).resolve().parent.parent / "supabase"
+              / "migrations")
+    files = sorted(migdir.glob("*.sql"))
+    defs: list[tuple[str, str]] = []
+    for f in files:
+        text = f.read_text()
+        for m in re.finditer(
+            r"CREATE (?:OR REPLACE )?FUNCTION public\.metering_cohort_spend"
+            r"\b.*?AS \$\$(.*?)\$\$;", text, re.S,
+        ):
+            defs.append((f.name, " ".join(m.group(1).split())))
+
+    # The ceiling's definition is re-issued at least once. If this ever fails,
+    # the enumeration narrowed and every assertion below became evidence about
+    # a file nobody deploys.
+    assert len(defs) > 1, (
+        f"metering_cohort_spend must be defined in MORE THAN ONE migration "
+        f"(the LIVE body replaces an earlier one); the guard enumerated "
+        f"{len(defs)} definition(s) across {len(files)} migration file(s)")
+    assert "20260918000001_metering_period_window.sql" in {n for n, _ in defs}, (
+        "the guard must enumerate the LIVE re-issue in 20260918000001 — the "
+        "one file a single-file read is blind to")
+
+    for name, body in defs:
+        assert "ask_cost_usd" in body and "capture_cost_usd" in body, (
+            f"metering_cohort_spend in {name} no longer sums the cost lanes: "
+            f"{body}")
+        assert "token" not in body.lower(), (
+            f"metering_cohort_spend in {name} reads a TOKEN column — the "
+            f"spend ceiling must never see extraction workload: {body}")
+
+    # The embedded twin. Read the LIVE Cypher between the reader's def and the
+    # next section banner, so this cannot pass on a comment elsewhere.
+    import tortoise.metering as _m
+    src = Path(_m.__file__).read_text()
+    embedded = src.split("def get_cohort_spend_usd")[1].split("# ── Usage query")[0]
+    assert "ask_cost_usd" in embedded and "capture_cost_usd" in embedded
+    assert "token" not in embedded.lower(), (
+        "get_cohort_spend_usd must not read a token column")
+
 
 
 def test_cohort_larger_than_the_priced_bound_fails_closed(monkeypatch):

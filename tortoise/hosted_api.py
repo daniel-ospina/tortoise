@@ -4843,9 +4843,14 @@ async def _emit_capture_ledger(org_id: str, session_id: str,
         if _cost_props is None:
             return
         from tortoise.metering import record_capture_usage
+        # #5045: the SAME measured token counts ride the ledger as the
+        # analytics row — carried from ``_cost_props``, never re-derived from
+        # cost. WORKLOAD only; the spend ceiling never reads them.
         await asyncio.to_thread(
             record_capture_usage, org_id,
-            cost_usd=float(_cost_props.get("cost_usd") or 0.0))
+            cost_usd=float(_cost_props.get("cost_usd") or 0.0),
+            tokens_in=int(_cost_props.get("prompt_tokens") or 0),
+            tokens_out=int(_cost_props.get("completion_tokens") or 0))
     except Exception as e:  # noqa: BLE001, RUF100 — never block a committed capture
         _alert_unmetered("capture_ledger", org_id, e)
         return

@@ -413,6 +413,37 @@ def test_capture_ledger_drop_is_signalled(caplog, monkeypatch):
         [rec.getMessage() for rec in caplog.records])
 
 
+def test_capture_ledger_carries_the_measured_tokens(monkeypatch):
+    """#5045: the capture ledger write carries the ALREADY-MEASURED extraction
+    token counts from ``_capture_cost_props`` (which reads them from
+    ``meta["stats"]["llm"]``) — they are never re-derived from cost, and the
+    ledger increment is the one write that can make an extraction allowance
+    drawable.
+
+    REDs on: ``_emit_capture_ledger`` reverting to passing only ``cost_usd``
+    (``tokens_in``/``tokens_out`` absent from the recorder call), or the
+    props-key mapping moving off ``prompt_tokens``/``completion_tokens``.
+    """
+    seen: dict = {}
+
+    def _spy(org_id, **kwargs):
+        seen["org_id"] = org_id
+        seen.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(ha, "_capture_cost_props",
+                        lambda *_a, **_k: {"cost_usd": 0.25,
+                                           "prompt_tokens": 640,
+                                           "completion_tokens": 64})
+    monkeypatch.setattr(metering, "record_capture_usage", _spy)
+    asyncio.run(ha._emit_capture_ledger("org-5045", "sess-5045", {}))
+
+    assert seen["org_id"] == "org-5045"
+    assert seen["cost_usd"] == 0.25
+    assert seen["tokens_in"] == 640, seen
+    assert seen["tokens_out"] == 64, seen
+
+
 # ── Sites 3 and 4: create_object / create_subject outer guards ─────────────
 
 

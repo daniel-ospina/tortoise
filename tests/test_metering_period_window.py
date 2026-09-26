@@ -1029,3 +1029,130 @@ def test_new_org_window_failure_still_applies_the_metadata_tier(
     row = fake.tables["organizations"][0]
     assert row.get("tier") == "pro", row
 
+
+
+# ── #5045 — the capture lane's EXTRACTION TOKEN workload ────────────────────
+#
+# The owner ruling (2026-09-26): extraction overage is sold in TOKENS. The ask
+# lane already records ``ask_tokens_in``/``ask_tokens_out``; the capture lane
+# recorded no token figure at all. ``_capture_cost_props`` already MEASURES
+# prompt/completion tokens — these tests pin that the ledger carries them, on
+# both substrates, and that no spend reader ever sees them.
+
+
+def test_capture_tokens_ride_the_embedded_ledger_and_summary(reg_org):
+    """Mutation: drop ``m.capture_tokens_in``/``_out`` from the embedded MERGE
+    (the counters never persist), or drop them from the returned summary (the
+    caller cannot see what it recorded).
+
+    RED: the row's counters stay 0/absent, and the summary's
+    ``capture_tokens_in`` key is missing.
+
+    GREEN legitimate form: two captures through the REAL writer; the counters
+    accumulate on the ONE shared window row while ``capture_calls`` and
+    ``capture_cost_usd`` keep their existing contract."""
+    from tortoise.metering import record_capture_usage
+
+    sdk, tid = reg_org
+    reg = sdk._get_registry()
+    _anchor(reg, tid, SUB_START, SUB_END)
+
+    first = record_capture_usage(tid, calls=2, cost_usd=1.5,
+                                 tokens_in=300, tokens_out=30)
+    assert first is not None
+    assert first["capture_tokens_in"] == 300, first
+    assert first["capture_tokens_out"] == 30, first
+    record_capture_usage(tid, calls=1, cost_usd=0.5,
+                         tokens_in=100, tokens_out=10)
+
+    rows = _rows(reg, tid, "capture_calls", "capture_tokens_in",
+                 "capture_tokens_out", "capture_cost_usd")
+    assert rows == [[3, 400, 40, 2.0]], rows
+
+
+def test_capture_tokens_are_never_read_by_the_cohort_spend_reader(reg_org):
+    """Mutation: fold ``capture_tokens_in``/``out`` into the embedded cohort
+    SUM (the ``embed_*`` trap: a token term added to a ceiling read).
+
+    RED: the ledger row above carries tokens but no cost, and the cohort read
+    returns the token total instead of 0.0.
+
+    GREEN legitimate form: a capture that recorded ONLY tokens (no cost) is
+    invisible to ``get_cohort_spend_usd`` — workload is not price."""
+    from tortoise.metering import get_cohort_spend_usd, record_capture_usage
+
+    sdk, tid = reg_org
+    reg = sdk._get_registry()
+    _anchor(reg, tid, SUB_START, SUB_END)
+
+    record_capture_usage(tid, calls=1, cost_usd=0.0,
+                         tokens_in=1_000_000, tokens_out=250_000)
+
+    assert get_cohort_spend_usd([tid], _period(SUB_START, SUB_END)) == 0.0
+
+
+def test_migration_adds_capture_token_columns_and_reissues_the_rpc(monkeypatch):
+    """The migration↔code contract for #5045: the columns are ``bigint NOT NULL
+    DEFAULT 0``; the RPC's argument list carries the token parameters; the OLD
+    signature is DROPPED (never left as a callable OVERLOAD); and the
+    supabase-mode record path sends the SAME ``p_*`` body keys.
+
+    RED: a column that is nullable (a NULL-coalescing counter that never
+    increments), a missing DROP, a missing token param, or a Python body key
+    that disagrees with the SQL signature.
+    """
+    import re as _re
+    from pathlib import Path
+
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import supabase_control as sc
+    from tortoise.metering import record_capture_usage
+
+    migdir = (Path(__file__).resolve().parent.parent / "supabase"
+              / "migrations")
+    mig = (migdir / "20260926000001_metering_capture_tokens.sql").read_text()
+
+    # (a) the additive columns, NOT NULL DEFAULT 0 (load-bearing, per comment)
+    assert ("ADD COLUMN IF NOT EXISTS capture_tokens_in  bigint NOT NULL "
+            "DEFAULT 0") in mig
+    assert ("ADD COLUMN IF NOT EXISTS capture_tokens_out bigint NOT NULL "
+            "DEFAULT 0") in mig
+
+    # (b) the effective RPC: DROP the old signature, then create with tokens
+    assert ("DROP FUNCTION IF EXISTS public.metering_increment_capture_cost"
+            "(text, timestamptz, timestamptz, integer, double precision)"
+            ) in " ".join(mig.split())
+    sig = _re.search(
+        r"CREATE FUNCTION public\.metering_increment_capture_cost\((.*?)\)"
+        r"\s*RETURNS",
+        mig, _re.S)
+    assert sig is not None, "the migration must recreate the capture RPC"
+    params = set(_re.findall(r"p_(\w+)\s+\w+", sig.group(1)))
+    # ``==``, never a subset: a subset stops catching a dropped counter.
+    assert params == {"org_id", "period_start", "period_end", "calls",
+                      "tokens_in", "tokens_out", "cost_usd"}
+    assert "p_tokens_in    bigint" in mig and "p_tokens_out   bigint" in mig
+
+    # (c) the supabase-mode writer calls the SAME RPC with the SAME keys
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+    fake = FakeControlPlane()
+    monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+    record_capture_usage("org-5045", calls=2, cost_usd=0.004,
+                         tokens_in=1234, tokens_out=56)
+    fn, body = fake.rpc_calls[-1]
+
+    assert fn == "metering_increment_capture_cost"
+    assert set(body) == {"p_org_id", "p_period_start", "p_period_end",
+                         "p_calls", "p_tokens_in", "p_tokens_out",
+                         "p_cost_usd"}
+    assert body["p_tokens_in"] == 1234 and body["p_tokens_out"] == 56
+    assert body["p_period_start"] and body["p_period_end"]
+
+    # (d) the shared Supabase FAKE must model the token columns too, or the
+    # hosted-lane tests would silently read a row the fake never stored them on
+    # (a fake that ignores an argument is how a plumbing break stays green).
+    stored = fake.tables["metering_records"][-1]
+    assert stored["capture_tokens_in"] == 1234, stored
+    assert stored["capture_tokens_out"] == 56, stored
