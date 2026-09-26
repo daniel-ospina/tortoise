@@ -909,6 +909,56 @@ def test_probe_detects_an_owed_search_keys_fixup(graph_factory):
             "the #5444 symptom")
 
 
+def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factory):
+    """#5312 review P1: the legacy branch's gate needs the SCHEMA half too.
+
+    That branch exists to drop→recreate ``Point(content)`` into
+    ``Point(content, search_keys)``. Gating it only on "an array is owed" meant
+    a legacy graph whose data is already FLAT never upgraded: the field stayed
+    missing, the probe stayed not-current, every construction re-ran the whole
+    sweep (#4465's churn, permanently) and ``search_keys`` was never indexed.
+
+    Mutation check (must stay true): dropping
+    ``or self._point_fts_search_keys_field_missing()`` from that gate leaves the
+    index single-field and fails the ``search_keys in fields`` assertion.
+    """
+    proj = graph_factory()
+    g = proj.g
+
+    dropped = False
+    for proc in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+        try:
+            g.query(f"CALL {proc}('Point')")
+            dropped = True
+            break
+        except Exception:
+            continue
+    if not dropped:
+        pytest.skip("engine has no Point fulltext drop procedure (#5440)")
+
+    g.query("MATCH (m:Meta) WHERE m.key='point_fts_v2' DELETE m")
+    g.query("MATCH (n:Point) DETACH DELETE n")
+    g.query(
+        "CREATE (n:Point {id:'legacy-flat', pointKind:'core:fact', "
+        "content:'legacy flat row', content_hash:'hlf', "
+        "search_keys:'fastest 5k'})")
+    g.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
+
+    assert proj._schema_is_current() is False, (
+        "a single-field Point FTS index is not the required schema")
+
+    proj._ensure_indexes()
+
+    fields = None
+    for row in g.query("CALL db.indexes()").result_set:
+        if row and row[0] == "Point":
+            fields = set((row[2] or {}).keys())
+    assert fields and "search_keys" in fields, (
+        "the legacy single-field index must be upgraded to carry search_keys "
+        f"even when no array is owed, got {fields} (#5312 review P1)")
+    assert proj._schema_is_current() is True
+
+
 def test_schema_probe_ignores_a_similarly_named_boolean_property(graph_factory):
     """`is_operator_flag` is NOT the forbidden `is_operator` index.
 

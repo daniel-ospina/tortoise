@@ -6162,6 +6162,27 @@ class FalkorProjection(
         "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1"
     )
 
+    def _point_fts_search_keys_field_missing(self) -> bool:
+        """Is the Point FULLTEXT index still the legacy single-field form?
+
+        The SCHEMA half of the legacy branch's precondition (#5312 review, P1).
+        That branch exists to drop→recreate ``Point(content)`` into
+        ``Point(content, search_keys)``, and gating it on the DATA precondition
+        alone meant a legacy graph whose data is already FLAT never upgraded:
+        the field stayed missing, the probe stayed not-current, and every
+        construction re-ran the whole sweep — #4465's churn, permanently, with
+        ``search_keys`` never indexed.
+
+        A probe that cannot run returns True (repair, never assume done).
+        """
+        try:
+            for row in self.g.query("CALL db.indexes()").result_set:
+                if row and row[0] == "Point":
+                    return "search_keys" not in (row[2] or {})
+            return True
+        except Exception:
+            return True
+
     def _array_valued_search_keys_exist(self) -> bool:
         """Does any Point still store ``search_keys`` as an ARRAY?
 
@@ -6562,15 +6583,17 @@ class FalkorProjection(
                             # flat space-joined string (the sdk write path
                             # already stores flat; this fixes existing nodes).
                             try:
-                                # Gate on the fixup's REAL precondition, not
-                                # the marker (#5312 review, P1). Gating on the
-                                # marker here left the same hole as the
-                                # fresh-create branch: a graph whose marker was
-                                # set over an owed fixup skipped it forever.
-                                # The array check is sound and, when nothing is
-                                # owed, costs one bounded read instead of the
-                                # drop→recreate churn this branch must avoid.
-                                if self._array_valued_search_keys_exist():
+                                # Gate on BOTH preconditions (#5312 review, P1).
+                                # The data half (an array still owed) is the
+                                # fixup's real precondition and replaces the
+                                # unsound marker check. The SCHEMA half is what
+                                # this branch exists for in the first place — a
+                                # legacy single-field index whose data is
+                                # already flat still needs the drop→recreate,
+                                # and without it the probe stays not-current and
+                                # every construction re-runs the full sweep.
+                                if (self._array_valued_search_keys_exist()
+                                        or self._point_fts_search_keys_field_missing()):
                                     self._fix_point_search_keys()
                             except Exception:
                                 pass
