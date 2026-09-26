@@ -43,7 +43,12 @@ from tortoise.commit_schema import (
     compile_vocab,
     validate_payload_dict,
 )
-from tortoise.extractor_v2 import build_master_list
+from tortoise.extractor_v2 import (
+    CORE_OBJECT_KEYS,
+    _build_master_from_brief,
+    build_master_list,
+    master_kind_forms,
+)
 from tortoise.pack_state import (
     _KIND_PROP_KEYS,
     graph_installed_namespaces,
@@ -80,6 +85,33 @@ ontology:
 """
 
 
+#: #5165: a SIXTH CATALOG pack whose namespace is deliberately OUTSIDE the
+#: legacy hardcoded starter tuple (``PACK_NS`` in the pre-fix engine). The
+#: catalog case is the one the tenant path could never reproduce: a catalog
+#: pack has no ``:PackManifest`` node, so it got no ``tenant_prefixes`` entry
+#: either — its kinds rode the gated brief and were dropped from the master.
+VENTURE_MANIFEST = """namespace: venture
+name: Venture
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds:
+  - tranche
+  pointKinds:
+  - thesis
+  kindDefs:
+    tranche:
+      description: A financing tranche in a round
+    thesis:
+      description: An investment thesis
+  memory_granularity: 'Durable: tranche terms.'
+"""
+
+VENTURE_TRANCHE = "venture:tranche"
+VENTURE_THESIS = "venture:thesis"
+
+
 def _brief_namespaces(brief: dict) -> set[str]:
     """The pack namespaces a compiled brief exposes (core excluded)."""
     return {k.split(":", 1)[0] for k in brief
@@ -104,6 +136,28 @@ def _dev_manifest_ontology() -> dict:
     data = yaml.safe_load(
         (Path(default_packs_dir()) / DEV / "manifest.yaml").read_text())
     return data["ontology"]
+
+
+@pytest.fixture
+def venture_catalog(tmp_path, monkeypatch):
+    """A hermetic default packs dir holding ONLY the venture pack (#5165).
+
+    The default-packs-dir resolution is monkeypatched at its ONE primitive
+    (``pack_registry.default_packs_dir`` — resolved by ``compile_value_brief``
+    at call time), so the catalog's namespace set is exactly ``{venture}``:
+    a namespace the pre-fix engine's hardcoded tuple does not contain. The
+    #1350 process-global master memo is reset for the test and restored by
+    monkeypatch.
+    """
+    from tortoise import extractor_v2
+
+    packs_dir = tmp_path / "packs"
+    (packs_dir / "venture").mkdir(parents=True)
+    (packs_dir / "venture" / "manifest.yaml").write_text(VENTURE_MANIFEST)
+    monkeypatch.setattr("tortoise.pack_registry.default_packs_dir",
+                        lambda *a, **k: packs_dir)
+    monkeypatch.setattr(extractor_v2, "_MASTER_LIST_CACHE", None)
+    return packs_dir
 
 
 def _seed_install(sdk, namespace: str, *, status: str = "active",
@@ -354,6 +408,141 @@ class TestLayer1WriteGate:
 # ══════════════════════════════════════════════════════════════════════════
 # D. The graph-side resolver + the PROMPT it feeds (needs a graph)
 # ══════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════
+# D2. pack_kinds is DERIVED from the brief — there is no second allowlist
+#     (#5165; the pre-fix engine prefix-matched a hardcoded PACK_NS tuple)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestPackKindDerivationFromBrief:
+    """#5165 — after #2714 the brief is the authority; a namespace filter in
+    the master builder can only ever DROP a pack the graph installed.
+
+    The defect: ``_build_master_from_brief`` kept a brief key only if it
+    started with ``PACK_NS + tenant_prefixes``. A CATALOG pack outside
+    ``PACK_NS`` has no ``:PackManifest`` node, hence no tenant prefix either,
+    so its kinds were present in the gated brief and silently absent from
+    ``pack_kinds`` — never offered by the prompt, never writable by the
+    minted-kind gate (``master_kind_forms``).
+    """
+
+    def test_installed_catalog_pack_outside_the_legacy_tuple_reaches_pack_kinds(
+            self, sdk, venture_catalog):
+        """The issue's exact scenario: a catalog pack INSTALLED on a graph
+        whose namespace is not in the legacy tuple.
+
+        FAIL-ON: the master re-applies a namespace allowlist — the graph's
+        approval set is ``{venture}``, so the gated brief carries the venture
+        kinds and a second filter drops them (pre-fix this assertion is
+        reached with an EMPTY ``pack_kinds``).
+        REACHABLE: the hermetic catalog genuinely declares
+        ``venture:tranche``/``venture:thesis`` (asserted on the gated brief
+        itself, the compile INPUT), and the seeded ``:PackInstall`` record is
+        the graph's whole approval set — so both the brief and the installed
+        set really name venture.
+        """
+        _seed_install(sdk, "venture")
+        gated_brief = compile_value_brief(
+            installed_namespaces=frozenset({"venture"}))
+        assert VENTURE_TRANCHE in gated_brief and VENTURE_THESIS in gated_brief, \
+            "fixture: the gated brief must carry the venture kinds"
+        master = build_master_list(sdk=sdk)
+        assert VENTURE_TRANCHE in master["pack_kinds"]
+        assert VENTURE_THESIS in master["pack_kinds"]
+        assert not any(k.startswith("core:") for k in master["pack_kinds"]), \
+            "core kinds belong to the objects section, never pack_kinds"
+        # The consequence named in the issue: a dropped pack_kind is also
+        # unwritable — master_kind_forms is S5's minted-kind gate, and it
+        # reads this exact section.
+        assert VENTURE_TRANCHE in master_kind_forms(master), \
+            "the minted-kind gate must accept an installed catalog pack's kind"
+
+    def test_default_path_pack_kinds_are_every_non_core_brief_key(
+            self, venture_catalog):
+        """The default (ungated) path too: the catalog union IS the brief's
+        own key set, so a new catalog pack needs no engine edit.
+
+        FAIL-ON: the default path still filters by a static namespace tuple
+        (pre-fix: ``pack_kinds`` is empty under this fixture).
+        REACHABLE: the hermetic catalog holds a namespace outside the legacy
+        tuple, so the brief and a filtered pack_kinds genuinely differ —
+        order included (the brief's insertion order is prompt-visible).
+        """
+        master = build_master_list()
+        brief = compile_value_brief()
+        expected = [k for k in brief
+                    if k != "memory_granularity" and not k.startswith("core:")]
+        assert expected, "fixture: the hermetic brief must have pack kinds"
+        assert list(master["pack_kinds"]) == expected, \
+            "pack_kinds must be exactly the brief's non-core keys, in order"
+        assert VENTURE_TRANCHE in master["pack_kinds"]
+
+    def test_every_catalog_pack_reaches_the_master_list(self, venture_catalog):
+        """The general guard: NO shipped catalog pack's namespace may be
+        absent from `pack_kinds` — the exact property the hardcoded tuple
+        violated.
+
+        FAIL-ON: the master re-applies a namespace allowlist. The oracle is
+        the registry's own `packs` (the compile INPUT), never the master —
+        under this hermetic catalog the pre-fix code reds with
+        `missing == ['venture']`.
+        REACHABLE: the registry genuinely holds the venture namespace and its
+        manifest genuinely declares kinds, so `missing` is a real comparison
+        and not an empty-vs-empty tautology.
+        """
+        from tortoise.pack_registry import PackRegistry, default_packs_dir
+
+        reg = PackRegistry(default_packs_dir())
+        reg.load_all()
+        assert "venture" in reg.packs, "fixture: the catalog must load venture"
+        kinds = build_master_list()["pack_kinds"]
+        missing = [ns for ns in reg.packs
+                   if not any(k.startswith(f"{ns}:") for k in kinds)]
+        assert not missing, f"shipped catalog packs absent from pack_kinds: {missing}"
+
+    def test_core_namespaced_brief_key_lands_in_objects_never_pack_kinds(self):
+        """A non-canonical `core:*` key must not enter `pack_kinds`.
+
+        FAIL-ON: the derivation classifies by `CORE_OBJECT_KEYS` membership
+        alone, so the stray key rides `pack_kinds` — and `render_s2_prompt`
+        derives the core-only prompt's pack-namespace list from exactly that
+        section, telling the model `core:` is a PACK namespace whose content
+        must be `unclassified`.
+        REACHABLE: `compile_value_brief` tolerates a non-canonical `core:*`
+        key by design (it filters only collisions with the canonical 16 — the
+        legacy/bypass `core` `:PackManifest` it defends against), so a brief
+        can genuinely carry one.
+        """
+        brief = {
+            "core:Project": {"description": "A project"},
+            "core:FinancialReport": {"description": "a bypass core kind"},
+            VENTURE_TRANCHE: {"description": "A financing tranche"},
+            "memory_granularity": {},
+        }
+        master = _build_master_from_brief(brief)
+        assert "core:FinancialReport" not in master["pack_kinds"]
+        assert master["objects"].get("core:FinancialReport") == \
+            "a bypass core kind", "the stray core kind must stay offered"
+        assert VENTURE_TRANCHE in master["pack_kinds"]
+
+    def test_brief_core_keys_are_exactly_the_canonical_object_kinds(self):
+        """The derivation rests on `CORE_OBJECT_KEYS` being the brief's whole
+        core key set; nothing else pins that equality.
+
+        FAIL-ON: `compile_value_brief`'s core dict gains or renames a key
+        while `CORE_OBJECT_KEYS` stays put. The consequence is NOT
+        mis-sectioning — a `core:`-prefixed key is routed into `objects`
+        either way — it is that the `objects` seed and the brief disagree:
+        a canonical kind the brief no longer carries renders with an empty
+        description, and a kind the brief adds loses its seeded position.
+        No other test pins this equality.
+        REACHABLE: the real brief carries 16 core keys, and the comparison is
+        a SET equality, so an addition and a removal each red it.
+        """
+        core_keys = {k for k in compile_value_brief() if k.startswith("core:")}
+        assert core_keys == set(CORE_OBJECT_KEYS), \
+            "the brief's core keys and the canonical object kinds drifted"
+
 
 class TestGraphInstalledNamespaces:
 
