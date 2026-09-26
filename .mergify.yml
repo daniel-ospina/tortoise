@@ -70,7 +70,8 @@ queue_rules:
 # WHY THIS EXISTS
 #   `queue_rules[].autoqueue` defaults to **false**, and this file never set it.
 #   The documented consequence is exactly what we lived with: "the pull request
-#   must be manually queued." Mergify therefore posted, on EVERY pull request —
+#   must be manually queued." Mergify therefore posted, on every ELIGIBLE pull
+#   request (non-draft, `base=main`; a draft or another base gets no control) —
 #   including ones with all six required checks green:
 #
 #     "Tick the box to add this pull request to the merge queue
@@ -98,28 +99,40 @@ queue_rules:
 # THE SAFETY PROPERTY, STATED BECAUSE "NO CLICK" SOUNDS LIKE "NO VALIDATION"
 #   It is not. The queue runs CI on the branch it will actually merge and
 #   re-asserts `merge_conditions` there, and branch protection applies to that
-#   branch's head. What is removed is a click that, on every sampled PR,
-#   appeared only after all six required checks were green — it was the dominant
-#   constraint on merge throughput (#5215) and it validated nothing. Note the
-#   control comment is offered as soon as a matching PR exists, so "after the
-#   gates" is what was measured, not a guarantee of the mechanism.
+#   branch's head. What is removed is a click that could only ever exist while
+#   the PR ALREADY satisfied `queue_conditions` — which include all six
+#   `check-success` conditions. Mergify withdraws the box the moment they stop
+#   matching ("This pull request does not currently match the merge queue
+#   conditions. … The box comes back if it matches again"), and on every sampled
+#   PR it appeared 34s–7min AFTER the last required check completed. So the
+#   click was already downstream of every gate and validated nothing; #5215
+#   measured it as the dominant constraint on merge throughput.
 #
-#   The human gates sit UPSTREAM of this: plan and UX approval, and design and
-#   Class-A judgements (e.g. #1026). DORA/Accelerate agrees — trunk-based, small
-#   batches, merge early; reserve human approval for high blast radius, not
-#   every low-risk change.
+#   The human gates sit UPSTREAM of this: plan approval, UX approval, and design
+#   judgement (see `proportional-gates` §Change Classification). DORA/Accelerate
+#   agrees — trunk-based, small batches, merge early; reserve human approval for
+#   high blast radius, not every low-risk change.
 #
-#   ⛔ DO NOT claim the head-bound review attestation is one of those gates.
-#   It is RECORDED but NOT ENFORCED. `scripts/record-review.sh` writes the
-#   marker; `ai-review-gate` is not among the required contexts (live:
-#   pricing-artifact, docs, test-isolation, license-surface, legal-e2e,
-#   python-ci-gate) and the rulesets API returns none. So nothing in the merge
-#   path reads it, and a PR with zero review markers merges. Auto-merge did not
-#   create that gap — it already existed — but it does remove the last human
-#   action standing near it. Tracked in #5426. If that attestation should be a
-#   real gate, make it required AND name it in `queue_conditions` per the
-#   contract at the top of this file, knowing it costs the review rail on every
-#   PR.
+#   ⛔ DO NOT describe the head-bound review attestation as an enforced gate.
+#   The chain, accurately:
+#     · `scripts/record-review.sh` writes TWO artefacts — a marker JSON at
+#       ~/.pi/agent/reviews/<owner>-<repo>-<PR>.json, and signed evidence
+#       posted into the PR body.
+#     · The JSON record is read by the LOCAL `review-enforcer` extension, and
+#       only when `gh pr merge` runs from a developer machine. That is what
+#       prints "No review record found for PR #N".
+#     · The PR-body evidence is read by `ai-review-gate`, which is NOT a
+#       required context (live: pricing-artifact, docs, test-isolation,
+#       license-surface, legal-e2e, python-ci-gate; the rulesets API returns
+#       none), so it cannot block a merge.
+#   Mergify merges SERVER-SIDE, where the local extension does not run, so a
+#   queue-merged PR has always bypassed the record gate. What THIS change does
+#   is make that path the DEFAULT for every eligible PR, so the record stops
+#   being effective for ordinary merges rather than only for clicked ones.
+#   Tracked in #5426 (the `ai-review-gate` half) and #5433 (this half). To make
+#   the attestation a real gate it must be enforced where the merge happens — a
+#   required check named in `queue_conditions` per the contract at the top of
+#   this file — and that costs the review rail on every PR.
 merge_protections_settings:
   auto_merge_conditions: true
 
