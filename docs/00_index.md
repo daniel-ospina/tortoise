@@ -37,6 +37,7 @@ aboutObjects: tortoise
 | Decision evidence — #2952 (degraded retrieval) + #2976 (temporal retrieval) from competitors (Hindsight TEMPR temporal leg, Zep bi-temporal, supermemory "dreaming") | `docs/research/2026-09-11-decisions-2952-2976-competitor-evidence.md` |
 | Auth architecture — **current: server-side BFF + HttpOnly `__Host-session` on `app.premiselabs.co` (#4054)**; historical client-side head-gate design (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
+| **Fixed / shared SaaS cost allocation** — the mechanical per-line allocation rule (even / proportional), the fail-closed basis read, the `tortoise_team_cost_cents` metric it writes, and the three read paths (#4493) | `docs/ops/cost-allocation.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | CI audit — measured runner-cost/lane analysis, read-only (2026-09-02) | `docs/research/2026-09-02-ci-audit.md` |
 | **Edge class outside every accounting surface (#4503)** — measured: no cap/meter/cost-basis term counts relationships; a dressed EP-bearing edge is ≈259 B (≈0.73× a dressed keyword-only Point) and the EP edge message state is never journaled, so `rebuild_all` returns a half-restored graph. Instrument: `tools/edge_census.py` (read-only census + isolated per-edge RAM probe); feeds the **#4333** census (`relations` block) | `docs/research/2026-09-25-4503-edge-accounting/measurement.md` |
