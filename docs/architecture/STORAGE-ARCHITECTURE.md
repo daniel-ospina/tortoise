@@ -562,6 +562,16 @@ The convergence is on **two layers with different jobs**: the **source** carries
 
 **Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; the ontology's `§4.7` already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
 
+#### ⭐ Where this stands (2026-09-25) — a status pointer, not a new rule
+
+- **The anchor shipped.** The read version rides on the `extractedFrom` link as `sourceVersion` (`#5256`, PR `#5288`), with the honest-absent rule (**`''`/blank/non-string hash ⇒ no property at all**), live == replay, and **no SDK/MCP surface change**.
+- **The currency CHECK is a read** (this section's model): it compares the recorded `sourceVersion` against the source's current `contentHash`, with **no stored `status`** field — so it belongs on the **existing** read surfaces and needs **no new tool and no new SDK method**.
+- **What a stale fact does — Policy B, REFINED by the owner on 2026-09-26** (`#5038` comment `5845802608`): *"We should not return an out-of-date fact when we have a newer one"* — so when a newer fact exists, the out-of-date fact is **withheld as an answer** and **disclosed as an FYI carrying its source** (*"let the user know that (newer fact but no source, and older fact from source X) … so I can disambiguate"*). This **refines rather than reverses** Policy B: Policy B's prohibition was on the fact being *"silently"* withdrawn, and the required disclosure is exactly what keeps this non-silent. **OVERRIDES:** the field's practice of returning a stale fact **alongside** its replacement with a flag (Zep/Graphiti's temporal fields; the RAG `is_latest` norm) — the withheld-as-answer + disclosed-as-FYI form is deliberate, because a visible flag is measurably not acted on (`arXiv 2609.08258`; `2605.06527`: 77.5% visible vs 3.3% adjudicated). The **write-time** notice the owner also asked for (*"ideally at write time it would have told me"*) is **`lane:c1-capture`'s** surface, not this one. **⚠️ Open alongside it:** how mechanical validity reconciles with **EP confidence** (owner, same comment — *"not sure how we reconcile the two here"*), tracked as **O9** in `docs/plans/2026-09-25-5038-source-version-anchor.md`; research first, and no second truth signal is added beside EP in the meantime.
+- **A non-re-read successor records no version** (owner, O1) and reads `unknown` until it is itself read from a source; `ONTOLOGY.md` §4.6 is unmodified and the §4.6 reopen was not taken.
+- **The re-inference step has no owner** — filed as **#5422**, because acceptance A2 of `#5038` cannot complete without it. **`#5024` is its precondition** (a re-fetched `:Source` currently mutates in place, unjournalled: if the old version is overwritten there is nothing to mark stale).
+
+*This pointer records status only. `ONTOLOGY.md` §4.6 is owner-gated and is NOT edited by this work.*
+
 ---
 
 ## 10. Two storage patterns worth taking from Hindsight (2026-09-23)
