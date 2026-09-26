@@ -6849,12 +6849,14 @@ def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
     return {}
 
 
-#: The fixed 9-class ``_classify_error`` vocabulary (#1524) — the census
-#: keys the report, the integrity grader's recoverable allowlist and the
-#: extraction-health killer set all branch on. Declared as code (the #1787
-#: ``llm_error_census`` emission contract that also names it has no code
-#: presence — #5526) so a future add/rename is detectable; #4959 reroutes a
-#: 403 WITHIN this set rather than adding a 10th class.
+#: The fixed 9-class ``_classify_error`` vocabulary (#1524). Declared as code
+#: (the #1787 ``llm_error_census`` emission contract that also names it has no
+#: code presence — #5526) so a future add/rename is detectable; #4959 reroutes
+#: a 403 WITHIN this set rather than adding a 10th class. This is the
+#: CLASSIFIER's vocabulary only — the report, the integrity grader and the
+#: extraction-health gate ALSO branch on stage-producer census classes
+#: (``parse_error``, ``truncated``, ``truncated_parse_error``,
+#: ``partial_parse``, ``s1_chunk_summary``, ``empty_embed_list``).
 _LLM_ERROR_CENSUS_CLASSES = frozenset({
     "fatal_401_auth",
     "fatal_402_billing",
@@ -6913,10 +6915,10 @@ def _classify_error(e: BaseException) -> str:
     are produced by the stage callers, not here.
 
     Duck-typed (``e.response.status_code``) so the extractor stays free of a
-    hard ``requests`` import — the fatal/transient mapping matches P2's
-    taxonomy table for every status BOTH readers can see (#1530: 401/402/403
-    fatal, 429/5xx transient, other 4xx fatal). The one shape they do not
-    share is the urllib one — see SCOPE OF THE STATUS READ below.
+    hard ``requests`` import. This is the CENSUS-class mapper, NOT the retry
+    taxonomy (that is ``_is_fatal_error`` / P2's ``is_fatal``); the two are
+    aligned on the common provider statuses but are deliberately NOT claimed
+    identical — see KNOWN DIVERGENCES below.
 
     #4959 — the ONE body-sensitive carve-out: a 403 whose response BODY
     carries the provider's key-limit signature is the SAME condition as a
@@ -6933,14 +6935,19 @@ def _classify_error(e: BaseException) -> str:
 
     The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``.
 
-    SCOPE OF THE STATUS READ (pre-existing, not introduced here): the status
-    comes from ``e.response.status_code`` ONLY. A ``urllib.error.HTTPError``
-    carries it on ``.code`` and has NO ``.response``, so every HTTP failure
-    from that shape (``OpenAICompatModel``) classifies ``transient_unknown``
-    — a divergence from ``model_adapters._http_status`` (which reads
-    ``.code``), tracked separately as #5525; this function's duck-typed read
-    is left as-is so #4959 does not change classification for the product
-    capture path."""
+    KNOWN DIVERGENCES from P2's retry taxonomy (pre-existing, not introduced
+    here; tracked as #5525). The list is what is KNOWN — NOT an exhaustive
+    claim, because a claim of exhaustiveness is exactly what kept re-staling:
+
+    * the status is read from ``e.response.status_code`` ONLY, so a
+      ``urllib.error.HTTPError`` (status on ``.code``, no ``.response`` — the
+      ``OpenAICompatModel`` shape) is never matched and classifies
+      ``transient_unknown``;
+    * 408 / 425 are TRANSIENT in ``model_adapters.TRANSIENT_STATUS_CODES`` but
+      fall through ``400 <= st < 500`` here to ``fatal_4xx``.
+
+    Neither is changed here (a classifier change is its own concern, #5525),
+    and neither is denied here."""
     st = getattr(getattr(e, "response", None), "status_code", None)
     if st is not None:
         if st == 429:
@@ -6970,14 +6977,11 @@ def _is_fatal_error(e: BaseException) -> bool:
 
     Consumes P2's taxonomy export (``tortoise.model_adapters.is_fatal`` —
     401/402/403 FATAL + 400/404/other-4xx FATAL_CONFIG are permanent; never
-    retried, MECE fix #1524). The local ``_classify_error`` fallback mirrors
-    the same semantics (the ``fatal_*`` census prefix), so the retry decision
-    and the census classes agree on every error whose status BOTH readers can
-    see (GATE-1: one taxonomy). They DIVERGE only for the urllib shape
-    (``urllib.error.HTTPError``: status on ``.code``, no ``.response``) —
-    ``is_fatal`` reads it fatally while ``_classify_error`` censuses
-    ``transient_unknown`` (#5525). That is the pre-existing transport
-    divergence, not a second taxonomy."""
+    retried, MECE fix #1524); the local ``_classify_error`` fallback mirrors
+    the same ``fatal_*`` prefix (GATE-1). This is the ABORT decision ONLY.
+    The CENSUS class comes from ``_classify_error``, and the two are NOT
+    guaranteed to agree — it reads the status from a different attribute and
+    maps 408/425 differently; see its KNOWN DIVERGENCES paragraph."""
     try:
         from tortoise.model_adapters import is_fatal
         return is_fatal(e)
