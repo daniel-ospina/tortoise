@@ -1922,8 +1922,12 @@ def build_report(
     # | Census signal            | Mechanical fix (run-protocol steps 4/6)   |
     # |--------------------------|------------------------------------------|
     # | fatal_402_billing > 0    | M2 pre-flight probe missed it → check     |
-    # |                          | budget (A6), re-run pre-flight — not a   |
-    # |                          | code bug                                 |
+    # | (a key-limit 403 lands   | budget (A6), re-run pre-flight — not a    |
+    # | here too, #4959)         | code bug. The signature set is BROAD      |
+    # |                          | (#4952): a 403 "rate/organization/token   |
+    # |                          | limit exceeded" also lands here — a false |
+    # |                          | DEGRADE (fail-closed, never a false       |
+    # |                          | certificate); triage budget first.        |
     # | transient_429 spike      | reduce --workers / raise backoff cap /   |
     # |                          | provider load                            |
     # | transient_timeout spike  | raise TORTOISE_EXTRACTOR_MAX_TOKENS or   |
@@ -1932,11 +1936,13 @@ def build_report(
     # |                          | → fix prompt, not retries                |
     # | truncated > 0            | cap too low for the stage → raise the    |
     # |                          | stage cap (TORTOISE_EXTRACTOR_MAX_TOKENS) |
-    # | fatal_401_auth /         | key rotation / provider config — pre-    |
-    # | fatal_403_forbidden      | flight (M2) should have caught (a 403    |
-    # |                          | whose BODY matches a key-limit signature |
-    # |                          | is the BILLING condition and lands in    |
-    # |                          | fatal_402_billing instead, #4959)        |
+    # | fatal_401_auth /         | operator key replacement / provider      |
+    # | fatal_403_forbidden      | config — pre-flight (M2) should have     |
+    # |                          | caught (automatic rotation is billing-   |
+    # |                          | only, #1951; a 403 whose BODY matches a  |
+    # |                          | key-limit signature is the BILLING       |
+    # |                          | condition and lands in fatal_402_billing |
+    # |                          | instead, #4959)                          |
     # ───────────────────────────────────────────────────────────────────────
 
     # ── M7 (D2): leg-mix — match_source aggregation, never re-derived ──

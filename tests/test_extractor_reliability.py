@@ -209,6 +209,51 @@ def test_key_limit_403_census_fires_the_extraction_killer_gate():
     }) == "degraded"
 
 
+def test_classify_error_vocabulary_is_the_pinned_nine_classes():
+    """#4959: the census vocabulary is a fixed 9-class set (#1524) and #4959
+    REROUTES a 403 within it rather than adding a class. Pin the exact set so a
+    future add/rename is detectable — the #1787 ``llm_error_census`` emission
+    contract that also names it has no code presence (#5526), so this frozenset
+    is the only executable record of the contract."""
+    assert frozenset({
+        "fatal_401_auth", "fatal_402_billing", "fatal_403_forbidden",
+        "fatal_4xx", "transient_429_rate_limit", "transient_5xx",
+        "transient_timeout", "transient_network", "transient_unknown",
+    }) == v2._LLM_ERROR_CENSUS_CLASSES
+    assert len(v2._LLM_ERROR_CENSUS_CLASSES) == 9
+    probes = [
+        _HTTPError(401), _HTTPError(402), _HTTPError(403),
+        _HTTPError(403, _OR_KEY_LIMIT_BODY), _HTTPError(400),
+        _HTTPError(429), _HTTPError(503), TimeoutError(),
+        ConnectionError(), RuntimeError(),
+    ]
+    assert {v2._classify_error(e) for e in probes} \
+        <= v2._LLM_ERROR_CENSUS_CLASSES
+
+
+def test_classify_error_generic_limit_403_is_billing_broad_by_design():
+    """#4959 review (P1): the census INHERITS the rotation seam's deliberately
+    broad ``"limit exceeded"`` signature (#4952), so a 403 whose body carries a
+    GENERIC provider-limit phrasing — rate / organization / token limit — also
+    records ``fatal_402_billing`` and degrades the run.
+
+    Pinned as an ACCEPTED consequence of reusing the single seam, not a bug:
+    the direction is fail-closed (a false degrade, never a false certificate),
+    the signature table is #4951's to narrow, and a second boundary inside the
+    extractor would re-create the divergence #4959 removes. A real 429 is
+    intercepted before the 403 branch and is unchanged."""
+    for body in (
+        '{"error":{"message":"Rate limit exceeded","code":403}}',
+        '{"error":{"message":"Organization limit exceeded","code":403}}',
+        '{"error":{"message":"Max token limit exceeded for this '
+        'organization","code":403}}',
+    ):
+        assert v2._classify_error(_HTTPError(403, body)) == "fatal_402_billing"
+    assert v2._classify_error(
+        _HTTPError(429, '{"error":{"message":"Rate limit exceeded"}}')
+    ) == "transient_429_rate_limit"
+
+
 def test_complete_stats_recorded_on_failure(monkeypatch):
     monkeypatch.setattr(v2.time, "sleep", lambda _: None)
     model = _Flaky(_HTTPError(429), fails=99)
