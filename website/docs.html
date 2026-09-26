@@ -49,6 +49,8 @@
     @media (max-width: 560px) {
       .topbar { flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
       .topbar nav { flex-wrap: wrap; gap: 12px; }
+      /* the wrapped topbar is ~2 rows tall, so 5rem no longer clears it */
+      h2[id], h3[id], h4[id] { scroll-margin-top: 7rem; }
     }
 
     /* Layout */
@@ -258,8 +260,8 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
         <li>Open <code>chatgpt.com/plugins</code> → the <strong>+</strong> button → create a Developer-mode app.</li>
         <li>MCP server URL: <code>https://api.premiselabs.co/mcp</code> — no API key. Use the URL exactly as written, with no trailing slash. Choose <strong>OAuth</strong>; ChatGPT discovers Tortoise's authorization server automatically.</li>
         <li>Click <strong>Scan Tools</strong>, sign in to Tortoise when prompted, and click <strong>Authorize</strong>. When Tortoise asks which organization to connect, choose the one you want this graph in.</li>
-        <li>Start a new chat at chatgpt.com. Open <code><a href="https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md" target="_blank" rel="noopener">app.premiselabs.co/skills/tortoise-onboarding/SKILL.md</a></code> in a browser, copy the whole document, and paste it into that chat — ChatGPT has no local skills, so this document is what onboards it (if the agent can open the link itself, that works too).</li>
-        <li>Ask it to set up Tortoise: it follows those instructions and calls <code>tortoise_health</code> to verify the connection, then files your first memory. Which <code>tortoise_*</code> tools appear can be plan-dependent — reopen <code>chatgpt.com/plugins</code> and check the <strong>Scan Tools</strong> result to see which tools were granted.</li>
+        <li>In the same ChatGPT chat where you authorized Tortoise, open <code><a href="https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md" target="_blank" rel="noopener">app.premiselabs.co/skills/tortoise-onboarding/SKILL.md</a></code> in a browser, copy the whole document, and paste it into that chat — ChatGPT has no local skills, so this document is what onboards it (if the agent can open the link itself, that works too).</li>
+        <li>Ask it to set up Tortoise: it follows those instructions to verify the connection, then files your first memory. Which <code>tortoise_*</code> tools appear can be plan-dependent — reopen <code>chatgpt.com/plugins</code> and check the <strong>Scan Tools</strong> result to see which tools were granted. The connection completes on the agent's first <strong>write</strong>: a grant of read tools only can read your graph but cannot finish connecting.</li>
       </ol>
       <p>If ChatGPT asks for a key (they start <code>tt_…</code> or <code>tk_…</code>) or an <code>Authorization</code> header, you have left the OAuth path — refuse it. The document you pasted also carries keyed recipes for the other harnesses; they do not apply to ChatGPT.</p>
 

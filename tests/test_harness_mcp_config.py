@@ -496,24 +496,6 @@ class TestDocsPageAndSkillConfig:
             f"{len(found)}: {found}")
         return found[0]
 
-    @classmethod
-    def _harness_families(cls) -> str:
-        """The `HARNESS_FAMILIES` array literal.
-
-        Both anchors are asserted BEFORE slicing: if either moves, the slice
-        silently widens to the end of the file and the negative assertion below
-        would be satisfied by unrelated trailing prose — the widening failure
-        the #4365 review caught in this same file.
-        """
-        src = cls._read_harnesses()
-        decl = "export const HARNESS_FAMILIES"
-        assert decl in src, "harnesses.js lost HARNESS_FAMILIES"
-        rest = src.split(decl, 1)[1]
-        assert "\n])" in rest, (
-            "HARNESS_FAMILIES' close is no longer column-0 — re-anchor the "
-            "guard's terminator before trusting the slice below")
-        return rest.split("\n])", 1)[0]
-
     def test_4836_docs_page_is_the_live_chatgpt_carrier(self):
         """#4836: ChatGPT has no dashboard CHOOSER/connect surface (#2912's 4-family
         chooser keeps it out; #2698 deleted the flat tab first). It is not absent
@@ -527,8 +509,8 @@ class TestDocsPageAndSkillConfig:
         The row is the JOURNEY a ChatGPT user performs, so the assertions below
         are per-step: a `/docs#chatgpt` visitor has to reach a verified
         connection, not just a URL. Dropping a step, or replacing one with a
-        claim that is false for ChatGPT (a pasted key, "any plan"), must fail
-        here rather than ship.
+        claim that is false for ChatGPT (a pasted key, an unnamed plan set),
+        must fail here rather than ship.
         """
         canonical = self._dashboard_constant("CANONICAL_MCP_URL")
         instructions_url = self._dashboard_constant("ONBOARDING_INSTRUCTIONS_URL")
@@ -551,21 +533,19 @@ class TestDocsPageAndSkillConfig:
             cut = row.find(delim, 1)
             if cut != -1:
                 row = row[:cut]
-        # ...then to the ordered list INSIDE that row. `row` extends past
-        # `</ol>` into the row's closing prose, where a stray copy of a literal
-        # would satisfy an assertion without any user-facing step carrying it
-        # (the pre-fix docs.html kept the instructions URL only in that prose).
+        # ...then to the ordered list INSIDE that row, so the step literals below
+        # cannot be satisfied by the row's closing prose instead of a step.
         assert "<ol>" in row and "</ol>" in row, (
             "the ChatGPT row must carry the ordered procedure the user performs")
         steps = row.split("<ol>", 1)[1].split("</ol>", 1)[0]
         for step in (
             "Security and login",   # 1 — where the Developer-mode toggle lives
+            "(Plus / Pro / Business / Enterprise / Education)",  # 1 — plan set
             "chatgpt.com/plugins",  # 2 — the Developer-mode app entry point
             "Scan Tools",           # 4 — OAuth enrolment
             "Authorize",            # 4 — consent (key-less connect completes here)
             "paste it into that chat",  # 5 — the hand-off to the agent
-            "tortoise_health",      # 6 — the journey's outcome: a verified link
-            "first memory",         # 6 — ...and a first filed memory
+            "files your first memory",  # 6 — the journey's outcome
             "plan-dependent",       # 6 — which tools appear is plan-dependent
         ):
             assert step in steps, (
@@ -574,6 +554,14 @@ class TestDocsPageAndSkillConfig:
         assert steps.count("<li>") == 6, (
             "the ChatGPT procedure is 6 steps; if you deliberately changed the "
             "journey, update this count and the per-step literals together")
+        # The row must NOT name a RETIRED tool: `tortoise_health` is absent from
+        # `tools/list` (#3883), so a tool-grant client like ChatGPT cannot call
+        # it — naming it would claim a verification step ChatGPT cannot perform.
+        # The advertised equivalent is an agent-side detail for the onboarding
+        # document, not a step the human reads here.
+        assert "tortoise_health" not in row, (
+            "the ChatGPT row must not name the retired tortoise_health (#3883) — "
+            "it is not in tools/list, so ChatGPT cannot call it")
         # The URL the row teaches must be the CONNECTOR form. harnesses.js pins
         # CANONICAL_MCP_URL for every connector surface (the two Claude leaves +
         # ChatGPT): it is the canonical endpoint, the value its PRM advertises and
@@ -610,18 +598,22 @@ class TestDocsPageAndSkillConfig:
             "the warning must name the tt_ prefix too — dropping it would leave "
             "legacy-shaped keys looking acceptable to ChatGPT")
 
-    def test_4836_document_section2_and_the_chooser_agree_on_chatgpt(self):
-        """#4836 acceptance: `SKILL.md` §2's 7th-harness note and
-        `HARNESS_FAMILIES` must agree — a ChatGPT user can choose nothing from the
-        dashboard chooser, and the note must name the surface that actually
-        carries the instructions instead of leaving that to a test constant.
+    def test_4836_document_section2_names_the_live_chatgpt_carrier(self):
+        """#4836 acceptance: `SKILL.md` §2's 7th-harness note must name the surface
+        that actually carries the instructions instead of leaving that to a
+        test-consumed constant.
 
         `tests/test_onboarding_variants.py::test_4365_served_document_sends_
         chatgpt_to_a_path_that_exists` owns the retired-tab pins for the whole
-        served document; this test re-pins those same three literals SCOPED TO
-        §2 (a tighter surface — §2 could keep the retired tab while the rest of
-        the document is clean) and owns the carrier name + the note↔chooser
-        agreement.
+        served document; this test re-pins the same literals SCOPED TO §2 (a
+        tighter surface — §2 could keep the retired tab while the rest of the
+        document is clean) and owns the carrier name.
+
+        The note↔chooser agreement is NOT re-checked here. The chooser half is
+        derived and asserted against the real vocabulary by
+        `website/apps/dashboard/src/onboardingEmptyStateKeyNote.test.js`
+        (`assert.ok(!chooserLeafIds().includes('chatgpt'))`), and a text scan from
+        Python cannot decide it without a shape heuristic (#4880).
         """
         skill = self.SKILL.read_text(encoding="utf-8")
         marker = "> **#1701 —"
@@ -656,13 +648,6 @@ class TestDocsPageAndSkillConfig:
         assert "Never a request header" in note, (
             "§2's note must forbid a key/Authorization header — the agent that "
             "receives this document has to be told, not just the human")
-        # ...and the chooser must actually agree with that sentence. Match the
-        # entry SHAPE, not the bare word: a family added as `id: 'ChatGPT'`
-        # would evade a case-sensitive substring test while still adding one.
-        assert not re.search(r"id:\s*['\"]chatgpt['\"]",
-                             self._harness_families(), re.I), (
-            "§2 says there is no ChatGPT chooser surface, but HARNESS_FAMILIES "
-            "now carries one — the document and the chooser disagree")
 
     def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
         section = self._mcp_section()

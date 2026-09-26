@@ -2996,8 +2996,7 @@ function claimIntentInFlight() {
   // #1998 (W2) / #3428 (lane B3): connect-step busy state. The advance no
   // longer WRITES the harness-connected checkpoint — that click-writer was
   // deleted, so this flag covers the refresh that sharpens the done step's read
-  // of the server projection. (#4836: the connect-error state and its banner
-  // went with the chatgpt copy handler, which was their only message writer.)
+  // of the server projection.
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
   const [wizardKeyMode, setWizardKeyMode] = React.useState('included')
   // #1998 fold-in (durable connect key, PR #2161 finding): the connect step's

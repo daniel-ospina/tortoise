@@ -616,22 +616,17 @@ export function preferredSurface(family, current) {
 // stay the single 7-harness vocabulary; the harness table in the SERVED
 // onboarding instructions (#4365: an instruction document, not an installed
 // skill) is the agent-side self-adjudication source (the chooser's
-// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the live chooser can
-// never select it: #2698 deleted its dashboard tab and #2912's 4-family
-// HARNESS_FAMILIES excluded it. (The gates are the LIVE ones — the archived
-// #1643 render named at the bottom of this block maps the full HARNESS_ORDER,
-// chatgpt included, but it is gated on `LEGACY_WIZARD_ARCHIVED && welcomeOriented`,
-// and nothing has set `welcomeOriented` true since #1997.) Its LIVE carrier is the public setup docs page
-// (#4836): website/docs.html#chatgpt names the Developer-mode path, the
-// canonical connector URL and the onboarding instructions URL, so a ChatGPT user
-// is not left with only a test-consumed constant. The block below and that page
-// hand over different INSTRUCTIONS, not different paths — both enrol the same
-// Developer-mode OAuth connector; this block embeds the workflows prompt and asks
-// an in-chat question, the page hands over the onboarding document, whose verify
-// step calls `tortoise_health`. The block must not name `tortoise_health`
-// (pinned in harnesses.test.js); that is a property of THIS copy, not evidence
-// about what ChatGPT can call. Reachability of each `chatgpt` leaf below is a
-// `grep` question, deliberately not restated here.
+// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the live chooser
+// cannot select it: #2698 deleted its dashboard tab and #2912's 4-family
+// HARNESS_FAMILIES excludes it. (The archived #1643 render at the bottom of this
+// block maps the full HARNESS_ORDER, chatgpt included, but it is gated on
+// `LEGACY_WIZARD_ARCHIVED && welcomeOriented` — both false.) Its LIVE carrier is
+// the public setup docs page (#4836): website/docs.html#chatgpt names the
+// Developer-mode path, the canonical connector URL and the onboarding
+// instructions URL. The block below embeds the workflows prompt; the page hands
+// over the onboarding document. This block must not name `tortoise_health` — that
+// name is retired and absent from `tools/list` (#3883), so a tool-grant client
+// cannot call it (pinned in harnesses.test.js).
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the
