@@ -783,6 +783,32 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
     return match.group(1), stored[match.end():]
 
 
+#: The durable-session read projection (#3557): the field list the hosted
+#: read surfaces (`GET /v1/sessions` and `GET /v1/sessions/{id}`) both serve,
+#: and the subset `TortoiseSDK.get_session` returns for a captured `:Session`.
+#: The hosted handlers spell these column names inline — the shared surface is
+#: the declared NAMES, not a shared import — so this tuple is the SDK-side
+#: declaration and the parity test BINDS the two in BOTH directions: it
+#: iterates this tuple (a field dropped from or renamed on the SDK read
+#: reddens it) AND pins the detail response's key SET to this tuple plus the
+#: detail endpoint's known extras — `actor_display`, `turn_points`,
+#: `extracted_points`, `source` — so a column ADDED to the hosted detail
+#: handler reddens it too, the direction the inline columns would otherwise
+#: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
+#: way (this tuple plus `actor_display`); its `extracted` COUNT is not,
+#: because the list still uses the legacy typed filter and diverges for
+#: untyped extractions (#3555). Ordered as the hosted handlers append their
+#: columns: existing positions are stable and new columns go at the END, so
+#: a consumer reading positionally never shifts.
+#: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
+#: additionally serves `actor_display`, the point lists and `source`; those
+#: are derived per-request and are deliberately not part of this shared list.)
+SESSION_READ_FIELDS: tuple[str, ...] = (
+    "id", "created_at", "turns", "extracted",
+    "actor_user_id", "harness", "machine_id", "model",
+)
+
+
 def _capture_turn_embeddings(
     turn_texts: list[str],
     expected_dim: int | None,
@@ -19229,7 +19255,25 @@ class TortoiseSDK:
         ).result_set]
 
     def get_session(self, session_id: str) -> dict | None:
-        """Get a single session Event by session_id (matches snake or camel case)."""
+        """Get a single agent session by session_id.
+
+        TWO lanes share this read, and they write DIFFERENT node kinds:
+
+        * an indexed agent-session ``Event`` (``eventKind='AgentSession'`` —
+          the ``index_sessions`` / session-commit lane), returned as its raw
+          properties (the historical contract, positionally unchanged);
+        * a captured durable ``:Session`` record (``capture_session``, and the
+          hosted ``POST /v1/sessions``), returned in the SAME projection the
+          hosted ``GET /v1/sessions/{id}`` serves.
+
+        #3557: the second arm did not exist. The capture lane writes a
+        ``:Session`` node plus a ``sessionCaptured`` Event — never an
+        ``AgentSession`` Event — so ``get_session`` returned ``None`` for
+        EVERY session the SDK itself had just captured, and a self-hosted
+        consumer (including the MCP ``tortoise_get_session`` tool, which
+        delegates here) could not read back its own captures at all. The
+        durable arm below is the read half of the capture lane.
+        """
         if not session_id:
             return None
         proj = self._get_proj()
@@ -19238,7 +19282,92 @@ class TortoiseSDK:
             "WHERE e.session_id = $sid OR e.sessionId = $sid RETURN properties(e)",
             params={"sid": session_id}
         ).result_set
-        return rows[0][0] if rows else None
+        if rows:
+            return rows[0][0]
+        return self._read_captured_session(proj, session_id)
+
+    def _read_captured_session(self, proj, session_id: str) -> dict | None:
+        """The durable ``:Session`` projection — the SDK mirror of the hosted
+        ``GET /v1/sessions/{id}`` read (#3557).
+
+        Field-for-field the same keys the hosted detail endpoint builds, so a
+        self-hosted SDK consumer and a hosted one see one session vocabulary:
+        ``SESSION_READ_FIELDS`` plus ``actor_display`` (the raw id here — this
+        lane has no control plane to resolve a member email, the hosted
+        endpoint's own fail-soft fallback) and the ``turn_points`` /
+        ``extracted_points`` lists.
+
+        Both counts use the DETAIL endpoint's non-turn predicate
+        (``pointKind IS NULL OR pointKind <> 'event'``) — LLM-extracted claims
+        are untyped, so the legacy ``IN ['decision','statement']`` filter the
+        LIST endpoint still uses would report 0 for them (#3555).
+
+        Returns ``None`` when no ``:Session`` carries the id.
+        """
+        rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
+            "s.turn_count, s.actor_user_id, s.harness, "
+            "s.machine_id, s.model",
+            params={"sid": session_id},
+        ).result_set
+        if not rows:
+            return None
+        sess = rows[0]
+        extracted_count = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN count(p)",
+            params={"sid": session_id},
+        ).result_set[0][0]
+        turn_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+            params={"sid": session_id},
+        ).result_set
+        turn_points = []
+        for tr in turn_rows:
+            role, body = _capture_turn_role_text(tr[1] or "")
+            turn_points.append({
+                "id": tr[0], "role": role, "content": body,
+                "created_at": tr[2],
+            })
+        ext_rows = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN p.id, p.content, p.pointKind, p.createdAt "
+            "ORDER BY p.createdAt",
+            params={"sid": session_id},
+        ).result_set
+        extracted_points = [{
+            "id": er[0], "content": er[1] or "",
+            "kind": er[2] or "statement", "created_at": er[3],
+        } for er in ext_rows]
+        source = None
+        source_rows = proj.g.query(
+            "MATCH (src:Source {url:$url}) "
+            "RETURN src.url, src.sourceKind, src.eventId",
+            params={"url": f"session:{session_id}"},
+        ).result_set
+        if source_rows:
+            source = {
+                "url": source_rows[0][0],
+                "sourceKind": source_rows[0][1],
+                "eventId": source_rows[0][2],
+            }
+        return {
+            "id": sess[0],
+            "created_at": sess[1],
+            "turns": sess[2],
+            "actor_user_id": sess[3],
+            "actor_display": sess[3],
+            "harness": sess[4],
+            "machine_id": sess[5],
+            "model": sess[6],
+            "extracted": extracted_count,
+            "turn_points": turn_points,
+            "extracted_points": extracted_points,
+            "source": source,
+        }
 
     def index_file(self, path: str,
                    file_type: str | None = None,   # "agent_session"|"meeting"|"doc"|None(auto)
