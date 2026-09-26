@@ -608,8 +608,7 @@ def _is_repeated_schema_work(cypher: str) -> bool:
     earlier form missed — a repeat sweep that flattened every Point again
     would otherwise have counted as clean). The fixup's precondition READS are
     deliberately NOT in this set (#5444): the fast path must read the fixup's
-    state to know whether it is owed, and forbidding that read is what made
-    the marker-gate attempt unusable. ``_is_fast_path_read`` bounds them
+    state to know whether it is owed. ``_is_fast_path_read`` bounds them
     instead — reads are allowed, writes and DDL are not, so a future "probe by
     rebuilding" still cannot hide here.
     """
@@ -625,7 +624,7 @@ def _is_repeated_schema_work(cypher: str) -> bool:
 #: deliberately NOT consulted, because "marker present" does not mean "fixup
 #: done": `sdk.update_entity` (the `surface.update_entity` MCP tool) writes raw
 #: `SET n += $p` props without flattening. Pinned to the EXACT literal rather
-#: than by prefix (#5312 review, P2): a prefix match classifies ANY reworded
+#: than by prefix: a prefix match classifies ANY reworded
 #: statement as a permitted "read" — including a destructive one such as
 #: ``MATCH (n:Point) WHERE n.search_keys IS NOT NULL DETACH DELETE n``.
 _FAST_PATH_READS = (
@@ -638,7 +637,7 @@ _FAST_PATH_READS = (
 #: ``CREATE``: the two vector-API attempts are expected here and one of them is
 #: a ``CREATE VECTOR INDEX``. This replaces a `" SET "`/`" MERGE "` blacklist
 #: applied to the reads only, which a reworded destructive statement could
-#: evade (#5312 review, P2).
+#: evade.
 _DESTRUCTIVE_VERBS = (" DETACH DELETE ", " DELETE ", " REMOVE ", " SET ",
                       " MERGE ")
 
@@ -887,7 +886,7 @@ def test_probe_detects_an_owed_search_keys_fixup(graph_factory):
     assert proj._schema_is_current() is False, (
         "the point_fts_v2 marker must not be able to hide an owed fixup: a "
         "supported write path stores array search_keys without flattening "
-        "(#5312 review, P1)")
+        "(#5482)")
 
     proj._ensure_indexes()
 
