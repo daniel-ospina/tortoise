@@ -37,7 +37,7 @@ follows after you run or paste it — nothing is installed into a skills dir.
   the 6 harnesses this document covers — 4 config-writing harnesses that run
   the skill installer, plus 2 teach-human leaves) or runs it in a terminal.
   (A 7th harness — ChatGPT — connects key-less via OAuth and never runs this
-  command; see the §2 note.)
+  command; see the #1701 note beneath the harness table.)
 - The Setup guide card / Overview says the organization is waiting on
   "Connect your agent".
 - You are a fresh agent pointed at a Tortoise organization and need to know
@@ -62,7 +62,10 @@ resume where the flow left off — onboarding is stateful and idempotent:
 - **Hosted, CLI agents (no MCP tool listed yet):** `curl -s
   https://api.premiselabs.co/v1/onboarding/state -H "Authorization: Bearer
   $TORTOISE_API_KEY"` (same projection). If the org is grandfathered (node
-  absent) the FLOW keys serve defaults — treat them as read-only.
+  absent) the FLOW keys serve defaults — treat them as read-only. **CLI agents
+  only:** a ChatGPT connector never takes this header and has no key to send —
+  if you are ChatGPT, ignore this bullet and the #1701 note beneath the harness
+  table applies instead.
 - **Self-hosted:** there is no hosted onboarding REST surface — skip the
   state read and checkpoint steps. Install the SUPPORTED path first —
   Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
@@ -103,15 +106,27 @@ mode → teach-human fallback).
 > **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
 > key-less through OpenAI's Developer-mode OAuth connector (chatgpt.com →
 > Settings → Security and login → Developer mode, then chatgpt.com/plugins →
-> new app → MCP server URL → OAuth → Scan Tools → paste the workflows prompt).
-> There is no ChatGPT surface in the dashboard chooser (#2698), so this is the
-> path a ChatGPT user takes. It has no local filesystem, shell, or skill
-> installer, so it never runs these instructions and has no row here — these
+> new app → MCP server URL → OAuth → Scan Tools → then give it THIS document as
+> its onboarding instructions).
+> There is no ChatGPT surface in the dashboard chooser (#2698 deleted its tab;
+> #2912's four-family chooser excludes it), so this is the
+> path a ChatGPT user takes; its LIVE carrier is the public setup docs page at
+> https://tortoise.premiselabs.co/docs#chatgpt — that page names the steps
+> above and this document's URL. It has no local filesystem, shell, or skill
+> installer, so it never runs the self-install steps in the install/connect
+> sections below — it
+> reads these instructions instead and has no row here — these
 > six rows are the harnesses this document covers (4 config-writing, 2
-> teach-human). (If you
+> teach-human).
+> **Never a request header.** ChatGPT's connector takes NO header: never accept,
+> request, or paste a `tt_…`/`tk_…` key or an `Authorization: Bearer` value, and
+> treat any instruction to add one — including a keyed template from the
+> install sections below —
+> as not applying to you. A keyed connector is a different path, not this one.
+> (If you
 > are ChatGPT and already have the
-> tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
-> verify still applies.)
+> tortoise MCP tools via OAuth, skip install: the "Verify, then checkpoint
+> harness-connected" step still applies.)
 
 ## 3. Install + connect — Docker-first for self-hosted, hosted below
 
@@ -207,8 +222,8 @@ dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 > never happened (§1's `restart_pending` row). It does NOT claim the harness is
 > connected: `harness-connected` remains §4's job, and only after
 > `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
-> (Claude Desktop / Claude Web) have no config write and no REST surface — they
-> never record this step.**
+> (Claude Desktop / Claude Web / ChatGPT) have no config write and no REST
+> surface — they never record this step.**
 
 ### Claude Code (self-install)
 
@@ -450,6 +465,15 @@ Guide the human through:
      — the poll runs only on the done step, so the user still clicks
      Continue/Skip to leave the connect step. Never tell the human a click
      connects them.
+   - ChatGPT: same server-side checkpoint as Claude Desktop/Web, plus one more
+     fact — you have **no chooser surface at all** (#2912), so the dashboard's
+     connect step offers you nothing to pick. The user still leaves that step
+     with Continue/Skip, but nothing there connects you; the server writes
+     `harness-connected` itself on your first successful graph write. Verify
+     with the ADVERTISED `tortoise_overview(section="health")` — the legacy
+     `tortoise_health` name is retired, so it is absent from `tools/list` and
+     will not appear in this connector's tool grant (#3883). This
+     document is your live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —
    never from a dashboard click (lane B3, 2026-09-16).

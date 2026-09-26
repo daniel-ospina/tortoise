@@ -28,6 +28,10 @@
 
     body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.7; -webkit-font-smoothing: antialiased; }
 
+    /* Deep links must clear the sticky topbar: the onboarding notes send a
+       ChatGPT user straight to /docs#chatgpt (#4836). */
+    h2[id], h3[id], h4[id] { scroll-margin-top: 5rem; }
+
     /* Top bar */
     .topbar { display: flex; align-items: center; gap: 20px; padding: 14px 24px; border-bottom: 1px solid var(--border); background: rgba(6, 11, 20, 0.9); position: sticky; top: 0; z-index: 10; }
     .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
@@ -45,6 +49,8 @@
     @media (max-width: 560px) {
       .topbar { flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
       .topbar nav { flex-wrap: wrap; gap: 12px; }
+      /* the wrapped topbar is ~2 rows tall, so 5rem no longer clears it */
+      h2[id], h3[id], h4[id] { scroll-margin-top: 7rem; }
     }
 
     /* Layout */
@@ -193,10 +199,10 @@
     </div>
 
     <h2 id="mcp">Connect your agent (MCP)</h2>
-    <p>The fastest way to give an agent Tortoise memory is the <strong>MCP server</strong> — no code required. Your agent (Claude Code, Cursor, Codex, Pi, Claude Desktop, or Claude Web — or any other MCP client) reads and writes your Tortoise graph automatically. (ChatGPT connects key-less over OAuth from the dashboard's ChatGPT tab — no config file, so it has no row below.)</p>
+    <p>The fastest way to give an agent Tortoise memory is the <strong>MCP server</strong> — no code required. Your agent (Claude Code, Cursor, Codex, Pi, Claude Desktop, Claude Web, or <a href="#chatgpt">ChatGPT</a> — or any other MCP client) reads and writes your Tortoise graph automatically. (ChatGPT connects key-less over OAuth through OpenAI's Developer mode — its steps are below.)</p>
     <div class="card">
       <h3>Setup — hosted (no install)</h3>
-      <p>The hosted server speaks Streamable HTTP at <code>https://api.premiselabs.co/mcp/</code>. Keep your API key in an environment variable — never paste a literal <code>tt_…</code> key into a file that can be committed. In client JSON config the transport value is <code>"http"</code> (the protocol's spec name is Streamable HTTP): Claude Code accepts <code>"streamable-http"</code> as an alias and Cursor's IDE may tolerate it, but Cursor's CLI can drop the whole config file and Pi ignores <code>type</code> — so <code>"http"</code> is the only universally safe value.</p>
+      <p>The hosted server speaks Streamable HTTP at <code>https://api.premiselabs.co/mcp/</code> — the slashed form the keyed config-file rows below use. Keep your API key in an environment variable — never paste a literal <code>tt_…</code> key into a file that can be committed. In client JSON config the transport value is <code>"http"</code> (the protocol's spec name is Streamable HTTP): Claude Code accepts <code>"streamable-http"</code> as an alias and Cursor's IDE may tolerate it, but Cursor's CLI can drop the whole config file and Pi ignores <code>type</code> — so <code>"http"</code> is the only universally safe value.</p>
 
       <h4>Claude Code</h4>
       <p>Add to <code>.mcp.json</code> in your project. Claude Code <strong>requires</strong> <code>"type": "http"</code> — a <code>url</code> entry with no <code>type</code> is read as a stdio server and skipped.</p>
@@ -247,8 +253,20 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
       <h4>Claude Web</h4>
       <p>In claude.ai go to <strong>Settings → Connectors → Add custom connector</strong>, name it <code>Tortoise</code>, and use the Server URL above. Claude Web has no environment to read a variable from, so its request header holds the key literally: <code>Authorization: Bearer YOUR_KEY</code>. The key is held by Anthropic in your account — keep it private and revoke it from the dashboard if it leaks.</p>
 
-      <p class="callout">The hosted MCP server runs on our infrastructure — no Python or <code>tortoise</code> install needed. Your client just needs network access to <code>https://api.premiselabs.co/mcp/</code>.</p>
-      <p>After editing a config file, restart that client (Claude Code, Cursor, Pi, and both Codex surfaces). The Claude Desktop and Claude Web connectors are live immediately.</p>
+      <h4 id="chatgpt">ChatGPT (Developer mode)</h4>
+      <p>Connect it once — ChatGPT is key-less, so there is no config file to edit and no key to store:</p>
+      <ol>
+        <li>Enable <strong>Developer mode</strong>: chatgpt.com → Settings → Security and login → Developer mode (Plus / Pro / Business / Enterprise / Education).</li>
+        <li>Open <code>chatgpt.com/plugins</code> → the <strong>+</strong> button → create a Developer-mode app.</li>
+        <li>MCP server URL: <code>https://api.premiselabs.co/mcp</code> — no API key. Use the URL exactly as written, with no trailing slash. Choose <strong>OAuth</strong>; ChatGPT discovers Tortoise's authorization server automatically.</li>
+        <li>Click <strong>Scan Tools</strong>, sign in to Tortoise when prompted, and click <strong>Authorize</strong>. When Tortoise asks which organization to connect, choose the one you want this graph in.</li>
+        <li>Start a new chat at chatgpt.com (if the Tortoise tools don't appear, re-open <code>chatgpt.com/plugins</code> and re-check the <strong>Scan Tools</strong> result). Open <code><a href="https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md" target="_blank" rel="noopener">app.premiselabs.co/skills/tortoise-onboarding/SKILL.md</a></code> in a browser, copy the whole document, and paste it into that chat — ChatGPT has no local skills, so this document is what onboards it (if the agent can open the link itself, that works too).</li>
+        <li>Ask it to set up Tortoise: it follows those instructions to verify the connection and file your first memory — that first <strong>write</strong> is what the dashboard reads as connected. Which <code>tortoise_*</code> tools appear can be plan-dependent — reopen <code>chatgpt.com/plugins</code> and check the <strong>Scan Tools</strong> result to see which tools were granted. A grant of read tools only can read your graph but cannot finish connecting: write tools may not be granted on your OpenAI plan, so if the <strong>Scan Tools</strong> result shows no write tools, connect a keyed harness (Claude Code, Cursor, Pi, or Codex) to the same organization to complete onboarding.</li>
+      </ol>
+      <p>If ChatGPT asks for a key (they start <code>tt_…</code> or <code>tk_…</code>) or an <code>Authorization</code> header, you have left the OAuth path — refuse it. The document you pasted also carries keyed recipes for the other harnesses; they do not apply to ChatGPT.</p>
+
+      <p class="callout">The hosted MCP server runs on our infrastructure — no Python or <code>tortoise</code> install needed — so your client just needs network access to it.</p>
+      <p>After editing a config file, restart that client (Claude Code, Cursor, Pi, and both Codex surfaces). The Claude Desktop, Claude Web, and ChatGPT connectors are live immediately.</p>
     </div>
     <div class="card">
       <h3>Setup — self-hosted (stdio)</h3>
@@ -275,7 +293,7 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
         <li><strong>Reason:</strong> <code>tortoise_compute_confidence</code> — see how evidence propagates</li>
         <li><strong>Structure:</strong> <code>tortoise_create_operator</code>, <code>tortoise_traverse</code>, <code>tortoise_entity_profile</code>, and more</li>
       </ul>
-      <p>Your in-app welcome flow includes a ready-to-copy harness setup with your key pre-filled.</p>
+      <p>For the keyed harnesses (Claude Code, Cursor, Pi, and both Codex surfaces) the in-app welcome flow includes a ready-to-copy setup with your key pre-filled.</p>
     </div>
 
     <h2 id="api">API reference</h2>

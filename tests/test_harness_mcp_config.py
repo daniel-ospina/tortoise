@@ -422,7 +422,8 @@ class TestDocsPageAndSkillConfig:
     # heading (not a bare "Codex"/"Pi" substring) so deleting a row fails.
     ROW_HEADINGS = ("<h4>Claude Code</h4>", "<h4>Cursor", "<h4>Pi",
                     "<h4>Codex CLI</h4>", "<h4>Codex Desktop (no terminal)</h4>",
-                    "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>")
+                    "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>",
+                    '<h4 id="chatgpt">ChatGPT (Developer mode)</h4>')
 
     def _mcp_section(self) -> str:
         text = self.DOCS.read_text(encoding="utf-8")
@@ -470,6 +471,184 @@ class TestDocsPageAndSkillConfig:
         assert "~/.codex/config.toml" in desktop
         assert "bearer_token_env_var" in desktop
         assert "does <em>not</em> read shell exports" in desktop
+
+    # The dashboard's harness table: it pins the connector URL the ChatGPT row
+    # must teach (#2864).
+    HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
+
+    @classmethod
+    def _read_harnesses(cls) -> str:
+        """One reader for `harnesses.js`, so the parses below cannot drift."""
+        return cls.HARNESSES.read_text(encoding="utf-8")
+
+    @classmethod
+    def _dashboard_constant(cls, name: str) -> str:
+        """The dashboard's exported string constant `name`.
+
+        Exactly ONE match: a second definition would make the assertion below
+        read whichever came first and silently drop the other from every guard
+        that uses it.
+        """
+        found = re.findall(rf"^export const {name} =\s*\n?\s*'([^']+)'",
+                           cls._read_harnesses(), re.M)
+        assert len(found) == 1, (
+            f"{name} must be defined exactly once in harnesses.js, found "
+            f"{len(found)}: {found}")
+        return found[0]
+
+    def test_4836_docs_page_is_the_live_chatgpt_carrier(self):
+        """#4836: ChatGPT has no dashboard CHOOSER/connect surface (#2912's 4-family
+        chooser keeps it out; #2698 deleted the flat tab first). It is not absent
+        from the dashboard — the LIVE Memory-sources capture panel lists it as
+        unsupported-with-a-reason — but nothing there carries its onboarding
+        instructions, so the public docs page does. That page is the surface that
+        already CLAIMED to describe ChatGPT
+        connection. That claim was false ("the dashboard's ChatGPT tab") and must
+        not come back.
+
+        The row is the JOURNEY a ChatGPT user performs, so the assertions below
+        are per-step: a `/docs#chatgpt` visitor has to reach a verified
+        connection, not just a URL. Dropping a step, or replacing one with a
+        claim that is false for ChatGPT (a pasted key, an unnamed plan set),
+        must fail here rather than ship.
+        """
+        canonical = self._dashboard_constant("CANONICAL_MCP_URL")
+        instructions_url = self._dashboard_constant("ONBOARDING_INSTRUCTIONS_URL")
+        slashed = self._dashboard_constant("MCP_URL")
+        assert slashed == canonical + "/", "MCP_URL is the slashed keyed-row form"
+        docs = self.DOCS.read_text(encoding="utf-8")
+        assert "ChatGPT tab" not in docs, (
+            "docs.html must not send a ChatGPT user to the retired dashboard tab")
+        assert "it has no row below" not in docs, (
+            "docs.html must not claim ChatGPT has no row below once the row lands")
+        section = self._mcp_section()
+        start = section.find('<h4 id="chatgpt">')
+        assert start != -1, "docs #mcp must carry a ChatGPT carrier row (#4836)"
+        # Bound the slice to the row's own end — the next heading OR the
+        # hosted card's callout, which follows the row — so the literals below
+        # cannot be satisfied elsewhere in the section (the id is un-anchored
+        # because the docs indent their `<h4>` rows).
+        row = section[start:]
+        for delim in ('<p class="callout">', "<h3", "<h4"):
+            cut = row.find(delim, 1)
+            if cut != -1:
+                row = row[:cut]
+        # ...then to the ordered list INSIDE that row, so the step literals below
+        # cannot be satisfied by the row's closing prose instead of a step.
+        assert "<ol>" in row and "</ol>" in row, (
+            "the ChatGPT row must carry the ordered procedure the user performs")
+        steps = row.split("<ol>", 1)[1].split("</ol>", 1)[0]
+        for step in (
+            "Security and login",   # 1 — where the Developer-mode toggle lives
+            "(Plus / Pro / Business / Enterprise / Education)",  # 1 — plan set
+            "chatgpt.com/plugins",  # 2 — the Developer-mode app entry point
+            "Scan Tools",           # 4 — OAuth enrolment
+            "Authorize",            # 4 — consent (key-less connect completes here)
+            "paste it into that chat",  # 5 — the hand-off to the agent
+            "to verify the connection",  # 6 — the row names the verification hand-off
+            "file your first memory",  # 6 — the journey's outcome
+            "plan-dependent",       # 6 — which tools appear is plan-dependent
+        ):
+            assert step in steps, (
+                f"the ChatGPT row must keep step {step!r} — a /docs#chatgpt "
+                "visitor follows this list to a verified connection (#4836)")
+        assert steps.count("<li>") == 6, (
+            "the ChatGPT procedure is 6 steps; if you deliberately changed the "
+            "journey, update this count and the per-step literals together")
+        # The row must NOT name a RETIRED tool: `tortoise_health` is absent from
+        # `tools/list` (#3883), so a tool-grant client like ChatGPT cannot call
+        # it — naming it would claim a verification step ChatGPT cannot perform.
+        # The advertised equivalent is an agent-side detail for the onboarding
+        # document, not a step the human reads here.
+        assert "tortoise_health" not in row, (
+            "the ChatGPT row must not name the retired tortoise_health (#3883) — "
+            "it is not in tools/list, so ChatGPT cannot call it")
+        # The URL the row teaches must be the CONNECTOR form. harnesses.js pins
+        # CANONICAL_MCP_URL for every connector surface (the two Claude leaves +
+        # ChatGPT): it is the canonical endpoint, the value its PRM advertises and
+        # the form the shipped connector copy uses (#2864/#2849). The server
+        # TOLERATES the slash — oauth.py parse_resource rstrips it, and accepts
+        # the bare origin too — so this is a canonicality guard, not a hard
+        # failure the user would hit; the keyed rows keep the slashed MCP_URL.
+        assert f"<code>{canonical}</code>" in steps, (
+            f"the ChatGPT row must teach the canonical connector URL {canonical}")
+        assert f"<code>{canonical}/</code>" not in steps, (
+            "the ChatGPT row must not teach the slashed form (CANONICAL_MCP_URL)")
+        assert "no trailing slash" in steps, (
+            "the row must state the URL exactly — the connector form is the "
+            "canonical endpoint, not the slashed config-file form")
+        # The carrier LINKS the SERVED instructions document (the reach claim is
+        # that a user can open it), and it is the same constant the dashboard
+        # serves — a second hard-coded copy on a static page is only safe while
+        # a test ties it to the constant.
+        assert f'href="{instructions_url}"' in steps, (
+            "the ChatGPT row must LINK the onboarding instructions URL — it is "
+            "the live carrier #4836 requires, not a bare mention")
+        # Handing a cloud agent the whole document must not become a key leak:
+        # the document's teach-human recipes carry `Bearer <TORTOISE_API_KEY>`,
+        # so the row has to say the key-less path is the only one. The warning
+        # names BOTH minted prefixes (`tk_` for scoped/graph-bound keys,
+        # `tt_` for legacy shapes — hosted_api.py), so both are asserted here.
+        assert "left the OAuth path" in row, (
+            "the ChatGPT row must warn that no key/Authorization header belongs "
+            "in ChatGPT — the OAuth path is the only one")
+        assert "<code>tk_…</code>" in row, (
+            "the warning must name the tk_ prefix too — a scoped key is tk_, and "
+            "a warning that only says tt_ reads as not applying to its holder")
+        assert "<code>tt_…</code>" in row, (
+            "the warning must name the tt_ prefix too — dropping it would leave "
+            "legacy-shaped keys looking acceptable to ChatGPT")
+
+    def test_4836_document_section2_names_the_live_chatgpt_carrier(self):
+        """#4836 acceptance: `SKILL.md` §2's 7th-harness note must name the surface
+        that actually carries the instructions instead of leaving that to a
+        test-consumed constant.
+
+        `tests/test_onboarding_variants.py::test_4365_served_document_sends_
+        chatgpt_to_a_path_that_exists` owns the retired-tab pins for the whole
+        served document; this test re-pins the same literals SCOPED TO §2 (a
+        tighter surface — §2 could keep the retired tab while the rest of the
+        document is clean) and owns the carrier name.
+
+        The note↔chooser agreement is NOT re-checked here. The chooser half is
+        derived and asserted against the real vocabulary by
+        `website/apps/dashboard/src/onboardingEmptyStateKeyNote.test.js`
+        (`assert.ok(!chooserLeafIds().includes('chatgpt'))`), and a text scan from
+        Python cannot decide it without a shape heuristic (#4880).
+        """
+        skill = self.SKILL.read_text(encoding="utf-8")
+        marker = "> **#1701 —"
+        assert marker in skill, "SKILL.md lost the §2 7th-harness note"
+        terminator = "\n\n## 3. Install + connect"
+        assert terminator in skill, (
+            "SKILL.md lost §2's terminator — the slice would run to EOF and the "
+            "assertions below could be satisfied from any later section")
+        note = skill.split(marker, 1)[1].split(terminator, 1)[0]
+        carrier = "https://tortoise.premiselabs.co/docs#chatgpt"
+        assert carrier in note, (
+            "§2's note must name the live ChatGPT carrier (the public docs page)")
+        # Reachability: the note SENDS a user to that URL, so pin that the path
+        # still resolves to the docs page and that the fragment it names exists
+        # there. Either half being renamed leaves the note pointing at nothing
+        # (#4836) — this is the check the URL literal alone cannot make.
+        docs = self.DOCS.read_text(encoding="utf-8")
+        assert f'id="{carrier.rpartition("#")[2]}"' in docs, (
+            "the note's carrier fragment must exist on the docs page")
+        redirects = (REPO_ROOT / "website" / "_redirects").read_text(encoding="utf-8")
+        assert re.search(r"^/docs\.html\s+/docs(\s+\d+)?\s*$", redirects, re.M), (
+            "the carrier URL's path must keep resolving to docs.html")
+        assert "chatgpt.com/plugins" in note, (
+            "§2's note must keep naming the ChatGPT Developer-mode path")
+        assert "ChatGPT tab" not in note, (
+            "§2's note must not name the retired dashboard ChatGPT tab")
+        assert "no ChatGPT surface in the dashboard chooser" in note, (
+            "§2's note must state there is no ChatGPT chooser surface")
+        # The document ITSELF is what a ChatGPT agent receives, so the key
+        # prohibition has to travel with it — not only on the human-facing page
+        # (docs.html), whose warning the pasted document never carries.
+        assert "Never a request header" in note, (
+            "§2's note must forbid a key/Authorization header — the agent that "
+            "receives this document has to be told, not just the human")
 
     def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
         section = self._mcp_section()
