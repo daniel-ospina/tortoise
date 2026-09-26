@@ -319,17 +319,14 @@ def test_hooks_status_distinguishes_never_ran_from_not_installed(tmp_path):
 @pytest.mark.parametrize("payload,why", [
     (json.dumps({"harness": "claude", "kind": "capture-failure",
                  "recorded_at": "2026-09-26T00:00:00Z"}), "wrong kind"),
-    ("{not json at all", "malformed"),
     (json.dumps({"harness": "codex", "kind": "hook-run",
                  "recorded_at": "2026-09-26T00:00:00Z"}), "wrong harness"),
     (json.dumps(["hook-run"]), "not an object"),
 ])
-def test_a_foreign_or_corrupt_record_reads_as_no_observation(
-        tmp_path, payload, why):
-    """The READ condition is the WRITE condition (#4314): a file that is not a
-    ``KIND_HOOK_RUN`` record for THIS harness — foreign, malformed, or
-    corrupt — must degrade to "no run recorded", never raise and never read
-    as a run.
+def test_a_foreign_record_reads_as_no_observation(tmp_path, payload, why):
+    """The READ condition is the WRITE condition (#4314): a file that PARSES
+    but is not a ``KIND_HOOK_RUN`` record for THIS harness must degrade to "no
+    run recorded", never raise and never read as a run.
 
     Mutation: drop the ``kind``/``harness`` test in ``_read_hook_run`` — the
     wrong-kind case renders as a RUN and this REDs."""
@@ -350,6 +347,72 @@ def test_a_foreign_or_corrupt_record_reads_as_no_observation(
     line = _status_line(proc.stdout)
     assert line is not None, proc.stdout
     assert "none" in line and "no run recorded" in line, (why, line)
+
+
+@pytest.mark.parametrize("payload,why", [
+    ("", "an empty file (the writer truncates before writing)"),
+    ('{"harness": "claude", "kind": "hook-ru', "a torn write"),
+    ("{not json at all", "plain garbage"),
+])
+def test_an_unparseable_record_is_not_reported_as_no_record(tmp_path, payload, why):
+    """A file that EXISTS but yields no record must not be rendered as an
+    absence nobody observed.  The shipped writer truncates and rewrites with a
+    plain `>` redirect, so a torn file is a real (if brief) state; reporting it
+    as "no run recorded" would claim a run never happened.
+
+    Mutation: return `None` instead of raising `_HookRunUnreadable` from the
+    parse arm — the line claims nothing was recorded and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    (home / "hook-runs").mkdir(parents=True)
+    (home / "hook-runs" / "claude.json").write_text(payload, encoding="utf-8")
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, (why, proc.stdout)
+    _assert_observation_is_honest(line)
+    assert "cannot tell whether a run was recorded" in line, (why, line)
+    assert "no run recorded" not in line, (why, line)
+
+    _proc, jpayload = _status(home, receipts, tmp_path, root=root,
+                              json_out=True)
+    assert jpayload["hook_run"]["observed"] is None, (why, jpayload["hook_run"])
+    assert jpayload["hook_run"]["reason"] == "record-unreadable", \
+        (why, jpayload["hook_run"])
+
+
+def test_a_non_executable_writer_is_not_called_qualified(tmp_path):
+    """A current version marker is not enough: `detect_install` also requires
+    the OWNER's exec bit, and its `not-executable` finding is blocking.  A
+    script the harness cannot execute is not a writer that could have recorded
+    a run, so calling the absent record a real absence would contradict the
+    finding printed beside it in the same payload.
+
+    Mutation: drop the exec-bit check in `_hook_run_writer_gap` — the reason
+    goes null while the finding says not-executable, and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    (root / ".claude" / "hooks" / "session-start.sh").chmod(0o644)
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    assert "cannot tell whether a run was recorded" in line, line
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    hr = payload["hook_run"]
+    assert hr["observed"] is None, hr
+    assert hr["reason"] == "hook-script-unqualified", hr
+    kinds = {f["kind"] for f in payload["findings"]}
+    assert kinds & {"not-executable", "not-executable-symlink"}, (kinds, hr)
 
 
 def test_hooks_status_says_nothing_about_a_harness_whose_hooks_do_not_write(
@@ -582,9 +645,9 @@ def test_a_pathologically_nested_record_cannot_silence_the_surface(tmp_path):
     original defect: the surface must still say what it could not tell.
 
     Mutation: narrow the catch in `_read_hook_run` back to
-    `(OSError, ValueError)` — the escape lands in the outer arm, which says
-    "could not be read" instead of "no run recorded", and this REDs.  (With
-    BOTH layers removed the line disappears entirely.)"""
+    `(OSError, UnicodeError)` — a `RecursionError` is neither, so it escapes
+    and this REDs on the `Traceback` assertion (the line itself still says
+    what it could not tell)."""
     home = tmp_path / "home"
     home.mkdir()
     root = tmp_path / "project"
@@ -602,14 +665,11 @@ def test_a_pathologically_nested_record_cannot_silence_the_surface(tmp_path):
     assert "Traceback" not in proc.stderr, proc.stderr
     line = _status_line(proc.stdout)
     assert line is not None, proc.stdout
-    # A record that cannot be PARSED is malformed, and the read/write
-    # condition says a malformed record is indistinguishable from no
-    # observation — so the honest line is the same "no run recorded" the
-    # foreign/corrupt test asserts.  Asserting merely "cannot tell" would let
-    # this pass with the INNER catch removed, because the outer arm also
-    # prints something; silence (the original defect) is the only other
-    # failure mode the line can have.
-    assert "no run recorded" in line, line
+    # A record that cannot be PARSED is an observation that could not be MADE,
+    # never a claim that no run happened — asserting "no run recorded" here
+    # would be the false absence #3797 exists to remove.
+    assert "cannot tell whether a run was recorded" in line, line
+    assert "no run recorded" not in line, line
     _assert_observation_is_honest(line)
 
 
@@ -837,13 +897,13 @@ def test_an_unreadable_writer_script_is_not_called_marker_less(tmp_path):
 def test_a_writer_at_the_floor_reports_a_real_absence(tmp_path):
     """HOOK_RUN_GENERATION is a FLOOR, not a mirror of the shipped marker: the
     SHIPPED install IS at the floor while the write contract is unchanged, so
-    an absent record from it is a real absence of a run.  If the floor is ever
-    raised in lockstep with an unrelated script bump, this install becomes
-    "too old" and this REDs — the intended behaviour is pinned here against an
-    UNMODIFIED install, not against a fixture derived from the constant.
+    an absent record from it is a real absence of a run.  Raising the floor
+    WITHOUT bumping the shipped script is the mutation this pins — that is the
+    lockstep error (a floor that follows an unrelated script bump would call an
+    install that can still record "too old").
 
-    Mutation: raise the floor with the shipped generation — the shipped
-    install is called too old and this REDs."""
+    Mutation: `HOOK_RUN_GENERATION = 8` while the shipped script stays at 7 —
+    the shipped install is called too old and this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     root = tmp_path / "project"

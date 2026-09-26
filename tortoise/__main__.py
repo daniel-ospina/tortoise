@@ -4156,12 +4156,12 @@ def _read_hook_run(harness: str) -> dict | None:
     The READ condition is the WRITE condition (#4314): a record is accepted
     only when its ``kind`` marker equals
     :data:`tortoise.hook_install.KIND_HOOK_RUN` AND its recorded ``harness``
-    is the one asked about.  A file that is absent, MALFORMED, not an object,
-    or of another kind is therefore indistinguishable from "no observation" —
-    which is exactly what the caller must render.  This is the same rule
-    ``session_verify._install_link`` applies to the sibling ``capture-errors``
-    record, and it is what stops a foreign file at this path from reading as
-    "the hook ran".
+    is the one asked about.  A file that is ABSENT, or that PARSES to
+    something which is not that record, is therefore indistinguishable from
+    "no observation" — which is exactly what the caller must render.  This is
+    the same rule ``session_verify._install_link`` applies to the sibling
+    ``capture-errors`` record, and it is what stops a foreign file at this
+    path from reading as "the hook ran".
 
     The catch on the PARSE is broad ON PURPOSE and must stay broad: the next
     unenumerated parse failure is the same silent-suppression bug — a deeply
@@ -4170,12 +4170,16 @@ def _read_hook_run(harness: str) -> dict | None:
     P2-2), and an escape reads as "no record", i.e. as a run that never
     happened.  Same shape as ``detect_install``'s boundary above.
 
-    A record that is present but UNREADABLE is not treated as absent: it
+    A record that is present but whose BYTES cannot be turned into a record —
+    unreadable, undecodable, or not JSON at all — is not treated as absent: it
     raises :class:`_HookRunUnreadable`, because rendering it as "no run
-    recorded" would be an absence nobody observed.  A non-regular file (FIFO,
-    directory, socket) is never read at all — ``open()`` on a FIFO blocks
-    forever, and this command is credential-free and interactive
-    (``hook_install._load_settings`` carries the same rule for settings.json).
+    recorded" would be an absence nobody observed.  The shipped writer
+    truncates and rewrites with a plain ``>`` redirect, so a torn file is a
+    real (if brief) state, and it must not become a claim that the hook never
+    ran.  A non-regular file (FIFO, directory, socket) is never read at all —
+    ``open()`` on a FIFO blocks forever, and this command is credential-free
+    and interactive (``hook_install._load_settings`` carries the same rule for
+    settings.json).
     """
     import json as _json
 
@@ -4199,8 +4203,10 @@ def _read_hook_run(harness: str) -> dict | None:
         data = _json.loads(raw)
     except MemoryError:
         raise
-    except Exception:
-        return None
+    except Exception as e:
+        # Not a record at all — a torn write (the writer truncates first), an
+        # empty file, or plain garbage.  The observation could not be MADE.
+        raise _HookRunUnreadable(str(e)) from e
     if not isinstance(data, dict):
         return None
     if data.get("kind") != KIND_HOOK_RUN or data.get("harness") != harness:
@@ -4210,22 +4216,25 @@ def _read_hook_run(harness: str) -> dict | None:
 
 #: Reason codes for an ABSENT hook-run record.  :data:`NO_WRITER_MISSING` is
 #: real evidence that the hook did not run — nothing is installed to run it.
-#: The other two are NOT evidence: a writer exists that cannot record, so a
-#: reader must say it could not tell.  Deliberately coarse — naming WHICH
-#: condition holds (not-a-regular-file / unreadable / foreign / un-markered)
-#: is `hook_install.detect_install`'s job, and its finding is printed beside
-#: this reason; a vocabulary that guessed would be able to contradict it.
+#: The other two are NOT evidence: the session-start path is not a writer that
+#: can be qualified (a directory, a FIFO, a broken symlink, an unreadable or
+#: un-markered file, below the floor), so a reader must say it could not tell.
+#: Deliberately coarse — naming WHICH condition holds is
+#: `hook_install.detect_install`'s job, and its finding is printed beside this
+#: reason; a vocabulary that guessed would be able to contradict it.
 NO_WRITER_MISSING = "hook-script-missing"
 NO_WRITER_UNQUALIFIED = "hook-script-unqualified"
 NO_WRITER_TOO_OLD = "hook-scripts-too-old"
 
 
 class _HookRunUnreadable(Exception):
-    """A record EXISTS at the path but could not be READ (#3797).
+    """A record EXISTS at the path but did not yield one (#3797).
 
-    Distinct from "no record": the read/write condition makes a MALFORMED
-    record indistinguishable from no observation, but a file that is present
-    and unreadable must not be rendered as an absence nobody observed.
+    Distinct from "no record": a file that is present but yields no record —
+    unreadable, undecodable, not JSON at all, or torn mid-write — must not be
+    rendered as an absence nobody observed.  ``None`` from
+    :func:`_read_hook_run` is reserved for a record that is ABSENT or that
+    PARSES to something which is not this harness's ``hook-run`` marker.
     """
 
 
@@ -4246,10 +4255,14 @@ def _hook_run_writer_gap(layout, root) -> tuple[str, int | None, int] | None:
     causes (no marker, an unreadable file — it swallows the `OSError` — and a
     foreign script), so a reason that named one of them would assert an
     install fact nobody read, and could contradict the `detect_install`
-    finding printed beside it.  Best-effort by design: a read failure yields
-    ``None`` (no opinion), never a claim.
+    finding printed beside it.  A failure to LOOK is reported the same coarse
+    way rather than as a real absence.
     """
-    from tortoise.hook_install import HOOK_RUN_GENERATION, read_hook_version
+    from tortoise.hook_install import (
+        HOOK_RUN_GENERATION,
+        _has_owner_exec_bit,
+        read_hook_version,
+    )
 
     try:
         spec = next((s for s in layout.scripts if "session-start" in s.name),
@@ -4265,10 +4278,22 @@ def _hook_run_writer_gap(layout, root) -> tuple[str, int | None, int] | None:
             # missing would contradict the finding beside it.
             return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
         installed = read_hook_version(path)
+        # A current marker is not enough: `detect_install` also requires the
+        # OWNER's exec bit (its `not-executable` finding is blocking), and a
+        # script the harness cannot execute is not a writer that could have
+        # recorded a run.  Same predicate, one definition.
+        current = installed is not None and installed >= HOOK_RUN_GENERATION
+        if current and not _has_owner_exec_bit(path.stat().st_mode):
+            return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
     except MemoryError:
         raise
     except Exception:
-        return None
+        # NO OPINION — which must not be rendered as a real absence: `None`
+        # from this function means "the writer could have recorded one", so a
+        # read failure that returned it would fabricate the absence #3797
+        # exists to remove.  `detect_install`'s catch-all shape, and the same
+        # reasoning as `_read_hook_run`'s parse boundary.
+        return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
     if installed is None:
         # Marker-less (pre-#3795), unreadable, or foreign — see the docstring.
         return (NO_WRITER_UNQUALIFIED, None, HOOK_RUN_GENERATION)
@@ -4314,10 +4339,11 @@ def _print_hook_run(harness: str, layout, root) -> None:
     them says "installed" — the record proves a RUN, and the drift findings
     above are the only thing that speak to the install.  Where the observation
     could not be MADE — the state directory is unresolvable, a record is
-    present but unreadable, the installed scripts carry no version marker or
-    predate the writer — the line says so rather than reporting an absence it
-    did not observe; and where the record's own probe fields are unreadable it
-    says that instead of inventing an outcome.
+    present but yielded none, or the session-start path cannot be qualified as
+    a writer (the findings above say which condition holds) — the line says so
+    rather than reporting an absence it did not observe; and where the
+    record's own probe fields are unreadable it says that instead of inventing
+    an outcome.
     """
     label = "Last hook run observed on this machine:"
     try:
@@ -4394,17 +4420,19 @@ def _hook_run_json(harness: str, layout, root) -> dict | None:
     record at all (codex/cursor) — distinct from ``observed: false``, which
     is a real absence of a RUN for a hook that does write one.
 
-    ``observed`` is ``True``/``False``/``None``: ``False`` is a real absence
-    of a RUN (a writer is installed and could have recorded one), and ``None``
-    is "the observation could not be made" — never a fabricated absence.
-    When it is not ``True``, ``reason`` says which of those it is
-    (:data:`NO_WRITER_MISSING` alone means the absence is real;
-    :data:`NO_WRITER_UNQUALIFIED` and :data:`NO_WRITER_TOO_OLD` mean the
-    record could not have been written, with ``generation`` for the latter).
-    When it IS ``True`` but the probe fields are unreadable, ``reason`` STAYS
-    ``None`` and ``probe_outcome`` carries the problem instead, so a consumer
-    keying on ``reason is not None`` is never told an observed run was not
-    observed.  Best-effort and exit-code-neutral, like its text sibling.
+    ``observed`` is ``True``/``False``/``None``.  ``False`` is a REAL absence
+    of a RUN, and ``reason`` names its basis: ``null`` (a qualified writer
+    that could have recorded one) or :data:`NO_WRITER_MISSING` (nothing is
+    installed to write one).  ``None`` is "the observation could not be
+    made" — never a fabricated absence — with :data:`NO_WRITER_UNQUALIFIED`
+    or :data:`NO_WRITER_TOO_OLD` (plus ``generation``) when the writer could
+    not be qualified, and ``record-unreadable`` /
+    ``state-directory-unresolvable`` when the record could not be read.
+    When ``observed`` IS ``True`` but the probe fields are unreadable,
+    ``reason`` STAYS ``None`` and ``probe_outcome`` carries the problem
+    instead, so a consumer keying on ``reason is not None`` is never told an
+    observed run was not observed.  Best-effort and exit-code-neutral, like
+    its text sibling.
     """
     if not layout.writes_hook_run:
         return None
