@@ -271,7 +271,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 2
+_PREWIPE_SNAPSHOT_VERSION = 3
 # #2814: v2 adds the `config_snapshot` section. Reading v1 is required
 # (backward compatibility): a rescue file written before this change carries
 # no config record, and the union treats that exactly as the loader does —
@@ -280,7 +280,14 @@ _PREWIPE_SNAPSHOT_VERSION = 2
 # `_write_prewipe_snapshot`, so without a bump a v1 build would accept this
 # file and silently ignore `config_snapshot` while its wipe landed. With the
 # bump that build REFUSES the rebuild instead (its `version != 1` check).
-_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2)
+#
+# #4653: v3 adds the `event_meta` section (the `:GraphEventMeta` high-water
+# mark). Same reasoning, one section later: a v2 build reading a v3 file
+# would ignore `event_meta` and wipe — silently resetting the event-log
+# allocator, which is the defect — so the version gate is what makes an
+# older binary refuse instead. v1 and v2 remain readable (`v1` written by the
+# #2943/#990 build, `v2` by the #2814 one).
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -292,10 +299,28 @@ _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       "batch_point_links", "session_snapshot",
                       "session_point_links",
                       # #2814: authoritative configuration. Enrolled here so it
-                      # is validated before the wipe (:447) and so the
-                      # retirement payload and `rebuild_all`'s write payload can
-                      # be DERIVED from this tuple rather than re-listed.
-                      "config_snapshot")
+                      # is validated before the wipe (via
+                      # `_SNAPSHOT_ENTRY_CHECK`) and so the retirement payload
+                      # and `rebuild_all`'s write payload can be DERIVED from
+                      # this tuple rather than re-listed.
+                      "config_snapshot",
+                      # #4653: the `:GraphEventMeta` high-water mark. The wipe
+                      # destroys the event-log allocator, and `last_seq` exists
+                      # nowhere else (the JSONL carries no `seq`), so it must be
+                      # carried like the classes above — but it is NOT a
+                      # config-registry class (no identity property), so it
+                      # rides its own section and its own restore rule. Enrolled
+                      # here so pre-wipe validation (via
+                      # `_SNAPSHOT_ENTRY_CHECK`), the write payload and the
+                      # RETIREMENT payload all derive it from this one tuple:
+                      # a hand-list would go stale and leave the retirement
+                      # artifact carrying a live high-water mark that the next
+                      # rebuild's union would re-merge. The union's return
+                      # literal is hand-written for every section, so
+                      # `test_event_meta_section_and_validator_are_wired` pins
+                      # its key set against this tuple — a section added here and
+                      # forgotten there cannot pass silently.
+                      "event_meta")
 # The sidecar is read whole into memory before the wipe, so an unbounded file
 # (a planted one especially — the log dir is caller-supplied) would exhaust
 # memory on the recovery path. The cap is now WRITER-ENFORCED
@@ -418,6 +443,12 @@ def _assert_config_registry_safe() -> None:
             "the config registry exists but `config_snapshot` is not in "
             "_SNAPSHOT_SECTIONS — the capture would never be validated or "
             "written (#2814)"
+        )
+    if "event_meta" not in _SNAPSHOT_SECTIONS:
+        raise RuntimeError(
+            "`event_meta` is not in _SNAPSHOT_SECTIONS — the `:GraphEventMeta` "
+            "high-water mark would neither be validated nor written, so a "
+            "rebuild would silently reset the event-log allocator to 1 (#4653)"
         )
 
 
@@ -666,6 +697,47 @@ def _capture_config_snapshot(g) -> list[dict]:
     return entries
 
 
+def _capture_event_meta(proj) -> list[dict]:
+    """Read the `:GraphEventMeta` high-water mark into the `event_meta` section.
+
+    #4653: a 0-or-1 element section. ``last_seq`` is the ONLY durable record of
+    the highest ``:GraphEvent.seq`` ever handed out — the JSONL journal carries
+    no ``seq`` — so the wipe destroys it irrecoverably unless it is carried.
+    An absent counter node yields ``[]`` (an entry-less section), never a
+    synthetic ``{"last_seq": 0}``: a graph that never emitted must come back
+    with no counter so ``next_seq`` still creates it at 1.
+
+    A read failure propagates to the caller's ``capture_failed`` gate — the
+    #2943 discipline (a corrupt/heavy read failing while the light DELETE
+    succeeds would otherwise reset the allocator with no durable record).
+    """
+    from tortoise.event_store import capture_watermark
+    entry = capture_watermark(proj)
+    return [entry] if entry is not None else []
+
+
+def _event_meta_last_seq(entries) -> int | None:
+    """The carried high-water mark from a (unioned) ``event_meta`` section.
+
+    The section is validated before the wipe, so this only unwraps it; a
+    malformed entry is ignored rather than guessed at, because the pre-wipe
+    validator has already refused the file (the loader never hands one here).
+
+    The section is WRITTEN as a singleton (0 or 1 entry), but the MAXIMUM over
+    whatever entries are present is taken rather than the first: the union is
+    fed hand-planted as well as writer-produced sections, and a counter's only
+    safe collapse is the maximum — last-wins or first-wins could both hand back
+    a LOWER value than the section actually carries.
+    """
+    values = [
+        entry.get("last_seq") for entry in entries or []
+        if isinstance(entry, dict)
+        and isinstance(entry.get("last_seq"), int)
+        and not isinstance(entry.get("last_seq"), bool)
+    ]
+    return max(values) if values else None
+
+
 def _validate_point_entry(entry) -> str | None:
     """Return a complaint about a ``synthetic_events`` entry, else None.
 
@@ -754,6 +826,46 @@ def _validate_link_entry(entry) -> str | None:
     return None
 
 
+def _validate_event_meta_entry(entry) -> str | None:
+    """Return a complaint about an ``event_meta`` entry, else None.
+
+    #4653: the section is WRITTEN with at most one entry — the
+    `:GraphEventMeta` high-water mark — and its ``last_seq`` is the value a
+    rebuild writes back into the live allocator. The type check is therefore
+    load-bearing, not cosmetic: it is the untrusted boundary, and a non-integer
+    is silently DROPPED downstream (``_event_meta_last_seq`` keeps only ``int``,
+    so a string ``last_seq`` would make the section look empty and the counter
+    would never be restored). ``bool`` is excluded explicitly because
+    ``int(True) == 1`` is not a counter. A hand-planted file may carry SEVERAL
+    entries; each is validated here and they are collapsed to their maximum by
+    ``_event_meta_last_seq``. The upper bound matters as much as the type: above
+    ``MAX_SEQ`` the ``seq`` range index no longer compares exactly, so those
+    events are silently undeliverable, and the range is therefore closed at both
+    ends here — and, for the same reason, on a live capture
+    (``event_store.capture_watermark``) and at the write itself
+    (``event_store.reestablish_watermark``).
+    """
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    last_seq = entry.get("last_seq")
+    if isinstance(last_seq, bool) or not isinstance(last_seq, int):
+        return (f"last_seq {last_seq!r} is not an int — the high-water mark is "
+                f"a sequence number")
+    if last_seq < 0:
+        return f"last_seq {last_seq} is negative"
+    from tortoise.event_store import MAX_SEQ
+    if last_seq > MAX_SEQ:
+        return (f"last_seq {last_seq} is outside the event-store integer "
+                f"domain (0 <= last_seq <= {MAX_SEQ})")
+    for key, value in entry.items():
+        if key == "last_seq":
+            continue
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
 _SNAPSHOT_ENTRY_CHECK = {
     "synthetic_events": _validate_point_entry,
     "batch_snapshot": _validate_batch_entry,
@@ -761,6 +873,7 @@ _SNAPSHOT_ENTRY_CHECK = {
     "session_snapshot": _validate_session_entry,
     "session_point_links": _validate_link_entry,
     "config_snapshot": _validate_config_entry,
+    "event_meta": _validate_event_meta_entry,
 }
 # Node properties a snapshot Point carries that the replay does not fully
 # reconstruct, restored by the pass-1b tail.
@@ -1162,11 +1275,36 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             continue
         config_seen.add(key)
         config_entries.append(entry)
+    # #4653: the `:GraphEventMeta` high-water mark. A section WRITTEN as a
+    # singleton (0 or 1 entry) whose value is a MONOTONE COUNTER, so NEITHER of
+    # `_merge_entry`'s two rules applies: fresh-wins lets a LOWER post-wipe
+    # capture overwrite the carried value (the allocator moves BACKWARD), and
+    # leftover-wins keeps a stale value when the graph genuinely kept emitting.
+    # The only correct merge for a high-water mark is the MAXIMUM — an inflated
+    # value merely opens a gap in the seq space, which is harmless; a deflated
+    # one re-issues `seq` values the graph already handed out, which is the
+    # collision this whole section exists to prevent.
+    #
+    # The backward move is REACHABLE, not theoretical, and it is the reason
+    # for the max: the sidecar-recovery path is an interrupted rebuild, so the
+    # previous run's wipe already destroyed `:GraphEventMeta`, and any event
+    # emitted before the retry re-creates the counter LOW (`next_seq` MERGEs it
+    # at 1). The fresh capture is therefore NOT reliably the newer counter —
+    # after a reset it is the OLDER one. The post-replay guard cannot recover
+    # the discarded value either: it compares against the replayed log, and
+    # `:GraphEvent` rows are not replayed at all (#4664).
+    carried = max(
+        (v for v in (_event_meta_last_seq(leftover.get("event_meta")),
+                     _event_meta_last_seq(fresh.get("event_meta")))
+         if v is not None),
+        default=None)
+    event_meta = [{"last_seq": carried}] if carried is not None else []
     return {"synthetic_events": events, "batch_snapshot": batches,
             "batch_point_links": links,
             "session_snapshot": session_containers,
             "session_point_links": session_links,
-            "config_snapshot": config_entries}
+            "config_snapshot": config_entries,
+            "event_meta": event_meta}
 
 
 class _GuardedGraph:
@@ -3430,6 +3568,21 @@ class FalkorProjection(
         events = list(log.read_all())
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
+        # #4653: capture the event-log high-water mark BEFORE the wipe, so it
+        # can be re-established after the replay. This engine has no `log_dir`
+        # and therefore no durable pre-wipe sidecar, so the mark is held in
+        # memory: an interrupted `rebuild()` cannot restore it — the ROUTED
+        # recovery path (`recover_from_log` → `rebuild_all`, and the CLI) is
+        # the one that carries it durably. It is still strictly better than
+        # the reset it replaces, and identical in effect on the normal path.
+        #
+        # The read runs BEFORE `DETACH DELETE`, so a failure aborts with the
+        # graph untouched — never captured-then-swallowed (#2943's "a graph
+        # that cannot answer a read is no evidence the wipe is safe").
+        from tortoise.event_store import (  # noqa: I001
+            capture_watermark, reestablish_watermark)
+        carried_watermark = capture_watermark(self)
+        carried_last_seq = (carried_watermark or {}).get("last_seq")
         self.g.query("MATCH (n) DETACH DELETE n")
         # #3664: this engine feeds ``apply()`` ONE record at a time, so an
         # ``EntityLinked`` whose endpoint is created LATER in the journal would
@@ -3447,6 +3600,23 @@ class FalkorProjection(
                 continue
             self.apply(ev)
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
+        # #4653: re-establish the watermark captured above. DEGRADES, never
+        # raises — this runs after the wipe (#2943 "no loss without proof").
+        try:
+            restored = reestablish_watermark(self, carried_last_seq)
+            if restored is not None:
+                logger.info(
+                    "rebuild: re-established the :GraphEventMeta watermark "
+                    "at last_seq=%d (#4653)", restored)
+        except Exception as e:  # noqa: BLE001, RUF100
+            logger.error(
+                "rebuild: could not re-establish the :GraphEventMeta "
+                "watermark (%s: %s) — the event-log allocator may restart at "
+                "1 and under-count subscribers that polled to a higher "
+                "cursor. The graph itself is rebuilt; a full "
+                "`rebuild_all(log_dir)` carries the mark durably instead "
+                "(#4653)",
+                type(e).__name__, e)
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -3663,6 +3833,28 @@ class FalkorProjection(
             capture_failed.append(
                 f"config snapshot/#2814 ({type(e).__name__}: {e})")
 
+        # ── Event-log watermark snapshot (#4653) ────────────────────
+        # The wipe destroys `:GraphEventMeta`, and its `last_seq` is the
+        # per-graph allocator handed to `event_store.next_seq`. It is NOT
+        # re-derivable after the wipe: `rebuild_all` does not replay
+        # `:GraphEvent` rows (#4664 — the store comes back EMPTY), and the
+        # JSONL journal carries no `seq`, so a pure post-replay re-derivation
+        # reads `max(:GraphEvent.seq) = null` and resets the allocator to 1.
+        # The next emit then collides with a `seq` the graph already handed
+        # out, and every consumer holding a cursor at or above it silently
+        # under-counts (`read_after` is `seq > cursor`) — the identical harm
+        # `hosted_backup._restore_event_meta` (#3902) prevents on the
+        # backup/restore path.
+        #
+        # Best-effort read funneled into the SAME `capture_failed` gate: a
+        # failed read must not fall through to the wipe.
+        event_meta_snapshot: list[dict] = []
+        try:
+            event_meta_snapshot = _capture_event_meta(self)
+        except Exception as e:
+            capture_failed.append(
+                f"event-log watermark/#4653 ({type(e).__name__}: {e})")
+
         # ── #2943: a FAILED capture must not fall through to the wipe ───
         # Both capture blocks above are best-effort by design (the graph may
         # be corrupt), but proceeding after a failed capture would wipe the
@@ -3769,7 +3961,7 @@ class FalkorProjection(
                 "rebuild: found a leftover pre-wipe snapshot at %s (%d "
                 "graph-only point event(s), %d batch(es), %d batch link(s), "
                 "%d session container(s), %d session link(s), "
-                "%d config entry(ies)) "
+                "%d config entry(ies), event-log watermark %s) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
                 snapshot_path,
@@ -3778,7 +3970,8 @@ class FalkorProjection(
                 len(leftover.get("batch_point_links") or []),
                 len(leftover.get("session_snapshot") or []),
                 len(leftover.get("session_point_links") or []),
-                len(leftover.get("config_snapshot") or []))
+                len(leftover.get("config_snapshot") or []),
+                _event_meta_last_seq(leftover.get("event_meta")))
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
             "batch_snapshot": batch_snapshot,
@@ -3786,6 +3979,7 @@ class FalkorProjection(
             "session_snapshot": session_snapshot,
             "session_point_links": session_point_links,
             "config_snapshot": config_snapshot,
+            "event_meta": event_meta_snapshot,
         })
         synthetic_events = merged["synthetic_events"]
         batch_snapshot = merged["batch_snapshot"]
@@ -3805,6 +3999,14 @@ class FalkorProjection(
         # above) so the union's per-key leftover-wins rule is what the write
         # payload and the restore leg both see.
         config_snapshot = merged["config_snapshot"]
+        # #4653: assigned from `merged` (not from the capture above) so the
+        # union's MAXIMUM rule is what the write payload and the post-replay
+        # restore both see. The leftover is NOT necessarily the only record: on
+        # the sidecar-recovery path the live counter may be gone, but when the
+        # app emitted after the interrupted wipe the live capture exists too —
+        # and can be LOWER (that wipe reset the counter), which is exactly why
+        # the union takes the maximum of the two instead of picking a side.
+        event_meta_snapshot = merged["event_meta"]
         # ── #2814 T2: a pre-preservation rescue file cannot record config ──
         # A sidecar written by a build that predates this change has no
         # `config_snapshot` section at all — so on the sidecar-RECOVERY path
@@ -3923,6 +4125,15 @@ class FalkorProjection(
                     ]
                 _write_prewipe_snapshot(snapshot_path, payload)
             except (OSError, TypeError, ValueError) as e:
+                # #4653: the `event_meta` section is named as well. It is the one
+                # section whose only other record is the node the wipe destroys
+                # (`:GraphEventMeta` is not re-derivable from the journal), so a
+                # watermark-only refusal would otherwise read as protecting
+                # "0 ... 0 ... and the 0 config entries".
+                watermark_note = (
+                    " The wipe would also destroy the event-log high-water "
+                    "mark this snapshot carries (#4653) — no other record "
+                    "holds it." if event_meta_snapshot else "")
                 raise RuntimeError(
                     f"rebuild aborted BEFORE the graph wipe: could not persist "
                     f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
@@ -3933,9 +4144,10 @@ class FalkorProjection(
                     f"{len(session_point_links)} session link(s) with no "
                     f"durable record (#2943, #3947) — and the "
                     f"{len(config_snapshot)} captured authoritative config "
-                    f"entr(y/ies) with them (#2814). Fix the cause — write "
-                    f"permissions/space on the event-log directory, or a "
-                    f"non-serializable Point property — and re-run."
+                    f"entr(y/ies) with them (#2814).{watermark_note} Fix the "
+                    f"cause — write permissions/space on the event-log "
+                    f"directory, or a non-serializable Point property — and "
+                    f"re-run."
                 ) from e
         elif leftover is not None:
             # Nothing left to protect — do not leave a stale sidecar behind.
@@ -5640,6 +5852,88 @@ class FalkorProjection(
                             f"(b:Point {{id:$b}}) SET r += $attrs",
                             params={"a": src_f, "b": tgt_f, "attrs": attrs},
                         )
+
+        # ── #4653: re-establish the event-log watermark ───────────────
+        # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is
+        # retired, so what the payload carries is what this run restored. The
+        # wipe destroyed `:GraphEventMeta` and no replay pass recreates it
+        # (#4664), so without this the next `next_seq` MERGEs a fresh counter
+        # at 1 — colliding with `seq` values the graph already handed out and
+        # silently under-counting every consumer parked above the restart.
+        #
+        # DEGRADES, never raises: this runs after the wipe, and a raise would
+        # leave the store without its watermark (#2943 "no loss without
+        # proof" — the same rule the derived-restore and config-restore loops
+        # above follow). The failure is an ERROR naming the consequence; the
+        # sidecar is still retired below, because keeping a graph-wide rescue
+        # file to re-merge pre-wipe truth for EVERY id in it is strictly worse
+        # than a reset allocator (see the #4305 note below).
+        try:
+            from tortoise.event_store import reestablish_watermark
+            # Whether the RESCUE FILE carried the mark decides what the outcome
+            # MEANS, because the merged carry can also come from the LIVE
+            # capture. Three cases, and the wording of each claims only what is
+            # knowable: (a) nothing to restore at all; (b) a value is restored but
+            # the file cannot say whether it is the pre-wipe mark or one
+            # re-created after the wipe; (c) the file carried the mark.
+            leftover_carry = (None if leftover is None else
+                              _event_meta_last_seq(leftover.get("event_meta")))
+            restored = reestablish_watermark(
+                self, _event_meta_last_seq(event_meta_snapshot))
+            if restored is None:
+                if leftover is not None:
+                    logger.error(
+                        "rebuild: the event-log watermark could NOT be "
+                        "restored and the allocator is left with no counter, "
+                        "so it restarts at 1 at the next emit — the rescued "
+                        "pre-wipe snapshot (version %s) carries no usable "
+                        "`event_meta` mark, no replay pass recreates the "
+                        "counter (#4664), and the live graph holds none. "
+                        "Restarting at 1 is correct for a graph that never "
+                        "emitted and a silent under-count for one whose "
+                        "counter a wipe destroyed: the next emit may re-issue "
+                        "seqs the pre-wipe graph already used, and every "
+                        "subscriber parked above the restart then under-counts "
+                        "without being told. The snapshot records only its "
+                        "capture-time state, so it cannot tell the two apart. "
+                        "The graph itself is rebuilt; a rescue file written by "
+                        "the current version carries the mark (#4653)",
+                        leftover.get("version"))
+            elif leftover is not None and leftover_carry is None:
+                # A state-UNKNOWN signal, like `legacy_sidecar_no_config_record`
+                # (#2814): the counter now holds a value, and the file records
+                # only its capture-time state, so it cannot say whether that
+                # value is the one the graph already had (the window between the
+                # sidecar write and the wipe is real) or one re-created after
+                # that wipe (a lost pre-wipe position).
+                logger.error(
+                    "rebuild: the rescued pre-wipe snapshot (version %s) "
+                    "carries no usable `event_meta` mark, so the allocator "
+                    "position could NOT be recovered from it and CANNOT be "
+                    "determined: the counter holds %d, which is either the "
+                    "value it already had before this wipe+replay (nothing "
+                    "lost) or one re-created after that earlier wipe — in "
+                    "which case the next emit re-issues seqs the pre-wipe "
+                    "graph already used and every subscriber parked above the "
+                    "restart silently under-counts. The snapshot records only "
+                    "its capture-time state, so it cannot tell the two apart. "
+                    "The graph itself is rebuilt (#4653)",
+                    leftover.get("version"), int(restored))
+            else:
+                logger.info(
+                    "rebuild: re-established the :GraphEventMeta watermark "
+                    "at last_seq=%d — the next event seq continues above "
+                    "every seq the graph has already handed out (#4653)",
+                    restored)
+        except Exception as e:  # noqa: BLE001, RUF100
+            logger.error(
+                "rebuild: could not re-establish the :GraphEventMeta "
+                "watermark (%s: %s) — the event-log allocator may restart at "
+                "1, colliding with seq values already handed out and "
+                "under-counting every subscriber that polled to a higher "
+                "cursor. The graph itself is rebuilt; re-run `tortoise "
+                "rebuild --dir <log_dir>` to retry (#4653)",
+                type(e).__name__, e)
 
         # #2943: replay completed and the graph now holds everything the
         # sidecar recorded — drop it BEFORE the count queries (a timeout there
