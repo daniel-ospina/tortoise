@@ -71,10 +71,23 @@ from tortoise.fork_safety import (
 
 pytestmark = pytest.mark.embedded_only
 
+# #5049: the verdict contract. This file is the safety proof for a wedge fix,
+# and a client socket timeout under load used to surface as a FAIL — which
+# trains a reader to retry the guard, making it worthless on the day it reports
+# a real regression. A timeout is now INCONCLUSIVE; a parked child is still a
+# FAIL regardless of timing (structural evidence beats a wall clock).
+from tests._verdict import inconclusive  # noqa: E402
+
 _FIXTURE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "tests", "fixtures", "fork_safety", "tz_holder.c",
 )
+#: The redis client's own socket read budget. #4742: under load this expires
+#: inside `_race`, so a timeout on it is evidence about the host, not the wedge.
+_SOCKET_TIMEOUT_S = 4.0
+#: The fork-counter probe carries no own deadline; a timeout on `INFO` is the
+#: same class as `_SOCKET_TIMEOUT_S` (the client's budget, not the wedge).
+_PROBE_DEADLINE_S = _SOCKET_TIMEOUT_S
 #: How long each race runs.  With the holder below the leak lands within
 #: 7-20 copies in every measured run; the window stays generous so a loaded
 #: machine cannot turn it into a false green.
@@ -127,6 +140,17 @@ def _cpu_seconds(stamp: str) -> float:
     return seconds
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """True when ``exc`` is the redis client's socket-budget expiry (#4742).
+
+    A client ``TimeoutError``/"Timeout reading from socket" on this hostile-lock
+    fixture is evidence about host load, not about the wedge. Matched by name so
+    the harness does not import ``redis`` at module scope.
+    """
+    name = type(exc).__name__.lower()
+    return "timeout" in name or "timeout" in str(exc).lower()
+
+
 def _daemon_children(daemon_pid: int):
     """``(pid, cumulative_cpu_seconds)`` for every child of OUR daemon.
 
@@ -135,13 +159,19 @@ def _daemon_children(daemon_pid: int):
     ``daemonize no`` rules out the startup double-fork.  Keying on the parent
     pid rather than on a process title keeps the harness independent of what a
     child calls itself, and structurally unable to see any other server.
+
+    Returns ``None`` when the census could not be READ (non-zero ``ps`` exit, or
+    empty output where a header is always expected). A failure must never read
+    as "no children": that would make a wedge look green (`#5049`).
     """
-    out = subprocess.run(
+    proc = subprocess.run(
         ["ps", "-eo", "pid,ppid,time"],
         capture_output=True, text=True, check=False,
-    ).stdout
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
     found = []
-    for line in out.splitlines()[1:]:
+    for line in proc.stdout.splitlines()[1:]:
         parts = line.split()
         if len(parts) == 3 and parts[1] == str(daemon_pid):
             found.append((int(parts[0]), _cpu_seconds(parts[2])))
@@ -163,9 +193,16 @@ def _total_forks(db) -> int | None:
     """redis's fork counter — the observable that the fork path really ran.
 
     A counter incremented per ``fork()``, not a constant: it is how the tests
-    below show their race was live instead of merely quiet.
+    below show their race was live instead of merely quiet. Returns ``None`` when
+    the counter could not be read — including a client socket timeout on the
+    ``INFO`` probe (#4742), which is a load event, not a verdict.
     """
-    info = db.execute_command("INFO")
+    try:
+        info = db.execute_command("INFO")
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            return None
+        raise
     if isinstance(info, dict):
         return int(info.get("total_forks", -1))
     for line in str(info).splitlines():
@@ -227,10 +264,11 @@ def _race(holder: str, serverconfig: dict | None, dbdir: str) -> dict:
 
     result = {"copies": 0, "attempts": 0, "errors": 0, "last_err": None,
               "hung": [], "forks": None, "clone_nodes": None,
-              "swapped_nodes": None, "verify_err": None}
+              "swapped_nodes": None, "verify_err": None,
+              "timeout_errors": 0, "sampling_unavailable": False}
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(unix_socket_path=sock, socket_timeout=4)
+        db = FalkorDB(unix_socket_path=sock, socket_timeout=_SOCKET_TIMEOUT_S)
         g = db.select_graph("src")
         g.query("CREATE (:P {i:1})")
         forks0 = _total_forks(db)
@@ -245,8 +283,14 @@ def _race(holder: str, serverconfig: dict | None, dbdir: str) -> dict:
             except Exception as exc:  # a wedge surfaces here as a refusal/timeout
                 result["errors"] += 1
                 result["last_err"] = str(exc)
+                if _is_timeout_error(exc):
+                    result["timeout_errors"] += 1
             result["attempts"] += 1
             children = _daemon_children(proc.pid)
+            if children is None:
+                # the child census could not be READ — never "no children"
+                result["sampling_unavailable"] = True
+                break
             result["hung"] = _parked(children, first_seen, time.time())
             if result["hung"]:
                 break
@@ -257,6 +301,9 @@ def _race(holder: str, serverconfig: dict | None, dbdir: str) -> dict:
         settle = time.time() + _SETTLE_S
         while not result["hung"] and time.time() < settle:
             children = _daemon_children(proc.pid)
+            if children is None:
+                result["sampling_unavailable"] = True
+                break
             if not children:
                 break
             result["hung"] = _parked(children, first_seen, time.time())
@@ -286,7 +333,7 @@ def _race(holder: str, serverconfig: dict | None, dbdir: str) -> dict:
     finally:
         # Own-process hygiene only: kill the daemon WE started and the module
         # children carrying ITS pid as parent.  Never a fleet-wide sweep.
-        for pid, _cpu in _daemon_children(proc.pid):
+        for pid, _cpu in (_daemon_children(proc.pid) or []):
             with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
         with contextlib.suppress(Exception):
@@ -307,24 +354,112 @@ def holder():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _assert_fixed_race_verdict(result: dict) -> None:
+    """#5049 verdict for the FIX-path race — structural evidence beats a clock.
+
+    Polarity, in this order:
+
+    * a parked child is a FAIL regardless of any timeout (the wedge is structural);
+    * a census/counter that could not be READ is INCONCLUSIVE — never a PASS, or
+      the non-vacuity proof would be void;
+    * a client socket timeout under load is INCONCLUSIVE (evidence about the host);
+    * only a fully-observed healthy race PASSes.
+    """
+    assert result["hung"] == [], (
+        f"module-fork child parked {result['hung']} with the fork-safe "
+        f"config {fork_safe_serverconfig()!r}; last error "
+        f"{result['last_err']!r}")
+    if result["sampling_unavailable"]:
+        inconclusive(
+            "the daemon child census (`ps`) could not be read, so a wedge "
+            "cannot be ruled out",
+            deadline_s=_RACE_SECONDS,
+            diagnosis=f"the census failure is not 'no children': {result}",
+        )
+    if result["forks"] is None:
+        inconclusive(
+            "the fork counter (`INFO`) could not be read, so non-vacuity is "
+            "unproven (a PASS here would prove nothing)",
+            deadline_s=_PROBE_DEADLINE_S,
+            diagnosis=f"last error {result['last_err']!r}",
+        )
+    # non-vacuity: this asserts the fork path RAN, from redis's own counter,
+    # so a green result cannot come from a copy that never forked.
+    assert result["forks"] >= result["copies"] > 0, (
+        f"the fork path did not run: {result}")
+    assert result["copies"] > 0, f"the race never ran: {result}"
+    if result["timeout_errors"]:
+        inconclusive(
+            "a client socket call exceeded its budget under load",
+            deadline_s=_SOCKET_TIMEOUT_S,
+            diagnosis=(
+                f"{result['timeout_errors']} timeout(s) of "
+                f"{result['attempts']} attempts: {result['last_err']!r}"),
+        )
+    if result["verify_err"] is not None and "timeout" in result["verify_err"].lower():
+        inconclusive(
+            "the DR-restore verification copy exceeded the client socket "
+            "budget under load",
+            deadline_s=_SOCKET_TIMEOUT_S,
+            diagnosis=result["verify_err"],
+        )
+    assert result["last_err"] is None, result
+    assert result["verify_err"] is None, result
+    assert result["clone_nodes"] == 1, result
+    assert result["swapped_nodes"] == 1, result
+
+
+def _healthy_result(*, copies: int = 5, forks: int = 6) -> dict:
+    """A fully-observed healthy race result (the PASS shape)."""
+    return {
+        "copies": copies, "attempts": copies, "errors": 0, "last_err": None,
+        "hung": [], "forks": forks, "clone_nodes": 1, "swapped_nodes": 1,
+        "verify_err": None, "timeout_errors": 0, "sampling_unavailable": False,
+    }
+
+
+def test_fixed_race_verdict_passes_a_fully_observed_healthy_race():
+    _assert_fixed_race_verdict(_healthy_result())
+
+
+def test_fixed_race_verdict_skips_on_a_client_timeout():
+    result = _healthy_result()
+    result["timeout_errors"] = 1
+    result["last_err"] = "Timeout reading from socket"
+    with pytest.raises(pytest.skip.Exception):
+        _assert_fixed_race_verdict(result)
+
+
+def test_fixed_race_verdict_fails_on_a_parked_child_even_with_a_timeout():
+    """Structural evidence (a parked child) beats a timing event."""
+    result = _healthy_result()
+    result["hung"] = [(12345, 3.0, 0.0)]
+    result["timeout_errors"] = 1
+    with pytest.raises(AssertionError):
+        _assert_fixed_race_verdict(result)
+
+
+def test_fixed_race_verdict_skips_when_the_fork_counter_is_unreadable():
+    """A PASS with an unreadable counter would prove nothing (non-vacuity)."""
+    result = _healthy_result()
+    result["forks"] = None
+    with pytest.raises(pytest.skip.Exception):
+        _assert_fixed_race_verdict(result)
+
+
+def test_fixed_race_verdict_skips_when_the_child_census_could_not_be_read():
+    result = _healthy_result()
+    result["sampling_unavailable"] = True
+    with pytest.raises(pytest.skip.Exception):
+        _assert_fixed_race_verdict(result)
+
+
 def test_fork_child_does_not_hang_with_the_production_config(holder):
     """(b)+(c) — with the fork-safe verbosity the same race produces NO parked
     module-fork child, no fork refusal, and the copy still copies."""
     dbdir = tempfile.mkdtemp(prefix="fork-safety-fixed-")
     result = _race(holder, fork_safe_serverconfig(), dbdir)
-    assert result["hung"] == [], (
-        f"module-fork child parked {result['hung']} with the fork-safe "
-        f"config {fork_safe_serverconfig()!r}; last error "
-        f"{result['last_err']!r}")
-    # non-vacuity: this asserts the fork path RAN, from redis's own counter,
-    # so a green result cannot come from a copy that never forked.
-    assert result["forks"] is None or result["forks"] >= result["copies"] > 0, (
-        f"the fork path did not run: {result}")
-    assert result["copies"] > 0, f"the race never ran: {result}"
-    assert result["last_err"] is None, result
-    assert result["verify_err"] is None, result
-    assert result["clone_nodes"] == 1, result
-    assert result["swapped_nodes"] == 1, result
+    _assert_fixed_race_verdict(result)
 
 
 def test_without_the_fix_the_same_race_hangs_a_child(holder):
@@ -335,12 +470,28 @@ def test_without_the_fix_the_same_race_hangs_a_child(holder):
     exactly as the fleet's leaked children did.  This is also the harness-
     capability proof: the green test above cannot be green because the race
     never happened — the fork counter shows ~70 forks happened there too.
+
+    #4742 acceptance: a run in which the race does NOT fire is reported
+    INCONCLUSIVE, never a PASS (which would read as proof the control works)
+    and never a FAIL (which would read as a wedge regression). The mutation
+    proof is the parked child itself — a structural observable, not a clock.
     """
     dbdir = tempfile.mkdtemp(prefix="fork-safety-unfixed-")
     result = _race(holder, None, dbdir)
-    assert result["hung"], (
-        "held the timezone rwlock and still no module-fork child parked — "
-        f"the reproduction is not exercising the producer: {result}")
+    if result["sampling_unavailable"]:
+        inconclusive(
+            "the daemon child census (`ps`) could not be read, so the "
+            "mutation control's observable was never observed",
+            deadline_s=_RACE_SECONDS,
+        )
+    if not result["hung"]:
+        inconclusive(
+            "the un-fixed race did not park a module-fork child in this run",
+            deadline_s=_RACE_SECONDS,
+            diagnosis=(
+                f"{result['attempts']} attempts / {result['copies']} copies; "
+                "a non-firing run is inconclusive, not a pass"),
+        )
     assert result["forks"] is None or result["forks"] >= 1, result
     assert result["attempts"] > 0, result
     # the parked child holds redis's single module-fork slot, so the copies

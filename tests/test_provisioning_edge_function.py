@@ -17,6 +17,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from tests._verdict import NODE_FLOOR_STRIP_TYPES, require_node_floor
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 EDGE_FN = _REPO_ROOT / "supabase" / "functions" / "tenant-provision" / "index.ts"
 SHARED_LOOKUP = _REPO_ROOT / "supabase" / "functions" / "_shared" / "lookup.ts"
@@ -27,13 +29,14 @@ def test_edge_function_parses():
     would make every signup 500 at deploy time. Regression guard for the
     duplicate-`const pepper` P0 caught in review (PR #847): string-assertion
     tests above cannot see redeclarations, and CI has no deno/tsc step, so
-    node's type-stripping parser is the cheapest gate (node >= 22.18).
-    Skips when node is absent."""
+    node's type-stripping parser is the cheapest gate (node >= 22.7 for
+    `--experimental-strip-types`; #4916 — a present-but-too-old host SKIPs,
+    it does not RED). Skips when node is absent."""
+    require_node_floor(
+        NODE_FLOOR_STRIP_TYPES,
+        what="the tenant-provision edge-function parse check",
+    )
     node = shutil.which("node")
-    if node is None:
-        import pytest
-
-        pytest.skip("node not available — edge-function parse check skipped")
     result = subprocess.run(
         [node, "--experimental-strip-types", "--check", str(EDGE_FN)],
         capture_output=True,

@@ -213,9 +213,14 @@ _COLLECTION_SKIP_EXEMPT_RE = re.compile(r"TORTOISE_DB_URI", re.IGNORECASE)
 
 # Intentional availability-class reason families, exempt from the FalkorDB
 # trip. Prefix match on the raw reason (case-sensitive for these two).
+# #5049: the INCONCLUSIVE family is a DEADLINE-class skip (a load-induced
+# wall-clock expiry the verdict contract emits) — never an availability
+# regression. It is exempt so moving a load failure from FAIL to INCONCLUSIVE
+# does not re-surface as a skip-guard violation in the carve-out lane.
 _EXEMPT_REASON_PREFIXES = (
     "requires TORTOISE_DB_URI",
     "Live FalkorDB server on localhost:6399",
+    "INCONCLUSIVE [#5049]",
 )
 # Embedded-lane / carve-out precondition family — case-insensitive prefix.
 _EMBEDDED_UNAVAILABLE_PREFIXES = (

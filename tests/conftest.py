@@ -1072,6 +1072,38 @@ def _embedded_only_skip_hook(request):
     _embedded_only_skip(request)
 
 
+# ── #5049 rule 4: process globals reset per test ──────────────────────────
+# A test verdict must not depend on process state an earlier test left behind.
+# `tortoise.embedded_lifecycle._atexit_deadline` is a once-armed clock (#4913):
+# the first mid-run seam call anchors a 30 s budget that is never re-armed, so a
+# later test that asserts the seam closed a server reads it as SPENT and takes
+# the budget short-circuit (which returns "handled" while leaving the server
+# RUNNING). `tests/test_embedded_lifecycle.py` already worked around this
+# per-module (#4879); this is the same reset applied suite-wide, and it is the
+# authoritative home. The reset runs BEFORE every test (so an inherited armed
+# clock can never reach a test body) and after. `TORTOISE_API_URL` is deleted
+# too: on a fleet shell it makes the suite non-hermetic — the ask lane fails
+# loud on it (`ask_lane.py:438,848`) and the commit client routes to it
+# (`sdk.py` `_post_commit`). `monkeypatch` restores the env after the test.
+# The `tests._verdict` import is module level (and registered in
+# SHARED_MODULES) so a change to the contract runs the full matrix
+# (`test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`).
+from tests._verdict import (  # noqa: E402
+    AMBIENT_ENV_GLOBALS,
+    reset_process_globals,
+)
+
+
+@pytest.fixture(autouse=True)
+def _process_global_isolation(monkeypatch):
+    """#5049 rule 4: reset declared process globals + ambient env per test."""
+    reset_process_globals()
+    for var in AMBIENT_ENV_GLOBALS:
+        monkeypatch.delenv(var, raising=False)
+    yield
+    reset_process_globals()
+
+
 # ── #1930: ambient TORTOISE_PACKS_DIR isolation ───────────────────────────
 # The pack-dir env leg (epic #1891 WF-2) makes the whole suite
 # ambient-env-sensitive: a developer/CI/operator machine that exports
