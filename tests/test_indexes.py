@@ -600,12 +600,31 @@ _REDUNDANT_ON_INDEXED_GRAPH = (
 
 
 def _is_repeated_schema_work(cypher: str) -> bool:
+    """A statement that may only run on a graph that still needs BUILDING.
+
+    DDL and marker WRITES. The fixup's precondition READS are deliberately
+    NOT in this set (#5444): the fast path must read the fixup's state to
+    know whether it is owed, and forbidding that read is what made the
+    marker-gate attempt unusable. ``_is_fast_path_read`` bounds them instead
+    — reads are allowed, writes and DDL are not, so a future "probe by
+    rebuilding" still cannot hide here.
+    """
     return (cypher.startswith(_REDUNDANT_ON_INDEXED_GRAPH)
             or "fulltext.createNodeIndex" in cypher
             or "fulltext.drop" in cypher
-            or cypher.startswith("MERGE (m:Meta")
-            or cypher.startswith("MATCH (m:Meta")
-            or cypher.startswith("MATCH (n:Point) WHERE n.search_keys"))
+            or cypher.startswith("MERGE (m:Meta"))
+
+
+#: The ONLY extra statements the fast path may issue (#5444): the cheap marker
+#: skip, then the fixup's real precondition. Reads only — never a write.
+_FAST_PATH_READS = (
+    "MATCH (m:Meta {key:'point_fts_v2'})",
+    "MATCH (n:Point) WHERE n.search_keys",
+)
+
+
+def _is_fast_path_read(cypher: str) -> bool:
+    return cypher.startswith(_FAST_PATH_READS)
 
 
 @pytest.fixture
@@ -749,11 +768,101 @@ def test_repeat_sweep_runs_no_already_satisfied_ddl(graph_factory):
         "a second `_ensure_indexes()` on an already-indexed graph re-ran "
         f"{len(repeated)} schema statement(s): {repeated[:6]} — the "
         "bootstrap is repeated per construction again (#4465)")
+
+    # #5444: the fast path also READS the fixup's state (the marker, then the
+    # array precondition). That is the fix — the probe must be able to tell an
+    # owed fixup from a done one. Bound it: reads only, at most one of each,
+    # and never a write, so the check above cannot be evaded by probing via
+    # rebuilding.
+    reads = [c for c in seen if _is_fast_path_read(c)]
+    assert len(reads) <= 2, (
+        f"the fast path issued {len(reads)} precondition read(s): {reads} — "
+        "bounded to the marker read plus one array read (#5444)")
+    assert not [c for c in reads if "SET " in c or "MERGE " in c], (
+        "the fast path must not WRITE the fixup state (#5444)")
+
     assert seen.count("CALL db.indexes()") == 1, (
         f"the guard must cost exactly one catalogue probe, got {seen}")
     # One probe + at most the two vector-API attempts (procedure, then the
     # Cypher-native fallback) — anything more is schema work coming back.
-    assert len(seen) <= 3, f"the repeat sweep is no longer a probe: {seen}"
+    # The #5444 precondition reads are excluded: they are bounded separately
+    # above, and the point of this count is that the SWEEP is gone.
+    non_fast = [c for c in seen if not _is_fast_path_read(c)]
+    assert len(non_fast) <= 3, (
+        f"the repeat sweep is no longer a probe: {non_fast}")
+
+
+def test_probe_detects_an_owed_search_keys_fixup(graph_factory):
+    """#5444: 'two-field index present, marker absent, array ``search_keys``'
+    is NOT current — that graph still owes the one-time data fixup.
+
+    The fixup flattens array-valued ``search_keys`` because FalkorDB's
+    fulltext index does not index array properties; leaving it owed makes
+    those Points permanently invisible to ``queryNodes`` — silent
+    unfindability, not a slow path.
+
+    The probe tests the fixup's REAL precondition, not the ``point_fts_v2``
+    marker: the marker write is swallowed on the fresh-create path
+    (``except Exception: pass``), so "marker absent" does not mean "fixup
+    owed", and gating on it re-bootstrapped every construction on CI.
+
+    Mutation check (must stay true): removing the
+    ``_array_valued_search_keys_exist()`` arm from ``_schema_is_current``
+    fails assertion (a) below.
+
+    Assertion (a) pins the state that ISOLATES that arm: the marker absent
+    and NO array-valued ``search_keys`` anywhere. Without the array arm the
+    condition collapses to ``not _point_fts_marker_present()``, which is True
+    there — so the probe would report a healthy marker-less graph as
+    not-current and re-bootstrap it on every construction. That is the exact
+    CI regression the marker-gate attempt caused, so (a) is both the arm's
+    guard and the fast-path-preservation test.
+    """
+    proj = graph_factory()
+    g = proj.g
+    g.query("MATCH (n:Point) DETACH DELETE n")
+    g.query("MATCH (m:Meta) WHERE m.key='point_fts_v2' DELETE m")
+
+    # (a) Marker ABSENT, no array-valued search_keys → still CURRENT. This is
+    # the arm's isolator: only the array check can keep this fast.
+    assert proj._schema_is_current() is True, (
+        "a marker-less graph that owes no fixup must still read as current — "
+        "otherwise every construction re-runs the sweep (the CI regression "
+        "that made the marker-only gate unusable, #5444)")
+
+    # (b) The issue's repro state: marker absent AND an array present.
+    g.query(
+        "CREATE (n:Point {id:'legacy-5444', pointKind:'core:fact', "
+        "content:'legacy row', content_hash:'h5444', "
+        "search_keys:['fastest 5k','running pb']})")
+    assert proj._schema_is_current() is False, (
+        "a graph whose search_keys is still an array owes the one-time "
+        "fixup and must not read as current (#5444)")
+
+    proj._ensure_indexes()
+
+    sk = g.query(
+        "MATCH (n:Point {id:'legacy-5444'}) RETURN n.search_keys"
+    ).result_set[0][0]
+    assert not isinstance(sk, (list, tuple)), (
+        f"the sweep must flatten search_keys to a space-joined string, "
+        f"got {sk!r}")
+    assert "fastest 5k" in str(sk)
+
+    assert g.query(
+        "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
+    ).result_set, "the sweep must re-mint the marker once the fixup has run"
+
+    try:
+        hits = g.query(
+            "CALL db.idx.fulltext.queryNodes('Point','fastest 5k') RETURN 1"
+        ).result_set
+    except Exception:
+        hits = None  # engine without the fulltext query procedure
+    if hits is not None:
+        assert hits, (
+            "the repaired Point must be findable by FTS — silence here IS "
+            "the #5444 symptom")
 
 
 def test_schema_probe_ignores_a_similarly_named_boolean_property(graph_factory):

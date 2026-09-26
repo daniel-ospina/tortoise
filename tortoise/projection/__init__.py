@@ -6061,17 +6061,17 @@ class FalkorProjection(
         ``point_fts_v2`` marker as well. A one-field legacy index fails the
         field requirement below, so it takes the full path.
 
-        KNOWN GAP (review P1, tracked separately): the marker is NOT reliable
-        enough to gate on. The ``if not done:`` block it guards also performs a
-        ONE-TIME DATA FIXUP (flattening array-valued ``search_keys``), so a
-        graph in the state "two-field index present, marker absent" still has
-        that fixup owed to it — and this probe reads it as current. Requiring
-        the marker here was tried and reverted: the fresh-create branch
-        swallows a failed marker write (``except Exception: pass``), so a
-        healthy graph can legitimately have no marker, and gating on it
-        re-bootstrapped every construction on CI (embedded + test-slow legs).
-        The fix is to make the marker write reliable, or to test the fixup's
-        real precondition, and only then gate the probe on it.
+        The fixup's real precondition is tested too (#5444). The
+        ``if not done:`` block also performs a ONE-TIME DATA FIXUP (flattening
+        array-valued ``search_keys``), so a graph in the state "two-field
+        index present, fixup owed" used to read as current and stay that way —
+        those Points are permanently invisible to FTS. Requiring the
+        ``point_fts_v2`` marker for this was tried and reverted: the
+        fresh-create branch swallows a failed marker write
+        (``except Exception: pass``), so a healthy graph can legitimately have
+        no marker, and gating on it re-bootstrapped every construction on CI
+        (embedded + test-slow legs). The probe therefore tests the array
+        itself, using the marker only as a cheap skip.
 
         ``event_fts_v2`` is deliberately NOT consulted: no data fixup rides it
         (it guards only the drop→recreate churn), and a fresh graph sets the
@@ -6115,20 +6115,67 @@ class FalkorProjection(
         fts_required = _ver is None or _ver[0] >= 4
         if fts_required:
             required |= set(self._REQUIRED_FULLTEXT_INDEXES)
-        if required <= present and fts_required:
-            # REVIEW P1 — NOT enforced here on purpose. Requiring the marker
-            # makes the fast path permanently dead on any engine where the
-            # marker write did not land: the fresh-create branch wraps its
-            # ``MERGE (m:Meta {key:'point_fts_v2'})`` in ``except Exception:
-            # pass``, so a healthy, fully-indexed graph can sit with no marker.
-            # That is not hypothetical — it reddened CI's embedded and
-            # test-slow legs (every construction re-bootstrapped). The marker
-            # is therefore NOT a reliable "work done" signal, and the real fix
-            # is to make the marker write reliable (or to detect the fixup's
-            # actual precondition, array-valued ``search_keys``), then gate on
-            # it. Tracked separately.
-            pass
+        # The FIELD SET proves the indexes EXIST. It does NOT prove the
+        # one-time DATA FIXUP in ``_ensure_indexes`` is done (#5444): that
+        # fixup flattens array-valued ``search_keys``, because FalkorDB's
+        # fulltext index does not index array properties — so a Point left as
+        # an array is PERMANENTLY unfindable by ``queryNodes``. A graph in the
+        # state "two-field index present, fixup owed" must not read as
+        # current: skipping the fixup is unfindable data, not a slow path.
+        #
+        # Test the fixup's ACTUAL precondition (an array-valued
+        # ``search_keys``), NOT the ``point_fts_v2`` marker. The marker write
+        # is swallowed on the fresh-create path (``except Exception: pass``),
+        # so "marker absent" does not mean "fixup owed"; requiring it was
+        # measured to re-bootstrap every construction on CI (#5444). The real
+        # precondition is exact: no array ⇒ nothing owed, whatever the marker
+        # says.
+        #
+        # The marker is consulted FIRST, purely as a cheap skip: a graph that
+        # recorded the fixup keeps a metadata-only probe and never runs the
+        # array query. Both arms are short-circuited behind
+        # ``required <= present``, so neither query runs on a graph that still
+        # needs building.
+        if (required <= present and fts_required
+                and not self._point_fts_marker_present()
+                and self._array_valued_search_keys_exist()):
+            return False
         return required <= present
+
+    def _point_fts_marker_present(self) -> bool:
+        """Is the one-time ``point_fts_v2`` marker recorded on this graph?
+
+        Used only as a cheap SKIP for the array check — never as proof the
+        fixup ran, because the fresh-create path swallows a failed marker
+        write (#5444). A probe that cannot run reports ABSENT, so the array
+        check still runs: a query we cannot answer must not be able to skip
+        work.
+        """
+        try:
+            return bool(self.g.query(
+                "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1 LIMIT 1"
+            ).result_set)
+        except Exception:
+            return False
+
+    def _array_valued_search_keys_exist(self) -> bool:
+        """Does any Point still store ``search_keys`` as an ARRAY?
+
+        The one-time fixup's real precondition: FalkorDB's fulltext index does
+        not index array-valued properties, so such Points are invisible to
+        ``queryNodes`` until ``_ensure_indexes`` flattens them. A probe that
+        cannot run returns True — assume the fixup is owed rather than skip
+        work we cannot prove unnecessary.
+        """
+        try:
+            rows = self.g.query(
+                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+                "RETURN n.search_keys"
+            ).result_set
+        except Exception:
+            return True
+        return any(isinstance(row[0], (list, tuple))
+                   for row in rows if row)
 
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
