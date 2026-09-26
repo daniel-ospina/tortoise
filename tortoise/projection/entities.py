@@ -1107,11 +1107,29 @@ class _EntityHandlers:
         # fold would faithfully replay an edge the ontology does not have.
         if (rel, src_label, tgt_label) not in self._ENTITY_LINKED_TRIPLES:
             return _malformed("not a permitted ONTOLOGY §3.2 triple")
-        r = self.g.query(
-            f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
-            f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
-            params={"sid": sid, "tid": tid},
-        )
+        # #1370: the binding confidence is OPTIONAL on the record. It is SET
+        # only when present, mirroring the live writer's conditional SET — so
+        # a later no-confidence EntityLinked for the same edge cannot clear a
+        # confident one on replay (the live pre-probe short-circuits, and this
+        # fold must agree). The value is coerced fail-closed by the SHARED
+        # helper: non-numeric, bool, NaN/±inf, overflow (10**400) and
+        # out-of-[0,1] values all become None — no SET, no FalkorDB parameter
+        # rejection (a raise here would abort rebuild_all AFTER the wipe).
+        from tortoise.session_link import coerce_confidence
+        conf = coerce_confidence(ev.get("confidence"))
+        if conf is None:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
+                params={"sid": sid, "tid": tid},
+            )
+        else:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[e:{rel}]->(t) SET e.confidence=$conf "
+                "RETURN count(s)",
+                params={"sid": sid, "tid": tid, "conf": float(conf)},
+            )
         n = int(r.result_set[0][0]) if r.result_set else 0
         return (1, "ok") if n else (0, "absent")
 
@@ -1203,20 +1221,29 @@ class _EntityHandlers:
         NO-OP (return 0); a malformed field is OMITTED, never bound.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
-        SECOND ``SessionRecorded`` the capture emits after the link pass
-        (``sdk.capture_session``), so the counters the live raw SET writes are
-        durable too — ``recover_from_log`` / a journal-only ``rebuild()``
-        otherwise came back with them null (review P2, #3722).
+        ``SessionRecorded`` the capture emits after the link pass
+        (``sdk.capture_session``) — the THIRD of the four, after the turn
+        write's own trailing record (#4911) — so the counters the live raw SET
+        writes are durable too — ``recover_from_log`` / a journal-only
+        ``rebuild()`` otherwise came back with them null (review P2, #3722).
 
-        ``capture_ok`` / ``capture_extractor`` ride a THIRD, TRAILING
+        ``capture_ok`` / ``capture_extractor`` ride the last, TRAILING
         ``SessionRecorded`` the capture emits right after the live
-        ``SET s.capture_ok / s.capture_extractor``. Without it those two came
+        ``SET s.capture_ok / s.capture_extractor`` — the FOURTH record. Without it those two came
         back null on a journal-only rebuild, and null is CONSUMED by the
         #2335 WI-2b TRUE-retry gate as the legacy "presumed captured" case — a
         session whose capture FAILED stopped retrying (review P2, #3722).
         Same overwrite semantics as the live SET (these are not
         coalesce-preserved); a NUL-laden string is OMITTED by the shared value
         gate, never bound.
+
+        ``capture_redactions`` (#4911) rides the trailing record
+        ``sdk._write_capture_turns`` emits after its live
+        ``SET s.capture_redactions`` — the SECOND of the four, emitted right
+        after the capture's opening record and BEFORE the link pass, same
+        reason as the pair below: a
+        journal-only rebuild must not restore the Session as though nothing
+        was ever redacted. Overwrite semantics, like ``turn_count``.
         """
         from tortoise.projection import _annotator_value_ok, _writable_id
 
@@ -1233,7 +1260,7 @@ class _EntityHandlers:
             params["created_at"] = created_at
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
-                     "capture_extractor"):
+                     "capture_extractor", "capture_redactions"):
             val = ev.get(prop)
             if val is not None and _annotator_value_ok(val):
                 sets.append(f"s.{prop}=$v_{prop}")
@@ -1780,7 +1807,20 @@ class _EntityHandlers:
         name = ev.get("name")
         if not oid and not name:
             return (0, 0)
-        supersedes_by = str(ev.get("supersedes_by") or "")[:200]
+        # #5370: store the successor name VERBATIM — no 200-char cap. A cap
+        # here is LOSSY: a successor named >200 chars is stored on its
+        # Object in full (identity is the NAME — `_upsert_object` MERGEs on
+        # it — and `create_entity` has never capped), but the fold would
+        # record only its 200-char prefix — a value that names NO Object.
+        # The ask path's name-keyed successor probe
+        # (assembly._probe_visible_successors — MATCH (o:Object) WHERE
+        # o.name IN $names) then matches nothing and the renderer reports
+        # "no successor record found" for a successor that exists and is
+        # live. The old comment claimed this cap MIRRORED a writer cap in
+        # sdk.py `_connect_issue_objects`; that writer-side surface is a
+        # separate, session-indexing-only concern (still capped on main;
+        # #3574/#5314 removes it) and the fold must not truncate to it.
+        supersedes_by = str(ev.get("supersedes_by") or "")
         # #2164 final-review P4: prefer the journaled event's ORIGINAL ts —
         # rebuild pass-1b replays the raw journaled event (sdk._emit_event
         # stamps ts on the JSONL line) — without this a JSONL wipe+rebuild
@@ -2470,8 +2510,11 @@ class _EntityHandlers:
             is completed — the JOINT-E2E sweep's stub-handling);
           - ``s.sourcePath = coalesce($sp, s.sourcePath)`` (§4.1 — the
             sanctioned source_path route maps to camelCase on the node);
-          - ``s._searchText`` — coalesce ON CREATE, OVERWRITE on hash-diff
-            MERGE (§4.1 cycle-4 merge semantics; E2E-5 retitle refresh);
+          - ``s._searchText`` — coalesce ON CREATE, and on a hash-diff MERGE
+            overwrite only when the incoming text is present (``coalesce($st,
+            s._searchText)``, #3518: a text-less write must never NULL the
+            value a prior capture/index write established); E2E-5 retitle
+            refresh still overwrites.
           - ``s.__runId = $rid`` on the ON CREATE branch ONLY when
             ``merge_run_id`` is given — the creator's per-run token. The
             embedded FalkorDBLite reports ``Nodes created: 1`` for BOTH of two
@@ -2546,7 +2589,13 @@ class _EntityHandlers:
             "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                        THEN $st ELSE s._searchText END, "
+            # #3518: coalesce — a hash-diff write that carries NO searchable
+            # text ($st IS NULL, the commit path's session Source) must not
+            # ERASE the text a prior capture/index write established. A write
+            # that does carry text (the indexer's retitle) still overwrites,
+            # so the #900 T3 cycle-4 retitle-refresh semantics are unchanged.
+            "                        THEN coalesce($st, s._searchText) "
+            "                        ELSE s._searchText END, "
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).

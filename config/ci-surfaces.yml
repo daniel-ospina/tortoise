@@ -62,6 +62,13 @@ surfaces:
   # monkeypatches — tortoise/monitoring.py (the offload pool), plus the
   # billing/notify paths the Stripe tests drive — which fall through to `core`.
   - test_analytics_offloop_4015.py
+  # #4456: the billing notification's off-loop contract (the Stripe webhook's
+  # blocking sync Resend/Telegram send). Same dual registration as the loop-
+  # responsiveness guards above: the file it guards is tortoise/hosted_api.py
+  # (which selects `api`), and the `core` half is load-bearing for the seams it
+  # monkeypatches — tortoise/monitoring.py (the offload pool) and the
+  # tortoise/notify.py notifier — which fall through to `core`.
+  - test_notify_offloop_4456.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
@@ -170,6 +177,9 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  # #1370: dual-registered with `core` — the same test file covers the hosted
+  # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
+  - test_subject_binding_1370.py
   - test_verbatim_span.py  # #5007: the fourth layer's SPAN link is a POINTER into the Source's raw text, not a payload — schema all-or-nothing + node round-trip + the "no verbatim text on the node" trap (registered here with test_commit_schema.py: it guards the same contract, and `tortoise/sdk.py` selects this surface)
   - test_cross_subdomain_cookie_sync.py
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
@@ -221,6 +231,15 @@ surfaces:
   # roll-up it drives). Same #2938 dual-membership convention as
   # test_graphcopy_boolean_index_3154.py.
   - test_capture_cost_measurement.py
+  # #4911: the capture write path redacts credential-shaped spans before
+  # persistence. DUAL-REGISTERED (also under `core`, where its primary entry
+  # carries the full rationale): the hosted lane's own redaction receipt is
+  # written in tortoise/hosted_api.py, which SELECTS the `api` surface, and a
+  # named-surface match REPLACES the `core` fallback — so a core-only
+  # registration would never run this guard on a hosted_api.py-only PR, which
+  # is exactly the PR that could silently drop the receipt. Same #2938
+  # dual-membership convention as the two entries above.
+  - test_capture_secret_redaction_4911.py
   # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
   # admission gate, the ledger write, the reader and the RPC wrappers all live
   # in tortoise/hosted_api.py, metering.py and supabase_control.py, which
@@ -550,6 +569,12 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
+  # #1370: write-time subject binding — the confidence-gated, fail-closed
+  # Point→aboutSubject producer + its audit/quality-gate tooling. Registered
+  # under `core` like its sibling binder guard (test_capture_entity_attachment_
+  # 3664.py) and the unpatterened engine modules it exercises (subject_binding,
+  # session_link, projection/entities, sdk). It also covers hosted_api.py.
+  - test_subject_binding_1370.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
   - test_client_cli_probe.py
@@ -619,6 +644,12 @@ surfaces:
   - test_selfhost_health_probe_executor.py  # #3287/#2988/#3243: selfhost health probes (dual-registered)
   - test_server_hygiene_gate.py
   - test_source_dedup_registration.py
+  # #3518: the Source FTS index guard (docker-lane). Registered under `core`
+  # because the module it pins most (`tortoise/search_engine.py`) matches no
+  # SOURCE_PATTERNS entry and so falls to the `core` fallback — a PR touching
+  # that module alone would otherwise select no surface and the guard would
+  # never run.
+  - test_source_fts.py
   - test_source_identity.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
@@ -823,6 +854,7 @@ surfaces:
   - test_extractor_doc.py
   - test_extractor_priors.py
   - test_extractor_reliability.py
+  - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   - test_extractor_v2.py
   - test_falkordb_compat.py
   - test_file_indexer.py
@@ -933,6 +965,7 @@ surfaces:
   - test_never_across_fold_5080.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
+  - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   - test_open_kinds.py
   - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
@@ -1016,6 +1049,7 @@ surfaces:
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
+  - test_capture_secret_redaction_4911.py  # #4911: the capture write path redacts credential-shaped spans before persistence (guards tortoise/security.py's scrubber + sdk._capture_turn_texts; `core` is security.py's surface and `sdk` is a SHARED_MODULE so this runs on the full matrix — DUAL-REGISTERED under `api` for a hosted_api.py-only PR, see the entry there)
   - test_security.py
   - test_semantic_extractor.py
   - test_ship_test_onboarding.py   # #3806: the ship-test probe's guard (classifier + page-wide claim sweep + DOM/server readers + RED/GREEN mutation evidence); the browser half is tests/e2e/test_ship_test_onboarding.py, run by the dashboard-e2e job
@@ -1061,6 +1095,12 @@ surfaces:
   - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
+  # #5358: fail-closed refusal for an INVERTED predecessor window in
+  # invalidate_point (a future-dated validFrom would be stamped validTo=now).
+  # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so no single surface
+  # owns it; `core` is the default home, the same surface as the E6 window
+  # suite directly above.
+  - test_invalidate_inverted_window_5358.py
   - test_value_extractor.py
   # #2714 (lane L7): vocab gating by graph — the compile seams
   # (compile_value_brief / compile_vocab) and the graph's :PackInstall
@@ -2355,6 +2395,14 @@ durations:
   test_reaper_ownership.py: 2.0  # unmeasured
   test_write_ahead_mint.py: 2.0  # unmeasured
   test_run_with_eval_keys.py: 2.0  # unmeasured
+  # #3518: new file — no CI junit measurement yet, so it enters at the flat 2.0s
+  # default per the #3400/#4221 convention (the conservative floor keeps the
+  # durations-coverage floor satisfied and cannot mis-balance the LPT pack).
+  # Local timing 2026-10 on a loaded host: ~65s for the file, but ~37s of that is
+  # the embedder's cold start the first docker-lane search test pays in every lane
+  # — not a per-file weight. Refresh from the first post-merge main run that
+  # includes it.
+  test_source_fts.py: 2.0  # unmeasured
   test_rotate_key.py: 3.6  # unmeasured
   test_verbatim_span.py: 0.5  # unmeasured
   test_ops_safety.py: 16.8  # unmeasured

@@ -410,8 +410,14 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
   // direct Continue path (`wizardPaused` false) rendering "Your agent takes over
   // from here." beneath a "Not connected yet" heading — the #2364/#2912
   // heading-vs-body contradiction, reassembled.
-  assert.match(head, /if \(wizardStep === 3 && !serverHarnessConnected\) return null/,
-    'the step-3 lede is suppressed whenever no connection was observed')
+  // #3725: both null arms (and the build-fork suppression) are now the pure
+  // `wizardStepSub` helper, so this pin is a CALL-SHAPE backstop only — the
+  // behaviour is executed in wizardFlow.test.js. The head must still derive the
+  // lede from the same `serverHarnessConnected` flag (never `effectivelyPaused`).
+  assert.match(head, /wizardStepSub\(wizardStep, \{ hasOrg: welcomeHasOrg, connected: serverHarnessConnected, buildFork: isBuildFork \}\)/,
+    'the head lede goes through wizardStepSub on the same derived flags as the <h1>')
+  assert.match(head, /if \(headSub === null\) return null/,
+    'a null lede suppresses the <p class="welcome-lede"> entirely')
   assert.doesNotMatch(head, /wizardStep === 3 && effectivelyPaused\) return null/,
     'the lede guard must not key on the local paused flag alone')
 })
