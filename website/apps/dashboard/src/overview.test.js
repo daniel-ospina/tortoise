@@ -21,6 +21,149 @@ import { wizardPromptText } from './wizardPrompts.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+// ── #4646: EXECUTE main.jsx's connection derivation, never grep it ───────────
+// This lane has a recorded history of static pins defeated by reformatting, so
+// the guard reads main.jsx's BEHAVIOUR: the real `serverHarnessConnected`
+// statement is sliced out of the file and run.
+const mainJsxSrc = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
+
+// The projection #4646 is about: complete by the wire (legacy jsonb /
+// backfilled node status) with NO server-observed `harness-connected` edge —
+// `resolve_wire_completion`'s grandfathered branch (tortoise/onboarding/state.py).
+const GRANDFATHERED = Object.freeze({
+  status: 'active', fork: 'self', completed_steps: [], onboarding_complete: true,
+})
+
+// The projection matrix, SHARED by every parity assertion, so a member added for
+// one surface is exercised on ALL of them (review round 3: the wizard statement
+// was only ever asked about GRANDFATHERED, and the card's positive members all
+// omitted `fork`).
+//
+// Every member representing a NORMAL served projection carries `...FLOW` — the
+// keys every such projection has (`hosted_api.py::_get_onboarding_projection`
+// merges `flow_defaults()`: version, compact, member_progress,
+// last_decide_attempt, fork_unsure_at, and it always adds `restart_pending`).
+// Omitting them made a leg gating on any of them survive in BOTH directions
+// (round 4, P1): `... || state?.version === 1` read a grandfathered org as
+// connected, and `... && state?.version !== 1` suppressed a real edge — both
+// green, because the only member carrying `version` was the outage marker.
+// (The graph-down marker below is the ONE exception — the real
+// `flow_unavailable()` sets every FLOW key to the literal 'unavailable'.)
+const FLOW = Object.freeze({
+  version: 1, compact: false, member_progress: {},
+  last_decide_attempt: null, fork_unsure_at: null, restart_pending: false,
+})
+
+const CONNECTION_MATRIX = [
+  // the population #4646 is about — complete by the wire, no observed edge:
+  { ...GRANDFATHERED, ...FLOW },
+  { ...GRANDFATHERED, ...FLOW, fork: 'build' },
+  // ... including the NODE-ABSENT grandfather form, which the server serves with
+  // `fork: null` — omitted, a leg gating on `fork === null` read the real
+  // grandfathered org as connected with the suite green (round 5, P2).
+  { ...FLOW, status: 'active', fork: null, completed_steps: [], onboarding_complete: true },
+  { status: 'active', completed_steps: ['team-named'], ...FLOW },
+  // the discriminator for the DELETED `status === 'complete'` leg — a complete
+  // node status with NO agent edge. Reachable (backfill / recompute_completion's
+  // grandfather branch writes status='complete' with zero agent steps); without
+  // this member, re-adding `|| status === 'complete'` to the card passed the
+  // whole file (review cycle 1, mutation M1).
+  { status: 'complete', completed_steps: ['team-named'], ...FLOW },
+  { status: 'complete', completed_steps: [], ...FLOW },
+  // ... and the discriminator for the DELETED `onboarding_complete` leg:
+  { status: 'active', completed_steps: [], onboarding_complete: true, ...FLOW },
+  // POSITIVE members carrying the fields the negative arms do not, so a leg
+  // that gates on an untested field cannot hide behind the parity loop:
+  { status: 'active', fork: 'build', completed_steps: ['team-named', 'harness-connected'], ...FLOW },
+  { status: 'active', fork: 'build',
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'], ...FLOW },
+  { status: 'active', completed_steps: ['harness-connected'], onboarding_complete: true, ...FLOW },
+  { status: 'active', completed_steps: ['team-named', 'harness-connected'], ...FLOW },
+  { status: 'complete',
+    completed_steps: ['team-named', 'harness-connected', 'first-points-filed'], ...FLOW },
+  { status: 'unavailable', fork: 'unavailable', version: 'unavailable', completed_steps: 'unavailable' },
+  { status: 'active', ...FLOW },
+]
+
+// Slice ONE `const <name> = <expr>` statement out of main.jsx, so it can be
+// RUN. Three requirements keep this non-silent: the marker must occur EXACTLY
+// ONCE (asserted), the scan is depth/continuation-aware so a wrapped multi-line
+// initializer slices whole, and a missing/ambiguous slice THROWS — there is
+// deliberately NO fallback literal, so a reformat fails loud rather than
+// passing vacuously.
+function extractConstStatement(src, name) {
+  const marker = `const ${name} =`
+  const seen = src.split(marker).length - 1
+  assert.equal(seen, 1, `main.jsx must declare \`const ${name} =\` exactly once (found ${seen})`)
+  const start = src.indexOf(marker)
+  // A line whose last non-space char is an operator continues the expression,
+  // and so does a line whose NEXT token is one — the canonical wrapped form
+  // puts the operator at the START of the continuation line (Prettier's ternary,
+  // a `&&`/`||` chain, a method chain). Only checking the previous line made the
+  // scan stop early: `const X = f(y)\n  ? false : true` sliced to `f(y)`, so a
+  // reformatted main.jsx ran a SEMANTICALLY DIFFERENT prefix while every test
+  // stayed green (review round 2, P1).
+  const CONTINUES = new Set(['&', '|', '+', '-', '*', '/', '%', '?', ':', '.', ',', '=', '<', '>'])
+  let depth = 0
+  let quote = null
+  let end = -1
+  for (let i = src.indexOf('=', start); i < src.length; i++) {
+    const c = src[i]
+    const prev = src[i - 1]
+    if (quote) { if (c === quote && prev !== '\\') quote = null; continue }
+    if (c === "'" || c === '"' || c === '`') { quote = c; continue }
+    if (c === '(' || c === '[' || c === '{') depth++
+    else if (c === ')' || c === ']' || c === '}') depth--
+    else if (c === '\n' && depth === 0) {
+      let j = i - 1
+      while (j > 0 && /\s/.test(src[j])) j--
+      if (CONTINUES.has(src[j])) continue
+      // Look PAST whitespace and comments to the next token: a leading operator
+      // continues the expression, anything else terminates it.
+      if (CONTINUES.has(nextToken(src, i + 1))) continue
+      end = i
+      break
+    }
+  }
+  assert.notEqual(end, -1, `main.jsx: the \`${name}\` statement never terminated — refusing a slice to EOF`)
+  return src.slice(start, end).trimEnd()
+}
+
+// The first non-whitespace, non-comment character at or after `i` ('' at EOF).
+// Comment-aware for the BOUNDARY decision only — a quote inside a comment is
+// not modelled, which is acceptable because a mis-set quote can only make the
+// slice SHORTER, and the assertion below then fails loud rather than passing.
+function nextToken(src, i) {
+  for (let j = i; j < src.length; j++) {
+    if (/\s/.test(src[j])) continue
+    if (src[j] === '/' && src[j + 1] === '/') { while (j < src.length && src[j] !== '\n') j++; continue }
+    if (src[j] === '/' && src[j + 1] === '*') {
+      j += 2
+      while (j < src.length && !(src[j] === '*' && src[j + 1] === '/')) j++
+      j++
+      continue
+    }
+    return src[j]
+  }
+  return ''
+}
+
+// `stripComments` is the REPO's own quote-aware stripper (./testSupport.js,
+// imported at the top of this file): used so a static assertion below cannot be
+// satisfied by a COMMENTED-OUT occurrence of what it is looking for.
+
+// Run the sliced statement with the given projection and the injected
+// observed-connection derivation. The injection is what lets a test pin WHICH
+// predicate main.jsx uses: a pre-#4646 inline statement IGNORES the parameter,
+// so a caller that records its calls sees ZERO rather than dying at module link
+// time — and a statement that re-adds an inference disagrees with the helper
+// (test B2 runs it over the whole matrix).
+function runHarnessConnectedDerivation(onboarding, connectionObserved) {
+  const stmt = extractConstStatement(mainJsxSrc, 'serverHarnessConnected')
+  return new Function('onboarding', 'harnessConnectionObserved',
+    `${stmt}\nreturn serverHarnessConnected`)(onboarding, connectionObserved)
+}
+
 test('DE2E-2: the Overview renders EXACTLY 3 elements in order', () => {
   assert.deepEqual([...OVERVIEW_ELEMENTS], [
     'connection-status',
@@ -35,6 +178,7 @@ test('connection: harness-connected step → Connected ✓', () => {
   })
   assert.equal(c.kind, 'connected')
   assert.equal(c.value, 'Connected ✓')
+  assert.equal(c.detail, 'Your agent is connected to this Organization.')
 })
 
 test('connection: node-status complete (gate requires harness-connected) → connected', () => {
@@ -45,9 +189,363 @@ test('connection: node-status complete (gate requires harness-connected) → con
   assert.equal(c.kind, 'connected')
 })
 
-test('connection: grandfathered wire-complete (no node steps) → connected', () => {
+test('connection: grandfathered wire-complete (no node steps) → NOT connected', () => {
+  // #4646: this expectation used to require the completion INFERENCE
+  // (`onboarding_complete` ⇒ connected). That inference is false for this very
+  // population — it reaches wire completion with NO server-observed
+  // `harness-connected` edge (`resolve_wire_completion`'s grandfather branch) —
+  // so it is re-pointed to the observed fact the wizard already states.
   const c = overviewConnection({ status: 'active', completed_steps: [], onboarding_complete: true })
-  assert.equal(c.kind, 'connected')
+  assert.equal(c.kind, 'disconnected')
+  assert.equal(c.value, NO_CONNECTION_OBSERVED)
+})
+
+// ── #4646: ONE derivation of the observed connection, consumed by both ──────
+// #3724 unified the NEGATIVE arm's wording; this is the POSITIVE direction. The
+// card's `status === 'complete' || onboarding_complete === true` legs are a
+// completion inference, so the card could read "Connected ✓" while the wizard's
+// step-3 heading read "No connection observed yet" for the same Organization.
+
+test('#4646 (A): card and wizard step-3 state the SAME fact for the grandfathered org', async () => {
+  const mod = await import('./connectionObservation.js')
+  const connected = runHarnessConnectedDerivation(GRANDFATHERED, mod.harnessConnectionObserved)
+  assert.equal(connected, false,
+    'the projection carries no server-observed harness-connected edge')
+  const card = overviewConnection(GRANDFATHERED)
+  assert.equal(card.kind, 'disconnected',
+    'the card must not claim Connected ✓ without the server-observed edge')
+  assert.equal(card.value, wizardStageLabel(3, { connected }),
+    'the card and the step-3 heading must state the SAME observed fact')
+})
+
+test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared helper', async () => {
+  // BINDING (review cycle 1, mutation M7): injecting the predicate as the
+  // `new Function` parameter only proves the statement calls SOMETHING by that
+  // name — a local duplicate under the same identifier inside main.jsx shadows
+  // it and stays green. So first pin main.jsx's OWN binding: the identifier is
+  // an IMPORT of './connectionObservation.js', never a local declaration.
+  // BINDING (review cycle 1, mutation M7; hardened in round 2): injecting the
+  // predicate as the `new Function` parameter only proves the statement calls
+  // SOMETHING by that name — anything that shadows the identifier inside
+  // main.jsx (a local duplicate, an object-destructuring local, a parameter
+  // default) keeps every dynamic assertion green. So pin main.jsx's OWN
+  // binding statically — against the COMMENT-STRIPPED source (a commented-out
+  // matching import satisfies a naive match while the real binding is
+  // elsewhere) and by EXACT occurrence count (an import path swap, a
+  // `const { harnessConnectionObserved } = wideHelpers`, or a defaulted
+  // parameter all add an occurrence; a bare `const X =` regex missed all three).
+  // The occurrence count is taken on the RAW source, NOT the comment-stripped
+  // view: `stripComments` is defeated by a regex literal containing `//`
+  // (`/x\//; const harnessConnectionObserved = () => true` — the rest of the
+  // line is swallowed and the stripped count still reads 2), so a shadow could
+  // hide there (round 4, P2). Counting raw means a mention in a comment fails
+  // LOUD, which is the safe direction.
+  assert.equal(mainJsxSrc.split('harnessConnectionObserved').length - 1, 2,
+    'main.jsx must mention harnessConnectionObserved EXACTLY twice — its import and its one call. '
+    + 'A third mention is a shadowing duplicate (local declaration, destructuring, or parameter default).')
+  assert.doesNotMatch(mainJsxSrc,
+    /(?:^|[^\w$.])(?:const|let|var|function)\s+harnessConnectionObserved\b/,
+    'main.jsx must not locally declare/shadow the shared helper — it must IMPORT it')
+  // The extractor's marker is whitespace-sensitive (`const X =`), so a SECOND
+  // declaration written `const serverHarnessConnected=...` escapes its count and
+  // can shadow the real binding in another scope while the sliced statement is
+  // untouched — the poll effect's promise is then silenced for exactly the
+  // grandfathered population (round 5, P2). Count the DECLARATION itself,
+  // spacing-agnostically, on the raw source.
+  assert.equal((mainJsxSrc.match(/\b(?:const|let|var)\s+serverHarnessConnected\s*=/g) ?? []).length, 1,
+    'main.jsx must DECLARE serverHarnessConnected exactly once, whatever the spacing')
+  const code = stripComments(mainJsxSrc)
+  assert.match(code,
+    /import\s*\{[^}]*\bharnessConnectionObserved\b[^}]*\}\s*from\s*'\.\/connectionObservation\.js'/,
+    'main.jsx must IMPORT harnessConnectionObserved from ./connectionObservation.js')
+  // The RENDER SITE, not just the declaration: everything above runs the sliced
+  // STATEMENT, so nothing notices a heading re-deriving the inference
+  // (`connected: serverHarnessConnected || onboarding?.status === 'complete'`, or
+  // a second, widened variable). Both wizard headings must pass the BARE
+  // identifier (round 4, P1).
+  assert.equal((code.match(/connected:\s*serverHarnessConnected\s*[,}]/g) ?? []).length, 2,
+    'both wizard headings must pass the bare serverHarnessConnected as `connected` — '
+    + 'no inline widening at the render site')
+  // ... and then that the import resolves to the shared module's own export.
+  const mod = await import('./connectionObservation.js')
+  assert.equal(typeof mod.harnessConnectionObserved, 'function')
+  for (const answer of [false, true]) {
+    const calls = []
+    const value = runHarnessConnectedDerivation(GRANDFATHERED,
+      (s) => { calls.push(s); return answer })
+    assert.deepEqual(calls, [GRANDFATHERED],
+      'main.jsx must derive serverHarnessConnected from the ONE shared helper')
+    assert.equal(value, answer, "the helper's answer must be the value main.jsx uses")
+  }
+  // The real helper, through main.jsx's real statement, on the real projections:
+  assert.equal(runHarnessConnectedDerivation(GRANDFATHERED, mod.harnessConnectionObserved), false)
+  assert.equal(runHarnessConnectedDerivation(
+    { status: 'active', completed_steps: ['harness-connected'] }, mod.harnessConnectionObserved), true)
+  // Exact membership, not a widening predicate (#4646 round 7): the server's
+  // STEP_IDS holds exactly one `harness-*` step today, so a `.some(s =>
+  // s.startsWith('harness'))` rewrite is equivalent TODAY and would accept a
+  // future `harness-<other>` step as a connection. Pin the equality.
+  assert.equal(mod.harnessConnectionObserved(
+    { status: 'active', completed_steps: ['harness-connected-x'] }), false,
+    'a step that merely starts with `harness-` is not the connected step')
+  assert.equal(mod.harnessConnectionObserved(
+    { status: 'active', completed_steps: ['harness'] }), false)
+})
+
+test('#4646 (C): overviewConnection consumes the shared observed-connection derivation', () => {
+  for (const answer of [false, true]) {
+    const calls = []
+    const card = overviewConnection(GRANDFATHERED, (s) => { calls.push(s); return answer })
+    assert.equal(calls.length, 1,
+      'overviewConnection must read the connection fact through the shared derivation, not re-decide it')
+    assert.equal(calls[0], GRANDFATHERED, 'the derivation must be asked about THIS projection')
+    assert.equal(card.kind === 'connected', answer, "the derivation's answer must drive the arm")
+  }
+})
+
+test('#4646 (C2): the INJECTED derivation decides — an inline duplicate cannot override it', () => {
+  // Review round 2, mutation f2: `connectionObserved(state) || (Array.isArray(...)
+  // && ...includes('harness-connected'))` SURVIVED test C, because C only ever
+  // passes a projection where the inline copy is FALSE — so the two can never
+  // disagree. This member is the direction that separates them: an OBSERVED
+  // edge with an injected predicate that says no. Without it, the exact
+  // duplication #4646 removes can be reintroduced and stay green.
+  const observed = { status: 'active', completed_steps: ['harness-connected'] }
+  const card = overviewConnection(observed, () => false)
+  assert.notEqual(card.kind, 'connected',
+    'the injected derivation must decide — an inline re-implementation must not be able to override it')
+  assert.equal(card.value, NO_CONNECTION_OBSERVED)
+  const hidden = overviewConnection({ status: 'active', completed_steps: [] }, () => true)
+  assert.equal(hidden.kind, 'connected',
+    'conversely, an injected yes must be honoured when no step edge is present')
+})
+
+test('#4646 (B2): main.jsx derives the SAME edge-only answer on EVERY projection the card is judged on', async () => {
+  // Review round 3, P1: the wizard's statement is the OTHER half of this
+  // invariant, and test B only ever asked it about GRANDFATHERED. A wizard-side
+  // `|| onboarding?.status === 'complete'` therefore re-added the deleted
+  // inference on the WIZARD surface with the whole file green — the exact
+  // cross-surface divergence #4646 deletes, moved to the other side. The sliced
+  // statement is run over the SAME matrix the card is judged on.
+  const mod = await import('./connectionObservation.js')
+  assert.ok(CONNECTION_MATRIX.some((s) => mod.harnessConnectionObserved(s)),
+    'the matrix must contain a POSITIVE member, or this parity is vacuous')
+  assert.ok(CONNECTION_MATRIX.some((s) => !mod.harnessConnectionObserved(s)),
+    'the matrix must contain a NEGATIVE member, or this parity is vacuous')
+  for (const s of CONNECTION_MATRIX) {
+    const viaMain = runHarnessConnectedDerivation(s, mod.harnessConnectionObserved)
+    assert.equal(viaMain, mod.harnessConnectionObserved(s),
+      `main.jsx must not re-add an inference the helper does not make: ${JSON.stringify(s)}`)
+    assert.equal(viaMain, overviewConnection(s).kind === 'connected',
+      `card/wizard parity: ${JSON.stringify(s)}`)
+  }
+  // The deleted legs, asserted DIRECTLY on the wizard path too (a symmetric
+  // re-widening on both surfaces would survive the parity loop above):
+  for (const s of [{ status: 'complete', fork: 'self', completed_steps: [] },
+                   { status: 'active', completed_steps: [], onboarding_complete: true }]) {
+    assert.equal(runHarnessConnectedDerivation(s, mod.harnessConnectionObserved), false,
+      `completion is not an observed connection on the wizard path either: ${JSON.stringify(s)}`)
+  }
+  // Both directions on the REAL served shape, so a leg gating on a FLOW key
+  // cannot hide behind the parity loop (round 4, P1): the matrix carries the
+  // defaults, and these assert the polarity explicitly.
+  assert.equal(overviewConnection({ ...GRANDFATHERED, ...FLOW }).kind, 'disconnected')
+  assert.equal(overviewConnection(
+    { ...FLOW, status: 'active', fork: null, completed_steps: [], onboarding_complete: true }).kind,
+  'disconnected', 'the NODE-ABSENT grandfather form must not read as connected')
+  assert.equal(overviewConnection({ status: 'active', completed_steps: ['harness-connected'], ...FLOW }).kind,
+    'connected')
+  assert.equal(runHarnessConnectedDerivation({ ...GRANDFATHERED, ...FLOW },
+    mod.harnessConnectionObserved), false)
+  assert.equal(runHarnessConnectedDerivation(
+    { status: 'active', completed_steps: ['harness-connected'], ...FLOW },
+    mod.harnessConnectionObserved), true)
+  // Each `unavailable` marker leg stands on its own. The server sets them
+  // atomically (`flow_unavailable()` writes every FLOW key), so this is defence
+  // in depth — but each leg guards a real field, and dropping any one of them
+  // left the suite green (round 4, P2).
+  for (const s of [{ ...FLOW, status: 'active', fork: 'unavailable', completed_steps: [] },
+                   { ...FLOW, status: 'active', version: 'unavailable', completed_steps: [] },
+                   { ...FLOW, status: 'active', completed_steps: 'unavailable' },
+                   { ...FLOW, status: 'unavailable', completed_steps: [] }]) {
+    assert.equal(overviewConnection(s).kind, 'unavailable', JSON.stringify(s))
+    assert.equal(overviewConnection(s).value, 'Unavailable')
+    assert.equal(overviewConnection(s).detail,
+      'Connection status read failed — retry shortly.', JSON.stringify(s))
+  }
+  // ... and the positive direction must not be gated on an untested field:
+  assert.equal(overviewConnection({ ...FLOW, status: 'active', fork: 'build',
+    completed_steps: ['team-named', 'harness-connected'] }).kind, 'connected',
+    'a build-fork org WITH the observed edge is connected — `fork` must not gate the predicate')
+})
+
+test('#4646 (G): ONLY the step edge decides — no other served field can flip the verdict', async () => {
+  // Round 6, P1: the matrix closed the KEY-PRESENCE hole but carried each FLOW
+  // key only at its `flow_defaults()` value, and the parity loops compare helper
+  // with helper — so a leg keyed on a key's NON-DEFAULT reachable value
+  // (`state.compact === true` for a returning creator, a non-empty
+  // `member_progress`, a `last_decide_attempt`, a `fork_unsure_at`) re-created
+  // the card-vs-wizard divergence with the suite green. Enumerating values would
+  // chase the tail, so the PROPERTY is asserted instead: for BOTH step sets,
+  // varying every non-step field leaves the answer unchanged — on the card AND
+  // through the sliced main.jsx statement.
+  const mod = await import('./connectionObservation.js')
+  const variations = [
+    {},
+    { version: 2 },
+    { compact: true },
+    { compact: true, restart_pending: true },
+    { member_progress: { 'a@b.co': ['team-named'] } },
+    { member_progress: { 'a@b.co': ['team-named', 'harness-connected'] } },
+    { last_decide_attempt: '2026-01-01T00:00:00Z' },
+    { fork_unsure_at: '2026-01-01T00:00:00Z' },
+    { fork: 'build' },
+    { fork: null },
+    { status: 'complete' },
+    { onboarding_complete: true },
+    { onboarding_complete: false },
+  ]
+  for (const withEdge of [true, false]) {
+    const steps = withEdge ? ['team-named', 'harness-connected'] : ['team-named']
+    for (const variation of variations) {
+      const s = { ...FLOW, status: 'active', fork: 'self', completed_steps: steps, ...variation }
+      assert.equal(mod.harnessConnectionObserved(s), withEdge, JSON.stringify(s))
+      assert.equal(overviewConnection(s).kind === 'connected', withEdge,
+        `only the step edge may decide, on the card: ${JSON.stringify(s)}`)
+      assert.equal(runHarnessConnectedDerivation(s, mod.harnessConnectionObserved), withEdge,
+        `only the step edge may decide, in main.jsx: ${JSON.stringify(s)}`)
+    }
+  }
+})
+
+test('#4646 (F): both effects that consume the derivation list it as a dependency', () => {
+  // Round 6, P2: the derivation and the render site are pinned, but the two
+  // effects that consume it were not — dropping `serverHarnessConnected` from
+  // either dep array ships a stale screen (the poll never stops; the step-3
+  // announcement keeps saying "no connection" under a heading that flipped).
+  const code = stripComments(mainJsxSrc)
+  assert.match(code, /\[\s*wizardStep,\s*welcomeMode,\s*authed,\s*serverHarnessConnected\s*\]/,
+    'the connect poll must re-run when the observed connection lands')
+  assert.match(code,
+    /wizardPaused,\s*effectivelyPaused,\s*serverHarnessConnected,\s*isBuildFork\s*\]/,
+    'the step-3 announcement must re-derive when the observed connection lands')
+})
+
+test('#4646 (C3): overview.js BINDS the shared predicate — it must not re-declare it', () => {
+  // Review round 3, P2: the main.jsx binding was pinned but overview.js's was
+  // not, so the SAME duplication class could be reintroduced on the card side
+  // (a local `function harnessConnectionObserved` replacing the import) with
+  // every other test still green. Test C proves only that SOME predicate is
+  // called — not that it is the shared one.
+  const code = stripComments(readFileSync(join(__dirname, 'overview.js'), 'utf8'))
+  assert.equal(code.split('harnessConnectionObserved').length - 1, 2,
+    'overview.js must mention harnessConnectionObserved EXACTLY twice — its import and its one defaulted parameter')
+  assert.match(code,
+    /import\s*\{[^}]*\bharnessConnectionObserved\b[^}]*\}\s*from\s*'\.\/connectionObservation\.js'/,
+    'overview.js must IMPORT the shared predicate, never re-declare it')
+})
+
+test('#4646 (D): the card agrees with the shared predicate across the projection matrix', async () => {
+  const mod = await import('./connectionObservation.js')
+  assert.equal(typeof mod.harnessConnectionObserved, 'function',
+    'the ONE observed-connection predicate must be exported by connectionObservation.js')
+  const matrix = CONNECTION_MATRIX
+  assert.ok(matrix.some((s) => mod.harnessConnectionObserved(s)),
+    'the matrix must contain a POSITIVE member, or the parity below is vacuous')
+  assert.ok(matrix.some((s) => !mod.harnessConnectionObserved(s)),
+    'the matrix must contain a NEGATIVE member, or the parity below is vacuous')
+  for (const s of matrix) {
+    assert.equal(overviewConnection(s).kind === 'connected', mod.harnessConnectionObserved(s),
+      `card and the shared predicate must agree on ${JSON.stringify(s)}`)
+  }
+  // The deleted legs, asserted DIRECTLY (the matrix above proves parity; these
+  // prove the completion legs are gone even if the helper were re-widened in
+  // lockstep with the card — a symmetric mutation the parity test cannot see):
+  for (const s of [{ status: 'complete', completed_steps: [] },
+                   { status: 'active', completed_steps: [], onboarding_complete: true },
+                   { status: 'complete', completed_steps: ['team-named'], onboarding_complete: true }]) {
+    assert.equal(overviewConnection(s).kind, 'disconnected',
+      `completion is not an observed connection: ${JSON.stringify(s)}`)
+    assert.equal(overviewConnection(s).value, NO_CONNECTION_OBSERVED)
+  }
+})
+
+test('#4646 (E): a graph-down read never reads as connected on EITHER surface', async () => {
+  const mod = await import('./connectionObservation.js')
+  // The reachable graph-down shape: `state.flow_unavailable()` sets EVERY FLOW
+  // key to the literal 'unavailable' (atomically), so this is what the server
+  // serves on an outage. Nothing here needs a guard of its own: that string does
+  // not CONTAIN the marker, so its absence — not the type check — is what keeps
+  // the read negative. The `Array.isArray` invariant is exercised by test E2,
+  // whose malformed step sets DO carry the marker.
+  const outage = { status: 'unavailable', fork: 'unavailable', version: 'unavailable',
+                   completed_steps: 'unavailable', onboarding_complete: 'unavailable' }
+  for (const s of [outage, { status: 'unavailable', completed_steps: 'unavailable' }, null]) {
+    assert.equal(mod.harnessConnectionObserved(s), false,
+      `a graph-down read must never read as connected: ${JSON.stringify(s)}`)
+    const connected = runHarnessConnectedDerivation(s, mod.harnessConnectionObserved)
+    assert.equal(connected, false,
+      `main.jsx's derivation must be false on a graph-down read: ${JSON.stringify(s)}`)
+    assert.equal(overviewConnection(s).kind === 'connected', false)
+  }
+  // The card is stricter still — it names the outage outright:
+  assert.equal(overviewConnection(outage).value, 'Unavailable')
+  // and the wizard's heading is the honest understatement, not a connected claim:
+  assert.equal(wizardStageLabel(3, { connected: false }), NO_CONNECTION_OBSERVED)
+})
+
+test('#4646 (E2): a non-array `completed_steps` carrying the marker never reads as connected', async () => {
+  // Review round 2, mutation g: dropping the helper's `Array.isArray` guard
+  // SURVIVED the whole file, because every graph-down fixture uses the literal
+  // `'unavailable'` — a string that does not CONTAIN the marker, so the type
+  // check was never the thing under test. The server does serve a string in
+  // this key, and a shape that carries the marker must not be scanned as a step
+  // set: without the guard, `'harness-connected'` reads as a connection on BOTH
+  // surfaces (fail-open on a malformed read).
+  const mod = await import('./connectionObservation.js')
+  const malformed = [
+    { status: 'active', completed_steps: 'harness-connected' },
+    { status: 'active', completed_steps: '["harness-connected"]' },
+    { status: 'active', completed_steps: 'team-named,harness-connected' },
+  ]
+  for (const s of malformed) {
+    assert.equal(mod.harnessConnectionObserved(s), false,
+      `a non-array step set must never read as connected: ${JSON.stringify(s)}`)
+    assert.equal(runHarnessConnectedDerivation(s, mod.harnessConnectionObserved), false,
+      `main.jsx's derivation must be false on a malformed step set: ${JSON.stringify(s)}`)
+    assert.equal(overviewConnection(s).kind, 'disconnected')
+    assert.equal(overviewConnection(s).value, NO_CONNECTION_OBSERVED)
+  }
+  // ... while the ARRAY form of each still reads correctly:
+  assert.equal(mod.harnessConnectionObserved({ completed_steps: ['harness-connected'] }), true)
+  assert.equal(mod.harnessConnectionObserved({ completed_steps: ['team-named'] }), false)
+})
+
+test('#4646: the extractor fails LOUD on an absent, ambiguous, or unterminated slice', () => {
+  // The whole "a reformat fails loud rather than passing vacuously" property
+  // rests on these paths, so they are asserted rather than assumed.
+  assert.throws(() => extractConstStatement('const X = 1\nconst X = 2\n', 'X'), /exactly once/)
+  assert.throws(() => extractConstStatement('const Y = 1\n', 'X'), /exactly once/)
+  assert.throws(() => extractConstStatement('const X = (1 +\n', 'X'), /never terminated/)
+  assert.throws(() => extractConstStatement('const X = (1 +\nconst Z = 2\n', 'X'), /never terminated/,
+    'a still-open bracket at EOF must refuse a slice, not treat the new statement as the close')
+})
+
+test('#4646: a LEADING continuation operator continues the slice (it is not a boundary)', () => {
+  // Review round 2, P1: the canonical wrapped forms put the operator at the
+  // START of the continuation line. Returning the truncated prefix made a
+  // reformatted main.jsx run a semantically different expression while the
+  // suite stayed green — the exact cross-surface divergence this file exists to
+  // catch, so the boundary rule is pinned here directly.
+  assert.equal(extractConstStatement('const X = f(y)\n  ? false : true\nconst Z = 1\n', 'X'),
+    'const X = f(y)\n  ? false : true')
+  assert.equal(extractConstStatement('const Y = a\n  .b()\n  .c()\nconst W = 1\n', 'Y'),
+    'const Y = a\n  .b()\n  .c()')
+  assert.equal(extractConstStatement('const Q = f(a)\n  // why\n  || g(b)\nconst V = 1\n', 'Q'),
+    'const Q = f(a)\n  // why\n  || g(b)',
+    'a comment between the operands must not turn the boundary into a termination')
+  // ... and it still terminates at the genuinely-next statement:
+  assert.equal(extractConstStatement('const R = f(a)\nconst S = 2\n', 'R'), 'const R = f(a)')
 })
 
 test('connection: active org without harness-connected → not connected', () => {
@@ -79,11 +577,15 @@ test('#3724: the paused wizard heading is derived from the shared observation ph
 // this ratchet catches a future edit that re-divides them into two DIFFERENT
 // words. Both sides are pinned to the literal, so neither can drift silently.
 //
-// SCOPED to the NEGATIVE (not-connected) arm: the wizard's POSITIVE arms
-// legitimately take extra predicates the card does not (`connected`,
-// `buildFork`), so the two surfaces do NOT state one universal string.
-// Unifying the positive arms is a separate copy decision, not this fix —
-// asserting it here would overclaim the ratchet.
+// SCOPED to the NEGATIVE (not-connected) arm: the two surfaces render
+// DIFFERENT positive STRINGS (the card says "Connected ✓", the wizard's step-3
+// heading is the step label), so they do not state one universal string.
+// #4646 (this lane) DID unify the positive PREDICATE — both surfaces now derive
+// connected from ONE shared `harnessConnectionObserved` (connectionObservation.js),
+// which is why the wizard's statement is run over the same projection matrix
+// (tests B2) and the card's parity is asserted per member (test D). Do not
+// re-divide the predicate: this note used to say the unification was out of
+// scope.
 test('#3724: the Overview card and the wizard step state the SAME observation phrase in the NEGATIVE arm', () => {
   const c = overviewConnection({ status: 'active', completed_steps: ['team-named'] })
   assert.equal(c.value, 'No connection observed yet',
