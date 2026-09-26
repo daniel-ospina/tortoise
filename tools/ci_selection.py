@@ -500,8 +500,9 @@ SOURCE_PATTERNS = {
             # (registered in `api` AND `core`) is the drift gate. Same gap as the
             # bridge table above: `tools/` is in NON_PYTHON_PREFIXES, so a
             # generator-only edit selected NO surface and the gate never ran on
-            # the PR that can break it. A docs-only hand-edit of the generated
-            # file still skips the matrix by the docs-PR policy (tortoise #4454).
+            # the PR that can break it. The generated doc is NOT committed (#5373:
+            # gitignored, generated on demand), so no hand-edited copy can appear
+            # in a PR for the docs-PR policy to skip.
             "tools/sdk_rename_table.py",
             # #4282 Phase 0.4 + 1.1: `tools/sdk_surface.py` derives the declared
             # `TortoiseSDK` public surface and GENERATES `config/sdk-surface.json` +

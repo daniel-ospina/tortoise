@@ -22284,14 +22284,11 @@ class TortoiseSDK:
     # operator surface is the CLI (see `tortoise/__main__.py`). Both delegate to
     # the module-level helpers so the reader/writer contract has ONE driver.
     #
-    # The imports are FUNCTION-LOCAL, and that is load-bearing: the generated
-    # rename table (`docs/product/sdk-rename-table.md`) cites `sdk.py` LINE
-    # NUMBERS, so a two-line import at the top of this file re-stales every
-    # citation below it (`tests/test_sdk_rename_table.py::test_part_a_*`,
-    # `::test_check_mode_is_clean`) — a documentation-drift failure with no
-    # relation to this fix. These methods sit AFTER the last cited line, so
-    # importing here shifts nothing. (Same reason `_config_classes()` imports
-    # `PACK_INSTALL_LABEL` locally in `projection/__init__.py`.)
+    # NOTE (#5373): the imports below are FUNCTION-LOCAL. The generated
+    # `docs/product/sdk-rename-table.md` is produced ON DEMAND from this module and
+    # is NOT committed (gitignored), so its `sdk.py:N` citations are re-rendered
+    # from the current file on every run and no committed copy pins this file's
+    # line numbers.
     def _config_reset_state(self) -> dict | None:
         """The sticky `config_reset` marker's properties, or None if never set.
 

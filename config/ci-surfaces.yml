@@ -556,12 +556,12 @@ surfaces:
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
-  # `docs/product/beta-sdk-surface.md`,
-  # `docs/product/canonical-sdk-methods.md`, or the GENERATED
-  # `docs/product/sdk-rename-table.md` selects NO surface at all (#4454), so this
-  # registration does not run for a docs-only change. A hand-edit of the GENERATED
-  # document is therefore UNGUARDED BY DESIGN (#4454); the drift gate exists only
-  # for the generator path.
+  # `docs/product/beta-sdk-surface.md` or
+  # `docs/product/canonical-sdk-methods.md` selects NO surface at all (#4454), so
+  # this registration does not run for a docs-only change — a hand-edit of those two
+  # TRACKED docs is therefore UNGUARDED BY DESIGN (#4454). The GENERATED
+  # `docs/product/sdk-rename-table.md` is a different case: NOT committed (#5373 —
+  # gitignored, generated on demand), so no hand-edited copy can appear in a PR.
   - test_sdk_rename_table.py
   # #4282 Phase 0.4 + 1.1: dual-registered with `api` for the same reason — `api` is keyed on
   # SOURCE PATTERNS, and the files this guard protects are not api-owned: `tools/sdk_surface.py`
