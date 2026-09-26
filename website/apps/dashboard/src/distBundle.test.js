@@ -231,7 +231,10 @@ function* tagOccurrences(html, name) {
 // NBSP that the URL parser keeps). `src=" http://evil"` and `src="\u0001http://evil"`
 // ARE fetched, off-origin; `src="\u0000http://evil"` is NOT (it resolves relative).
 function urlValue(s) {
-  return s.replace(/\u0000/g, '\uFFFD').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
+  return s
+    .replace(/\u0000/g, '\uFFFD')
+    .replace(/[\t\n\r]/g, '') // the URL parser removes these ANYWHERE, not just at the ends
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
 }
 
 // #3787: the first pair's value for `name` (lower-cased) in a parsed attribute
@@ -750,17 +753,26 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //      `p.srcs` note), and the off-origin refusal enumerates `<script`
   //      occurrences independently of the element walk, so a desync cannot hide
   //      one. That refusal reads `src`, `href` and `xlink:href`, refuses an
-  //      off-origin `<base href>` (it retargets every relative URL) and an
-  //      off-origin `<link rel=modulepreload>`/`preload`/`prefetch` `as=script|
-  //      worker>. A load channel outside that set is not covered; residual 2 covers
-  //      the runtime ones.
+  //      off-origin `<base href>` wherever it appears and an off-origin `<link>`
+  //      whose tokenized `rel`/`as` make it a script fetch. A load channel outside
+  //      that set is not covered (residual 2 covers the runtime ones, residual 10
+  //      the character-reference spelling).
   //   9. clause 2(d) refuses a `src`/`href` the browser never FETCHES: a data
   //      block (`type="text/template"`/`application/json`/`text/html`), a
-  //      `nomodule` script, a `<script>` inside `<template>` (inert content), and
-  //      the `href`/`xlink:href` spelling on an HTML-namespace `<script>` or on
-  //      `<math>` — an `<svg>` script does load through `href`, and only that one
-  //      was reproduced as a real fetch. All fail closed, and none of them is in
-  //      the built site.
+  //      `nomodule` script, a `<script>` inside `<template>` (inert content), the
+  //      `src` spelling on a FOREIGN-namespace script (`<svg>`/`<math>` load
+  //      through `href`), the `href`/`xlink:href` spelling on an HTML-namespace
+  //      `<script>` or on `<math>`, and a `<base href>` that is not the page's
+  //      effective base. Only the `<svg>` `href` and `xlink:href` were reproduced
+  //      as real fetches. All fail closed, and none of them is in the built site.
+  //  10. the off-origin refusal reads the attribute's SPELLING, not a browser's
+  //      character-reference decoding, so `<base href="&#104;ttps://evil/">` or
+  //      `<link href="&#104;ttps://evil/x.js">` is refused only if the written
+  //      spelling already looks off-origin — and unlike a `<script src>`, neither
+  //      has the dangling-local backstop. The decoder that closed this class for
+  //      the content probes was WITHDRAWN (see the note on `pageContexts`): it
+  //      produced false positives on clean builds, and a false positive here is
+  //      the failure mode this file treats as fatal.
   //
   // Class-B (the lane's doctrine): each message names the value that makes it
   // fail, and each context is REACHABLE — these are the scripts and pages the
@@ -881,9 +893,14 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   const OFF_ORIGIN = /^(?:https?:)?\/\//i
   // `<link rel=modulepreload>`, and `preload`/`prefetch` with `as=script|worker`,
   // are script FETCHES; `<link>` for icons, a stylesheet or a canonical URL is
-  // not, and the built site uses it only for those.
-  const LINK_REL = /^(?:modulepreload|preload|prefetch)$/
-  const LINK_AS = /^(?:script|worker)$/
+  // not, and the built site uses it only for those. `rel` is a whitespace-
+  // separated, ASCII-case-insensitive TOKEN SET and `as` is case-insensitive, so
+  // both are tokenized — matching a canonical single spelling left
+  // `rel="ModulePreload"`, `rel=" modulepreload "` and `as="Script"` GREEN while
+  // a browser fetched the script (review cycle 11).
+  const LINK_REL = new Set(['modulepreload', 'preload', 'prefetch'])
+  const LINK_AS = new Set(['script', 'worker'])
+  const tokens = (values) => values.flatMap((v) => v.toLowerCase().split(/[\t\n\f\r ]+/)).filter(Boolean)
   const offOrigin = []
   for (const p of pages) {
     for (const { from, end } of tagOccurrences(p.html, 'script')) {
@@ -899,27 +916,35 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
         offOrigin.push(`${p.name} → <script ${name}="${urlValue(raw)}">`)
       }
     }
-    // `<base href>` retargets EVERY relative URL on the page, so a
-    // same-origin-looking `<script src="/consent.js">` is fetched from the base
-    // origin — this clause read the local spelling and stayed GREEN while a real
-    // browser requested the script off-origin (review cycle 10, reproduced). A
-    // LOCAL `<base href>` cannot retarget an absolute-path reference to another
-    // origin, and the built site has no `<base>` at all, so an off-origin one is
-    // refused outright.
+    // An off-origin `<base href>` is refused WHEREVER it appears — even when a
+    // later `<base>` is the effective one, or no element precedes it, or the page
+    // has no relative reference at all. The rule is not "this base retargets
+    // something"; it is that a page naming another origin as its base is a change
+    // to how the site is LOADED rather than a build detail, and a deliberate
+    // fail-closed over-red is cheaper than modelling base precedence (the built
+    // site has no `<base>`). It was a MISS before: `<base href="https://evil/">`
+    // plus the shipped `<script src="/consent.js">` had the script fetched from
+    // the base origin while the clause read the local spelling and stayed green
+    // (review cycle 10, reproduced against a real fetch).
     for (const { from, end } of tagOccurrences(p.html, 'base')) {
       const raw = firstAttr(tagAttrs(p.html, from, end), 'href')
       if (raw !== null && OFF_ORIGIN.test(urlValue(raw))) {
-        offOrigin.push(`${p.name} → <base href="${urlValue(raw)}"> retargets relative script URLs`)
+        offOrigin.push(`${p.name} → <base href="${urlValue(raw)}">`)
       }
     }
     for (const { from, end } of tagOccurrences(p.html, 'link')) {
       const attrs = tagAttrs(p.html, from, end)
-      const rel = firstAttr(attrs, 'rel')
+      // EVERY `rel` attribute counts, not just the first: `<link rel="stylesheet"
+      // rel="modulepreload" href="…">` is read by a browser as a script fetch as
+      // well as a stylesheet one, and `firstAttr` alone stayed green on it
+      // (review cycle 11). `href` keeps first-wins, which is what a browser uses.
+      const rels = tokens(attrs.filter(([n]) => n === 'rel').map(([, v]) => v))
+      if (!rels.some((r) => LINK_REL.has(r))) continue
+      const as = tokens(attrs.filter(([n]) => n === 'as').map(([, v]) => v))
+      if (!rels.includes('modulepreload') && !as.some((a) => LINK_AS.has(a))) continue
       const href = firstAttr(attrs, 'href')
-      if (rel === null || href === null || !LINK_REL.test(rel)) continue
-      if (rel !== 'modulepreload' && !LINK_AS.test(firstAttr(attrs, 'as') ?? '')) continue
-      if (!OFF_ORIGIN.test(urlValue(href))) continue
-      offOrigin.push(`${p.name} → <link rel="${rel}" href="${urlValue(href)}">`)
+      if (href === null || !OFF_ORIGIN.test(urlValue(href))) continue
+      offOrigin.push(`${p.name} → <link rel="${rels.join(' ')}" href="${urlValue(href)}">`)
     }
   }
   assert.deepEqual(offOrigin, [],
