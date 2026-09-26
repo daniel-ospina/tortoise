@@ -183,9 +183,26 @@ def migrate(force: bool = False) -> dict:
             remove_stale_aof(target)
             proj = FalkorProjection(target, allow_nonstandard_path=True)
             try:
-                proj.rebuild_all(events_dir)
+                rebuild_counts = proj.rebuild_all(events_dir)
             finally:
                 proj.close()
+            # #4641: the JSONL rebuild path is one of the three routes that
+            # performs the unconditional wipe, so a completed rebuild can
+            # still leave the migrated graph's onboarding state NOT confirmed
+            # intact — an onboarding restore gap (those writes ride no journal
+            # record), an unverified restore, or a state-UNKNOWN rescue file.
+            # Reporting `migrated` while swallowing it is the silent partial
+            # loss the class exists to stop, so name it here as the other
+            # callers (`consistency.recover_from_log`, the CLI) now do. This
+            # route discards the counts (`migrate()` returns only status/
+            # nodes/backup), so the warning can only POINT at the rebuild ERROR
+            # lines, which carry the shape; it must not describe all three as
+            # a loss the replay could not close.
+            if rebuild_counts.get("onboarding_gap"):
+                logger.warning(
+                    "rebuild: the migrated graph's onboarding state is NOT "
+                    "confirmed intact — re-run onboarding for the affected "
+                    "org(s) and see the rebuild ERROR log (#4641)")
 
         # Integrity verification (node-ID-set equality vs source) before marker
         target_nodes = _count_nodes(target)
