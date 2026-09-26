@@ -939,7 +939,7 @@ def _render_block(h: dict) -> str:
     else:
         sid = hit_session_id(h)
         prefix = f"[session {sid}]" if sid else "[session ?]"
-    sdate = h.get("session_date")
+    sdate = _one_line(h.get("session_date"))
     if sdate:
         prefix = f"{prefix} (session date {sdate})"
     # E3 (#1535): speaker decoration — mirrors the deterministic leg's
@@ -949,7 +949,7 @@ def _render_block(h: dict) -> str:
     # "[role] text" AND have the speaker prop — decorating both would
     # double-attribute, e.g. "[user] [user] ..." on the deterministic leg's
     # primary recall surface).
-    spk = h.get("speaker") or ""
+    spk = _one_line(h.get("speaker"))
     # only the deterministic leg's own role-bracket shape suppresses the
     # decoration — a non-role bracket prefix ([context], [IMPORTANT])
     # must not suppress speaker attribution
@@ -962,6 +962,34 @@ def _render_block(h: dict) -> str:
         # extra wrap.
         prefix = f"{prefix} {marker}"
     return f"{prefix} {h.get('content', '')}"
+
+
+def _one_line(value: object) -> str:
+    """Collapse a decoration value to a SINGLE LINE (#3844).
+
+    ``session_date`` and ``speaker`` are interpolated into the reader-evidence
+    annotation prefix, and BOTH were interpolated raw. The session id beside
+    them is safe only *by construction* (it is an index, never free text), which
+    is exactly why the pair was missed.
+
+    The values are free text from a captured session, so a newline inside one
+    FORGES an annotation line: it fabricates a turn the reader will read as a
+    real ``[user] …`` message, or a fake ``(session date …)``. That is prompt
+    injection into the evidence the model is asked to reason over, and the model
+    cannot tell the fabricated line from a real one.
+
+    Whitespace-collapse rather than strip-a-blacklist: it neutralises every
+    line-forging sequence (``\\n``, ``\\r``, ``\\r\\n``, unicode line separators,
+    vertical tab, form feed) without needing the list to be complete, which is
+    the property a blacklist cannot offer.
+
+    Byte-identical for ordinary values — ``"Alice"`` and an ISO date both pass
+    through unchanged, and a missing value still yields ``""`` (falsy), so
+    absent-decoration rendering is unchanged.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
 
 
 def _has_claim_text(h: dict) -> bool:
