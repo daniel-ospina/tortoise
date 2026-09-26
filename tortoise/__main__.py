@@ -6455,16 +6455,22 @@ def _cmd_doctor(args):
             _manual = sorted({f.kind for f in findings
                               if is_manual_fix(f.kind)})
             # A collision the DETECTOR cannot see, so it cannot arrive as a
-            # finding: `install_capture` refuses when the legacy extension is
-            # already disabled at `PI_DISABLED_DIRNAME` (it will not overwrite
-            # the previous backup).  The detector's legacy blind spot is #3713;
-            # this guard exists only so the hint below never names a command
-            # that refuses, which is this block's own invariant.
+            # finding: `install_capture` refuses when a REAL legacy extension
+            # directory is already disabled at `PI_DISABLED_DIRNAME` (it will
+            # not overwrite the previous backup).  The condition MIRRORS the
+            # installer's, which handles a symlinked legacy entry by unlinking
+            # it and never reaches the refusal — so `exists()` alone would fire
+            # the guard on a state the install repairs and withhold a working
+            # command.  The detector's legacy blind spot is #3713; this guard
+            # exists only so the hint never names a command that refuses.
+            _legacy = _root / LEGACY_PI_DIRNAME
+            _legacy_disabled = _root / PI_DISABLED_DIRNAME
             _legacy_collision = (
                 _harness == "pi"
-                and (_root / LEGACY_PI_DIRNAME).exists()
-                and ((_root / PI_DISABLED_DIRNAME).exists()
-                     or (_root / PI_DISABLED_DIRNAME).is_symlink())
+                and _legacy.is_dir()
+                and not _legacy.is_symlink()
+                and (_legacy_disabled.exists()
+                     or _legacy_disabled.is_symlink())
             )
             if _manual:
                 _hint = ("needs a manual fix before "
@@ -6481,10 +6487,12 @@ def _cmd_doctor(args):
                          f"run `tortoise install {_harness}` to repair")
             # The finding's OWN detail names the repair command too, so it is
             # the second place a refusing recommendation can come from.  In the
-            # collision state it is replaced by the read-only query, which
-            # cannot refuse.
+            # collision state that command is replaced — and it must be one that
+            # ACCEPTS `--harness pi`: `tortoise hooks status` is layout-keyed and
+            # exits 1 with "unknown harness 'pi'", so naming it would swap one
+            # refusal for another.  `session verify` takes the artifact seam.
             _detail = (f"({first.kind}: {first.detail})" if not _legacy_collision
-                       else f"({first.kind}; run `tortoise hooks status "
+                       else f"({first.kind}; run `tortoise session verify "
                             f"--harness {_harness}` for the repair path)")
             results.append((
                 _label, "❌",

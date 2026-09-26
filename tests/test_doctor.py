@@ -55,6 +55,23 @@ def _pi_seam_name() -> str:
     return ARTIFACT_CONTRACTS["pi"].install_name
 
 
+def _session_verify_accepts_pi_harness() -> bool:
+    """The pi-aware read-only query is one that ACCEPTS `--harness pi`.
+
+    Doctor's collision hint names a replacement command, and the obvious
+    `tortoise hooks status` is layout-keyed — it exits 1 with "unknown harness
+    'pi'", so naming it would swap one refusal for another.  This asserts the
+    command actually named accepts the harness.  Its exit code may still be
+    non-zero for a missing config, which is not a refusal of the REQUEST.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "tortoise", "session", "verify",
+         "--harness", "pi"],
+        capture_output=True, text=True, cwd=os.getcwd(),
+    )
+    return "unknown harness" not in (proc.stdout + proc.stderr)
+
+
 def _seed_db(db_path: str, content: str, attempts: int = 3) -> None:
     """Boot an embedded DB at db_path and write one point.
 
@@ -609,6 +626,47 @@ class TestDoctorPreInit:
         assert "tortoise install pi" not in out, (
             "the hint recommends a command that refuses in this state")
         assert _ci.PI_DISABLED_DIRNAME in out, out
+        # A replacement command must itself accept `--harness pi`: the obvious
+        # `tortoise hooks status` is layout-keyed and exits 1 there.
+        assert "hooks status --harness pi" not in out, out
+        assert _session_verify_accepts_pi_harness()
+
+    def test_a_symlinked_legacy_entry_is_not_treated_as_a_collision(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The guard must mirror the installer's own refusal condition.
+
+        `_install_pi` unlinking a SYMLINKED legacy entry never reaches its
+        refusal — only a real legacy DIRECTORY whose backup name is taken does.
+        A guard keyed on `.exists()` fires on the symlink case too, so doctor
+        withholds the command that actually works.
+
+        Mutation: change `.is_dir() and not .is_symlink()` back to `.exists()` —
+        this REDs, because the working `tortoise install pi` disappears.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        assert _ci.install_capture("pi", home=tmp_path).ok
+        root = _ci.pi_home(tmp_path)
+        (root / _pi_seam_name()).write_text("// tortoise-hook-version: 0\n",
+                                            encoding="utf-8")
+        target = tmp_path / "checkout"
+        target.mkdir()
+        (root / _ci.LEGACY_PI_DIRNAME).symlink_to(
+            target, target_is_directory=True)
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "Capture hooks" in out, out
+        assert "move one aside" not in out, (
+            "a symlinked legacy entry is repaired by the installer, so the "
+            "working command must still be offered")
 
     def test_a_memory_error_is_not_reported_as_an_unavailable_check(
             self, monkeypatch, clear_db_env, tmp_path, capsys):
