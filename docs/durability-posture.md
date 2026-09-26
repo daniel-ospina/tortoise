@@ -331,11 +331,13 @@ gate in `tests/test_durability_posture.py` fails the build if a
   divergence above, this too is a raw/hand-edited graph only. The remedy is
   the same as for #2814: the operator deletes the pending rescue file (never
   the retired, entry-less one).
-- **#4641 residual (state-UNKNOWN)** — a rescue file written before onboarding
-  preservation (carrying no `onboarding_snapshot`/`onboarding_step_links` key,
-  or carrying only one of the two) cannot say whether the graph it describes
-  ever had onboarding state, so the restore reports **UNKNOWN, not absent**
-  (`onboarding_state_unknown`, an ERROR line, and a gap in `onboarding_gap`),
+- **#4641 residual (state-UNKNOWN)** — a rescue file that cannot say whether
+  the graph it describes ever had onboarding state reports **UNKNOWN, not
+  absent**: either it predates onboarding preservation (carrying no
+  `onboarding_snapshot`/`onboarding_step_links` key, or carrying only one of the
+  two), or it carries this build's own `onboarding_unknown` marker inherited
+  from an earlier interrupted rebuild. The restore reports it as
+  `onboarding_state_unknown`, an ERROR line, and a gap in `onboarding_gap`,
   mirroring #2814's `legacy_sidecar_no_config_record`. The signal is **carried
   forward** across this run's own sidecar write as a metadata key
   (`onboarding_unknown`), because this build writes both sections (empty), so

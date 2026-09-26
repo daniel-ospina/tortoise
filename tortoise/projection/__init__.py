@@ -271,7 +271,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 3
+_PREWIPE_SNAPSHOT_VERSION = 4
 # #2814: v2 adds the `config_snapshot` section. Reading v1 is required
 # (backward compatibility): a rescue file written before this change carries
 # no config record, and the union treats that exactly as the loader does —
@@ -281,25 +281,38 @@ _PREWIPE_SNAPSHOT_VERSION = 3
 # file and silently ignore `config_snapshot` while its wipe landed. With the
 # bump that build REFUSES the rebuild instead (its `version != 1` check).
 #
-# #4641: v3 adds `onboarding_snapshot` / `onboarding_step_links`. Same
-# reasoning one increment on, stated correctly: WITHOUT a bump the writer
-# would stamp `2`, and a v2 build would accept that file and ignore the
-# onboarding sections while its wipe landed. WITH the bump that build REFUSES
-# it (its readable set is `(1, 2)`). A v1/v2 rescue file stays READABLE — it
+# #4641: v3 was picked for `onboarding_snapshot` / `onboarding_step_links`.
+# The reasoning holds one increment on: WITHOUT a bump the writer would stamp
+# `2`, and a v2 build would accept that file and ignore the onboarding
+# sections while its wipe landed. A v1/v2 rescue file stays READABLE — it
 # carries no onboarding record (the writing build did not capture the class),
 # and the restore leg reports that as state-UNKNOWN rather than as a clean,
 # empty restore.
 #
-# #4641 review round 6 — the version is a FORMAT gate, not a SECTION-SET gate.
-# Two sibling builds can legitimately claim the same version with different
-# section sets (the open #5327 picks `3` for `event_meta`; this change picks
-# `3` for the onboarding pair), and a same-version file is then ACCEPTED, its
-# unknown section silently ignored, and its class destroyed by the wipe —
-# exactly what the bump exists to prevent. `_validate_prewipe_snapshot`
-# therefore ALSO refuses a file carrying any section key outside this build's
-# `_SNAPSHOT_SECTIONS`: a build that cannot restore a section must not wipe
-# over it, whatever the version says.
-_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
+# #4641 review round 8 — v4, NOT v3, because the format gate was made
+# asymmetric by sibling contention. The version is a FORMAT gate, and THREE
+# builds independently picked `3` for three different payloads: this change
+# (the onboarding pair), the open #5327 (`event_meta`) and the open #5241
+# (`graph_identity`). A section-set refusal inside ONE of them cannot make
+# that gate symmetric: it stops a foreign-section v3 file from being consumed
+# HERE, but a sibling that carries no such refusal still reads THIS build's
+# file, walks only its own `_SNAPSHOT_SECTIONS`, ignores the onboarding
+# sections it does not know, and lets its unconditional wipe land on the very
+# class this change exists to preserve — the fail-open, in the direction that
+# destroys data. Claiming a DISTINCT number closes it without depending on
+# the siblings: every not-yet-updated build sees version 4 as unsupported and
+# REFUSES the rebuild (fail-closed), instead of accepting the file and wiping
+# over the onboarding class. v3 stays readable because a v3 file may be this
+# build's own earlier write; the section-set refusal below still rejects a v3
+# file carrying a foreign section (#2943, #4641).
+#
+# `_validate_prewipe_snapshot` therefore ALSO refuses a file carrying any
+# section key outside this build's `_SNAPSHOT_SECTIONS`: a build that cannot
+# restore a section must not wipe over it, whatever the version says. The two
+# guards are complementary — the distinct version refuses a file from a build
+# that does not know our sections; the section refusal rejects a foreign
+# payload that claims a version we read.
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4)
 # Top-level keys that are METADATA, never a preserved class. The
 # unknown-section refusal below subtracts these so it cannot mistake the
 # envelope for a section.
@@ -5747,13 +5760,14 @@ class FalkorProjection(
 
         if onboarding_unknown:
             logger.error(
-                "rebuild: the leftover pre-wipe snapshot at %s predates "
-                "onboarding preservation and does not carry the complete "
-                "onboarding record, so whether the destroyed graph held any "
-                "onboarding state CANNOT be determined — this is a "
-                "state-UNKNOWN signal, not proof the state is absent. "
-                "Re-run onboarding for any org whose onboarding state is "
-                "uncertain (#4641).",
+                "rebuild: the leftover pre-wipe snapshot at %s does not "
+                "carry a usable onboarding record — it either predates "
+                "onboarding preservation or carries a state-UNKNOWN marker "
+                "from an earlier interrupted rebuild — so whether the "
+                "destroyed graph held any onboarding state CANNOT be "
+                "determined. This is a state-UNKNOWN signal, not proof the "
+                "state is absent. Re-run onboarding for any org whose "
+                "onboarding state is uncertain (#4641).",
                 snapshot_path,
             )
         if not onboarding_verified:

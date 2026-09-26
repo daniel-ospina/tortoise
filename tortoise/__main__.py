@@ -83,9 +83,10 @@ def _cmd_rebuild(args):
         # #4641: onboarding state rides the same rescue file but is not
         # "config", so it gets its own line — printed at zero expected too, so
         # "no onboarding state to preserve" is distinguishable from
-        # "preservation was not attempted", and non-zero when the replay could
-        # not close a gap (the operator-facing counterpart of the
-        # `onboarding_gap` key the embedded auto-recovery path now warns on).
+        # "preservation was not attempted". This line is the COUNT only; the
+        # failure shapes (UNVERIFIED, UNKNOWN, confirmed loss) are reported
+        # separately below, because the projection's aggregate `onboarding_gap`
+        # is a max that collapses them.
         # The three shapes below are NOT mutually exclusive: a
         # pre-preservation rescue file (UNKNOWN) can coexist with an
         # unverified restore and with a confirmed partial loss. Each is
@@ -125,12 +126,13 @@ def _cmd_rebuild(args):
             )
         if onboarding_unknown:
             print(
-                "Onboarding: the leftover pre-wipe snapshot predates "
-                "onboarding preservation and does not carry the complete "
-                "onboarding record — whether the destroyed graph held any "
-                "onboarding state CANNOT be determined (UNKNOWN, not "
-                "absent). Re-run onboarding for any org whose onboarding "
-                "state is uncertain (#4641).",
+                "Onboarding: the leftover pre-wipe snapshot does not carry a "
+                "usable onboarding record — it either predates onboarding "
+                "preservation or carries a state-UNKNOWN marker from an "
+                "earlier interrupted rebuild — so whether the destroyed "
+                "graph held any onboarding state CANNOT be determined "
+                "(UNKNOWN, not absent). Re-run onboarding for any org whose "
+                "onboarding state is uncertain (#4641).",
                 file=sys.stderr,
             )
         if onboarding_missing_total:

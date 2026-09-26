@@ -974,16 +974,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
         raised — the caller decides fail-loud policy. Torn trailing lines
         (crash mid-append) are skipped, not fatal.
 
-    Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`
-    and (only for a rescue file that predates onboarding preservation)
-    `onboarding_state_unknown`, set whenever a completed replay left the
-    graph's onboarding state NOT confirmed intact (#4641). `onboarding_gap` is
-    the trigger flag (non-zero for a confirmed loss, an unverified restore, or
-    a state-UNKNOWN rescue file); `reason` carries an ADDITIVE clause naming
-    which of the three applies. `recovered` is still True in every one of those
-    cases: the rebuild did complete and refusing to open the store would be
-    strictly worse, so the signal is PROPAGATED for the caller to branch on
-    rather than swallowed into a success-shaped result.
+    Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`,
+    the trigger flag set whenever a completed replay left the graph's onboarding
+    state NOT confirmed intact (non-zero for a confirmed loss, an unverified
+    restore, OR a state-UNKNOWN rescue file), plus `onboarding_state_unknown`,
+    set ONLY for the rescue-file shape (#4641). `reason` carries an ADDITIVE
+    clause naming which of the three applies. `recovered` is still True in
+    every one of those cases: the rebuild did complete and refusing to open the
+    store would be strictly worse, so the signal is PROPAGATED for the caller
+    to branch on rather than swallowed into a success-shaped result.
     """
     import json as _json
     import os

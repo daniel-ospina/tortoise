@@ -511,6 +511,15 @@ def test_prewipe_snapshot_version_bumped_and_stamped(monkeypatch, graph):
     assert pr._PREWIPE_SNAPSHOT_VERSION != 1
     assert 1 in pr._PREWIPE_SNAPSHOT_READABLE_VERSIONS
     assert pr._PREWIPE_SNAPSHOT_VERSION in pr._PREWIPE_SNAPSHOT_READABLE_VERSIONS
+    # #4641 review round 8: the version must be DISTINCT from the numbers the
+    # sibling v3 claimants use (`event_meta` in #5327, `graph_identity` in
+    # #5241), because the section-set refusal only guards THIS build's read
+    # direction. A distinct number is what makes an un-updated sibling build
+    # REFUSE our file instead of accepting it and wiping over the onboarding
+    # class it cannot see. v3 must stay readable (this build wrote it before
+    # the bump; a foreign-section v3 file is rejected by that refusal).
+    assert pr._PREWIPE_SNAPSHOT_VERSION != 3
+    assert 3 in pr._PREWIPE_SNAPSHOT_READABLE_VERSIONS
 
     events, sdk = graph
     _write_journal(events, [])
