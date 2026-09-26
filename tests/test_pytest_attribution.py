@@ -21,10 +21,14 @@ So the tests come in two layers, both of which EXECUTE:
 2. the rail — the ``::error::`` marker is fed through the real
    ``scripts/ci_exemption.py ids`` so the claim that an unobservable leg becomes
    an ATTRIBUTABLE failure (instead of a silent gap) is measured, not asserted.
+   This layer is HOST-ONLY: the rail is agent-infra's, reached through a symlink
+   that dangles on a runner, so both of its cases skip by name where the rail is
+   absent (see ``RAIL_AVAILABLE``) — they never fail on that environment.
 
 No DB, no network, no Docker: every input is a file this module writes to
 ``tmp_path``.
 """
+
 from __future__ import annotations
 
 import re
@@ -41,6 +45,26 @@ WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 # The reporter serves both workflows that print a `/tmp/*pytest.log` tail;
 # post-merge-validation has no nodeid grep, so its tail was its ONLY channel.
 ATTRIBUTION_WORKFLOWS = [WORKFLOW, REPO / ".github" / "workflows" / "post-merge-validation.yml"]
+
+# The RAIL this module measures against lives in agent-infra, not here: `scripts`
+# is a tracked symlink to `$AGENT_INFRA_PATH/scripts`, so `EXEMPTION_PY` resolves
+# on a developer host and DANGLES on a runner. python-ci.yml is self-contained BY
+# DECISION (fix #555: "no reusable-workflow call and no `scripts`/`agent-infra`
+# symlinks — both resolve to paths that are broken on the runner") and no CI job
+# checks out agent-infra, so the rail layer can only be EXECUTED where the rail
+# exists. Off that host the two rail cases SKIP BY NAME rather than fail on an
+# environment this repo does not own — and the skip is announced, so a green leg
+# reads "the marker contract is pinned, the rail's parse was not run", never the
+# vacuous "the rail agreed" that the marker itself exists to prevent. The marker
+# TEXT stays pinned repo-side on EVERY run, by
+# `test_marker_text_is_exactly_the_issue_contract`.
+RAIL_AVAILABLE = EXEMPTION_PY.exists()
+RAIL_ABSENT_REASON = (
+    "agent-infra rail not checked out: `scripts/ci_exemption.py` is reached through the "
+    "tracked `scripts` symlink, which dangles off a developer host (python-ci.yml is "
+    "self-contained by decision, fix #555), so the rail's parse of the marker can only "
+    "be executed where agent-infra is present"
+)
 
 INCOMPLETE_MARKER = "::error::test leg INCOMPLETE — no pytest summary; failure set unobservable"
 
@@ -85,7 +109,9 @@ NON_SUMMARY_BANNERS = [
 ]
 
 
-def run_script(log: Path | None = None, *extra: str, rc: str | None = None) -> subprocess.CompletedProcess[str]:
+def run_script(
+    log: Path | None = None, *extra: str, rc: str | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run the reporter the way the workflow does."""
     argv = ["bash", str(SCRIPT)]
     if log is not None:
@@ -170,9 +196,7 @@ def test_summary_above_a_noise_starved_tail_still_reaches_the_report(tmp_path: P
     """
     summary = "= 4 failed, 2360 passed, 18 skipped, 20 warnings in 358.47s (0:05:58) =====\n"
     log = tmp_path / "pytest.log"
-    log.write_text(
-        "tests/test_x.py::test_a PASSED [ 50%]\n" + summary + NOISE
-    )
+    log.write_text("tests/test_x.py::test_a PASSED [ 50%]\n" + summary + NOISE)
     noise_lines = [ln for ln in log.read_text().splitlines() if ln.strip()]
     assert len(noise_lines) > 300, "fixture must out-noise the workflow's tail window"
 
@@ -261,6 +285,7 @@ def _rail_ids(capture_text: str, tmp_path: Path) -> tuple[str, int]:
     return "\n".join(keys), result.returncode
 
 
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
 def test_incomplete_leg_without_the_marker_contributes_nothing(tmp_path: Path) -> None:
     """The MEASURED gap: the old prose line yields ids=0 — the leg vanishes.
 
@@ -274,6 +299,7 @@ def test_incomplete_leg_without_the_marker_contributes_nothing(tmp_path: Path) -
     assert keys == "", f"a silent leg must yield no key — measured, not assumed; got: {keys!r}"
 
 
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
 def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) -> None:
     """With the marker the SAME leg is a named, attributable failure key.
 
