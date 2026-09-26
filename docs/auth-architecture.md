@@ -366,7 +366,9 @@ unissued: the MCP consent page in `tortoise/oauth.py` writes it independently
 ACCEPTED as a credential is a third fact, and it is: see the two surfaces in
 §2.1, and #4178 for removing them. The dashboard's auth state now comes
 from `functions/api/session.ts` and its bounce is a local same-origin
-`location.replace("/auth" + search + hash)` in `main.jsx`; the non-secret
+`location.replace` built by `src/authBounce.js::authBounceTarget({ pathname:
+window.location.pathname, search, errorHash })` — a `/auth?<search>&next=<pathname+query>` target
+whose pathname the auth page re-validates against a mirrored route allowlist (#3930); the non-secret
 `tt_claim_pending` cookie is still written by `signup.html` and `main.jsx`.
 
 ### 5.6 Test coverage

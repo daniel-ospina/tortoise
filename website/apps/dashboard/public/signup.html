@@ -31,16 +31,18 @@
        /auth/start (the BFF stores it in the flow row), so no round-trip marker
        cookie is needed. -->
   <script>
-    // #3930: the app origin's returnable pathnames — the same list the dashboard
-    // SPA keeps in src/authBounce.js (APP_RETURN_ROUTES + APP_SUBTREE_ROUTES).
-    // The mirror is pinned by a test (src/authBounce.test.js reads this literal),
-    // because the two halves cannot share a source: this page is inline HTML in
-    // the ASSETS project, the SPA is bundled by Vite.
-    var APP_RETURN_ROUTES = ["/welcome", "/team", "/admin"];
-    // /admin is the console SUBTREE (its gate serves the shell at any depth);
-    // /welcome and /team are single pages, so a deeper path is not a route.
-    var APP_SUBTREE_ROUTES = ["/admin"];
     (function () {
+      // #3930: the app origin's returnable pathnames — the same list the dashboard
+      // SPA keeps in src/authBounce.js (APP_RETURN_ROUTES + APP_SUBTREE_ROUTES).
+      // The mirror is pinned by a test (src/authBounce.test.js reads these
+      // literals out of this file), because the two halves cannot share a runtime
+      // source: this page is inline HTML in the ASSETS project, the SPA is
+      // bundled by Vite. Kept INSIDE the IIFE — this page is a security surface
+      // and has no need for two new globals.
+      // /admin is the console SUBTREE (its gate serves the shell at any depth);
+      // /welcome and /team are single pages, so a deeper path is not a route.
+      var APP_RETURN_ROUTES = ["/welcome", "/team", "/admin"];
+      var APP_SUBTREE_ROUTES = ["/admin"];
       try {
         var raw = new URLSearchParams(window.location.search).get("next");
         if (!raw) return;
@@ -79,8 +81,12 @@
         // Re-check the RESULT, not just the input: `/..//evil.example` resolves
         // same-origin (so the origin check passes) but serialises to a
         // network-path reference, which the BROWSER then re-interprets as
-        // `https://evil.example/`. Defence in depth — the allowlist on
-        // `u.pathname` is the load-bearing control.
+        // `https://evil.example/`. NOTE: while the allowlist above is
+        // pathname-prefix based THIS LINE CANNOT FIRE — `/..//evil.example`
+        // normalises to `//evil.example`, which matches no allowlisted route and
+        // is rejected there. It is kept as belt-and-braces so the invariant
+        // survives a future loosening of the allowlist; the allowlist is the
+        // load-bearing control.
         if (ret.charAt(0) !== "/" || ret.indexOf("//") === 0) return;
         window.__ADMIN_RETURN_TO = ret;
         window.__DASHBOARD_BASE_URL = window.location.origin + ret;
@@ -110,6 +116,12 @@
         // /admin <-> /auth loop the bounce came from. This URL is
         // attacker-forgeable (?next=/admin&stale=1), so it must not clear a
         // cookie either — the visitor signs in again, which overwrites it.
+        // #3930: `__ADMIN_RETURN_TO` is no longer console-only, so this now
+        // arms for any allowlisted return-to (`welcome.ts` also emits stale=1).
+        // The direction is safe — it only SUPPRESSES a forward, never forces
+        // one, and never clears a cookie — and the SPA producer no longer mints
+        // a `stale` of its own (see authBounce.js), so it is reachable only from
+        // a server gate or a deliberately forged app URL.
         if (p.get("stale") === "1" && window.__ADMIN_RETURN_TO) window.__ADMIN_STALE = true;
         window.__SESSION_PROBE = null;
         if (window.__OAUTH_ERROR || window.__ADMIN_STALE) return;
@@ -637,17 +649,33 @@
     // (?claim=1), NEVER welcome.html (its Phase-2 mint would orphan the
     // claimable anon team).
     const DASHBOARD_URL = window.__DASHBOARD_BASE_URL;
+    // #1511: the app-ROOT claim card. Built from the ORIGIN, never from
+    // __DASHBOARD_BASE_URL — since #3930 the base may itself carry a
+    // path+query (/team?session_id=…), so appending "/?claim=1" to it would
+    // produce `…/team?session_id=abc/?claim=1`.
+    function claimCardUrl() { return window.location.origin + "/?claim=1"; }
+    // #3080: the CONSOLE return-to. /admin has no claim card, so its return-to
+    // wins unconditionally — appending ?claim=1 would land the user on a dead
+    // route.
+    function isConsoleReturnTo() {
+      return !!window.__ADMIN_RETURN_TO && window.__ADMIN_RETURN_TO.indexOf("/admin") === 0;
+    }
+    // #1082: claim intent in flight (non-secret marker, set by the dashboard
+    // claim card on app.premiselabs.co).
+    function claimPending() {
+      try { return /(?:^|; )tt_claim_pending=/.test(document.cookie); } catch (e) { return false; }
+    }
     // #3080: where to NAVIGATE once a session exists (head gate + async bounce).
     function claimRedirectTarget() {
       // The admin return-to wins over claim routing — the console is the
       // requested destination, and /admin has no claim card.
-      if (window.__ADMIN_RETURN_TO) return DASHBOARD_URL;  // absolute: origin + /admin path
-      try {
-        const m = document.cookie.match(/(?:^|; )tt_claim_pending=([^;]*)/);
-        if (m) {
-          return DASHBOARD_URL + "/?claim=1";
-        }
-      } catch (e) { /* fall through to welcome */ }
+      if (isConsoleReturnTo()) return DASHBOARD_URL;  // absolute: origin + the console path
+      // #3930: for every OTHER return-to the pending claim is the visitor's
+      // unfinished intent and must not be silently dropped by the widened
+      // allowlist — the claim card wins, exactly as it did before #3930 (when
+      // only /admin could be a return-to).
+      if (claimPending()) return claimCardUrl();
+      if (window.__ADMIN_RETURN_TO) return DASHBOARD_URL;
       return WELCOME_URL;
     }
 
@@ -657,12 +685,13 @@
     // server sets `__Host-session` BEFORE navigating, so landing on the
     // return-to is safe (unlike the old fragment flow, where a /admin landing
     // could never see the token and bounced into a self-revoking stale loop).
-    // The admin return-to wins over claim routing — /admin has no claim card.
+    // The CONSOLE return-to wins over claim routing — /admin has no claim card.
+    // #3930: for every other return-to the pending claim still wins (see
+    // claimRedirectTarget above).
     function oauthNextPath() {
+      if (isConsoleReturnTo()) return window.__ADMIN_RETURN_TO;
+      if (claimPending()) return "/?claim=1";
       if (window.__ADMIN_RETURN_TO) return window.__ADMIN_RETURN_TO;
-      try {
-        if (/(?:^|; )tt_claim_pending=/.test(document.cookie)) return "/?claim=1";
-      } catch (e) { /* fall through to the app root */ }
       return "/";
     }
 
@@ -1301,9 +1330,14 @@
             // dashboard claim card (the raw key never crosses origins; the
             // user re-pastes it there).
             setClaimPendingMarker();
-            // #3080: an admin return-to wins — /admin has no claim card, so
+            // #3080: the console return-to wins — /admin has no claim card, so
             // appending ?claim=1 would land the user on a dead route.
-            window.location.href = window.__ADMIN_RETURN_TO || (window.__DASHBOARD_BASE_URL + "/?claim=1");
+            // #3930: every OTHER return-to must NOT be preferred here. This
+            // visitor is still SIGNED OUT, so landing them on /team would have
+            // the SPA's mount gate bounce them straight back to /auth (the
+            // claim card never renders and the pending marker is left set for
+            // its TTL). Send them to the claim card, exactly as before #3930.
+            window.location.href = isConsoleReturnTo() ? window.__ADMIN_RETURN_TO : claimCardUrl();
             return;
           }
           if (code === "KEY_NOT_USER_MINTED") {

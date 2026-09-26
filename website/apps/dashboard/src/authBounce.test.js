@@ -150,12 +150,63 @@ test('preserves the existing bounce behaviour', () => {
   assert.equal(nextOf(authBounceTarget({ pathname: '/team', search: 'session_id=abc' })), '/team?session_id=abc')
 })
 
+test('this module is the single source of next', () => {
+  // A caller-supplied `next` must be dropped, not nested: otherwise the bounce
+  // would forward a second, unchecked return-to (or nest it inside the emitted
+  // one). The consumer validates `next` anyway, but the producer must not rely
+  // on that — one carrier, one writer.
+  assert.equal(nextOf(authBounceTarget({ pathname: '/', search: '?next=https%3A%2F%2Fevil.com' })), null)
+  const nested = authBounceTarget({ pathname: '/team', search: '?next=%2Fadmin&a=1' })
+  assert.equal(nextOf(nested), '/team?a=1', `the caller's next was nested: ${nested}`)
+})
+
+test('the SPA bounce never mints the server gate stale marker', () => {
+  // `stale=1` arms the /auth page's no-forward loop-breaker and suppresses the
+  // session probe. It is a SERVER-gate verdict (welcome.ts, admin/[[path]].ts);
+  // the SPA has no session verdict, so forwarding a deep link's `stale=1` would
+  // let /team?stale=1 show a signed-in visitor the sign-in card.
+  const target = authBounceTarget({ pathname: '/team', search: '?stale=1&session_id=abc' })
+  assert.doesNotMatch(target, /(?:^|[?&])stale=1/, `the bounce minted stale=1: ${target}`)
+  assert.equal(nextOf(target), '/team?session_id=abc', target)
+})
+
+test('tolerates a non-string or absent search and a null options bag', () => {
+  // The module is a public, unit-tested seam — the defaults only cover
+  // `undefined`, and `null` used to throw or corrupt the emitted path.
+  assert.equal(authBounceTarget({ pathname: '/team', search: null }), '/auth?next=%2Fteam')
+  assert.equal(authBounceTarget({ pathname: '/team', search: 42 }), '/auth?next=%2Fteam')
+  assert.equal(authBounceTarget(null), '/auth')
+  assert.equal(authBounceTarget(undefined), '/auth')
+})
+
 // ── wiring pin: main.jsx must use the module ───────────────────────────────
 
+/** Extract a top-level `function <name>() { … }` from source by brace counting. */
+function functionBody(src, name) {
+  const start = src.indexOf(`function ${name}(`)
+  assert.ok(start !== -1, `${name} not found in main.jsx`)
+  const open = src.indexOf('{', start)
+  assert.ok(open !== -1, `no body for ${name}`)
+  let depth = 0
+  for (let i = open; i < src.length; i += 1) {
+    if (src[i] === '{') depth += 1
+    else if (src[i] === '}') {
+      depth -= 1
+      if (depth === 0) return src.slice(start, i + 1)
+    }
+  }
+  throw new Error(`unbalanced braces in ${name}`)
+}
+
 test('main.jsx delegates its bounce to this module', () => {
+  // Scoped to bounceToAuth's OWN body: a file-scoped match would still pass if
+  // bounceToAuth reverted to the pathname-dropping form while a second call
+  // elsewhere in the file satisfied the pin.
+  const body = functionBody(mainJsx, 'bounceToAuth')
   assert.match(mainJsx, /import\s*\{[^}]*\bauthBounceTarget\b[^}]*\}\s*from\s*'\.\/authBounce\.js'/, 'the module is not imported')
-  assert.match(mainJsx, /authBounceTarget\(\{/, 'bounceToAuth does not call authBounceTarget')
-  assert.match(mainJsx, /pathname:\s*window\.location\.pathname/, 'the bounce does not read the pathname')
+  assert.match(body, /window\.location\.replace\(/, 'bounceToAuth no longer navigates')
+  assert.match(body, /authBounceTarget\(\{/, 'bounceToAuth does not call authBounceTarget')
+  assert.match(body, /pathname:\s*window\.location\.pathname/, 'the bounce does not read the pathname')
   // The pre-#3930 destination built itself from the origin + search + hash only.
   assert.doesNotMatch(mainJsx, /['"]\/auth['"]\s*\+\s*search/, 'the pathname-dropping bounce is back')
 })
@@ -181,6 +232,10 @@ test('signup.html mirrors the route allowlist and the subtree set', () => {
 test('mutation control: the pre-#3930 bounce fails these assertions', () => {
   // Rebuild the exact shape #3930 removed and show the core property is absent
   // from it — so this file is not passing over an unchanged implementation.
+  // NOTE: this is a NON-VACUITY control for `nextOf`/`isAppReturnPath` (a local
+  // restatement cannot fail when the shipped module regresses); the shipped
+  // module's own guards are covered by the corpus tests above and, end to end,
+  // by tests/test_admin_return_to.py (which executes the shipped producer).
   const legacyBounce = (search = '', hash = '') => '/auth' + search + hash
   const legacy = legacyBounce('?session_id=abc', '')
   assert.equal(legacy, '/auth?session_id=abc')

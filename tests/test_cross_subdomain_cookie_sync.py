@@ -364,14 +364,20 @@ def test_auth_bounce_preserves_search_params() -> None:
     # The bounce target is same-origin now — the cross-origin bridge hop (and its
     # separate fallback) is gone. It is built by the pure module from THIS
     # document's pathname, so the destination can never name another origin.
+    # Whitespace-tolerant: a prettier re-wrap of the call must not red this.
     norm = dash.replace('"', "'")
-    assert (
-        "authBounceTarget({ pathname: window.location.pathname, search, errorHash: hash })" in norm
+    assert re.search(
+        r"authBounceTarget\(\{\s*pathname:\s*window\.location\.pathname,\s*search,\s*errorHash:\s*hash\s*\}\)",
+        norm,
     ), (
         "the bounce must be the same-origin /auth navigation that consumes the "
         "preserved search/hash (and, since #3930, the pathname)"
     )
-    assert "'/auth' + search" not in norm, "the pathname-dropping destination is back (#3930)"
+    # The pre-#3930 destination, matched as CODE (`location.replace("/auth" +`)
+    # so a comment quoting it cannot red a doc-only change (#3930).
+    assert not re.search(r"location\.replace\(\s*['\"]/auth['\"]\s*\+", dash), (
+        "the pathname-dropping destination is back (#3930)"
+    )
 
 
 def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:

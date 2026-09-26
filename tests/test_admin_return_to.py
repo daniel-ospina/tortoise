@@ -42,7 +42,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlsplit
 
 import pytest
 
@@ -136,8 +136,19 @@ def _blocks() -> dict[str, str]:
         "headGate": _script_after(html, _HEAD_GATE),
         # #3501: `gotrueRedirectTarget` (a GoTrue `redirect_to`) is retired — the
         # BFF `/auth/start` owns the redirect. `oauthNextPath` is the same-origin
-        # PATH handed to it as `next`.
-        "claim": _function(html, "claimRedirectTarget") + "\n" + _function(html, "oauthNextPath"),
+        # PATH handed to it as `next`. #3930: the claim helpers
+        # (claimCardUrl/isConsoleReturnTo/claimPending) are extracted too — the
+        # return-to no longer wins over a pending claim outside the console.
+        "claim": "\n".join(
+            _function(html, name)
+            for name in (
+                "claimCardUrl",
+                "isConsoleReturnTo",
+                "claimPending",
+                "claimRedirectTarget",
+                "oauthNextPath",
+            )
+        ),
         "consumer": _brace_block(html, "Session probe consumer"),
         "gate": _function(gate_src, "gateDecision")
         + "\n"
@@ -161,7 +172,8 @@ const cases = JSON.parse(fs.readFileSync(path.join(dir, 'cases.json'), 'utf8'));
 const ORIGIN = process.argv[3];
 const APP = process.argv[4];
 
-function mkEnv(search, cookie, session) {
+function mkEnv(search, cookie, session, origin) {
+  origin = origin || ORIGIN;
   // Model a real cookie jar: `Max-Age=0` DELETES the cookie. A naive
   // append-only mock would keep the deleted value and produce false failures.
   const jar = {};
@@ -187,8 +199,8 @@ function mkEnv(search, cookie, session) {
   };
   const win = {
     location: {
-      search: search, hash: '', hostname: 'tortoise.premiselabs.co',
-      origin: ORIGIN, protocol: 'https:', href: '',
+      search: search, hash: '', hostname: new URL(origin).hostname,
+      origin: origin, protocol: 'https:', href: '', pathname: '/auth',
       replace: function (u) { navigations.push(u); },
     },
   };
@@ -197,8 +209,11 @@ function mkEnv(search, cookie, session) {
   return { win: win, doc: doc, cleared: cleared, navigations: navigations, cookie: function () { return doc.cookie; } };
 }
 
-function runEarly(search, cookie) {
-  const e = mkEnv(search, cookie);
+function runEarly(search, cookie, origin) {
+  // #3930: /auth lives on the APP origin (#4054). The app-host cases pass it
+  // explicitly; the legacy /admin cases keep the tortoise origin so their
+  // pre-existing expectations stay meaningful.
+  const e = mkEnv(search, cookie, undefined, origin || ORIGIN);
   new Function('window', 'document', 'URLSearchParams', early)(e.win, e.doc, URLSearchParams);
   return { base: e.win.__DASHBOARD_BASE_URL || null, ret: e.win.__ADMIN_RETURN_TO || null, cookie: e.cookie() };
 }
@@ -220,7 +235,10 @@ function runHeadGate(search, cookie, session) {
 // Mimic the async post-session bounce: whatever claimRedirectTarget() returns is
 // assigned to window.location.href, so it must be a NAVIGATION target.
 function runTargets(ret, cookie) {
-  const e = mkEnv('', cookie);
+  // #3930/#4054: the /auth page IS on the app origin, and `claimCardUrl()`
+  // builds from `window.location.origin` — so the mock must be the app origin
+  // or the claim-card assertion would pin the mock, not production.
+  const e = mkEnv('', cookie, undefined, APP);
   e.win.__ADMIN_RETURN_TO = ret || null;
   const DASHBOARD_URL = ret ? ORIGIN + ret : APP;
   const WELCOME_URL = DASHBOARD_URL;
@@ -237,7 +255,7 @@ function runTargets(ret, cookie) {
 // effect is observable without an event loop.
 function runConsumer(status, ret, cookie, opts) {
   opts = opts || {};
-  const e = mkEnv('', cookie);
+  const e = mkEnv('', cookie, undefined, APP);
   e.win.__ADMIN_RETURN_TO = ret || null;
   if (opts.adminStale) e.win.__ADMIN_STALE = true;
   if (opts.oauthError) e.win.__OAUTH_ERROR = true;
@@ -257,7 +275,7 @@ function runConsumer(status, ret, cookie, opts) {
 }
 
 const out = { early: [], headGate: [], claim: [], consumer: [], gate: [] };
-for (const c of cases.early) out.early.push(runEarly(c[0], c[1]));
+for (const c of cases.early) out.early.push(runEarly(c[0], c[1], c[2]));
 for (const c of cases.headGate) out.headGate.push(runHeadGate(c[0], c[1], c[2]));
 for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1]));
 for (const c of cases.consumer) out.consumer.push(runConsumer(c[0], c[1], c[2], c[3]));
@@ -859,22 +877,27 @@ def _spa_bounce_target(pathname: str, search: str) -> str:
 def test_app_return_to_survives_the_bounce() -> None:
     """Every real app pathname is honoured, and its query rides along.
 
-    The query is load-bearing: `/team?session_id=…` is Stripe's return handoff
-    (the SPA reads it from `location.search`) and `/welcome?reset=…` names the
-    recovery panel.
+    Every row is driven through the REAL producer (`authBounce.js`, imported
+    through node) and then through the REAL consumer (the executed early block)
+    — the two halves are joined, not restated. The query is load-bearing:
+    `/team?session_id=…` is Stripe's return handoff (the SPA reads it from
+    `location.search`) and `/welcome?reset=…` names the recovery panel.
     """
     cases = [
+        (path, search, path + search)
+        for path in _APP_RETURN_PATHS
+        for search in ("", "?x=1")
+    ] + [
         ("/team", "?session_id=abc", "/team?session_id=abc"),
-        ("/team/", "", "/team/"),
         ("/welcome", "?reset=1", "/welcome?reset=1"),
-        ("/welcome/", "", "/welcome/"),
-        ("/admin/blog", "", "/admin/blog"),
-        ("/admin/sub/deep/path", "", "/admin/sub/deep/path"),
     ]
-    rows = _run({"early": [["?next=" + quote(want, safe=""), ""] for _, _, want in cases]})["early"]
-    for (pathname, search, want), row in zip(cases, rows, strict=True):
-        assert row["ret"] == want, f"{pathname}{search} → ret {row['ret']!r}, want {want!r}"
-        assert row["base"] == ORIGIN + want, row
+    targets = [_spa_bounce_target(path, search) for path, search, _ in cases]
+    searches = [t[len("/auth"):] for t in targets]
+    rows = _run({"early": [[s, "", APP_ORIGIN] for s in searches]})["early"]
+    for (path, search, want), target, row in zip(cases, targets, rows, strict=True):
+        assert target.startswith("/auth"), f"{path}{search}: not a /auth target: {target}"
+        assert row["ret"] == want, f"{path}{search} → ret {row['ret']!r}, want {want!r}"
+        assert row["base"] == APP_ORIGIN + want, row
 
 
 def test_spa_producer_reaches_the_auth_page_end_to_end() -> None:
@@ -893,13 +916,19 @@ def test_spa_producer_reaches_the_auth_page_end_to_end() -> None:
     ]
     targets = [_spa_bounce_target(pathname, search) for pathname, search, _ in cases]
     for (pathname, _, _), target in zip(cases, targets, strict=True):
-        assert target.startswith("/auth"), f"{pathname}: the bounce is not a same-origin /auth target: {target}"
-        # A producer that named an ORIGIN would produce an absolute URL here.
-        assert "//" not in target.split("next=")[0] or target.startswith("/auth?"), target
+        # The producer must name a PATH, never an origin: resolve it against a
+        # foreign base and require it to stay on the app origin. (`startswith`
+        # alone would pass for `/auth/../..//evil.com`, and grepping for `//`
+        # before `next=` is a tautology — this is the assertion that can fail.)
+        assert target.startswith("/auth"), f"{pathname}: not a /auth target: {target}"
+        resolved = urlsplit(target)
+        assert not resolved.scheme and not resolved.netloc, f"the bounce named an origin: {target}"
 
     searches = [t[len("/auth"):] for t in targets]
-    rows = _run({"early": [[s, ""] for s in searches]})["early"]
+    rows = _run({"early": [[s, "", APP_ORIGIN] for s in searches]})["early"]
     rets = [row["ret"] for row in rows]
+    for (_, _, want), row in zip(cases, rows, strict=True):
+        assert row["base"] == APP_ORIGIN + want, row
     destinations = _run({"claim": [[ret, ""] for ret in rets]})["claim"]
 
     for (pathname, search, want), ret, dest in zip(cases, rets, destinations, strict=True):
@@ -918,6 +947,10 @@ def test_welcome_producer_next_is_accepted_by_the_auth_page() -> None:
     Pinning the producer's expression (not just its output) is what keeps this
     pair honest: a producer that started sending only the pathname would
     silently lose `/welcome?reset=1`.
+
+    NOTE the `?reset` form: `welcome.ts` renders the recovery panel whenever a
+    `reset` param is PRESENT (any value), so `?reset=1` is one instance, not the
+    only one.
     """
     src = WELCOME_FN.read_text(encoding="utf-8")
     m = re.search(r"`/auth\?next=\$\{encodeURIComponent\(([^)]*)\)\}&stale=1`", src)
@@ -927,12 +960,56 @@ def test_welcome_producer_next_is_accepted_by_the_auth_page() -> None:
     )
     for path, search, want in (
         ("/welcome", "?reset=1", "/welcome?reset=1"),
+        ("/welcome", "?reset", "/welcome?reset"),
+        ("/welcome/", "?reset=0", "/welcome/?reset=0"),
         ("/welcome", "", "/welcome"),
     ):
         search_str = "?next=" + quote(path + search, safe="") + "&stale=1"
-        row = _run({"early": [[search_str, ""]]})["early"][0]
+        row = _run({"early": [[search_str, "", APP_ORIGIN]]})["early"][0]
         assert row["ret"] == want, f"welcome.ts emitted {want!r} and the /auth page read {row['ret']!r}"
-        assert row["base"] == ORIGIN + want, row
+        assert row["base"] == APP_ORIGIN + want, row
+
+
+def test_spa_bounce_does_not_mint_the_server_stale_marker() -> None:
+    """A forged `stale=1` on an app deep link must not survive the SPA bounce.
+
+    `stale=1` arms the /auth page's no-forward loop-breaker and suppresses the
+    session probe. It is a SERVER-gate verdict; the SPA has none to report, so
+    forwarding a deep link's `stale=1` would let `/team?stale=1` show a
+    signed-in visitor the sign-in card.
+    """
+    target = _spa_bounce_target("/team", "?stale=1&session_id=abc")
+    assert "stale" not in target, f"the SPA bounce minted a stale marker: {target}"
+    assert _run({"early": [[target[len("/auth"):], "", APP_ORIGIN]]})["early"][0]["ret"] == (
+        "/team?session_id=abc"
+    )
+
+
+def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
+    """#3080's precedence, re-pinned for the widened allowlist.
+
+    The console has no claim card, so its return-to wins unconditionally. For
+    every OTHER return-to the pending claim is the visitor's unfinished intent
+    and must win — otherwise the #3930 widening would silently drop the claim
+    funnel (`/team` is a signed-out visitor's bounce target and would round-trip
+    them back to /auth).
+    """
+    rows = _run({
+        "claim": [
+            ["/admin/blog", ""],                       # console, no claim
+            ["/admin/blog", "tt_claim_pending=1"],      # console wins anyway
+            ["/team?session_id=abc", "tt_claim_pending=1"],   # claim wins
+            ["/welcome?reset=1", "tt_claim_pending=1"],       # claim wins
+            ["/team?session_id=abc", ""],               # no claim → the return-to
+        ],
+    })["claim"]
+    assert rows[0]["nav"] == ORIGIN + "/admin/blog", rows[0]
+    assert rows[1]["nav"] == ORIGIN + "/admin/blog", rows[1]
+    assert rows[2]["nav"] == APP_ORIGIN + "/?claim=1", rows[2]
+    assert rows[2]["oauth"] == "/?claim=1", rows[2]
+    assert rows[3]["nav"] == APP_ORIGIN + "/?claim=1", rows[3]
+    assert rows[4]["nav"] == ORIGIN + "/team?session_id=abc", rows[4]
+    assert rows[4]["oauth"] == "/team?session_id=abc", rows[4]
 
 
 @pytest.mark.parametrize(
@@ -960,7 +1037,7 @@ def test_app_hostile_or_off_allowlist_next_is_ignored(search: str) -> None:
     These are the paths a forged `?next=` can take. None may change the
     destination origin, and none may name a non-route on this origin.
     """
-    (row,) = _run({"early": [[search, ""]]})["early"]
+    (row,) = _run({"early": [[search, "", APP_ORIGIN]]})["early"]
     assert row["base"] is None, f"unsafe app return-to honoured: {search!r} → {row['base']!r}"
     assert row["ret"] is None, f"unsafe app return-to recorded: {search!r}"
 
@@ -973,6 +1050,6 @@ def test_dot_segments_resolving_into_the_allowlist_are_accepted_same_origin() ->
     or the origin — is dropped. Pinned so the reject-side tests above are not
     read as "any dot-segment is hostile".
     """
-    (row,) = _run({"early": [["?next=/welcome/../team", ""]]})["early"]
+    (row,) = _run({"early": [["?next=/welcome/../team", "", APP_ORIGIN]]})["early"]
     assert row["ret"] == "/team", row
-    assert row["base"] == ORIGIN + "/team", row
+    assert row["base"] == APP_ORIGIN + "/team", row
