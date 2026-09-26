@@ -139,6 +139,28 @@ def test_m2_distinct_claims_stay_new(sdk, monkeypatch):
     assert len(_claim_nodes(sdk._get_proj())) == len(res["points"])
 
 
+def test_m2_load_bearing_connective_swap_keeps_both_claims(sdk, monkeypatch):
+    """A swapped operator is a RIVAL, so the in-capture seam must not fold it.
+
+    `and`/`or` are frame words by their commonest role, so before the
+    pair-level connective check both claims carried one content multiset,
+    `rephrase_hit` returned a hit and the seam reached its `DETACH DELETE`
+    (#5139).  Both claims must now survive as NEW — the assertion is on the
+    node count, which is what the seam destroys.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "We ship and test the build."},
+        {"role": "assistant", "content": "We ship or test the build."},
+        {"role": "user", "content": "ok"},
+    ]
+    res = sdk.capture_session(conv)
+    verdicts = [p["dedup"] for p in res["points"]]
+    assert verdicts == [DEDUP_NEW, DEDUP_NEW], verdicts
+    claims = _claim_nodes(sdk._get_proj())
+    assert len(claims) == 2, f"the rival must not be deleted — got {len(claims)}"
+
+
 def test_m2_operator_wired_repeat_kept_distinct_with_warning(sdk, monkeypatch):
     """Honest residual (anti-gaming): a duplicate whose minted node engaged
     operator wiring is NOT folded (folding would orphan the cue-gated edge) —
