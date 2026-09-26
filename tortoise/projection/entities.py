@@ -2002,7 +2002,12 @@ class _EntityHandlers:
         # its first hop), so the chain still resolves.
         ref = ev.get("source_url")
         if ref and ref != did:
-            self.link_source_to_entity(ref, did, "Source")
+            # "Document" is the RELATION's spelling, not a node label: D10 retired
+            # `:Document` and the writer remaps it onto `:Source` for identity, but it is
+            # what marks this link a DERIVATION — and only a derivation link takes the
+            # `sourceVersion` anchor (#5199, STORAGE-ARCHITECTURE.md 9.6). Switching this
+            # to "Source" keeps the edge and silently drops the anchor.
+            self.link_source_to_entity(ref, did, "Document")
         # #125 — aboutSubject edges when about_entities present (Task 1
         # self-contained: label-agnostic generalization lives in edges.py)
         about = ev.get("about_entities") or []

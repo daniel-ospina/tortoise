@@ -252,10 +252,20 @@ _VALID_EDGE_PREDICATES = frozenset({
 #
 # The discriminator is the target LABEL, which is a proxy for "derived" — the only
 # signature-preserving signal available. `Document` is a member because in-repo writers
-# do mint `(Source)-[:references]->(:Document)` (`projection/entities.py:1901`,
-# `hosted_api.py:11558`, the doc classifier of the ingest path); excluding it would
-# leave that derivation half unanchored. If the ontology rules that the connector
-# `Event` is identity rather than derivation, only this set moves.
+# do mint a DOCUMENT-DERIVATION link (`projection/entities.py::_upsert_document`, the
+# session->document link in `hosted_api.py`, the doc classifier of the ingest path);
+# excluding it would leave that derivation half unanchored. If the ontology rules that
+# the connector `Event` is identity rather than derivation, only this set moves.
+#
+# !! POST-D10 the `:Document` LABEL is retired (a document is a `:Source`), so this set
+# member is reachable ONLY through the retained deprecated alias: those writers keep
+# passing `"Document"` as the RELATION's spelling, and `link_source_to_entity` reads it
+# for exactly this decision BEFORE remapping the identity onto `:Source`. Those are two
+# separate facts — the stored edge is `(Source)-[:references]->(Source)` either way,
+# while the alias is what still marks it a DERIVATION rather than containment. A
+# "tidy-up" that switches those call sites to `"Source"` therefore simplifies nothing:
+# it silently drops the anchor from every document link. That is not hypothetical — it
+# is the merge regression pinned by `test_document_derivation_through_the_production_path_anchors`.
 _DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})
 
 # CQL suffix stamping the derivation anchor on a `references` MERGE, `ON CREATE` only.

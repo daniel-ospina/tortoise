@@ -81,14 +81,16 @@ def test_derivation_label_set_excludes_identity_targets():
     regression that would stamp a non-answer onto a link with no version to
     compare — or if a derivation class is dropped.
 
-    ``Document`` IS a member: in-repo writers do mint
-    ``(Source)-[:references]->(:Document)`` (``projection/entities.py:1901``,
-    ``hosted_api.py:11558``, and the doc classifier of the ingest path), so
-    excluding it would leave that derivation half unanchored. ⚠️ ONTOLOGY §3.4
-    declares the target list as ``Event|Object|Source`` and notes a document is
-    itself a ``:Source`` — that list does not name ``Document``, so this set is
-    pinned to the code's actual writers, not to a §3.4 enumeration (the ontology
-    wording is in owner review on #5199).
+    ``Document`` IS a member: in-repo writers do mint a document-derivation link
+    (``projection/entities.py::_upsert_document``, the session→document link in
+    ``hosted_api.py``, and the doc classifier of the ingest path), so excluding it
+    would leave that derivation half unanchored. ⚠️ POST-D10 the ``:Document`` label
+    is retired and those writers keep passing ``"Document"`` as the RELATION's
+    spelling — the writer reads it for this decision and then remaps the IDENTITY
+    onto ``:Source``. ⚠️ ONTOLOGY §3.4 declares the target list as
+    ``Event|Object|Source`` and notes a document is itself a ``:Source`` — that list
+    does not name ``Document``, so this set is pinned to the code's actual writers,
+    not to a §3.4 enumeration (the ontology wording is in owner review on #5199).
     """
     from tortoise.projection.edges import _DERIVATION_REFERENCES_LABELS
 
@@ -359,9 +361,12 @@ def test_document_link_records_the_version_read():
 
     FAILS IF ``Document`` is dropped from the derivation set — deleting it used
     to leave every test green, so the set member had no input that could fail.
-    The member tracks the CODE's writers (``projection/entities.py:1901``,
-    ``hosted_api.py:11558``), which is where the label is live; ONTOLOGY §3.4's
-    declared target list does not name it (see the label-set test above).
+    The member tracks the CODE's writers (``projection/entities.py::_upsert_document``,
+    the session→document link in ``hosted_api.py``), which is where the relation's
+    label is live; ONTOLOGY §3.4's declared target list does not name it (see the
+    label-set test above). NOTE this test calls the writer directly, so it pins the
+    MECHANISM only — production-call-site reachability is pinned by
+    ``test_document_derivation_through_the_production_path_anchors`` below.
 
     **Updated at the #5199 x main merge (D10).** This test used to hang the
     target off a ``:Document`` node. D10 retires that label and collapses the
@@ -390,6 +395,44 @@ def test_document_link_records_the_version_read():
             "RETURN r.sourceVersion"
         ).result_set
         assert rows == [["h1"]], f"Document is a derivation class, got {rows!r}"
+    finally:
+        sdk.close()
+
+
+def test_document_derivation_through_the_production_path_anchors():
+    """Input: the REAL document write path — ``entities.py::_upsert_document`` handed a
+    corpus ``source_url`` — rather than a link this test builds by hand.
+
+    FAILS IF the production call site stops spelling the relation ``"Document"``.
+    That is exactly what D10 did: it rewrote these call sites to ``"Source"`` because
+    the *node* a document resolves to is now a ``:Source``. The writer remaps identity
+    either way, so the edge is still created and every other test here stayed green —
+    while the anchor silently disappeared from every document link in the product,
+    because ``"Source"`` means referential containment and containment links are
+    deliberately property-free. Test the CALL SITE, not just the mechanism.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (s:Source {url:'corpus.txt', sourceKind:'corpus', "
+            "title:'corpus.txt', contentHash:'h1', ingestedAt:'2024-01-01'})"
+        )
+        proj._upsert_document({
+            "id": "doc-prod-1",
+            "title": "Spec",
+            "source_url": "corpus.txt",
+            "suppress_embedding": True,
+        })
+
+        rows = proj.g.query(
+            "MATCH (:Source {url:'corpus.txt'})-[r:references]->(:Source {url:'doc-prod-1'}) "
+            "RETURN r.sourceVersion"
+        ).result_set
+        assert rows == [["h1"]], (
+            "the document-derivation link minted by the production write path must carry "
+            f"the version it was read at, got {rows!r}"
+        )
     finally:
         sdk.close()
 

@@ -20092,9 +20092,13 @@ class TortoiseSDK:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
                         repair_work = not base_complete or merge_outcome == "updated"
                     # wire (Source)-[:references]->(Event|Source) — plain edge
-                    # (D10: a document is a :Source, so the doc target is Source)
+                    # (D10: a document is a :Source, so the doc target is keyed by
+                    # url=doc_id). The label stays "Document" for the doc case: it is
+                    # the RELATION's spelling — the writer remaps the identity onto
+                    # `:Source` — and it is what keeps this a derivation link, which is
+                    # what takes the `sourceVersion` anchor (#5199).
                     target = event_id if classifier != "doc" else doc_id
-                    label = "Event" if classifier != "doc" else "Source"
+                    label = "Event" if classifier != "doc" else "Document"
                     proj.link_source_to_entity(url, target, label)
 
             # ── embedding repair (sessions; extract_metadata=True) — runs only
