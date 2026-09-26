@@ -356,7 +356,9 @@ def _liveness_probe_hard_timeout() -> float:
     its daemon worker on every cold start. ``PROBE_SDK_ACQUISITION_BUDGET`` is
     charged too, matching the hosted bound: since #3446 the SDK lookup is a
     BOUNDED phase of ``probe_db`` itself (``acquire=_acquire_probe_sdk``), so
-    both terms of this sum are deadlines the code enforces.
+    every term of this sum is an ENFORCED deadline (the acquisition phase, the
+    #3143 allowance, and the reachability budget) — nothing here is an
+    unbounded phase. The residual is stranding, not a missing deadline.
 
     Resolved once at import, like the hosted bound. In production this is safe
     to freeze: ``tortoise.selfhost`` imports ``tortoise.mcp_server`` (which

@@ -669,17 +669,18 @@ class TestHealthEndpoints:
         ``monkeypatch.setenv`` lands) after our reset, making the count 2 (green
         in the docker lane, red in the embedded one). ``HealthProbe.reset()``
         nulls its ``_worker`` handle, so the leftover thread cannot be joined.
-        Fixed by counting only the builds made on THIS test's thread, and by
-        pinning ``_probe_sdk_key`` so no thread can compute a mismatching key.
-        The autouse fixture also resets the SDK cache, not just the probe
-        coordinators.
+        Fixed by counting only builds attributable to this test's own probe
+        path, and by pinning ``_probe_sdk_key`` so no thread can compute a
+        mismatching key. The autouse fixture also resets the SDK cache, not just
+        the probe coordinators. #3446 moved the build off the caller's thread,
+        so the count follows it onto the probe worker lane (see ``_factory``).
         """
         from unittest.mock import MagicMock
 
         import tortoise.hosted_api as ha_mod
 
         own_thread = threading.current_thread().name
-        calls = {"all": 0, "own": 0}
+        calls = {"all": 0, "own": 0, "probe_lane": 0}
 
         def _factory(*, namespace=None, graph_name=None):
             # Only builds made by THIS test's two ``_probe_db()`` calls count.
@@ -687,9 +688,20 @@ class TestHealthEndpoints:
             # share the process-global cache (and cannot be joined —
             # ``HealthProbe.reset()`` drops its ``_worker`` handle), so
             # counting them is what made the old assertion flaky.
+            #
+            # #3446: ``hosted_api._probe_db`` no longer acquires inline on the
+            # CALLER's thread — it hands the acquisition to ``probe_db`` via
+            # ``acquire=``, so ``_make_sdk`` now runs on the shared probe
+            # worker. Counting only ``own_thread`` therefore became VACUOUS
+            # (structurally 0), silently disabling the anti-rebuild guard. Count
+            # the lane the build actually happens on, and pin the caller's own
+            # lane stays untouched.
             calls["all"] += 1
-            if threading.current_thread().name == own_thread:
+            name = threading.current_thread().name
+            if name == own_thread:
                 calls["own"] += 1
+            if name.startswith("tortoise-probe-worker"):
+                calls["probe_lane"] += 1
             sdk = MagicMock()
             sdk._get_proj.return_value.g.query.return_value = MagicMock()
             return sdk
@@ -717,8 +729,15 @@ class TestHealthEndpoints:
         # Our TWO checks may build at most ONE SDK (a per-call rebuild needs 2).
         # Zero is possible when a still-running probe from an earlier test won
         # the race and warmed the cache first — that does not weaken the point.
-        assert calls["own"] <= 1, (
-            f"the two checks built the SDK {calls['own']}x — not reused")
+        assert calls["probe_lane"] <= 1, (
+            f"the two checks built the SDK {calls['probe_lane']}x on the probe "
+            "worker lane — not reused")
+        # #3446: and it must be built THERE, not on this test's thread. This is
+        # the assertion that stops the count above from going vacuous again if
+        # the acquisition ever moves back inline.
+        assert calls["own"] == 0, (
+            "#3446: the SDK acquisition ran on the CALLER's thread — it must be "
+            "handed to probe_db as acquire= and bounded on the probe worker")
 
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")

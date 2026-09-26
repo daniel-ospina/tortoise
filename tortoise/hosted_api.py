@@ -3166,12 +3166,15 @@ def _probe_db() -> dict:
     """Deep-check the graph DB through the reused probe connection (#1384).
 
     Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
-    monitoring.probe_db — never raises. ``probe_db`` itself is statically
-    bounded at ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry
-    delay, ~3.1s, because a transient connect failure is retried once). The
-    ``_probe_sdk()`` prefix that runs BEFORE it is, since #3446, its OWN
-    bounded phase: it is handed to ``probe_db`` as ``acquire=`` and abandoned
-    at ``PROBE_SDK_ACQUISITION_BUDGET`` (2.0s) rather than running unbounded on
+    monitoring.probe_db — never raises on a probe failure. ``probe_db``'s own
+    deadline is ONE caller deadline (``PROBE_TIMEOUT``, ~1.5s): since #3143 the
+    #1565 retry rides the REMAINDER of it rather than taking a second, so
+    ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry delay, ~3.1s)
+    is only the LOOSE over-estimate the outer bound is sized above — NOT this
+    function's ceiling, as the pre-#3143 wording here claimed. The SDK
+    acquisition, since #3446, is its OWN bounded phase: it is handed to
+    ``probe_db`` as ``acquire=`` and abandoned at
+    ``PROBE_SDK_ACQUISITION_BUDGET`` (2.0s) rather than running unbounded on
     this coordinator's thread. That is what makes ``DB_PROBE_HARD_TIMEOUT`` an
     outer bound PROVABLY above a sum of ENFORCED inner deadlines instead of an
     alignment against a guess. It is still not a ceiling on the acquisition's
@@ -3195,15 +3198,19 @@ def _probe_db() -> dict:
 # The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
 # ``monitoring.PROBE_HARD_TIMEOUT`` (``PROBE_DB_TOTAL_TIMEOUT`` +
 # ``PROBE_SDK_ACQUISITION_BUDGET`` + a strict-above margin), so a
-# ``PROBE_TIMEOUT`` change propagates. ``probe_db`` retries one transient
-# connect failure, so its statically-known ceiling is
-# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s) — NOT ``PROBE_TIMEOUT`` (1.5s); reading
-# only the per-attempt figure is what inverted the ordering in the
-# #2850/#2988 merge. Since #3446 the acquisition prefix is no longer an
-# unenforced term: ``_probe_db`` hands ``_probe_sdk`` to
-# ``probe_db(acquire=…)``, which bounds it at ``PROBE_SDK_ACQUISITION_BUDGET``
-# on the shared probe worker. Both terms of the sum are therefore ENFORCED
-# deadlines and this ordering is provable for this plane. Two honest caveats,
+# ``PROBE_TIMEOUT`` change propagates. ``probe_db``'s own deadline is ONE
+# caller deadline, so the figure that clears it is
+# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT + the retry delay) —
+# NOT ``PROBE_TIMEOUT`` (1.5s); reading only the per-attempt figure is what
+# inverted the ordering in the #2850/#2988 merge. Since #3143 that 3.1s is a
+# deliberate OVER-ESTIMATE (the retry rides the remainder of the one deadline,
+# it does not take a second), which is why the bound is sized above the LOOSE
+# figure rather than above the exact total. Since #3446 the acquisition prefix
+# is no longer an unenforced term either: ``_probe_db`` hands ``_probe_sdk``
+# to ``probe_db(acquire=…)``, which bounds it at
+# ``PROBE_SDK_ACQUISITION_BUDGET`` on the shared probe worker. So the sum is
+# one ENFORCED deadline plus one deliberate over-estimate, and the ordering is
+# provable for this plane. Two honest caveats,
 # neither of them a missing deadline:
 #   * the acquisition's INTERIOR is not bounded by that budget — the embedded
 #     anchor connects eagerly, runs real queries, and ``TortoiseSDK.__init__``
@@ -3345,10 +3352,11 @@ CONTROL_PLANE_HARD_TIMEOUT = CONTROL_PLANE_PROBE_TOTAL_S + CONTROL_PLANE_BOUND_M
 # strict-above margin — hence ``DB_PROBE_HARD_TIMEOUT`` =
 # ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. Since
 # #3446 the acquisition prefix is itself a bounded phase
-# (``probe_db(acquire=…)``), so BOTH terms of that sum are deadlines the code
-# enforces; the ordering is provable for this plane, and the residual is
-# stranding — a phase that overruns its deadline is abandoned, not cancelled.
-# See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
+# (``probe_db(acquire=…)``), so no term of that sum is an UNBOUNDED phase any
+# more — one is an enforced deadline and the other (``PROBE_DB_TOTAL_TIMEOUT``)
+# is a deliberate over-estimate. The ordering is provable for this plane, and
+# the residual is stranding — a phase that overruns its deadline is abandoned,
+# not cancelled. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
 _CONTROL_PLANE_PROBE = HealthProbe(
     lambda: _probe_control_plane(),
     timeout=CONTROL_PLANE_HARD_TIMEOUT,
@@ -3508,8 +3516,8 @@ async def health_ready():
     # Data plane. Runs its OWN coordinator (``_READY_PROBE`` — deliberately
     # NOT the liveness refresher's, so a readiness call cannot join a probe
     # started before the outage), hard-bounded at ``DB_PROBE_HARD_TIMEOUT``
-    # (an ordering between ENFORCED deadlines: the ~3.1s ``probe_db`` TOTAL
-    # plus the bounded SDK-acquisition phase, since #3446), and it never
+    # (the #3143 loose outer-alignment figure the derivation is sized above,
+    # plus the ENFORCED SDK-acquisition phase, since #3446), and it never
     # raises, so a dead DB degrades the result instead of the process.
     # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
     # auto-creates the graph on select, so a registry-namespaced probe

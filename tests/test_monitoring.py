@@ -662,6 +662,184 @@ class TestProbeDbBoundedAcquisition:
         with pytest.raises(ValueError):
             monitoring.probe_db()
 
+    def test_slow_but_in_budget_acquisition_does_not_eat_the_retry_window(
+            self):
+        """The acquisition's OWN deadline must not be charged to the probe's.
+
+        #3446 review (reproduced): ``start`` was taken BEFORE the acquisition,
+        so ``remaining = total_budget - elapsed - PROBE_RETRY_DELAY`` subtracted
+        the acquisition's duration from a budget that does not include it. For
+        the platform shape ``total_budget`` is ``PROBE_TIMEOUT`` (1.5s) while
+        the acquisition's budget is 2.0s, so an acquisition slower than ~1.35s
+        SUPPRESSED the #1565 transient retry and reported a reachable graph
+        degraded — a false-degrade, and the exact cold-embedded-acquisition
+        scenario the retry exists for.
+
+        LOAD-BEARING (mutation: measure ``remaining`` from ``start`` again
+        instead of ``probe_start``): the retry never happens, ``ok`` is False
+        and this reds.
+        """
+        calls = {"acquire": 0, "probe": 0}
+        # 1.45s is inside the 2.0s acquisition budget but larger than
+        # PROBE_TIMEOUT (1.5s) minus PROBE_RETRY_DELAY (0.15s) — i.e. exactly
+        # the window the bug conflated.
+        slow = 1.45
+        assert slow > monitoring.PROBE_TIMEOUT - monitoring.PROBE_RETRY_DELAY, (
+            "this test only means something if the slow acquisition exceeds "
+            "the probe's own remaining window"
+        )
+        assert slow < monitoring.PROBE_SDK_ACQUISITION_BUDGET
+
+        def slow_acquire():
+            calls["acquire"] += 1
+            time.sleep(slow)
+            return TransientOnceSDK(calls)
+
+        result = monitoring.probe_db(acquire=slow_acquire)
+
+        assert calls["acquire"] == 1
+        assert calls["probe"] == 2, (
+            "the transient retry did NOT happen — a slow-but-in-budget "
+            "acquisition consumed the probe's retry window, so a reachable "
+            "graph is reported degraded (#3446 review)"
+        )
+        assert result["ok"] is True, result
+
+    def test_acquisition_failure_reports_the_historical_zero_latency(self):
+        """An acquisition failure reports ``latency_ms: 0.0``, as before #3446.
+
+        Both coordinators returned a FIXED ``{"ok": False, "latency_ms": 0.0,
+        "error": …}`` for an acquisition failure before the phase moved inside
+        ``probe_db``. The field means "probe latency", and the probe never
+        reached the DB — reporting the acquisition's own elapsed time is a
+        silent contract change for every downstream reader of the shape.
+
+        LOAD-BEARING (mutation: return ``round((time.monotonic() - start) *
+        1000, 1)`` on the two acquisition-failure returns): the raising case
+        reds on the ``== 0.0`` assertion below.
+        """
+
+        def broken():
+            time.sleep(0.02)  # ensure any elapsed-time reading is non-zero
+            raise RuntimeError("no handle for you")
+
+        raised = monitoring.probe_db(acquire=broken)
+        assert raised["ok"] is False
+        assert raised["latency_ms"] == 0.0, (
+            f"an acquisition failure reported latency_ms={raised['latency_ms']} "
+            "— the pre-#3446 contract (and the field's meaning) is 0.0 because "
+            "the probe never reached the DB"
+        )
+
+        def too_slow():
+            time.sleep(1.0)
+            return FakeSDK(db_ok=True)
+
+        debug = monitoring.PROBE_SDK_ACQUISITION_BUDGET
+        try:
+            monitoring.PROBE_SDK_ACQUISITION_BUDGET = 0.05
+            timed_out = monitoring.probe_db(acquire=too_slow)
+        finally:
+            monitoring.PROBE_SDK_ACQUISITION_BUDGET = debug
+        assert timed_out["ok"] is False
+        assert timed_out["latency_ms"] == 0.0, timed_out
+
+    def test_queued_acquisition_names_the_wait_not_an_overrun(self):
+        """An acquisition that never STARTED must not read as one that ran.
+
+        The worker-side ``started`` event is the same never-ran/overran
+        discrimination ``_probe_once`` applies to its query phase — the review
+        P1 PR #3217 mandated for exactly this class (a submission queued behind
+        another probe's cold start was reported as that phase's own overrun).
+        Without it the error text names a callable that never executed, which
+        is the misattribution the third spelling exists to prevent.
+
+        LOAD-BEARING (mutation: drop the ``if not started.is_set()`` branch):
+        the message becomes the acquisition-timeout spelling and this reds.
+        """
+        worker = monitoring._probe_worker()
+        occupier = concurrent.futures.Future()
+        occupier.set_running_or_notify_cancel()
+        try:
+            # Occupy the SINGLE slot for longer than the acquisition budget, so
+            # the acquisition below is submitted but never picked up.
+            worker.submit(lambda: time.sleep(0.6))
+            ran = {"n": 0}
+
+            def never_picked_up():
+                ran["n"] += 1
+                return FakeSDK(db_ok=True)
+
+            budget = 0.05
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(monitoring, "PROBE_SDK_ACQUISITION_BUDGET", budget)
+                result = monitoring.probe_db(acquire=never_picked_up)
+
+            assert ran["n"] == 0, "the acquisition ran — the slot was not busy"
+            assert result["ok"] is False
+            assert result["error"] == (
+                f"{monitoring._PROBE_ACQUISITION_QUEUED_MSG}{budget}s"), (
+                f"a QUEUED acquisition reported {result['error']!r} — the "
+                "spelling must name the WAIT, not an overrun of a callable "
+                "that never ran (#3446 review / PR #3217)"
+            )
+        finally:
+            # Drop the occupied worker so a later test is not queued behind the
+            # occupier's sleep (the documented escape hatch; the old thread is
+            # a daemon and is abandoned, never joined).
+            monitoring._reset_probe_worker()
+            occupier.set_result(None)
+
+    def test_malformed_acquire_is_a_call_error_not_a_db_failure(self):
+        """A non-callable or null-returning ``acquire`` is a CALL error.
+
+        Reporting these through the degraded dict labels a downstream
+        ``AttributeError`` (``'NoneType' object has no attribute '_get_proj'``)
+        as an unreachable graph — the same misattribution class the phase
+        spellings exist to remove.
+
+        LOAD-BEARING (mutations: drop the ``if not callable(acquire)`` guard →
+        the first ``pytest.raises`` reds; drop the post-acquisition ``if sdk is
+        None`` guard → the second reds).
+        """
+        with pytest.raises(ValueError, match="zero-arg callable"):
+            monitoring.probe_db(acquire=42)
+        with pytest.raises(ValueError, match="returned no SDK handle"):
+            monitoring.probe_db(acquire=lambda: None)
+
+    def test_probe_db_enters_exactly_the_declared_enforced_phases(self):
+        """The derivation is a sum over a phase SET — pin the set in code.
+
+        A bound that is a sum over four constants is only a bound if the
+        function can enter no other phase. Every other test in this file (and
+        the derivation lock in ``test_health_ready_nonblocking``) recomputes
+        CONSTANTS and therefore cannot see a phase added to ``probe_db`` — the
+        one premise of the proof that prose alone was holding up.
+
+        LOAD-BEARING (mutation: append any extra phase to ``phases_entered``
+        inside ``probe_db``): the recorded tuple no longer equals the declared
+        one and this reds.
+        """
+        declared = monitoring._PROBE_ENFORCED_PHASES
+        assert declared == ("sdk_acquisition", "projection_setup",
+                            "reachability_query"), declared
+
+        acquired = monitoring.probe_db(acquire=lambda: FakeSDK(db_ok=True))
+        assert acquired["ok"] is True, acquired
+        assert declared == monitoring._PROBE_LAST_PHASES, (
+            f"probe_db entered {monitoring._PROBE_LAST_PHASES!r} but the "
+            f"derivation declares {declared!r} — a phase the outer bound does "
+            "not account for makes it an under-estimate (#3446)"
+        )
+
+        supplied = monitoring.probe_db(FakeSDK(db_ok=True))
+        assert supplied["ok"] is True, supplied
+        assert declared[1:] == monitoring._PROBE_LAST_PHASES, (
+            f"the ``sdk=`` shape entered {monitoring._PROBE_LAST_PHASES!r} — "
+            "it must not run the acquisition phase, because that cost belongs "
+            "to whichever caller acquired the handle"
+        )
+
 
 class TransientOnceSDK:
     """First ``_get_proj`` fails transiently, the second succeeds — the #1565

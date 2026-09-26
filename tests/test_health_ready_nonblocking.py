@@ -1090,7 +1090,7 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
     default IS the shared module constant) AND the ordering property (it clears
     the DB probes' loose outer-alignment bound — ``PROBE_DB_TOTAL_TIMEOUT`` is
     deliberately an OVER-ESTIMATE of the probes' real total, NOT that total —
-    plus the nominal SDK-acquisition budget), plus each plane's fail-closed flag
+    plus the ENFORCED SDK-acquisition phase), plus each plane's fail-closed flag
     and the liveness refresher's alignment. ``_READY_PROBE_TIMEOUT_S`` is gone
     with the mechanism it bounded; a reintroduced per-handler literal would be
     an unreasoned second source of truth.
@@ -1117,9 +1117,11 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
     # (2) ORDERING PROPERTY. The default must clear the DB probes' loose
     # outer-alignment bound (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
     # OVER-ESTIMATE of probe_db's real total, NOT the exact inner total — plus
-    # the nominal SDK-acquisition budget). Necessary but NOT sufficient: the
-    # embedded acquisition prefix is unbounded, so this is a best-effort
-    # alignment, not a proven invariant (see monitoring.PROBE_MAX_SUPERSEDES).
+    # the ENFORCED SDK-acquisition phase). Sufficient for THIS shape since
+    # #3446: the acquisition is a bounded phase of ``probe_db``, so the sum is
+    # over deadlines the code imposes — but the residual is still STRANDING (a
+    # phase that overruns its deadline is abandoned, not cancelled), not an
+    # unenforced phase (see monitoring.PROBE_MAX_SUPERSEDES).
     inner_total = PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
     assert default > inner_total, (
         f"HealthProbe's default wall bound ({default}s) does not clear the DB "
@@ -1153,24 +1155,27 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
         f"/health's refresher bound ({mod._HEALTH_PROBE._timeout}s) must clear "
         f"_probe_db's loose outer-alignment bound ({inner_total}s = the "
         f"over-estimate PROBE_DB_TOTAL_TIMEOUT {PROBE_DB_TOTAL_TIMEOUT}s + the "
-        f"{PROBE_SDK_ACQUISITION_BUDGET}s nominal SDK-acquisition budget), or it "
-        "abandons a live worker on every timeout (#2988). This is alignment, "
-        "not proof: the embedded acquisition prefix is unbounded."
+        f"{PROBE_SDK_ACQUISITION_BUDGET}s ENFORCED SDK-acquisition phase), or it "
+        "abandons a live worker on every timeout (#2988). The phase is bounded "
+        "(#3446); what remains is stranding — a phase that overruns is "
+        "abandoned, not cancelled."
     )
 
 
 def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
-    """The #2988 layered-timeout ALIGNMENT, expressed PER PLANE.
+    """The #2988 layered-timeout ordering, expressed PER PLANE.
 
     Abandoning a probe does not stop its thread — ``wait_for`` cancels the
     awaitable, not the worker (CPython #87185), so the worker stays parked in
     its socket read. The defence is ordering: keep the outer bound ABOVE the
     probe's loose inner figure (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
     OVER-ESTIMATE, not the exact inner total), so the inner bound normally fires
-    first and the thread returns by itself. This is a best-effort ALIGNMENT
-    that reduces stranding, NOT a proven invariant — the inner worst case is
-    unbounded (httpx's ``read`` is per-read; the embedded acquisition prefix
-    runs real queries bounded by the redis read timeout).
+    first and the thread returns by itself. For the DB plane this ordering is
+    now PROVABLE as an inequality between ENFORCED deadlines (#3446 — the
+    acquisition is a bounded phase of ``probe_db``), though the residual is
+    still stranding: a phase that overruns its own deadline is abandoned, not
+    cancelled. For the CONTROL plane it remains a best-effort ALIGNMENT: httpx's
+    ``read`` is per-read, so that inner request has no enforceable total.
 
     #2850 initially INVERTED this (2s outer vs a 5s inner on the control plane)
     and leaned on ``PROBE_MAX_SUPERSEDES`` instead. That rationale was
@@ -1411,20 +1416,21 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
 
 
 def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
-    """The DB probes' bound is aligned above the whole worker as far as the
-    acquisition cost can be computed, not just ``probe_db``.
+    """The DB probes' bound clears the whole worker path ``probe_db`` runs.
 
-    ``_probe_db`` is ``_probe_sdk()`` THEN ``probe_db(sdk)``. In URI mode
-    (the hosted steady state) the acquisition prefix is ~free — the SDK's
-    projection is LAZY and the connect happens inside ``probe_db``'s own
-    per-attempt bound. On the EMBEDDED path (cold ``_probe_sdk`` cache /
-    ``_probe_sdk_reset()``) the anchor path connects EAGERLY and runs real
-    queries bounded by the redis READ timeout, which the budget does NOT
-    cover. The bound is DERIVED as ``PROBE_DB_TOTAL_TIMEOUT`` +
-    ``PROBE_SDK_ACQUISITION_BUDGET`` (best-effort) — pin both the budget's
-    source (so it cannot drift from projection) and the derivation (so a
-    ``PROBE_TIMEOUT`` change propagates instead of leaving a stale hand-typed
-    literal).
+    ``_probe_db`` is ``probe_db(acquire=_acquire_probe_sdk)``: since #3446 the
+    SDK lookup runs INSIDE ``probe_db`` as a bounded phase under
+    ``PROBE_SDK_ACQUISITION_BUDGET``, not as a prefix on the coordinator's
+    thread before the call. In URI mode (the hosted steady state) that phase is
+    ~free — the SDK's projection is LAZY and the connect happens inside
+    ``probe_db``'s own per-attempt bound. On the EMBEDDED path (cold
+    ``_probe_sdk`` cache / ``_probe_sdk_reset()``) the anchor path connects
+    EAGERLY and runs real queries, so the phase is REPORTED as failed when it
+    cannot finish inside its budget — the budget bounds the PHASE, not the
+    interior. The bound is DERIVED as ``PROBE_DB_TOTAL_TIMEOUT`` +
+    ``PROBE_SDK_ACQUISITION_BUDGET`` — pin both the budget's source (so it
+    cannot drift from projection) and the derivation (so a ``PROBE_TIMEOUT``
+    change propagates instead of leaving a stale hand-typed literal).
     """
     import tortoise.hosted_api as mod
     from tortoise.monitoring import (
@@ -1447,10 +1453,10 @@ def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
     )
     # STRICTLY above the LOOSE outer-alignment figure (``PROBE_DB_TOTAL_TIMEOUT``
     # — deliberately an OVER-ESTIMATE of probe_db's real total, NOT the exact
-    # inner total — PLUS the acquisition budget). Since #3446 BOTH terms are
-    # enforced deadlines (``probe_db(acquire=…)`` bounds the acquisition), so
-    # this is a real ordering rather than an alignment against a nominal
-    # charge. Equality would still be a race.
+    # inner total — PLUS the acquisition budget). Since #3446 the acquisition is
+    # an ENFORCED phase (``probe_db(acquire=…)``); ``PROBE_DB_TOTAL_TIMEOUT``
+    # itself is still an over-estimate nothing enforces, which is precisely why
+    # this margin sits above the LOOSE figure. Equality would still be a race.
     assert mod.DB_PROBE_HARD_TIMEOUT > \
         PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET, (
         "DB_PROBE_HARD_TIMEOUT must sit strictly above PROBE_DB_TOTAL_TIMEOUT + "
