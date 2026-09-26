@@ -1873,6 +1873,12 @@ _NO_PROJECTION_FOLD = frozenset({
     "CalibrationRecorded",  # :Meta milestone marker (audit)
     "DedupeRecorded",       # #784 content-dedup audit
     "DedupeRejected",       # #784 content-dedup audit
+    # #1370: a refused/suspected subject binding is an AUDIT record — the
+    # edge it declined to write must NOT be replayed from it (the confidence
+    # gate is a write-time policy decision, not graph state). Recognized-and-
+    # intentionally-not-folded; without this entry every replay would log an
+    # "unrecognized event type" warning per refusal.
+    "EntityBindingRefused",
 })
 
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
@@ -6218,6 +6224,20 @@ class FalkorProjection(
                                   ("Source", ["_searchText"])]:  # #125 Document FTS
                                   # (D10: the doc node is a :Source, so the
                                   # full-text leg rides the Source label).
+                                  # #3518: a captured session's :Source carried
+                                  # NO searchable text field, so
+                                  # `tortoise_fts_query(entity_type='source')`
+                                  # never resolved against this label (it
+                                  # degraded to `index_missing` / an empty run)
+                                  # and the captured session was unfindable.
+                                  # `_searchText` is the ONE searchable field
+                                  # and BOTH Source writers populate it through
+                                  # `sdk._source_search_text` — the indexer
+                                  # (`_upsert_source`, title) and the capture
+                                  # path (`_materialize_session_source`,
+                                  # title-else-summary). `summary`/`topics` are
+                                  # deliberately NOT indexed: a second
+                                  # vocabulary the FTS surface does not read.
                 try:
                     fields_sql = ", ".join(f"'{f}'" for f in fields)
                     self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")

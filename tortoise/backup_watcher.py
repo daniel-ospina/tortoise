@@ -34,7 +34,7 @@ from collections.abc import Mapping, MappingView
 from datetime import datetime, timezone
 from typing import Any, Callable  # noqa: UP035
 
-from .alert_store import AlertStore
+from .alert_store import AlertStore, CloseCooldown
 
 logger = logging.getLogger(__name__)
 
@@ -494,7 +494,10 @@ class BackupWatcher:
         # ── R2 read (the only external read the daemon makes). ──
         try:
             r2_orgs = _org_prefixes(self._storage)
-            state = _read_json(self._storage, "ops/state.json")
+            # (The `ops/state.json` read that used to sit here was dead — the
+            # name was never read, and only escaped ruff because the alert
+            # loops below rebound it. #3031 moved those loops into
+            # `_drive_alerts`, which is what exposed it.)
             heartbeat = self._heartbeat_reader()
             driver_ts: datetime | None = None
             try:
@@ -561,6 +564,21 @@ class BackupWatcher:
         # honest — same policy as the org surface). ──
         graph_r2_ok = r2_ok
         graph_surface_confirmed = graph_r2_ok
+        # The enumeration used for the STATUS table is cached from the surface
+        # scan (cycle-2 review P1): the two loops used to call `_graphs_for(t)`
+        # independently, so a control-plane failure on only the SECOND read left
+        # `graph_surface_confirmed` True while `per_graph` was missing that team —
+        # a live graph then looked VANISHED, its incidents were closed, and it was
+        # re-opened on the next poll (fabricated false recovery + ✅/🚨 flap).
+        # `per_graph` is therefore built from THIS cached read, so the resolved
+        # surface is exactly the surface the gate judged. The second read is not
+        # gone, though: it is restored in the build loop as a CONFIRMATION read
+        # that gates the shrink DECISION only (#3405 review P2), so one silently
+        # TRUNCATED enumeration cannot resolve a live graph's incidents — the
+        # confirmation read disagrees with the cache and clears
+        # `graph_surface_confirmed`, while `per_graph` itself stays on the CACHED
+        # list (an inconsistent read never drops keys either).
+        gids_by_team: dict[str, list[str] | None] = {}
         try:
             graph_newest: dict[str, datetime] = {}
             graph_state: set[str] = set()
@@ -574,6 +592,7 @@ class BackupWatcher:
                         # the universe-shrink below).
                         continue
                     gids = self._graphs_for(t)
+                    gids_by_team[t] = gids
                     if gids is None:
                         # Control-plane read failed — the custom surface is
                         # UNCONFIRMED this poll. Never open or resolve custom
@@ -631,10 +650,13 @@ class BackupWatcher:
         # ── #2313 per-graph status table (custom graphs; the default rides
         # the org surface). Mirrors the per-org table's classes. ──
         per_graph: dict[str, str] = {}
-        for t in sorted(set(orgs + r2_orgs)):
+        for t in sorted(set(r2_orgs + orgs)):
             if eligible_orgs is not None and t not in eligible_orgs:
                 continue  # #3658: no backup is owed to a non-eligible org
-            gids = self._graphs_for(t)
+            # Healthy poll → the cached enumeration from the surface scan (see the
+            # gids_by_team comment: a second read could disagree with the gate).
+            # Degraded poll → read now, and never classify "never" off it below.
+            gids = gids_by_team.get(t) if graph_r2_ok else self._graphs_for(t)
             if gids is None:
                 # Control-plane read failed — the custom surface is
                 # UNCONFIRMED for this org: never open/resolve custom
@@ -648,6 +670,25 @@ class BackupWatcher:
                 # fabricated recovery off an unconfirmed surface.
                 graph_surface_confirmed = False
                 continue
+            if graph_r2_ok:
+                # CONFIRMATION read — main's second read, restored for the SHRINK
+                # DECISION only (#3405 review P2). The cache above is the single
+                # source for `per_graph`, but it also removed the redundancy that
+                # caught a single silently-TRUNCATED enumeration (the documented
+                # PostgREST `db-max-rows` fail-open class): a short scan read would
+                # drop a live graph's key out of `per_graph`, and the
+                # universe-shrink would then resolve its still-active incidents —
+                # a fabricated false recovery, re-opened when the full read returns
+                # (✅/🚨 flap). So re-read here and clear the flag when the re-read
+                # is UNCONFIRMED (None) or DISAGREES with the cached set. `per_graph`
+                # below still uses the CACHED list, so an inconsistent read can
+                # never drop keys: the worst case is a one-poll DEFERRAL of a
+                # legitimate vanish — a deliberate trade, because a deferred
+                # resolve is honest while a fabricated one pages an operator about
+                # a recovery that did not happen.
+                confirm = self._graphs_for(t)
+                if confirm is None or set(confirm) != set(gids):
+                    graph_surface_confirmed = False
             for gid in gids:
                 key = f"{t}:{gid}"
                 newest = graph_newest.get(key)
@@ -679,19 +720,16 @@ class BackupWatcher:
                 if key not in graph_state and t in orgs:
                     per_graph[key] = "stamp_missing"
         # Universe shrink: graphs no longer on the seam surface (deleted /
-        # ineligible) resolve their incidents — but ONLY on a CONFIRMED
-        # surface. A degraded R2 or a failed control-plane read must never
-        # resolve real incidents (a CP blip at sweep time is exactly when
-        # customs age into staleness; delete-to-resolve would close the issue
-        # and re-file a fresh one on recovery — fabricated false recovery).
+        # ineligible) resolve their incidents — but ONLY on a CONFIRMED surface.
+        # A degraded R2 or a failed control-plane read must never resolve real
+        # incidents (a CP blip at sweep time is exactly when customs age into
+        # staleness; delete-to-resolve would close the issue and re-file a fresh
+        # one on recovery — fabricated false recovery).
+        # #3031 (review): this was ON the poll's critical path OUTSIDE any
+        # containment — a raise here escaped before the heartbeat and fabricated
+        # the very WATCHER_DOWN this change removes. Same gate, contained.
         if graph_surface_confirmed:
-            prev_graph_keys = set(getattr(self, "_last_graph_keys", set()))
-            cur_graph_keys = set(per_graph)
-            for key in prev_graph_keys - cur_graph_keys:
-                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
-                             "BACKUP_SET_MISSING"):
-                    self._alerts.resolve_incident(kind, key)
-            self._last_graph_keys = cur_graph_keys
+            self._resolve_vanished_graphs(per_graph)
         prev_per_team = set(self._last_confirmed_per_team)
         status = dict(status)
         status["per_graph"] = per_graph
@@ -703,141 +741,14 @@ class BackupWatcher:
         # re-baselined even while in grace (review cycle 10).
         r2_confirmed = r2_ok is True
         if not status.get("unknown") and not status.get("in_grace"):
-            # #3658 review (P1). A DEGRADED poll does not MEASURE the archive
-            # surface: `compute_status` evaluates from the last-known-good
-            # cache and treats every census org as archived, so an org with no
-            # cached newest lands in the `stale` arm. Resolving off that
-            # inference is a FABRICATED RECOVERY — a genuine NEVER_BACKED_UP
-            # would be closed (with a false "resolved" push) for an org that
-            # has no archive at all. Every ARCHIVE-DERIVED resolve below is
-            # therefore gated on a confirmed archive read; the `not_eligible`
-            # arm's resolves are ELIGIBILITY-derived, not archive-derived, and
-            # are deliberately NOT gated (see the note there). The OPEN
-            # direction stays ungated everywhere — opening is the conservative
-            # direction. This is the per-org counterpart of the
-            # `census_confirmed` / `graph_surface_confirmed` guards.
-            for org, state in status["per_team"].items():
-                # Each state resolves the kinds it is NOT the current truth for,
-                # so a transition (e.g. `stamp_missing`→`stale`) cannot leave a
-                # stale incident open beside the new one.
-                if state == "never":
-                    if r2_confirmed:
-                        self._alerts.resolve_incident("STALE", org)
-                        self._alerts.resolve_incident("METADATA_LOST", org)
-                    self._alerts.open_incident("NEVER_BACKED_UP", org)
-                elif state == "stale":
-                    if r2_confirmed:
-                        self._alerts.resolve_incident("NEVER_BACKED_UP", org)
-                        self._alerts.resolve_incident("METADATA_LOST", org)
-                    self._alerts.open_incident("STALE", org)
-                elif state == "stamp_missing":
-                    if r2_confirmed:
-                        self._alerts.resolve_incident("STALE", org)
-                        self._alerts.resolve_incident("NEVER_BACKED_UP", org)
-                    self._alerts.open_incident("METADATA_LOST", org)
-                elif state == "not_eligible":
-                    # #3658: an org the sweep does not target is not a DR
-                    # gap. Open nothing — and close everything a previous
-                    # (eligible) poll opened, so an org that is downgraded
-                    # to free does not leave an incident behind forever.
-                    # NOT gated on `r2_confirmed`: eligibility is a
-                    # control-plane fact, not an R2 measurement.
-                    self._alerts.resolve_incident("STALE", org)
-                    self._alerts.resolve_incident("NEVER_BACKED_UP", org)
-                    self._alerts.resolve_incident("METADATA_LOST", org)
-                    self._alerts.resolve_incident("BACKUP_SET_MISSING", org)
-                else:
-                    if r2_confirmed:
-                        self._alerts.resolve_incident("STALE", org)
-                        self._alerts.resolve_incident("NEVER_BACKED_UP", org)
-                        self._alerts.resolve_incident("METADATA_LOST", org)
-            # Universe shrink: an org that LEFT the census (partial or full —
-            # `no_teams` is the degenerate case) keeps no DR incident. The
-            # per-org loop above only maintains orgs in THIS poll's census, so
-            # without this a departed org's incidents stay open forever (and
-            # drop out of `_last_status`, making them un-closeable). Gated on a
-            # CONFIRMED census AND a confirmed archive read: a control-plane
-            # blip must never resolve a real incident, and on a degraded R2
-            # poll `per_team` is the census, not a faithful archive surface
-            # (mirror of the per-graph `graph_surface_confirmed`).
-            if census_confirmed and r2_confirmed:
-                for org in prev_per_team - set(status["per_team"]):
-                    # SAFETY INVARIANT, relied on deliberately: `per_team` is
-                    # `census ∪ r2_orgs`, so an org can leave it only by
-                    # leaving the CENSUS *and* having no R2 archive listing.
-                    # An org that still holds archives therefore can never be
-                    # shrunk here — which is what keeps a silently SHORT
-                    # census read (the documented PostgREST `db-max-rows`
-                    # fail-open class) from resolving a real incident for an
-                    # org whose data is present. Residual: a short read can
-                    # still close a NO-ARCHIVE org's NEVER_BACKED_UP, which
-                    # the next complete poll re-files (filed as a follow-up).
-                    # NOTE: `BACKUP_SET_MISSING` is deliberately NOT in this
-                    # tuple. It is state/archive-derived, not census-derived:
-                    # `compute_status` re-lists a departed state-only org in
-                    # `backup_set_missing`, so resolving it here would be
-                    # immediately undone by the BSM open later in this same
-                    # poll — emitting a false "resolved" push and filing a
-                    # fresh incident for a still-active condition (review
-                    # cycle 3). Its own block (open + positive scan +
-                    # cross-poll diff) fully reconciles it.
-                    for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
-                        self._alerts.resolve_incident(kind, org)
-            if status.get("driver_down"):
-                self._alerts.open_incident("DRIVER_DOWN")
-            else:
-                self._alerts.resolve_incident("DRIVER_DOWN")
-            for key, state in status.get("per_graph", {}).items():
-                if state == "never":
-                    self._alerts.open_incident("NEVER_BACKED_UP", key)
-                elif state == "stale":
-                    self._alerts.open_incident("STALE", key)
-                elif state == "stamp_missing":
-                    self._alerts.open_incident("METADATA_LOST", key)
-                elif state == "backup_set_missing":
-                    self._alerts.open_incident("BACKUP_SET_MISSING", key)
-                else:
-                    self._alerts.resolve_incident("STALE", key)
-                    self._alerts.resolve_incident("NEVER_BACKED_UP", key)
-                    self._alerts.resolve_incident("METADATA_LOST", key)
-                    self._alerts.resolve_incident("BACKUP_SET_MISSING", key)
-            if r2_confirmed:
-                # The BACKUP_SET_MISSING OPEN is an ABSENCE claim ("this org's
-                # state exists and NO archive does"), so it needs a confirmed
-                # archive read for the same reason the resolves do: on a
-                # degraded poll `compute_status` substitutes the CENSUS for the
-                # archive surface, so an org whose archives are intact but
-                # which is absent from the live census would be paged as a
-                # data-loss condition. Opening is normally the conservative
-                # direction; this one is not, because the state it asserts was
-                # never measured.
-                for org in status.get("backup_set_missing", []):
-                    self._alerts.open_incident("BACKUP_SET_MISSING", org)
-            # BACKUP_SET_MISSING resolves when the org's archives reappear OR
-            # the org leaves the set. Gated on a confirmed archive read, like
-            # every other resolve here.
-            if r2_confirmed:
-                cur_bsm = set(status.get("backup_set_missing", []))
-                # POSITIVE reconciliation — the pre-#3658 per_team scan,
-                # restored (its removal was a regression): after a watcher
-                # RESTART `_last_backup_set_missing` is empty, so the
-                # cross-poll diff below alone can never close a
-                # BACKUP_SET_MISSING whose archives recovered before the first
-                # poll — the incident would stay open and its dedup state
-                # could absorb the next genuine recurrence.
-                for org in set(status["per_team"]) - cur_bsm:
-                    self._alerts.resolve_incident("BACKUP_SET_MISSING", org)
-                # ...and a state-only org that LEFT the set (tracked across
-                # polls — it is never in `per_team`, so the scan above cannot
-                # close it).
-                for org in self._last_backup_set_missing - cur_bsm:
-                    self._alerts.resolve_incident("BACKUP_SET_MISSING", org)
-                self._last_backup_set_missing = cur_bsm
-            # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
-            if r2_ok is False:
-                self._alerts.open_incident("R2_DOWN")
-            else:
-                self._alerts.resolve_incident("R2_DOWN")
+            # #3031: the (fail-soft) alert drive, extraction of the inline loops
+            # below. #3658's gating is carried in: `census_confirmed` gates the
+            # org universe-shrink and `r2_ok` gates every archive-derived resolve.
+            self._drive_alerts(
+                status, r2_ok,
+                prev_per_team=prev_per_team,
+                census_confirmed=census_confirmed,
+            )
 
         # Re-baseline the universe-shrink reference ONLY on a confirmed poll (the
         # `_last_graph_keys` convention) — and OUTSIDE the grace/unknown gate.
@@ -873,6 +784,279 @@ class BackupWatcher:
 
         self._check_memory()
         return status
+
+    def _resolve_vanished_graphs(self, per_graph: dict[str, Any]) -> None:
+        """Close the incidents of graphs no longer on the seam surface.
+
+        Only ever called on a CONFIRMED surface (a degraded R2 or a failed
+        control-plane read must never resolve real incidents — a CP blip at sweep
+        time is exactly when customs age into staleness, and delete-to-resolve
+        would close the issue and re-file a fresh one on recovery: fabricated
+        false recovery).
+
+        #3031 (review): contained like every other alert leg. The extraction also
+        # fixed the retry semantics for the new raise-on-close-failure contract
+        # (cycle-2 review P1): `resolve_incident` RAISES when the close fails (a
+        # `False` return only ever means "nothing was open"), so a key whose close
+        # failed is kept in `_last_graph_keys` and the `prev - cur` diff still
+        # contains it next poll. Retiring it would have documented a retry that
+        # never happened and orphaned the incident forever — the graph is gone, so
+        # no other surface ever revisits it.
+        """
+        pending: set[str] = set()
+        try:
+            prev_graph_keys = set(getattr(self, "_last_graph_keys", set()))
+            cur_graph_keys = set(per_graph)
+            for key in sorted(prev_graph_keys - cur_graph_keys):
+                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
+                             "BACKUP_SET_MISSING"):
+                    try:
+                        self._alerts.resolve_incident(kind, key)
+                    except Exception:
+                        logger.exception(
+                            "vanished-graph resolve failed for %s/%s — kept "
+                            "pending for the next poll", kind, key,
+                        )
+                        pending.add(key)
+            # A pending key is no longer in `cur`, so keeping it in the set makes
+            # the next poll's diff re-include it.
+            self._last_graph_keys = cur_graph_keys | pending
+        except Exception:
+            logger.exception(
+                "vanished-graph resolution failed — heartbeat unaffected "
+                "(retried next poll)"
+            )
+
+    def _alert_leg(self, op: str, kind: str, subject: str = "") -> bool:
+        """One alert-store leg, contained AND attributed (#3031 cycle-2 review P2).
+
+        Contained per leg rather than per block, for two reasons:
+        * attribution — `logger.exception` prints a traceback into alert_store
+          internals but no locals, so a block-level log left the operator unable
+          to tell WHICH team/graph/incident leg died;
+        * isolation — a single broken incident (or a GitHub outage on one close)
+          no longer starves every remaining leg until the next poll. Retry is
+          unchanged: the next poll re-evaluates every leg, and the lifecycle is
+          dedup-backed and idempotent.
+
+        Returns True when the leg SUCCEEDED. Callers that iterate a shrunken
+        universe need that signal to keep a failed subject pending instead of
+        retiring it (a swallowed failure + a retired subject is a permanent
+        orphan — the defect the graph path had and the team path shared).
+        `CloseCooldown` is logged at INFO without a traceback: it means "still
+        open, backing off" rather than "something broke".
+
+        The heartbeat written just after this block is the watcher's own liveness
+        evidence, so no leg may ever escape into `poll()` — an escaped exception
+        is what fabricated the false WATCHER_DOWN this change removes.
+        """
+        if op not in ("open_incident", "resolve_incident"):
+            # A typo'd op would raise AttributeError into the catch-all below and
+            # silently disable EVERY leg while the heartbeat stayed healthy
+            # (final-cycle review P2). Fail loudly instead — the bot/daemon
+            # watchdogs surface a crash, a green-but-deaf alerter does not.
+            raise ValueError(f"unknown alert leg op: {op!r}")
+        try:
+            getattr(self._alerts, op)(kind, subject)
+            return True
+        except CloseCooldown as cool:
+            logger.info(
+                "alert leg cooling down: %s(%s, %r) — %s", op, kind, subject, cool,
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "alert leg failed: %s(%s, %r) — heartbeat unaffected, "
+                "re-evaluated next poll", op, kind, subject,
+            )
+            return False
+
+    def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None,
+                      *, prev_per_team: set[str] | None = None,
+                      census_confirmed: bool = False) -> None:
+        """#3031: drive the alert store — fail-soft, never at the heartbeat's expense.
+
+        The heartbeat written right after this call is the watcher's OWN
+        liveness evidence: the DR driver files WATCHER_DOWN when it goes stale.
+        The alerts share the same R2 store, so the degraded condition that
+        R2_DOWN exists to report is exactly the one that makes
+        ``open_incident``/``resolve_incident`` raise (``_read_json`` re-raises a
+        read ``RuntimeError``; ``create_if_not_exists`` re-raises anything that
+        is neither 412 nor an accepted fallback). Uncontained, that exception
+        escaped ``_poll_inner``, was swallowed by ``poll()``, and skipped the
+        heartbeat — so a broken alert path fabricated a *different*, false
+        incident (WATCHER_DOWN) and masked the real R2 fault.
+
+        The block is best-effort AND per-leg contained: a leg that fails is logged
+        with its (op, kind, subject) and the remaining legs still run (see
+        ``_alert_leg``). The outer guard below is therefore only reachable for a
+        structural defect in the status dict, not for an ordinary store failure.
+        If a leg fails, the next poll re-evaluates it — the lifecycle is
+        dedup-backed and idempotent. That is the deliberate trade for never losing
+        the heartbeat.
+
+        #3658 semantics are carried through unchanged and only routed through
+        ``_alert_leg``: ``r2_confirmed`` (``r2_ok is True``) gates every
+        ARCHIVE-DERIVED resolve — a degraded poll does not MEASURE the archive
+        surface, so resolving off it is a fabricated recovery — while the
+        ``not_eligible`` arm's resolves stay UNGATED (eligibility is a
+        control-plane fact, not an R2 measurement). The org universe-shrink
+        additionally requires ``census_confirmed``.
+        """
+        try:
+            r2_confirmed = r2_ok is True
+            for org, state in status["per_team"].items():
+                # Each state resolves the kinds it is NOT the current truth for,
+                # so a transition (e.g. `stamp_missing`→`stale`) cannot leave a
+                # stale incident open beside the new one.
+                if state == "never":
+                    if r2_confirmed:
+                        self._alert_leg("resolve_incident", "STALE", org)
+                        self._alert_leg("resolve_incident", "METADATA_LOST", org)
+                    self._alert_leg("open_incident", "NEVER_BACKED_UP", org)
+                elif state == "stale":
+                    if r2_confirmed:
+                        self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
+                        self._alert_leg("resolve_incident", "METADATA_LOST", org)
+                    self._alert_leg("open_incident", "STALE", org)
+                elif state == "stamp_missing":
+                    if r2_confirmed:
+                        self._alert_leg("resolve_incident", "STALE", org)
+                        self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
+                    self._alert_leg("open_incident", "METADATA_LOST", org)
+                elif state == "not_eligible":
+                    # #3658: an org the sweep does not target is not a DR
+                    # gap. Open nothing — and close everything a previous
+                    # (eligible) poll opened, so an org that is downgraded
+                    # to free does not leave an incident behind forever.
+                    # NOT gated on `r2_confirmed`: eligibility is a
+                    # control-plane fact, not an R2 measurement.
+                    self._alert_leg("resolve_incident", "STALE", org)
+                    self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
+                    self._alert_leg("resolve_incident", "METADATA_LOST", org)
+                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", org)
+                else:
+                    if r2_confirmed:
+                        self._alert_leg("resolve_incident", "STALE", org)
+                        self._alert_leg("resolve_incident", "NEVER_BACKED_UP", org)
+                        self._alert_leg("resolve_incident", "METADATA_LOST", org)
+            # Universe shrink: an org that LEFT the census (partial or full —
+            # `no_teams` is the degenerate case) keeps no DR incident. The
+            # per-org loop above only maintains orgs in THIS poll's census, so
+            # without this a departed org's incidents stay open forever (and
+            # drop out of `_last_status`, making them un-closeable). Gated on a
+            # CONFIRMED census AND a confirmed archive read: a control-plane
+            # blip must never resolve a real incident, and on a degraded R2
+            # poll `per_team` is the census, not a faithful archive surface
+            # (mirror of the per-graph `graph_surface_confirmed`).
+            #
+            # SAFETY INVARIANT, relied on deliberately: `per_team` is
+            # `census ∪ r2_orgs`, so an org can leave it only by leaving the
+            # CENSUS *and* having no R2 archive listing. An org that still
+            # holds archives therefore can never be shrunk here — which is what
+            # keeps a silently SHORT census read (the documented PostgREST
+            # `db-max-rows` fail-open class) from resolving a real incident for
+            # an org whose data is present. Residual: a short read can still
+            # close a NO-ARCHIVE org's NEVER_BACKED_UP, which the next complete
+            # poll re-files (filed as a follow-up).
+            #
+            # NOTE: `BACKUP_SET_MISSING` is deliberately NOT in this tuple. It
+            # is state/archive-derived, not census-derived: `compute_status`
+            # re-lists a departed state-only org in `backup_set_missing`, so
+            # resolving it here would be immediately undone by the BSM open
+            # later in this same poll — emitting a false "resolved" push and
+            # filing a fresh incident for a still-active condition (review
+            # cycle 3). Its own block (open + positive scan + cross-poll diff)
+            # fully reconciles it.
+            #
+            # An org whose resolve FAILED stays pending (our #3031 cycle P1):
+            # `prev_per_team` is a one-shot snapshot, so without carrying the
+            # failure forward the subject would never be retried and the
+            # incident would be orphaned forever (the same defect the graph
+            # path had, fixed the same way).
+            if census_confirmed and r2_confirmed:
+                cur_per_team = set(status.get("per_team", {}))
+                pending = set(getattr(self, "_pending_team_resolves", set()))
+                pending -= cur_per_team  # reappeared → resolved, drop from pending
+                departed = (set(prev_per_team or set()) - cur_per_team) | pending
+                for org in sorted(departed):
+                    ok = True
+                    for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
+                        if not self._alert_leg("resolve_incident", kind, org):
+                            ok = False
+                    if ok:
+                        pending.discard(org)
+                    else:
+                        pending.add(org)
+                self._pending_team_resolves = pending
+            if status.get("driver_down"):
+                self._alert_leg("open_incident", "DRIVER_DOWN")
+            elif r2_ok is not False:
+                # Resolving requires HAVING READ the heartbeat: on an R2 read
+                # failure the heartbeat is never read (`driver_ts=None`), so
+                # `driver_down` is False out of ignorance, not out of evidence.
+                # Resolving there would clear a real DRIVER_DOWN and re-file it on
+                # recovery (final-cycle review P2).
+                self._alert_leg("resolve_incident", "DRIVER_DOWN")
+            for key, state in status.get("per_graph", {}).items():
+                if state == "never":
+                    self._alert_leg("open_incident", "NEVER_BACKED_UP", key)
+                elif state == "stale":
+                    self._alert_leg("open_incident", "STALE", key)
+                elif state == "stamp_missing":
+                    self._alert_leg("open_incident", "METADATA_LOST", key)
+                elif state == "backup_set_missing":
+                    self._alert_leg("open_incident", "BACKUP_SET_MISSING", key)
+                else:
+                    self._alert_leg("resolve_incident", "STALE", key)
+                    self._alert_leg("resolve_incident", "NEVER_BACKED_UP", key)
+                    self._alert_leg("resolve_incident", "METADATA_LOST", key)
+                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", key)
+            if r2_confirmed:
+                # The BACKUP_SET_MISSING OPEN is an ABSENCE claim ("this org's
+                # state exists and NO archive does"), so it needs a confirmed
+                # archive read for the same reason the resolves do: on a
+                # degraded poll `compute_status` substitutes the CENSUS for the
+                # archive surface, so an org whose archives are intact but
+                # which is absent from the live census would be paged as a
+                # data-loss condition. Opening is normally the conservative
+                # direction; this one is not, because the state it asserts was
+                # never measured.
+                for org in status.get("backup_set_missing", []):
+                    self._alert_leg("open_incident", "BACKUP_SET_MISSING", org)
+                # BACKUP_SET_MISSING resolves when the org's archives reappear
+                # OR the org leaves the set. Gated on a confirmed archive read,
+                # like every other resolve here.
+                cur_bsm = set(status.get("backup_set_missing", []))
+                # POSITIVE reconciliation — the pre-#3658 per_team scan,
+                # restored (its removal was a regression): after a watcher
+                # RESTART `_last_backup_set_missing` is empty, so the
+                # cross-poll diff below alone can never close a
+                # BACKUP_SET_MISSING whose archives recovered before the first
+                # poll — the incident would stay open and its dedup state
+                # could absorb the next genuine recurrence.
+                for org in set(status["per_team"]) - cur_bsm:
+                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", org)
+                # ...and a state-only org that LEFT the set (tracked across
+                # polls — it is never in `per_team`, so the scan above cannot
+                # close it).
+                for org in self._last_backup_set_missing - cur_bsm:
+                    self._alert_leg("resolve_incident", "BACKUP_SET_MISSING", org)
+                self._last_backup_set_missing = cur_bsm
+            # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
+            # Its own guard kept for symmetry with the other legs; the outer
+            # `except` below remains as a backstop for structural errors (a
+            # malformed status dict), and per-leg containment means it is now
+            # only reached for defects rather than for an ordinary store failure.
+            if r2_ok is False:
+                self._alert_leg("open_incident", "R2_DOWN")
+            else:
+                self._alert_leg("resolve_incident", "R2_DOWN")
+        except Exception:
+            logger.exception(
+                "alert store legs failed — heartbeat unaffected (a broken "
+                "alerter must never fabricate WATCHER_DOWN)"
+            )
 
     def _check_memory(self) -> None:
         """Process-RSS trend guard: if RSS grows beyond 50 MB over baseline,

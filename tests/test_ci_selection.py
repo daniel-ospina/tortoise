@@ -1097,10 +1097,11 @@ def test_real_workflow_halves_are_consistent():
     # halves carry every fast file exactly once and tilt is bounded.
     # #3400: the tilt invariant is now DURATION, not count. The full-matrix
     # halves are packed by measured weight (LPT), so a correct split is
-    # duration-balanced while carrying very different file counts — the real
-    # pool splits 195/325 at 27.95m/27.95m (one 855s file + ~130 sub-second
-    # files on one side). The old `abs(count_a - count_b) <= 3` assertion
-    # encoded the duration-blind parity split this issue exists to remove.
+    # duration-balanced while carrying very different file counts — the count
+    # difference is the design (a few multi-minute files against the long tail
+    # of sub-second ones), and the assertion below checks the balance, not the
+    # count. The old `abs(count_a - count_b) <= 3` assertion encoded the
+    # duration-blind parity split this issue exists to remove.
     from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
                                     workflow_halves_issues,
                                     HALF_DURATION_IMBALANCE_RATIO)
@@ -1287,8 +1288,9 @@ def test_duration_integrity():
 
 # ── #3400: duration-balanced full-matrix halves + durations coverage ──────
 # The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
-# duration-blind, so half (b) collected the slow files by luck (37.1m vs
-# 18.8m on the real pool) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# duration-blind, so half (b) collected the slow files by luck, tilted the split
+# far past the ratio the assertion below allows, and blew the 55m watchdog
+# (#3400). These pin the LPT pack (#1473)
 # on the full-matrix path and the coverage floor that keeps the `durations`
 # map from rotting back to a handful of entries.
 
@@ -1309,7 +1311,7 @@ def test_full_matrix_split_is_duration_balanced():
 
     Four heavy files + many 2s files: parity can cluster the heavies on one
     half; LPT must not.  The assertion is the *duration* ratio, not a count
-    ratio — the correct duration split of the real pool is 195/325 files.
+    ratio — a correct pack of the real pool carries unequal counts.
     """
     from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
     heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,

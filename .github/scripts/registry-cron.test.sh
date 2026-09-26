@@ -77,6 +77,15 @@
 #      not enter flat classification and blank a measured default archive
 #  62. an unparseable top-level listing is UNKNOWN, never an empty pool
 #  63. the top-level listing stderr is captured (not /dev/null'd)
+#  64. #3029: a FAILED search is not "no incident" — defer, never duplicate
+#  65. #3029: an ERROR BODY (403 rate-limit) is not an empty result
+#  66. #3029: an issue that merely MENTIONS the kind is never adopted
+#  67. #3029: the kind must follow `[DR] ` immediately (boundary)
+#  68. #3029: the subject must be the EXACT ` — ` segment
+#  69. #3032: unsupported IfNoneMatch + ambiguous HEAD → LOUD, never a blind put
+#  69b. #3032: a bare `412` in an unrelated error is NOT "already exists"
+#  70. #3032: unsupported IfNoneMatch + EXISTING object → adopt, no duplicate
+#  71. #3032: an UNRESOLVED dedup write fails LOUD, never search-only
 #  64. a subject-less incident is written ONCE, under the CANONICAL `_.json`
 #      (the AlertStore's spelling) — never the legacy `global.json` (#2844)
 #  65. a legacy sentinel holding a CLOSED issue still lets the incident re-file
@@ -234,12 +243,36 @@ case "$op" in
       *)            printf '' ;;
     esac
     ;;
-  put-object)   [ "${STUB_412:-0}" = "1" ] && exit 1 || exit 0 ;;
+  put-object)
+    # #3032 knobs: a client that rejects the conditional flag, a store that
+    # fails the write outright, and an unrelated error that merely contains the
+    # digits 412. All three are distinguished from the real 412 race.
+    if [ "${STUB_NO_IFNONEMATCH:-0}" = "1" ] && printf '%s' "${args[*]}" | grep -q -- '--if-none-match'; then
+      echo "Unknown options: --if-none-match" >&2
+      exit 2
+    fi
+    if [ "${STUB_PUT_412_SUBSTRING:-0}" = "1" ] && printf '%s' "${args[*]}" | grep -q -- '--if-none-match'; then
+      echo "An error occurred (InternalError) when calling the PutObject operation: RequestId 4120xyz" >&2
+      exit 1
+    fi
+    if [ "${STUB_PUT_FAIL:-0}" = "1" ]; then
+      echo "An error occurred (InternalError) when calling the PutObject operation" >&2
+      exit 1
+    fi
+    [ "${STUB_412:-0}" = "1" ] && exit 1 || exit 0 ;;
+  head-object)  [ "${STUB_HEAD_EXISTS:-${STUB_412:-0}}" = "1" ] && exit 0 || exit 1 ;;
   get-object)
     # STUB_INDEX_FAIL emulates a NON-404 failure reading the legacy-flat index
     # (a transient S3 error) so the driver must treat the pool as unmeasured.
     if [ "${STUB_INDEX_FAIL:-0}" = "1" ] && case "$(argval --key)" in *legacy-flat-index*) true ;; *) false ;; esac; then
       echo "An error occurred (InternalError) when calling the GetObject operation" >&2
+      exit 1
+    fi
+    # STUB_GET_ONLY_CANONICAL: answer STUB_GET_BODY for the CANONICAL `_.json`
+    # object only. A test that must exercise the create-once write
+    # (`r2_put_once`) uses this so `file_alert`'s #2844 legacy-alias pre-read
+    # (which consults `global.json`) does not adopt the object first.
+    if [ "${STUB_GET_ONLY_CANONICAL:-0}" = "1" ] && ! printf '%s' "${args[*]}" | grep -q '/_\.json'; then
       exit 1
     fi
     printf '%s' "${STUB_GET_BODY:-}" ;;
@@ -301,28 +334,39 @@ case "$url" in
     gh_log
     case "$url" in
       */search/issues*)
-        items="[]"
-        for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN STALE; do
-          var="GH_ISSUE_$kind"
-          val="${!var:-}"
-          if [ -n "$val" ] && printf '%s' "$url" | grep -q "$kind"; then
-            items="[{\"number\":$val,\"title\":\"${GH_ISSUE_TITLE:-[DR] $kind}\"}]"
-            break
+        # #3029/#3032 knobs: a transport failure, an error body (403 rate-limit),
+        # a hand-written result set, or an unrelated issue whose title merely
+        # mentions the kind (the #2844 adoption shape). `emit` carries the HTTP
+        # status: the merged `gh_find_open` reads it through gh_search_items, so
+        # a stub that printed a body raw would be read as a code-less failure.
+        if [ "${STUB_GH_SEARCH_FAIL:-0}" = "1" ]; then
+          exit 1
+        elif [ -n "${STUB_GH_SEARCH_BODY:-}" ]; then
+          emit "$STUB_GH_SEARCH_BODY" "${STUB_SEARCH_CODE:-200}"
+        else
+          items="[]"
+          for kind in SWEEP_CONFIG_ERROR SWEEP_OFF_STALE SWEEP_NO_COVERAGE WATCHER_DOWN APP_DOWN R2_DOWN STALE; do
+            var="GH_ISSUE_$kind"
+            val="${!var:-}"
+            if [ -n "$val" ] && printf '%s' "$url" | grep -q "$kind"; then
+              items="[{\"number\":$val,\"title\":\"${GH_ISSUE_TITLE:-[DR] $kind}\"}]"
+              break
+            fi
+          done
+          # GH_SEARCH_FILLER=1: page 1 is a FULL page of 100 machine-authored
+          # look-alikes, so the exact match can only be found on page 2 — a
+          # single-page read files a duplicate. NB the match must be `&page=1`:
+          # `page=1` is also a substring of `per_page=100`.
+          if [ "${GH_SEARCH_FILLER:-0}" = "1" ]; then
+            case "$url" in
+              *'&page=1')
+                filler="$(python3 -c 'import json;print(",".join(json.dumps({"number":1000+i,"title":"[DR] OTHER — filler %d" % i}) for i in range(100)))')"
+                emit "{\"items\":[$filler]}" "${STUB_SEARCH_CODE:-200}"
+                exit 0 ;;
+            esac
           fi
-        done
-        # GH_SEARCH_FILLER=1: page 1 is a FULL page of 100 machine-authored
-        # look-alikes, so the exact match can only be found on page 2 — a
-        # single-page read files a duplicate. NB the match must be `&page=1`:
-        # `page=1` is also a substring of `per_page=100`.
-        if [ "${GH_SEARCH_FILLER:-0}" = "1" ]; then
-          case "$url" in
-            *'&page=1')
-              filler="$(python3 -c 'import json;print(",".join(json.dumps({"number":1000+i,"title":"[DR] OTHER — filler %d" % i}) for i in range(100)))')"
-              emit "{\"items\":[$filler]}" "${STUB_SEARCH_CODE:-200}"
-              exit 0 ;;
-          esac
-        fi
-        emit "{\"items\":$items}" "${STUB_SEARCH_CODE:-200}" ;;
+          emit "{\"items\":$items}" "${STUB_SEARCH_CODE:-200}"
+        fi ;;
       */issues/*/comments*)
         # #3907: occurrence counting GETs the issue's comments; the comment
         # POST is the recording write. Distinguish by method so the counting
@@ -354,9 +398,10 @@ case "$url" in
           # ONE status-checked call.
           emit "{\"state\":\"${GH_ISSUE_STATE:-open}\"}" "${STUB_ISSUE_CODE:-200}"
         else
-          # PATCH = the close. STUB_CLOSE_CODE models a 403/5xx answered with
-          # exit 0 (the shape a real GitHub returns).
-          emit '{}' "${STUB_CLOSE_CODE:-200}"
+          # PATCH (close). emit honours -w so gh_close's HTTP-code check works;
+          # STUB_GH_CLOSE_CODE / STUB_CLOSE_CODE both simulate a rate-limit/5xx
+          # close failure (the two suites spell the knob differently).
+          cbody='{}'; emit "$cbody" "${STUB_GH_CLOSE_CODE:-${STUB_CLOSE_CODE:-200}}"
         fi ;;
       */issues)
         # A real POST returns the created issue; the HTTP status (not the exit
@@ -411,7 +456,10 @@ reset_case() {
   : > "$LOG"
   unset STUB_STATUS_BODY STUB_SWEEP_BODY STUB_SWEEP_RC STUB_PURGE_BODY STUB_PURGE_CODE \
         STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
-        SIMULATE_APP_DOWN \
+        SIMULATE_APP_DOWN STUB_GH_SEARCH_FAIL STUB_GH_SEARCH_BODY \
+        STUB_NO_IFNONEMATCH STUB_HEAD_EXISTS STUB_PUT_FAIL STUB_PUT_412_SUBSTRING \
+        STUB_GET_ONLY_CANONICAL \
+        STUB_GH_CLOSE_CODE \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
         STUB_TOP_NOT_JSON \
         STUB_SEARCH_CODE STUB_CREATE_CODE STUB_CLOSE_CODE GH_SEARCH_FILLER \
@@ -766,6 +814,23 @@ run_driver
 assert_eq "$RC" 0 "29. healthy run exits 0"
 assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29. the driver dedup object is deleted on resolve"
 assert_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29. the legacy spelling is deleted too (#2844)"
+
+# ── 29b. a FAILED close keeps the dedup object (cycle-2 review P1) ─────────
+# The shell twin of the Python P0: deleting the object on a failed PATCH leaves
+# the object gone while the issue stays OPEN, so the next run re-creates it,
+# adopts the still-open issue and pages again — while the run reports green.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export GH_ISSUE_APP_DOWN=99
+export STUB_GH_CLOSE_CODE=500
+run_driver
+assert_eq "$RC" 1 "29b. a failed self-heal close exits RED (1), not a silent green"
+assert_match "$OUT" "closing issue #99 returned HTTP 500" "29b. the failed close is LOUD"
+assert_not_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/global.json" "29b. the driver dedup object is KEPT"
+assert_not_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/APP_DOWN/_.json" "29b. the server-side dedup object is KEPT"
 
 # ── 30. missing .watcher block neither files nor self-heals WATCHER_DOWN ────
 reset_case
@@ -1214,6 +1279,140 @@ run_driver
 assert_eq "$RC" 1 "63. a failed top-level listing exits RED (1)"
 assert_contains "$OUT" "AccessDenied" "63. the top-level CLI stderr is captured, not discarded"
 
+# ── 64. #3029: a FAILED search is not "no incident" — defer, never duplicate ─
+# The alerter's dedup authority is the create-once object; the search is the
+# fallback that decides whether an issue already exists. When the search does
+# not run, treating it as empty files a DUPLICATE — so filing is deferred (the
+# placeholder object keeps issue_number:null, so the next run's 412 branch
+# retries) and the run goes RED rather than silent.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_GH_SEARCH_FAIL=1
+run_driver
+assert_eq "$RC" 1 "64. a failed search exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "64. a failed search never files a duplicate"
+assert_contains "$OUT" "filing DEFERRED" "64. the deferral is loud and explicit"
+assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/SWEEP_CONFIG_ERROR" "64. the dedup object is still created (the next run retries)"
+
+# ── 65. #3029: an ERROR BODY (403 rate-limit) is not an empty result ─────────
+# GitHub answers a rate-limited search with HTTP 200-ish JSON that carries no
+# `items`, and curl exits 0 — the pre-#3029 `.items[0] // empty` read that as
+# "no open incident".
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_GH_SEARCH_BODY='{"message":"API rate limit exceeded"}'
+run_driver
+assert_eq "$RC" 1 "65. a rate-limit body exits RED (1)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "65. a rate-limit body is not read as 'no incident'"
+assert_contains "$OUT" "filing DEFERRED" "65. the rate-limit body is treated as a search failure"
+
+# ── 66. #3029: an issue that merely MENTIONS the kind is never adopted ───────
+# The live production shape: the platform-scoped query for `[DR] R2_DOWN`
+# resolved to #2844 — a bug report ABOUT R2_DOWN (title "bug(dr): R2_DOWN is
+# deduped under two different R2 keys…"). Adoption would have closed it.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_GH_SEARCH_BODY='{"items":[{"number":2844,"title":"bug(dr): R2_DOWN is deduped under two different R2 keys by the driver and the app watcher"},{"number":2845,"title":"bug(dr): SWEEP_CONFIG_ERROR mentions this kind in prose"}]}'
+run_driver
+assert_eq "$RC" 1 "66. a prose mention does not suppress filing (still RED)"
+assert_filed "$(cat "$LOG")" "SWEEP_CONFIG_ERROR" "66. the driver files its OWN issue instead of adopting #2844"
+assert_not_match "$(cat "$LOG")" "issues/2844" "66. the unrelated issue is never touched (not closed, not commented)"
+
+# ── 67. #3029: the kind must follow `[DR] ` immediately (boundary) ───────────
+# `[DR] SWEEP_CONFIG_ERROR_EXTRA` must not be adopted for kind
+# SWEEP_CONFIG_ERROR — a bare startswith would accept it.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_GH_SEARCH_BODY='{"items":[{"number":777,"title":"[DR] SWEEP_CONFIG_ERROR_EXTRA — a different kind"},{"number":778,"title":"[DR] SWEEP_CONFIG_ERRORish"}]}'
+run_driver
+assert_filed "$(cat "$LOG")" "SWEEP_CONFIG_ERROR" "67. a kind-prefix collision is not adopted"
+assert_not_match "$(cat "$LOG")" "issues/777" "67. the colliding kind's issue is untouched"
+
+# ── 68. #3029: the subject must be the EXACT ` — ` segment ────────────────
+# A bare team subject is a literal PREFIX of its per-graph subjects, so
+# `[DR] STALE — teamA:g_x` must never satisfy a search for subject teamA —
+# adopting it would let teamA's recovery close the custom graph's live issue
+# (#2413/#2375 cross-talk).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":555,"title":"[DR] STALE — teamA:g_x — last backup 3h"}]}'
+run_driver
+assert_filed "$(cat "$LOG")" STALE "68. a per-graph subject does not satisfy the team subject"
+assert_not_match "$(cat "$LOG")" "issues/555" "68. the per-graph issue is not adopted by the team incident"
+
+# ── 69. #3032: unsupported IfNoneMatch + ambiguous HEAD → LOUD, never a blind put
+# The Python twin RAISES in this case (`hosted_backup.create_if_not_exists`:
+# "a blind-put would weaken the dedup linearization point"); the shell twin must
+# not create an object it cannot prove absent — that could overwrite a
+# concurrent writer's object and null its issue_number.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_NO_IFNONEMATCH=1
+export STUB_HEAD_EXISTS=0
+run_driver
+assert_eq "$RC" 1 "69. an ambiguous dedup write exits RED (1)"
+assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "69. the fallback HEAD-checks the object"
+assert_contains "$OUT" "refusing a blind put" "69. an unconfirmable object is never blind-put"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "69. nothing is filed on an unverified dedup"
+
+# ── 69b. #3032: a bare `412` in an unrelated error is NOT "already exists" ──
+# The pre-review glob `*412*` matched any request-id/byte-count, reporting
+# "exists" without ever HEAD-checking. Only the real AWS markers may shortcut.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_PUT_412_SUBSTRING=1
+export STUB_HEAD_EXISTS=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+# The alias pre-read (main's #2844 `file_alert`) would otherwise adopt the
+# object from the legacy `global.json` spelling and never reach the create-once
+# write this case is guarding.
+export STUB_GET_ONLY_CANONICAL=1
+run_driver
+assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "69b. an unrelated 412 substring still HEAD-checks"
+assert_contains "$OUT" "already tracked by open issue #42" "69b. the existing object is adopted (not a false exists)"
+
+# ── 70. #3032: unsupported IfNoneMatch + EXISTING object → adopt, no duplicate
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_NO_IFNONEMATCH=1
+export STUB_HEAD_EXISTS=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+export GH_ISSUE_SWEEP_CONFIG_ERROR=42
+run_driver
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "70. an existing object is adopted (no duplicate filed)"
+assert_contains "$OUT" "already tracked by open issue #42" "70. the open issue is adopted from the object"
+
+# ── 71. #3032: an UNRESOLVED dedup write fails LOUD, never search-only ──────
+# Conditional write rejected AND HEAD cannot confirm the object AND the
+# unconditional put fails: dedup is unverifiable, so the run must not proceed
+# on the fail-open search.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_PUT_FAIL=1
+run_driver
+assert_eq "$RC" 1 "71. an unresolved dedup write exits RED (1)"
+assert_contains "$OUT" "Dedup is unverified" "71. the failure is loud and names the cause"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "71. nothing is filed on an unverified dedup"
+
 # ── 64. a subject-less incident is written ONCE, under the canonical spelling ─
 # #2844: the driver's pre-fix spelling was `global.json` while the server-side
 # AlertStore writes `_.json`. Two spellings = two create-once points = two issues
@@ -1251,7 +1450,7 @@ assert_match "$(cat "$LOG")" "AWS put-object key=ops/alerts/R2_DOWN/_.json" "65.
 reset_case
 RESOLVE_EXT="$(mktemp)"
 RESOLVE_LOG="$(mktemp)"
-sed -n '/^kind_owner()/,/^}/p; /^resolve_global()/,/^}/p' "$DRIVER" > "$RESOLVE_EXT"
+sed -n '/^GH_SEARCH_FAILED_SENTINEL=/p; /^kind_owner()/,/^}/p; /^resolve_global()/,/^}/p' "$DRIVER" > "$RESOLVE_EXT"
 run_resolve() { # kind — real kind_owner/resolve_global + stubbed log/gh/r2
   local kind="$1"
   : > "$RESOLVE_LOG"
@@ -1485,7 +1684,11 @@ export STUB_STATUS_BODY="$(status_body false null null)"
 export GH_ISSUE_SWEEP_CONFIG_ERROR=42
 export STUB_CLOSE_CODE=403
 run_driver
-assert_eq "$RC" 0 "76. a failed close does not redden an otherwise healthy run"
+# The merged runbook (docs/ops/registry-backup-dr.md) states the driver's
+# `gh_close` "keeps the dedup object and marks the run red" on a non-2xx PATCH —
+# PR #3405's contract, asserted by case 29b. The run is therefore RED even
+# though the sweep itself was healthy; the issue is NOT silently green.
+assert_eq "$RC" 1 "76. a failed close keeps the sentinel AND marks the run RED (runbook/29b)"
 assert_match "$(cat "$LOG")" "GH PATCH .*/issues/42" "76. the close was attempted"
 assert_not_match "$(cat "$LOG")" "AWS delete-object key=ops/alerts/SWEEP_CONFIG_ERROR/_.json" "76. the sentinel is KEPT on a failed close"
 assert_contains "$OUT" "could NOT close issue #42" "76. the failed close is reported, not swallowed"

@@ -15,12 +15,15 @@ Coverage:
   * PR-body PROSE is not a collision: a closed PR body that merely
     cross-references `#N` (the live #2926/#2754 shapes) is WEAK/non-blocking ->
     CLEAN; a body closing reference (`Closes #N`) is still a strong hit
-  * PR lists are completeness-checked: a list longer than its cap is reported
-    TRUNCATED and the run is INCOMPLETE (exit 2), never CLEAN
-  * the closed-PR surface is fetched over the REST API (`gh api --paginate`),
-    not the `gh pr list` GraphQL path that resets on this host (#3587). A
-    non-zero exit or a truncated stream is INCOMPLETE — partial output is never
-    salvaged into a short-but-clean list — and a complete enumeration is CLEAN
+  * PR lists are completeness-checked: an OPEN list longer than its cap is
+    reported TRUNCATED and the run is INCOMPLETE (exit 2), never CLEAN
+  * the closed-PR surface is fetched in ONE bounded request over the REST API
+    (`gh api -i`), not the `gh pr list` GraphQL path that resets on this host
+    (#3587) and not the `--paginate` multi-request enumeration it replaced
+    (#5251). It is ADVISORY: a hit is reported but can never block, and a
+    failure / partial sample is reported but can never force INCOMPLETE. A
+    partial sample is `~N` (derived from the response's own Link header), never
+    silently presented as the whole list
   * keyword hits match name-like fields only (`.worktrees/` structural token
     in a title does not collide)
   * an unqueryable surface (gh / git / keyword source) -> INCOMPLETE, exit 2,
@@ -89,6 +92,39 @@ case "$1 $2" in
     printf '%s\n' "$@" > "$d/pr-list-argv.txt"
     f="$d/${state:-open}_prs.json" ;;
   "api --paginate") f="$d/closed_prs.json"; printf '%s\n' "$@" > "$d/api-argv.txt" ;;
+  "api -i")
+    # #5251: the closed-PR surface is ONE bounded request made with `gh api -i`.
+    # `-i` prefixes the body with the status line + headers + a blank line, and
+    # the tool reads the total from the response's OWN `Link: rel="last"` header
+    # (emitted only when GH_STUB_CLOSED_PR_TOTAL_PAGES is set to an integer) so a
+    # partial sample stays observable. GH_STUB_API_NO_SEPARATOR=1 drops the blank
+    # line to exercise the tool's refusal of an ambiguous header/body split.
+    f="$d/closed_prs.json"
+    printf '%s\n' "$@" > "$d/api-argv.txt"
+    # ONE line per INVOCATION: proves the sample is a single bounded request
+    # (a regressed `--paginate` would append once per page).
+    printf '%s\n' "$*" >> "$d/api-calls.log"
+    if [ ! -f "$f" ]; then echo "gh-stub: no fixture: $f" >&2; exit 1; fi
+    echo 'HTTP/2.0 200 OK'
+    echo 'content-type: application/json; charset=utf-8'
+    if [ -n "${GH_STUB_CLOSED_PR_TOTAL_PAGES:-}" ]; then
+      base="$3"
+      printf 'link: <https://api.github.com/%s&page=1>; rel="first", <https://api.github.com/%s&page=%s>; rel="last"\n' "$base" "$base" "$GH_STUB_CLOSED_PR_TOTAL_PAGES"
+      if [ "$GH_STUB_CLOSED_PR_TOTAL_PAGES" -gt 1 ] 2>/dev/null; then
+        printf 'link: <https://api.github.com/%s&page=2>; rel="next"\n' "$base"
+      fi
+    fi
+    if [ "${GH_STUB_API_NO_SEPARATOR:-0}" = "1" ]; then
+      cat "$f"
+      exit 0
+    fi
+    echo
+    cat "$f"
+    if [ "${GH_STUB_API_FAIL_AFTER_OUTPUT:-0}" = "1" ]; then
+      echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
+      exit 1
+    fi
+    exit 0 ;;
   "issue view")
     # A number ABSENT from the target repo is not "no in-flight work" (#4027).
     if [ "${GH_STUB_ISSUE_ABSENT:-0}" = "1" ]; then
@@ -970,7 +1006,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[issue keywords]", out)
         self.assertIn("keyword-source-unavailable", out)
 
-    # ── truncation is INCOMPLETE, never CLEAN ───────────────────────────────
+    # ── truncation: blocking -> INCOMPLETE; advisory sample -> reported ──────
 
     def test_open_pr_list_truncation_is_incomplete(self):
         # A PR list longer than its cap is a PARTIAL query — the fail-open
@@ -986,17 +1022,32 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("TRUNCATED", out)
         self.assertIn("[open PRs]", out)
 
-    def test_closed_pr_list_truncation_is_incomplete(self):
+    def test_closed_pr_partial_sample_is_reported_but_not_incomplete(self):
+        # The response's own Link header advertises more pages than the bounded
+        # sample covers, so the sample MUST NOT read as the whole list — that is
+        # the fail-open this tool exists to prevent. Because the surface is
+        # ADVISORY, though, its partiality must NOT force INCOMPLETE either.
+        # `~N` is the upper bound derived from the last page number; the `~`
+        # says it is an estimate, not a measured total. Before #5251 this exact
+        # shape was exit 2.
         self.gh_fixtures(closed_prs=[
             {"number": 3, "title": "a", "body": "", "headRefName": "chore/a"},
             {"number": 4, "title": "b", "body": "", "headRefName": "chore/b"},
         ])
-        rc, out = self.run_tool(extra_args=["--closed-pr-limit", "1"])
-        self.assertEqual(rc, 2, out)
-        self.assertIn("VERDICT: INCOMPLETE", out)
-        self.assertNotIn("VERDICT: CLEAN", out)
-        self.assertIn("TRUNCATED", out)
+        rc, out = self.run_tool(
+            extra_args=["--closed-pr-limit", "1"],
+            env_extra={"GH_STUB_CLOSED_PR_TOTAL_PAGES": "5"},
+        )
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        # NOT INCOMPLETE: the words appear only inside the advisory NOTE that
+        # says the run is NOT incomplete, so assert against the verdict and the
+        # section header rather than the bare token.
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("INCOMPLETE SURFACES", out)
         self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("⚠ PARTIAL — advisory sample, cannot block", out)
+        self.assertIn("sampled the most recent 2 of ~5 closed PR(s)", out)
 
     def test_complete_pr_list_reports_the_count_and_stays_clean(self):
         self.gh_fixtures(open_prs=[
@@ -1007,29 +1058,32 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("1 PR(s) enumerated (complete, cap 5)", out)
 
-    # ── closed-PR REST transport (#3587) ────────────────────────────────────
+    # ── closed-PR ONE-REQUEST sample, ADVISORY (#5251) ──────────────────────
 
     def test_closed_pr_surface_uses_rest_not_the_resetting_graphql_path(self):
         # REGRESSION GUARD (#3587). The stub reproduces production exactly: the
-        # `gh pr list` GraphQL path FAILS for closed PRs while the REST
-        # endpoint serves them. A closed-PR hit must still be found over REST
-        # and the surface must be complete — not INCOMPLETE. Before the fix
-        # (GraphQL transport) this run was exit 2 with no hit found.
+        # `gh pr list` GraphQL path FAILS for closed PRs while the REST endpoint
+        # serves them. Since #5251 the closed-PR match is ADVISORY (reported,
+        # never blocking), but the TRANSPORT guarantee is unchanged: it must
+        # never regress to the GraphQL path that resets on this host.
         self.gh_fixtures(closed_prs=[{
             "number": 9998, "title": "time-dependent ranking",
             "body": "", "headRefName": "fix/3061-fts-determinism",
         }])
         rc, out = self.run_tool()
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("VERDICT: COLLISION", out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("[recently-closed PRs]", out)
         self.assertIn("matched issue-number (3061) in branch", out)
-        self.assertNotIn("INCOMPLETE", out)
-        self.assertIn("1 PR(s) enumerated (complete, cap 5000)", out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+        argv = (self.gh_dir / "api-argv.txt").read_text()
+        self.assertIn("-i", argv)
+        self.assertIn("state=closed", argv)
+        self.assertNotIn("pr list", argv)
 
     def test_closed_pr_rest_complete_enumeration_is_clean(self):
-        # The gate becoming SATISFIABLE again: a non-empty, fully enumerated
-        # closed-PR list with no hit is CLEAN (exit 0), not INCOMPLETE.
+        # With NO `Link: rel="last"` header the single page IS the whole list,
+        # so the surface is complete — reported as such and CLEAN (exit 0).
         self.gh_fixtures(closed_prs=[
             {"number": 3, "title": "a", "body": "", "headRefName": "chore/a"},
             {"number": 4, "title": "b", "body": "", "headRefName": "chore/b"},
@@ -1038,66 +1092,158 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertNotIn("INCOMPLETE", out)
-        self.assertIn("2 PR(s) enumerated (complete, cap 5000)", out)
+        self.assertIn(
+            "2 closed PR(s) in one request (this page is the complete list)", out)
+        self.assertNotIn("⚠ PARTIAL", out)
 
-    def test_closed_pr_rest_partial_output_on_failure_is_not_salvaged(self):
-        # A mid-enumeration transport failure prints the pages already fetched
-        # and exits non-zero. Salvaging them would be a SILENT SHORT
-        # ENUMERATION — the fail-open class this tool exists to prevent. The
-        # planted hit IS in the printed rows; the surface must still read
-        # INCOMPLETE and record NO hit from that partial data.
+    def test_closed_pr_failure_is_reported_but_does_not_force_incomplete(self):
+        # A non-zero exit on the single request leaves the surface UNQUERYABLE.
+        # Nothing from the failed request is salvaged into hits (the transport
+        # failed mid-stream), and the failure is REPORTED — but it cannot force
+        # INCOMPLETE, because an advisory surface's failure conceals no
+        # collision. Before #5251 this exact shape halted a dispatch.
         self.gh_fixtures(closed_prs=[{
             "number": 9998, "title": "fix: 3061 planted",
             "body": "", "headRefName": "fix/3061-planted",
         }])
         rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
-        self.assertEqual(rc, 2, out)
-        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("INCOMPLETE SURFACES", out)
         self.assertIn("[recently-closed PRs]", out)
         self.assertIn("connection reset by peer", out)
-        # The positive claim: the printed rows were NOT scanned into hits.
-        self.assertNotIn("[recently-closed PRs] PR", out)
+        # The failure is REPORTED, never silent...
+        self.assertIn("ADVISORY SURFACES", out)
+        self.assertIn("gh-unavailable", out)
+        # ...and the rows printed before the failure were NOT scanned into hits.
+        self.assertNotIn("planted", out)
 
-    def test_closed_pr_rest_empty_output_is_incomplete_not_clean(self):
-        # rc 0 + EMPTY stdout is not an empty closed-PR list: a wrapper/proxy
-        # that swallows the body would otherwise read as
-        # "0 PR(s) enumerated (complete)" -> CLEAN, a fail-open on the gate's
-        # primary contract. A genuinely exhausted list still emits one `[]`.
+    def test_closed_pr_unparseable_output_is_reported_but_not_incomplete(self):
+        # Two ways the `-i` response can be unusable: an empty body (a proxy
+        # swallowed it) and a missing header/body separator (the total cannot be
+        # derived from the headers). Neither may read as a COMPLETE scan, and
+        # neither may force INCOMPLETE — both are reported in the advisory
+        # section instead.
         (self.gh_dir / "closed_prs.json").write_text("")
         rc, out = self.run_tool()
-        self.assertEqual(rc, 2, out)
-        self.assertIn("VERDICT: INCOMPLETE", out)
-        self.assertNotIn("VERDICT: CLEAN", out)
-        self.assertIn("empty stream", out)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("ADVISORY SURFACES", out)
+        self.assertIn("non-JSON body", out)
+        self.assertNotIn("this page is the complete list", out)
 
-    def test_closed_pr_rest_truncated_stream_is_incomplete(self):
-        # A truncated JSON stream (partial write) is not a short-but-valid
-        # list. It must raise -> INCOMPLETE, never be parsed as "fewer PRs".
+        self.gh_fixtures(closed_prs=[
+            {"number": 3, "title": "a", "body": "", "headRefName": "chore/a"},
+        ])
+        rc, out = self.run_tool(env_extra={"GH_STUB_API_NO_SEPARATOR": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("no header/body separator", out)
+        self.assertNotIn("this page is the complete list", out)
+
+    def test_closed_pr_malformed_json_body_is_reported_but_not_incomplete(self):
+        # A truncated JSON body (partial write) is not a short-but-valid list.
+        # It must be reported, must never be parsed as "fewer PRs", and must not
+        # force INCOMPLETE — the advisory surface's failure cannot conceal a
+        # collision. (The non-zero-exit half is pinned by the test above; this
+        # pins the malformed-PARSE half.)
         (self.gh_dir / "closed_prs.json").write_text(
             '[{"number": 1, "title": "a", "body": "", "headRefName": "chore/a"},'
             '{"number": 2, "title": "b"'
         )
         rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("non-JSON body", out)
+        self.assertNotIn("this page is the complete list", out)
+
+    def test_closed_pr_sample_is_one_bounded_request_and_still_scanned(self):
+        # The whole point of #5251: the surface is fetched in EXACTLY ONE
+        # request (no `--paginate` following rel="next"), and the hit inside that
+        # single page is still found and reported. `--paginate` is asserted
+        # absent from the argv and the stub's per-invocation call log must hold
+        # exactly one line — a regressed pagination would append one per page.
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps([
+            {"number": 1, "title": "a", "body": "", "headRefName": "chore/a"},
+            {"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2"},
+        ]))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)  # advisory: reported, never blocking
+        self.assertIn("matched issue-number (3061) in branch", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn(
+            "2 closed PR(s) in one request (this page is the complete list)", out)
+        argv = (self.gh_dir / "api-argv.txt").read_text()
+        self.assertIn("-i", argv)
+        self.assertNotIn("--paginate", argv)
+        calls = (self.gh_dir / "api-calls.log").read_text().splitlines()
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_advisory_closed_pr_strong_shape_cannot_block_but_is_reported(self):
+        # #5251, the STRUCTURAL guarantee. A payload whose `state` is ABSENT is
+        # NOT terminal by `_pr_terminal_state`, so its branch match would be
+        # `strong` — the demotion must come from the SURFACE's authority, not
+        # from a payload field (#5129's data-dependent shape is exactly what
+        # that cannot give). It must be CLEAN (exit 0) with the match reported.
+        self.gh_fixtures(closed_prs=[{
+            "number": 9998, "title": "time-dependent ranking",
+            "body": "", "headRefName": "fix/3061-fts-determinism",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertNotIn("do NOT dispatch", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("matched issue-number (3061) in branch", out)
+        self.assertRegex(out, r"recently-closed PRs\s+ADVISORY")
+        self.assertIn("ADVISORY SURFACES", out)
+
+    def test_clean_report_counts_only_surfaces_actually_queried(self):
+        # Review cycle 2 (P2-7): the CLEAN line counts surfaces actually READ.
+        # Before #5251 it was reachable only when every surface had been
+        # queried, so `7/7` was literally true; with an advisory surface it can
+        # now mean 6 of 7 were read. A silent revert of that count would
+        # otherwise pass the whole suite, because the pre-existing `7/7`
+        # assertion still matches a fully-queried run.
+        self.gh_fixtures(open_prs=[])
+        # Fail ONLY the (advisory) closed-PR request: every blocking surface
+        # stays clean, so the run must still reach CLEAN.
+        rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        # 6, not 7 — and the shortfall is NAMED, not hidden.
+        self.assertIn("6/7 surfaces queried", out)
+        self.assertNotIn("7/7 surfaces queried", out)
+        self.assertIn("advisory surface(s) partial or unqueried", out)
+
+    def test_advisory_demotion_is_scoped_to_the_advisory_surface(self):
+        # The OVERRIDE must not weaken the blocking surfaces. (a) An advisory
+        # failure alongside an OPEN-PR hit is still a COLLISION. (b) An advisory
+        # failure alongside an unqueryable BLOCKING surface is still INCOMPLETE.
+        self.gh_fixtures(open_prs=[{
+            "number": 9999, "title": "fix: guard retrieval (#3061)",
+            "body": "closes it", "headRefName": "fix/guard",
+        }])
+        rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[open PRs]", out)
+        self.assertIn("do NOT dispatch", out)
+
+        # Drop the (blocking) open-PR hit so INCOMPLETE can surface.
+        self.gh_fixtures(open_prs=[])
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_API_FAIL_AFTER_OUTPUT": "1",
+            "GH_STUB_ISSUE_ABSENT": "1",
+        })
         self.assertEqual(rc, 2, out)
         self.assertIn("VERDICT: INCOMPLETE", out)
-        self.assertNotIn("VERDICT: CLEAN", out)
-        self.assertIn("[recently-closed PRs]", out)
-        self.assertIn("truncated/malformed JSON stream", out)
-
-    def test_closed_pr_rest_multi_page_stream_is_fully_scanned(self):
-        # `--paginate` emits ONE JSON ARRAY PER PAGE. A decoder that stopped at
-        # the first value would short-enumerate silently; the hit below lives on
-        # the SECOND page, so only a parser that accumulates every page in the
-        # stream can find it and report the full count.
-        (self.gh_dir / "closed_prs.json").write_text(
-            '[{"number": 1, "title": "a", "body": "", "headRefName": "chore/a"}]\n'
-            '[{"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2"}]'
-        )
-        rc, out = self.run_tool()
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn("matched issue-number (3061) in branch", out)
-        self.assertIn("2 PR(s) enumerated (complete, cap 5000)", out)
+        self.assertIn("INCOMPLETE SURFACES", out)
+        self.assertIn("issue-absent", out)
 
     def test_closed_pr_rest_requests_the_projected_fields(self):
         # The REST response nests the branch under `head.ref` while the scanner
@@ -1109,7 +1255,9 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         argv = (self.gh_dir / "api-argv.txt").read_text()
         self.assertIn("state=closed", argv)
-        self.assertIn("--paginate", argv)
+        self.assertIn("-i", argv)
+        self.assertNotIn("--paginate", argv)
+        self.assertIn("per_page=100", argv)
         self.assertIn("headRefName: .head.ref", argv)
         # The terminal-PR rule reads BOTH fields, so the projection must carry
         # both: REST reports `state: "closed"` for merged and unmerged PRs

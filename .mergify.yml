@@ -1,11 +1,16 @@
 # Mergify configuration — the merge queue for `main`.
 #
 # WHY THIS FILE EXISTS
-#   `strict: true` branch protection makes validation a **singleton lock** rather
-#   than a property of a tree. A green check certifies exactly one composition —
-#   `main ∪ this PR` — so every merge invalidates every other PR's certification,
-#   a landed PR must be re-updated, and N merges cost N full CI cycles. Landing
-#   becomes serialized at one PR per required-CI duration.
+#   The queue validates the composition that will actually exist — `main ∪ the
+#   queued PRs` — rather than trusting a green check on a head that may since
+#   have moved. It also removes the author's obligation to update their branch.
+#
+#   `strict` is **false** today; restoring `true` is an open decision. Under
+#   `strict: true` validation becomes a singleton lock — a green check certifies
+#   exactly one composition, so each merge invalidates every other PR's
+#   certification and N merges cost N full CI cycles — which is the base race
+#   #3016 records. Do NOT describe `strict: true` as the current setting; read
+#   the live value before quoting it. See #3016 and #4798.
 #
 #   #3016 (the base race) records Option 1: replace the lock with a queue and
 #   stop requiring authors to update their branch. #4798 records the change of
@@ -64,6 +69,50 @@ queue_rules:
     # a failing batch is re-tested bisected, so a large batch is a slow failure.
     batch_size: 2
     batch_max_wait_time: 5 min
+
+# ── Auto-queue: finished work enters the queue with no human click (#3016) ─────
+#
+# WHAT THIS SETS
+#   `merge_protections_settings.auto_merge_conditions: true`. A PR matching
+#   `queue_conditions` above is then queued automatically. Without it, Mergify
+#   posts "Tick the box to add this pull request to the merge queue" and waits
+#   for a human.
+#
+#   ⚠️ The `pull_request_rules` section of this file is NOT LOADED. Mergify
+#   reports it unused — "The product Workflow Automation needs to be activated
+#   to enable this feature" — so the `queue ready PRs onto main` rule below has
+#   never run and CANNOT be a fill mechanism. Do not read it as one, and do not
+#   add rules to that section expecting them to take effect: they are inert
+#   until Workflow Automation is activated for this repository.
+#
+#   `merge_protections_settings` IS loaded — Mergify's own message says the rest
+#   of the configuration will be used — which is why this setting, and not that
+#   rule, is what actually queues finished work.
+#
+# WHY NOT `autoqueue: true`
+#   `queue_rules[].autoqueue` is deprecated and maps to this setting. The two are
+#   mutually exclusive BY SCHEMA — a config setting both is REJECTED. Never
+#   restore `autoqueue` beside this.
+#
+# WHAT STILL GATES A MERGE
+#   `queue_conditions` above still gate entry, and `merge_conditions` is
+#   re-asserted against the queue branch before that branch is merged. This
+#   setting removes the click. It removes no check.
+#
+# DO NOT RESTATE THE REASONING HERE
+#   Reasoning belongs where it can be maintained and cited, not duplicated into a
+#   comment that nothing re-reads:
+#     · #3016 — the base race this queue exists to remove
+#     · #5215 — merge throughput, and what the click actually cost
+#     · #5426 — `ai-review-gate` is red whenever no valid recorded review marker
+#       exists for the PR, and it is not a required context
+#     · #5433 — the review record is enforced only by LOCAL tooling
+#       (`review-enforcer` and `scripts/atomic-land.sh`); Mergify merges
+#       server-side, so no step on that path reads it
+#   ⛔ Never write "the review attestation is an enforced gate" here or anywhere
+#   else. It is enforced on local land paths only, never on a queue merge.
+merge_protections_settings:
+  auto_merge_conditions: true
 
 pull_request_rules:
   - name: queue ready PRs onto main

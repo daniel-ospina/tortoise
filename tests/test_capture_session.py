@@ -2433,6 +2433,79 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
 
 
+def test_apply_supersessions_long_successor_dedup_and_legacy_prefix(sdk):
+    """#5370 (indicators 3+4): the fold stores the FULL successor name, and
+    the dedup/keep-first compare accepts EITHER the full name (rows folded
+    after the fix) or its 200-char prefix (rows folded before it).
+
+      * a same-successor re-ingest on the NEW (full) stored form is a SILENT
+        dedup — no spurious divergence;
+      * a LEGACY row (the old 200-char prefix) re-ingested with the full name
+        is still an idempotent dedup (applied=0, stored value kept) — never a
+        keep-first "conflict" — with the loud unverified-identity warning the
+        #2164 round-2 review added;
+      * a genuinely DIVERGENT successor is still keep-first (applied=0, stored
+        value untouched, loud conflict warning).
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    other_name = "other-title-" + ("z" * 240)
+    assert len(long_name) > 200 and len(other_name) > 200
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "long-target")
+    sdk.create_entity("object", long_name)
+    sdk.create_entity("object", other_name)
+    record = [{"superseded": "long-target", "supersedes_by": long_name,
+               "evidence": "#5370"}]
+    warns: list[str] = []
+
+    applied = apply_supersessions(proj, sdk, record, session_id="s5370_a",
+                                  warn=warns.append)
+    assert applied == 1 and warns == [], (applied, warns)
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name), _entity_fold_state(proj, "long-target")
+
+    # (1) NEW full form: same-successor re-ingest → SILENT dedup.
+    applied2 = apply_supersessions(proj, sdk, record, session_id="s5370_b",
+                                   warn=warns.append)
+    assert applied2 == 0, "same successor must dedup, not re-fold"
+    assert warns == [], f"full-form dedup must be silent: {warns}"
+    assert _object_superseded_events(proj) == 1
+
+    # (2) LEGACY row (pre-#5370 200-char prefix): a full-name re-ingest still
+    #     dedups — never a keep-first conflict — and says so loudly.
+    proj.g.query("MATCH (o:Object {name:'long-target'}) "
+                 "SET o.supersededBy=$p", params={"p": long_name[:200]})
+    applied3 = apply_supersessions(proj, sdk, record, session_id="s5370_c",
+                                   warn=warns.append)
+    assert applied3 == 0, "legacy prefix must dedup, not re-fold"
+    assert len(warns) == 1, warns
+    # Round 3: the warning deliberately does NOT claim the stored value is a
+    # "legacy fold" — the same arithmetic is reached by a POST-#5370 row whose
+    # successor name is exactly 200 chars (a genuine full name). Pin the
+    # neutral wording, not a legacy claim.
+    assert "identity beyond that prefix is not verified" in warns[0], warns
+    assert "legacy" not in warns[0], \
+        f"the warning must not blame a legacy fold: {warns}"
+    assert "conflict with" not in warns[0], \
+        f"legacy dedup must not read as a divergence: {warns}"
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name[:200])
+    assert _object_superseded_events(proj) == 1
+
+    # (3) genuinely DIVERGENT successor → keep-first + loud conflict warning.
+    divergent = [{"superseded": "long-target", "supersedes_by": other_name,
+                  "evidence": "#5370"}]
+    applied4 = apply_supersessions(proj, sdk, divergent, session_id="s5370_d",
+                                   warn=warns.append)
+    assert applied4 == 0, "divergent successor must never blind-overwrite"
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name[:200])
+    assert "keep-first" in warns[-1], warns
+    assert _object_superseded_events(proj) == 1
+
+
 def test_apply_supersessions_chain_converges_both_orders(sdk):
     """#2249 (O3): a same-payload chain (approach-A → approach-B →
     approach-C) must converge to the IDENTICAL end state whether emitted in

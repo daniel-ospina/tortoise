@@ -116,7 +116,15 @@ CHAINS = {
     },
 }
 
-PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:", "agent-ops:")
+# #5165: there is deliberately NO ``PACK_NS`` tuple here. The pack-kind set
+# is DERIVED from the compiled value brief (``_build_master_from_brief``),
+# which after #2714 is graph-gated to the packs THIS graph installs — the
+# brief is the single authority. A second, hardcoded namespace allowlist was
+# the narrower of the two: a catalog pack whose namespace was not listed had
+# its kinds present in the gated brief and silently dropped from
+# ``pack_kinds`` (never offered by the prompt, never writable by the minted-
+# kind gate), and installing a pack required an edit to engine code — the
+# "domain behaviour living in engine code" defect #1026 exists to remove.
 
 # E2 (#1534): the USER-PERSONAL-STATE vocabulary — the operative criterion for
 # the Tier-A classification hint (personal bests, schedules, preferences). The
@@ -326,22 +334,43 @@ def _desc(brief: dict, key: str) -> str:
 _MASTER_LIST_CACHE: dict | None = None
 
 
-def _build_master_from_brief(brief: dict,
-                             pack_prefixes: tuple[str, ...] = PACK_NS) -> dict:
+def _build_master_from_brief(brief: dict) -> dict:
     """The master-list sections from a compiled value brief (#2031 refactor
-    of the build_master_list loop body — the section semantics are
-    byte-identical to pre-#2031). ``pack_prefixes`` is the namespace
-    allowlist for the pack_kinds section: the DEFAULT path passes the
-    starter set; the hosted tenant path passes starter + that tenant's
-    namespaces. Loop semantics preserved exactly: the memory_granularity
-    skip precedes the prefix check, and pack_kinds keeps the brief's
-    insertion order (prompt-visible)."""
+    of the build_master_list loop body).
+
+    The pack_kinds section is **derived from the brief itself** (#5165):
+    every namespaced key that is not part of a fixed section (``objects`` =
+    ``CORE_OBJECT_KEYS``; ``memory_granularity``) is a pack kind. There is no
+    second namespace allowlist on either leg, so a filter here can only ever
+    DROP a pack the brief carries. (How the brief was narrowed is
+    ``compile_value_brief``'s business: on the ``sdk`` path it is gated to the
+    graph's installed packs when that graph has ``:PackInstall`` records, and
+    falls back to the ungated catalog union when it has none — indicator 3;
+    on the ``sdk=None`` path it is the ungated catalog union by contract. The
+    legacy starter tuple ``product-strategy``/``dev``/``marketing``/``pm``/
+    ``agent-ops`` was a second copy of that gate, and agreed with it only
+    while the catalog happened to hold exactly those five namespaces.)
+
+    Core is handled by NAMESPACE: a ``core:*`` key the brief carries is
+    seeded into ``objects`` — which every render mode emits and
+    ``master_kind_forms`` reads — never into ``pack_kinds``, even when it is
+    not one of the canonical ``CORE_OBJECT_KEYS`` (defense-in-depth for a
+    legacy/bypass ``core`` manifest, or a brief whose core dict outgrew
+    ``CORE_OBJECT_KEYS``). ``render_s2_prompt`` derives the core-only
+    prompt's pack-namespace list from exactly ``pack_kinds``, so a ``core:``
+    entry there would tell the model that ``core:`` is a PACK namespace whose
+    content must be emitted as ``unclassified`` — contradicting the same
+    prompt's "core kinds are in-context".
+
+    Loop semantics preserved: the ``memory_granularity`` skip comes first,
+    and pack_kinds keeps the brief's insertion order (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
-    for k, v in brief.items():  # noqa: B007
+    for k in brief:
         if k == "memory_granularity":
             continue
-        if not k.startswith(pack_prefixes):
+        if k in CORE_OBJECT_KEYS or k.startswith("core:"):
+            objects.setdefault(k, _desc(brief, k))
             continue
         pack_kinds[k] = _desc(brief, k)
     return {
@@ -371,9 +400,12 @@ def build_master_list(sdk=None) -> dict:
 
     #2031 hosted tenant path (``sdk``): the master compiles from the
     memoized tenant view's brief (shared catalog + THIS tenant's
-    :PackManifest manifests) with the pack_kinds allowlist extended to the
-    tenant's namespaces — so tenant A's pack kinds reach A's extraction
-    prompts and write gates while tenant B's never do. The tenant identity
+    :PackManifest manifests), narrowed by the graph's #2714 APPROVAL set when
+    that graph has ``:PackInstall`` records (a graph with none falls back to
+    the catalog union — indicator 3) — so tenant A's pack kinds reach A's
+    extraction prompts and write gates while tenant B's never do, and no
+    second namespace allowlist is applied on top (#5165). The ``sdk=None``
+    path stays the ungated catalog union by contract. The tenant identity
     is the SDK's resolved graph (pass the tenant-scoped SDK,
     ``_make_sdk(namespace=org_id)`` — no separate identity argument to
     mismatch). The tenant path NEVER reads or writes the process-global
@@ -389,13 +421,12 @@ def build_master_list(sdk=None) -> dict:
             return copy.deepcopy(_MASTER_LIST_CACHE)
         from tortoise.value_extractor import compile_value_brief
         brief = compile_value_brief()
-        master = _build_master_from_brief(brief, PACK_NS)
+        master = _build_master_from_brief(brief)
         _MASTER_LIST_CACHE = copy.deepcopy(master)
         return master
     from tortoise.pack_manifest_store import tenant_view
     view = tenant_view(sdk)
-    tenant_prefixes = tuple(f"{m['namespace']}:" for m in view["tenant"])
-    return _build_master_from_brief(view["brief"], PACK_NS + tenant_prefixes)
+    return _build_master_from_brief(view["brief"])
 
 
 def master_kind_forms(master: dict) -> set[str]:
@@ -469,11 +500,16 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     for k, v in pack_kinds.items():
         ns = k.split(":")[0] + ":"
         triggers = _PACK_TRIGGERS.get(ns)
-        # #2031: a namespace with NO trigger entry cannot be story-selected —
-        # always include it (per-tenant custom packs; dropping them would
-        # silently strip the tenant's own kinds from their compact prompt).
-        # All five starter namespaces have trigger entries, so the DEFAULT
-        # path behavior is unchanged (byte-identical).
+        # A namespace with NO trigger entry cannot be story-selected —
+        # always include it (per-tenant custom packs AND, since #5165, any
+        # catalog pack shipped without a trigger entry; dropping them would
+        # silently strip their kinds from the compact prompt). The five
+        # shipped catalog namespaces all HAVE entries, so the default
+        # render's selection is unchanged for them — but the byte-identity
+        # argument is about those entries, not about a starter-set
+        # restriction: a new catalog pack is injected whole in compact mode
+        # until it is given a trigger entry (the remaining engine edit, and
+        # a deliberate, fail-open one).
         if triggers is None or any(t in low for t in triggers):
             selected[k] = v
     return selected or dict(pack_kinds)  # nothing matched → all (safe)
@@ -2473,6 +2509,22 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
+def _clip(value: object, limit: int = 60) -> str:
+    """Coerce a model-supplied field to bounded text for a report/warning.
+
+    The report must never be STRICTER than the write gate it reports on:
+    `execute_embed` already coerces every one of these fields with `str(...)`
+    before using them (`_norm` above carries the same correction as FIX C),
+    so a `None`/`0` name or content is WRITABLE — as `"None"`/`"0"`. Slicing
+    the raw value raised `TypeError` instead, and because
+    `extract_session_v2` wraps S5 fail-open the raise discarded the WHOLE
+    session's payload, not just the one odd item (#5060). `_parse_json_robust`
+    rung 1 returns parsed JSON without `_validate_output_shape`, so such
+    values reach these sites from real model output.
+    """
+    return str(value)[:limit]
+
+
 def _norm_kind(k: str) -> str:
     """Bare + case-folded kind form — the link-before-create lookup key.
     The model may emit 'plan' where the backend stores 'core:plan'; both
@@ -2488,6 +2540,10 @@ _MIN_OVERLAP_TOKENS = 2
 # E5 fact-value contradiction frame: stopword-stripped shared tokens on the
 # longer side must reach 0.5. A small LOCAL closed-class set (importing the
 # eval's ingest_v2._STOPWORDS into tortoise/ would invert the layering).
+# ⛔ A frame word can still be a load-bearing OPERATOR — `and` in "we ship and
+# test" asserts a different relation from `or`, while the same `and` coordinates
+# two list items.  Membership here is by commonest role; the role is read from
+# the PAIR in `_connective_swap` (#5139).
 _FRAME_STOPWORDS = frozenset({
     "a", "an", "the", "and", "or", "but", "if", "then", "else", "of",
     "to", "in", "on", "at", "for", "with", "from", "by", "about",
@@ -3110,6 +3166,112 @@ _CONDITION_PHRASES = (
     "as long as", "so long as", "in case", "in the event", "on condition that",
     "provided that", "assuming that", "in the case that", "conditional on",
 )
+# A connective is FRAME (syntax) or an OPERATOR (meaning), and one spelling does
+# both jobs.  `and` COORDINATES two list items in "we ship the server and the
+# client", which must fold against the comma paraphrase; the same `and` is the
+# conjunction OPERATOR in "we ship and test", where `or` asserts something else.
+# `_FRAME_STOPWORDS` holds the token by its commonest role and the content
+# skeleton is a set, so the role cannot be read from the token — it is read from
+# the PAIR: each entry below is one SLOT, and a pair is a rival claim when BOTH
+# sides fill the SAME slot and each side owns a member the other LACKS (#5139).
+# The slot is the family, never a position: a position-keyed comparison would
+# refuse the paraphrases below, and a set (not a sequence) is what keeps
+# `and then` / `, then` folding.
+#
+# A slot is a DECLARED grouping of RIVAL operators — not a set of synonyms and
+# not a partition into relation sub-families.  Splitting the clause-relation
+# slot by relation would make `and` against `but` a CROSS-slot difference and so
+# fold it, reopening the memory-loss class this table exists to close; the cost
+# of keeping it coarse is that a swap between two members that happen to be
+# near-synonyms (`but`/`yet`, `because`/`as`, `for`/`as`) is refused too.  That
+# over-block is deliberate and is part of the declared residual set.
+#
+# What keeps the legitimate folds folding:
+#   * ONE side only — a comma list owns no `and`, so one side fills the slot, the
+#     connective did no work, and the pair is the documented broadening.
+#   * A SHARED member with a one-sided extra — "we wait for the build and the
+#     tests" against "we wait for the build, the tests" shares `for`; only ONE
+#     side is missing a member, which is the same broadening.
+#   * A SYNONYM pair that is nowhere a slot — `with`/`by` are spelled
+#     differently and assert the SAME relation, so "we ship with the courier"
+#     folds into "we ship by the courier"; the place (`in`/`on`/`at`) and
+#     relation (`of`/`for`/`about`) prepositions are that same kind of set.  ⚠️
+#     `for` is the EXCEPTION: it is a clause-relation slot member below, so its
+#     prepositional use is over-blocked — see the ⚠️ note after the table.
+#   * DIFFERENT slots are a rewording, not a swap — `to` (transfer direction)
+#     against `and` (clause relation) is the phase-D seam's own restatement, and
+#     it folds.
+# `as` fills two slots because it is polysemous (comparative "taller as", causal
+# "as it rained"); `and` is the counterpart of `or`, `but`, `nor`, `so`, `yet`,
+# `as` and `for` in one clause-relation slot.  Membership is read from the
+# TOKENS, so a member need not be a frame word to be caught — `yet`, `because`,
+# `although` and `whereas` are not frame words.
+#
+# ⚠️ Deliberate OVER-blocks, taken because the boundary's asymmetry says a wrong
+# keep is noise while a wrong drop is memory loss, and each is pinned as a
+# declared residual rather than silently absorbed:
+#   * `for` as a clause-relation member refuses the instrumental rewording
+#     "use the tool for a hammer"/"as a hammer".  Pruning it out would reopen
+#     the memory-loss class this table exists to close.
+#   * the coarse clause-relation slot refuses the within-relation synonyms
+#     `but`/`yet` and `because`/`as`.
+#   * a one-sided EXTRA operator inside an already-shared slot still folds
+#     ("we ship and test" / "we ship and test but we wait") — the extra is read
+#     as the broadening case, and closing it needs syntax.
+# `before`/`after` are deliberately NOT slots: both are ordinary content tokens
+# (neither is a frame word), so each side keeps its own ordering word and the
+# two-sided substitution rule already refuses the swap.
+_CONNECTIVE_SLOTS = (
+    # clause relation — the logical/causal/contrastive link between two
+    # predications.
+    frozenset({"and", "or", "but", "nor", "so", "yet", "as", "for",
+               "because", "although", "though", "whereas"}),
+    frozenset({"then", "else"}),
+    frozenset({"than", "as"}),
+    frozenset({"to", "from"}),
+)
+_CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
+# Multi-word COORDINATIONS.  `as well as` IS `and`, so it is canonicalised to
+# its operator before the slots are read.  Left as written its `as` fills the
+# clause-relation slot and REFUSES the legitimate `as well as` ⇄ `and` fold;
+# deleting the phrase instead would lose the `and`/`or` contrast, because
+# `as well as` against `or` would then read as one-sided and fold.
+#
+# Matched case-insensitively on a phrase EDGE that is "not alphanumeric", so
+# "it was well as expected" and "the gas well as a fuel" are not rewritten into
+# a coordination they are not.  `\b` is NOT that edge: `_` is a word character
+# to `re`, so `\b` would leave Markdown-emphasised "_as well as_"
+# uncanonicalised — the same phrase to a reader, and a MISS, which is the lossy
+# direction.
+#
+# The flag and the caller's `_norm` are both present because either alone
+# suffices for case; keeping both means no call path can depend on which one
+# happened.
+_COORDINATION_PHRASES = (("as well as", "and"),)
+_PHRASE_EDGE_LEFT = r"(?<![^\W_])"
+_PHRASE_EDGE_RIGHT = r"(?![^\W_])"
+_PHRASE_MARK_GAP = "\x00"
+# A phrase WORD is matched mark-TOLERANT between its letters, but only for the
+# gap a DROPPED MARK leaves (``\x00*``), while the SEPARATOR between the
+# phrase's words may be any non-word run (``[\W_]+``).  Both halves are needed
+# because the phrase pass reads the text through TWO de-accentings and neither
+# is complete alone: one deletes a mark (so an accent inside a word leaves the
+# word intact but a mark standing where a separator sits fuses two words), the
+# other keeps that mark as the gap it can stand for (so the separator survives
+# but a word carrying an accent is split).  The gap is a SENTINEL rather than
+# a non-word class for a reason: ``[\W_]*`` also admits a real token inside a
+# word, so the contraction ``we'll`` would spell ``well`` and ``as we'll, as``
+# would canonicalise to ``and`` — deleting the very comparison operators this
+# guard exists to keep.  A sentinel is only ever produced by a dropped mark.
+# The ends stay anchored, so only the phrase's own skeleton is loosened.
+_COORDINATION_PHRASE_RE = tuple(
+    (re.compile(_PHRASE_EDGE_LEFT
+                + r"[\W_]+".join(
+                    (_PHRASE_MARK_GAP + "*").join(re.escape(c) for c in w)
+                    for w in phrase.split())
+                + _PHRASE_EDGE_RIGHT, re.IGNORECASE), operator)
+    for phrase, operator in _COORDINATION_PHRASES
+)
 # Relative days + month names.  Not interchangeable with the value dimension:
 # "shipped in march" vs "shipped in april" carries no number.
 _DATE_WORDS = frozenset({
@@ -3161,6 +3323,80 @@ _CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS
 # content, the two are one-sided against each other and the substitution rule
 # sees them.
 _CONTENT_STOPWORDS = _CONTENT_STOPWORDS - {"on"}
+
+# A state word is load-bearing the same way a load-bearing connective is, and
+# it fails the same way: `off` in "the flag is off" asserts a property, while
+# the very same `off` can be a particle and `on` a preposition, so
+# `_CONTENT_STOPWORDS` holds the token by its commonest role and the role
+# cannot be read from the token.  PR #5320 (issue #5139, still open) adds the
+# analogous guard for the connective and refuses a SWAP — both sides fill one
+# slot, so each side owns a member the other LACKS.  A state word inverts a
+# claim on a ONE-SIDED DROP instead: "the flag is off" folded into "the
+# flag", and the in-capture seam then `DETACH DELETE`d the rival (#5134).
+#
+# The vocabulary is a flat declared set of antonym PAIRS, and `_polarity_drop`
+# reads it over the PAIR: a member present on ONE side is refused only when it
+# is the ENTIRE distinguishing content of that side's copula predicate and the
+# other side is silent.  So the two sides of the fold are the same claim minus
+# a state rather than a claim plus a detail.  The allowance for a one-sided
+# token is load-bearing (it is what keeps "the team meets weekly in main
+# office" folding into "the team meets weekly", #4652), so the pair and the
+# predicate — never a token list — decide.
+#
+# A flat set, not a table of slots like the connective rule's (#5320),
+# because a DROP has no second side to match a slot against — the rival is the
+# member's ABSENCE, not another member — so a partition would be structure no
+# rule reads.  The members above are the vocabulary's declaration, and the
+# union is what the pair predicate consults.
+#
+# The predicate condition is what separates the state `on` from the
+# prepositional one, and it is why `on` can stay a single member: "we ship on
+# friday" is a preposition whose object is a DATE token, so "we ship on
+# friday"/"we ship friday" carries one one-sided `on` and looks exactly like a
+# state drop until the predicate is read; "the focus is on quality" carries
+# `quality` as a second content token and reads the same way.  Both stay
+# foldable (pinned in the suite).
+#
+# The vocabulary is deliberately a small declared set, not an enumeration of
+# the language: a state word outside it (`shut`, `down`, `broken`) reaches no
+# dimension and is the documented residual, and so is a state term with an
+# adverb, a non-be linking verb, a passive/particle form, an inverted or fused
+# predicate, or an ATTRIBUTIVE (pre-nominal) position beside it ("seems off",
+# "was turned off", "currently off", "is the flag off", "the invalid token").
+# Each is a residual FAIL-OPEN in this guard: the pair folds, so in one
+# capture order the state-bearing claim can still be dropped.  All are pinned
+# in `tests/test_never_across_fold_5080.py` so they cannot go silent.
+_POLARITY_MEMBERS = frozenset({
+    "on", "off",
+    "enabled", "disabled",
+    "open", "closed",
+    "active", "inactive",
+    "available", "unavailable",
+    "locked", "unlocked",
+    "muted", "unmuted",
+    "online", "offline",
+    "valid", "invalid",
+    "present", "absent",
+})
+# Frame-class tokens a state predicate's complement may carry without making
+# the complement anything but the state.  The date words that are ALSO frame
+# stopwords (`today`, `yesterday`) are removed deliberately: as frame they
+# would be ignored in the tail, so "the release is on today" would read as the
+# state `on` with an empty complement and the legitimate prepositional fold
+# would be refused.  A date word that is NOT frame (`friday`, `monday`) blocks
+# the tail on its own, so the subtraction is not what keeps it — only the
+# today/yesterday pair is load-bearing, and that is the pair pinned in the
+# suite.
+_TAIL_IGNORABLE = _CONTENT_STOPWORDS - _DATE_WORDS
+# The copulas a state term completes.  `do`/`does`/`did` are auxiliaries, not
+# copulas — they carry no predicate complement — so they are excluded; a
+# non-be linking verb (`seems`, `remains`, `stays`) is a pinned residual: it is
+# a content token, so the two sides stop being one claim minus a state.  `am`
+# is the first-person be-form and is NOT a `_FRAME_STOPWORDS` member — it is a
+# `_CLOCK_UNITS` member, so `_content_tokens` drops it as a clock suffix and
+# the copula must be declared here or "i am offline" folds into "i am".
+_COPULAS = frozenset({"am", "is", "are", "was", "were", "be", "been",
+                      "being"})
 _UNREADABLE = frozenset({"unreadable"})
 
 # Token edges stripped before comparison.  `_norm` lowercases and collapses
@@ -3560,6 +3796,152 @@ def _deaccent(t: str) -> str:
         "NFC", "".join(c for c in decomposed if unicodedata.category(c) != "Mn"))
 
 
+def _wordlist_hits(content: str, words: frozenset[str]) -> frozenset[str]:
+    """Every member of a closed-class word list the claim carries.
+
+    ONE walk, shared by the marker tables: a token is looked up whole AND by
+    its word-parts (``_lookup_keys``), so a member fused to a separator
+    ("if!then", "and/or") is still that member and a de-accented spelling
+    agrees with the table's plain one.  A hit can only ADD a marker downstream,
+    and a marker only ever refuses a fold, so over-reading is the safe
+    direction.
+    """
+    found: set[str] = set()
+    for t in _guard_tokens(content):
+        found.update(k for k in _lookup_keys(t) if k in words)
+    return frozenset(found)
+
+
+def _deaccent_with_map(t: str, drop: str = "") -> tuple[str, list[int]]:
+    """``_deaccent`` plus the raw index each surviving character came from.
+
+    The same filtering as ``_deaccent`` (NFD, drop the non-spacing marks),
+    without the final NFC recomposition, because the caller has to map a match
+    found in the folded text back to the span it came from in the raw one.
+
+    ``drop`` is what a dropped mark becomes.  Empty (the default) is
+    ``_deaccent``'s own read — the mark vanishes, so ``as\u0338well`` reads as
+    one token ``aswell``.  ``_PHRASE_MARK_GAP`` keeps the SEPARATOR a mark can
+    stand for, which the phrase pattern reads as a non-word run: the variant a
+    phrase whose separator IS a mark needs.  A sentinel rather than a space,
+    so the phrase pattern can tell a mark-derived gap from a real space and
+    never let a real token stand inside a word.  Both reads share one ``src``
+    map, so a match found in either splices back at the same raw span.
+    """
+    chars: list[str] = []
+    src: list[int] = []
+    for i, ch in enumerate(str(t or "")):
+        for d in unicodedata.normalize("NFD", ch):
+            if unicodedata.category(d) == "Mn":
+                if drop:
+                    chars.append(drop)
+                    src.append(i)
+                continue
+            chars.append(d)
+            src.append(i)
+    return "".join(chars), src
+
+
+def _canonicalise_coordinations(text: str) -> str:
+    """Rewrite every ``_COORDINATION_PHRASES`` phrase to its operator.
+
+    Two passes over ONE text, and the second is what stops a phrase from
+    leaking its own ``as`` into a slot and masking the operator swap it stands
+    for.  The FIRST matches the text as written, so a separator BETWEEN the
+    phrase's words is the separator it is ("as well as", "as-well-as").
+    The SECOND matches the DE-ACCENTED text, because a phrase WORD can carry a
+    diacritic ("as w\u00e9ll as") or a non-spacing mark inside it ("as
+    we\u0338ll as") that no separator-based pattern sees.
+
+    The second pass reads TWO variants of that same de-accenting, because
+    deleting a mark and KEEPING it as the separator it can stand for are both
+    right and neither alone is complete: a phrase whose mark sits between its
+    words ("as\u0338well as") is a phrase only in the separator-preserving
+    variant, and one whose mark sits inside a word is a phrase only in the
+    deleting one — so a phrase that does BOTH ("as\u0338w\u00e9ll as") is
+    found by neither alone and stays two stray ``as`` tokens.  Both variants
+    share one ``src`` map, so a match from either splices back at its own raw
+    span; coinciding spans are merged before the (reversed) splice.
+
+    The sentinel a dropped mark leaves is a character a claim could also
+    CONTAIN, so the raw text is read with it replaced first — a literal NUL
+    becomes a separator and never a word gap, which keeps the sentinel
+    unproducible from outside (one char for one char, so every splice index
+    still addresses the caller's text).
+    """
+    out = text.replace(_PHRASE_MARK_GAP, " ")
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        out = pattern.sub(f" {operator} ", out)
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        folded, src = _deaccent_with_map(out)
+        separated, sep_src = _deaccent_with_map(out, _PHRASE_MARK_GAP)
+        spans: list[tuple[int, int]] = []
+        for variant, index_map in ((folded, src), (separated, sep_src)):
+            spans.extend((index_map[m.start()], index_map[m.end() - 1] + 1)
+                         for m in pattern.finditer(variant))
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        for start, end in reversed(merged):
+            out = out[:start] + f" {operator} " + out[end:]
+    return out
+
+
+def _connective_slots(content: str) -> tuple[frozenset[str], ...]:
+    """Membership in each ``_CONNECTIVE_SLOTS`` slot, one entry per slot.
+
+    A multi-word coordination is canonicalised to its operator first
+    (``_COORDINATION_PHRASES``, case-INSENSITIVELY, including the marks a
+    phrase word may carry — see ``_canonicalise_coordinations``).  The members
+    are then read from the RAW token stream through ``_wordlist_hits`` — and
+    therefore through the word-part split and ``_deaccent``, PER TOKEN.  That
+    matters: a member carrying a non-spacing combining mark ("a\u0338nd") is
+    still that member, while a mark standing where a separator would be still
+    SEPARATES ("and\u0338the" holds `and`).  Reading the FLATTENED form
+    instead LOSES the first — ``_flat_words`` turns the mark into a separator,
+    so the member is split in two before ``_deaccent`` can drop it, the slot
+    reads empty, and the guard fails OPEN.  De-accenting the WHOLE claim loses
+    the second instead: the mark glues the member to its neighbour before
+    ``_wordlist_hits`` can split it.  Canonicalising first, per the paragraph
+    above, means neither route has to be chosen.  The phrase pass lowercases
+    only because the member pass below it is case-insensitive too — a capital
+    must not make one pass and the other disagree about one phrase.
+    """
+    text = _canonicalise_coordinations(_norm(content))
+    found = _wordlist_hits(text, _CONNECTIVE_MEMBERS)
+    return tuple(found & slot for slot in _CONNECTIVE_SLOTS)
+
+
+def _connective_swap(a: str, b: str) -> frozenset[str]:
+    """A slot BOTH sides fill where EACH side owns a member the other lacks.
+
+    Empty when the pair does not swap operators: a slot filled on ONE side only
+    is the documented broadening (`and` against a comma list); a slot filled on
+    neither says nothing; and a shared member with a one-sided extra has a
+    member the other side lacks on ONE side only — the broadening case again,
+    not a swap ("we wait for the build and the tests" against "we wait for the
+    build, the tests" shares `for` and only one side is missing `and`).  Both
+    sides owning an extra is what a swap looks like, and it is why a SHARED
+    member cannot mask one: "we ship as planned and test" against "we ship as
+    planned or test" shares `as` and still swaps `and` for `or`.
+
+    The role of a load-bearing connective is thus decided by the pair, which is
+    what a token-level predicate cannot do — and a non-empty result is a
+    substituted-content difference, the same dimension a swapped content token
+    reaches.
+    """
+    out: set[str] = set()
+    for slot_a, slot_b in zip(_connective_slots(a), _connective_slots(b),
+                              strict=True):
+        only_a, only_b = slot_a - slot_b, slot_b - slot_a
+        if only_a and only_b:
+            out |= only_a | only_b
+    return frozenset(out)
+
+
 def _flat_words(s: str) -> str:
     """The claim with every non-word character turned into a single space.
 
@@ -3590,9 +3972,7 @@ def _condition_markers(content: str) -> frozenset[str]:
     whitespace token whose parts are "if" and "the", and matching only the
     whole token left the condition invisible.
     """
-    found: set[str] = set()
-    for t in _guard_tokens(content):
-        found.update(k for k in _lookup_keys(t) if k in _CONDITION_MARKERS)
+    found = set(_wordlist_hits(content, _CONDITION_MARKERS))
     flat = _flat_words(content)
     found.update(p for p in _CONDITION_PHRASES if p in flat)
     return frozenset(found)
@@ -3694,6 +4074,101 @@ def _content_tokens(content: str) -> set[str]:
             continue
         out.add(t)
     return out
+
+
+def _state_predicate(content: str, targets: frozenset[str] | set[str]) -> bool:
+    """True when a copula's complement is ONLY polarity members AND a target.
+
+    Read from the ORDERED token stream, because the reading is about the
+    predicate's shape and not a token's membership: the state term must be the
+    whole complement of some copula on its side ("the flag is off", "the
+    feature is disabled").  That is the pair-level signal a token lookup does
+    not have — it is what tells the state `on` from the prepositional `on`
+    whose object is a second token ("the focus is on quality"), and it is what
+    keeps a DATE object from reading as an absent one: ``_TAIL_IGNORABLE``
+    deliberately does not drop date words, so "the release is on friday" keeps
+    `friday` as a blocker and the pair stays foldable.  (`_content_tokens`
+    drops dates and numbers — correct for the skeleton, wrong here.)
+
+    ``targets`` is what the pair actually DROPS (``_polarity_drop``'s
+    distinguishing set), and the complement must INTERSECT it.  Without that,
+    a copula anywhere in the claim whose polarity complement is a member the
+    two sides SHARE would license a refusal: appending the same trailing
+    clause to both sides ("we ship on friday and the flag is off" against
+    "we ship friday and the flag is off") would then refuse a legitimate fold
+    on the strength of the shared trailing `off`, not the dropped
+    prepositional `on`.
+
+    A tail of frame words only does not qualify: a copula with no predicate
+    complement asserts nothing, and a marker-only tail (`not`, a condition) is
+    owned by those dimensions.  A second content token — an adverb, a value, a
+    modifier — disqualifies the complement, because the state is then not the
+    whole of what is being dropped.  That is a declared residual and it is a
+    FAIL-OPEN in this guard: the pair folds, so in one capture order the
+    state-bearing claim can still be dropped (the wrong-drop direction the
+    boundary exists to prevent).  It cannot be closed from the ordered token
+    stream without over-blocking the prepositional `on` whose object is a
+    second content token.
+    """
+    seq = _guard_token_seq(content)
+    for i, token in enumerate(seq):
+        if _apostrophe_free(_deaccent(token)) not in _COPULAS:
+            continue
+        tail = {key for t in seq[i + 1:]
+                if (key := _apostrophe_free(_deaccent(t)))
+                and key not in _TAIL_IGNORABLE}
+        if tail and tail <= _POLARITY_MEMBERS and tail & targets:
+            return True
+    return False
+
+
+def _polarity_drop(a: str, b: str,
+                   content_a: set[str] | None = None,
+                   content_b: set[str] | None = None) -> frozenset[str]:
+    """The state members on ONE side that are the pair's ONLY difference.
+
+    Empty unless exactly one side's DISTINGUISHING content is a set of
+    polarity members (the other side is silent), and a dropped member is the
+    whole complement of some copula there.  Reading the DISTINGUISHING
+    members rather than every member is what catches a one-sided state beside
+    a member the two sides SHARE ("the flag is off and the gate is on"
+    against "\u2026 the gate is off"): subtracting every member from one side
+    would fail the equality and miss it.  A one-sided token that is NOT a state
+    predicate is the documented broadening case ("the team meets weekly in
+    main office").
+
+    A pair that differs by a PERMUTATION of the same polarity members ("the
+    flag is on and the gate is off" against "the flag is off and the gate is
+    on") is not refused here: the skeleton is a SET, so both sides compare
+    equal and this predicate sees no difference at all.  That is the
+    set-level / attachment blind spot of the whole boundary (#5139 / #5131),
+    pre-existing and not specific to polarity.
+
+    A non-empty result is a substituted-content difference — dropping a state
+    substitutes the claim, it does not broaden it — so `fold_allowed`,
+    `supersede_allowed`, `classify_consolidation` and
+    `dedup_classify.rephrase_hit` all refuse from the one boundary.
+
+    ``content_a``/``content_b`` are the caller's already-computed skeletons
+    (``_identity_differences`` holds them); they are recomputed only when this
+    is called standalone.
+    """
+    if content_a is None or content_b is None:
+        content_a, content_b = _content_tokens(a), _content_tokens(b)
+    if not content_a or not content_b:
+        return frozenset()
+    # The DISTINGUISHING members, not every member: a member shared with the
+    # other side must not be subtracted from this side's skeleton, or a
+    # one-sided state beside a shared state is missed.  `only_a` all-polarity
+    # with `only_b` empty is exactly "a is b plus a state".
+    only_a, only_b = content_a - content_b, content_b - content_a
+    if only_a and not only_b and only_a <= _POLARITY_MEMBERS \
+            and _state_predicate(a, only_a):
+        return frozenset(only_a)
+    if only_b and not only_a and only_b <= _POLARITY_MEMBERS \
+            and _state_predicate(b, only_b):
+        return frozenset(only_b)
+    return frozenset()
 
 
 def _possessives(content: str) -> frozenset[str]:
@@ -3813,6 +4288,23 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
         out.add("substituted_content")
     poss_a, poss_b = _possessives(a), _possessives(b)
     if (poss_a or poss_b) and poss_a != poss_b:
+        out.add("substituted_content")
+    # A load-bearing CONNECTIVE, read from the pair (#5139).  `and`/`or` are
+    # frame words by their commonest role — the role that keeps
+    # "we ship the server and the client" folding into the comma paraphrase —
+    # and they are also operators, so a swap between two members of one slot is
+    # a substituted content token even though neither side's skeleton holds it.
+    # See `_CONNECTIVE_SLOTS` for the one-sided, synonym and cross-slot cases
+    # that must keep folding.
+    if _connective_swap(a, b):
+        out.add("substituted_content")
+    # A one-sided STATE word (#5134).  Read from the PAIR, not the token: the
+    # state word is refused only when it is the whole distinguishing content of
+    # a copula predicate, which is the same pair-read shape the connective guard
+    # above uses (#5139).  A one-sided token that is not that remains the
+    # documented broadening case.  See `_POLARITY_MEMBERS` for why a token list
+    # cannot decide and which residuals are pinned.
+    if _polarity_drop(a, b, content_a, content_b):
         out.add("substituted_content")
     # Negation and condition are SCOPE-bearing, and a set cannot express that:
     # "the cache is not the problem, the lock is" and "the cache is the
@@ -4265,7 +4757,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # object kind is writable at execute_embed, so it is NOT minted;
         # the report must agree with the write gate).
         if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
-            minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
+            minted.append(f"{k} (entity '{_clip(e.get('name', ''))}')")
     for ev in embed_list.get("events", []) or []:
         if not isinstance(ev, dict):
             continue
@@ -4276,7 +4768,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # write gate).
         if k and k.lower() != UNCLASSIFIED and \
                 k.lower() not in _event_kind_forms(master):
-            minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
+            minted.append(f"{k} (event '{_clip(ev.get('content', ''))}')")
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             continue
@@ -4288,7 +4780,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # otherwise accept (FIX P — the report agrees with the gate).
         if k and k.lower() != UNCLASSIFIED and \
                 k.lower() not in point_full and k.lower() not in point_bare:
-            minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
+            minted.append(f"{k} (point '{_clip(p.get('content', ''))}')")
     return minted
 
 
@@ -5336,12 +5828,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             strength = float(o.get("strength") or 0.3)
         except (TypeError, ValueError):
             warnings.append(f"MITIGATES strength {o.get('strength')!r} not numeric "
-                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            f"('{_clip(o.get('src', ''), 40)}'→"
+                            f"'{_clip(o.get('dst', ''), 40)}') "
                             "→ defaulted to 0.3")
             strength = 0.3
         if not (0.10 <= strength <= 0.50):
             warnings.append(f"MITIGATES strength {strength} outside [0.10, 0.50] "
-                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            f"('{_clip(o.get('src', ''), 40)}'→"
+                            f"'{_clip(o.get('dst', ''), 40)}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
         declared_target_missing = (

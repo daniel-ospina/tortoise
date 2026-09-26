@@ -48,6 +48,30 @@ def _run_doctor(argv: list[str]) -> int:
     return main(["doctor", *argv])
 
 
+def _pi_seam_name() -> str:
+    """Pi's installed artifact basename, DERIVED from the contract registry so
+    a rename cannot leave a test writing a file nothing reads."""
+    from tortoise.hook_install import ARTIFACT_CONTRACTS
+    return ARTIFACT_CONTRACTS["pi"].install_name
+
+
+def _session_verify_accepts_pi_harness() -> bool:
+    """The pi-aware read-only query is one that ACCEPTS `--harness pi`.
+
+    Doctor's collision hint names a replacement command, and the obvious
+    `tortoise hooks status` is layout-keyed — it exits 1 with "unknown harness
+    'pi'", so naming it would swap one refusal for another.  This asserts the
+    command actually named accepts the harness.  Its exit code may still be
+    non-zero for a missing config, which is not a refusal of the REQUEST.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "tortoise", "session", "verify",
+         "--harness", "pi"],
+        capture_output=True, text=True, cwd=os.getcwd(),
+    )
+    return "unknown harness" not in (proc.stdout + proc.stderr)
+
+
 def _seed_db(db_path: str, content: str, attempts: int = 3) -> None:
     """Boot an embedded DB at db_path and write one point.
 
@@ -565,13 +589,129 @@ class TestDoctorPreInit:
         # probe skipped → the missing dir tree was NOT created
         assert not os.path.exists(os.path.dirname(db_path))
 
+    def test_a_legacy_collision_does_not_recommend_a_refusing_command(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The hint's own invariant: never name a command that REFUSES.
+
+        `install_capture` refuses when the legacy extension is already disabled
+        at `.tortoise-capture.disabled` (it will not overwrite the previous
+        backup).  The detector cannot report that collision — its legacy blind
+        spot is #3713 — so in that state the only finding is `stale-artifact`,
+        no manual-fix kind is present, and the hint used to print
+        `tortoise install pi`: a command that then refuses.
+
+        Mutation: drop the `_legacy_collision` arm in `_cmd_doctor` — this REDs
+        on the assertion that the refusing command is absent.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        res = _ci.install_capture("pi", home=tmp_path)
+        assert res.ok, res.error
+        root = _ci.pi_home(tmp_path)
+        installed = root / _pi_seam_name()
+        installed.write_text("// tortoise-hook-version: 0\n// body\n",
+                             encoding="utf-8")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()      # the legacy directory
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()    # its backup name, taken
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "Capture hooks" in out, out
+        assert "tortoise install pi" not in out, (
+            "the hint recommends a command that refuses in this state")
+        assert _ci.PI_DISABLED_DIRNAME in out, out
+        # A replacement command must itself accept `--harness pi`: the obvious
+        # `tortoise hooks status` is layout-keyed and exits 1 there.
+        assert "hooks status --harness pi" not in out, out
+        assert _session_verify_accepts_pi_harness()
+
+    def test_a_symlinked_legacy_entry_is_not_treated_as_a_collision(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The guard must mirror the installer's own refusal condition.
+
+        `_install_pi` unlinking a SYMLINKED legacy entry never reaches its
+        refusal — only a real legacy DIRECTORY whose backup name is taken does.
+        A guard keyed on `.exists()` fires on the symlink case too, so doctor
+        withholds the command that actually works.
+
+        Mutation: change `.is_dir() and not .is_symlink()` back to `.exists()` —
+        this REDs, because the working `tortoise install pi` disappears.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        assert _ci.install_capture("pi", home=tmp_path).ok
+        root = _ci.pi_home(tmp_path)
+        (root / _pi_seam_name()).write_text("// tortoise-hook-version: 0\n",
+                                            encoding="utf-8")
+        target = tmp_path / "checkout"
+        target.mkdir()
+        (root / _ci.LEGACY_PI_DIRNAME).symlink_to(
+            target, target_is_directory=True)
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "Capture hooks" in out, out
+        assert "move one aside" not in out, (
+            "a symlinked legacy entry is repaired by the installer, so the "
+            "working command must still be offered")
+
+    def test_a_memory_error_is_not_reported_as_an_unavailable_check(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Resource exhaustion must not be laundered into "check unavailable".
+
+        `MemoryError` is an `Exception`, so the per-harness
+        `except MemoryError: raise` is re-caught by the handler around the
+        whole block — a simulated exhaustion used to print
+        `check unavailable: simulated exhaustion`, abort the harness loop, and
+        leave rc at 0, contradicting the comment that says exhaustion is not a
+        refusal.
+
+        Mutation: remove the outer `except MemoryError: raise` — this REDs,
+        because doctor then prints the laundered warning instead of raising.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        from tortoise import hook_install as _hi
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _ci.install_capture("pi", home=tmp_path).ok
+
+        def _boom(*_a, **_k):
+            raise MemoryError("simulated exhaustion")
+
+        monkeypatch.setattr(_hi, "detect_artifact_install", _boom)
+        with pytest.raises(MemoryError):
+            _run_doctor([])
+
     def test_no_flags_fresh_machine_reports_not_set_up(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """The canonical first-run scenario: no flags, no env, no ~/.tortoise
         → doctor reports 'not set up yet — run tortoise init' (rc 0) instead
-        of the raw embedded-redis FATAL CONFIG error."""
+        of the raw embedded-redis FATAL CONFIG error.
+
+        HOME is isolated because "fresh machine" includes the HOME-scoped
+        capture seams: since #4680 doctor grades the installed Pi extension's
+        GENERATION, so an ambient stale seam under the developer's real HOME
+        would legitimately FAIL this rc-0 assertion.
+        """
         from tortoise import config as _config
         canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
         monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         rc = _run_doctor([])
         out = capsys.readouterr().out
@@ -867,3 +1007,165 @@ class TestOnboardDoctorCall:
         assert rc == 0
         assert "Step 5/5: Health check" in out
         assert "'Namespace' object has no attribute" not in out
+
+
+class TestDoctorPiSeamFreshness:
+    """#4680: `doctor` must grade the Pi seam's GENERATION, not its presence.
+
+    Pi is the one wizard-offered harness with no `HarnessLayout`, so step 6's
+    "Pi (extension found)" used to be the only Pi row — a stale or
+    markerless seam exited 0 with no freshness row at all (the review-P1
+    finding). Step 7 now drives both seam classes through
+    `contract_version_for` / `detect_artifact_install`.
+
+    `--path relative.db` pins an invalid DB target so the graph checks fail
+    fast and no embedded server is started; steps 6/7 still run.
+    """
+
+    @staticmethod
+    def _seam(home, text: str):
+        root = home / ".pi" / "agent" / "extensions"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / _pi_seam_name()
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _pi_row(out: str) -> str:
+        return next(line for line in out.splitlines() if "Capture hooks (pi)" in line)
+
+    def test_doctor_fails_a_stale_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A markerless (pre-contract) Pi seam is a FAIL row naming the repair.
+
+        Mutation: drop "pi" from step 7's loop — the green "Pi (extension
+        found)" row stands alone and this REDs (no ❌ row, rc 0 for this seam).
+        """
+        home = tmp_path / "home"
+        from tortoise import hook_install
+        shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source.read_text(
+            encoding="utf-8")
+        # The body is the SHIPPED seam with its marker stripped, so it is ours
+        # by signature but declares no generation — the pre-contract shape.
+        self._seam(home, "\n".join(
+            line for line in shipped.splitlines()
+            if not line.startswith("// tortoise-hook-version:")) + "\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "unversioned-artifact" in row, row
+        assert "tortoise install pi" in row, row
+
+    def test_doctor_passes_a_current_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """The shipped bytes installed verbatim are "current" — doctor must not
+        nag a healthy Pi install (the failure mode that would train users to
+        ignore the row)."""
+        from tortoise import hook_install
+        home = tmp_path / "home"
+        self._seam(home, hook_install.ARTIFACT_CONTRACTS["pi"].source
+                   .read_text(encoding="utf-8"))
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "✅" in row, row
+        assert "install current" in row, row
+
+    def test_doctor_recommends_the_installer_for_a_repairable_pi_seam(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A stale-but-repairable Pi seam names `tortoise install pi`, the
+        command that actually fixes it (the counterpart to the foreign case
+        below — without this the hint could be silent for everything)."""
+        home = tmp_path / "home"
+        self._seam(home, "// tortoise-hook-version: 0\n// body\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "run `tortoise install pi` to repair" in row, row
+        assert "needs a manual fix" not in row, row
+
+    def test_doctor_never_recommends_a_pi_repair_that_would_refuse(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """#4680 review: `tortoise install pi` REFUSES a foreign artifact (it
+        will not clobber a file it cannot claim), so doctor must print the
+        finding's manual instruction instead of the hint that says to run it
+        unconditionally.  The detail is allowed to name the command as the
+        step AFTER moving the file aside — that is the installer's own
+        prescribed path.
+
+        Mutation: drop the `is_manual_fix` gate (always append "run `tortoise
+        install <harness>` to repair") — this REDs on a foreign artifact.
+        """
+        home = tmp_path / "home"
+        self._seam(home, "// some other product extension\nexport default 1;\n")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "foreign-artifact" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi` to repair" not in row, (
+            "recommending a command that refuses is worse than no hint")
+
+    def test_doctor_never_recommends_the_installer_for_a_symlinked_root(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A symlinked install ROOT makes `tortoise install pi` refuse (it will
+        not write through a symlink), so doctor must not recommend it.
+
+        Mutation: compute the manual set over BLOCKING findings only — the root
+        note is non-blocking, so the hint flips to "run `tortoise install pi`"
+        and this REDs.
+        """
+        home = tmp_path / "home"
+        real = home / "checkout-extensions"
+        real.mkdir(parents=True)
+        (home / ".pi" / "agent").mkdir(parents=True)
+        root = home / ".pi" / "agent" / "extensions"
+        root.symlink_to(real)
+        (real / "tortoise-capture.ts").write_text(
+            "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "symlinked-install" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi`" not in row, (
+            "the installer refuses a symlinked install root, so recommending "
+            "it is wrong")
+
+    def test_doctor_never_recommends_the_installer_for_an_out_of_home_symlink(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A leaf symlink whose target escapes $HOME is refused by the
+        installer; the refusal is expressed in the NON-blocking symlink note,
+        so the hint must consult all findings.  (Peer of the root case above.)
+        """
+        home = tmp_path / "home"
+        self._seam(home, "// tortoise-hook-version: 0\n// tortoise session\n")
+        outside = tmp_path / "outside.ts"
+        outside.write_text(
+            "// tortoise-hook-version: 0\n// tortoise session\n", encoding="utf-8")
+        installed = (home / ".pi" / "agent" / "extensions"
+                     / _pi_seam_name())
+        installed.unlink()
+        installed.symlink_to(outside)
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "needs a manual fix" in row, row
+        assert "run `tortoise install pi`" not in row, row

@@ -3177,10 +3177,11 @@ def _cmd_hooks(args) -> int:
     from pathlib import Path as _P
 
     from tortoise.hook_install import (
-        contract_version,
+        contract_version_for,
         default_root,
         detect_install,
         get_layout,
+        is_manual_fix,
         upgrade_install,
     )
 
@@ -3263,7 +3264,7 @@ def _cmd_hooks(args) -> int:
             print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
                   file=_sys.stderr)
             return 1
-        version = contract_version(layout)
+        version = contract_version_for(args.harness)
         if getattr(args, "json", False):
             import json as _json
             print(_json.dumps({
@@ -3287,32 +3288,25 @@ def _cmd_hooks(args) -> int:
             blocking = [f for f in findings if f.blocking]
             if blocking:
                 # Some blocking kinds are NOT repairable by `upgrade` (it
-                # refuses rather than clobber an unreadable/unsafe path), so
-                # the hint must name the manual fix for those instead of
-                # recommending a command that will refuse.
-                _manual = frozenset({
-                    "unreadable-settings",
-                    "settings-unreadable-entry",
-                    "not-a-regular-file",
-                    "not-executable-symlink",
-                    "not-readable",
-                    "foreign-script",
-                })
+                # refuses rather than clobber an unreadable/unsafe/foreign
+                # path), so the hint must name the manual fix for those
+                # instead of recommending a command that will refuse.  Which
+                # kinds those are is declared ONCE, in `hook_install`, because
+                # `doctor` recommends a repair for the same kinds (#4680
+                # review).
                 kinds = {f.kind for f in blocking}
                 # `upgrade` refuses on ANY symlink in a target path, and the
                 # finding kinds for those are not knowable in advance, so
-                # treat any symlink finding as manual too.
-                symlinked_kinds = {f.kind for f in findings
-                                   if f.kind.startswith("symlinked")}
-                if kinds & _manual or symlinked_kinds:
+                # `is_manual_fix` treats every symlink kind as manual — and it
+                # is asked over ALL findings, not just the blocking ones, so a
+                # non-blocking symlink note still blocks the recommendation.
+                manual = {f.kind for f in findings if is_manual_fix(f.kind)}
+                if manual:
                     # A manual kind makes `upgrade` refuse the WHOLE run, so
                     # recommending it (even alongside repairable findings)
                     # would point at a command that refuses.
                     print("\nSome findings need a manual fix before upgrade "
-                          "can run: "
-                          + ", ".join(sorted(
-                              (kinds & _manual) | symlinked_kinds))
-                          + ".")
+                          "can run: " + ", ".join(sorted(manual)) + ".")
                 elif kinds:
                     print("\nRun `tortoise hooks upgrade"
                           f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
@@ -6363,38 +6357,153 @@ def _cmd_doctor(args):
     # green row for an install Codex never reads (#3818) — the same silent
     # no-capture the row exists to catch.
     try:
-        from tortoise.hook_install import (
-            contract_version,
-            default_root,
-            detect_install,
-            get_layout,
-            is_installed,
+        from tortoise.capture_install import (
+            LEGACY_PI_DIRNAME,
+            PI_DISABLED_DIRNAME,
         )
-        for _harness in ("claude", "codex", "cursor"):
-            _layout = get_layout(_harness)
-            # Claude is project-scoped (`root_env is None`) and ignores this
-            # argument; a `None` home (step 6 could not resolve it) is given
-            # the cwd so a codex layout still refuses as a populated
-            # `ValueError` rather than raising `TypeError` on `Path(None)`.
-            _root = default_root(_layout, home if home is not None else Path("."))
-            if not is_installed(_root, _harness):
-                continue
-            findings = detect_install(_root, _harness)
-            blocking = [f for f in findings if f.blocking]
-            version = contract_version(_layout)
-            label = ("Capture hooks" if _harness == "claude"
-                     else f"Capture hooks ({_harness})")
-            if not blocking:
-                results.append((label, "✅",
-                                f"install current (contract v{version})"))
-            else:
-                first = blocking[0]
+        from tortoise.hook_install import (
+            ARTIFACT_CONTRACTS,
+            HARNESS_LAYOUTS,
+            artifact_root,
+            contract_version_for,
+            default_root,
+            detect_artifact_install,
+            detect_install,
+            get_layout_optional,
+            is_installed,
+            is_manual_fix,
+        )
+        # `pi` is a non-shell artifact seam: it has NO `HarnessLayout`, so it
+        # cannot go through `default_root`/`detect_install`, and omitting it
+        # here left step 6's green "Pi (extension found)" as the ONLY Pi
+        # signal — a stale or unmarkered seam exited 0 with no freshness row
+        # at all, which is the silent state #4680 exists to remove.
+        #
+        # MEMBERSHIP IS DERIVED FROM THE REGISTRIES, never a literal list: a
+        # third hand-written harness list would drift from `HARNESS_LAYOUTS` /
+        # `ARTIFACT_CONTRACTS`, and a seam registered there would be silently
+        # ungraded here — the same omission class this row exists to remove
+        # (#4680 review).
+        for _harness in (*HARNESS_LAYOUTS, *ARTIFACT_CONTRACTS):
+            # Per-harness boundary: one bad harness must not cost the OTHERS
+            # their freshness row.  `detect_install` can raise on a malformed
+            # `settings.json` (`_load_settings` catches only `ValueError`, so
+            # a `RecursionError` from `json.loads` escapes), and with a single
+            # loop-wide handler a raise on `claude` would hide the Pi row this
+            # step exists to print (#4680 review).
+            try:
+                _label = ("Capture hooks" if _harness == "claude"
+                          else f"Capture hooks ({_harness})")
+                _layout = get_layout_optional(_harness)
+                if _layout is not None:
+                    # Claude is project-scoped (`root_env is None`) and ignores
+                    # this argument; a `None` home (step 6 could not resolve
+                    # it) is given the cwd so a codex layout still refuses as a
+                    # populated `ValueError` rather than raising `TypeError` on
+                    # `Path(None)`.
+                    _root = default_root(
+                        _layout, home if home is not None else Path("."))
+                    if not is_installed(_root, _harness):
+                        continue
+                    findings = detect_install(_root, _harness)
+                else:
+                    # No home to anchor an artifact install, so there is
+                    # nothing to probe (step 6 already warned that home did not
+                    # resolve).
+                    if home is None:
+                        continue
+                    _root = artifact_root(_harness, home)
+                    if _root is None:
+                        # Registered in neither class — unreachable given the
+                        # loop source, but fail visibly rather than probe
+                        # another harness's path.
+                        results.append((
+                            _label, "⚠️",
+                            f"check unavailable: no layout or artifact "
+                            f"contract for {_harness!r}"))
+                        continue
+                    _artifact = _root / ARTIFACT_CONTRACTS[
+                        _harness].install_name
+                    if not (_artifact.exists() or _artifact.is_symlink()):
+                        continue
+                    findings = detect_artifact_install(_root, _harness)
+            except MemoryError:
+                raise  # resource exhaustion is not a refusal
+            except Exception as e:
                 results.append((
-                    label, "❌",
-                    f"{len(blocking)} stale issue(s) — run `tortoise hooks "
-                    f"status --harness {_harness}` for the repair path "
-                    f"({first.kind}: {first.detail})",
-                ))
+                    _label, "⚠️", f"check unavailable: {str(e)[:60]}"))
+                continue
+            blocking = [f for f in findings if f.blocking]
+            version = contract_version_for(_harness)
+            if not blocking:
+                results.append((_label, "✅",
+                                f"install current (contract v{version})"))
+                continue
+            first = blocking[0]
+            # Never recommend a command that REFUSES: `hooks upgrade` rejects
+            # every manual-fix kind, and `tortoise install <harness>` refuses
+            # the same kinds for an artifact seam (a foreign or unreadable
+            # artifact, a non-regular file, a symlinked install root) — so
+            # those get the finding's own manual instruction instead.
+            # Repairability is declared once, in `hook_install.is_manual_fix`
+            # (#4680 review), and it is asked over ALL findings, not just the
+            # blocking ones: the artifact detector reports a symlinked install
+            # root / leaf as a NON-blocking note, and that note is exactly what
+            # makes `tortoise install` refuse while a blocking `stale-artifact`
+            # sits beside it.  Scoping this set to `blocking` would print the
+            # refusing command — the same mistake `hooks status` avoids.
+            _manual = sorted({f.kind for f in findings
+                              if is_manual_fix(f.kind)})
+            # A collision the DETECTOR cannot see, so it cannot arrive as a
+            # finding: `install_capture` refuses when a REAL legacy extension
+            # directory is already disabled at `PI_DISABLED_DIRNAME` (it will
+            # not overwrite the previous backup).  The condition MIRRORS the
+            # installer's, which handles a symlinked legacy entry by unlinking
+            # it and never reaches the refusal — so `exists()` alone would fire
+            # the guard on a state the install repairs and withhold a working
+            # command.  The detector's legacy blind spot is #3713; this guard
+            # exists only so the hint never names a command that refuses.
+            _legacy = _root / LEGACY_PI_DIRNAME
+            _legacy_disabled = _root / PI_DISABLED_DIRNAME
+            _legacy_collision = (
+                _harness == "pi"
+                and _legacy.is_dir()
+                and not _legacy.is_symlink()
+                and (_legacy_disabled.exists()
+                     or _legacy_disabled.is_symlink())
+            )
+            if _manual:
+                _hint = ("needs a manual fix before "
+                         f"`tortoise hooks upgrade --harness {_harness}` "
+                         f"can run ({', '.join(_manual)})" if _layout is not None
+                         else "needs a manual fix before `tortoise install "
+                         f"{_harness}` can run ({', '.join(_manual)})")
+            elif _legacy_collision:
+                _hint = (f"a legacy capture extension is already disabled at "
+                         f"{PI_DISABLED_DIRNAME} — move one aside")
+            else:
+                _hint = (f"run `tortoise hooks status --harness {_harness}` "
+                         "for the repair path" if _layout is not None else
+                         f"run `tortoise install {_harness}` to repair")
+            # The finding's OWN detail names the repair command too, so it is
+            # the second place a refusing recommendation can come from.  In the
+            # collision state that command is replaced — and it must be one that
+            # ACCEPTS `--harness pi`: `tortoise hooks status` is layout-keyed and
+            # exits 1 with "unknown harness 'pi'", so naming it would swap one
+            # refusal for another.  `session verify` takes the artifact seam.
+            _detail = (f"({first.kind}: {first.detail})" if not _legacy_collision
+                       else f"({first.kind}; run `tortoise session verify "
+                            f"--harness {_harness}` for the repair path)")
+            results.append((
+                _label, "❌",
+                f"{len(blocking)} stale issue(s) — {_hint} {_detail}",
+            ))
+    except MemoryError:
+        # The inner `except MemoryError: raise` is re-caught by the handler
+        # below, because MemoryError is an Exception — so the refusal has to be
+        # repeated at THIS level or resource exhaustion reads as an
+        # unavailable check (and rc stays 0).
+        raise
     except Exception as e:
         results.append(("Capture hooks", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))

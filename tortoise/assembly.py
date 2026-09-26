@@ -852,7 +852,8 @@ def docker_walker_port(sdk) -> WalkerPort:
 #     [] to the D8 gate at Task 6 — never flips retrieval_degraded).
 #   * successor-absent (verified-empty) and torn rows render NAME-ONLY
 #     annotations — a successor is never fabricated into a date/evidence
-#     line; >200-char names truncate.
+#     line; a >200-char successor name is TRUNCATED FOR DISPLAY only (the
+#     probe/verification key is always the stored FULL name, #5370).
 #   * real rows pass through unchanged minus the pure walker derivation
 #     keys {date, tier} (no point_id — W4-OUTPUT-only).
 #   * per-subject sectioning (R12/C7): subject-major line blocks in
@@ -862,6 +863,10 @@ def docker_walker_port(sdk) -> WalkerPort:
 #     boundary (second-model P2-3) — one date source everywhere.
 # ══════════════════════════════════════════════════════════════════════════
 
+# Display-only bound on the successor name in the rendered STATE line. The
+# VERIFICATION key is always the stored FULL name (successors_verified holds
+# full names) — truncating before the membership test made a >200-char
+# successor render "no successor record found" (#5370).
 _MAX_SUCC_NAME = 200
 
 
@@ -952,7 +957,13 @@ def _state_header_hit(sr: dict, label: str,
                       successors_verified: frozenset[str],
                       *, question_date: str | None = None) -> dict:
     status = _as_str(sr.get("status")).strip()
-    succ = _as_str(sr.get("superseded_by")).strip()
+    # #5370: successors_verified is keyed on the stored FULL successor name
+    # (the probe's name set is the raw supersededBy values). Truncate for
+    # DISPLAY only — doing it before the membership test made a >200-char
+    # successor look unverified and the renderer claimed "no successor
+    # record found" for a successor that exists and is live.
+    succ_full = _as_str(sr.get("superseded_by")).strip()
+    succ = succ_full
     if len(succ) > _MAX_SUCC_NAME:
         succ = succ[: _MAX_SUCC_NAME] + "…"
     date = _norm_date(sr.get("superseded_at"))
@@ -969,7 +980,7 @@ def _state_header_hit(sr: dict, label: str,
         if not succ:
             text = f"STATE ({label}): superseded (successor unknown)"
             sb = {"content_snippet": ""}
-        elif succ in successors_verified:
+        elif succ_full in successors_verified:
             on = f" on {_fmt_date(date)}" if date else ""
             text = f"STATE ({label}): superseded by {succ}{on}"
             sb = {"content_snippet": succ}
