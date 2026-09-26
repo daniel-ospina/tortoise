@@ -509,6 +509,13 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #3982: a date-only temporal value anchors to UTC midnight rather than the
+  # reading machine's local midnight (ECMA-262 §21.4.3.2). DB-free — it only
+  # exercises the shared sort-key primitive under a forced TZ, so the fast
+  # `core` lane is the correct home. It guards the primitive that backs both
+  # window coverage and `at_date` queries, so a regression here moves which
+  # facts a point-in-time read can see.
+  - test_3982_date_only_utc.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
