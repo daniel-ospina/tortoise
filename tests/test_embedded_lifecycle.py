@@ -2282,6 +2282,23 @@ def test_unproven_recorded_pid_is_not_signalled_and_nothing_is_started(tmp_path)
         assert _live_rdb_writers(tmp_path, db_path.name) == [], (
             "#4879: the unproven branch must not start a second server")
         assert registry.exists(), "#4879: the registry is left untouched"
+        # #4926: the construction ABORTED inside `original(...)`, so the claim
+        # must have been released on the abort path. A claim left behind would
+        # name a LIVE pid whose construction is gone: `_inflight_claim_holds`
+        # would return True forever and the last-client decision would read
+        # "co-tenant" for the life of the socket (the #3599 immortal-pin
+        # class — the reaper's parsers ignore claim files, so nothing else
+        # prunes it).
+        import tortoise.embedded_lifecycle as _lifecycle
+        aborted_key = os.path.abspath(dead_socket)
+        assert _lifecycle._in_flight_replays.get(aborted_key, 0) == 0, (
+            "#4926: an aborted construction must release its in-flight claim")
+        assert _lifecycle._inflight_claim_holds(aborted_key) is False, (
+            "#4926: an aborted construction must not hold the server")
+        assert not os.path.exists(
+            _lifecycle._inflight_claim_path(aborted_key)), (
+            "#4926: the aborted construction's on-disk claim must be "
+            "retracted — nothing else ever removes it")
 
         # The failed construction leaves a partially-built client whose own
         # atexit `_cleanup` (registered at client.py:448, before the raise)
@@ -3184,6 +3201,13 @@ def test_owner_handoff_failure_keeps_the_in_flight_claim(
         assert _lifecycle._in_flight_replays.get(key, 0) >= 1, (
             "#4879 F3: the in-flight claim must be KEPT when the owner "
             "hand-off failed — the client is live but unrecorded")
+        # #4926: the fail-CLOSED keep must hold for the ON-DISK half too —
+        # for a co-tenant in another process it is the ONLY signal that this
+        # live-but-unrecorded client exists.
+        assert os.path.exists(_lifecycle._inflight_claim_path(key)), (
+            "#4926: a failed owner hand-off must KEEP the on-disk claim "
+            "alongside the in-memory one, or a cross-process reader loses "
+            "the unrecorded live client (#3653)")
     finally:
         with contextlib.suppress(Exception):
             if second is not None:
@@ -3255,6 +3279,11 @@ def test_owner_handoff_returning_false_keeps_the_claim_and_the_guard(
         assert _lifecycle._owner_refcounts.get(key, 0) == 1, (
             "#4879 F3: test setup — the falsy hand-off must leave the "
             "refcount at construction #1's single claim")
+        # #4926: the on-disk half of the fail-CLOSED keep. See the sibling
+        # raise-path test.
+        assert os.path.exists(_lifecycle._inflight_claim_path(key)), (
+            "#4926: a falsy owner hand-off must KEEP the on-disk claim "
+            "alongside the in-memory one")
         # (b) VERDICT — isolate the claim from the CLIENT LIST fallback by
         # dropping the peer's connection (the peer object stays live; only
         # its pool is disconnected), then ask the last-client decision.
@@ -3389,68 +3418,202 @@ def test_cross_process_midconstruction_claim_protects_the_attaching_peer(
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
+        # #4926: the guarded close above deliberately left the server ALIVE
+        # (that is the property under test) and neutralised redislite's own
+        # teardown of THIS client, so nothing else will stop it. `_t_close()`
+        # cannot either: with `pidfile` already nulled it takes the
+        # destructive path with `pid_before == 0` and only unlinks the socket
+        # dir. A server left here is invisible to the reaper (its socket file
+        # AND dir are gone), so it would leak once per run — stop it
+        # explicitly.
+        if _pid_alive(pid):
+            _kill_quiet(pid)
+        _wait_server_dead(pid)
         with contextlib.suppress(Exception):
             proj.db._t_close()
+
+
+def _claim_file_name(lifecycle, key, pid, start) -> str:
+    """A claim filename for ``key`` in the exact shape the writer emits."""
+    return (f"{lifecycle.OWNER_INFLIGHT_PREFIX}{pid}-{start}"
+            f"-{lifecycle._inflight_claim_digest(key)}")
 
 
 def test_inflight_claim_is_a_liveness_hold_not_an_owner_record(tmp_path):
     """#4926: the claim's artifact contract, one assertion per property.
 
-    (a) a published claim is readable by `_inflight_claim_holds`;
-    (b) `embedded_reaper._owner_records` IGNORES it — a claim must never move
-        the reaper's `total`/`live` arithmetic or its orphan decision;
-    (c) retraction removes the file AND the dir this process created (an empty
-        `.tortoise-owners` reads as "no evidence" -> the guard fails closed ->
-        the server could never be torn down);
-    (d) a claim naming a provably dead pid does NOT hold, and neither a
-        `record_owner`-shaped name nor a foreign name behind the prefix does.
+    (a) a published claim is readable by `_inflight_claim_holds` — and ONLY
+        for its own socket (two servers can share one record dir when an
+        explicit `unix_socket_path` puts their sockets in one directory);
+    (b) BOTH reaper parsers ignore it: `_owner_records` (the `total`/`live`
+        arithmetic) and `_owner_record_dir_present` (which feeds
+        `_has_ownership_claim` and the `unattributed` flag);
+    (c) retraction removes exactly this process's file for this socket and
+        reclaims the directory it created;
+    (d) the liveness case list mirrors `_owner_records`: a dead pid does not
+        hold; a live pid with a DIFFERENT start (recycled pid) does not hold;
+        a live pid with an unverifiable start DOES hold (fail closed);
+        `pid <= 0` and a non-pid body are foreign and ignored; a missing dir
+        does not hold.
     """
     import tortoise.embedded_lifecycle as _lifecycle
-    from tortoise.embedded_reaper import _owner_records
+    from tortoise.embedded_reaper import (
+        _owner_record_dir_present,
+        _owner_records,
+    )
 
     sock = str(tmp_path / "redis.socket")
     key = os.path.abspath(sock)
     record_dir = _lifecycle.owner_record_dir(key)
+    # A SECOND socket in the SAME directory — the explicit-`unix_socket_path`
+    # shape the reaper's `_has_ownership_claim` caveat documents as real.
+    other_key = os.path.abspath(str(tmp_path / "other.socket"))
+    # This process's own (pid, start) stamp — a claim naming a live pid with
+    # a DIFFERENT start is deliberately read as recycled, so the isolation
+    # assertions below must use the real one.
+    start = _lifecycle._own_start_time()
+    start_str = "unknown" if start is None else str(int(start))
+    stamp = f"{os.getpid()}-{start_str}"
 
-    # (a) publish
+    # ── (a) publish, and per-socket isolation ──
     _lifecycle._publish_inflight_claim(key)
     assert _lifecycle._inflight_claim_holds(key) is True
-    # (b) the reaper's parser sees no OWNER evidence at all in a dir holding
-    # only a claim -> None ("empty dir is no evidence"), not a live owner.
+    assert _lifecycle._inflight_claim_holds(other_key) is False, (
+        "#4926: a claim for one socket must not hold a DIFFERENT server that "
+        "merely shares its owner-record directory")
+    other_claim = _claim_file_name(
+        _lifecycle, other_key, os.getpid(), start_str)
+    Path(record_dir, other_claim).write_text("")
+    assert _lifecycle._inflight_claim_holds(other_key) is True
+    _lifecycle._retract_inflight_claim(key)  # must not touch `other_claim`
+    assert Path(record_dir, other_claim).exists(), (
+        "#4926: retraction removes only THIS process's claim for ITS socket")
+
+    # ── (b) both reaper parsers ignore the prefix ──
+    os.unlink(Path(record_dir, other_claim))
+    _lifecycle._retract_inflight_claim(key)
+    _lifecycle._publish_inflight_claim(key)
+    # A dir holding only a claim reads as "no owner evidence" to both.
     assert _owner_records(key) is None, (
         "#4926: a construction claim must not be counted as an owner record")
+    assert _owner_record_dir_present(os.path.dirname(key)) is False, (
+        "#4926: a claim must not make a server read as `attributed` by "
+        "`_owner_record_dir_present` / `_has_ownership_claim`")
     # ...and with a real record beside it, the claim still adds nothing.
-    start = _lifecycle._own_start_time()
-    stamp = f"{os.getpid()}-{'unknown' if start is None else int(start)}"
     Path(record_dir, stamp).write_text("")
     assert _owner_records(key) == (1, 1), (
         "#4926: the claim must not inflate the owner count beside a record")
+    assert _owner_record_dir_present(os.path.dirname(key)) is True
     assert _lifecycle._inflight_claim_holds(key) is True
 
-    # (c) retract removes the claim file; the dir survives only because the
-    # fabricated owner record above still lives in it.
+    # ── (c) retraction removes the file, then the dir it created ──
     _lifecycle._retract_inflight_claim(key)
     assert _lifecycle._inflight_claim_holds(key) is False
-    assert not list(Path(record_dir).glob("inflight-*"))
+    assert not list(Path(record_dir).glob(
+        f"{_lifecycle.OWNER_INFLIGHT_PREFIX}*")), (
+        "#4926: retraction must remove this process's claim file")
     os.unlink(Path(record_dir, stamp))
     _lifecycle._retract_inflight_claim(key)
     assert not os.path.isdir(record_dir), (
         "#4926: retraction must reclaim the dir it created")
 
-    # (d) dead-pid claim, a `record_owner`-shaped name, a foreign name.
+    # ── (d) the liveness case list ──
+    def _plant(name: str) -> None:
+        os.makedirs(record_dir, exist_ok=True)
+        Path(record_dir, name).write_text("")
+
+    def _clear() -> None:
+        with contextlib.suppress(FileNotFoundError):
+            for n in os.listdir(record_dir):
+                os.unlink(os.path.join(record_dir, n))
+
+    # a genuinely dead pid does not hold.
     dead = _subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
-    os.makedirs(record_dir, exist_ok=True)
-    Path(record_dir,
-         f"{_lifecycle.OWNER_INFLIGHT_PREFIX}{dead.pid}-12345").write_text("")
+    _plant(_claim_file_name(_lifecycle, key, dead.pid, 12345))
     assert _lifecycle._inflight_claim_holds(key) is False, (
         "#4926: a claim whose construction died before attaching must not "
-        "pin the server forever")
-    Path(record_dir, stamp).write_text("")
-    Path(record_dir, f"{_lifecycle.OWNER_INFLIGHT_PREFIX}not-a-pid").write_text(
-        "")
+        "pin the server forever (#3599)")
+    # a LIVE pid whose recorded START differs -> recycled pid -> not a holder.
+    assert start is not None, "test setup: this process has a start time"
+    _clear()
+    _plant(_claim_file_name(_lifecycle, key, os.getpid(), int(start) + 1000))
     assert _lifecycle._inflight_claim_holds(key) is False, (
-        "#4926: a shell record name behind the prefix must be ignored")
+        "#4926: a recycled pid must not hold the server — the recorded "
+        "construction is provably gone")
+    # a LIVE pid with an UNVERIFIABLE start -> LIVE (fail closed).
+    for bogus in ("unknown", "not-a-number", "nan", "inf"):
+        _clear()
+        _plant(_claim_file_name(_lifecycle, key, os.getpid(), bogus))
+        assert _lifecycle._inflight_claim_holds(key) is True, (
+            f"#4926: an unverifiable start ({bogus!r}) for a live pid must "
+            "count LIVE (fail closed), exactly as `_owner_records` treats an "
+            "unverifiable owner")
+    # `pid <= 0` (the `kill(0, 0)` process-group alias) and a non-pid body
+    # behind the prefix are foreign files and are ignored.
+    for bogus in ("0", "-1", "not-a-pid"):
+        _clear()
+        _plant(_claim_file_name(_lifecycle, key, bogus, 12345))
+        assert _lifecycle._inflight_claim_holds(key) is False, (
+            f"#4926: a foreign claim body ({bogus!r}) must be ignored")
+    # a missing owner-record dir is not a hold (the caller fails closed on it
+    # through the `_owner_records` branch).
+    _clear()
+    os.rmdir(record_dir)
+    assert _lifecycle._inflight_claim_holds(key) is False
+
+
+def test_inflight_claim_publish_and_retract_run_under_the_transition_lock(
+        tmp_path, monkeypatch):
+    """#4926: the on-disk publish/retract must be INSIDE `_inflight_claim_lock`.
+
+    The disk half's correctness rests on being one step with the
+    `_in_flight_replays` transition. Without that, two same-process
+    constructions on one socket can lose each other's claim: B starts while
+    A's file is still present (`FileExistsError` -> "reuse it"), then A's
+    retract unlinks the file B is now relying on — measured against the real
+    functions (`_in_flight_replays[key] == 1` while
+    `_inflight_claim_holds(key) is False`), which re-opens the fail-open
+    window this PR closes. A two-thread reproduction is not deterministic, so
+    the contract pinned here is that both disk operations happen inside the
+    critical section that guards the transition: the mutation that moves
+    either call outside the `with` reddens this test.
+    """
+    import tortoise.embedded_lifecycle as _lifecycle
+    from tortoise.projection import FalkorProjection
+
+    seen: dict = {}
+    real_publish = _lifecycle._publish_inflight_claim
+    real_retract = _lifecycle._retract_inflight_claim
+
+    def _publish(key):
+        seen["publish_locked"] = _lifecycle._inflight_claim_lock.locked()
+        return real_publish(key)
+
+    def _retract(key):
+        seen["retract_locked"] = _lifecycle._inflight_claim_lock.locked()
+        return real_retract(key)
+
+    monkeypatch.setattr(_lifecycle, "_publish_inflight_claim", _publish)
+    monkeypatch.setattr(_lifecycle, "_retract_inflight_claim", _retract)
+    db_path = str(tmp_path / "claim_lock.db")
+    first = FalkorProjection(db_path, graph_name="test")
+    second = None
+    try:
+        # Construction #1 STARTS the server (no registry yet -> no replay, so
+        # no claim). Construction #2 REPLAYS it and therefore publishes a
+        # claim that must be retracted when it finishes.
+        second = FalkorProjection(db_path, graph_name="test")
+        assert seen.get("publish_locked") is True, (
+            "#4926: the publish must run under `_inflight_claim_lock`")
+        assert seen.get("retract_locked") is True, (
+            "#4926: the retract must run under `_inflight_claim_lock`")
+    finally:
+        with contextlib.suppress(Exception):
+            if second is not None:
+                second.close()
+        with contextlib.suppress(Exception):
+            first.close()
 
 
 # ── #4439: harness fixtures must not fork periodic RDB snapshots ──────────

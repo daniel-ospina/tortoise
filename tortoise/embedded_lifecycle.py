@@ -69,6 +69,7 @@ import math
 import os
 import contextlib
 import fcntl
+import hashlib
 import logging
 
 import shutil
@@ -77,6 +78,7 @@ import socket
 import stat
 import sys
 import tempfile
+import threading
 import time
 
 from tortoise.embedded_reaper import (
@@ -651,8 +653,13 @@ def cotenant_holds_server(client) -> bool:
     # is still attaching has no owner record and no connection, so neither
     # the record branch nor the CLIENT LIST fallback below can see it. Its
     # construction published the claim on disk before it could attach.
-    if _inflight_claim_holds(key):
-        return True
+    # Wrapped fail-closed like every neighbouring signal (the guard family
+    # must never raise out of a close seam).
+    try:
+        if _inflight_claim_holds(key):
+            return True
+    except Exception:
+        return True  # cannot reason about the cross-process claim
     from tortoise.embedded_reaper import (
         _client_list,
         _owner_records,
@@ -1429,6 +1436,13 @@ def _adopt_owner_records_after_fork() -> None:
     # #4879 exists to prevent). Drop the inherited claims exactly like the
     # inherited refcounts above.
     _in_flight_replays.clear()
+    # #4926: `_inflight_claim_lock` must NOT be inherited. This hook runs in
+    # the CHILD; if another thread held the lock at fork time, the child's
+    # copy is locked with no thread alive to release it, and the child's next
+    # construction would deadlock. The child has no construction in flight
+    # (the claims above are cleared), so a fresh lock is the correct state.
+    global _inflight_claim_lock
+    _inflight_claim_lock = threading.Lock()
     # #4926: the ON-DISK claim is deliberately NOT retracted here. Its
     # filename names the PARENT's pid, and a claim is retracted only by the
     # construction that published it — a forked child unlinking it would drop
@@ -1728,22 +1742,56 @@ def _inflight_replay_holds(key: str) -> bool:
 # holds neither an owner record nor a connection: `_owner_records` reads
 # `live_owners == 1` and a raw `CLIENT LIST` sees only the probe, so the
 # guard reads "last client" and SHUTDOWNs + rmtrees the server the peer is
-# about to ping.
+# about to ping. (Consolidation parent: #5043.)
 #
 # Publish the SAME claim on disk for the SAME lifetime as the in-memory one,
 # in the store the cross-process reader already owns
-# (`<socket dir>/.tortoise-owners`). The filename carries the same
-# `<pid>-<start>` identity stamp `record_owner` uses, behind a prefix that
-# makes `embedded_reaper._owner_records` IGNORE it — a construction claim is
-# not an owner record (it must never move the reaper's `total`/`live`
-# arithmetic); it is a liveness-only hold the last-client decision reads.
+# (`<socket dir>/.tortoise-owners`). The filename carries `record_owner`'s
+# `<pid>-<start>` stamp plus a digest of the socket path — one file per
+# (process, socket) — behind a prefix that makes BOTH reaper parsers
+# (`_owner_records` and `_owner_record_dir_present`, hence
+# `_has_ownership_claim` and the `unattributed` flag) IGNORE it. A
+# construction claim is not an owner record: it must never move the reaper's
+# `total`/`live` arithmetic.
 #
-# Fail CLOSED in every direction: a claim that cannot be written is a missing
-# cross-process signal, never a construction failure; a claim whose holder
-# cannot be verified liveness-wise (an unreadable `ps`) counts LIVE, exactly
-# as `_owner_records` treats an unverifiable owner. A claim can only ever
-# HOLD a server (the #3653 cheaper error: a socket dir left for the reaper);
-# it can never authorize a kill.
+# Direction of failure. Where a claim is READ, every ambiguity counts LIVE (a
+# holder whose pid cannot be probed, or whose recorded start cannot be
+# verified, holds the server) — a claim can only ever HOLD a server, never
+# authorize a kill. A claim that cannot be WRITTEN is the opposite: a missing
+# cross-process signal, i.e. a fail-OPEN gap for the cross-process reader.
+# `_publish_inflight_claim` therefore swallows its own I/O failure (it must
+# never break a construction) and retries the one race that can lose a claim
+# outright (a peer's `rmdir` between our `makedirs` and our `open`); the gap
+# stays bounded because the caller's `_owner_records` branch fails CLOSED
+# whenever the record dir is missing or holds no parseable record.
+#
+# Residuals, named rather than implied (see also #4944): the publish/retract
+# decisions and the dictionary they are derived from are taken under
+# `_inflight_claim_lock`, so two constructions in THIS process cannot lose
+# each other's claim. `_owner_refcounts`' non-atomic hand-off is #4944 and is
+# untouched — when it mis-reads a hand-off as recorded, this claim is
+# retracted with it. A publisher SIGKILLed between publish and retract leaves
+# a file whose pid is provably dead: `_inflight_claim_holds` ignores it and no
+# reader's verdict changes (a claim-only dir reads as "no owner evidence"
+# exactly as a missing one); the file is reclaimed with the socket dir.
+
+#: Serialises the `_in_flight_replays` read-modify-write together with the
+#: on-disk publish/retract it gates, so the in-memory and on-disk halves of a
+#: claim cannot disagree under concurrent same-process constructions (#4926).
+_inflight_claim_lock = threading.Lock()
+
+
+def _inflight_claim_digest(socket_key: str) -> str:
+    """Short, stable digest binding a claim file to ONE socket (#4926).
+
+    redislite's socket dir is normally per-server, but an explicit
+    `unix_socket_path` can place two sockets in one directory, and the owner
+    records already share that directory. Without the digest a claim for one
+    socket would hold — and a retraction for one would remove — the other's;
+    the scoping declares one claim per (process, socket). The key is already
+    absolute at every call site; `abspath` normalises it defensively.
+    """
+    return hashlib.sha1(os.path.abspath(socket_key).encode()).hexdigest()[:12]
 
 
 def _inflight_claim_path(socket_key: str) -> str:
@@ -1752,49 +1800,63 @@ def _inflight_claim_path(socket_key: str) -> str:
     suffix = "unknown" if stamp is None else str(int(stamp))
     return os.path.join(
         owner_record_dir(socket_key),
-        f"{OWNER_INFLIGHT_PREFIX}{os.getpid()}-{suffix}",
+        f"{OWNER_INFLIGHT_PREFIX}{os.getpid()}-{suffix}"
+        f"-{_inflight_claim_digest(socket_key)}",
     )
 
 
 def _publish_inflight_claim(socket_key: str) -> None:
     """Create this process's on-disk mid-construction claim (#4926).
 
-    Called on the in-memory claim's 0 -> 1 transition, BEFORE
-    ``original(...)`` can block inside the replay, so another process's
-    last-client decision sees the construction while it attaches. Never
-    raises — a claim we cannot publish costs a cross-process reader its
-    signal (this process's own guard still reads ``_in_flight_replays``) and
-    must never break a client construction.
+    Called (under `_inflight_claim_lock`) on the in-memory claim's 0 -> 1
+    transition, BEFORE ``original(...)`` can block inside the replay, so
+    another process's last-client decision sees the construction while it
+    attaches. Never raises: a claim we cannot publish is a missing
+    cross-process signal (this process's own guard still reads
+    `_in_flight_replays`, and the caller's `_owner_records` branch fails
+    closed on an absent record dir) and must never break a client
+    construction. `ENOENT` from the `open` is retried ONCE — it is the one
+    race that can lose a claim outright, a peer's `_retract`/`forget_owner`
+    `rmdir` landing between our `makedirs` and our `open`.
     """
-    try:
-        os.makedirs(owner_record_dir(socket_key), exist_ok=True)
-        fd = os.open(_inflight_claim_path(socket_key),
-                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(fd)
-    except FileExistsError:
-        pass  # a claim this process left behind (a failed retract) — reuse it
-    except Exception:
-        pass
+    path = _inflight_claim_path(socket_key)
+    for attempt in range(2):
+        try:
+            os.makedirs(owner_record_dir(socket_key), exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+            return
+        except FileExistsError:
+            return  # a claim this process left behind (a failed retract)
+        except FileNotFoundError:
+            if attempt == 0:
+                continue  # the dir was reclaimed under us — recreate once
+            return
+        except Exception:
+            return
 
 
 def _retract_inflight_claim(socket_key: str) -> None:
-    """Remove this process's on-disk mid-construction claim (#4926).
+    """Remove THIS process's on-disk claim for ``socket_key`` (#4926).
 
-    Called on the in-memory claim's 1 -> 0 transition, AFTER the owner record
-    has been written on the success path, so there is no instant at which
-    neither claim is visible to a cross-process reader.
+    Called (under `_inflight_claim_lock`) on the in-memory claim's 1 -> 0
+    transition. On the success path the owner record was written by the
+    caller's `try` BEFORE this `finally` runs, so the retraction can only
+    remove the claim once the record is there to replace it.
 
-    Also best-effort reclaims the record dir when this process just left it
-    empty: an empty ``.tortoise-owners`` reads as
-    ``_owner_records() is None`` -> the guard fails CLOSED -> the server could
-    never be torn down, so leaving one behind would be a new leak. Never
-    raises.
+    Only this process's own file for THIS socket is unlinked (pid prefix AND
+    socket digest), so a peer's claim — including a forked child's inherited
+    copy, which names the parent — is never touched. The directory is then
+    best-effort reclaimed as hygiene; that is NOT what protects the verdict:
+    a missing dir, an empty dir and a claim-only dir all read as "no owner
+    evidence" to every reader. Never raises.
     """
     try:
         d = owner_record_dir(socket_key)
         prefix = f"{OWNER_INFLIGHT_PREFIX}{os.getpid()}-"
+        suffix = f"-{_inflight_claim_digest(socket_key)}"
         for n in os.listdir(d):
-            if n.startswith(prefix):
+            if n.startswith(prefix) and n.endswith(suffix):
                 with contextlib.suppress(OSError):
                     os.unlink(os.path.join(d, n))
         with contextlib.suppress(OSError):
@@ -1808,31 +1870,36 @@ def _inflight_claim_holds(socket_key: str) -> bool:
 
     The cross-process companion of `_inflight_replay_holds`, read by
     `cotenant_holds_server`. Scans the server's owner-record dir for claim
-    files and counts one LIVE holder. A claim whose pid is provably dead is a
-    construction that died before it attached: it has no live co-tenant, so it
-    must not hold the server — holding it would pin the server and its socket
-    dir forever, the #3599 failure the pid-liveness rule exists to prevent.
-    A live pid whose recorded start cannot be verified counts LIVE (fail
-    closed), decided with the same explicit cases `embedded_reaper`
-    `_owner_records` uses: pid dead -> not a holder; start unreadable -> LIVE;
-    start matches -> LIVE; start differs (recycled pid) -> not a holder.
+    files FOR THIS SOCKET (`_inflight_claim_digest`) and counts one LIVE
+    holder. A claim whose pid is provably dead is a construction that died
+    before it attached: it has no live co-tenant, so it must not hold the
+    server — holding it would pin the server and its socket dir forever, the
+    #3599 failure the pid-liveness rule exists to prevent. A live pid whose
+    recorded start cannot be verified counts LIVE (fail closed), decided with
+    the same explicit cases `embedded_reaper` `_owner_records` uses: pid dead
+    -> not a holder; start unreadable -> LIVE; start matches -> LIVE; start
+    differs (recycled pid) -> not a holder.
 
     An unreadable/missing dir yields False, deliberately: the caller's
     `_owner_records` branch already fails closed on a missing record dir, so a
-    second fail-closed here would only add a failure mode.
+    second fail-closed here would only add a failure mode. Never raises — the
+    caller still wraps it, because a future edit here must not be able to
+    break the guard family's never-raise contract.
     """
     try:
         names = os.listdir(owner_record_dir(socket_key))
     except OSError:
         return False
+    suffix = f"-{_inflight_claim_digest(socket_key)}"
     from tortoise.embedded_reaper import (
         _owner_pid_alive,
         _process_start_time,
     )
     for n in names:
-        if not n.startswith(OWNER_INFLIGHT_PREFIX):
+        if not n.startswith(OWNER_INFLIGHT_PREFIX) or not n.endswith(suffix):
             continue
-        pid_s, _, start_s = n[len(OWNER_INFLIGHT_PREFIX):].partition("-")
+        body = n[len(OWNER_INFLIGHT_PREFIX):-len(suffix)]
+        pid_s, _, start_s = body.partition("-")
         try:
             pid = int(pid_s)
         except ValueError:
@@ -1917,16 +1984,22 @@ def _install_owner_record_patch() -> None:
         inflight_key = os.path.abspath(pending) if pending else None
         claimed = inflight_key is not None
         if claimed:
-            before_count = _in_flight_replays.get(inflight_key, 0)
-            _in_flight_replays[inflight_key] = before_count + 1
-            if before_count == 0:
-                # #4926: publish the SAME claim cross-process, in the
-                # owner-record store the last-client decision already reads,
-                # so a peer PROCESS cannot tear the server down while this
-                # construction is still attaching. Lifetime is identical to
-                # the in-memory claim's: released with it below, and
-                # deliberately KEPT with it on a failed owner hand-off.
-                _publish_inflight_claim(inflight_key)
+            # #4926: the read-modify-write and the on-disk publish it gates
+            # are ONE atomic step, so two constructions in this process cannot
+            # lose each other's claim (the disk half must not disagree with
+            # the map).
+            with _inflight_claim_lock:
+                before_count = _in_flight_replays.get(inflight_key, 0)
+                _in_flight_replays[inflight_key] = before_count + 1
+                if before_count == 0:
+                    # #4926: publish the SAME claim cross-process, in the
+                    # owner-record store the last-client decision already
+                    # reads, so a peer PROCESS cannot tear the server down
+                    # while this construction is still attaching. Lifetime is
+                    # identical to the in-memory claim's: released with it
+                    # below, and deliberately KEPT with it on a failed owner
+                    # hand-off.
+                    _publish_inflight_claim(inflight_key)
             # F2: the dead-socket guard's #4879 gate line is gated on THIS
             # claim being live, so it can never fire on a close-path call
             # whose `socket_file` merely happens to be empty. Stash the key
@@ -1959,9 +2032,14 @@ def _install_owner_record_patch() -> None:
                 # incremented — recorded) AND "no record could be written"
                 # (`os.makedirs`/`os.open` OSError — the refcount is UNTOUCHED
                 # — NOT recorded). Read the refcount to tell them apart: this
-                # client is recorded exactly when it advanced. Anything else
-                # (a falsy socket, or a failed write) is live-but-UNRECORDED
-                # and must KEEP the claim (fail CLOSED, lifetime note above).
+                # client is recorded exactly when it advanced. (The delta is
+                # NOT atomic — #4944, a documented residual: a concurrent
+                # hand-off on the same socket can mis-read this. It is
+                # untouched here, but note its blast radius now includes the
+                # on-disk claim, since `release_claim` below gates its
+                # retraction.) Anything else (a falsy socket, or a failed
+                # write) is live-but-UNRECORDED and must KEEP the claim (fail
+                # CLOSED, lifetime note above).
                 owner_key = (
                     os.path.abspath(sock)
                     if isinstance(sock, str) and sock else None)
@@ -1979,16 +2057,19 @@ def _install_owner_record_patch() -> None:
                 release_claim = False
         finally:
             if claimed and release_claim:
+                # #4926: the decrement and the on-disk retract are one atomic
+                # step (see the increment above), so a concurrent construction
+                # on this socket can neither lose the file nor keep a stale
+                # one. `_retract_inflight_claim` never raises and the guard is
+                # kept so a construction can never be broken by teardown.
                 try:
-                    remaining = _in_flight_replays.get(inflight_key, 0) - 1
-                    if remaining > 0:
-                        _in_flight_replays[inflight_key] = remaining
-                    else:
-                        _in_flight_replays.pop(inflight_key, None)
-                        # #4926: retract the cross-process claim only once the
-                        # owner record is written (or the construction
-                        # aborted) — never a window with no claim visible.
-                        _retract_inflight_claim(inflight_key)
+                    with _inflight_claim_lock:
+                        remaining = _in_flight_replays.get(inflight_key, 0) - 1
+                        if remaining > 0:
+                            _in_flight_replays[inflight_key] = remaining
+                        else:
+                            _in_flight_replays.pop(inflight_key, None)
+                            _retract_inflight_claim(inflight_key)
                 except Exception:
                     _in_flight_replays.pop(inflight_key, None)
                     _retract_inflight_claim(inflight_key)
