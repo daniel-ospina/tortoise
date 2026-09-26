@@ -52,6 +52,28 @@ _logger = logging.getLogger("tortoise.operator_alert")
 #: ``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``.
 UNMETERED_INCREMENT_KIND = "UNMETERED_INCREMENT"
 
+#: The incident KINDS for a fault on the abuse ENFORCEMENT path (#4872). Declared
+#: HERE beside ``UNMETERED_INCREMENT_KIND`` so every operator-alert kind has one
+#: definition and one home for the runbook pin
+#: (``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``).
+#:
+#: TWO kinds, not one, because the incident BODY is written create-once: a DEDUP
+#: hit never rewrites ``detail`` (``alert_store.AlertStore.open_incident_state``),
+#: so a single kind would let the first lane to fault own the incident for its
+#: whole life. ``ABUSE_DECISION_FAULT`` is the evaluation path (``window_sum``,
+#: ``clean_window_episode_end``, ``latest_flag_at``, ``rule_event_between``);
+#: ``ABUSE_ENFORCEMENT_FAULT`` is the enforcement ACTION (``suspend_org``,
+#: ``flag_org``). Keeping them apart means a transient evaluation-read blip can
+#: never mask a failed suspension — the defect #4872 is about.
+#:
+#: Deliberately not superstrings of ``UNMETERED_INCREMENT`` / ``COHORT_*``: a
+#: dropped metering increment, an unenforceable spend cap, and an abuse
+#: decision fault are different conditions with different runbook actions, and
+#: the R2-unreachable adoption path resolves an incident by GitHub search on the
+#: subject suffix.
+ABUSE_DECISION_FAULT_KIND = "ABUSE_DECISION_FAULT"
+ABUSE_ENFORCEMENT_FAULT_KIND = "ABUSE_ENFORCEMENT_FAULT"
+
 #: The incident KIND for a Stripe billing notification the #3498 offload seam
 #: REFUSED (#4456). The event is already CLAIMED when the notify is submitted
 #: (the ``WebhookEvent`` marker commits BEFORE it), so a Stripe retry sees
@@ -182,6 +204,40 @@ def alert_unmetered_increment(lane: str, org_id: str | None,
     with contextlib.suppress(Exception):  # the alert must never raise
         alert_operator(UNMETERED_INCREMENT_KIND, org_id,
                        {"lane": lane, "error_type": type(error).__name__})
+
+
+def alert_abuse_fault(kind: str, lane: str, subject_org: str,
+                      error: BaseException, rule: str | None = None,
+                      fallback: str | None = None) -> None:
+    """Dispatch an abuse enforcement-path fault incident (#4872). Never raises.
+
+    PLATFORM-SCOPED BY CONSTRUCTION: the dispatch subject is hard-coded ``""``
+    (the store's canonical platform sentinel, ``ops/alerts/{kind}/_.json``), so a
+    fault on the SHARED substrate — one PostgREST RPC, one schema cache, one
+    ACL, one transport — is ONE incident rather than N per-org incidents. The
+    org whose evaluation failed is carried in the ``detail`` as ``subject_org``;
+    note it is EVIDENCE, NOT SCOPE: the body is written create-once, so only the
+    first org to fault is ever recorded and a triager must not read it as the
+    blast radius. The signature deliberately takes no subject argument: platform
+    scope is not a call-site choice, so no caller can reintroduce per-org
+    fan-out.
+
+    A platform subject also collapses the throttle key to one, so a store fault
+    affecting many orgs at once is one throttled dispatch rather than an
+    alert-plane storm.
+
+    The detail vocabulary is bounded and message-free (``lane``/``error_type``/
+    ``rule``/``subject_org``/``fallback``): the incident BODY is durable and an
+    exception MESSAGE is attacker-influenceable text that must never reach the
+    operator channel. The exception class name is the correct amount of detail.
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        alert_operator(kind, "",
+                       {"lane": lane,
+                        "error_type": type(error).__name__,
+                        "rule": rule,
+                        "subject_org": subject_org,
+                        "fallback": fallback})
 
 
 def alert_billing_notify_refused(org_id: str | None,
