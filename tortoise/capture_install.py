@@ -126,8 +126,10 @@ install.
 The *merge orchestration* is the one half deliberately NOT delegated (#3915).
 #3808 preferred delegating it to #3866's
 :func:`tortoise.hook_install._merge_settings`, but that function has no refusal
-arm for a document whose ``"hooks"`` is not a JSON object: it REPLACES the
-user's value with ``{}`` and merges into the replacement, where
+arm for a ``"hooks"`` that is present and is neither a JSON object nor
+``null`` (a ``null`` or an absent ``"hooks"`` is coerced identically by both
+modules, and so is not delegation-blocking): it REPLACES the user's value with
+``{}`` and merges into the replacement, where
 :func:`merge_capture_hooks` raises and :func:`install_capture` turns that into
 the documented refusal with the user's bytes untouched — the same
 never-clobber contract ``test_claude_install_refuses_to_clobber_invalid_settings``
