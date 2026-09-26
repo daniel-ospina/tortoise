@@ -80,6 +80,70 @@ def _cmd_rebuild(args):
         # distinguishable from "preservation was not attempted".
         print(f"Config: {counts.get('config_restored', 0)} of "
               f"{counts.get('config_expected', 0)} authoritative entr(y/ies) restored")
+        # #4641: onboarding state rides the same rescue file but is not
+        # "config", so it gets its own line — printed at zero expected too, so
+        # "no onboarding state to preserve" is distinguishable from
+        # "preservation was not attempted". This line is the COUNT only; the
+        # failure shapes (UNVERIFIED, UNKNOWN, confirmed loss) are reported
+        # separately below, because the projection's aggregate `onboarding_gap`
+        # is a max that collapses them.
+        # The three shapes below are NOT mutually exclusive: a
+        # pre-preservation rescue file (UNKNOWN) can coexist with an
+        # unverified restore and with a confirmed partial loss. Each is
+        # printed on its own so one cannot suppress the other, and the CLI
+        # reports the sources SEPARATELY rather than printing the projection's
+        # aggregate `onboarding_gap`: that aggregate is a max, so it collapses
+        # coexisting sources into one number and a UNKNOWN would be absorbed
+        # into a loss count (#4641 review round 7).
+        onboarding_unverified = counts.get("onboarding_verified") is False
+        onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
+        onboarding_missing_total = counts.get("onboarding_missing_total") or 0
+        # "Could not confirm" must not be printed as a LOSS: the projection
+        # forces `onboarding_restored` to 0 for an unverified restore, so the
+        # count line would read "0 of N restored" and contradict the stderr
+        # line right below it. The unverified shape gets non-loss wording.
+        if onboarding_unverified:
+            print(f"Onboarding: restore UNVERIFIED "
+                  f"({counts.get('onboarding_expected', 0)} org state(s) "
+                  f"expected)")
+        else:
+            print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
+                  f"{counts.get('onboarding_expected', 0)} org state(s) "
+                  f"restored")
+        # Mutually additive: an UNVERIFIED restore, a pre-preservation
+        # UNKNOWN, and a confirmed gap must not suppress each other.
+        if onboarding_unverified:
+            # "Could not confirm" must not be printed as "gone": the
+            # projection's own branch says UNVERIFIED, and the CLI must not
+            # contradict it (round 5).
+            print(
+                "Onboarding: the post-restore verification COULD NOT RUN "
+                "— this graph's onboarding state is UNVERIFIED: not "
+                "confirmed intact, and NOT observed gone. Re-check it "
+                "before trusting the organizations' onboarding state "
+                "(#4641).",
+                file=sys.stderr,
+            )
+        if onboarding_unknown:
+            print(
+                "Onboarding: the leftover pre-wipe snapshot does not carry a "
+                "usable onboarding record — it either predates onboarding "
+                "preservation, carries only one of the two onboarding "
+                "sections, or carries a state-UNKNOWN marker from an earlier "
+                "interrupted rebuild — so whether the destroyed graph held "
+                "any onboarding state CANNOT be determined (UNKNOWN, not "
+                "absent). Re-run onboarding for any org whose onboarding "
+                "state is uncertain (#4641).",
+                file=sys.stderr,
+            )
+        if onboarding_missing_total:
+            print(
+                f"Onboarding: {onboarding_missing_total} state/edge restore "
+                f"gap(s) — the wipe is unconditional and only the journal "
+                f"is replayed, so those onboarding states/edges are gone. "
+                f"Re-run onboarding for the affected org(s) (#4641).",
+                file=sys.stderr,
+            )
         if counts.get("config_reset"):
             if counts.get("config_reset_read_failed"):
                 # `config_reset` is fail-SAFE, so it does not prove the marker
