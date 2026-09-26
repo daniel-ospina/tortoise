@@ -2956,6 +2956,60 @@ def test_foreign_shapes_are_not_ours_in_both_modules(tmp_path, command):
     assert hook_install.detect_install(tmp_path, "claude") == []
 
 
+def test_non_dict_hooks_is_refused_by_both_modules_and_blocks_merge_delegation(
+        tmp_path):
+    """A ``settings.json`` whose top level IS a JSON object but whose
+    ``"hooks"`` is NOT one is refused by the installer (bytes untouched) and
+    reported by ``hooks status`` as a MANUAL fix — the two modules agree, so
+    neither may claim it repairable.
+
+    It also pins WHY ``merge_capture_hooks`` is the one half not delegated to
+    #3866's ``_merge_settings`` — the delegation #3915 preferred.  That
+    function has no refusal arm for a non-dict ``"hooks"``: it REPLACES the
+    user's value with ``{}`` and merges into the replacement, so delegating
+    the merge would route both harnesses through the clobbering arm and lose
+    the installer's never-clobber contract (the class
+    ``test_claude_install_refuses_to_clobber_invalid_settings`` pins for
+    unparsable JSON).  The shared classifier / entry reader / predicates plus
+    this pin keep the surfaces in step instead.
+
+    Mutation: delegate ``merge_capture_hooks`` to ``_merge_settings`` (or drop
+    its ``"hooks" is not a JSON object`` refusal) — the refusal and
+    bytes-unchanged assertions RED.  If ``_merge_settings`` ever GROWS a
+    non-dict refusal the asymmetry block REDs as well: that is a signal to
+    revisit the delegation decision, not to delete the pin.
+    """
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    original = json.dumps({"hooks": [], "keep": "me"}, indent=2)
+    target.write_text(original)
+
+    res = install_capture("claude", root=tmp_path)
+
+    assert not res.ok, "a non-object 'hooks' was silently merged into"
+    assert "not a JSON object" in res.error, res.error
+    assert target.read_text() == original, "the user's file was modified"
+
+    # `hooks status` calls the same document a MANUAL fix and `hooks upgrade`
+    # refuses it, so the installer's refusal cannot mask a state the repair
+    # path would happily rewrite.
+    manual = {f.kind for f in hook_install.detect_install(tmp_path, "claude")
+              if hook_install.is_manual_fix(f.kind)}
+    assert "unreadable-settings" in manual, manual
+    assert hook_install.upgrade_install(tmp_path, "claude").refused is not None
+    assert target.read_text() == original
+
+    # The concrete case that blocks delegating the MERGE (not the matchers):
+    # `_merge_settings` has no refusal arm — it clobbers the non-dict value.
+    data = {"hooks": [], "keep": "me"}
+    changed = hook_install._merge_settings(
+        hook_install.get_layout("claude"), data, [], tmp_path)
+    assert changed is True
+    assert data["hooks"] != [], (
+        "_merge_settings now respects a non-dict 'hooks' — if it grew the "
+        "refusal, merge delegation is worth revisiting (see the docstring)")
+
+
 def test_float_timeout_parity_between_install_and_status(tmp_path):
     """A float timeout is preserved by BOTH sides: the installer leaves 120.0
     alone and #3866 neither reports it as drift nor lowers it on upgrade.

@@ -123,6 +123,20 @@ missing its ``type`` are all **not** ours in both modules; treating any of them
 as ours would leave a project capturing nothing while reporting a successful
 install.
 
+The *merge orchestration* is the one half deliberately NOT delegated (#3915).
+#3808 preferred delegating it to #3866's
+:func:`tortoise.hook_install._merge_settings`, but that function has no refusal
+arm for a document whose ``"hooks"`` is not a JSON object: it REPLACES the
+user's value with ``{}`` and merges into the replacement, where
+:func:`merge_capture_hooks` raises and :func:`install_capture` turns that into
+the documented refusal with the user's bytes untouched — the same
+never-clobber contract ``test_claude_install_refuses_to_clobber_invalid_settings``
+pins for unparsable JSON.  Delegating would route both harnesses through the
+clobbering arm, so the classifier, the entry-shape reader and the two
+predicates are shared and the merge is pinned to #3866 by
+``test_non_dict_hooks_is_refused_by_both_modules_and_blocks_merge_delegation``
+instead.
+
 The same one-definition rule governs whether a hook is *runnable*: this
 module's exec-bit repair asks :func:`tortoise.hook_install._has_owner_exec_bit`
 — the predicate ``detect_install``/``upgrade_install`` use — instead of
