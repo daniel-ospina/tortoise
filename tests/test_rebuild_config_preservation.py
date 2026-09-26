@@ -1719,7 +1719,8 @@ def test_cmd_rebuild_reports_unverified_not_gone(tmp_path, capsys,
               "onboarding_missing_links": None,
               "onboarding_missing_onboards": None,
               "onboarding_restore_failures": 0,
-              "onboarding_gap": 1, "onboarding_state_unknown": False}
+              "onboarding_gap": 1, "onboarding_missing_total": 0,
+              "onboarding_state_unknown": False}
     monkeypatch.setattr(FalkorProjection, "rebuild_all",
                         lambda self, _dir: dict(counts))
     sdk, events = _mk_sdk(tmp_path)
@@ -2107,6 +2108,82 @@ def test_pre_onboarding_leftover_reports_state_unknown(graph, caplog):
                for r in caplog.records), (
         f"no UNKNOWN line was logged: "
         f"{[r.getMessage() for r in caplog.records]}")
+    # The UNKNOWN must NOT be re-described as observed loss: `onboarding_gap`
+    # is raised by this signal, so a branch keyed on the gap would emit a
+    # second, contradicting "TRUE POSITIVE ... are gone" line for a shape
+    # where nothing was observed missing (#4641 review round 7).
+    assert not any("are ABSENT" in r.getMessage() for r in caplog.records), (
+        f"the UNKNOWN-only shape must not also be reported as observed loss: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
+def test_leftover_with_only_one_onboarding_key_is_unknown(graph, caplog):
+    """Either key missing means the class was not fully recorded.
+
+    The predicate is `or`, not `and`: a file carrying only one of the two
+    sections recorded HALF the class, and the union would read the absent one
+    as `[]` — the same fail-open one level down from the section-set refusal
+    (#4641 review round 7).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    half = _legacy_pre_onboarding_sidecar(version=3)
+    half["onboarding_snapshot"] = []          # only one of the two keys
+    _plant(Path(_sidecar_path(events)), half)
+    _g(sdk).query("MATCH (n) DETACH DELETE n")
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        result = sdk._get_proj().rebuild_all(str(events))
+    assert result["onboarding_state_unknown"] is True
+    assert any("predates onboarding preservation" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_unknown_flag_is_carried_into_the_written_sidecar(graph, monkeypatch):
+    """The UNKNOWN survives a SECOND interruption via this run's sidecar.
+
+    This build writes both onboarding sections (empty), so a retry reading its
+    own write would see present-but-empty keys and read them as "captured and
+    empty". The flag rides the payload as a metadata key so the signal is not
+    erased by the very run that detected it (#4641 review round 7).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _plant(Path(_sidecar_path(events)), _legacy_pre_onboarding_sidecar())
+    written = _capture_writes(monkeypatch)
+
+    sdk._get_proj().rebuild_all(str(events))
+
+    assert written, "no sidecar was written"
+    assert written[0].get("onboarding_unknown") is True, (
+        "the state-UNKNOWN signal must ride the rescue file this run writes, "
+        "or a second interruption loses it")
+
+
+def test_unknown_is_reported_even_when_fresh_state_exists(graph, caplog):
+    """UNKNOWN is not conditional on the expected sets being EMPTY.
+
+    #2814 pins this for config
+    (`test_v1_leftover_with_self_healed_config_still_reports_unknown`): a
+    self-heal can make the fresh capture non-empty while the state the old
+    build destroyed is still unknown. Gating on emptiness would report a clean
+    `N of N restored` (#4641 review round 7).
+    """
+    events, sdk = graph
+    _write_journal(events, [])
+    _write_onboarding_state(sdk, "org-live", fork="build",
+                            steps=("harness-connected",))
+    _plant(Path(_sidecar_path(events)), _legacy_pre_onboarding_sidecar())
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        result = sdk._get_proj().rebuild_all(str(events))
+
+    assert result["onboarding_expected"] >= 1, (
+        "the live graph's onboarding state must be captured")
+    assert result["onboarding_state_unknown"] is True, (
+        "a pre-preservation rescue file means the pre-existing state is "
+        "unknown even when the live graph carries state")
+    assert result["onboarding_missing_total"] == 0
 
 
 def test_onboards_edge_symbol_is_bound_before_the_wipe(graph, monkeypatch):
@@ -2157,7 +2234,8 @@ def test_transient_restore_failure_is_not_reported_as_gone(tmp_path, capsys,
               "onboarding_missing_links": 0,
               "onboarding_missing_onboards": 0,
               "onboarding_restore_failures": 1,
-              "onboarding_gap": 0, "onboarding_state_unknown": False}
+              "onboarding_gap": 0, "onboarding_missing_total": 0,
+              "onboarding_state_unknown": False}
     monkeypatch.setattr(FalkorProjection, "rebuild_all",
                         lambda self, _dir: dict(counts))
     sdk, events = _mk_sdk(tmp_path)

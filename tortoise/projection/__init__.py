@@ -304,7 +304,7 @@ _PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
 # unknown-section refusal below subtracts these so it cannot mistake the
 # envelope for a section.
 _PREWIPE_SNAPSHOT_META_KEYS = frozenset(
-    {"version", "created_at", "completed"})
+    {"version", "created_at", "completed", "onboarding_unknown"})
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -728,14 +728,18 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
     it, so the guarantee is "carried or refused", never "silently lost".
 
     The pair is ``(parent state org_id, step_id)`` — the step node's OWN
-    ``org_id`` is not read, and the restore re-keys the step onto its parent
-    state. That is faithful to every writer (`write_completed_step` MERGEs
-    ``s.org_id`` from the parent in the same statement) and to every reader
-    (`completed_steps` matches through the parent edge), so the re-key is a
-    no-op on any graph a writer produced. A raw/hand-edited graph whose step
-    node's own ``org_id`` DIVERGES from its parent's is re-keyed onto the
-    parent rather than carried verbatim; that divergence is the documented
-    residual in `docs/durability-posture.md` (#4641).
+    ``org_id`` is not read, and the restore re-keys the step onto its parent.
+    That is faithful to every WRITER (`write_completed_step` MERGEs
+    ``s.org_id`` from the parent in the same statement) and to the
+    edge-traversing readers (`completed_steps`, `decide_completed_edge_exists`
+    — which match through the parent edge), so the re-key is a no-op on any
+    graph a writer produced. It is NOT a no-op for the readers that key the
+    step node's own ``org_id`` (`_prune_orphan_decide_step`,
+    `remove_decide_completed_edge`, both ``{org_id, step_id:'decide-completed'}``):
+    a raw/hand-edited graph whose step ``org_id`` DIVERGES from its parent's is
+    re-keyed onto the parent, and those readers would no longer find it under
+    its original org. That divergence is the documented residual in
+    `docs/durability-posture.md` (#4641).
 
     An orphan `:OnboardingStep` node (no `COMPLETED_STEP` edge) is not
     captured: it is the ``_prune_orphan_decide_step`` cleanup's residue, it
@@ -4175,6 +4179,21 @@ class FalkorProjection(
         # keeps the recovered onboarding state in the retry's rescue file.
         onboarding_snapshot = merged["onboarding_snapshot"]
         onboarding_step_links = merged["onboarding_step_links"]
+        # #4641: the pre-preservation window, computed HERE (pre-wipe) so the
+        # flag can be CARRIED into this run's own sidecar. A leftover with no
+        # onboarding section key — or one carrying the flag a previous run
+        # staged — was written by a build that did not record the class, so
+        # whether the wipe destroyed onboarding state CANNOT be determined
+        # from the file. `or`, not `and`: a file carrying only ONE of the two
+        # keys recorded half the class. Mirrors #2814's `config_reset` T2
+        # staging, and the flag is a METADATA key (see
+        # `_PREWIPE_SNAPSHOT_META_KEYS`) so a second interruption does not let
+        # this run's own empty sections erase the evidence.
+        onboarding_unknown = bool(
+            (leftover or {}).get("onboarding_unknown")) or (
+            leftover is not None
+            and ("onboarding_snapshot" not in leftover
+                 or "onboarding_step_links" not in leftover))
         # #2814: same reason as the session sections — on the sidecar-recovery
         # path the live graph is already empty, so the leftover's config is the
         # only record of it. Assigned from `merged` (not from the capture
@@ -4297,6 +4316,13 @@ class FalkorProjection(
                         list(entry) if isinstance(entry, tuple) else entry
                         for entry in merged[section]
                     ]
+                # #4641: carry the state-UNKNOWN signal (see above) into the
+                # file this run writes. Without it, a SECOND interruption
+                # leaves a retry reading a sidecar whose onboarding keys are
+                # now present-but-empty, which is indistinguishable from
+                # "captured and empty" — and the UNKNOWN would be lost.
+                if onboarding_unknown:
+                    payload["onboarding_unknown"] = True
                 _write_prewipe_snapshot(snapshot_path, payload)
             except (OSError, TypeError, ValueError) as e:
                 raise RuntimeError(
@@ -5689,19 +5715,10 @@ class FalkorProjection(
                 "(%s: %s) — treating it as not restored (#4641)",
                 type(e).__name__, e,
             )
-        # The pre-preservation window (#4641 review round 6): a leftover
-        # sidecar with NO onboarding section key was written by a build that
-        # predates onboarding capture, so the wipe that produced it destroyed
-        # a class it never recorded. The expected sets are empty in that case,
-        # so without this signal the run reports a clean "0 of 0 restored".
-        # Mirrors #2814's `leftover_version < 2` T2 handling; keyed on the
-        # SECTION's presence rather than on a version number, so a later bump
-        # for an unrelated section cannot make the predicate go stale.
-        onboarding_unknown = (
-            leftover is not None
-            and "onboarding_snapshot" not in leftover
-            and "onboarding_step_links" not in leftover)
-
+        # The pre-preservation UNKNOWN signal was computed PRE-wipe (see the
+        # payload block: the flag rides this run's sidecar too). It is logged
+        # here rather than there only because this is where the operator
+        # reads the restore outcome.
         # ONE canonical gap count, returned to the callers so the projection,
         # `consistency.recover_from_log` and the CLI cannot drift apart.
         # Deliberately NOT `restore_failures + missing_*`: a failed restore
@@ -5709,9 +5726,10 @@ class FalkorProjection(
         # destroyed org as two gaps; and a restore that RAISED after the write
         # landed (a timeout) is a failure with nothing missing, which must not
         # read as loss.
-        onboarding_gap = (len(onboarding_missing_orgs)
-                          + len(onboarding_missing_links)
-                          + len(onboarding_missing_onboards))
+        onboarding_missing_total = (len(onboarding_missing_orgs)
+                                    + len(onboarding_missing_links)
+                                    + len(onboarding_missing_onboards))
+        onboarding_gap = onboarding_missing_total
         if not onboarding_verified and (
                 onboarding_expected_orgs or onboarding_expected_links
                 or onboarding_expected_onboards):
@@ -5750,12 +5768,15 @@ class FalkorProjection(
                 len(onboarding_expected_links),
                 len(onboarding_expected_onboards),
             )
-        elif onboarding_gap:
-            # The MISSING SETS are the "gone" evidence. `restore_failures` is
-            # deliberately not part of that claim: a restore call can raise
-            # while the server already applied the write (a timeout or a
-            # connection blip), and calling that "gone" would be a false loss
-            # claim over intact state (see the `elif` below).
+        elif onboarding_missing_total:
+            # The MISSING SETS are the "gone" evidence — NOT the inflated
+            # `onboarding_gap` (which is also raised by the UNKNOWN flag and by
+            # an unverified read) and NOT `restore_failures`: a restore call
+            # can raise while the server already applied the write (a timeout
+            # or a connection blip), and calling that "gone" would be a false
+            # loss claim over intact state (see the `elif` below). Gating on
+            # the missing sets also keeps the UNKNOWN-only shape from being
+            # re-described here as observed loss (#4641 review round 7).
             logger.error(
                 "rebuild: onboarding-state post-restore verification "
                 "FAILED — %d of %d expected org state(s), %d of %d expected "
@@ -6427,6 +6448,7 @@ class FalkorProjection(
                 # the pre-preservation UNKNOWN signal — an old-build rescue
                 # file cannot say whether the class was lost or never present.
                 "onboarding_gap": onboarding_gap,
+                "onboarding_missing_total": onboarding_missing_total,
                 "onboarding_state_unknown": onboarding_unknown}
 
     def query(self, cypher: str, **params):

@@ -86,13 +86,15 @@ def _cmd_rebuild(args):
         # "preservation was not attempted", and non-zero when the replay could
         # not close a gap (the operator-facing counterpart of the
         # `onboarding_gap` key the embedded auto-recovery path now warns on).
-        # The projection owns the gap's definition and returns ONE canonical
-        # count; recomputing it here from the granular keys double-counted a
-        # single destroyed org and could read a transient restore failure as
-        # loss (#4641 review round 6).
-        onboarding_gap = counts.get("onboarding_gap") or 0
+        # The three shapes below are NOT mutually exclusive: a
+        # pre-preservation rescue file (UNKNOWN) can coexist with a confirmed
+        # partial loss. Each is printed on its own so one cannot suppress the
+        # other (#4641 review round 7). `onboarding_gap` is the projection's
+        # aggregate and is the max of exactly these three sources, so printing
+        # each source is equivalent to printing the aggregate.
         onboarding_unverified = counts.get("onboarding_verified") is False
         onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
+        onboarding_missing_total = counts.get("onboarding_missing_total") or 0
         # "Could not confirm" must not be printed as a LOSS: the projection
         # forces `onboarding_restored` to 0 for an unverified restore, so the
         # count line would read "0 of N restored" and contradict the stderr
@@ -105,8 +107,8 @@ def _cmd_rebuild(args):
             print(f"Onboarding: {counts.get('onboarding_restored', 0)} of "
                   f"{counts.get('onboarding_expected', 0)} org state(s) "
                   f"restored")
-        # Mutually exclusive: an UNVERIFIED restore, a pre-preservation
-        # UNKNOWN, and a confirmed gap must not be described as each other.
+        # Mutually additive: an UNVERIFIED restore, a pre-preservation
+        # UNKNOWN, and a confirmed gap must not suppress each other.
         if onboarding_unverified:
             # "Could not confirm" must not be printed as "gone": the
             # projection's own branch says UNVERIFIED, and the CLI must not
@@ -128,9 +130,9 @@ def _cmd_rebuild(args):
                 "any org whose onboarding state is uncertain (#4641).",
                 file=sys.stderr,
             )
-        elif onboarding_gap:
+        if onboarding_missing_total:
             print(
-                f"Onboarding: {onboarding_gap} state/edge restore "
+                f"Onboarding: {onboarding_missing_total} state/edge restore "
                 f"gap(s) — the wipe is unconditional and only the journal "
                 f"is replayed, so those onboarding states/edges are gone. "
                 f"Re-run onboarding for the affected org(s) (#4641).",

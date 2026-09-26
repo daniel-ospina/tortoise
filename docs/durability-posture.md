@@ -77,14 +77,17 @@ there is no third mechanism. Classes that can be re-derived are deliberately
 were truth.
 
 The preserved set is **declared in code**, not discovered — in **two** homes,
-both bound by the doc-consistency test:
+both checked against the doc-consistency test:
 `tortoise/projection/__init__.py::_config_classes()` for the keyed nodes
 (`:PackInstall`, `:PackManifest`, `:Meta{key:…}`), and the declared
 `_SNAPSHOT_SECTIONS` pair for a class whose identity is **composite or which
 owns edges** (`:Batch`, `:Session`, and since **#4641**
-`:OnboardingState`/`:OnboardingStep`). It is **not** a completeness gate — a
-class nobody enrolled still recurs, and **#2296 contributes its indicators
-into this subsection** rather than creating a rival artifact.
+`:OnboardingState`/`:OnboardingStep`). The first home is bound
+**bidirectionally** by that test; the second is a hand-maintained presence
+check (the test pins the class names, not the `_SNAPSHOT_SECTIONS` tuple). It
+is **not** a completeness gate — a class nobody enrolled still recurs, and
+**#2296 contributes its indicators into this subsection** rather than creating
+a rival artifact.
 
 <!-- config-registry:preserved -->
 | Preserved class (authoritative) | Identity property |
@@ -317,21 +320,29 @@ gate in `tests/test_durability_posture.py` fails the build if a
   `:OnboardingStep` node onto its **parent**; a raw graph whose step node's own
   `org_id` diverges from its parent's is therefore re-keyed rather than carried
   verbatim. Every writer co-writes both in one statement
-  (`write_completed_step`) and every reader matches through the parent edge, so
-  this too is a raw/hand-edited graph only. The remedy is the same as for
-  #2814: the operator deletes the pending rescue file (never the retired,
-  entry-less one).
+  (`write_completed_step`), and the edge-traversing readers
+  (`completed_steps`, `decide_completed_edge_exists`) match through the parent
+  edge — but the readers that key the step's OWN `org_id`
+  (`_prune_orphan_decide_step`, `remove_decide_completed_edge`) would no
+  longer find a re-keyed diverged step under its original org. Like the anchor
+  divergence above, this too is a raw/hand-edited graph only. The remedy is
+  the same as for #2814: the operator deletes the pending rescue file (never
+  the retired, entry-less one).
 - **#4641 residual (state-UNKNOWN)** — a rescue file written before onboarding
-  preservation (carrying no `onboarding_snapshot`/`onboarding_step_links` key)
-  cannot say whether the graph it describes ever had onboarding state, so the
-  restore reports **UNKNOWN, not absent** (`onboarding_state_unknown`, an ERROR
-  line, and a gap in `onboarding_gap`), mirroring #2814's
-  `legacy_sidecar_no_config_record`. Unlike the config marker this signal is
-  **not durable**: there is no on-graph onboarding-unknown marker, because the
-  onboarding state machine has no such property and adding one is a state
-  machine change owned by #5048. After the run, `:OnboardingState`'s *absence*
-  still cannot be told from *never onboarded* — only the log and the returned
-  counts carry the distinction.
+  preservation (carrying no `onboarding_snapshot`/`onboarding_step_links` key,
+  or carrying only one of the two) cannot say whether the graph it describes
+  ever had onboarding state, so the restore reports **UNKNOWN, not absent**
+  (`onboarding_state_unknown`, an ERROR line, and a gap in `onboarding_gap`),
+  mirroring #2814's `legacy_sidecar_no_config_record`. The signal is **carried
+  forward** across this run's own sidecar write as a metadata key
+  (`onboarding_unknown`), because this build writes both sections (empty), so
+  otherwise a second interruption would make the retry read present-but-empty
+  keys as "captured and empty" and lose the UNKNOWN. It is still **not
+  durable in the graph**: there is no on-graph onboarding-unknown marker,
+  because the onboarding state machine has no such property and adding one is
+  a state machine change owned by #5048. Once the rescue file is retired,
+  `:OnboardingState`'s *absence* cannot be told from *never onboarded* — only
+  the log and the returned counts carried the distinction.
 - **#4641 residual (the sidecar is caller-supplied)** — the pre-wipe sidecar is
   read from the caller-supplied `--dir` and carries **no provenance binding**
   (no HMAC, no ownership check), so shape validation

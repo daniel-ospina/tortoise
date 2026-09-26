@@ -1082,6 +1082,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # as loss; reading the one key also keeps this caller and the CLI from
         # drifting apart (#4641 review round 6).
         onboarding_gap = int(counts.get("onboarding_gap") or 0)
+        onboarding_missing_total = int(
+            counts.get("onboarding_missing_total") or 0)
+        onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
         result = {"recovered": True,
                   "log_points": events,
                   "db_points": nodes,
@@ -1089,10 +1092,26 @@ def recover_from_log(events_dir: str, projection) -> dict:
                              f"(#2943): {nodes} nodes, {edges} edges")}
         if onboarding_gap:
             result["onboarding_gap"] = onboarding_gap
-            result["reason"] += (
-                f"; WARNING: {onboarding_gap} onboarding state/edge "
-                "restore gap(s) the replay could not close — see the "
-                "rebuild ERROR log (#4641)")
+            # Additive, not a chain: a confirmed partial loss and a
+            # pre-preservation UNKNOWN can coexist, and one must not suppress
+            # the other (#4641 review round 7).
+            if counts.get("onboarding_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the onboarding post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's onboarding state "
+                    "is UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — see #4641")
+            if onboarding_missing_total:
+                result["reason"] += (
+                    f"; WARNING: {onboarding_missing_total} onboarding "
+                    "state/edge restore gap(s) the replay could not close — "
+                    "see the rebuild ERROR log (#4641)")
+            if onboarding_unknown:
+                result["onboarding_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot predates "
+                    "onboarding preservation, so this graph's onboarding "
+                    "state is UNKNOWN (not confirmed absent) — see #4641")
         return result
 
     if not files:
