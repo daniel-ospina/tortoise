@@ -59,6 +59,7 @@ aboutObjects: tortoise
 | #1370 write-time subject binding — confidence-gated, fail-closed direct `aboutSubject` edges (scope + plan; root cause = empty Subject layer, also #4934) | `docs/scoping/2026-09-24-1370-write-time-subject-binding.md` · `docs/plans/2026-09-24-1370-write-time-subject-binding.md` |
 | #2535 invited-user onboarding — what "joining an org" means; the membership model as it is, the member connect gap after the (shipped) skip, multi-org, and the recorded decisions (POLICY A · #2789 · #2534) | `docs/scoping/2026-09-25-2535-invited-user-onboarding-design.md` |
 | #3027 OAuth authorization-code redemption state — durable `redemption_state`/`redemption_id` + `code_id` provenance, the claim-identity CAS fence, why the reconciler never re-arms, and the directional `used_at`-agreement CHECK | `docs/scoping/2026-09-25-3027-oauth-redemption-state.md` |
+| #4911 capture-path credential redaction — the anchored scrubber at the ONE stored-text definition, the three persistence consumers it reaches, the local-spool exclusion ruling, and the measured residuals | `docs/scoping/2026-09-25-4911-capture-secret-redaction.md` |
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
