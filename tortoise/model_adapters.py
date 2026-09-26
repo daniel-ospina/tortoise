@@ -500,12 +500,17 @@ def is_billing_exhausted(exc: BaseException) -> bool:
       * **HTTP 403 carrying a key-limit body signature** (#4860) —
         ``is_key_limit_403``; the BODY, not the status, is the discriminator.
 
-    CONSULTED BY TWO CALLERS, ON DELIBERATELY DIFFERENT SCOPES:
+    CONSULTED BY THREE CALLERS, ON DELIBERATELY DIFFERENT SCOPES:
     ``RotatingModel`` uses the FULL class (402 and the key-limit 403 both
     rotate to an alternative), while ``RoutingModel`` uses only the NARROW
     ``is_key_limit_403`` — a bare 402 stays fatal there by the recorded
     #1987/#1509 decision, and must not be "tidied" into symmetry. The
     predicate itself is unchanged and remains the rotation contract.
+    The extractor's census classifier (``extractor_v2._classify_error``,
+    #4959) consults the SAME seam to map a key-limit 403 to the census's
+    billing class, so the extraction-killer gate fires on a key-limited
+    run — one seam, so the rotation decision and the census class can never
+    disagree.
 
     With no alternative lane ``RotatingModel`` raises loud (its n==1
     guard). Deliberately NOT part of the M2/M3 taxonomy export contract —

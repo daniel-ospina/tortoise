@@ -474,3 +474,55 @@ def test_reval3_replay_flagged_degraded():
     assert report["integrity"]["error_census"]["fatal_402_billing"] > 0
     # the BLEND is still emitted — but never without the split beside it.
     assert report["accuracy"]["overall"] == round(44 / 50, 4)  # 0.88 blend
+
+
+# ── #4959: key-limit 403 must reach the killer gate ────────────────────────
+
+def _key_limit_403() -> Exception:
+    """A REAL ``requests.HTTPError`` for OpenRouter's exhausted-key 403
+    (#4860: budget spent, key valid), built through ``raise_for_status()``
+    so the response BODY reaches the classifier the way production delivers
+    it (``err.response.text``) rather than via a fabricated attribute."""
+    import requests
+
+    resp = requests.Response()
+    resp.status_code = 403
+    resp.encoding = "utf-8"
+    resp._content = (b'{"error":{"message":"Key limit exceeded (monthly '
+                     b'limit).","code":403}}')
+    resp.url = "https://openrouter.ai/api/v1/chat/completions"
+    resp.request = requests.Request("POST", resp.url).prepare()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as err:
+        return err
+    raise AssertionError("raise_for_status did not raise")
+
+
+def test_key_limit_403_from_the_classifier_fires_the_run_killer_gate():
+    """#4959 end-to-end: the census class the extractor writes for a real
+    provider key-limit 403 lands in ``EXTRACTION_KILLER_CENSUS_CLASSES``, so
+    the RUN is flagged degraded by the killer class ALONE — with the degraded
+    fraction far below its threshold, proving the census path (not the
+    fraction path) is what fires.
+
+    Before the fix the same 403 recorded ``fatal_403_forbidden`` — outside
+    the killer set — and a key-limited run could certify as healthy
+    (#4860: all 7 captures aborted on an exhausted key)."""
+    from tools.longmem_eval.report import EXTRACTION_KILLER_CENSUS_CLASSES
+    from tortoise import extractor_v2
+
+    census: dict[str, int] = {}
+    extractor_v2._bump_census(census, _key_limit_403())
+    assert census == {"fatal_402_billing": 1}
+    assert set(census) & EXTRACTION_KILLER_CENSUS_CLASSES
+
+    # one partially-extracting question (the reval3 shape: 202 points AND a
+    # billing error) among 19 clean ones. The degraded FRACTION (1/20 = 0.05)
+    # is below the run threshold — only the killer census class can flag it.
+    outcomes = [_outcome("q0", points=202, error_classes=dict(census))]
+    outcomes += [_outcome(f"h{i}", points=350) for i in range(19)]
+    eh = _report(outcomes)["extraction_health"]
+    assert eh["degraded_n"] == 1 and eh["healthy_n"] == 19
+    assert eh["degraded_fraction"] < eh["threshold"]
+    assert eh["status"] == "degraded"
