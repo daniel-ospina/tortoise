@@ -549,6 +549,15 @@ TOOL_CARVEOUTS = (
     # tier-1 smoke) and its own wiring/behaviour tests would never run on the
     # PR that edits it.
     "tools/embedder_provision.py",
+    # #4256: the "who is on #N?" verb (tools/who_is_on.py + its wrapper
+    # tools/who-is-on.sh) owns tests/test_who_is_on.py. Same silent-drop class
+    # as the collision_preflight carve-out above: no SOURCE_PATTERNS entry
+    # matches `tools/who_is_on.py`, so a change to the tool alone would be
+    # swallowed by the flat "tools/" prefix, classify as docs-only, and its own
+    # guard test would never run on the PR that changes it. Fail-closed (FULL
+    # matrix) is the safe default for a tool whose answer drives dispatch.
+    "tools/who_is_on.py",
+    "tools/who-is-on.sh",
 )
 
 

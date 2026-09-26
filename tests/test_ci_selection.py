@@ -458,6 +458,20 @@ def test_collision_preflight_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_who_is_on_tool_change_fails_closed_to_full():
+    # #4256: tools/who_is_on.py (+ its tools/who-is-on.sh wrapper) owns
+    # tests/test_who_is_on.py. Same #3261 silent-drop class as
+    # tools/collision_preflight.py above: without the TOOL_CARVEOUTS entries the
+    # flat "tools/" prefix swallows the path, `changed` comes back empty,
+    # select() takes the docs-only return (surfaces=[], tier-1 smoke) and the
+    # tool's own guard test never runs on the PR that changes it.
+    for path in ("tools/who_is_on.py", "tools/who-is-on.sh"):
+        r = _sel([path])
+        assert r["full"] is True, path
+        assert r["test_files"] == "ALL", path
+        assert "core" in r["surfaces"], path
+
+
 def test_backfill_script_only_change_selects_eval():
     # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
     # path — a backfill-only PR selects the eval surface (its test,

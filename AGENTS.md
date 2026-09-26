@@ -405,6 +405,21 @@ python3 tools/collision_preflight.py <N> --repo .
 python3 tools/collision_preflight.py <N> --repo owner/name
 ```
 
+**Asking "who is on #N?" is a different question from "may I dispatch?"** The pre-flight is the
+*gate* — it exits 1 on a hit and 2 when a surface cannot be queried. For the human-facing question
+use the supported verb, which *answers*: it reuses the pre-flight's own enumeration (so the two
+cannot disagree), exits 0 for a complete answer, and 2 — never 1 — when a surface could not be
+queried:
+
+```bash
+tools/who-is-on.sh <N> --repo .   # who holds #N — local-only branches + worktrees included
+tools/who-is-on.sh --inventory    # local-only branches carrying uncommitted work (#4256)
+```
+
+Never answer "who is on #N?" from a remote-only `gh` query: it enumerates REMOTE refs only, so it
+cannot see a branch that was never pushed or a worktree's uncommitted changes — and reports live
+work as free. That gap is #4256.
+
 **The target is established, never assumed (#4027).** Every repository-scoped `gh` call carries
 the resolved `owner/name` (the two deliberate exceptions are `gh repo view`, which *discovers* the
 slug and so has nothing to send yet, and `gh api user`, which identifies the lane's account and is
@@ -452,7 +467,7 @@ worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a 
 | `tests/` | Test suite (pytest) |
 | `graph-scripts/` | Historical graph operations (pricing decisions, migrations, audit) |
 | `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts (symlink) |
-| `tools/` | In-repo tooling — e.g. `collision_preflight.py` (pre-dispatch in-flight-work check, #3061) |
+| `tools/` | In-repo tooling — e.g. `collision_preflight.py` (pre-dispatch in-flight-work check, #3061) and `who_is_on.py` / `who-is-on.sh` (the "who is on #N?" verb + stranded-work inventory, #4256) |
 | `config/` | YAML configs (routing, pipelines) |
 | `docs/` | Architecture, ontology, legal, strategy docs |
 | `data/` | Event logs, extracted documents, ontology |
