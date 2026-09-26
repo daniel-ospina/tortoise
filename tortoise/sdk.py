@@ -5840,8 +5840,13 @@ class TortoiseSDK:
         artifact — refusing on that would be a guess, not a comparison, so it
         proceeds and stamps as before (that point's window already covers no
         PARSEABLE instant, so the write cannot newly hide it from any
-        parseable query instant). Equality is NOT an inversion: ``>`` is
-        strict, so a zero-length ``[now, now]`` window is fine.
+        parseable query instant). EVERY matching node is examined, not just
+        the first: the writer's stamp block MATCHes **EVERY** node carrying
+        the id, and point ids are not unique (the duplicate fan-out is a
+        tested shape), so a first-row-only read could pass the guard and still
+        stamp an inverted window on a sibling node. Equality is NOT an
+        inversion: ``>`` is strict, so a zero-length ``[now, now]`` window is
+        fine.
 
         Shared by the writer (``invalidate_point``) and the MCP dry-run
         preview (``_preview_invalidate``) so the two cannot drift — the
@@ -5853,22 +5858,32 @@ class TortoiseSDK:
             "MATCH (n:Point {id:$id}) RETURN n.validFrom",
             params={"id": point_id},
         ).result_set
-        stored_vf = vf_rows[0][0] if vf_rows else None
-        if stored_vf is None:
+        if not vf_rows:
             return
         from .search_engine import _created_sort_key
-        k_vf = _created_sort_key(stored_vf)
         k_now = _created_sort_key(now)
-        if k_vf[0] == 0 and k_now[0] == 0 and k_vf[1] > k_now[1]:
-            raise ValueError(
-                f"invalidate_point: cannot invalidate {point_id!r} — its "
-                f"validFrom {stored_vf!r} is AFTER now ({now!r}), so "
-                f"stamping validTo=now would persist an inverted window "
-                f"(validTo < validFrom) and the point would disappear "
-                f"from every temporal query. retract_point is the "
-                f"window-agnostic route (it does not touch the window): "
-                f"call retract_point({point_id!r}) instead."
-            )
+        if k_now[0] != 0:
+            return  # `now` is a fresh ISO stamp; defensive symmetry
+        # The writer's stamp block MATCHes and stamps EVERY node carrying this
+        # id — point ids are not unique (the duplicate fan-out is a tested
+        # shape: test_dry_run_preview's count tests), so the guard must refuse
+        # on ANY parseable stored start after `now`, never merely the first
+        # row the server happens to return (row order is server-dependent).
+        for row in vf_rows:
+            stored_vf = row[0]
+            if stored_vf is None:
+                continue
+            k_vf = _created_sort_key(stored_vf)
+            if k_vf[0] == 0 and k_vf[1] > k_now[1]:
+                raise ValueError(
+                    f"invalidate_point: cannot invalidate {point_id!r} — its "
+                    f"validFrom {stored_vf!r} is AFTER now ({now!r}), so "
+                    f"stamping validTo=now would persist an inverted window "
+                    f"(validTo < validFrom) and the point would disappear "
+                    f"from every temporal query. retract_point is the "
+                    f"window-agnostic route (it does not touch the window): "
+                    f"call retract_point({point_id!r}) instead."
+                )
 
     def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.

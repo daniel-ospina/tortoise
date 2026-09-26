@@ -4311,7 +4311,14 @@ def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
     """Preview `tortoise_invalidate` — outdate ONE point, add ONE CORRECTS
     edge. Both lifecycle guards AND the writer's #5358 inverted-window
     precondition run first, mirroring the write's validation order and
-    messages."""
+    messages.
+
+    The #5358 check reads its own clock, which precedes the writer's. The
+    guarantee is therefore ONE-WAY, in the safe direction: the preview refuses
+    whenever the write would refuse (a start inside the preview→write interval
+    may be refused here and accepted there — conservative, never a false
+    "the write will succeed"). Do NOT "fix" that asymmetry by dropping the
+    shared call: a green preview must mean the write accepts."""
     if id == corrected_by_id:
         raise ValueError(
             f"invalidate_point: corrected_by cannot be the point itself ({id!r})"

@@ -801,7 +801,7 @@ class TestDryRunKeepsValidation:
         contract). The shared `_assert_window_start_not_inverted` is what
         makes the two agree; this is the differential that keeps it shared.
         """
-        future = (_dt.datetime.now(_dt.timezone.utc)
+        future = (_dt.datetime.now(_dt.UTC)
                   + _dt.timedelta(days=30)).replace(microsecond=0)
         old = sdk.create_point(
             "statement", "future claim", validFrom=future.isoformat())["id"]
@@ -821,7 +821,7 @@ class TestDryRunKeepsValidation:
         """`tortoise_supersede(transfer_edges=False)` reuses the invalidate
         preview, so it inherits the #5358 refusal — pinned, because a
         re-divergence of the two previews would otherwise be silent."""
-        future = (_dt.datetime.now(_dt.timezone.utc)
+        future = (_dt.datetime.now(_dt.UTC)
                   + _dt.timedelta(days=30)).replace(microsecond=0)
         old = sdk.create_point(
             "statement", "future claim", validFrom=future.isoformat())["id"]

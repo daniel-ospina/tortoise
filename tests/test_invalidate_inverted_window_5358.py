@@ -22,9 +22,10 @@ with) and its PRESENCE predicate (``is not None``, never truthiness; the
 falsey-but-present truthiness bug is #3985).  A refusal fires only on a
 *decidable* inversion: an unparseable stored start is not compared.
 
-Every test asserts the OUTCOME through the read path (``restore_point_at``),
-not by inspecting props alone — props are asserted only for the
-"nothing was mutated" half of the contract.
+Every test asserts the read-path OUTCOME via ``restore_point_at``; props are
+asserted ADDITIONALLY as corroboration — byte-identical pre/post props for the
+refusal, and the stamped window/flag for the success cases — never as the sole
+evidence of an outcome.
 
 Runnable with:
   TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \\
@@ -111,7 +112,7 @@ def test_future_dated_predecessor_refused_without_mutation(sdk):
     window/flag props, the CORRECTS edge, and the ``PointInvalidated`` journal
     are all untouched ("before any mutation" is silently violable).
     """
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.UTC)
     future = (now + _dt.timedelta(days=30)).replace(microsecond=0)
     old = _make_point(sdk, content="future claim",
                       validFrom=future.isoformat())
@@ -153,7 +154,7 @@ def test_normal_dated_predecessor_still_invalidates_and_stays_readable(sdk):
     """
     from tortoise.search_engine import _created_sort_key
 
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.UTC)
     past = (now - _dt.timedelta(days=30)).replace(microsecond=0)
     old = _make_point(sdk, content="live claim", validFrom=past.isoformat())
     repl = _make_point(sdk, content="replacement")
@@ -188,7 +189,7 @@ def test_valid_from_equal_to_now_is_not_an_inversion(sdk, monkeypatch):
     could not distinguish ``>`` from ``>=`` (``now`` always advances past a
     value read a moment earlier, so a ``>=`` guard would pass by accident).
     """
-    fixed = _dt.datetime(2031, 3, 4, 5, 6, 7, tzinfo=_dt.timezone.utc)
+    fixed = _dt.datetime(2031, 3, 4, 5, 6, 7, tzinfo=_dt.UTC)
     stamp = fixed.isoformat()
     old = _make_point(sdk, content="zero-length", validFrom=stamp)
     repl = _make_point(sdk, content="replacement")
@@ -224,7 +225,7 @@ def test_unparseable_valid_from_does_not_refuse(sdk):
     stamps as before.  (That point's window already covers no PARSEABLE instant,
     so the write cannot newly hide it.)
     """
-    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    now_iso = _dt.datetime.now(_dt.UTC).isoformat()
     old = _make_point(sdk, content="undecidable", validFrom="not-a-date")
     repl = _make_point(sdk, content="replacement")
 
@@ -251,7 +252,7 @@ def test_falsey_but_present_valid_from_is_a_real_past_start(sdk):
     ``""`` → unparseable), so the presence predicate is not observable from
     this guard's behaviour; the READ-PATH outcome is what is pinned here.
     """
-    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    now_iso = _dt.datetime.now(_dt.UTC).isoformat()
     old = _make_point(sdk, content="epoch-zero", validFrom=0)
     repl = _make_point(sdk, content="replacement")
 
@@ -279,7 +280,7 @@ def test_retract_point_is_the_window_agnostic_route_after_refusal(sdk):
     must not touch ``validTo``/``expiredAt``, and the future-dated window must
     still resolve through the read path afterwards.
     """
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.UTC)
     future = (now + _dt.timedelta(days=30)).replace(microsecond=0)
     old = _make_point(sdk, content="future claim", validFrom=future.isoformat())
     repl = _make_point(sdk, content="replacement")
@@ -296,3 +297,46 @@ def test_retract_point_is_the_window_agnostic_route_after_refusal(sdk):
         old["id"], (future + _dt.timedelta(days=15)).isoformat())
     assert out["found"] is True
     assert out["valid_point"]["id"] == old["id"]
+
+
+# ── Duplicate ids: the writer stamps EVERY matching node ───────────────
+
+def test_duplicate_id_group_refuses_when_ANY_node_is_future_dated(sdk):
+    """The writer's stamp block MATCHes **EVERY** node carrying the id, so the
+    guard must refuse on ANY inverted stored start — not just the first row.
+
+    Point ids are not unique (the duplicate fan-out is a tested shape:
+    ``test_dry_run_preview`` counts duplicate-id pairs). A first-row-only guard
+    passes when the server returns the past-dated node first, and the stamp
+    block then inverts the future-dated sibling's window — the exact #5358
+    corruption, still reachable. The past-dated node is inserted FIRST here so
+    the first-row read is the one that would pass.
+    """
+    now = _dt.datetime.now(_dt.UTC)
+    past = (now - _dt.timedelta(days=30)).replace(microsecond=0)
+    future = (now + _dt.timedelta(days=30)).replace(microsecond=0)
+    proj = sdk._get_proj()
+    proj.g.query(
+        "CREATE (a:Point {id:'dup5358', content:'past', validFrom:$past})",
+        params={"past": past.isoformat()},
+    )
+    proj.g.query(
+        "CREATE (b:Point {id:'dup5358', content:'future', validFrom:$future})",
+        params={"future": future.isoformat()},
+    )
+    repl = _make_point(sdk, content="replacement")
+
+    with pytest.raises(ValueError, match="retract_point"):
+        sdk.invalidate_point("dup5358", repl["id"])
+
+    rows = proj.g.query(
+        "MATCH (n:Point {id:'dup5358'}) RETURN n.validFrom, n.validTo"
+    ).result_set
+    assert len(rows) == 2
+    for _vf, vt in rows:
+        assert vt is None, f"a duplicate-id node was stamped validTo={vt!r}"
+    # both windows stay open-ended, so the future instant resolves — the
+    # inversion would have made it unreachable
+    out = sdk.restore_point_at(
+        "dup5358", (future + _dt.timedelta(days=15)).isoformat())
+    assert out["found"] is True
