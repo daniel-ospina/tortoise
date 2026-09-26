@@ -173,6 +173,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_entity_key_expansion.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                       r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2518 entity-key expansion: module live-FalkorDB probe (DELIBERATE_URI) + per-test docker force
+    # C6 #2520: time-aware query expansion — module-level live-FalkorDB probe
+    # (set + restore) + per-test fresh-graph fixture (the test_coverage_loop
+    # pattern; the monkeypatch.setenv auto-restores).
+    "test_time_aware_sdk_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_time_aware_eval_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                       r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    "test_time_aware_run_2520.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_hnsw_vector_index.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_ingest.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_integration_search.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
@@ -200,6 +207,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # DELIBERATE_URI: the docker-calibrated cross-lens test (T8 D9) forces
     # the docker lane — its setenv IS the test input.
     "test_cross_lens.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #1370: the subject-binding suite's URI-mode construction case forces the
+    # docker lane so `_graph_report` takes its URI branch. The URI is
+    # DELIBERATELY unreachable (port 16610) — the test pins the construction
+    # contract (no positional db_path, namespace passed through) against a
+    # spy SDK, so it never needs a server and proves nothing about one.
+    # Fixture-param monkeypatch, so pytest auto-undoes at teardown (no lane
+    # leak into a later docker-lane test).
+    "test_subject_binding_1370.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── Mixed lanes: CLI/HTTP surfaces force BOTH lanes deliberately ────────
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
@@ -239,6 +254,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # where the URI literal sits on the following line.
     "test_backup.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
+    # #5222/#5188 + #5222's hygiene gate: both files are HERMETIC (the SDK / the
+    # reaper is faked, no server is contacted), and both force the embedded or a
+    # test-pinned lane on purpose — the delenv/setenv IS the input, so the site
+    # must not be read as riding the ambient URI.
+    #   * backfill guard: `delenv` twice, so the run cannot inherit a developer's
+    #     ambient URI and accidentally target a real graph (the guard under test
+    #     resolves the namespace, not the URI path — #5188).
+    #   * server hygiene: `setenv` points the teardown probe at the test matrix
+    #     so the reaper's own path is exercised; fixture-param monkeypatch, so
+    #     pytest auto-undoes it at teardown (no lane leak).
+    "test_backfill_ghost_members_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                     # the URI literal sits on the FOLLOWING line at
+                                     # :251 (`setenv(` then the string), so the site's
+                                     # own line matches only the trailing branch — the
+                                     # same multi-line shape and the same remedy as
+                                     # `test_backup.py` above.
+                                     r'monkeypatch\.setenv\(\s*$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
