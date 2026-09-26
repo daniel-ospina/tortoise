@@ -866,11 +866,12 @@ def test_402_single_provider_raises_loud(monkeypatch):
 @pytest.mark.timeout(10)  # an unbounded-loop regression must fail fast, not hang CI
 def test_402_all_providers_dead_raises_bounded(monkeypatch):
     """#1951 no-infinite-loop bound, n≥2: BOTH providers 402 → the bounded
-    n*3 loop cooldowns each once, spends the rest of its attempts skipping
-    cooldowned lanes, and re-raises the last 402 loudly. Total real
-    attempts = 2 (≤ 6 bound) — no retry storm, no hang. A SECOND call with
-    both lanes still cooldowned raises the all-in-cooldown RuntimeError
-    (bounded, no hang) — the retry-continuity contract."""
+    n*3 rotation budget cooldowns each once, and the #4992 reachability pass
+    finds both already cooldowned and adds no calls, so the last 402 is
+    re-raised loudly. Total real attempts = 2 (≤ the 4n = 8 ceiling) — no
+    retry storm, no hang. A SECOND call with both lanes still cooldowned raises
+    the all-in-cooldown RuntimeError (bounded, no hang) — the
+    retry-continuity contract."""
     import random as _random
 
     from tortoise.model_adapters import RotatingModel
