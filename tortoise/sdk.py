@@ -18199,14 +18199,21 @@ class TortoiseSDK:
             secondary_entity_id_props,
         )
 
-        # #4649: a write can MOVE the node it addressed. `id` is refused by
-        # `_sanitize_props` above, but `url` (a :Source's identity) and
-        # `eventId` are writable — and the OR-set below matches by exactly those
-        # keys. The tail would then re-resolve by `id_val` and MISS the node
-        # this very call re-keyed, returning `{}` — the value `update()` /
-        # `get_entity` document as "nothing was written" — which is the
-        # success/no-op ambiguity #4649 removes, merely inverted. Track the
-        # address the write LEAVES BEHIND and resolve the return through it.
+        # #4649: a write can MOVE the node it addressed. The only identity key a
+        # caller may rewrite is `url` (a :Source's identity): `id` is refused by
+        # `_sanitize_props` above, and `eventId` is refused for every EVENT
+        # target by the #2104 guard above — whose `MATCH (e:Event) WHERE
+        # e.eventId = $id OR e.id = $id` is a SUPERSET of the Event branch's
+        # own MATCH below, so an Event can never be the node this loop matches
+        # while `eventId` is in props (`eventId` stays writable on a Point, but
+        # a Point is matched by `id`, which is never in props). The OR-set below
+        # matches by exactly those keys. The tail would then re-resolve by
+        # `id_val` and MISS the node this very call re-keyed, returning `{}` —
+        # the value `update()` / `get_entity` document as "nothing was
+        # written" — which is the success/no-op ambiguity #4649 removes, merely
+        # inverted. Track the address the write LEAVES BEHIND and resolve the
+        # return through it (the re-key guard is kept general and defensively
+        # covers `eventId` should that ban ever be lifted).
         post_write_id = id_val
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             # #4649: a canonical label's identity is an OR-SET, not one key.
