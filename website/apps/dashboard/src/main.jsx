@@ -28,6 +28,10 @@ import { setupGuide } from './setupGuide.js'
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
+// #4646: the ONE observed-connection predicate, shared with the Overview's
+// connection card (connectionObservation.js). The wizard and the card state the
+// same server fact and must not each re-decide it.
+import { harnessConnectionObserved } from './connectionObservation.js'
 // #3890: the D5 empty state's ONE primary action (a real link to the live
 // home of the four source toggles — Settings → Memory sources), the
 // hash→tab deep-link resolver, and the focus mover. Extracted so the suite
@@ -1451,8 +1455,15 @@ function claimIntentInFlight() {
   // `serverHarnessConnected` is now the ONLY source, read straight from the
   // server projection (refreshOnboarding at wizard-open + the step-3 landing
   // refresh keep it fresh).
-  const serverHarnessConnected = Array.isArray(onboarding && onboarding.completed_steps) &&
-    onboarding.completed_steps.includes('harness-connected')
+  //
+  // #4646: the read is the SHARED observed-connection predicate
+  // (connectionObservation.js), which the Overview's connection card consumes
+  // too — the two surfaces state ONE fact. It is deliberately edge-only: a
+  // completion verdict (`status === 'complete'` / `onboarding_complete`) is a
+  // different thing, and the grandfathered population reaches wire completion
+  // with no observed edge. The guard that a graph-down `'unavailable'` string
+  // never reads as connected lives in the helper.
+  const serverHarnessConnected = harnessConnectionObserved(onboarding)
   // `wizardPaused` is set ONLY by the connect step's THREE live "Skip for now"
   // escapes — the keyless/owner nav, the cap-remedy nav, and the main
   // per-harness nav (`setWizardPaused(true)` has exactly three call sites) — so
