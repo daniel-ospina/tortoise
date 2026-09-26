@@ -798,10 +798,11 @@ def _install_partial_init_cleanup_guard() -> None:
     RedisMixin._tortoise_partial_init_guard = True
 
 
-# Installed at import (before any client is constructed). Redislite's own
-# `atexit.register(self._cleanup, ...)` resolves `self._cleanup` through the
-# class, so both its atexit seam and `__del__` pick up the guarded version.
-_install_partial_init_cleanup_guard()
+# NOT called here — see `install_redislite_guards()` at the END of this module
+# (#5386). Redislite's own `atexit.register(self._cleanup, ...)` resolves
+# `self._cleanup` through the class, so both its atexit seam and `__del__`
+# pick up the guarded version; the guard is installed the moment redislite is
+# imported, which is the earliest point at which a client can exist.
 
 
 # ── Issue #1475: deterministic close-on-GC (lifecycle finalize) ────────────
@@ -2513,9 +2514,89 @@ def _install_dead_socket_guard() -> None:
     RedisMixin._tortoise_dead_socket_guard = True
 
 
-# Installed at import, at the END of the module so `record_owner` and
-# `owner_socket_of` are defined first. `tortoise/__init__.py` imports this
-# module before it defines the guarded `FalkorDB`, so the patch is always in
-# place before any tortoise construction.
-_install_owner_record_patch()
-_install_dead_socket_guard()
+_REDISLITE_GUARDS_INSTALLED = False
+
+
+def install_redislite_guards() -> None:
+    """Install all three redislite patches, once (#5386).
+
+    Order is irrelevant (the patch targets are disjoint), and each installer
+    is itself idempotent and a no-op when redislite is absent; this wrapper
+    adds the single once-only guard so a repeated or re-entrant call cannot
+    re-wrap an already-wrapped seam.
+    """
+    global _REDISLITE_GUARDS_INSTALLED
+    if _REDISLITE_GUARDS_INSTALLED:
+        return
+    _REDISLITE_GUARDS_INSTALLED = True
+    _install_partial_init_cleanup_guard()
+    _install_owner_record_patch()
+    _install_dead_socket_guard()
+
+
+class _RedisliteGuardInstaller:
+    """Install the redislite patches the moment redislite finishes importing.
+
+    #5386: `import tortoise` must not import redislite (it is ~90% of that
+    module's import cost), yet the three patches above MUST be in place before
+    the first redislite client of ANY kind is constructed — including RAW
+    constructions that never go through the guarded `tortoise.FalkorDB`
+    (#4487: the reaper's per-server "all owners dead" signal has no other
+    input; #3653/#4879 ride the same seam). Those two requirements are only
+    compatible if the trigger is redislite's OWN import: a client cannot exist
+    before the module defining its class has been loaded.
+
+    This finder provides that trigger. It claims only the top-level
+    `redislite` package, builds the spec through the normal `PathFinder` (so
+    every other finder keeps its usual say in the import), and wraps only that
+    spec's `exec_module` — redislite's module object and resolution order are
+    unchanged.
+    """
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != "redislite":
+            return None
+        import importlib.machinery
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if spec is None or spec.loader is None:
+            return None
+        original_exec_module = spec.loader.exec_module
+
+        def exec_module(module):
+            original_exec_module(module)
+            try:
+                install_redislite_guards()
+            except Exception:  # pragma: no cover - a patch must never break an import
+                pass
+
+        spec.loader.exec_module = exec_module
+        return spec
+
+
+def _arm_redislite_guard_installer() -> None:
+    """Install the patches now if redislite is loaded, else when it is imported.
+
+    Called at the end of this module — which `tortoise/__init__.py` imports at
+    `import tortoise` time — so the trigger exists before any code can reach
+    redislite, while redislite itself is never imported here.
+    """
+    if "redislite" in sys.modules:
+        # redislite was imported before tortoise: patch it now, exactly as the
+        # pre-#5386 import-time calls did.
+        install_redislite_guards()
+        return
+    import importlib.machinery
+    finder = _RedisliteGuardInstaller()
+    for index, existing in enumerate(sys.meta_path):
+        if existing is importlib.machinery.PathFinder:
+            # Immediately BEFORE `PathFinder` so that every finder which would
+            # have preceded it still does (a blocker still blocks) while the
+            # spec itself is still built by `PathFinder`.
+            sys.meta_path.insert(index, finder)
+            return
+    sys.meta_path.insert(0, finder)
+
+
+# Armed at import, at the END of the module so `record_owner` and
+# `owner_socket_of` are defined first.
+_arm_redislite_guard_installer()
