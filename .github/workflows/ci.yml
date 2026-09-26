@@ -499,16 +499,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # #2386: the changed-markdown diff below is a three-dot diff against
+          # pull_request.base.sha, so the base COMMIT must be in the local object
+          # store. The default depth-1 checkout omits it and the diff dies with
+          # `fatal: Invalid symmetric difference expression <base>...HEAD`; that
+          # fatal was swallowed by `|| true`, `files` came out empty, both lint
+          # steps were skipped and the REQUIRED `docs` check reported green
+          # without linting anything (job 100109903325). Full depth makes the
+          # base resolvable, so the diff is a real function of the PR's changes.
+          fetch-depth: 0
       - name: Conflict-marker check (#2802)
         # A whole-file unresolved conflict block was invisible to every gate and
-        # shipped to main twice (#2802, merge b71aa1534). Two independent gaps:
-        # the `docs` job's markdownlint/lychee steps are SKIPPED on PRs (the
-        # checkout is shallow, so github.event.pull_request.base.sha is absent,
-        # `git diff ... || true` swallows the failure and `files` comes out
-        # empty), and check-doc-affiliation.cjs is not wired into any workflow
-        # (it only validates frontmatter keys anyway). This step is
-        # checkout-depth independent and is today the job's only real content
-        # gate. Repo-wide, fail-closed. `=======` is deliberately NOT matched:
+        # shipped to main twice (#2802, merge b71aa1534). One of the two gaps is
+        # now CLOSED: the `docs` job's markdownlint/lychee steps used to be
+        # SKIPPED because the shallow checkout lacked
+        # github.event.pull_request.base.sha, `git diff ... || true` swallowed the
+        # failure and `files` came out empty (#2386 — the checkout is now
+        # full-depth and the diff is fail-closed). The other gap remains:
+        # check-doc-affiliation.cjs is not wired into any workflow (it only
+        # validates frontmatter keys anyway). This step is checkout-depth
+        # independent. Repo-wide, fail-closed. `=======` is deliberately NOT
+        # matched:
         # 7 equals is a valid setext H1 underline (a real false positive at
         # website/apps/dashboard/node_modules/js-tokens/README.md:238), and a
         # real conflict block always carries the <</>> markers anyway.
@@ -531,18 +543,52 @@ jobs:
           node-version: '22'
       - name: Get changed markdown files
         id: changed
+        env:
+          # #2386: the base SHA is passed through the ENVIRONMENT, not a `${{ }}`
+          # interpolation inside the shell, so the run body below is pure bash and
+          # is EXECUTED (not text-scanned) by tests/test_docs_lint_gate.py.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # `--no-renames` is deliberate here, though this is a lint-target list
           # rather than a changed-set SELECTION set (so the pin that enforces the
           # flag workflow-wide still applies to it): a rename's deleted .md source
-          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
+          # path is tolerated because markdownlint-cli2 exits 0 on a nonexistent
           # path, and plain .md deletions already produce exactly such paths.
           # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
-          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          # #2386, fail-closed. An empty BASE_SHA would make the pathspec below
+          # read `...HEAD` — git's shorthand for `HEAD...HEAD` — which resolves to
+          # an EMPTY diff with exit 0: the exact silent green this step exists to
+          # prevent, one input over.
+          if [ -z "${BASE_SHA:-}" ]; then
+            echo "::error::pull_request base SHA is empty — cannot compute the changed markdown set; failing closed (#2386)"
+            exit 1
+          fi
+          # No `|| true` (#2386): if the base commit is absent from this checkout
+          # the three-dot diff fails HERE and the required check goes red instead
+          # of skipping both lint steps and reporting green.
+          FILES="$(git diff --no-renames --name-only "${BASE_SHA}...HEAD" -- '*.md')"
+          if [ -z "$FILES" ]; then
+            # `files=` rather than a heredoc: an empty heredoc body parses
+            # ambiguously, and a value of "\n" would read as non-empty and run
+            # markdownlint with NO file args — which lints the WHOLE repo.
+            echo 'files=' >> "$GITHUB_OUTPUT"
+          else
+            # Heredoc form: `files=$FILES` with a multi-line value corrupts
+            # $GITHUB_OUTPUT (every line after the first is not NAME=VALUE).
+            {
+              echo 'files<<__CHANGED_MD_EOF__'
+              echo "$FILES"
+              echo '__CHANGED_MD_EOF__'
+            } >> "$GITHUB_OUTPUT"
+          fi
       - name: Markdownlint (changed files)
         if: steps.changed.outputs.files != ''
-        run: npx markdownlint-cli ${{ steps.changed.outputs.files }}
+        # #2386: cli2 reads the repo's own .markdownlint-cli2.jsonc (MD013 off for
+        # prose). The v1 `markdownlint-cli` cannot parse that JSONC file and
+        # silently fell back to DEFAULTS, so MD013 (line-length 80) fired on every
+        # long research-doc line — the opposite of the declared rules.
+        run: npx --yes markdownlint-cli2@0.23.3 ${{ steps.changed.outputs.files }}
       - name: Link check (changed files)
         if: steps.changed.outputs.files != ''
         uses: lycheeverse/lychee-action@v2
