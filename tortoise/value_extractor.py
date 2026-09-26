@@ -13,14 +13,26 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
 from pathlib import Path
 
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
 def compile_value_brief(packs_dir: Path | str | None = None,
-                        tenant_manifests: dict[str, str] | None = None) -> dict:
+                        tenant_manifests: dict[str, str] | None = None,
+                        installed_namespaces: Collection[str] | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
-    The same source the prompts and the enforcer validate against.
+
+    The brief the PROMPTS are compiled from. It is graph-gated only when a
+    caller passes ``installed_namespaces`` — the ENFORCER is not: the
+    deterministic enforcer (``validate_summary`` → ``_object_kind_vocab``),
+    the Layer-1 write gate (``commit_schema.get_vocab`` /
+    ``refresh_vocab``) and the classify-later index
+    (``compile_kind_index_spec``) all still compile the UNGATED catalog
+    union, so a gated graph's prompt offers a narrower vocabulary than what
+    the system will ACCEPT or CLASSIFY INTO until that plumbing lands —
+    the three callers #5163 tracks. Do not read "gated brief" as "gated
+    system".
 
     ``tenant_manifests`` (#2031 — hosted per-tenant custom packs) is an
     ADDITIVE overlay: ``{namespace: full manifest yaml}`` compiled through
@@ -32,11 +44,25 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     memory_granularity, and declared-but-kindDefs-less object/document/
     event kinds (empty semantics — the parity surface for the default
     path's FIX M declared-kind acceptance, which is served by the
-    process-global ``_PACK_*_FORMS`` sets that tenant packs never reach)."""
+    process-global ``_PACK_*_FORMS`` sets that tenant packs never reach).
+
+    ``installed_namespaces`` (#2714 layer 1 — APPROVAL) gates the brief to
+    one GRAPH's installed pack set. ``None`` = **no gate**: the catalog
+    union (all packs in ``packs_dir``), which is today's behaviour and the
+    mandatory back-compat path for a graph with no ``:PackInstall`` records
+    (indicator 3). A collection = only those namespaces contribute kinds /
+    granularity; a namespace NOT in the collection contributes nothing,
+    from the filesystem catalog OR from ``tenant_manifests`` alike. The
+    core vocabulary is never gated — it is always emitted. The gate is a
+    pure filter over an unchanged compile: same loop, same order, same
+    per-kind payload.
+    """
     from tortoise.pack_registry import PackRegistry  # noqa: I001
     from tortoise.pack_registry import default_packs_dir
     import yaml
     packs_dir = Path(packs_dir) if packs_dir else default_packs_dir()
+    # #2714: graph-scoped APPROVAL gate. None ⇒ ungated (catalog union).
+    _gate = None if installed_namespaces is None else set(installed_namespaces)
     reg = PackRegistry(packs_dir)
     reg.load_all()
     ns_files = {}
@@ -52,6 +78,8 @@ def compile_value_brief(packs_dir: Path | str | None = None,
             ns_files[d["namespace"]] = mf
     kinds = {}
     for ns, _ in reg.packs.items():
+        if _gate is not None and ns not in _gate:
+            continue
         raw = yaml.safe_load(ns_files[ns].read_text()) or {}
         kd = (raw.get("ontology") or {}).get("kindDefs") or {}
         for k, spec in kd.items():
@@ -67,6 +95,8 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     # target and added concept (not in §5). `concept` is mapped to core:other.
     granularity = {}
     for ns, path in ns_files.items():
+        if _gate is not None and ns not in _gate:
+            continue
         raw = yaml.safe_load(path.read_text()) or {}
         g = (raw.get("ontology") or {}).get("memory_granularity")
         if g:
@@ -81,6 +111,12 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     if tenant_manifests:
         _DECLARED_KIND_ATTRS = ("objectKinds", "documentKinds", "eventKinds")
         for ns, manifest_yaml in tenant_manifests.items():
+            # #2714: a tenant manifest whose namespace is not in the graph's
+            # installed set contributes NOTHING — the same gate as the
+            # filesystem catalog above (a stored-but-uninstalled tenant pack
+            # must not leak kinds into the prompt or the write gate).
+            if _gate is not None and ns not in _gate:
+                continue
             # #2031 review: per-namespace isolation — one malformed/legacy
             # node (hand-inserted, backfilled, corrupt) must degrade only its
             # own namespace, never the whole tenant's vocabulary compile
@@ -125,7 +161,6 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         "core:WorkItem": "A unit of work",
         "core:Problem": "A deviation between actual and desired state — "
                         "problem-family parent (2026-08-31)",
-        "core:document": "A document artifact",
         "core:tag": "A tag",
         "core:user": "A user",
         "core:skill": "A skill",

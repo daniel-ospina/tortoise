@@ -30,6 +30,8 @@
 // context.next() are covered by website/_headers). Value matches the API
 // (tortoise/hosted_api.py): max-age=31536000; includeSubDomains — no
 // `preload` yet, soak first per #1003 §1.
+import { RELAXED_CSP } from "./_shared/security-headers.ts";
+
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
 export const onRequest: PagesFunction = async (context) => {
@@ -58,7 +60,7 @@ export const onRequest: PagesFunction = async (context) => {
   // host=127.0.0.1) and *.pages.dev previews keep the pass-through so the
   // legal E2E suite can run against a dev server and previews stay
   // navigable (neither is indexed; no SEO impact). Runtime fetches (the
-  // tortoise-onboarding skill at app.premiselabs.co/skills/...) are not in the
+  // tortoise-onboarding instructions at app.premiselabs.co/skills/...) are not in the
   // set. The auth surface has its own origin split — see APP_ONLY below.
   // The auth surface moved to the APP origin (#4054): `tortoise-dashboard`
   // (app.premiselabs.co) owns the BFF and the three pages it serves
@@ -254,6 +256,7 @@ export const onRequest: PagesFunction = async (context) => {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
+        "Content-Security-Policy": RELAXED_CSP,
         ...HSTS,
       },
     });

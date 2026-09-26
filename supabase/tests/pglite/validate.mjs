@@ -133,6 +133,78 @@ for (const f of files) {
                 'org_4216-migrate-seed', 'sub_migrate_seed',
                 '2026-11-15T00:00:00+00:00', NULL);`);
     }
+    if (f === '20260925000001_oauth_referential_integrity.sql') {
+      // #3036: seed a DIRTY pre-migration DB. The FKs do not exist yet, so a
+      // dangling pointer is legal to insert here; only the migration's own
+      // backfill UPDATE (step 1) can null it. Without this seed, deleting the
+      // migration's repair statements leaves the whole harness green — the
+      // suite's behaviour would still pass on a clean DB and the re-apply drill
+      // runs on a DB with no dangling rows. This is the #4216 pattern applied
+      // to #3036: put the dirty row BEFORE the migration so the migration text
+      // is the thing under test.
+      await db.exec(`
+        INSERT INTO public.organizations (id, name, graph_name)
+          VALUES ('3036-preseed-org', '3036-preseed-org', 'org_3036-preseed-org');
+        INSERT INTO public.oauth_clients (id, client_name)
+          VALUES ('3036-preseed-client', '3036-preseed-client');
+        INSERT INTO public.oauth_access_tokens
+          (id, token_hash, client_id, user_id, org_id, expires_at, refresh_token_id)
+        VALUES ('3036-preseed-access', '3036-preseed-h', '3036-preseed-client',
+                '3036-preseed-user', '3036-preseed-org',
+                now() + interval '1 hour', '3036-preseed-missing-refresh');
+        INSERT INTO public.oauth_refresh_tokens
+          (id, token_hash, client_id, user_id, org_id, expires_at, rotated_from)
+        VALUES ('3036-preseed-refresh', '3036-preseed-hr', '3036-preseed-client',
+                '3036-preseed-user', '3036-preseed-org',
+                now() + interval '1 hour', '3036-preseed-missing-ancestor');
+        -- Valid links the repair must NOT touch: an access→refresh pair AND a
+        -- refresh→ancestor CHAIN link. Without them the assertion only proves
+        -- the DANGLING branch, and an over-broad predicate (the AND NOT EXISTS
+        -- guard dropped from EITHER repair) would silently NULL valid
+        -- provenance links and still pass. The chain link is what covers the
+        -- SECOND repair statement (rotated_from).
+        INSERT INTO public.oauth_refresh_tokens
+          (id, token_hash, client_id, user_id, org_id, expires_at, rotated_from)
+        VALUES ('3036-preseed-good-ancestor', '3036-preseed-hga2', '3036-preseed-client',
+                '3036-preseed-user', '3036-preseed-org',
+                now() + interval '1 hour', NULL);
+        INSERT INTO public.oauth_refresh_tokens
+          (id, token_hash, client_id, user_id, org_id, expires_at, rotated_from)
+        VALUES ('3036-preseed-good-refresh', '3036-preseed-hgr', '3036-preseed-client',
+                '3036-preseed-user', '3036-preseed-org',
+                now() + interval '1 hour', '3036-preseed-good-ancestor');
+        INSERT INTO public.oauth_access_tokens
+          (id, token_hash, client_id, user_id, org_id, expires_at, refresh_token_id)
+        VALUES ('3036-preseed-good-access', '3036-preseed-hga', '3036-preseed-client',
+                '3036-preseed-user', '3036-preseed-org',
+                now() + interval '1 hour', '3036-preseed-good-refresh');
+      `);
+    }
+    if (f === '20260925000002_oauth_redemption_state.sql') {
+      // #3027: seed a CONSUMED pre-migration code (the `redemption_state` column
+      // does not exist yet). Only this migration's own backfill UPDATE can make
+      // it terminal, so deleting the backfill reds here — the #4216/#3036 pattern.
+      // A second row is left UNCONSUMED, so an over-broad backfill (one that
+      // burns every row instead of `used_at IS NOT NULL`) reds too.
+      await db.exec(`
+        INSERT INTO public.organizations (id, name, graph_name)
+          VALUES ('3027-preseed-org', '3027-preseed-org', 'org_3027-preseed-org');
+        INSERT INTO public.oauth_clients (id, client_name)
+          VALUES ('3027-preseed-client', '3027-preseed-client');
+        INSERT INTO public.oauth_codes
+          (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+           expires_at, used_at)
+        VALUES ('3027-preseed-used', '3027-preseed-client', '3027-preseed-user',
+                '3027-preseed-org', 'https://app.example/cb', 'challenge',
+                now() + interval '10 min', now());
+        INSERT INTO public.oauth_codes
+          (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+           expires_at, used_at)
+        VALUES ('3027-preseed-unused', '3027-preseed-client', '3027-preseed-user',
+                '3027-preseed-org', 'https://app.example/cb', 'challenge',
+                now() + interval '10 min', NULL);
+      `);
+    }
     await db.exec(sql);
     console.log(`✓ migration ${f}`);
   } catch (e) {
@@ -162,6 +234,109 @@ for (const f of files) {
   console.log('✓ #4216: the migration\'s deploy-time repair completed the seeded NULL-end org');
 }
 
+// ── #3036: the migration's DANGLING-POINTER repair actually ran ─────────────
+// The dirty rows were seeded BEFORE `20260925000001` (the FKs did not exist
+// yet). Only that migration's own step-1 UPDATEs can have nulled them, so this
+// goes red if either repair statement is deleted, if its predicate is too
+// narrow (dangling links left non-NULL), or if it is OVER-broad (the seeded
+// VALID links below would be nulled too).
+{
+  const r = await db.query(`SELECT
+    (SELECT refresh_token_id FROM public.oauth_access_tokens
+       WHERE id = '3036-preseed-access') AS access_link,
+    (SELECT count(*) FROM public.oauth_access_tokens
+       WHERE id = '3036-preseed-access') AS access_rows,
+    (SELECT rotated_from FROM public.oauth_refresh_tokens
+       WHERE id = '3036-preseed-refresh') AS refresh_link,
+    (SELECT count(*) FROM public.oauth_refresh_tokens
+       WHERE id = '3036-preseed-refresh') AS refresh_rows,
+    (SELECT refresh_token_id FROM public.oauth_access_tokens
+       WHERE id = '3036-preseed-good-access') AS good_access_link,
+    (SELECT count(*) FROM public.oauth_access_tokens
+       WHERE id = '3036-preseed-good-access') AS good_access_rows,
+    (SELECT rotated_from FROM public.oauth_refresh_tokens
+       WHERE id = '3036-preseed-good-refresh') AS good_refresh_link,
+    (SELECT count(*) FROM public.oauth_refresh_tokens
+       WHERE id = '3036-preseed-good-refresh') AS good_refresh_rows,
+    (SELECT count(*) FROM public.oauth_refresh_tokens
+       WHERE id = '3036-preseed-good-ancestor') AS good_ancestor_rows`);
+  const d = r.rows[0] || {};
+  if (Number(d.access_rows) !== 1 || Number(d.refresh_rows) !== 1) {
+    console.error(`✗ #3036: the repair must NULL the pointer, not delete the row (access_rows=${d.access_rows}, refresh_rows=${d.refresh_rows})`);
+    process.exit(1);
+  }
+  if (d.access_link !== null || d.refresh_link !== null) {
+    console.error(`✗ #3036: the migration did NOT repair the seeded dangling pointers (access=${d.access_link}, refresh=${d.refresh_link})`);
+    process.exit(1);
+  }
+  if (Number(d.good_access_rows) !== 1 || Number(d.good_refresh_rows) !== 1) {
+    console.error(`✗ #3036: the repair DELETED a valid preseed row (good_access_rows=${d.good_access_rows}, good_refresh_rows=${d.good_refresh_rows})`);
+    process.exit(1);
+  }
+  if (d.good_access_link !== '3036-preseed-good-refresh') {
+    console.error(`✗ #3036: the repair NULLed a VALID provenance link (got ${d.good_access_link}, want '3036-preseed-good-refresh') — its predicate is over-broad`);
+    process.exit(1);
+  }
+  if (Number(d.good_ancestor_rows) !== 1) {
+    console.error(`✗ #3036: the repair DELETED a valid chain ancestor (good_ancestor_rows=${d.good_ancestor_rows})`);
+    process.exit(1);
+  }
+  if (d.good_refresh_link !== '3036-preseed-good-ancestor') {
+    console.error(`✗ #3036: the repair NULLed a VALID rotation-chain link (got ${d.good_refresh_link}, want '3036-preseed-good-ancestor') — its predicate is over-broad`);
+    process.exit(1);
+  }
+  await db.exec(`
+    DELETE FROM public.oauth_access_tokens  WHERE id LIKE '3036-preseed-%';
+    DELETE FROM public.oauth_refresh_tokens WHERE id LIKE '3036-preseed-%';
+    DELETE FROM public.oauth_clients        WHERE id LIKE '3036-preseed-%';
+    DELETE FROM public.organizations        WHERE id LIKE '3036-preseed-%';
+  `);
+  console.log('✓ #3036: the migration\'s own dangling-pointer repair nulled both seeded links');
+}
+
+// ── #3027: the migration's redemption-state BACKFILL actually ran ───────────
+// The consumed row was seeded BEFORE `20260925000002` (its columns did not
+// exist). Only that migration's own `UPDATE ... WHERE used_at IS NOT NULL` can
+// have made it terminal, so this goes red if the backfill is deleted, if it is
+// too NARROW (the consumed row stays 'unclaimed'), or if it is OVER-broad (the
+// unconsumed row is burned too).
+{
+  const r = await db.query(`SELECT
+    (SELECT redemption_state FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-used') AS used_state,
+    (SELECT redemption_settled_at FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-used') AS used_settled,
+    (SELECT redemption_note FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-used') AS used_note,
+    (SELECT redemption_state FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-unused') AS unused_state,
+    (SELECT redemption_settled_at FROM public.oauth_codes
+       WHERE code_hash = '3027-preseed-unused') AS unused_settled`);
+  const d = r.rows[0] || {};
+  if (d.used_state !== 'burned') {
+    console.error(`✗ #3027: the backfill did NOT burn the consumed pre-migration code (state=${d.used_state})`);
+    process.exit(1);
+  }
+  if (d.used_settled === null || d.used_settled === undefined) {
+    console.error('✗ #3027: the backfill did not record redemption_settled_at on the consumed code');
+    process.exit(1);
+  }
+  if (d.used_note !== 'backfill') {
+    console.error(`✗ #3027: the backfilled row must be marked 'backfill' (got ${d.used_note})`);
+    process.exit(1);
+  }
+  if (d.unused_state !== 'unclaimed' || d.unused_settled !== null) {
+    console.error(`✗ #3027: the backfill is OVER-broad — an unconsumed code was touched (state=${d.unused_state}, settled=${d.unused_settled})`);
+    process.exit(1);
+  }
+  await db.exec(`
+    DELETE FROM public.oauth_codes   WHERE code_hash LIKE '3027-preseed-%';
+    DELETE FROM public.oauth_clients WHERE id LIKE '3027-preseed-%';
+    DELETE FROM public.organizations WHERE id LIKE '3027-preseed-%';
+  `);
+  console.log('✓ #3027: the migration\'s own backfill burned the consumed code and left the unconsumed one alone');
+}
+
 // ── Run the assertion suites (0006–0009 from #769, 0010 from #770, then
 // the 0010 suite's #1716 keyless sections against the post-keyless RPC) ──
 const suites = [
@@ -175,6 +350,8 @@ const suites = [
   '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
   '20260906000001_graphs_deleted_at.sql',  // #2304
   '20260919000001_metering_period_end_repair.sql',  // #4216
+  '20260925000001_oauth_referential_integrity.sql',  // #3036
+  '20260925000002_oauth_redemption_state.sql',  // #3027
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
@@ -311,6 +488,64 @@ try {
 }
 
 console.log('✅ ROLLBACK DRILL PASSED (apply → rollback → re-apply round trip)');
+
+// ── #3036: OAuth FK migration re-applies idempotently ──────────────────────
+// The suite above proves the constraints BEHAVE (dangling refs rejected, the
+// ON DELETE SET NULL action). This drill re-executes the migration text on a
+// database where the constraints ALREADY EXIST — the scenario a deploy hits
+// when the migration was applied out-of-band / not recorded in
+// `supabase_migrations.schema_migrations` (the case `supabase db push
+// --include-all` re-selects). It proves the DROP-then-ADD pair and the repair
+// statements are re-applicable, not that they ran for the first time (the
+// pre-seed assertion above covers that).
+try {
+  await db.exec(readFileSync(`${MIG_DIR}/20260925000001_oauth_referential_integrity.sql`, 'utf8'));
+  console.log('✓ #3036: OAuth FK migration re-applies idempotently');
+} catch (e) {
+  console.error(`✗ #3036 migration re-apply FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #3027: the redemption-state migration re-applies idempotently ───────────
+// Same drill as #3036, but this migration carries STATE-BEARING rows: a
+// re-apply must not clobber a settled claim, must not re-run the backfill over
+// a row the state machine already moved, and must not fail on the ADD COLUMN /
+// ADD CONSTRAINT pair. The row is inserted BEFORE the re-apply, so deleting the
+// backfill's `AND redemption_state = 'unclaimed'` guard (making it over-broad)
+// reds here.
+try {
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('3027-reapply-org', '3027-reapply-org', 'org_3027-reapply-org');
+    INSERT INTO public.oauth_clients (id, client_name)
+      VALUES ('3027-reapply-client', '3027-reapply-client');
+    INSERT INTO public.oauth_codes
+      (code_hash, client_id, user_id, org_id, redirect_uri, code_challenge,
+       expires_at, used_at, redemption_state, redemption_id, redemption_note)
+    VALUES ('3027-reapply', '3027-reapply-client', '3027-reapply-user',
+            '3027-reapply-org', 'https://app.example/cb', 'challenge',
+            now() + interval '10 min', now() - interval '10 min',
+            'claimed', '3027-reapply-rid', NULL);
+  `);
+  await db.exec(readFileSync(`${MIG_DIR}/20260925000002_oauth_redemption_state.sql`, 'utf8'));
+  const r = await db.query(`SELECT redemption_state, redemption_id, redemption_note,
+      redemption_settled_at FROM public.oauth_codes WHERE code_hash = '3027-reapply'`);
+  const d = r.rows[0] || {};
+  if (d.redemption_state !== 'claimed' || d.redemption_id !== '3027-reapply-rid' ||
+      d.redemption_note !== null || d.redemption_settled_at !== null) {
+    console.error(`✗ #3027 migration re-apply CLOBBERED a live claim: ${JSON.stringify(d)}`);
+    process.exit(1);
+  }
+  await db.exec(`
+    DELETE FROM public.oauth_codes   WHERE code_hash = '3027-reapply';
+    DELETE FROM public.oauth_clients WHERE id = '3027-reapply-client';
+    DELETE FROM public.organizations WHERE id = '3027-reapply-org';
+  `);
+  console.log('✓ #3027: redemption-state migration re-applies idempotently (a live claim survives)');
+} catch (e) {
+  console.error(`✗ #3027 migration re-apply FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
 
 console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
 

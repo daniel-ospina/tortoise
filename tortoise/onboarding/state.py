@@ -26,9 +26,21 @@ from typing import Any
 # ── canonical vocabulary ─────────────────────────────────────
 
 # Display order = definition order (the Setup-guide card renders in this
-# order; the completion gate is order-independent).
+# order; the completion gate is order-independent). "connection-written" is
+# canonical but NOT a card row (CARD_STEPS is the counted, completion-
+# relevant subset — like capture-disclosed).
 STEP_IDS: tuple[str, ...] = (
     "team-named",            # satisfied at org-create (name REQUIRED)
+    # #3451: the MCP-config WRITE — the one step no server can verify. A
+    # self-installing harness writes the config onto the user's disk and then
+    # hands off to a restart (§3); the server cannot observe that file. This
+    # id records the CLIENT's act (an agent-credential checkpoint), never a
+    # server observation, and is in NO completion gate — completion is
+    # unchanged (#3913). It exists so "config written, restart pending" is
+    # distinguishable from "the write never happened": see
+    # ``restart_pending`` (the condition is DERIVED from this edge, never a
+    # second stored field).
+    "connection-written",
     "harness-connected",     # W2: agent harness connected
     "first-points-filed",    # W3 seed: org-anchor Subject filed
     "decide-completed",      # W3 decide (real decide protocol)
@@ -106,6 +118,23 @@ _GATES: dict[str, frozenset[str]] = {
     FORK_BUILD: _GATE_BUILD,
 }
 
+# Steps that are NOT evidence of agent onboarding work, and therefore do NOT
+# terminate the grandfathered-window guard (``resolve_wire_completion``,
+# ``recompute_completion``, ``_legacy_grandfathered``):
+#
+# - ``team-named`` is auto-satisfied at org-create (name REQUIRED) — never an
+#   agent act.
+# - ``connection-written`` (#3451) records a CLIENT-side config WRITE that the
+#   server cannot observe. #3913 rests completion on the acts the server
+#   OBSERVES, so a trace of a local file write must not close a completion the
+#   wire still grants — it says nothing about whether a harness ever connected.
+#   Without this exclusion, the §3 checkpoint alone would flip a legitimately
+#   grandfathered org to incomplete before the restart was even attempted.
+#
+# The window closes on the first SERVER-OBSERVED agent step.
+_NON_AGENT_STEPS: frozenset[str] = frozenset(
+    {"team-named", "connection-written"})
+
 # edge labels / node labels
 ONBOARDING_NODE_LABEL = "OnboardingState"
 ONBOARDING_STEP_LABEL = "OnboardingStep"
@@ -126,6 +155,34 @@ _NODE_DEFAULTS: dict[str, Any] = {
 def validate_step_id(step_id: str) -> bool:
     """True iff step_id is a canonical onboarding step."""
     return isinstance(step_id, str) and step_id in ONBOARDING_STEPS
+
+
+def restart_pending(completed_steps: Iterable[str]) -> bool:
+    """#3451: the config was WRITTEN and the harness is not yet verified.
+
+    DERIVED from the recorded step set — deliberately NOT a second stored
+    field (no ``restart_pending`` FLOW key, no jsonb key): the projection the
+    resuming agent already reads carries the condition. Both directions are
+    load-bearing:
+
+    - ``["team-named"]`` — the write never happened → False. An abandoned
+      install is NEVER reported as waiting for a restart.
+    - ``["team-named", "connection-written"]`` → True. The config is in
+      place; only the restart verification is outstanding, so §1 hands the
+      user a relaunch instead of re-walking §2–§3.
+    - ``"harness-connected"`` present → False. Verified; nothing is pending.
+
+    The parameter is a KNOWN step collection. A caller that does not know the
+    set (a graph-down read serves the literal ``'unavailable'``) must not call
+    this and report its ``False`` as fact — the projection serves
+    ``'unavailable'`` there instead.
+    """
+    if not isinstance(completed_steps, (list, tuple, set, frozenset)):
+        # A graph-down 'unavailable' marker is not a step set — fail to
+        # "not pending" only for a real collection, never by string scan.
+        return False
+    done = set(completed_steps)
+    return "connection-written" in done and "harness-connected" not in done
 
 
 def completion_gate_satisfied(completed_steps: Iterable[str],
@@ -195,17 +252,18 @@ def resolve_wire_completion(node_status: str | None,
 
     1. node.status == 'complete' → True (server-owned, gate-written).
     2. Grandfathered-window guard: node present but NOT complete, ZERO
-       AGENT step edges (the org-named edge is auto-satisfied at init and
-       never counts), and jsonb onboarding_complete=true → True — kills the
-       poisoned-false window for orgs completing via the legacy wizard
-       during the T2→T7 carve-out. One-directional and self-terminating:
-       the FIRST agent step edge flips control to the node.
+       AGENT step edges (``_NON_AGENT_STEPS`` — the org-named edge is
+       auto-satisfied at init and ``connection-written`` is a client-only
+       trace, so neither counts), and jsonb onboarding_complete=true → True —
+       kills the poisoned-false window for orgs completing via the legacy
+       wizard during the T2→T7 carve-out. One-directional and self-terminating:
+       the FIRST server-observed agent step edge flips control to the node.
     3. Otherwise → False (a node-present org without gate-complete status
        is never re-onboarded via the flag; accept-and-drop makes the jsonb
        writer inert post-W1)."""
     if node_status == STATUS_COMPLETE:
         return True
-    agent_steps = [s for s in completed_steps if s != "team-named"]
+    agent_steps = [s for s in completed_steps if s not in _NON_AGENT_STEPS]
     return bool(raw_complete and not agent_steps)
 
 
@@ -675,7 +733,7 @@ def recompute_completion(graph: Any, org_id: str,
     if node.get("status") == STATUS_COMPLETE:
         return "unchanged-already-complete"
     steps = completed_steps(graph, org_id)
-    agent_steps = [s for s in steps if s != "team-named"]
+    agent_steps = [s for s in steps if s not in _NON_AGENT_STEPS]
     if legacy_complete and not agent_steps:
         write_status(graph, org_id, STATUS_COMPLETE)
         return "complete-grandfathered"
@@ -925,7 +983,7 @@ def _legacy_grandfathered(legacy_complete: bool | None,
     same as false: we would rather leave a status alone than regress a
     completion the wire still grants.
     """
-    agent_steps = [s for s in steps if s != "team-named"]
+    agent_steps = [s for s in steps if s not in _NON_AGENT_STEPS]
     return (legacy_complete is not False) and not agent_steps
 
 

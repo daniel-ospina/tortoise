@@ -38,6 +38,8 @@
  * dashboard's `public/_headers`: max-age=31536000; includeSubDomains, no
  * `preload` yet (soak first per #1003 §1).
  */
+import { RELAXED_CSP } from "../_shared/security-headers";
+
 const HSTS = "max-age=31536000; includeSubDomains";
 
 export const onRequest: PagesFunction = async ({ request, env }) => {
@@ -66,6 +68,7 @@ export const onRequest: PagesFunction = async ({ request, env }) => {
   headers.set("Strict-Transport-Security", HSTS);
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.set("Cache-Control", "public, max-age=60");
+  headers.set("Content-Security-Policy", RELAXED_CSP);
 
   return new Response(res.body, { status: res.status, headers });
 };

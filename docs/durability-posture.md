@@ -57,14 +57,123 @@ persistence plus an off-box copy of it.** Nothing else.
   transaction.
 
 **A promise that names no mechanism is not a promise.** Each deployment below
-therefore states three things: the mechanism (where the data actually lives),
+states three things: the mechanism (where the data actually lives),
 the honest loss window, and **the strongest verification actually performed** —
 existence → checksum → restore drill. Where a restore has never been drilled,
 this document says **not drilled**, in those words. Green-looking machinery that
 has never been restored is worse than absent machinery: it suppresses the
 operator's own backups while reporting health.
 
+### Authoritative node classes across a rebuild
+
+**This subsection is the home of the complete node-class map.** Durability here
+has a second, narrower meaning than the deployment rows below: a **graph-resident
+class that rides no journal record and is not re-derivable** does not survive
+`rebuild_all`, whose wipe is an unconditional `MATCH (n) DETACH DELETE n` and
+whose replay is journal-only. Such a class is either **preserved** (captured into
+the durable pre-wipe sidecar and restored after replay) or it is **lost** —
+there is no third mechanism. Classes that can be re-derived are deliberately
+**not** preserved, because preserving them would restore a stale value as if it
+were truth.
+
+The preserved set is **declared in code**, not discovered:
+`tortoise/projection/__init__.py::_config_classes()`. It is **not** a
+completeness gate — a class nobody enrolled still recurs, and **#2296
+contributes its indicators into this subsection** rather than creating a rival
+artifact.
+
+<!-- config-registry:preserved -->
+| Preserved class (authoritative) | Identity property |
+|---|---|
+| `:PackInstall` | `namespace` |
+| `:PackManifest` | `namespace` |
+| `:Meta{key:'calibration_milestone'}` | `key` |
+| `:Meta{key:'config_reset'}` | `key` |
+<!-- config-registry:end -->
+
+The `config_reset` entry is the **third state**: a sticky marker distinguishing
+"config existed and did not come back" from "never configured". Absence is what
+a never-configured graph looks like, so absence can never encode it. It is
+**not** a "tombstone" — that is a controlled term in `docs/ONTOLOGY.md` for a
+retracted `Point`.
+
+<!-- config-registry:not-preserved -->
+- `:EpMeta` — a monotonic epoch that must be re-baselined with the Points;
+  preserving it would pin a stale epoch.
+- `:Meta{key:'point_fts_v2'}` — the index watermark, re-created on open.
+- `:Meta{key:'event_fts_v2'}` — the index watermark, re-created on open.
+<!-- config-registry:end -->
+
+The `:Meta` class is therefore enrolled **key-scoped**. A label-wide `:Meta`
+read would sweep the two derived `point_fts_v2`/`event_fts_v2` markers into the
+preserved set and restore them as if they were authoritative configuration.
+
+<!-- config-registry:unenrolled -->
+- `:OnboardingState`, `:OnboardingStep`, and their `COMPLETED_STEP` edges —
+  destroyed silently by `rebuild_all` today; no vehicle in this change.
+  **#4641**
+- `:TeamMeta` — same disposition, same vehicle. **#4641**
+- `:GraphEventMeta` — an event watermark that **is** re-derivable, so it is
+  re-derived post-replay rather than snapshotted; today it is reset, which
+  collides the next `next_seq` with replayed sequence numbers. **#4653**
+<!-- config-registry:end -->
+
+**Operator audit** — read-only; every preserved class is enumerated by the
+registry, so this query cannot silently under-report after a class is added:
+
+<!-- config-registry:audit-query -->
+```cypher
+MATCH (p:PackInstall) RETURN 'PackInstall' AS cls, p.namespace AS ident
+UNION ALL
+MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
+UNION ALL
+MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset']
+RETURN 'Meta' AS cls, x.key AS ident
+```
+<!-- config-registry:end -->
+
 ## Per-deployment posture
+
+### Derived properties that are STORED, not recomputed
+
+The node-class map above covers *classes*. A **property** can be in the same
+position for a different reason — not because it would be lost, but because
+recomputing it does not reproduce what the graph held.
+
+**R1 — the embedding STORES: a replay restores it verbatim and never
+regenerates it.** A re-embed is a *re-run*, not a replay. `embed(text)` depends
+on the model id, its pinned revision and the tokenizer — none of which is a
+function of the journal — so re-encoding on replay turns a fold into a silent
+re-execution: the same log yields a **different** graph after a model or
+provider change. A **creating** producer (the record that computed the vector
+from the content riding with it) therefore journals the vector **and** the
+identity it was computed under (`embedding_model`, `embedding_revision`,
+`embedding_text_hash`). A **re-emitted snapshot** — `PointPromoted`,
+`OperatorPromoted`, a re-capture that preserved an older vector — carries the
+vector but **no** identity, because that vector may predate a model change and
+the record cannot attest an origin it does not know. The replay restores the
+vector verbatim either way, *recording* — never resolving — a divergence from
+the configured embedder.
+
+The rule is **presence is ownership**: a producer that owns the `embedding`
+field always writes the key (the vector, or an explicit `None` when it has
+none), and a replay restores it, clears it, or leaves it — it never recomputes.
+A key that is *absent* is a pre-#5004 record, where recomputation is the only
+behaviour available and is kept deliberately for back-compat.
+
+This is **not** a durability-authority claim — the JSONL is still not the
+durability mechanism (see *The rule*). It states what a `rebuild_all` replay of
+that log must reproduce. **Paths still outside the rule, each pinned by a test
+and filed:** `PointRevised` — the record's `embedding` (including an explicit
+`null` clear) is not read on replay (**#5046**); `_update_entity`'s Point branch
+journals no embedding line at all — so its caller vector falls back to the
+creation value on a rebuild, and the `embedding_verbatim` marker it sets is
+**live-only** (**#4094**; the marker is deliberately still set, because leaving
+the vector unmarked would trade this declared marker gap for an undeclared
+byte-level vector divergence on the LATER, journaled `promote_point` re-emit);
+a stale `PointPromoted` predating a `delete → recreate` re-applies the dead
+incarnation's derived fields — the `#2884 A7` gate is belief-only by a recorded
+#785 decision (**#5068**).
 
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
@@ -109,6 +218,39 @@ gate in `tests/test_durability_posture.py` fails the build if a
 `is [the] truth` — outside this file.
 
 ## Open items
+
+- **#2814 residual** — the preserved set is a **declared** registry, not a
+  completeness gate. For a class nobody enrolled, `rebuild_all` captures
+  nothing and refuses nothing: the byte-identical unconditional wipe (which
+  #2814 does **not** change, by owner decision — the surface belongs to PR
+  #2996) destroys it exactly as before. The live instance is the
+  `unenrolled` list above (#4641, #4653).
+- **#2814 residual** — within an interrupted-rebuild window a **pending**
+  (non-retired) pre-wipe sidecar reverts a **colliding** config key to its
+  pre-wipe value, so a config deliberately deleted after the wipe can be
+  resurrected by the retry. The remedy is the operator deleting the pending
+  rescue file — never the retired, entry-less one. Pinned by
+  `test_pending_sidecar_restores_leftover_config_over_a_post_wipe_delete`.
+- **#2814 residual** — a pre-preservation (`version: 1`) rescue file carries no
+  config record at all, so the state of the graph it describes is **unknown**,
+  not "reset". It is reported as
+  `reason='legacy_sidecar_no_config_record'` and never as `reset`.
+- **#2814 residual** — the sticky `config_reset` marker makes a data-gone graph
+  report `count(n) > 0`, so `consistency.py` returns "graph already has nodes —
+  no rebuild" and auto-recovery stays suppressed until an operator clears it.
+  Safe (it refuses rather than wipes), but a real availability effect; changing
+  that gate to exclude bookkeeping nodes is a separate recovery-semantics
+  decision, out of #2814's unit. Pinned by
+  `test_recover_from_log_refuses_nonempty_graph_with_config`.
+- **agent-infra #1344** — `skills/tortoise-rebuild/SKILL.md` (the operator runbook
+  the runtime points operators to) states the event log is the source of truth
+  and describes `rebuild_all` as only lossy. That file lives in **agent-infra**
+  (the tortoise `operations/skills/*` paths are symlinks into it), so it is
+  outside this document's gate roots and outside the tortoise repo's diff: the
+  four required corrections are tracked there, not silently rewritten here.
+- **#2296** — the class-wide durability contract. **Dormant/unowned.** Its
+  indicators are contributed into *Authoritative node classes across a rebuild*
+  above; it does not create a rival map.
 
 - **#2880** — the self-hosted off-box copy. Until it ships, the self-hosted row
   is on-box only and the rule above is not yet met there. `README.md`'s

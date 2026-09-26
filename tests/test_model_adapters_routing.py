@@ -8,6 +8,8 @@ fatal 4xx, sticky forward-only per extraction, in-process cooldown flap guard.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 import requests
 
@@ -610,6 +612,74 @@ def _http_error(status: int) -> requests.HTTPError:
     return err
 
 
+# The provider's own exhausted-key-budget 403 body (#4860): OpenRouter reports
+# a spent monthly key limit as 403, NOT the 402 its credits-out case uses.
+OR_KEY_LIMIT_BODY = ('{"error":{"message":"Key limit exceeded (monthly '
+                     'limit). Add more credits at https://openrouter.ai/settings/keys",'
+                     '"code":403}}')
+# A WRONG credential (also 403/401) carries no limit signature — must stay
+# fatal, or rotation would retry the same bad key on every leg.
+OR_BAD_CREDENTIAL_BODY = '{"error":{"message":"No auth credentials found","code":403}}'
+
+
+def _http_error_body(status: int, body: str) -> requests.HTTPError:
+    """A REAL ``requests.Response`` raised through ``raise_for_status()``.
+
+    Built this way on purpose: it proves the response BODY reaches the
+    classifier the same way production delivers it (``err.response.text``),
+    rather than via a hand-set attribute a test could fabricate (#4860
+    requirement 2 — the body must actually be readable)."""
+    resp = requests.Response()
+    resp.status_code = status
+    resp.encoding = "utf-8"
+    resp._content = body.encode("utf-8")
+    resp.url = "https://openrouter.ai/api/v1/chat/completions"
+    resp.request = requests.Request("POST", resp.url).prepare()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as err:
+        return err
+    raise AssertionError("raise_for_status did not raise")
+
+
+# ── #4860: exhausted provider KEY (403 + limit body) rotates; rest fatal ────
+
+def test_403_key_limit_body_is_billing_exhausted_not_credential_failure():
+    """The body, not the status, is the discriminator: OpenRouter's exhausted
+    key budget arrives as 403 with a limit body and must be treated as the
+    provider-specific rotation class; a signature-less 403 is a credential
+    failure and must NOT be."""
+    from tortoise.model_adapters import is_billing_exhausted, is_fatal
+
+    limit = _http_error_body(403, OR_KEY_LIMIT_BODY)
+    assert is_billing_exhausted(limit) is True
+    assert is_fatal(limit) is True          # taxonomy unchanged: still FATAL
+    bad = _http_error_body(403, OR_BAD_CREDENTIAL_BODY)
+    assert is_billing_exhausted(bad) is False
+    assert is_fatal(bad) is True
+    # a body-less 403 (the existing stub shape) stays a credential failure
+    assert is_billing_exhausted(_http_error(403)) is False
+
+
+def test_401_with_key_limit_like_body_stays_fatal():
+    """The carve-out is STATUS-scoped: 401 is a credential failure even if a
+    mislabelled body mentions a limit — rotating a bad credential would mask
+    the bug on every leg."""
+    from tortoise.model_adapters import is_billing_exhausted, is_fatal
+
+    err = _http_error_body(401, OR_KEY_LIMIT_BODY)
+    assert is_billing_exhausted(err) is False
+    assert is_fatal(err) is True
+
+
+def test_billing_exhausted_402_unchanged():
+    """402 (Payment Required) rotates exactly as today (#1951)."""
+    from tortoise.model_adapters import is_billing_exhausted
+
+    assert is_billing_exhausted(_http_error(402)) is True
+    assert is_billing_exhausted(_http_error_body(402, "")) is True
+
+
 def _rotating_rng(monkeypatch, values):
     """Deterministically force ``RotatingModel._pick`` outcomes: patch
     ``random.random`` with a CYCLIC sequence so under-consumption (a pick
@@ -629,20 +699,72 @@ def _rotating_rng(monkeypatch, values):
 class _RotatingStub:
     """RotatingModel adapter stub: raises a scripted HTTP error for the
     first ``fails`` calls, then returns ``ok-<provider>`` (mirrors
-    _StubAdapter's counter + scripted-exc shape)."""
+    _StubAdapter's counter + scripted-exc shape). ``body`` attaches a REAL
+    response body to the raised HTTP error (#4860)."""
     def __init__(self, provider: str, fail_status: int | None = None,
-                 fails: int = 1):
+                 fails: int = 1, body: str | None = None):
         self.provider = provider
         self.fail_status = fail_status
         self.fails = fails
+        self.body = body
         self.calls = 0
         self.last_finish_reason = None
 
     def complete(self, *, system, user, max_tokens: int | None = None):
         self.calls += 1
         if self.fail_status is not None and self.calls <= self.fails:
+            if self.body is not None:
+                raise _http_error_body(self.fail_status, self.body)
             raise _http_error(self.fail_status)
         return f"ok-{self.provider}"
+
+
+def test_rotation_on_403_key_limit_cooldowns_and_uses_alternative(monkeypatch):
+    """#4860 target: a 403 carrying the provider's key-limit body is cooldowned
+    and rotation continues on the alternative — the exact bug where an
+    exhausted OpenRouter leg 403'd and the chain never rotated. FAILS on the
+    pre-fix code (403 was unconditionally fatal)."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    a = _RotatingStub("a", fail_status=403, body=OR_KEY_LIMIT_BODY)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # A picked first → B answers
+    try:
+        pool = RotatingModel([a, b], cooldown_s=300)
+        out = pool.complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert out == "ok-b"
+    assert a.calls == 1, "403ing provider must not be retried in cooldown"
+    assert b.calls == 1
+    assert "a" in pool._cooldowns, "403 key-limit must cooldown that provider"
+    assert pool.route == "b"
+    assert pool.errors and "HTTPError" in pool.errors[0]
+
+
+def test_403_without_key_limit_signature_stays_fatal_no_rotation(monkeypatch):
+    """#4860 owner constraint: a 403 whose body is a WRONG-CREDENTIAL report
+    (no limit signature) must re-raise immediately — no rotation, no cooldown.
+    Blanket-treating every 403 as rotatable would retry the same bad key on
+    every leg and mask the real cause."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    _orig = _rotating_rng(monkeypatch, [0.1])
+    try:
+        for body in (None, "", OR_BAD_CREDENTIAL_BODY):
+            a = _RotatingStub("a", fail_status=403, body=body)
+            b = _RotatingStub("b")
+            pool = RotatingModel([a, b], cooldown_s=300)
+            with pytest.raises(requests.HTTPError):
+                pool.complete(system="s", user="u")
+            assert b.calls == 0, f"no rotation on a signature-less 403 ({body!r})"
+            assert not pool._cooldowns, f"no cooldown on a signature-less 403 ({body!r})"
+    finally:
+        _random.random = _orig
 
 
 def test_rotation_on_402_billing_cooldowns_and_uses_alternative(monkeypatch):
@@ -693,10 +815,15 @@ def test_402_cooldown_skips_provider_on_next_call(monkeypatch):
 
 
 def test_auth_and_config_4xx_still_fatal_no_rotation(monkeypatch):
-    """#1951: auth AND config failures stay fatal — 401/403 (credentials)
-    and config 4xx (400/404/422, request-shape bugs) re-raise immediately;
-    the alternative provider is NEVER tried and no cooldown is written
-    (rotation would retry the same config bug on every lane)."""
+    """#1951, narrowed by #4860: a SIGNATURE-LESS 401/403 (credentials) and
+    config 4xx (400/404/422, request-shape bugs) stay fatal — re-raise
+    immediately; the alternative provider is NEVER tried and no cooldown is
+    written (rotation would retry the same bug on every lane). This stub
+    sends a BODY-LESS 403, which carries no key-limit signature, so it stays
+    fatal. A 403 whose body carries a provider key-limit signature IS
+    rotation-eligible (#4860) — see
+    ``test_rotation_on_403_key_limit_cooldowns_and_uses_alternative``; 402
+    stays rotation-eligible per #1951."""
     import random as _random
 
     from tortoise.model_adapters import RotatingModel
@@ -739,11 +866,12 @@ def test_402_single_provider_raises_loud(monkeypatch):
 @pytest.mark.timeout(10)  # an unbounded-loop regression must fail fast, not hang CI
 def test_402_all_providers_dead_raises_bounded(monkeypatch):
     """#1951 no-infinite-loop bound, n≥2: BOTH providers 402 → the bounded
-    n*3 loop cooldowns each once, spends the rest of its attempts skipping
-    cooldowned lanes, and re-raises the last 402 loudly. Total real
-    attempts = 2 (≤ 6 bound) — no retry storm, no hang. A SECOND call with
-    both lanes still cooldowned raises the all-in-cooldown RuntimeError
-    (bounded, no hang) — the retry-continuity contract."""
+    n*3 rotation budget cooldowns each once, and the #4992 reachability pass
+    finds both already cooldowned and adds no calls, so the last 402 is
+    re-raised loudly. Total real attempts = 2 (≤ the 4n = 8 ceiling) — no
+    retry storm, no hang. A SECOND call with both lanes still cooldowned raises
+    the all-in-cooldown RuntimeError (bounded, no hang) — the
+    retry-continuity contract."""
     import random as _random
 
     from tortoise.model_adapters import RotatingModel
@@ -844,6 +972,67 @@ def test_build_extractor_pool_survives_provider_402(monkeypatch):
     assert len(venice_calls) == 1, "venice 402s once, then stays cooldowned"
     assert [p.provider for p in pool.providers] == [
         "venice", "openrouter", "deepseek-direct"]  # pool membership unchanged
+
+
+def test_build_extractor_pool_fails_over_on_403_key_limit(monkeypatch):
+    """#4860 integration: the PRODUCTION 3-provider pool falls through to the
+    next configured leg when the OpenRouter leg answers 403 with its
+    exhausted-key-budget body. The error is a REAL ``requests.Response``
+    raised through ``raise_for_status()`` — the body reaches the classifier
+    exactly as production delivers it, so this is not a synthetic-attr test.
+    Pre-fix, the first 403 was fatal and the panel died on the exhausted leg.
+    Both calls return the healthy leg's content (same-run continuity; the
+    403ing lane is cooldowned and never re-tried)."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    or_calls: list[str] = []
+
+    def _resp(url, body=None):
+        r = requests.Response()
+        r.url = url
+        r.encoding = "utf-8"
+        if body is not None:
+            r.status_code = 403
+            r._content = body.encode("utf-8")
+        else:
+            r.status_code = 200
+            r._content = json.dumps({
+                "choices": [{"message": {"content": "ok-rotated"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }).encode("utf-8")
+        r.request = requests.Request("POST", url).prepare()
+        return r
+
+    def _fake_post(session, url, *args, **kwargs):
+        if "openrouter.ai" in url:
+            or_calls.append(url)
+            return _resp(url, body=OR_KEY_LIMIT_BODY)
+        return _resp(url)
+
+    monkeypatch.setattr(requests.sessions.Session, "post", _fake_post)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("VENICE_API_KEY", "vz")
+    pool = build_extractor_model("deepseek-flash-direct")
+    assert isinstance(pool, RotatingModel)
+    assert [p.provider for p in pool.providers] == [
+        "venice", "openrouter", "deepseek-direct"]
+    # force: openrouter first (r=0.6 → lane 1), then venice (r=0.1 → lane 0)
+    _orig = _rotating_rng(monkeypatch, [0.6, 0.1])
+    try:
+        out1 = pool.complete(system="s", user="u")
+        out2 = pool.complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert out1 == out2 == "ok-rotated"
+    assert "openrouter" in pool._cooldowns
+    assert pool.route == "venice"
+    assert len(or_calls) == 1, "openrouter 403s once, then stays cooldowned"
+    assert [p.provider for p in pool.providers] == [
+        "venice", "openrouter", "deepseek-direct"]  # membership unchanged
 
 
 # ── #1987 Task 3: json_mode structural pin + build_reader_model ────────────
