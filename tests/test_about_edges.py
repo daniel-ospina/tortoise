@@ -8,6 +8,7 @@ Covers:
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
@@ -16,7 +17,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK, _is_entity_id
 
 
 @pytest.fixture
@@ -249,6 +250,146 @@ class TestCreateEventAboutEdges:
             params={"eid": eid, "oid": obj["id"]},
         ).result_set
         assert r[0][0] == 1, "aboutObject edge did not land on canonical node"
+
+    # ── #3586: classify by PROVENANCE, not by shape ─────────────────────
+    #
+    # `_is_entity_id` is a shape test, so it cannot say which node (if any) an
+    # about* value addresses: an opaque id's spelling belongs to the MINTER
+    # (epic #2835 Stage 3 mints new ones). The three cases below pin the three
+    # wrong branches the shape-only guard took — each pinned here because the
+    # pre-fix suite covered only MATCHING ids (`test_create_event_prefixed_
+    # id_no_stub` / `..._object_no_stub`) and the plain-name path.
+
+    def test_create_event_minted_id_unrecognized_shape_resolves(self, sdk):
+        """#3586 provenance: a value that RESOLVES to a node is an id, whatever
+        its spelling — the shape test must not decide.
+
+        Before: `create_about_edge`'s result was discarded and the name
+        fallback ran on `not _is_entity_id(value)`. For a minted id whose
+        spelling the shape test did not recognize (here a plausible Stage-3
+        minted id), the fallback found no node NAMED after the id, minted a
+        stub via `_mint_subject_stub`, and wired the edge to that junk Subject
+        — so the Event was 'about' a fabricated node, never the real one.
+        """
+        minted = "entity-01h8z9x5m4k7p2q3r6t8v0w1y4"
+        assert _is_entity_id(minted) is False, "spelling must stay unrecognized"
+        # The canonical Subject, created under the minted id (the Stage-3 shape:
+        # the id is opaque and no longer a function of the name).
+        sdk._create_entity(
+            "Subject", minted,
+            {"name": "acme", "subjectKind": "company", "status": "live"},
+            "SubjectAdded")
+        ev = sdk.create_event("minted-id-event", "meeting", aboutSubject=minted)
+        proj = sdk._get_proj()
+        # no stub whose name is the identifier
+        stub = proj.g.query(
+            "MATCH (s:Subject {name:$name}) RETURN count(s)",
+            params={"name": minted},
+        ).result_set
+        assert stub[0][0] == 0, \
+            f"junk Subject minted named after the id: {minted}"
+        # the edge lands on the canonical node, not on a stub
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutSubject]->(s:Subject) "
+            "RETURN s.id, count(s)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert r == [[minted, 1]], f"edge did not land on the canonical node: {r}"
+
+    def test_create_event_nonmatching_id_shaped_no_stub(self, sdk):
+        """#3586: an id-shaped value that resolves to NO node must not be
+        minted as a stub.
+
+        `sub-0123456789ABCDEF0123456789` is a well-formed-looking id the
+        canonical minted shape did not accept (upper-case digest). Before, the
+        shape test called it a NAME, so `_mint_subject_stub` made the
+        identifier BOTH the Subject's name and its id and attached a spurious
+        `aboutSubject` edge to that junk node — a graph write a caller cannot
+        tell apart from data.
+        """
+        bogus = "sub-0123456789ABCDEF0123456789"
+        assert _is_entity_id(bogus) is True, "id-shaped spelling must be refused"
+        ev = sdk.create_event("uppercase-id-event", "meeting",
+                              aboutSubject=bogus)
+        proj = sdk._get_proj()
+        stub = proj.g.query(
+            "MATCH (s:Subject {name:$name}) RETURN count(s)",
+            params={"name": bogus},
+        ).result_set
+        assert stub[0][0] == 0, \
+            f"identifier minted as a Subject name: {bogus}"
+        by_id = proj.g.query(
+            "MATCH (s:Subject {id:$id}) RETURN count(s)",
+            params={"id": bogus},
+        ).result_set
+        assert by_id[0][0] == 0, \
+            f"identifier minted as a Subject id: {bogus}"
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[a:aboutSubject]->(x) "
+            "RETURN count(a)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert r[0][0] == 0, "spurious aboutSubject edge to a stub named after the id"
+
+    def test_create_event_unresolved_id_shaped_is_reported(self, sdk, caplog):
+        """#3586: an unresolved id-shaped value must fail LOUDLY, not silently
+        no-op — a cached legacy alias is shape-identical to a minted id, so the
+        shape test cannot tell 'no such node' from 'not an id'.
+
+        Before, this case produced no edge, no node and no signal at all.
+        """
+        caplog.set_level(logging.WARNING, logger="tortoise.sdk")
+        bogus = "sub-0123456789abcdef0123456789"  # valid shape, absent node
+        ev = sdk.create_event("unresolved-id-event", "meeting",
+                              aboutSubject=bogus)
+        proj = sdk._get_proj()
+        stub = proj.g.query(
+            "MATCH (s:Subject {name:$name}) RETURN count(s)",
+            params={"name": bogus},
+        ).result_set
+        assert stub[0][0] == 0, "unresolved id must never become a stub's name"
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[a:aboutSubject]->(x) "
+            "RETURN count(a)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert r[0][0] == 0, "no edge can exist for an unresolvable handle"
+        assert any("does not resolve to a" in rec.getMessage()
+                   for rec in caplog.records), \
+            "unresolved about* handle must be reported, not silently dropped"
+
+    def test_create_event_about_subject_not_stolen_by_event_id(self, sdk):
+        """#3586 review: `create_about_edge` resolves its target across ALL
+        labels by id/eventId, so a value that collides with ANOTHER node's
+        eventId used to win — the edge attached to the wrong-label node and the
+        intended Subject target was dropped.
+
+        Provenance-first made this worse for the name case: the value RESOLVED
+        (to the Event), so the result was accepted and the name/mint path never
+        ran — `aboutSubject="acme"` linked an Event and never created the
+        Subject `acme`. Pin the label-scoped resolution: aboutSubject must land
+        on the Subject named `acme`, never on the Event whose eventId is it.
+        """
+        # an Event whose eventId collides with the aboutSubject value
+        sdk.create_event("first event", "meeting", _server_id="acme")
+        ev = sdk.create_event("second event", "meeting", aboutSubject="acme")
+        proj = sdk._get_proj()
+        # the intended Subject exists and carries the edge
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutSubject]->"
+            "(s:Subject {name:'acme'}) RETURN count(s)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert r[0][0] == 1, \
+            "aboutSubject must land on the Subject named 'acme'"
+        # the wrong-label Event must NOT be the aboutSubject target
+        wrong = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[:aboutSubject]->(x:Event) "
+            "RETURN count(x)",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert wrong[0][0] == 0, \
+            "aboutSubject must not land on an Event (wrong label)"
 
 
 # ── Existing edges unbroken (regression) ────────────────────────────────

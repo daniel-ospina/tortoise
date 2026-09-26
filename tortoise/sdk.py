@@ -1704,20 +1704,116 @@ def _iso_date10(value: object) -> str:
 # (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
 # These are IDs, not names — a guard that only recognizes bare ULIDs treats
 # them as names and runs the stub-creating keyword fallback.
-_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
+#
+# #3586: the digest spelling is deliberately NOT pinned to ``{26}``/lowercase.
+# An opaque id's spelling is a property of the MINTER, not of the value, so a
+# spelling the regex does not anticipate is not thereby a name: epic #2835
+# Stage 3 mints new opaque ids, and a minted spelling this regex rejected was
+# silently treated as a NAME and minted as a Subject whose name AND id are the
+# identifier (`_mint_subject_stub`, projection/edges.py). The predicate is
+# therefore LENIENT about casing and digest length — ``prefix`` + a 16..64 hex
+# digest covers every id spelling the SDK mints or can plausibly mint — and it
+# is used ONLY for the negative case at the about* seam (may an UNRESOLVED
+# value be treated as a name?), never to decide that a value IS an id: that is
+# provenance, decided by resolution (`_wire_about_value`). Over-refusal there
+# is fail-closed (one warning, no node); the reverse mints junk a caller cannot
+# distinguish from data.
+#
+# ``_is_canonical_entity_id`` is the STRICT, HARD-REJECTION predicate. The two
+# are NOT interchangeable, and widening this one is not free: its consumer
+# (`_check_refs`) fails the WHOLE bundle closed on a hit, so a digest it newly
+# rejects is a previously-valid ref that stops ingesting. Keep it pinned to the
+# shapes the minting surfaces actually emit — a bare ULID, or
+# ``label[:3]-<sha256[:26]>`` (`_entity_name_id`). A spelling no minter can
+# produce (``pr-<hex16>``) cannot shadow a real node, so rejecting it buys no
+# safety and breaks a live ingest.
+_ENTITY_ID_RE = re.compile(r"^[a-z]{2,8}-[0-9a-f]{16,64}$", re.IGNORECASE)
+_CANONICAL_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
 
 
 def _is_entity_id(s: str) -> bool:
-    """Return True if *s* is an entity id: the prefixed _entity_name_id format
-    OR a bare ULID. Used by the about* wiring guards (create_entity event
-    branch) so ID-valued aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props never hit the name-resolution fallback.
+    """Return True if *s* is shaped like an entity handle (an opaque id), not
+    a name: a bare ULID (canonical or Crockford) OR ``prefix-<hex digest>``.
 
-    Boundary: a NAME shaped exactly like ``[a-z]{2,3}-<26 lowercase hex>``
-    (e.g. ``ab-0123456789abcdef0123456789``) is classified as an id and skips
-    name resolution — vanishingly rare for human names and consistent with
-    the pre-existing bare-ULID/Crockford behavior."""
+    NOT a provenance test (#3586): a minted id and a legacy
+    ``obj-<sha26(name)>`` alias are shape-identical, so shape alone cannot say
+    which node — if any — a value addresses. Callers that need that answer MUST
+    resolve the value first (``_wire_about_value`` does) and use this predicate
+    only for the negative case: may an UNRESOLVED value be resolve-or-minted as
+    a name? See ``_ENTITY_ID_RE`` for why the spelling range is lenient.
+
+    Boundary: a NAME shaped like ``[a-z]{2,8}-<16..64 hex>`` (e.g.
+    ``ab-0123456789abcdef``) is classified as an id — vanishingly rare for
+    human names, and now REPORTED rather than silently dropped by the about*
+    seam."""
     return bool(_is_ulid(s) or _ENTITY_ID_RE.match(s))
+
+
+def _is_canonical_entity_id(s: str) -> bool:
+    """Return True if *s* is shaped like an id the minting surfaces EMIT — a
+    bare ULID or ``label[:3]-<sha256[:26]>`` (``_entity_name_id``) — and so
+    could address (and shadow) a real node.
+
+    The HARD-REJECTION predicate (``_check_refs`` fails the whole bundle closed
+    on a hit). Do NOT widen it to anticipate a future id format: that trades a
+    live, previously-accepted ingest for protection against a spelling no
+    minter produces and which therefore cannot shadow anything. The lenient
+    about*-seam predicate is ``_is_entity_id``."""
+    return bool(_is_ulid(s) or _CANONICAL_ENTITY_ID_RE.match(s))
+
+
+def _wire_about_value(proj, source_id: str, value, rel: str) -> bool:
+    """Wire ONE ``about*`` prop of a freshly-written Event; True iff an edge
+    was created.
+
+    **Provenance first (#3586).** ``create_about_edge`` resolves the value
+    against the id/eventId index WITHIN the label *rel* implies — the surfaces
+    a HANDLE comes from — so a value that resolves to a node of that label is
+    an id, whatever its spelling, and a value that resolves only to a
+    DIFFERENT label is refused here and falls through to the name path below
+    (it must not steal the rel from its intended target). Its result previously
+    went unread and a shape test decided instead, which took the wrong branch in
+    both directions:
+
+    * a resolvable value whose spelling the shape test did not recognize (a
+      minted id under a new format) fell through to the name fallback, which
+      found no node NAMED after the id and minted a stub — so the edge landed
+      on a junk Subject, not on the entity the caller named;
+    * an unresolvable id-shaped value fell through to that same fallback, whose
+      ``_mint_subject_stub`` made the identifier BOTH a name and an id;
+    * an unresolvable recognized-id was a silent no-op — no edge, no node, no
+      signal — which is how a cached legacy alias vanishes.
+
+    So: only a value that resolves to nothing can be a name, and only a value
+    that is not handle-shaped may then be resolve-or-minted as one. An
+    unresolvable handle is a stale/unknown reference and is REPORTED, never
+    minted — the #1917 precedent (a long id that does not resolve is never
+    stubbed; warn and skip, projection/edges.py) applied to the about* seam.
+
+    epic #2835 Stage 3: while legacy ``obj-<sha26(name)>`` aliases remain
+    resolvable they are shape-identical to minted ids, so the alias→id lookup is
+    the REQUIRED resolution branch here — extend the ``create_about_edge`` hop
+    below, never this shape predicate.
+    """
+    from .projection.edges import STRUCTURAL_REL_LABELS
+    # The rel names its target label; scope the resolution to it so a value that
+    # collides with ANOTHER label's id/eventId cannot win (review of #3586 —
+    # `aboutSubject="acme"` landing on the Event whose eventId is "acme" and
+    # dropping the intended Subject).
+    target_label = STRUCTURAL_REL_LABELS.get(rel)
+    if proj.create_about_edge(source_id, value, rel, target_label=target_label):
+        return True
+    if not isinstance(value, str):
+        return False
+    if _is_entity_id(value):
+        _logger.warning(
+            "create_entity: %s %r is handle-shaped but does not resolve to a "
+            "%s node — edge not created and no stub minted (an identifier "
+            "must not become a name, #3586)", rel, value,
+            target_label or "node")
+        return False
+    proj._create_about_edges(source_id, value)
+    return True
 
 
 def _content_hash(text: str) -> str:
@@ -8662,7 +8758,15 @@ class TortoiseSDK:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
         and node-id-shadowing rejection: a ref shaped like a real node id —
         a bare ULID OR a prefixed entity id (e.g. ``sub-<hex26>``, #1553) —
-        would make refs.get(x, x) silently address an existing node."""
+        would make refs.get(x, x) silently address an existing node.
+
+        #3586: rejection fails the WHOLE bundle closed, so this check uses the
+        STRICT canonical predicate (``_is_canonical_entity_id``): only a shape
+        a minting surface can actually emit is rejected. The lenient about*-
+        seam predicate (``_is_entity_id``) is deliberately broader, and sharing
+        it here hard-rejected previously-valid refs whose digest is not a
+        canonical id (``pr-<hex16>``) — an id no minter produces, and which
+        therefore cannot shadow anything."""
         seen: dict[str, str] = {}
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
@@ -8671,7 +8775,7 @@ class TortoiseSDK:
                 ref = item.get("ref")
                 if not ref:
                     continue
-                if _is_entity_id(str(ref)):
+                if _is_canonical_entity_id(str(ref)):
                     violations.append({
                         "section": section, "index": i,
                         "message": f"ingest: {section}[{i}] ref {ref!r} is "
@@ -18958,22 +19062,13 @@ class TortoiseSDK:
                 is_episodic=is_episodic)
             proj = self._get_proj()
             if about_subject:
-                proj.create_about_edge(eid, about_subject, "aboutSubject")
-                # Only name-resolve if it looks like a plain name, not an ID
-                if isinstance(about_subject, str) and not _is_entity_id(about_subject):
-                    proj._create_about_edges(eid, about_subject)
+                _wire_about_value(proj, eid, about_subject, "aboutSubject")
             if about_object:
-                proj.create_about_edge(eid, about_object, "aboutObject")
-                if isinstance(about_object, str) and not _is_entity_id(about_object):
-                    proj._create_about_edges(eid, about_object)
+                _wire_about_value(proj, eid, about_object, "aboutObject")
             if about_point:
-                proj.create_about_edge(eid, about_point, "aboutPoint")
-                if isinstance(about_point, str) and not _is_entity_id(about_point):
-                    proj._create_about_edges(eid, about_point)
+                _wire_about_value(proj, eid, about_point, "aboutPoint")
             if about_document:
-                proj.create_about_edge(eid, about_document, "aboutDocument")
-                if isinstance(about_document, str) and not _is_entity_id(about_document):
-                    proj._create_about_edges(eid, about_document)
+                _wire_about_value(proj, eid, about_document, "aboutDocument")
         elif t == "document":
             documentKind = props.pop("documentKind", None)
             if not documentKind:
