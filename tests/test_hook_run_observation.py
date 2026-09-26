@@ -428,6 +428,14 @@ def test_an_unresolvable_home_cannot_break_hooks_status(tmp_path, bad_home):
     # A literal `~` tree must not be created where the CLI ran.
     assert not (tmp_path / "~").exists(), "HOME=~ materialised a tree"
 
+    # Same verdict on the machine surface.
+    proc_json = _cli(["hooks", "status", "--harness", "claude", "--dir",
+                      str(root), "--json"], home=bad_home, cwd=tmp_path)
+    assert proc_json.returncode == 0, (proc_json.stdout, proc_json.stderr)
+    hr = json.loads(proc_json.stdout)["hook_run"]
+    assert hr["observed"] is None, hr
+    assert hr["reason"] == "state-directory-unresolvable", hr
+
 
 # ── the writer/reader path derivation must not drift ─────────────────────
 
@@ -646,6 +654,12 @@ def test_an_install_too_old_to_record_is_not_reported_as_never_ran(tmp_path):
     assert f"starts at generation {HOOK_RUN_GENERATION}" in line, line
     assert "no run recorded" not in line, line
 
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    hr = payload["hook_run"]
+    assert hr["observed"] is None, hr
+    assert hr["reason"] == "hook-scripts-too-old", hr
+    assert hr["generation"] == HOOK_RUN_GENERATION - 1, hr
+
 
 def test_hooks_status_json_carries_the_observation(tmp_path):
     """The credential-free MACHINE surface must make the same distinction the
@@ -706,14 +720,14 @@ def _status(home, receipts, cwd, *, harness="claude", root=None, json_out=False)
     return proc, (json.loads(proc.stdout) if json_out else None)
 
 
-def test_an_unversioned_installed_hook_is_not_reported_as_never_ran(tmp_path):
+def test_an_unqualified_writer_is_not_reported_as_never_ran(tmp_path):
     """A pre-#3795 install carries NO version marker, and `read_hook_version`'s
     own contract calls that a first-class STALE signal — it is by definition
     pre-#3797 and cannot write a record.  Collapsing it into "no basis to say
     the writer is missing" reports an absence nobody observed.
 
-    Mutation: treat an absent marker as "no opinion" — both surfaces report a
-    real absence and this REDs."""
+    Mutation: treat an unreadable/marker-less script as "no opinion" — both
+    surfaces report a real absence and this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     root = tmp_path / "project"
@@ -731,11 +745,151 @@ def test_an_unversioned_installed_hook_is_not_reported_as_never_ran(tmp_path):
     assert line is not None, proc.stdout
     _assert_observation_is_honest(line)
     assert "cannot tell whether a run was recorded" in line, line
-    assert "no version marker" in line, line
+    assert "could not be qualified" in line, line
 
     _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
     assert payload["hook_run"]["observed"] is None, payload["hook_run"]
-    assert payload["hook_run"]["reason"] == "hook-script-unversioned", \
+    assert payload["hook_run"]["reason"] == "hook-script-unqualified", \
+        payload["hook_run"]
+
+
+@pytest.mark.parametrize("occupant,why", [
+    ("dir", "a directory"),
+    ("fifo", "a FIFO"),
+    ("broken-symlink", "a broken symlink"),
+    ("foreign", "a foreign script"),
+])
+def test_an_unusable_or_foreign_writer_is_never_called_missing(
+        tmp_path, occupant, why):
+    """`detect_install` reports these as `not-a-regular-file`,
+    `symlinked-script` or `foreign-script` IN THE SAME PAYLOAD, so a reason of
+    `hook-script-missing` would contradict the finding printed beside it.  The
+    reason is deliberately coarse, and must match what was actually observed.
+
+    Mutation: classify a non-regular session-start script as missing — the
+    reason says `hook-script-missing` and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    script = root / ".claude" / "hooks" / "session-start.sh"
+    script.unlink()
+    if occupant == "dir":
+        script.mkdir()
+    elif occupant == "fifo":
+        os.mkfifo(script)
+    elif occupant == "broken-symlink":
+        script.symlink_to(root / "nope.sh")
+    else:
+        script.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+        script.chmod(0o755)
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, (why, proc.stdout)
+    _assert_observation_is_honest(line)
+    assert "cannot tell whether a run was recorded" in line, (why, line)
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    hr = payload["hook_run"]
+    assert hr["observed"] is None, (why, hr)
+    assert hr["reason"] != "hook-script-missing", (why, hr)
+    # The reason must not contradict the finding the SAME document carries for
+    # the same path.
+    kinds = {f["kind"] for f in payload["findings"]}
+    assert kinds & {"not-a-regular-file", "symlinked-script", "foreign-script"}, \
+        (why, kinds, hr)
+
+
+def test_an_unreadable_writer_script_is_not_called_marker_less(tmp_path):
+    """`read_hook_version` swallows `OSError` and returns `None`, so a
+    chmod-000 script is indistinguishable from a marker-less one AT THAT
+    CALL.  Asserting "no version marker, so they predate the record" about a
+    file nobody could read is an install claim made from a failed read.
+
+    Mutation: map `installed is None` unconditionally to the marker-less
+    reason — the text claims a missing marker and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    script = root / ".claude" / "hooks" / "session-start.sh"
+    script.chmod(0o000)
+    try:
+        proc, _ = _status(home, receipts, tmp_path, root=root)
+        _proc, payload = _status(home, receipts, tmp_path, root=root,
+                                 json_out=True)
+    finally:
+        script.chmod(0o755)
+
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    assert "cannot tell whether a run was recorded" in line, line
+    assert "no version marker" not in line, line
+    assert payload["hook_run"]["reason"] == "hook-script-unqualified", \
+        payload["hook_run"]
+
+
+def test_a_writer_at_the_floor_reports_a_real_absence(tmp_path):
+    """HOOK_RUN_GENERATION is a FLOOR, not a mirror of the shipped marker: the
+    SHIPPED install IS at the floor while the write contract is unchanged, so
+    an absent record from it is a real absence of a run.  If the floor is ever
+    raised in lockstep with an unrelated script bump, this install becomes
+    "too old" and this REDs — the intended behaviour is pinned here against an
+    UNMODIFIED install, not against a fixture derived from the constant.
+
+    Mutation: raise the floor with the shipped generation — the shipped
+    install is called too old and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    assert "none" in line and "no run recorded" in line, line
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    assert payload["hook_run"]["observed"] is False, payload["hook_run"]
+    assert payload["hook_run"]["reason"] is None, payload["hook_run"]
+
+
+def test_an_undecodable_record_is_not_reported_as_no_record(tmp_path):
+    """A present record whose bytes are not UTF-8 is a READ failure, not a
+    parse result — the shipped writer truncates and rewrites with a plain `>`
+    redirect, so a concurrent reader can legitimately see a torn file.  With
+    `read_text` failing outside `OSError`, that arm returned None and the
+    surface reported an absence nobody observed.
+
+    Mutation: catch only `OSError` in the read arm — the line claims nothing
+    was recorded and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    (home / "hook-runs").mkdir(parents=True)
+    (home / "hook-runs" / "claude.json").write_bytes(
+        b'{"harness": "cla\xff\xfe')
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    _assert_observation_is_honest(line)
+    assert "cannot tell whether a run was recorded" in line, line
+    assert "no run recorded" not in line, line
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    assert payload["hook_run"]["observed"] is None, payload["hook_run"]
+    assert payload["hook_run"]["reason"] == "record-unreadable", \
         payload["hook_run"]
 
 
@@ -860,5 +1014,6 @@ def test_an_unreadable_probe_outcome_agrees_on_both_surfaces(tmp_path, fields, w
     _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
     hr = payload["hook_run"]
     assert hr["observed"] is True, (why, hr)
-    assert hr["reason"] == "probe-outcome-unreadable", (why, hr)
+    assert hr["reason"] is None, (why, hr)
+    assert hr["probe_outcome"] == "unreadable", (why, hr)
     assert "probe_recorded" not in hr and "probe_rc" not in hr, (why, hr)
