@@ -57,7 +57,11 @@ class _FakeChannels:
         self.telegram.append(text)
 
 
-def _store(channels, storage=None, issue_open=None, writer="unspecified") -> AlertStore:
+def _store(channels, storage=None, issue_open=None, writer="unspecified",
+           *, now=None, close_cooldown_min=None) -> AlertStore:
+    # ``close_cooldown_min`` is omitted when not given so the pre-fix behaviour
+    # can be exercised against this same fixture in a RED demonstration.
+    extra = {} if close_cooldown_min is None else {"close_cooldown_min": close_cooldown_min}
     return AlertStore(
         storage or MemoryStorage(),
         file_issue=channels.file_issue,
@@ -68,6 +72,8 @@ def _store(channels, storage=None, issue_open=None, writer="unspecified") -> Ale
         default_writer=writer,
         repo="daniel-ospina/tortoise",
         assignee="daniel-ospina",
+        now=now,
+        **extra,
     )
 
 
@@ -1447,3 +1453,38 @@ def test_open_incident_state_reports_the_three_facts_and_keeps_the_bool():
     assert store.open_incident("STALE", "team_x") is False
     assert store.open_incident_state("STALE", "team_x") is OpenOutcome.DEDUP
     assert len(ch.issues) == 1, "a dedup hit must never re-file"
+
+
+# ── #5143 / ADR-011: a failed close is not a resolution ─────────────────────
+
+def test_a_failed_close_does_not_report_success_or_delete_the_sentinel():
+    """#5143 / ADR-011: a close that did not HAPPEN must not be announced.
+
+    Pre-fix, ``resolve_incident_state`` swallowed the close exception, pushed
+    "✅ DR resolved", deleted the sentinel and returned RESOLVED — a false
+    all-clear on the one DR channel whose job is truthfulness, with the issue
+    still OPEN. ADR-011 (Consequences): *"A blip must not re-file; a permanent
+    failure must not be silent"* and *"the incident stays open with no writer
+    able to close it. That is correct rather than a defect … The driver's next
+    healthy run closes it."* Recovery must be OBSERVED, not inferred.
+
+    RED pre-fix: the swallow does not raise, pushes "✅ DR resolved" and deletes
+    ``ops/alerts/STALE/team_a.json``.
+    """
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage, writer="watcher")
+    assert store.open_incident("STALE", "team_a") is True
+    number = max(ch.issues)
+
+    ch.fail_close = True
+    with pytest.raises(RuntimeError):
+        store.resolve_incident("STALE", "team_a")
+
+    assert ch.closed == [], "the close did NOT happen"
+    assert not any("resolved" in t for t in ch.telegram), "no false all-clear"
+    # The sentinel survives so the incident is still ON RECORD — a recurrence
+    # dedups onto the still-open issue instead of filing a second one.
+    sentinel = json.loads(storage.download("ops/alerts/STALE/team_a.json"))
+    assert sentinel["issue_number"] == number
+    assert sentinel["close_failures"] == 1, "the failure is recorded for the backoff"
