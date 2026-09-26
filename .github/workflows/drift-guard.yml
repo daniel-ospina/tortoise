@@ -1,9 +1,18 @@
-# drift-guard CI gate (epic #1509 P3 / issue #1531)
+# drift-guard CI gate (epic #1509 P3 / issue #1531; #4174)
 # Fails when a long-lived branch has drifted from origin/main beyond the
-# threshold (commits on main missing from the branch). The v3 epic's
-# real-backend E2Es all gate on 'worktree == origin/main' — this makes the
-# gate loud. Behind-only: rebased branches report 0 regardless of commits
-# ahead. Follows redis-guard.yml conventions (checkout@v4, python3 tools/).
+# threshold (commits on main missing from the branch), OR when the branch
+# SILENTLY REVERTS main's work for paths it never touched (#4174 — the
+# conflict-free revert). The v3 epic's real-backend E2Es all gate on
+# 'worktree == origin/main' — this makes the gate loud. The tool fetches
+# origin/main first and fails closed when freshness cannot be proven, so a
+# never-fetched worktree cannot pass on a stale ref.
+#
+# #4174: the checkout MUST be the PR HEAD. actions/checkout's default ref on
+# `pull_request` is the synthetic `refs/pull/<N>/merge` ref, which CONTAINS
+# the base tip by construction — measuring it reports behind=0 and no revert
+# for every PR, making the gate structurally inert. Pinning `ref` to the PR
+# head is what makes the gate measure what it claims.
+# Follows redis-guard.yml conventions (checkout@v4, python3 tools/).
 name: drift-guard
 on:
   pull_request:
@@ -21,8 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # fetch-depth 0: counting commits behind origin/main needs full history.
+      # ref: the PR HEAD (#4174) — NOT the default merge ref, which contains
+      # the base and would make every measurement vacuously current.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Run drift-guard
         run: python3 tools/drift-guard.py
