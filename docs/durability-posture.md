@@ -188,8 +188,10 @@ EMPTY one. The loader accepts both on purpose (a legacy file is still the only
 record of the graph-only nodes it holds), and the rebuild then logs one of two
 ERRORs, neither of which claims a cause the file cannot record:
 
-- **no counter anywhere** — the allocator restarts at 1, so the next emit
-  re-issues `seq` values the pre-wipe graph already used;
+- **no counter anywhere** — the allocator is left absent, so it restarts at 1
+  at the next emit. That is correct for a graph that never emitted and a silent
+  under-count for one whose counter a wipe destroyed; the file records only its
+  capture-time state, so it cannot tell the two apart;
 - **a counter is present but did not come from the file** — a state-UNKNOWN
   signal, like `legacy_sidecar_no_config_record` (#2814): the value is either the
   one the graph already had (the window between the sidecar write and the wipe is

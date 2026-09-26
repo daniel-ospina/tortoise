@@ -5868,15 +5868,20 @@ class FalkorProjection(
                 if leftover is not None:
                     logger.error(
                         "rebuild: the event-log watermark could NOT be "
-                        "restored and the allocator restarts at 1 — the "
-                        "rescued pre-wipe snapshot (version %s) carries no "
-                        "usable `event_meta` mark, no replay pass recreates "
-                        "the counter (#4664), and the live graph holds none, "
-                        "so the next emit hands out seqs the pre-wipe graph "
-                        "already used and every subscriber parked above the "
-                        "restart silently under-counts. The graph itself is "
-                        "rebuilt; a rescue file written by the current version "
-                        "carries the mark (#4653)",
+                        "restored and the allocator is left with no counter, "
+                        "so it restarts at 1 at the next emit — the rescued "
+                        "pre-wipe snapshot (version %s) carries no usable "
+                        "`event_meta` mark, no replay pass recreates the "
+                        "counter (#4664), and the live graph holds none. "
+                        "Restarting at 1 is correct for a graph that never "
+                        "emitted and a silent under-count for one whose "
+                        "counter a wipe destroyed: the next emit may re-issue "
+                        "seqs the pre-wipe graph already used, and every "
+                        "subscriber parked above the restart then under-counts "
+                        "without being told. The snapshot records only its "
+                        "capture-time state, so it cannot tell the two apart. "
+                        "The graph itself is rebuilt; a rescue file written by "
+                        "the current version carries the mark (#4653)",
                         leftover.get("version"))
             elif leftover is not None and leftover_carry is None:
                 # A state-UNKNOWN signal, like `legacy_sidecar_no_config_record`
