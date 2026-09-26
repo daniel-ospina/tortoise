@@ -811,6 +811,197 @@ class TestRateLimit:
             assert sum(1 for s in statuses if s == 429) >= 1
 
 
+# ── #2050: pack_install consumes the pack_manifest budget ──────────────────
+
+class TestPackInstallRateBudget:
+    """#2050: ``tortoise_pack_install`` must consume the pack_manifest op
+    budget, exactly as its REST twin ``POST /v1/packs/manifests`` does.
+
+    #2038 added a ``pack_manifest`` entry to ``_SENSITIVE_OP_LIMITS`` and
+    charged it on the REST endpoint. The MCP tool reaches
+    ``upsert_tenant_manifest`` in-process (no HTTP), so it consumed NOTHING —
+    bounded only by the generic 100/min per-key middleware, a ~1200x looser
+    bound on the same expensive operation. These tests drive the MCP transport
+    end to end and pin the refusal.
+    """
+
+    #: A manifest the shared registry validator + tenant policy both accept
+    #: (mirrors tests/test_pack_manifest_store.py::VALID_MANIFEST).
+    MANIFEST = (
+        "namespace: tenant-ops\n"
+        "name: Tenant Operations\n"
+        "version: 0.1.0\n"
+        "tier: free\n"
+        "ontology:\n"
+        "  extends: core\n"
+        "  objectKinds:\n"
+        "  - contract\n"
+    )
+
+    @staticmethod
+    def _env(tmp_path, monkeypatch, name, limit):
+        """Registry + team default graph + mounted MCP app, limiter ENABLED.
+
+        ``RATE_LIMIT_DISABLED`` is set process-wide by conftest and read at
+        middleware CONSTRUCTION time, so it must be cleared before the app is
+        built (mirrors TestRateLimit.test_101st_post_429).
+        """
+        import tortoise.hosted_api as _ha  # the deployment gate + shared store
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(_ha._SENSITIVE_OP_LIMITS, "pack_manifest", limit)
+        _ha._SENSITIVE_BUCKETS.clear()
+
+        db_path = str(tmp_path / f"{name}.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create(name)
+        reg._graph_create(team["id"], "default", kind="default")
+        key = reg.apikey_create(team["id"], "#2050")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        return reg, team["id"], key, _mounted_test_client(app)
+
+    @classmethod
+    def _install(cls, tc, key):
+        """One ``tools/call tortoise_pack_install``; returns (result, text)."""
+        r = tc.post("/mcp", headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
+                 "params": {"name": "tortoise_pack_install",
+                            "arguments": {"manifest_yaml": cls.MANIFEST}}})
+        assert r.status_code == 200, r.text
+        body = _parse_sse_json(r)
+        result = body.get("result") or {}
+        text = "".join(c.get("text", "") for c in result.get("content", [])
+                       if isinstance(c, dict))
+        return result, text
+
+    def test_install_refused_once_budget_exhausted(self, tmp_path, monkeypatch):
+        """The (N+1)th install over MCP HTTP is REFUSED — not merely counted.
+
+        Fails before the #2050 fix: the MCP path consumed no budget, so every
+        call was admitted and the refusal assertion below never fired.
+        """
+        import tortoise.hosted_api as ha_mod
+        _reg, _tid, key, tc = self._env(tmp_path, monkeypatch, "pi-budget", 2)
+        try:
+            with tc:
+                for _ in range(2):
+                    result, text = self._install(tc, key)
+                    assert result.get("isError") is not True, text
+                    assert '"installed":true' in text, text
+                result, text = self._install(tc, key)
+                assert result.get("isError") is True, (
+                    "pack install was still ADMITTED after the pack_manifest "
+                    f"budget was exhausted (no refusal returned): {text}")
+                assert "Rate limit exceeded for pack_manifest" in text, text
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_install_charges_the_shared_sensitive_bucket(self, tmp_path,
+                                                         monkeypatch):
+        """The install charges the SHARED store under ``(team_id, op)``.
+
+        Pins the mechanism, not just the behaviour: a fork into a private MCP
+        store would leave this bucket empty while the refusal test above could
+        still pass against that fork's own counter.
+        """
+        import tortoise.hosted_api as ha_mod
+        _reg, tid, key, tc = self._env(tmp_path, monkeypatch, "pi-bucket", 5)
+        try:
+            with tc:
+                result, text = self._install(tc, key)
+                assert result.get("isError") is not True, text
+            assert ha_mod._SENSITIVE_BUCKETS.get((tid, "pack_manifest")), (
+                "the MCP install consumed no entry in the shared "
+                f"_SENSITIVE_BUCKETS store: {dict(ha_mod._SENSITIVE_BUCKETS)}")
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_budget_is_team_scoped_not_ip_scoped(self, tmp_path, monkeypatch):
+        """Two teams on the SAME client address have INDEPENDENT budgets.
+
+        An MCP caller is an authenticated agent server, frequently sharing one
+        egress address with unrelated tenants — a per-IP bucket would let one
+        tenant exhaust another's install allowance.
+        """
+        import tortoise.hosted_api as ha_mod
+        _reg, tid_a, key_a, tc = self._env(tmp_path, monkeypatch, "pi-team-a", 1)
+        try:
+            with tc:
+                # second tenant in the SAME registry, same TestClient (one IP)
+                team_b = _reg.org_create("pi-team-b")
+                _reg._graph_create(team_b["id"], "default", kind="default")
+                key_b = _reg.apikey_create(team_b["id"], "#2050")["api_key"]
+
+                result, text = self._install(tc, key_a)
+                assert result.get("isError") is not True, text
+                # team A is now exhausted...
+                result, text = self._install(tc, key_a)
+                assert result.get("isError") is True, text
+                # ...but team B, on the SAME IP, still has its own budget
+                result, text = self._install(tc, key_b)
+                assert result.get("isError") is not True, (
+                    "team B was refused by team A's exhausted budget — the "
+                    f"bucket is not team-scoped: {text}")
+                assert (team_b["id"], "pack_manifest") in ha_mod._SENSITIVE_BUCKETS
+                assert (tid_a, "pack_manifest") in ha_mod._SENSITIVE_BUCKETS
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_clientless_request_still_returns_with_an_explicit_key(
+            self, monkeypatch):
+        """#5397 review: the widening for the Request-FREE arm must not widen
+        the HTTP callers that already pass a Request.
+
+        The pre-#2050 guard (``not request.client``) is restored FIRST, so a
+        client-less Request charges NOTHING whether or not an explicit ``key``
+        is supplied. Pinned on the reviewer's worst case: the per-IP dimension
+        of ``invite-accept`` collapsing into one shared
+        ``("invite-accept", "ip", None)`` bucket across unrelated tokens.
+        The Request-free arm keeps enforcing on the SAME store, so the guard
+        cannot be dropped without failing this test's second half.
+        """
+        from collections import defaultdict
+
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        store = defaultdict(list)
+        lock = asyncio.Lock()
+        req = Request({"type": "http", "method": "POST",
+                       "path": "/invites/accept", "headers": [],
+                       "query_string": b"", "client": None})
+
+        async def _scenario():
+            kw = {"buckets": store, "lock": lock, "limit": 1,
+                  "window_s": 3600, "detail": "rate limited",
+                  "retry_after_s": None}
+            # A client-less Request: both attempts ADMITTED, nothing charged.
+            for _ in range(2):
+                await ha_mod._check_ip_bucket_rate_limit(
+                    req, key=("invite-accept", "ip", None), **kw)
+            assert store == {}, (
+                "a client-less Request charged an explicit key — an existing "
+                f"caller now enforces where it used to return: {dict(store)}")
+            # The Request-free arm charges the SAME store and refuses at limit.
+            await ha_mod._check_ip_bucket_rate_limit(
+                None, key=("team-x", "pack_manifest"), **kw)
+            with pytest.raises(HTTPException) as exc:
+                await ha_mod._check_ip_bucket_rate_limit(
+                    None, key=("team-x", "pack_manifest"), **kw)
+            assert exc.value.status_code == 429
+
+        asyncio.run(_scenario())
+
+
 # ── Excluded tools ──────────────────────────────────────────────────────────
 
 class TestExcludedTools:
