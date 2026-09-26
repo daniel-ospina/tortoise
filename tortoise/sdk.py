@@ -22046,9 +22046,13 @@ class TortoiseSDK:
         whose note was right there — the ordinary shape, since `hosted_api` gives
         one Source a document derivation link AND external containment links.
 
-        Each row's pair speaks for THAT link only. A Point-level currency is an
-        aggregate over its links (ONTOLOGY §4.6), so a caller that needs a
-        Point-level verdict must aggregate these rows itself.
+        Each row's pair speaks for THAT ``references`` link only, and these rows
+        are **NOT** §4.6's Point-level aggregate: §4.6 aggregates the Point's
+        ``extractedFrom`` links — a DIFFERENT link set, which this method does
+        not read at all (it binds no version off ``extractedFrom``). A caller
+        wanting that verdict has to read those links itself. What these rows
+        answer is the narrower question: *which version was each referenced
+        entity read at, and is that still the source's current version?*
         """
         proj = self._get_proj()
         from .search_engine import currency_status
@@ -22061,15 +22065,21 @@ class TortoiseSDK:
             # decide what a caller sees. Deliberately NO `LIMIT`: one row per
             # link, because a Point extracted from several sources — or a source
             # referencing several things — must not have its remaining notes
-            # dropped, and a Point-level verdict needs every link (§4.6).
+            # dropped.
             # (1) a resolved reference beats the self-terminal fallback;
             # (2) an ANNOTATED reference beats an unannotated one — this is what
             #     makes the note reachable at all;
             # (3) node key, then the note itself. `eventId` is required: a legacy
             #     raw-Cypher Event carries no `url` and no `id`, so without it
             #     every such candidate keyed `''` and the tie-break did nothing.
+            #     `src` is required for the same reason one level up: a
+            #     fallback row has `ref` NULL, so every ``ref``-based key is `''`
+            #     and the fallback rows of a Point with SEVERAL reference-less
+            #     sources (the D10 legacy-document shape `ingest.add_document`
+            #     produces) would tie end to end, leaving ingestion order in
+            #     charge of which document a caller sees first.
             "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
-            "coalesce(ref.url, ref.id, ref.eventId, ''), "
+            "coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, ''), "
             "coalesce(ref_edge.sourceVersion, '') "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "

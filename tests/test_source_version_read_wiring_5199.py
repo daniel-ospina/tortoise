@@ -151,10 +151,9 @@ def test_provenance_chain_says_unknown_when_the_link_carries_no_note():
 
 def test_provenance_chain_reports_every_link_of_a_multi_source_point():
     """REGRESSION (#5199 review P2). A Point read from two sources carries a note
-    on EACH `extractedFrom` link, and ONTOLOGY §4.6 makes the Point's currency an
-    aggregate over them — so a reader that answered with ONE row hid a note and
-    made the aggregate impossible to compute. `MIN`/`LIMIT`-style caps here are
-    not a simplification; they are data loss.
+    on EACH source's `references` link — so a reader that answered with ONE row
+    hid a note, and a caller could not even see the per-link set. `MIN`/`LIMIT`
+    caps here are not a simplification; they are data loss.
 
     FAILS IF the reader caps its result (e.g. re-adds `LIMIT 1`): this Point has
     two sources, each with its own annotated reference, and both must come back."""
@@ -263,6 +262,45 @@ def test_provenance_chain_order_is_stable_for_event_only_targets():
 
     assert _events(False) == _events(True), (
         "eventId-only targets must not let insertion order decide the answer"
+    )
+
+
+def test_provenance_chain_orders_reference_less_sources_by_key():
+    """REGRESSION (#5199 review P2). A source that references NOTHING yields a
+    self-terminal fallback row whose `ref` is NULL, so EVERY `ref`-based order
+    key evaluates to `''`. For a Point with several such sources the rows tied
+    end to end and insertion order decided which document a caller sees first —
+    the D10 legacy-document shape, reachable through `ingest.add_document`,
+    which omits `source_url` at every site.
+
+    FAILS IF the order keys ignore `src`: the two insertion orders below would
+    then disagree about `rows[0]`, which is not a benign tie — the rows are
+    different documents."""
+    def _bare(reverse: bool):
+        sdk = TortoiseSDK(_tmp("bare.db"))
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (p:Point {id:'pt_1', content:'a fact', pointKind:'fact', "
+            "status:'live', createdAt:'2024-01-01'})"
+        )
+        for url, h in (("c1.txt", "h1"), ("c2.txt", "h2")):
+            proj.g.query(
+                f"CREATE (s:Source {{url:'{url}', sourceKind:'corpus', "
+                f"title:'{url}', contentHash:'{h}', ingestedAt:'2024-01-01'}})"
+            )
+        order = ["c1.txt", "c2.txt"]
+        for url in (reversed(order) if reverse else order):
+            proj.g.query(
+                f"MATCH (p:Point {{id:'pt_1'}}), (s:Source {{url:'{url}'}}) "
+                f"CREATE (p)-[:extractedFrom]->(s)"
+            )
+        try:
+            return [r["source"].get("url") for r in sdk.get_provenance_chain("pt_1")]
+        finally:
+            sdk.close()
+
+    assert _bare(False) == _bare(True) == ["c1.txt", "c2.txt"], (
+        "reference-less sources must be ordered by key, not by insertion order"
     )
 
 
