@@ -6849,18 +6849,53 @@ def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
     return {}
 
 
+#: The fixed 9-class ``_classify_error`` vocabulary (#1524) — the census
+#: keys the report, the integrity grader's recoverable allowlist and the
+#: extraction-health killer set all branch on. Declared as code (the #1787
+#: ``llm_error_census`` emission contract that also names it has no code
+#: presence — #5526) so a future add/rename is detectable; #4959 reroutes a
+#: 403 WITHIN this set rather than adding a 10th class.
+_LLM_ERROR_CENSUS_CLASSES = frozenset({
+    "fatal_401_auth",
+    "fatal_402_billing",
+    "fatal_403_forbidden",
+    "fatal_4xx",
+    "transient_429_rate_limit",
+    "transient_5xx",
+    "transient_timeout",
+    "transient_network",
+    "transient_unknown",
+})
+
+
 def _is_key_limit_error(e: BaseException) -> bool:
-    """True → this HTTP rejection is the provider's OWN key-budget condition
-    (a spent quota), not a credential/authorization failure.
+    """True → this HTTP rejection is the provider's OWN key-limit condition
+    (a spent budget, or another provider-side limit), not a credential /
+    authorization failure.
 
     Delegates to ``tortoise.model_adapters.is_billing_exhausted`` (#4860 /
     #4951) — the SINGLE seam that owns the key-limit body signatures — so the
-    census class and the rotation decision can never disagree (#4959).
+    census class and the rotation decision agree on every requests-shaped
+    error this lane produces (#4959). The seam's signature set is deliberately
+    BROAD (#4952: the trailing ``"limit exceeded"`` also matches "rate limit
+    exceeded" / "organization limit exceeded" / "token limit exceeded"), and
+    the census INHERITS that breadth — a 403 whose body matches any of those
+    phrasings records ``fatal_402_billing`` and degrades the run. Deliberately
+    NOT narrowed here: the direction is fail-closed (a false degrade, never a
+    false certificate), a 429 is intercepted by the earlier branch, the seam's
+    signature table is #4951's to own, and a second boundary in this module
+    would re-create exactly the divergence #4959 removes. Pinned by
+    ``test_classify_error_generic_limit_403_is_billing_broad_by_design``.
+
     Lazily imported (the extractor stays free of a hard ``model_adapters`` /
-    ``requests`` import), mirroring ``_is_fatal_error``; if the seam is
-    unimportable the answer is False — a 403 stays ``fatal_403_forbidden``
-    (fail-closed to the credential class, never a silent billing-lenient
-    pass)."""
+    ``requests`` import), mirroring ``_is_fatal_error``. On ``ImportError``
+    the answer is False, so a 403 degrades to the PRE-#4959 credential class
+    ``fatal_403_forbidden``: still ``fatal_*`` (the abort decision is
+    unchanged and the integrity gate still grades it ``hard``), but NOT a
+    killer class — the extraction-killer gate does not fire on that branch.
+    That branch is a defensive fallback for an unimportable seam, not a
+    supported mode (``model_adapters`` is a first-class dependency of this
+    module's taxonomy — ``_is_fatal_error`` imports it too)."""
     try:
         from tortoise.model_adapters import is_billing_exhausted
     except ImportError:  # pragma: no cover — P2 landed; defensive fallback
@@ -6891,7 +6926,19 @@ def _classify_error(e: BaseException) -> str:
     fired (#4860: 7/7 captures aborted on a key-limit 403). The retry/abort
     decision is unchanged — both classes are FATAL — and a signature-less
     403 (a genuine permission failure) keeps ``fatal_403_forbidden``, so the
-    credential-vs-budget distinction survives."""
+    credential-vs-budget distinction survives. The key-limit test itself is
+    ``_is_key_limit_error`` above (its breadth caveat included).
+
+    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``.
+
+    SCOPE OF THE STATUS READ (pre-existing, not introduced here): the status
+    comes from ``e.response.status_code`` ONLY. A ``urllib.error.HTTPError``
+    carries it on ``.code`` and has NO ``.response``, so every HTTP failure
+    from that shape (``OpenAICompatModel``) classifies ``transient_unknown``
+    — a divergence from ``model_adapters._http_status`` (which reads
+    ``.code``), tracked separately as #5525; this function's duck-typed read
+    is left as-is so #4959 does not change classification for the product
+    capture path."""
     st = getattr(getattr(e, "response", None), "status_code", None)
     if st is not None:
         if st == 429:
