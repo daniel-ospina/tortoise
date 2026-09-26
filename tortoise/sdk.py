@@ -22010,6 +22010,12 @@ class TortoiseSDK:
             entity_label: the entity label (Source|Event|Object) for the MATCH.
                 The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
                 resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
+                ⚠️ The alias is NOT equivalent to ``"Source"`` for the caller:
+                it also selects the DERIVATION relation, so the link takes the
+                optional ``sourceVersion`` anchor described below, while
+                ``"Source"`` means referential containment and stays
+                property-free. Pass ``"Document"`` when the link's meaning is
+                "this target was read from that source".
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
         Anchor (#5199): a DERIVATION link (``Event`` | ``Document``) records the

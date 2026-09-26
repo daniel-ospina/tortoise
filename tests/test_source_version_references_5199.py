@@ -400,8 +400,9 @@ def test_document_link_records_the_version_read():
 
 
 def test_document_derivation_through_the_production_path_anchors():
-    """Input: the REAL document write path — ``entities.py::_upsert_document`` handed a
-    corpus ``source_url`` — rather than a link this test builds by hand.
+    """Input: the production writer ``entities.py::_upsert_document`` handed a corpus
+    ``source_url``, called directly (so the surrounding ``_doc_write``→``apply`` routing
+    is not exercised) rather than a link this test builds by hand.
 
     FAILS IF the production call site stops spelling the relation ``"Document"``.
     That is exactly what D10 did: it rewrote these call sites to ``"Source"`` because
@@ -435,6 +436,99 @@ def test_document_derivation_through_the_production_path_anchors():
         )
     finally:
         sdk.close()
+
+
+def test_index_path_document_link_records_the_version_read(tmp_path):
+    """Input: the REAL index path (``sdk.index_directory``) over one document — the path
+    through which a corpus→document link is actually minted in production.
+
+    Pins the ANCHOR end-to-end on that path. It does NOT pin the ``sdk.py`` doc-classifier
+    call site specifically, and says so rather than implying otherwise: mutating that
+    site's label leaves this test GREEN, because on this path the edge is minted earlier
+    by ``_upsert_document`` and ``ON CREATE`` does not fire twice. The call sites
+    themselves are pinned by
+    ``test_document_call_sites_express_derivation_not_containment``.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "spec.md").write_text("---\ntitle: Spec\n---\nBody text about the spec.")
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        sdk.index_directory(str(corpus), extract_metadata=False)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (a:Source)-[r:references]->(b:Source) "
+            "WHERE b.url CONTAINS 'spec.md' AND a.url CONTAINS 'spec.md' "
+            "RETURN a.contentHash, r.sourceVersion"
+        ).result_set
+        assert rows, "the index path must mint the corpus->document references edge"
+        for source_hash, anchor in rows:
+            assert anchor == source_hash and anchor, (
+                "the index path's corpus->document link must carry the version it was "
+                f"read at, got contentHash={source_hash!r} sourceVersion={anchor!r}"
+            )
+    finally:
+        sdk.close()
+
+
+def test_document_call_sites_express_derivation_not_containment():
+    """A STRUCTURAL contract test, deliberately, and the reason is the regression class
+    itself: D10 rewrote three production call sites from ``"Document"`` to
+    ``"Source"`` with no conflict marker and no test failure, because the writer remaps
+    identity either way and only the ANCHOR changes. A behavioural pin can only cover a
+    path its fixture happens to drive — and two of the three paths (the hosted commit and
+    the index repair) need heavy harnesses. This reads the call sites directly.
+
+    The invariant: every literal label the document-derivation writers pass is a member
+    of ``_DERIVATION_REFERENCES_LABELS``. A genuinely caller-supplied label rides in a
+    VARIABLE (the public passthrough does exactly that and must stay untouched), so it is
+    not a literal here and is not constrained by this test.
+    """
+    import ast
+    from pathlib import Path
+
+    from tortoise.projection.edges import _DERIVATION_REFERENCES_LABELS
+
+    root = Path(__file__).resolve().parent.parent
+    files = (
+        "tortoise/projection/entities.py",
+        "tortoise/hosted_api.py",
+        "tortoise/sdk.py",
+    )
+    literal_labels: list[tuple[str, int, str]] = []
+    for rel in files:
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "link_source_to_entity"
+                and len(node.args) >= 3
+                and isinstance(node.args[2], ast.Constant)
+                and isinstance(node.args[2].value, str)
+            ):
+                literal_labels.append((rel, node.lineno, node.args[2].value))
+            # the doc classifier of the ingest path picks its label conditionally
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.IfExp)
+                and isinstance(node.value.orelse, ast.Constant)
+                and isinstance(node.value.orelse.value, str)
+                and any(isinstance(t, ast.Name) and t.id == "label" for t in node.targets)
+            ):
+                literal_labels.append((rel, node.lineno, node.value.orelse.value))
+
+    non_derivation = [t for t in literal_labels if t[2] not in _DERIVATION_REFERENCES_LABELS]
+    assert not non_derivation, (
+        "a production document call site passes a NON-derivation label, so its link "
+        f"silently loses the sourceVersion anchor: {non_derivation!r}"
+    )
+    assert len(literal_labels) == 3, (
+        "expected exactly the three production document-derivation call sites "
+        f"(entities/_upsert_document, hosted_api session->document, sdk doc classifier); "
+        f"found {len(literal_labels)}: {literal_labels!r} — if one moved or was removed, "
+        "re-point this pin rather than deleting it"
+    )
 
 
 def test_pre_model_edge_is_not_retro_stamped():
