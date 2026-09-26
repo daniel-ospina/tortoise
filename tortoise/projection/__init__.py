@@ -1920,7 +1920,7 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
 # ``sdk._update_entity``.
 _CANONICAL_ENTITY_ID_PROPS: tuple[tuple[str, str], ...] = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
-    ("Document", "id"), ("Source", "id"), ("Event", "eventId"),
+    ("Source", "id"), ("Event", "eventId"),
 )
 _CANONICAL_ENTITY_LABELS: frozenset[str] = frozenset(
     label for label, _ in _CANONICAL_ENTITY_ID_PROPS)
@@ -2313,7 +2313,7 @@ _JOURNAL_CREATING_EVENT_TYPES = frozenset({
 # them across deletes conflated an ``EntityMutated`` delete with a later
 # ``PointsMerged`` and over-suppressed a live link.
 _HARD_DELETE_LABELS = frozenset({
-    "Point", "Subject", "Object", "Document", "Source", "Event",
+    "Point", "Subject", "Object", "Source", "Event",
 })
 _POINTS_MERGED_LABELS = frozenset({"Point"})
 
@@ -5924,7 +5924,7 @@ class FalkorProjection(
     #: (url-only ingestion stubs from _link_source have no id).
     _RESOLVE_BRANCHES = (
         ("Point", "id"), ("Subject", "id"), ("Object", "id"),
-        ("Document", "id"), ("Source", "id"),
+        ("Source", "id"),
         ("Event", "eventId"), ("Source", "url"),
     )
 
@@ -6133,18 +6133,11 @@ class FalkorProjection(
             except Exception:
                 pass
 
-        # ── Document range indexes (#125 — structural queries filter by kind) ──
-        for prop in ("id", "documentKind"):
-            try:
-                self.g.query(f"CREATE INDEX FOR (n:Document) ON (n.{prop})")
-            except Exception as e:
-                msg = str(e).lower()
-                if "already indexed" in msg or "already exists" in msg:
-                    pass
-                else:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        "Failed to create index on Document.%s: %s", prop, e)
+        # ── D10 (ONTOLOGY v3.15 §4.4): the :Document label is retired — a
+        # document is a :Source. No :Document range index is created. A
+        # :Source(documentKind) index is deliberately NOT added: the index
+        # block declines kind-field indexes (measured 3.15x write slowdown,
+        # #522). ──
 
         # ── Range indexes on canonical entity keys (issue #327) ──
         # Point/Document are created above; these enable index-backed
@@ -6222,7 +6215,23 @@ class FalkorProjection(
                                   # by name) needs the Object FTS leg —
                                   # without it S3's entities bucket is dead
                                   # on the real backend.
-                                  ("Document", ["_searchText"])]:  # #125 Document FTS
+                                  ("Source", ["_searchText"])]:  # #125 Document FTS
+                                  # (D10: the doc node is a :Source, so the
+                                  # full-text leg rides the Source label).
+                                  # #3518: a captured session's :Source carried
+                                  # NO searchable text field, so
+                                  # `tortoise_fts_query(entity_type='source')`
+                                  # never resolved against this label (it
+                                  # degraded to `index_missing` / an empty run)
+                                  # and the captured session was unfindable.
+                                  # `_searchText` is the ONE searchable field
+                                  # and BOTH Source writers populate it through
+                                  # `sdk._source_search_text` — the indexer
+                                  # (`_upsert_source`, title) and the capture
+                                  # path (`_materialize_session_source`,
+                                  # title-else-summary). `summary`/`topics` are
+                                  # deliberately NOT indexed: a second
+                                  # vocabulary the FTS surface does not read.
                 try:
                     fields_sql = ", ".join(f"'{f}'" for f in fields)
                     self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
@@ -6433,15 +6442,18 @@ class FalkorProjection(
         return EMBEDDING_DIM
 
     def backfill_document_search_text(self) -> int:
-        """#125: set _searchText=title on Documents missing it (idempotent).
+        """#125: set _searchText on document Sources missing it (idempotent).
 
-        Covers pre-existing Documents created before the capture-fields change.
-        Returns the number of Documents backfilled.
+        D10: the document node is a :Source, so this targets document-bearing
+        Sources (``documentKind IS NOT NULL``) — never a session/connector/
+        provenance Source, which owns no _searchText.
+        Returns the number of document Sources backfilled.
         """
         rows = self.g.query(
-            "MATCH (d:Document) WHERE d._searchText IS NULL "
-            "SET d._searchText = coalesce(d.title, '') "
-            "RETURN count(d)"
+            "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+            "AND s._searchText IS NULL "
+            "SET s._searchText = coalesce(s.title, '') "
+            "RETURN count(s)"
         ).result_set
         return rows[0][0] if rows else 0
 

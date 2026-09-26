@@ -362,6 +362,16 @@ def test_document_link_records_the_version_read():
     The member tracks the CODE's writers (``projection/entities.py:1901``,
     ``hosted_api.py:11558``), which is where the label is live; ONTOLOGY §3.4's
     declared target list does not name it (see the label-set test above).
+
+    **Updated at the #5199 x main merge (D10).** This test used to hang the
+    target off a ``:Document`` node. D10 retires that label and collapses the
+    caller onto ``:Source`` ("existing callers/journal replay converge on the
+    same node"), so post-D10 the caller's ``"Document"`` must resolve to a
+    ``:Source`` target by ``url``. The GUARD is unchanged and still load-bearing:
+    drop ``Document`` from ``_DERIVATION_REFERENCES_LABELS`` and this reddens
+    again, because the caller's original label is what selects the anchor
+    (``_is_derivation``) — a bare ``Source`` caller stays property-free, which is
+    what keeps referential-containment links unanchored.
     """
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
@@ -370,12 +380,13 @@ def test_document_link_records_the_version_read():
             "CREATE (s:Source {url:'src3.txt', sourceKind:'document', "
             "title:'src3.txt', contentHash:'h1', ingestedAt:'2024-01-01'})"
         )
-        proj.g.query("CREATE (d:Document {id:'doc-9', name:'Spec'})")
+        # D10: the document IS a :Source — the caller still says "Document".
+        proj.g.query("CREATE (d:Source {url:'doc-9', name:'Spec'})")
 
         sdk.link_source_to_entity("src3.txt", "doc-9", "Document")
 
         rows = proj.g.query(
-            "MATCH (:Source {url:'src3.txt'})-[r:references]->(:Document {id:'doc-9'}) "
+            "MATCH (:Source {url:'src3.txt'})-[r:references]->(:Source {url:'doc-9'}) "
             "RETURN r.sourceVersion"
         ).result_set
         assert rows == [["h1"]], f"Document is a derivation class, got {rows!r}"

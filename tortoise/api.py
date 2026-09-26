@@ -391,7 +391,6 @@ class EventAPI:
                      owned_by: str = "",
                      managed_by: str = "",
                      governing_agreement: str = "",
-                     doc_status: str = "draft",
                      format: str = "markdown",
                      version: str = "",
                      createdAt: str | None = None,
@@ -414,11 +413,14 @@ class EventAPI:
         #125: topics/summary/session_id/event_id capture metadata.
         #167: source_path → d.sourcePath for file resolution.
         #133: needs_extraction → d.needs_extraction for --upgrade-all discovery.
+        D10 (ONTOLOGY v3.15 §4.4): ``doc_status`` is RETIRED — liveness is a
+        read of the extracted entities, not a stored field. It is no longer a
+        parameter and is never emitted.
         Epic #900 T3: ``source_url`` overrides the #205 auto-wire target (the
         indexer passes the real ``corpus://`` Source url so no phantom Source
         is merged — the override rides the JOURNALED event, so replay honors
         it); ``domain`` is persisted as ``d.domain`` via ``_persist_extra_props``
-        (intentionally NOT in ``_DOCUMENT_HANDLED`` — the persistence IS the
+        (intentionally NOT in ``_DOC_RETIRED`` — the persistence IS the
         intent); ``suppress_embedding`` skips the unconditional embedding call
         (new-path docs; the legacy branch computes as today — SC4).
         """
@@ -433,7 +435,6 @@ class EventAPI:
                    owned_by=owned_by,
                    managed_by=managed_by,
                    governing_agreement=governing_agreement,
-                   doc_status=doc_status,
                    format=format,
                    version=version,
                    createdAt=createdAt or now_iso(),
