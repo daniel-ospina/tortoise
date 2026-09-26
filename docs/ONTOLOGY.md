@@ -90,9 +90,11 @@ doc_status: live
 >   `subclassOf` against any of them (#2727).
 >   **Count correction on merge:** §5/§6/§1/§4.3 name **16** object kinds —
 >   v3.15 (#5013) retired `document` from the Object vocabulary (a document is a
->   `:Source`, §4.4) and the resolutions below follow it. The runtime constant
->   (`CANONICAL_OBJECT_KINDS` — 17 members) and `extractor_v2.CORE_OBJECT_KEYS`
->   still carry `document`, a code lag owned by #5026.
+>   `:Source`, §4.4) and the resolutions below follow it. The code lag this note
+>   used to record is now closed: the runtime constant (`CANONICAL_OBJECT_KINDS`
+>   — 16 members) and `extractor_v2.CORE_OBJECT_KEYS` no longer carry
+>   `document` (removed in `e5de6373c`, PR #5236 — the D10 code half tracked by
+>   #5026).
 >   The `subclassOf` PascalCase shape check is scoped to allow canonical
 >   lowercase object kinds — superseding the R6 §1.1 "parent must be a core
 >   PascalCase kind" contract (the `packs/agent-ops` `nearMisses: [standard]`
@@ -139,9 +141,11 @@ doc_status: live
 >   `docs/architecture/STORAGE-ARCHITECTURE.md` +
 >   `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (PR #5016) > the
 >   implementing issue.
-> - **Implementation status:** the code half is not landed — `#5026` (the label
->   migration), `#5024` (the unjournalled version transition), `#5038` (the
->   version model).
+> - **Implementation status:** `#5026` (the label migration) **landed** — PR
+>   #5127 merged 2026-09-25 (`294d5847e`): the `:Document` label is retired, and
+>   the legacy spelling survives only as a deprecated alias whose writes route to
+>   `:Source` keyed `url`. Still **open**: `#5024` (the unjournalled version
+>   transition) and `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 > - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
