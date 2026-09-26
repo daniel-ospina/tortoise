@@ -10092,7 +10092,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     receipt_key = _capture_receipt_key(body.harness)
     if _session_alive():
         try:
-            _update_onboarding_state(org["org_id"], **{
+            # #4661: write-only — the return is discarded here, and this is
+            # the per-capture hot path (see ``_update_onboarding_state``).
+            _update_onboarding_state(org["org_id"], _echo=False, **{
                 receipt_key: now,
             })
             _record_capture_last_error(org["org_id"], body.harness, None)
@@ -10472,7 +10474,10 @@ def _record_capture_last_error(org_id: str, harness: str | None,
         # GRAPH_NOT_FOUND) — the dashboard sub-line is text; a Python repr
         # would leak structure. Stringify to the message.
         detail = str(detail.get("message") or detail)
-    _update_onboarding_state(org_id, **{key: detail})
+    # #4661: write-only — this caller discards the echo, and computing it
+    # costs two fresh FalkorDB connections on the event loop (see
+    # ``_update_onboarding_state``).
+    _update_onboarding_state(org_id, _echo=False, **{key: detail})
 
 
 # ── #1727 Slice 2 (Task 14, T2-P1): POST /v1/sessions/install-probe ────────
@@ -19772,7 +19777,8 @@ def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
             pass  # telemetry must never break the write path (R19)
 
 
-def _update_onboarding_state(org_id: str, **fields) -> dict:
+def _update_onboarding_state(org_id: str, _echo: bool = True,
+                             **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
     infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
@@ -19834,6 +19840,28 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     # Org row (no-op jsonb write) must not silently flip the client's
     # just-ACKed value (test-seam + pre-existing echo semantics). The
     # overlay is never FLOW — operational keys only.
+    #
+    # #4661: the echo is NOT free, and callers that DISCARD it must say so.
+    # ``_get_onboarding_projection`` reaches ``_registry_existing_graphs()``
+    # twice, and in URI mode each probe builds a fresh
+    # ``_make_sdk(namespace="registry")`` and opens a NEW FalkorDB connection
+    # (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` + ``list_graphs``).
+    # The capture path calls this router twice per successful
+    # ``POST /v1/sessions`` (receipt write, then the last-error clear) and
+    # discards both returns — four synchronous TLS handshakes per capture,
+    # executed ON the event loop, which stalls every read in flight and
+    # drives the transport-bound 504s. Measured by py-spy on the live
+    # machine: the loop thread sitting in ``do_handshake (ssl.py:1319)`` <-
+    # ``_registry_existing_graphs`` <- ``_get_onboarding_projection`` <-
+    # ``_record_capture_last_error`` <- ``_capture_session_impl``.
+    #
+    # ``_echo=False`` is the write-only contract for those callers. The
+    # projection is a strictly read-only graph leg (see
+    # ``_get_onboarding_projection``), so skipping it cannot change what was
+    # written; it changes only what is computed. Default True keeps every
+    # GET/PATCH writer-echo caller byte-identical.
+    if not _echo:
+        return {}
     echo = _get_onboarding_projection(org_id)
     if jsonb_fields:
         echo.update(jsonb_fields)

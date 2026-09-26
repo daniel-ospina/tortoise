@@ -9474,3 +9474,82 @@ class TestFirstContactPrewarm:
         assert "Retry-After" in exposed, (
             "a browser client cannot read Retry-After without "
             f"Access-Control-Expose-Headers (got {exposed!r})")
+
+
+# ── #4661: the capture path must not compute the projection it discards ──────
+#
+# `_update_onboarding_state` computes the merged projection as its RETURN VALUE
+# (the GET/PATCH writer-echo contract). That projection is not free: it reaches
+# `_registry_existing_graphs()` twice, and in URI mode each probe builds a fresh
+# `_make_sdk(namespace="registry")` and opens a NEW FalkorDB connection — TCP +
+# TLS handshake + `Is_Sentinel`'s INFO + `list_graphs` — executed ON the event
+# loop.
+#
+# `POST /v1/sessions` calls the router TWICE per successful capture (receipt
+# write, then the last-error clear) and discards both returns: four synchronous
+# TLS handshakes per capture. With ~46 lanes capturing per turn that stalls the
+# loop for seconds at a time, every read in flight blows the 10s transport
+# bound, and the agent's `tools/list` returns 504 with an EMPTY toolbelt.
+# Reproduced live by py-spy: loop thread in `do_handshake (ssl.py:1319)` <-
+# `_registry_existing_graphs` <- `_get_onboarding_projection` <-
+# `_record_capture_last_error` <- `_capture_session_impl` <- `capture_session`.
+#
+# These tests pin the write-only contract and the echo the GET/PATCH callers
+# depend on. They fail if `_echo=False` stops being honoured (i.e. if the
+# projection is computed again on the discard path).
+
+
+class TestCapturePathSkipsDiscardedProjection:
+    """#4661 — write-only onboarding writes must not compute the echo."""
+
+    @staticmethod
+    def _spy(monkeypatch):
+        """Replace the projection + the jsonb legs; record projection calls."""
+        calls: list[str] = []
+
+        def _spy_projection(org_id):
+            calls.append(org_id)
+            return {}
+
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_projection", _spy_projection)
+        monkeypatch.setattr(_ha_mod, "_get_onboarding_state", lambda org_id: {})
+        monkeypatch.setattr(_ha_mod, "_write_onboarding_state",
+                            lambda org_id, state: None)
+        return calls
+
+    def test_write_only_skips_the_projection(self, monkeypatch):
+        _ha = _ha_mod
+        calls = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None, "fixture requires a registered harness key"
+
+        _ha._update_onboarding_state("org-4661", _echo=False, **{key: "boom"})
+
+        assert calls == [], (
+            "the write-only path computed the onboarding projection — that is "
+            "the #4661 event-loop stall (two fresh FalkorDB TLS handshakes)")
+
+    def test_default_still_returns_the_echo(self, monkeypatch):
+        """GET/PATCH writer-echo contract must be unchanged."""
+        _ha = _ha_mod
+        calls = self._spy(monkeypatch)
+        key = _ha._capture_last_error_key("codex")
+        assert key is not None
+
+        reversed_echo = _ha._update_onboarding_state("org-4661", **{key: "boom"})
+
+        assert calls == ["org-4661"], "the default path must still compute the echo"
+        assert isinstance(reversed_echo, dict)
+        # overlay: the just-written field wins over the projection's value
+        assert reversed_echo.get(key) == "boom"
+
+    def test_record_capture_last_error_is_write_only(self, monkeypatch):
+        """The per-capture hot path — called on 2xx AND non-2xx."""
+        _ha = _ha_mod
+        calls = self._spy(monkeypatch)
+
+        _ha._record_capture_last_error("org-4661", "codex", "capture boom")
+
+        assert calls == [], (
+            "_record_capture_last_error computed the projection it discards — "
+            "this is the per-capture hot path across the fleet")
