@@ -516,6 +516,12 @@ surfaces:
   # and no workflow runs the generator's `--check` standalone. Correcting that
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
+  # #5358: fail-closed refusal for an INVERTED predecessor window in
+  # invalidate_point (a future-dated validFrom would be stamped validTo=now).
+  # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so no single surface
+  # owns it; `core` is the default home, beside the E6 window suite
+  # (test_validity_windows.py).
+  - test_invalidate_inverted_window_5358.py
   - test_mcp_rename_table.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
