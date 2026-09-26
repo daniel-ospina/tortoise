@@ -624,7 +624,7 @@ export function preferredSurface(family, current) {
 // the public setup docs page (#4836): website/docs.html#chatgpt names the
 // Developer-mode path, the canonical connector URL and the onboarding
 // instructions URL. The block below embeds the workflows prompt; the page hands
-// over the onboarding document. Only this block's `chatgpt` copy must omit
+// over the onboarding document. This block's `chatgpt` copy must omit
 // `tortoise_health` — it verifies in the chat instead (pinned in
 // harnesses.test.js).
 //
