@@ -8932,13 +8932,12 @@ function claimIntentInFlight() {
               {keyTabAffordance({ snippetKey, connectGate }) && (
                 // #4637: the gate, not `snippetKey`, decides this affordance too
                 // — `keyTabAffordance` (note module) is the one derivation, and
-                // its truth table is executed by the note module's tests. The
-                // owner no-key clause names the API Keys tab, and that clause
-                // renders exactly when the gate holds no usable key — so the
-                // button must be there whenever the gate says no key is live,
-                // including the stale reveal case (`snippetKey` truthy, gate
-                // says 'mint'), where the old `!snippetKey` gate withheld it in
-                // the same render that told the owner to go there. The `!snippetKey` half is kept so the
+                // its verdict is executed by the note module's tests. The owner
+                // MINT clause names the API Keys tab, and the button must be
+                // there whenever the gate says no key is live, including the
+                // stale reveal case (`snippetKey` truthy, gate says 'mint'),
+                // where the old `!snippetKey` gate withheld it in the same
+                // render that told the owner to go there. The `!snippetKey` half is kept so the
                 // pre-existing affordance for a key-less organization is
                 // unchanged.
                 <button type="button" className="ghost" onClick={() => setTab('keys')}>

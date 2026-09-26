@@ -33,7 +33,7 @@ import {
   focusDeepLinkTarget,
 } from './overviewEmptyAction.js'
 import { stripComments } from './testSupport.js'
-import { probeTags } from './jsxSourceProbe.js'
+import { probeTags, importsFromMain } from './jsxSourceProbe.js'
 
 // The guarded call sites live in main.jsx (the app, which a node test cannot
 // import) — the probe compiles them with the app's own JSX transform and reads
@@ -290,7 +290,10 @@ test('#4637 wiring: the graph-missing action set receives the derived fork (effe
   for (const buildFork of ['true', 'false']) {
     const [probe] = await probeTags(mainJsxSource, {
       tag: 'GraphMissingEmptyStateActions',
-      imports: { GraphMissingEmptyStateActions: './overviewEmptyAction.js' },
+      // The module main.jsx ITSELF imports — a local binding shadowing the
+      // import would otherwise be certified by a probe bound to this test's
+      // choice of module.
+      imports: importsFromMain(mainJsxSource, ['GraphMissingEmptyStateActions']),
       bindings: { isBuildFork: buildFork, setTab: '() => {}' },
     })
     assert.equal(probe.props.buildFork, buildFork === 'true',

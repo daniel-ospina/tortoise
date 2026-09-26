@@ -130,6 +130,40 @@ export function extractAll(source, pattern, label) {
   return hits
 }
 
+/**
+ * The import map main.jsx ITSELF declares, for the names a probe needs.
+ *
+ * A probe must bind the module the application actually uses. Injecting the
+ * module a TEST chooses leaves a hole: a local `const ownerCardProps = () => ({…})
+ * inside App() shadows the import, the app renders the shadowing helper, and the
+ * probe happily asserts the props of the imported one — the #4637 defect with
+ * every guard green (found by an independent reviewer). So `probeTags`'s
+ * `imports` should come from here, and the tests additionally pin that main.jsx
+ * declares no local binding of these names.
+ *
+ * Throws when a name is not imported at all (a locally-declared helper then
+ * cannot be probed — the caller must fail rather than assert against a module the
+ * app does not use).
+ */
+export function importsFromMain(source, names) {
+  const found = new Map()
+  const importRe = /import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2/g
+  for (const m of stripComments(source).matchAll(importRe)) {
+    for (const raw of m[1].split(',')) {
+      const name = raw.trim().split(/\s+as\s+/).pop().trim()
+      if (name) found.set(name, m[3])
+    }
+  }
+  const out = {}
+  for (const name of names) {
+    if (!found.has(name)) {
+      throw new Error(`main.jsx does not import ${name} — a probe may not bind a module the application does not use`)
+    }
+    out[name] = found.get(name)
+  }
+  return out
+}
+
 async function compileAndRun({ imports, bindings, expressions }) {
   const importLines = Object.entries(imports)
     .map(([name, spec]) => `import { ${name} } from ${JSON.stringify(resolveSpec(spec))};`).join('\n')

@@ -1495,7 +1495,11 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   // review P2: the Overview answered "is a key live" with its own
   // `durableConnect.source === 'rows-durable'` — a second derivation that agreed
   // today but could drift. One question, one gate.
-  const src = stripBlockAndWholeLineComments(mainJsx)
+  // The shared, quote-aware stripper — NOT the local
+  // `stripBlockAndWholeLineComments` above, which leaves inline/trailing `//`
+  // intact, so a trailing comment carrying the pinned text kept a pin green
+  // (the file-wide unification is #3102's).
+  const src = stripComments(mainJsx)
   assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
     'no surface may re-derive the rows-durable source outside connectKeyGate')
   // #4637: the Overview's live-key claim is ONE derivation — `ownerKeyLive` of

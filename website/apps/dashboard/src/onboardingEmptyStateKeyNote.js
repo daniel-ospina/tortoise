@@ -257,15 +257,19 @@ export function ownerKeyLive(connectGateMode) {
 //     which survives its own row being revoked or rotated).
 //
 //   keyTabAffordance({ snippetKey, connectGate }) — whether the re-entry card's
-//     API Keys button renders. The owner no-key clause names that tab exactly
-//     when the gate holds no usable key, so the button must be there whenever
-//     `!keyIsLive`, INCLUDING the stale-reveal case (`snippetKey` truthy, the
-//     gate says 'mint'), where the old inline `!snippetKey` gate withheld it in
-//     the same render that told the owner to go there. The `!snippetKey` half is
-//     kept so the pre-existing affordance for a key-less Organization is
-//     unchanged; it is subsumed by `!keyIsLive` in every state where
-//     `snippetKey` is truthy (a truthy `snippetKey` under a no-key gate mode is
-//     by definition stale).
+//     API Keys button renders: `!snippetKey || !keyIsLive`, i.e. the gate decides
+//     it whenever the in-memory reveal is truthy. The owner MINT clause names
+//     that tab, and the button must be there whenever the gate holds no usable
+//     key, INCLUDING the stale-reveal case (`snippetKey` truthy, the gate says
+//     'mint'), where the old inline `!snippetKey` gate withheld it in the same
+//     render that told the owner to go there. The `!snippetKey` half is kept so
+//     the pre-existing affordance for a key-less Organization is unchanged; with
+//     `snippetKey` truthy it adds nothing (the first disjunct is false, so the
+//     result is `!keyIsLive`), and a truthy `snippetKey` under a no-key gate mode
+//     is by definition stale. (Only the mint clause NAMES the tab — the
+//     unresolved modes' clauses describe the read instead — so this is a
+//     superset: the affordance is the first-party surface there too, and the
+//     wizard is where the key state resolves.)
 //
 // main.jsx supplies the inputs and spreads/applies the result — it holds no
 // branch of its own for either fact, so there is no second decision site to

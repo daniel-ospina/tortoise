@@ -17,9 +17,11 @@
 // end proves main.jsx renders the guarded components at every arm (three member,
 // two owner — the re-entry owner arm was ONE arm rendered twice, once per key
 // state, and is now one call of the gate-derived boolean) with the derived
-// booleans, and consumes the two
-// derivations (`ownerKeyLive`, `graphMissingCta`) rather than re-deciding the
-// facts the arms are built on (the render tests above are the behaviour guard).
+// booleans, and consumes the three
+// derivations main.jsx imports for it (`ownerCardProps`, `keyTabAffordance`,
+// `graphMissingCta`) rather than re-deciding the facts the arms are built on (the
+// render tests above are the behaviour guard; main.jsx is forbidden to call
+// `ownerKeyLive` itself — the note module owns that derivation).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -38,8 +40,10 @@ import {
   ownerCardProps,
   keyTabAffordance,
   graphMissingCta,
+  REENTRY_BUILD_LEAD_IN,
+  GRAPH_MISSING_BUILD_LEAD_IN,
 } from './onboardingEmptyStateKeyNote.js'
-import { probeTags, evalExpressions, extractOne, extractAll } from './jsxSourceProbe.js'
+import { probeTags, evalExpressions, extractOne, extractAll, importsFromMain } from './jsxSourceProbe.js'
 import { HARNESS_NAMES, HARNESS_OAUTH } from './harnesses.js'
 import { connectKeyGate } from './sessionKey.js'
 import { stripComments } from './testSupport.js'
@@ -493,11 +497,11 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   assert.match(mainCode, /(?<!['"`])\{connectGate\.key \?/,
     'the graph-missing snippet branch must be gated on the gate\'s own held plaintext')
   // …and the API Keys affordance is the module's derivation, applied at the call
-  // site (the probe below EVALUATES that call for the stale-reveal, key-less and
-  // live-key states, and the region anchor keeps the real guard in view: the
-  // owner clause names the API Keys tab exactly when the gate holds no usable
-  // key, and the old inline `!snippetKey` gate withheld the button in the very
-  // render that told the owner to go there).
+  // site (the probe test below RENDERS the whole guard for every gate mode and
+  // every in-memory reveal state, and this region anchor keeps the real guard in
+  // view: only the owner MINT clause names the API Keys tab, the button follows
+  // the derivation in every state, and the old inline `!snippetKey` gate withheld
+  // it in the very render that told the owner to go there).
   const affordanceGuard = extractOne(mainCode,
     /\{keyTabAffordance\(\{[^}]*\}\) && \([\s\S]{0,400}?Go to API Keys →/,
     'the re-entry API Keys affordance')
@@ -529,8 +533,27 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
 // a wrapped statement cannot pass by resembling the pinned text.
 const NOTE_MODULE = './onboardingEmptyStateKeyNote.js'
 const mainJsxSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
-const NOTE_IMPORTS = { OwnerEmptyStateKeyNote: NOTE_MODULE, MemberEmptyStateKeyNote: NOTE_MODULE,
-  ownerCardProps: NOTE_MODULE, keyTabAffordance: NOTE_MODULE, ownerKeyLive: NOTE_MODULE }
+// The probe binds the modules main.jsx ITSELF imports (`importsFromMain`), never
+// a module this test chooses: a local `const ownerCardProps = () => ({…})` inside
+// App() shadows the import, so asserting against a test-chosen module would
+// certify props the application does not render. The pin below forbids that
+// shadowing outright.
+const NOTE_IMPORTS = { OwnerEmptyStateKeyNote: NOTE_MODULE, MemberEmptyStateKeyNote: NOTE_MODULE }
+const NOTE_NAMES = ['OwnerEmptyStateKeyNote', 'MemberEmptyStateKeyNote', 'ownerCardProps',
+  'keyTabAffordance', 'graphMissingCta']
+const MAIN_IMPORTS = importsFromMain(mainJsxSource, NOTE_NAMES)
+
+test('#4637 wiring: main.jsx declares no local binding of the note-module derivations', () => {
+  const src = stripComments(mainJsxSource)
+  for (const name of NOTE_NAMES) {
+    const declaration = new RegExp(`(?:^|\\n)\\s*(?:const|let|var|function)\\s+${name}\\b`)
+    assert.ok(!declaration.test(src),
+      `main.jsx may not re-declare ${name} — a local binding shadows the import the app is supposed to render`)
+  }
+  // and the two derivations are imported from the ONE module the probe binds
+  assert.equal(MAIN_IMPORTS.ownerCardProps, MAIN_IMPORTS.keyTabAffordance,
+    'the two derivations come from the same module')
+})
 
 // `snippetKey` is a truthy STALE reveal in every binding set below on purpose: if
 // anything but the gate is accepted as a live-key signal, the render claims a
@@ -542,7 +565,7 @@ test('#4637 wiring: each owner arm’s EFFECTIVE props and rendered copy come fr
     for (const buildFork of ['true', 'false']) {
       const arms = await probeTags(mainJsxSource, {
         tag: 'OwnerEmptyStateKeyNote',
-        imports: NOTE_IMPORTS,
+        imports: { ...MAIN_IMPORTS, ...NOTE_IMPORTS },
         bindings: { ...WIRING_BINDINGS, isBuildFork: buildFork, connectGate: `{ mode: '${mode}', key: null }` },
       })
       assert.equal(arms.length, 2, `two owner arms expected — got ${arms.length}`)
@@ -568,23 +591,28 @@ test('#4637 wiring: each owner arm’s EFFECTIVE props and rendered copy come fr
   }
 })
 
-test('#4637 wiring: each member arm RENDERS its fork’s lead-in at the real call site', async () => {
+test('#4637 wiring: each member arm RENDERS its fork’s lead-in (and never the other fork’s route clause)', async () => {
   const fragments = extractAll(stripComments(mainJsxSource), /<>\{isBuildFork[\s\S]*?<\/>/,
     'the member fork fragments')
   assert.equal(fragments.length, 3, `three member arms expected — got ${fragments.length}`)
   for (const fragment of fragments) {
     for (const buildFork of ['true', 'false']) {
       const [rendered] = await evalExpressions(fragment, {
-        imports: { ...NOTE_IMPORTS, REENTRY_BUILD_LEAD_IN: NOTE_MODULE, REENTRY_SELF_LEAD_IN: NOTE_MODULE,
+        imports: { ...MAIN_IMPORTS, REENTRY_BUILD_LEAD_IN: NOTE_MODULE, REENTRY_SELF_LEAD_IN: NOTE_MODULE,
           REENTRY_KEYED_LEAD_IN: NOTE_MODULE, GRAPH_MISSING_BUILD_LEAD_IN: NOTE_MODULE,
           GRAPH_MISSING_SELF_LEAD_IN: NOTE_MODULE },
         bindings: { isBuildFork: buildFork },
       })
       const html = String(rendered.html)
+      const buildLeadIns = [REENTRY_BUILD_LEAD_IN, GRAPH_MISSING_BUILD_LEAD_IN]
       if (buildFork === 'true') {
+        assert.ok(buildLeadIns.some((leadIn) => html.includes(leadIn)),
+          `build fork: the arm must render its build lead-in — got ${html}`)
         assert.ok(!/connect your agent/.test(html),
           `build fork: a member arm may not read the route clause — got ${html}`)
       } else {
+        assert.ok(!buildLeadIns.some((leadIn) => html.includes(leadIn)),
+          `self fork: the arm must not render the build lead-in — got ${html}`)
         assert.ok(/connect your agent/.test(html),
           `self fork: a member arm must read the route clause — got ${html}`)
       }
@@ -592,34 +620,61 @@ test('#4637 wiring: each member arm RENDERS its fork’s lead-in at the real cal
   }
 })
 
-test('#4637 wiring: the re-entry API Keys affordance is the module derivation, evaluated', async () => {
-  const call = extractOne(stripComments(mainJsxSource), /keyTabAffordance\(\{[^}]*\}\)/,
-    'the re-entry API Keys affordance call')
-  const states = [
-    { snippetKey: "'stale-reveal'", connectGate: "{ mode: 'mint' }", expected: true,
-      why: 'a stale in-memory reveal must not withhold the affordance the no-key clause names' },
-    { snippetKey: 'null', connectGate: "{ mode: 'mint' }", expected: true,
-      why: 'a key-less organization keeps the affordance' },
-    { snippetKey: "'stale-reveal'", connectGate: "{ mode: 'loading' }", expected: true,
-      why: 'an unresolved keys read must not withhold it either' },
-    { snippetKey: "'k'", connectGate: "{ mode: 'embed' }", expected: false,
-      why: 'a live key needs no keys-tab detour' },
-    { snippetKey: "'stale-reveal'", connectGate: "{ mode: 'existing' }", expected: false,
-      why: 'the Organization holds a usable key' },
+test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivation’s verdict', async () => {
+  // The WHOLE guard is compiled and rendered, not just the inner call: evaluating
+  // `keyTabAffordance(...)` in isolation passed while `… && (false ? true : null) && (`
+  // withheld the button in every state — the defect, with every guard green
+  // (found by an independent reviewer).
+  const guard = extractOne(stripComments(mainJsxSource),
+    /keyTabAffordance\(\{[^}]*\}\)[\s\S]{0,600}?<\/button>\s*\)\}/,
+    'the re-entry API Keys affordance guard')
+  // the guard expression: drop the trailing `}` that closes the JSX container
+  const expression = guard.slice(0, -1)
+  // Every gate mode (built by the REAL gate, whose states are pinned by
+  // connectKeyGate.test.js) x the two in-memory states that matter.
+  const gates = [
+    connectKeyGate('wk_live', [], true, false),                              // embed
+    connectKeyGate('', [{ key_prefix: 'wk_live2', enabled: true }], true, false), // existing
+    connectKeyGate('', [], true, false),                                     // mint
+    connectKeyGate('', [], false, false),                                    // loading
+    connectKeyGate('', [], false, true),                                     // error
   ]
-  for (const state of states) {
-    const [result] = await evalExpressions(call, {
-      imports: { keyTabAffordance: NOTE_MODULE },
-      bindings: { snippetKey: state.snippetKey, connectGate: state.connectGate },
-    })
-    assert.equal(result.value, state.expected,
-      `${state.connectGate} + snippetKey=${state.snippetKey}: ${state.why} — got ${result.value}`)
+  const reveals = [
+    { source: "'stale-reveal'", value: 'stale-reveal' },
+    { source: 'null', value: null },
+  ]
+  for (const gate of gates) {
+    for (const reveal of reveals) {
+      const [rendered] = await evalExpressions(expression, {
+        imports: MAIN_IMPORTS,
+        bindings: { snippetKey: reveal.source, connectGate: JSON.stringify(gate), setTab: '() => {}' },
+      })
+      const html = String(rendered.html)
+      const shown = html.includes('Go to API Keys →')
+      // The WHOLE guard's verdict must be the derivation's verdict. This is what
+      // catches an extra conjunct (`&& (false ? true : null) && (`) that keeps the
+      // call's own truth table intact while withholding the button.
+      const expected = keyTabAffordance({ snippetKey: reveal.value, connectGate: gate })
+      assert.equal(shown, expected,
+        `gate ${JSON.stringify(gate)} + snippetKey=${reveal.source}: the guard must render exactly the derivation's verdict — got ${html}`)
+      // #4637's direction: a STALE in-memory reveal must not withhold the button
+      // in a render whose owner clause names the API Keys tab, and an unresolved
+      // read must not withhold it either.
+      if (!ownerKeyLive(gate.mode) && reveal.value === 'stale-reveal') {
+        assert.ok(shown,
+          `gate ${JSON.stringify(gate)}: the stale reveal must not withhold the affordance — got ${html}`)
+      }
+    }
   }
 })
 
-test('#4637 wiring: the graph-missing snippet branch opens on the gate’s held key', async () => {
+test('#4637 wiring: the graph-missing snippet branch opens iff the gate holds the plaintext', async () => {
+  // Anchored on the graph-missing card's OWN section marker (the shared
+  // `<h2>Continue setting up` text also opens the re-entry card, so a region
+  // anchored on it spans a second card and a decoy could sit inside the match).
   const card = extractOne(stripComments(mainJsxSource),
-    /<h2>Continue setting up[\s\S]*?<pre className="snippet">/, 'the graph-missing snippet region')
+    /<section className="overview empty-state graph-missing">[\s\S]*?<pre className="snippet">/,
+    'the graph-missing snippet region')
   // ONE branch decision between the card heading and the snippet: a planted decoy
   // condition would have to sit inside this region and would trip this count
   // rather than give the real (broken) guard a second chance to match.
@@ -629,14 +684,22 @@ test('#4637 wiring: the graph-missing snippet branch opens on the gate’s held 
   assert.ok(testMatch, 'the snippet branch truth test must be extractable')
   const truthTest = testMatch[1]
   const bindings = { snippetKey: "'stale-reveal'", keyIsLive: 'false', isBuildFork: 'true' }
-  const [withKey] = await evalExpressions(truthTest,
-    { bindings: { ...bindings, connectGate: "{ mode: 'embed', key: 'tt_live' }" } })
-  const [withoutKey] = await evalExpressions(truthTest,
-    { bindings: { ...bindings, connectGate: '{ mode: "mint", key: null }' } })
-  assert.ok(withKey.value,
-    `the snippet branch must open when the gate holds the plaintext — ${truthTest} evaluated to ${withKey.value}`)
-  assert.ok(!withoutKey.value,
-    `the snippet branch must stay closed when the gate holds nothing — ${truthTest} evaluated to ${withoutKey.value}`)
+  // EVERY gate mode, with `connectGate` built by the real gate: a predicate that
+  // merely agrees on the two hand-picked states (e.g. `connectGate.mode !== 'mint'`,
+  // which opens the snippet over an unresolved read with an empty key) fails here.
+  const gates = [
+    connectKeyGate('wk_live', [], true, false),                              // embed, holds the reveal
+    connectKeyGate('', [{ key_prefix: 'wk_live2', enabled: true }], true, false), // existing, holds nothing
+    connectKeyGate('', [], true, false),                                     // mint, holds nothing
+    connectKeyGate('', [], false, false),                                    // loading, holds nothing
+    connectKeyGate('', [], false, true),                                     // error, holds nothing
+  ]
+  for (const gate of gates) {
+    const [result] = await evalExpressions(truthTest,
+      { bindings: { ...bindings, connectGate: JSON.stringify(gate) } })
+    assert.equal(Boolean(result.value), Boolean(gate.key),
+      `${truthTest} with gate ${JSON.stringify(gate)}: the snippet branch may open iff the gate holds the plaintext — evaluated to ${result.value}`)
+  }
 })
 
 test('#4637 wiring: the snippet-branch call to action is fork-derived at the call site', async () => {
