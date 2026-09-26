@@ -705,6 +705,19 @@ TOOL_CARVEOUTS = (
     # Pinned by
     # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
     "tools/run-with-eval-keys.sh",
+    # #4503: the edge census/probe (tools/edge_census.py) owns
+    # tests/test_4503_edge_relationship_accounting.py. Same silent-drop class
+    # as every carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return (surfaces=[] -> tier-1 smoke) — so
+    # the instrument's own guard tests would never run on the PR that changes
+    # the instrument. Verified live before adding: `--changed-files
+    # tools/edge_census.py` returned `"surfaces": []`. No SOURCE_PATTERNS
+    # entry matches the path, so it lands in the unknown-path branch -> FULL
+    # matrix (fail closed), the same treatment tools/finding_provenance.py and
+    # tools/embedded_evidence.py get. Pinned by
+    # test_ci_selection.test_edge_census_tool_change_fails_closed_to_full.
+    "tools/edge_census.py",
 )
 
 

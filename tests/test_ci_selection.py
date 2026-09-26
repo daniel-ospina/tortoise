@@ -630,6 +630,23 @@ def test_finding_provenance_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_edge_census_tool_change_fails_closed_to_full():
+    # #4503: tools/edge_census.py owns
+    # tests/test_4503_edge_relationship_accounting.py. Same silent-drop class
+    # as the carve-outs above — and it was observed live, not predicted: before
+    # the TOOL_CARVEOUTS entry, `--changed-files tools/edge_census.py` returned
+    # `"surfaces": []`, i.e. the docs-only return, so the census/probe's own
+    # guard tests would never have run on the PR that changes the instrument.
+    # The instrument exists to make an uncounted class visible; being itself
+    # invisible to CI selection would be the same defect one level up. No
+    # SOURCE_PATTERNS entry matches the path, so it lands in the unknown-path
+    # branch -> FULL matrix (fail closed).
+    r = _sel(["tools/edge_census.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_embedded_evidence_tool_change_fails_closed_to_full():
     # #3827: tools/embedded_evidence.py owns tests/test_embedded_evidence.py.
     # Same silent-drop class as the preflight carve-out above: the flat "tools/"
