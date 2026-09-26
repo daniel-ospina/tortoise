@@ -22,10 +22,11 @@ naming the branch here is not a convenience — it is the only tree that *can* h
 (`git cat-file -e origin/main:tools/edge_census.py` fails). An earlier revision of this line named
 `origin/main` itself, which asserted a measurement tree that cannot contain the instrument and passed
 the ancestry gate only vacuously (the named SHA *was* `origin/main`). Every locator in §1 was re-read
-against `a2a08beaa` on **2026-09-26** and is unchanged. Two things make that sound, and neither is an
+against `a2a08beaa` on **2026-09-26** and is unchanged. Three things make that sound, and none is an
 assumption:
-- The branch now contains `origin/main` (`git merge-base --is-ancestor origin/main HEAD` succeeds), so
-  the reported finding has not been overtaken by main.
+- The branch tree contains the declared base — `git merge-base --is-ancestor a2a08beaa HEAD` succeeds.
+  That is pinned to the SHA, **not** to the moving `origin/main` ref: a sentence citing the live ref
+  stops reproducing as soon as main advances, which it has (to `9c8f9c805`).
 - Because the instrument is branch-only, comparing it across two MAIN trees is not a check anyone can
   run: an empty `git diff <a> <b> -- tools/edge_census.py` between two revisions that both lack the
   file would mean absent at both ends, not unchanged.
@@ -33,6 +34,19 @@ assumption:
   `tortoise/commit_ops.py`, `tortoise/projection/entities.py` and tests. The only property they touch
   in the measured path is `supersedes_by` (a 200-char truncation fix), which `tools/edge_census.py`
   never sets — `grep supersede` in it returns nothing.
+
+⚠️ **The staleness gate reads STALE, and that verdict cannot invalidate this finding.**
+`tools/finding_provenance.py --validate` exits 1 as soon as `origin/main` advances past the named tree;
+main has since moved to `9c8f9c805` (behind by 1), so it does. That check asks whether the tree a
+finding was measured on contains today's main — a question about *product* findings, which can be
+overtaken. This one cannot be: the instrument is branch-only, so no main tree could ever have produced
+it, and the commits main gained touch nothing in the measured path — the counting, capping and pricing
+surfaces. `git show --name-only 9c8f9c805` gives `tortoise/mcp_server.py`, `tortoise/sdk.py`, two tests,
+`config/ci-surfaces.yml` and a generated doc: no `quota.py`, `metering.py`, `ep.py` or `pricing.json`.
+(`tortoise/sdk.py` is imported by the instrument, but the change there is a private
+`_assert_window_start_not_inverted` guard, not a counting path.) The line is kept rather than dropped because
+the gate's own doctrine is that unknown provenance is not a pass, and a reader must be able to see
+exactly which tree produced these numbers.
 **Instrument:** `tools/edge_census.py` (shipped with this report) · **Status:** measurement only.
 
 > **What the instrument touches.** Over a **`--uri`** connection a census reads through a raw
