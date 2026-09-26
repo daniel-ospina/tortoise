@@ -41,7 +41,7 @@ import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from '.
 import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
@@ -7281,8 +7281,14 @@ function claimIntentInFlight() {
                     // over from here." beneath a "Not connected yet" <h1> — the
                     // #2364/#2912 heading-vs-body contradiction, reassembled. It
                     // is now keyed on the same derived flag the <h1> uses.
-                    if (wizardStep === 0 && welcomeHasOrg) return null
-                    if (wizardStep === 3 && !serverHarnessConnected) return null
+                    //
+                    // #3725: the arm is now the pure `wizardStepSub` helper
+                    // (wizardFlow.js, unit-tested) — the build fork's step 3
+                    // carries a connection but never hands over to an agent, so
+                    // its lede is suppressed rather than contradicting its own
+                    // "Keep calling the SDK from your app." body.
+                    const headSub = wizardStepSub(wizardStep, { hasOrg: welcomeHasOrg, connected: serverHarnessConnected, buildFork: isBuildFork })
+                    if (headSub === null) return null
                     // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
                     // pick's copy, but step 2 has THREE bodies — only the
                     // owner/self branch is a harness pick.
@@ -7330,8 +7336,7 @@ function claimIntentInFlight() {
                       }
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
-                    const sub = WIZARD_STEPS[wizardStep].sub
-                    return <p className="welcome-lede">{sub}</p>
+                    return <p className="welcome-lede">{headSub}</p>
                   })()}
                 </div>
                 <span className="sr-only" role="status" aria-live="polite">
