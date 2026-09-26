@@ -378,44 +378,140 @@ jobs:
           fi
           echo "✅ sign-in reachable across both hops, SESSIONS write succeeded, PKCE challenge issued"
 
+      # #4050: a Pages deploy updates the ORIGIN only — it does not purge the zone's
+      # edge cache, so a file removed from the upload root keeps being served from
+      # the edge for up to its `s-maxage`. Measured on run 35398083881
+      # (2026-09-18): `cache-control: public, s-maxage=604800` (7 days), `age:
+      # 6718`. This is a real, bounded exposure of the session DDL and client auth
+      # code, and — worse — the leak probe below could not see it: it fetched the
+      # plain URL, which the edge answers from cache, so it printed ✅ in a cold
+      # colo while a warm colo still served the file. Reproduced in a local cache
+      # layer: shipped probe PASSES on a cold instance while the warm instance
+      # answers 200, and PASSES on a stale cached 404 while origin still serves it.
+      #
+      # So the purge runs BEFORE the probe, and the step FAILS CLOSED on every
+      # failure (unset credential, transport error, non-JSON, `success:false`) — a
+      # purge that silently no-ops is the same class of bug this issue reports.
+      #
+      # The credential is the least-privilege zone-cache-purge token. Its values
+      # already exist as Pages Function env vars (`CF_API_TOKEN`/`CF_ZONE_ID`,
+      # website/functions/blog/_shared/cloudflare-purge.ts), but a GitHub-hosted
+      # runner CANNOT read a Pages project's Function env — the issue's "the deploy
+      # job already binds them" is not true of the runner. The runner's only
+      # Cloudflare credential is `CLOUDFLARE_API_TOKEN`, documented in
+      # docs/infra-runbook.md as "Pages + R2". Operator step recorded on #4050:
+      # expose `CF_API_TOKEN`/`CF_ZONE_ID` as repo secrets (recommended), or grant
+      # `CLOUDFLARE_API_TOKEN` Zone.Cache Purge. Do NOT downgrade the missing-
+      # credential branch to a warning — that is the fail-open class being fixed.
+      #
+      # A FAILED deploy job is the intended direction: the exposure exists until the
+      # purge succeeds, and a red deploy is how an operator learns the token was
+      # never configured.
+      - name: Post-deploy — purge the internal paths from the edge cache (#4050)
+        run: |
+          if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ZONE_ID" ]; then
+            # NOTE: single quotes — backticks here would be command substitution.
+            echo '::error::CF_API_TOKEN / CF_ZONE_ID are not bound to this job — the edge purge cannot run (#4050).'
+            echo '::error::A runner cannot read a Pages project Function env; expose them as repo secrets,'
+            echo '::error::or grant CLOUDFLARE_API_TOKEN the Zone.Cache Purge permission. Until that is done'
+            echo '::error::the removed internal files stay served from the edge for up to s-maxage (7 days).'
+            exit 1
+          fi
+          # Explicit `files` list (NOT purge_everything) from the SAME enumeration
+          # the probe reads, so the blast radius is exactly the paths that are
+          # supposed to be gone. A divergence between the two lists is a test
+          # failure (test_the_purge_and_the_probe_enumerate_the_same_paths).
+          files=$(printf '%s\n' \
+            "https://tortoise.premiselabs.co/.wranglerignore" \
+            "https://tortoise.premiselabs.co/README.md" \
+            "https://tortoise.premiselabs.co/website_architecture.md" \
+            "https://tortoise.premiselabs.co/2479-re-auth-implementation-plan.md" \
+            "https://tortoise.premiselabs.co/migrations/0001_auth_sessions.sql" \
+            "https://tortoise.premiselabs.co/apps/dashboard/src/main.jsx" \
+            "https://tortoise.premiselabs.co/apps/blog-admin/src/App.tsx" \
+            "https://tortoise.premiselabs.co/apps/dashboard/package.json" \
+            "https://tortoise.premiselabs.co/apps/blog-admin/package.json" \
+            | jq -R . | jq -s .)
+          # `|| true` so bash -e does not abort before the response can be reported;
+          # a transport failure then fails the `jq -e` check below.
+          resp=$(curl -sS -m 20 -X POST \
+              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -d "{\"files\": $files}" || true)
+          if ! printf '%s' "$resp" | jq -e '.success == true' >/dev/null 2>&1; then
+            echo '::error::edge purge FAILED (#4050) — a purge that silently no-ops is the bug this guards.'
+            echo "::error::API response: $(printf '%s' "$resp" | head -c 300)"
+            exit 1
+          fi
+          echo "✅ purged $(printf '%s' "$files" | jq -r 'length') internal-path URLs from the premiselabs.co edge cache (id $(printf '%s' "$resp" | jq -r '.result.id // "unknown"'))"
+        env:
+          # #4361: bound in `env:` and read as QUOTED shell variables — never
+          # interpolated into the `run:` text (a value with `"` loses its quotes
+          # and one with `$(…)`/backticks would execute).
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+
       # #3620: the deploy step above stages an explicit upload set. This is the
       # gate that proves it — the paths below were verified LIVE at 200 while
       # `wrangler pages deploy .` was in use (issue #3620).
       #
+      # #4050: the gate reads TWO facts per path, one leg each, because they are
+      # different facts and the old single-leg fetch could not tell them apart:
+      #
+      #   * ORIGIN leg — a cache-bypassing request (`?cb=<per-run nonce>`). A unique
+      #     query is a MISS at every edge, so a 404 here is a statement about the
+      #     DEPLOYMENT. This is the leg the old probe lacked: fetching the plain URL
+      #     let the edge answer from cache, so the probe passed in a cold colo while
+      #     a warm colo still served the file, and could pass on a stale cached 404
+      #     while origin still served the file.
+      #   * EDGE leg — the plain URL, exactly what a visitor fetches. A 404 here is
+      #     the user-visible contract; the purge step above is what makes it
+      #     reachable.
+      #
+      # A disagreement is the finding, and it is NAMED: `origin HTTP 200` = the
+      # upload root is not controlled (#3620); `edge-stale HTTP 200` = origin is
+      # clean but the edge still serves a removed file (#4050, the purge did not
+      # take effect). Diagnosing the wrong surface is half of #4050.
+      #
       #   * 404 is asserted EXACTLY, not "any non-2xx": `curl -sf` (the obvious
       #     spelling) treats a 5xx as a PASS, and a 5xx means the file could not
       #     be read back — not that it is absent.
-      #   * a transport failure fails CLOSED, matching
+      #   * a transport failure fails CLOSED on EITHER leg, matching
       #     tools/check_pages_bindings.py's exit-2 contract: not knowing is not
       #     the same as knowing it is fine.
       #   * `|| curl_rc=$?` is required — GitHub's default shell is `bash -e`, so
-      #     a bare `code=$(curl ...)` whose substitution fails ABORTS the step and
-      #     the remaining paths go unchecked. Same trap the sign-in probe above
-      #     documents; tests/test_pages_bindings.py executes both blocks.
-      #   * it POLLS, like the sign-in probe above. Pages can briefly serve the
-      #     PREVIOUS deployment after upload, and that cuts both ways: on THIS
-      #     deploy the previous deployment is the leaking one (a single-shot
-      #     probe reds the very fix that removes the leak), and on a deploy that
-      #     re-introduces a leak the previous deployment is the clean one (a
-      #     single-shot probe silently PASSES the regression — fail-open). The
-      #     final attempt's verdict is the step's verdict.
-      #     KNOWN LIMIT (unpinned): the loop stops at the first fully-404 attempt,
-      #     so a PARTIALLY propagated edge could satisfy it while another edge
-      #     still serves the old, leaking deployment. A per-deployment URL does
-      #     NOT attest that the custom-domain edges have been cut over (wrangler
-      #     prints a deployment URL/alias and the API exposes a deployment id, but
-      #     neither proves edge cutover), so the cheap close is N-consecutive-clean
-      #     attempts — deferred, as it multiplies the step's runtime on every
-      #     deploy. Same limitation the sign-in probe above documents.
+      #     a bare `curl ...` whose substitution fails ABORTS the step and the
+      #     remaining paths go unchecked. Same trap the sign-in probe above
+      #     documents; tests/test_pages_bindings.py executes this block rather than
+      #     string-matching it.
+      #   * it POLLS: Pages can briefly serve the PREVIOUS deployment after upload,
+      #     and a purge is not instant at every colo. Both facts cut both ways — on
+      #     THIS deploy the previous deployment is the leaking one (a single-shot
+      #     probe reds the fix), and on a deploy that re-introduces a leak the
+      #     previous deployment is the clean one (a single-shot probe silently
+      #     PASSES the regression — fail-open). The final attempt's verdict is the
+      #     step's verdict.
+      #     KNOWN LIMIT (documented, unpinned): the loop samples ONE edge instance.
+      #     A warm colo the probe does not run in cannot be observed from here —
+      #     nothing short of a global fetch could. The PURGE (not the probe) is what
+      #     makes every colo clean; the edge leg is the local witness that the purge
+      #     took effect where it looked. The origin leg is global: it reads the
+      #     deployment, and no stale cache can satisfy it.
       #
       # `if: always()` so a failing sign-in probe cannot MASK a leak: the two
       # assertions are independent, and a served internal file cannot be
       # un-published by retrying the other one.
-      - name: Post-deploy — internal paths are not publicly served (#3620)
+      - name: Post-deploy — internal paths are not publicly served (#3620/#4050)
         if: always()
         run: |
           base=https://tortoise.premiselabs.co
           MAX_ATTEMPTS=10
+          # #4050: per-run nonce for the ORIGIN leg. `$RANDOM` alone can repeat across
+          # runs, so the run id + epoch pin uniqueness per run — no edge can have this
+          # URL cached. NEVER drop it: without it the origin leg is just another edge
+          # read and the probe is back to the #4050 defect.
+          nonce="${GITHUB_RUN_ID:-local}-$(date +%s)-$RANDOM"
           leaks=0
           failing=""
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
@@ -431,31 +527,61 @@ jobs:
               /apps/blog-admin/src/App.tsx \
               /apps/dashboard/package.json \
               /apps/blog-admin/package.json; do
-              code=000
+              # ── Leg 1 — ORIGIN (cache-bypassing): is the file still published? ──
+              origin=000
+              origin_clean=0
               curl_rc=0
-              code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$base$p") \
+              origin=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$base$p?cb=$nonce") \
                 || curl_rc=$?
               if [ "$curl_rc" -ne 0 ]; then
-                echo "::warning::attempt $attempt: could not verify $p (curl rc=$curl_rc) — a leak check that cannot run must not pass (#3620)"
-                failing="$failing $p(unverifiable)"
+                echo "::warning::attempt $attempt: could not verify the ORIGIN of $p (curl rc=$curl_rc) — a leak check that cannot run must not pass (#4050)"
+                failing="$failing $p(origin-unverifiable)"
                 leaks=$((leaks + 1))
-                continue
+              elif [ "$origin" != "404" ]; then
+                case "$origin" in
+                  2*|3*)
+                    echo "::warning::attempt $attempt: $p is publicly served by the DEPLOYMENT (origin HTTP $origin) (#3620)"
+                    ;;
+                  *)
+                    echo "::warning::attempt $attempt: $p did not return 404 (HTTP $origin) at ORIGIN — refusing to pass a leak check it could not run (#3620)"
+                    ;;
+                esac
+                failing="$failing $p(origin HTTP $origin)"
+                leaks=$((leaks + 1))
+              else
+                origin_clean=1
               fi
-              case "$code" in
-                404)
-                  :
-                  ;;
-                2*|3*)
-                  echo "::warning::attempt $attempt: $p is publicly served (HTTP $code) (#3620)"
-                  failing="$failing $p(HTTP $code)"
-                  leaks=$((leaks + 1))
-                  ;;
-                *)
-                  echo "::warning::attempt $attempt: $p did not return 404 (HTTP $code) — refusing to pass a leak check it could not run (#3620)"
-                  failing="$failing $p(HTTP $code)"
-                  leaks=$((leaks + 1))
-                  ;;
-              esac
+              # ── Leg 2 — EDGE (plain): is the user-visible copy gone? ──
+              # Always probed, even when the origin leg already failed: the two facts
+              # are independent, and reporting both is what makes the failure
+              # diagnosable (a deployment leak AND a stale edge is different from a
+              # deployment leak alone).
+              edge=000
+              curl_rc=0
+              edge=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$base$p") \
+                || curl_rc=$?
+              if [ "$curl_rc" -ne 0 ]; then
+                echo "::warning::attempt $attempt: could not verify the EDGE copy of $p (curl rc=$curl_rc) — a leak check that cannot run must not pass (#4050)"
+                failing="$failing $p(edge-unverifiable)"
+                leaks=$((leaks + 1))
+              elif [ "$edge" != "404" ]; then
+                case "$edge" in
+                  2*|3*)
+                    if [ "$origin_clean" -eq 1 ]; then
+                      echo "::warning::attempt $attempt: $p is served from the EDGE while origin is 404 — a stale edge copy (#4050; check the purge step above)"
+                      failing="$failing $p(edge-stale HTTP $edge)"
+                    else
+                      echo "::warning::attempt $attempt: $p is served from the EDGE too (HTTP $edge) — the deployment leak already failed this path (#3620)"
+                      failing="$failing $p(edge HTTP $edge)"
+                    fi
+                    ;;
+                  *)
+                    echo "::warning::attempt $attempt: $p did not return 404 (HTTP $edge) at the EDGE — refusing to pass a leak check it could not run (#4050)"
+                    failing="$failing $p(edge HTTP $edge)"
+                    ;;
+                esac
+                leaks=$((leaks + 1))
+              fi
             done
             [ "$leaks" -eq 0 ] && break
             # No sleep after the FINAL attempt — it would delay the failure by
@@ -463,10 +589,12 @@ jobs:
             [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep 15
           done
           if [ "$leaks" -ne 0 ]; then
-            echo "::error::the Pages upload root is not controlled — still not 404 after $MAX_ATTEMPTS attempts:$failing (#3620)"
+            echo "::error::the Pages surface is not clean after $MAX_ATTEMPTS attempts:$failing (#3620/#4050)"
+            echo '::error::`origin HTTP <2xx>` = the DEPLOYMENT still contains an internal file (#3620).'
+            echo '::error::`edge-stale HTTP <2xx>` = origin is clean but the edge serves a cached copy (#4050) — the purge step above did not take effect.'
             exit 1
           fi
-          echo "✅ every internal path returns 404"
+          echo "✅ every internal path is absent at ORIGIN (cache-bypassing) and at the EDGE"
 
   # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
   # #1112: wire the dashboard into CI — closes #1086 + #1109 (two

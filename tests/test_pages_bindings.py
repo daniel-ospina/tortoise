@@ -312,8 +312,13 @@ DEPLOY = "Deploy to Cloudflare Pages (premise-labs project)"
 #: `website/` is classified before anything is staged/uploaded.
 UPLOAD_PREFLIGHT = "Preflight — every website/ top-level entry is classified (#3620)"
 #: #3620 — the post-deploy assertion that the staged upload root excluded the
-#: internal paths that `wrangler pages deploy .` used to serve.
-LEAK_PROBE = "Post-deploy — internal paths are not publicly served (#3620)"
+#: internal paths that `wrangler pages deploy .` used to serve. #4050 extended it
+#: to read the ORIGIN (cache-bypassing) and the EDGE (plain) separately.
+LEAK_PROBE = "Post-deploy — internal paths are not publicly served (#3620/#4050)"
+#: #4050 — the post-deploy edge purge that runs BEFORE the probe. A Pages deploy
+#: updates the origin only; the pre-#3652 copies stay in the edge cache for
+#: `s-maxage` (7 days) unless they are explicitly purged.
+PURGE = "Post-deploy — purge the internal paths from the edge cache (#4050)"
 
 #: Strip `#`-comments from a shell run block. Quote-aware: a `#` inside single
 #: or double quotes, inside a `${VAR#...}` expansion, or escaped with `\#` is NOT
@@ -1426,12 +1431,24 @@ pwd -P > "$STUB_DIR/npx_pwd"
 exit 0
 """
 
-#: Stub `curl` for the leak probe. STUB_SERVED lists paths that still answer 200;
-#: STUB_ERROR lists paths that answer 500; STUB_TRANSPORT_FAIL fails the
-#: connection; STUB_SERVED_CALLS limits serving to the first N probes (the "Pages
-#: is still serving the previous, leaking deployment" shape). Every requested path
-#: is recorded so the harness can prove the loop probed ALL of them, on the right
-#: number of attempts, and is reachable under `bash -e`.
+#: Stub `curl` for the leak probe. The probe issues TWO legs per path (#4050):
+#: the ORIGIN leg carries a `?cb=<nonce>` query (cache-bypassing), the EDGE leg is
+#: the bare path. This stub models each surface independently:
+#:   * STUB_SERVED      — path answers 200 on BOTH legs (the deployment still has it)
+#:   * STUB_ORIGIN      — 200 only on the query (origin) leg; the edge leg stays 404
+#:                        (a stale cached 404 masking a live origin leak — the
+#:                        false-green the shipped probe produced)
+#:   * STUB_EDGE        — 200 only on the bare (edge) leg; origin stays 404 (the
+#:                        #4050 stale-edge case)
+#:   * STUB_CACHED_404  — forces 404 on the bare leg (a negative cache entry)
+#:   * STUB_ERROR       — path answers 500 on both legs
+#:   * STUB_TRANSPORT_FAIL — the connection fails
+#:   * STUB_SERVED_CALLS   — limit serving to the first N probes (the "Pages is
+#:                        still serving the previous, leaking deployment" shape)
+#: Every requested path is recorded RAW (with query) into `probed_raw` and
+#: query-stripped into `probed`, so the harness can prove both legs ran, on the
+#: right number of attempts, that the origin leg was genuinely cache-bypassing,
+#: and that the block is reachable under `bash -e`.
 STUB_LEAK_CURL = r"""#!/bin/bash
 out=; fmt=; url=
 while [ $# -gt 0 ]; do
@@ -1443,7 +1460,9 @@ while [ $# -gt 0 ]; do
     *) url=$1; shift;;
   esac
 done
-path="/${url#*//*/}"
+raw="/${url#*//*/}"
+echo "$raw" >> "$STUB_DIR/probed_raw"
+path="${raw%%\?*}"
 echo "$path" >> "$STUB_DIR/probed"
 if [ "$STUB_TRANSPORT_FAIL" = "1" ]; then
   echo "curl: (7) Failed to connect to host" >&2
@@ -1454,10 +1473,51 @@ code=404
 n=$(wc -l < "$STUB_DIR/probed")
 if [ -z "$STUB_SERVED_CALLS" ] || [ "$n" -le "$STUB_SERVED_CALLS" ]; then
   for s in $STUB_SERVED; do [ "$s" = "$path" ] && code=200; done
+  # Leg-aware overrides: `raw` carries `?…` for the ORIGIN leg only.
+  if [ "$raw" != "${raw%%\?*}" ]; then
+    for s in $STUB_ORIGIN; do [ "$s" = "$path" ] && code=200; done
+  else
+    for s in $STUB_EDGE; do [ "$s" = "$path" ] && code=200; done
+    for s in $STUB_CACHED_404; do [ "$s" = "$path" ] && code=404; done
+  fi
   for s in $STUB_ERROR; do [ "$s" = "$path" ] && code=500; done
 fi
 [ -n "$out" ] && : > "$out"
 case "$fmt" in *http_code*) printf '%s' "$code";; esac
+exit 0
+"""
+
+#: Stub `curl` for the #4050 edge-purge step. Records the request URL and the
+#: `-d` payload of every call so the harness can prove (a) the step actually
+#: invoked the purge API, (b) with the enumerated `files`, and (c) that a failure
+#: response fails the job. STUB_PURGE_SUCCESS_FALSE / STUB_PURGE_NOTJSON /
+#: STUB_PURGE_TRANSPORT_FAIL model the three ways a purge silently no-ops.
+STUB_PURGE_CURL = r"""#!/bin/bash
+data=; url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) data=$2; shift 2;;
+    -H|-X|-m) shift 2;;
+    -s|-S|-sS|-f|--fail) shift;;
+    *) url=$1; shift;;
+  esac
+done
+printf '%s\n' "$url" >> "$STUB_DIR/purge_urls"
+printf '%s\n' "$data" >> "$STUB_DIR/purge_payloads"
+printf '%s\n' '===END===' >> "$STUB_DIR/purge_payloads"
+if [ "$STUB_PURGE_TRANSPORT_FAIL" = "1" ]; then
+  echo "curl: (7) Failed to connect to host" >&2
+  exit 7
+fi
+if [ "$STUB_PURGE_NOTJSON" = "1" ]; then
+  printf '%s' '<html>502 Bad Gateway</html>'
+  exit 0
+fi
+if [ "$STUB_PURGE_SUCCESS_FALSE" = "1" ]; then
+  printf '%s' '{"success":false,"errors":[{"message":"nope"}]}'
+  exit 0
+fi
+printf '%s' '{"success":true,"result":{"id":"purge-abc123"}}'
 exit 0
 """
 
@@ -1748,19 +1808,37 @@ def _leak_script(tmp_path: Path) -> Path:
     return p
 
 
+#: One probe ATTEMPT reads every path TWICE (#4050): the cache-bypassing ORIGIN leg
+#: first, then the plain EDGE leg. Both legs always run, so the per-attempt path
+#: sequence is uniform — which is what makes the count assertions below exact
+#: rather than order-fragile.
+_PROBES_PER_ATTEMPT = [p for p in LEAK_PATHS for _ in range(2)]
+
+
 def _run_leak_probe(
     tmp_path: Path,
     served: str = "",
+    origin: str = "",
+    edge: str = "",
+    cached_404: str = "",
     error: str = "",
     transport_fail: bool = False,
     served_calls: int | None = None,
-) -> tuple[int, str, list[str]]:
+) -> tuple[int, str, list[str], list[str]]:
+    """Run the shipped leak probe; return (rc, output, probed_paths, raw_paths).
+
+    `probed` is query-stripped (one entry per leg), `probed_raw` keeps the query so
+    a test can prove the ORIGIN leg was genuinely cache-bypassing.
+    """
     bin_dir = _stub_bin(tmp_path, "curl", STUB_LEAK_CURL)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "STUB_DIR": str(tmp_path),
         "STUB_SERVED": served,
+        "STUB_ORIGIN": origin,
+        "STUB_EDGE": edge,
+        "STUB_CACHED_404": cached_404,
         "STUB_ERROR": error,
         "STUB_TRANSPORT_FAIL": "1" if transport_fail else "0",
         "STUB_SERVED_CALLS": "" if served_calls is None else str(served_calls),
@@ -1773,27 +1851,109 @@ def _run_leak_probe(
     )
     probed_file = tmp_path / "probed"
     probed = probed_file.read_text(encoding="utf-8").split() if probed_file.exists() else []
-    return r.returncode, r.stdout + r.stderr, probed
+    raw_file = tmp_path / "probed_raw"
+    raw = raw_file.read_text(encoding="utf-8").split() if raw_file.exists() else []
+    return r.returncode, r.stdout + r.stderr, probed, raw
 
 
 def test_the_leak_probe_passes_when_every_internal_path_is_404(tmp_path) -> None:
-    rc, out, probed = _run_leak_probe(tmp_path)
+    rc, out, probed, _raw = _run_leak_probe(tmp_path)
     assert rc == 0, out
-    # Non-vacuity: the loop must have ACTUALLY probed every declared path. A
-    # probe that requests nothing passes every other assertion here.
-    assert probed == list(LEAK_PATHS), probed
+    # Non-vacuity: the loop must have ACTUALLY probed every declared path, on BOTH
+    # legs. A probe that requests nothing passes every other assertion here.
+    assert probed == _PROBES_PER_ATTEMPT, probed
     assert "::error::" not in out, out
 
 
 @pytest.mark.parametrize("path", LEAK_PATHS)
 def test_the_leak_probe_fails_for_each_path_that_is_still_served(tmp_path, path: str) -> None:
     """Every path #3620 enumerated must independently red the deploy."""
-    rc, out, _probed = _run_leak_probe(tmp_path, served=path)
+    rc, out, _probed, _raw = _run_leak_probe(tmp_path, served=path)
     assert rc == 1, f"{path} still served but the probe exited {rc}:\n{out}"
     assert "::error::" in out, out
-    assert f"{path}(HTTP 200)" in out, out
-    assert "publicly served" in out, out
+    assert f"{path}(origin HTTP 200)" in out, out
+    assert "publicly served by the DEPLOYMENT" in out, out
     assert "#3620" in out, out
+
+
+#: A representative pair for the #4050 leg tests: one TOP-LEVEL path and one
+#: NESTED path (the nested one is the sensitive SQL migration). Per-PATH independence
+#: of the loop is already pinned 9 ways by
+#: `test_the_leak_probe_fails_for_each_path_that_is_still_served`; what these two
+#: tests add is which LEG a fact came from, which is path-shape-independent — so
+#: they do not re-run all nine paths and multiply the file's runtime.
+_REPRESENTATIVE_LEAK_PATHS = (LEAK_PATHS[0], LEAK_PATHS[4])
+
+
+@pytest.mark.parametrize("path", _REPRESENTATIVE_LEAK_PATHS)
+def test_the_leak_probe_fails_when_the_edge_serves_a_stale_copy(tmp_path, path: str) -> None:
+    """#4050: origin clean, the EDGE still serving the removed copy.
+
+    The shipped probe fetched only the plain URL, so it could not tell this apart
+    from a deployment leak and blamed `the Pages upload root is not controlled`.
+    The fix reads origin (404), keeps the plain leg, and names the EDGE.
+    """
+    rc, out, probed, _raw = _run_leak_probe(tmp_path, edge=path)
+    assert rc == 1, f"a stale edge copy of {path} must red the deploy:\n{out}"
+    assert f"{path}(edge-stale HTTP 200)" in out, out
+    assert "stale edge copy" in out, out
+    assert "#4050" in out, out
+    # The upload-root diagnosis must NOT be the one reported here: origin was 404.
+    assert "upload root is not controlled" not in out, out
+    assert probed == _PROBES_PER_ATTEMPT * 3, probed
+
+
+@pytest.mark.parametrize("path", _REPRESENTATIVE_LEAK_PATHS)
+def test_the_leak_probe_fails_when_origin_still_serves_even_if_the_edge_says_404(
+    tmp_path, path: str
+) -> None:
+    """The false-GREEN the shipped probe produced, in the opposite direction.
+
+    A stale cached 404 satisfies the plain fetch while the deployment STILL serves
+    the file. The shipped probe (plain only) would exit 0 here — a gate that passes
+    while an internal file is published. Only the cache-bypassing ORIGIN leg can
+    see it.
+    """
+    rc, out, probed, raw = _run_leak_probe(tmp_path, origin=path)
+    assert rc == 1, f"origin still serves {path} but the probe exited {rc}:\n{out}"
+    assert f"{path}(origin HTTP 200)" in out, out
+    assert "publicly served by the DEPLOYMENT" in out, out
+    # Non-vacuity: the origin leg really was the cache-bypassing one (the edge leg
+    # below stayed 404, which is why the old predicate would have passed).
+    origin_leg = [u for u in raw if u.startswith(f"{path}?")]
+    edge_leg = [u for u in raw if u.startswith(path) and "?" not in u]
+    assert len(origin_leg) == 3, raw
+    assert len(edge_leg) == 3, raw
+    assert probed == _PROBES_PER_ATTEMPT * 3, probed
+
+
+def test_the_leak_probe_cache_busts_the_origin_leg(tmp_path) -> None:
+    """#4050: the ORIGIN truth must come from a request no edge can have cached.
+
+    A unique query is a MISS at every edge; without it the origin leg is just
+    another edge read and the probe is back to the defect this issue reports.
+    """
+    rc, out, probed, raw = _run_leak_probe(tmp_path)
+    assert rc == 0, out
+    origin_leg = [u for u in raw if "?" in u]
+    edge_leg = [u for u in raw if "?" not in u]
+    assert len(origin_leg) == len(LEAK_PATHS), raw
+    assert len(edge_leg) == len(LEAK_PATHS), raw
+    # The edge leg is the plain URL exactly as a visitor requests it.
+    assert set(edge_leg) == set(LEAK_PATHS), edge_leg
+    # The origin leg carries ONE non-empty per-run nonce, on every path.
+    queries = {u.split("?", 1)[1] for u in origin_leg}
+    assert len(queries) == 1, queries
+    (nonce,) = queries
+    assert nonce, "the origin leg carried an empty query — not a cache buster"
+
+    # Per-RUN uniqueness: a second run must not reuse the nonce (otherwise a
+    # previous run's response could be replayed from an edge cache).
+    other = tmp_path / "second-run"
+    other.mkdir()
+    _rc, _out, _p, raw2 = _run_leak_probe(other)
+    nonce2 = next(u.split("?", 1)[1] for u in raw2 if "?" in u)
+    assert nonce2 != nonce, "the cache-busting nonce is not unique per run"
 
 
 def test_the_leak_probe_reports_every_leak_in_one_run(tmp_path) -> None:
@@ -1803,13 +1963,13 @@ def test_the_leak_probe_reports_every_leak_in_one_run(tmp_path) -> None:
     never sees the whole exposed set — and the loop must stay reachable under
     `bash -e` to report anything at all.
     """
-    rc, out, probed = _run_leak_probe(tmp_path, served=" ".join(LEAK_PATHS))
+    rc, out, probed, _raw = _run_leak_probe(tmp_path, served=" ".join(LEAK_PATHS))
     assert rc == 1
     for path in LEAK_PATHS:
-        assert f"{path}(HTTP 200)" in out, out
-    # Every path on every attempt: the loop never short-circuits, and the retry
-    # really ran to its bound.
-    assert probed == list(LEAK_PATHS) * 3, probed
+        assert f"{path}(origin HTTP 200)" in out, out
+    # Every path on every attempt: the loop never short-circuits, BOTH legs run,
+    # and the retry really ran to its bound (served on all legs of all attempts).
+    assert probed == _PROBES_PER_ATTEMPT * 3, probed
 
 
 def test_the_leak_probe_retries_because_pages_can_serve_the_previous_deploy(tmp_path) -> None:
@@ -1820,13 +1980,13 @@ def test_the_leak_probe_retries_because_pages_can_serve_the_previous_deploy(tmp_
     INTRODUCES this fix the previous deployment is the leaking one (a single-shot
     probe reds the fix), and on a deploy that re-introduces a leak the previous
     deployment is the clean one (a single-shot probe PASSES the regression —
-    fail-open). Here the leak is visible for exactly one attempt.
+    fail-open). Here the leak is visible for exactly the first attempt's two legs.
     """
-    rc, out, probed = _run_leak_probe(
-        tmp_path, served=LEAK_PATHS[1], served_calls=len(LEAK_PATHS)
+    rc, out, probed, _raw = _run_leak_probe(
+        tmp_path, served=LEAK_PATHS[1], served_calls=2 * len(LEAK_PATHS)
     )
     assert rc == 0, f"a leak that clears on the next attempt must not fail:\n{out}"
-    assert probed == list(LEAK_PATHS) * 2, probed
+    assert probed == _PROBES_PER_ATTEMPT * 2, probed
     assert "::warning::" in out, "the transient was not reported at all"
 
 
@@ -1837,22 +1997,23 @@ def test_the_leak_probe_refuses_a_non_404_answer(tmp_path) -> None:
     probe asserts 404 EXACTLY. This is the assertion that separates the gate from
     a one-line `curl -sf` check.
     """
-    rc, out, _probed = _run_leak_probe(tmp_path, error=LEAK_PATHS[1])
+    rc, out, _probed, _raw = _run_leak_probe(tmp_path, error=LEAK_PATHS[1])
     assert rc == 1, f"a 500 must not pass the leak check:\n{out}"
     assert "did not return 404 (HTTP 500)" in out, out
-    assert f"{LEAK_PATHS[1]}(HTTP 500)" in out, out
+    assert f"{LEAK_PATHS[1]}(origin HTTP 500)" in out, out
     assert "publicly served" not in out, out
 
 
 def test_the_leak_probe_fails_closed_on_a_transport_failure(tmp_path) -> None:
     """Not knowing is not the same as knowing it is fine — the same contract as
-    `check_pages_bindings.main()`'s exit 2."""
-    rc, out, probed = _run_leak_probe(tmp_path, transport_fail=True)
+    `check_pages_bindings.main()`'s exit 2. Fail-closed on EITHER leg."""
+    rc, out, probed, _raw = _run_leak_probe(tmp_path, transport_fail=True)
     assert rc == 1, f"a leak check that could not run must not pass:\n{out}"
     assert "could not verify" in out, out
-    assert "(unverifiable)" in out, out
-    # `bash -e` must not abort the substitution: every path on every attempt.
-    assert probed == list(LEAK_PATHS) * 3, probed
+    assert "origin-unverifiable" in out, out
+    assert "edge-unverifiable" in out, out
+    # `bash -e` must not abort the substitution: every path, BOTH legs, every attempt.
+    assert probed == _PROBES_PER_ATTEMPT * 3, probed
 
 
 def test_the_leak_probe_harness_exercises_the_retry_bound() -> None:
@@ -1870,6 +2031,150 @@ def test_the_leak_probe_harness_exercises_the_retry_bound() -> None:
     src = inspect.getsource(_leak_script)
     assert "MAX_ATTEMPTS=10" in src and "MAX_ATTEMPTS=3" in src
     assert "sleep 15" in src and "sleep 0" in src
+
+
+# ---------------------------------------------------------------------------
+# #4050: the post-deploy EDGE PURGE — the user-visible half of the fix. The probe
+# above can only report that a warm edge disagrees with origin; the purge is what
+# removes the stale copy. Its failure modes are the point: a purge that silently
+# no-ops is the same class of bug as the probe that passes on a cached copy.
+# ---------------------------------------------------------------------------
+
+
+def _purge_script(tmp_path: Path) -> Path:
+    """The shipped purge step, executed as written (comments stripped).
+
+    No rewrites: the step has no retry bound, and its `exit 1` branches are the
+    behaviour under test. `bash -e` mirrors the Actions default shell.
+    """
+    p = tmp_path / "purge.sh"
+    p.write_text(_step_code(PURGE), encoding="utf-8")
+    return p
+
+
+def _run_purge(
+    tmp_path: Path,
+    token: str | None = "tok",
+    zone: str | None = "zone-abc",
+    success_false: bool = False,
+    notjson: bool = False,
+    transport_fail: bool = False,
+) -> tuple[int, str, list[str], list[str]]:
+    bin_dir = _stub_bin(tmp_path, "curl", STUB_PURGE_CURL)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "STUB_PURGE_SUCCESS_FALSE": "1" if success_false else "0",
+        "STUB_PURGE_NOTJSON": "1" if notjson else "0",
+        "STUB_PURGE_TRANSPORT_FAIL": "1" if transport_fail else "0",
+    }
+    # Explicitly control the credential env, so an ambient value on the dev machine
+    # cannot make the "unset secret" case pass by accident.
+    env.pop("CF_API_TOKEN", None)
+    env.pop("CF_ZONE_ID", None)
+    if token is not None:
+        env["CF_API_TOKEN"] = token
+    if zone is not None:
+        env["CF_ZONE_ID"] = zone
+    r = subprocess.run(
+        ["bash", "-e", str(_purge_script(tmp_path))],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    urls_file = tmp_path / "purge_urls"
+    payloads_file = tmp_path / "purge_payloads"
+    urls = urls_file.read_text(encoding="utf-8").split() if urls_file.exists() else []
+    # The `-d` payload is pretty-printed JSON (multi-line), so each call is
+    # terminated by an `===END===` sentinel rather than split on whitespace.
+    payloads: list[str] = []
+    if payloads_file.exists():
+        payloads = [
+            chunk.strip()
+            for chunk in payloads_file.read_text(encoding="utf-8").split("===END===")
+            if chunk.strip()
+        ]
+    return r.returncode, r.stdout + r.stderr, urls, payloads
+
+
+def test_the_purge_step_runs_between_the_deploy_and_the_leak_probe() -> None:
+    """Wiring: the purge must exist and PRECEDE the probe it protects.
+
+    A purge placed after the probe (or in another job) would leave the probe
+    measuring the stale edge — the exact #4050 failure. `verify-legal` runs only
+    after `deploy` succeeds, so another job cannot make the purge precede the probe.
+    """
+    names = [s.get("name", "") for s in _deploy_steps()]
+    assert PURGE in names, "the post-deploy edge purge is gone (#4050)"
+    assert names.index(DEPLOY) < names.index(PURGE), "the purge must run AFTER the upload"
+    assert names.index(PURGE) < names.index(LEAK_PROBE), (
+        "the purge must run BEFORE the leak probe, or the probe measures the stale edge"
+    )
+
+
+def test_the_purge_step_is_fail_closed_without_a_purge_credential(tmp_path) -> None:
+    """#4050 AC4: a purge that cannot run must FAIL, not silently skip.
+
+    The issue's premise — that the deploy job already binds CF_API_TOKEN/CF_ZONE_ID
+    — is not true of a runner (those are Pages Function env vars). If the credential
+    is absent the step must say so and exit non-zero: a `|| true` or a warning here
+    re-opens the fail-open class this issue reports.
+    """
+    rc, out, urls, _payloads = _run_purge(tmp_path, token=None, zone=None)
+    assert rc == 1, f"an unbound purge credential must fail the job:\n{out}"
+    assert "::error::" in out, out
+    assert "CF_API_TOKEN" in out and "CF_ZONE_ID" in out, out
+    assert urls == [], "the purge API was called without a credential"
+
+
+def test_the_purge_step_purges_the_enumerated_paths(tmp_path) -> None:
+    """The step must actually POST the enumerated files to the zone's purge API."""
+    rc, out, urls, payloads = _run_purge(tmp_path)
+    assert rc == 0, f"a successful purge must pass:\n{out}"
+    assert len(urls) == 1, urls
+    assert "/zones/zone-abc/purge_cache" in urls[0], urls
+    assert len(payloads) == 1, payloads
+    sent = json.loads(payloads[0])["files"]
+    assert sent == [f"https://tortoise.premiselabs.co{p}" for p in LEAK_PATHS], sent
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "label"),
+    [
+        ({"success_false": True}, "success:false"),
+        ({"notjson": True}, "non-JSON"),
+        ({"transport_fail": True}, "transport-failure"),
+    ],
+)
+def test_the_purge_step_fails_closed_on_a_no_op(tmp_path, kwargs: dict, label: str) -> None:
+    """Every shape of silent purge no-op must red the deploy (#4050 AC4)."""
+    rc, out, urls, _payloads = _run_purge(tmp_path, **kwargs)
+    assert rc == 1, f"{label} must fail the purge step, rc={rc}:\n{out}"
+    assert "::error::" in out, out
+    assert "purge FAILED" in out, out
+    assert urls, "the purge API was never called"
+
+
+def test_the_purge_and_the_probe_enumerate_the_same_paths() -> None:
+    """One source of truth for the leak surface.
+
+    The purge builds a URL list and the probe builds a path list. If they drift, a
+    path can be probed but never purged (the stale copy outlives the gate) or
+    purged but never probed (an unverified claim). Both must equal LEAK_PATHS.
+    """
+    purge_code = _step_code(PURGE)
+    purge_urls = re.findall(r'"(https://tortoise\.premiselabs\.co[^"]*)"', purge_code)
+    assert purge_urls, "the purge step no longer enumerates explicit URLs"
+    assert [u[len("https://tortoise.premiselabs.co") :] for u in purge_urls] == list(
+        LEAK_PATHS
+    ), purge_urls
+
+    probe_code = _step_code(LEAK_PROBE)
+    m = re.search(r"for p in \\\n(.*?); do", probe_code, re.S)
+    assert m, "the probe's path enumeration changed shape"
+    probe_paths = re.findall(r"/[^\s\\]+", m.group(1))
+    assert probe_paths == list(LEAK_PATHS), probe_paths
 
 
 #: Every top-level entry under `website/` and whether the Pages upload STAGES it.
