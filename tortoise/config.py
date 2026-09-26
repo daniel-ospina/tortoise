@@ -93,11 +93,13 @@ def raw_uri_userinfo(uri: str) -> tuple[str | None, str | None]:
     (#3067). This module is already the one sanctioned reader.
 
     Absent/empty components stay ``None`` (the client-default sentinel), the same
-    shape as :func:`parse_uri_userinfo`.
+    shape as :func:`parse_uri_userinfo`. ``urlparse`` yields ``''`` for an empty
+    userinfo component (``docker://:pw@host`` — the canonical credentialed form
+    in this repo), so the fields are normalised with ``or None`` here.
     """
     from urllib.parse import urlparse
     parsed = urlparse(uri)
-    return parsed.username, parsed.password
+    return parsed.username or None, parsed.password or None
 
 
 def parse_uri_userinfo(uri: str) -> tuple[str | None, str | None]:

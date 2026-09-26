@@ -347,6 +347,35 @@ def test_double_encoded_percent_decodes_exactly_once():
     assert decoded == "p%40ss"
 
 
+def test_raw_uri_userinfo_normalises_like_the_decoded_helper():
+    """#3067 (P2): the raw pair must keep the SAME sentinel shape as the decoded one.
+
+    ``raw_uri_userinfo`` is the pair the #3039 guard forces client-constructing
+    modules through, so its contract is relied on by later consumers. ``urlparse``
+    yields ``''`` (not ``None``) for an empty component, so without normalisation
+    ``docker://:pw@host`` — the canonical credentialed form in this repo — would
+    return ``('', 'pw')`` while :func:`parse_uri_userinfo` returns ``(None, 'pw')``.
+    """
+    from tortoise.config import parse_uri_userinfo, raw_uri_userinfo
+
+    # Anonymous user, real password (the canonical local docker form).
+    assert raw_uri_userinfo(f"docker://:pw@h:6379/{TEST_GRAPH}") == (None, "pw")
+    # No userinfo at all, and empty userinfo on both sides.
+    assert raw_uri_userinfo(f"docker://h:6379/{TEST_GRAPH}") == (None, None)
+    assert raw_uri_userinfo(f"docker://:@h:6379/{TEST_GRAPH}") == (None, None)
+    # The ENCODED form is preserved — this helper must NOT unquote.
+    assert raw_uri_userinfo(f"docker://admin:p%40ss@h:6379/{TEST_GRAPH}") == (
+        "admin", "p%40ss")
+    # ``None``/absent agreement with the decoded helper across the shapes the
+    # boundary table exercises; only the payment differs (encoded vs decoded).
+    for uri in (f"docker://:pw@h:6379/{TEST_GRAPH}",
+                f"docker://h:6379/{TEST_GRAPH}",
+                "localhost:6379/test_g"):
+        raw = raw_uri_userinfo(uri)
+        decoded = parse_uri_userinfo(uri)
+        assert tuple(v is None for v in raw) == tuple(v is None for v in decoded), uri
+
+
 # ── 3. Source guard ──────────────────────────────────────────────────────
 
 _PARSE_CALLS = {"urlparse", "urlsplit"}
@@ -858,6 +887,89 @@ def test_redact_exc_short_secrets_do_not_mangle_the_class_name():
     msg = _redact_exc(PermissionError("Authentication required"), ("e", "x"))
     assert msg == "PermissionError: Authentication required"
     assert _redact_exc(PermissionError("boom"), ("**",)) == "PermissionError: boom"
+
+
+def test_redact_exc_scrubs_a_prefix_overlapping_credential():
+    """#3067 (P2): scrub LONGEST-first, or a prefix secret leaks a partial.
+
+    The secrets arrive as ``(decoded_user, decoded_pw, raw_user, raw_pw)``. In a
+    fixed order a shorter secret that is a PREFIX of a longer one consumes the
+    longer secret's first occurrence: scrubbing ``user`` before ``userpass``
+    turns the password into ``***pass``, retaining half the credential on the
+    log line — which the function's own contract forbids.
+    """
+    from tortoise.session_indexer import _redact_exc
+
+    secrets = ("user", "userpass", "user", "userpass")
+    out = _redact_exc(Exception("auth failed password=userpass"), secrets)
+    # ``***pass`` (the partial leak) would fail this equality; the fixture's own
+    # word "password" is why the check is the whole string, not a substring.
+    assert out == "Exception: auth failed password=***", out
+    assert "userpass" not in out
+    # The ordering fix must not break the mixed-shape case it was built for.
+    mixed = _redact_exc(
+        Exception("auth pa%ss@wo:rd"), ("u", "pa%ss@wo:rd", "u", "pa%25ss%40wo"))
+    assert "pa%ss@wo:rd" not in mixed, mixed
+
+
+def test_session_indexer_warns_again_after_a_recovery(monkeypatch, caplog):
+    """#3067 (P2): the outage latch RE-ARMS, so a later outage warns again.
+
+    A per-process latch downgraded every outage after the first to DEBUG — which
+    ``logging.lastResort`` drops at default configuration, i.e. the SILENT
+    failure mode #3067 exists to remove. The latch must clear once the graph is
+    demonstrably healthy, so ``outage -> recovery -> outage`` warns twice.
+    """
+    import falkordb
+    import redis
+
+    from tortoise import session_indexer as si
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", _uri("pw", user="admin", host="rearm.example"))
+    monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(si, "_graph_warned", False)
+
+    # ``state`` makes the fault controllable, so one fake can drive BOTH outages
+    # and the recovering success between them.
+    state: dict = {"error": redis.exceptions.ConnectionError("first outage")}
+
+    class _Result:
+        result_set = (("SiblingParser",), ("UnrelatedThing",))
+
+    class _Graph:
+        def query(self, cypher, *args, **kwargs):
+            if state["error"] is not None:
+                raise state["error"]
+            return _Result()
+
+    class _FalkorDB:
+        def __init__(self, **kwargs):
+            pass
+
+        def select_graph(self, name):
+            return _Graph()
+
+    monkeypatch.setattr(falkordb, "FalkorDB", _FalkorDB)
+
+    with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
+        assert si._graph_entity_keywords("SiblingParser") == []   # 1st outage
+        first = [r.levelname for r in caplog.records]
+        caplog.clear()
+
+        state["error"] = None                                     # recovery
+        assert si._graph_entity_keywords("SiblingParser") == ["SiblingParser"]
+        assert [r.levelname for r in caplog.records] == []
+        caplog.clear()
+
+        state["error"] = redis.exceptions.ConnectionError("second outage")
+        assert si._graph_entity_keywords("SiblingParser") == []   # 2nd outage
+        second = [r.levelname for r in caplog.records]
+
+    assert first == ["WARNING"], first
+    assert second == ["WARNING"], (
+        "the second outage was downgraded — the latch did not re-arm: "
+        f"{second}")
 
 
 def test_session_indexer_failure_log_names_real_endpoint_on_cache_hit(

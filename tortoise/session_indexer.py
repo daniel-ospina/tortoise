@@ -142,10 +142,14 @@ def _tfidf_keywords(content: str, top_n: int = 8) -> list[str]:
 # Cached FalkorDB connection for graph entity lookups
 _graph_db = None
 
-# Set once the first graph-lookup failure has been logged at WARNING, so a
+# Latches WITHIN an outage: the FIRST failure is logged at WARNING, so a
 # PERSISTENT outage (the broken client stays cached, and this runs once per
 # session file) does not emit one identical WARNING per document (#3067 review
-# note). Subsequent failures are logged at DEBUG, still with endpoint + error.
+# note). Subsequent cached-broken failures are logged at DEBUG, still with
+# endpoint + error. It is re-armed on the first SUCCESSFUL query, so the next
+# outage warns again — a per-process latch made every outage after the first
+# DEBUG-only, i.e. SILENT under ``logging.lastResort``, the exact failure mode
+# #3067 exists to remove.
 _graph_warned = False
 
 # A literal shorter than this cannot be scrubbed safely: the scrub is a
@@ -170,9 +174,14 @@ def _redact_exc(e: BaseException,
     """
     from tortoise.security import redact_error
     msg = redact_error(e)
-    for secret in secrets:
-        if secret and len(secret) >= _MIN_SCRUB_LEN:
-            msg = msg.replace(secret, '***')
+    # LONGEST-first: a shorter secret that is a PREFIX of a longer one would
+    # otherwise consume the longer secret's first occurrence (``user`` scrubbed
+    # before ``userpass`` turns ``userpass`` into ``***pass``, retaining half
+    # the credential). Sorting by descending length removes the overlap.
+    for secret in sorted(
+            {s for s in secrets if s and len(s) >= _MIN_SCRUB_LEN},
+            key=len, reverse=True):
+        msg = msg.replace(secret, '***')
     return msg
 
 
@@ -180,9 +189,12 @@ def _graph_entity_keywords(content: str) -> list[str]:
     """Find Object and Subject names from the graph mentioned in content.
 
     Best-effort: a lookup failure degrades to "no graph terms" rather than
-    aborting keyword extraction — but it is NEVER silent (#3067). Every
-    failure is logged at WARNING with the host/port and a redacted exception;
-    the URI itself is not logged because it carries credentials.
+    aborting keyword extraction — but it is never silent (#3067). The FIRST
+    failure of each outage is logged at WARNING with the host/port and a
+    redacted exception; further failures of the same outage are DEBUG, because
+    the broken client stays cached and this runs once per session file. The
+    warning is re-armed by the next successful query, so an outage after a
+    recovery warns again. The URI itself is not logged — it carries credentials.
     """
     global _graph_db
     global _graph_warned
@@ -235,6 +247,9 @@ def _graph_entity_keywords(content: str) -> list[str]:
                                  ssl=(parsed.scheme == 'rediss'))
         g = _graph_db.select_graph('tortoise')
         rows = g.query('MATCH (n) WHERE (n:Object OR n:Subject) AND n.name IS NOT NULL RETURN DISTINCT n.name').result_set
+        # Re-arm the outage latch: the graph is demonstrably healthy again, so
+        # the NEXT failure must warn rather than be downgraded to DEBUG.
+        _graph_warned = False
         for row in rows:
             name = str(row[0])
             if len(name) > 3 and name.lower() in content_lower:
@@ -242,9 +257,11 @@ def _graph_entity_keywords(content: str) -> list[str]:
     except Exception as e:
         # #3067: observable, not silent — a misconfigured/unreachable graph
         # must be distinguishable from "the graph has no matching entities".
-        # WARNING on the FIRST failure per process; DEBUG thereafter, because the
-        # broken client stays cached and this handler then runs for every session
-        # file — one identical WARNING per document is noise, not observability.
+        # WARNING on the FIRST failure of each OUTAGE; DEBUG thereafter, because
+        # the broken client stays cached and this handler then runs for every
+        # session file — one identical WARNING per document is noise, not
+        # observability. The latch re-arms on the next successful query, so a
+        # later outage warns again rather than degrading to silent.
         # Both levels name the endpoint and the redacted error.
         msg = _redact_exc(e, (username, password, raw_username, raw_password))
         if _graph_warned:
