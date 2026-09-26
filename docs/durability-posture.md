@@ -159,18 +159,21 @@ that can introduce a value: the pre-wipe validator (untrusted file),
 
 **Residual — the ALLOCATOR itself has no ceiling.** `next_seq` is unchanged by
 #4653, so a graph that keeps emitting can still walk past `MAX_SEQ` (and would
-wrap negative at INT64_MAX); once it does, `capture_watermark` refuses to carry
-the value and the rebuild aborts before the wipe rather than restoring it. That
-is fail-closed but it is not a repair, and it is unreachable in practice at
-~9e15 events; capping allocation is a separate change (**#5379**).
+wrap negative at INT64_MAX) — reachable only at ~9e15 events. An out-of-domain
+counter is ALSO reachable without emitting anything, via an unbounded dump
+restore (`hosted_backup._restore_event_meta` writes the dump's value verbatim)
+or a hand-written node, and that state is what `capture_watermark` refuses: the
+rebuild aborts before the wipe rather than restoring it. Fail-closed, but not a
+repair; capping allocation is a separate change (**#5379**).
 
 **Residual — the same gap, one step out.** With the log EMPTY (today's state,
 #4664) the floor is `last_seq + 1`, so no cursor survives; but the moment a
 replay writes `:GraphEvent` rows again, the floor becomes `min(:GraphEvent.seq)`
-and a subscriber parked between that and a live counter far above it reads `[]`
-with no 410. That starvation is the #4664 unreplayed/truncated-stream residual,
-not a regression from carrying the counter — the pre-fix allocator starved the
-same cursor — and it is why `first_seq` is raised, never lowered.
+and a subscriber parked ABOVE the top replayed `seq` — served nothing, yet not
+below the floor — reads `[]` with no 410 while a live counter sits far above it.
+That starvation is the #4664 truncated-stream residual, not a regression from
+carrying the counter — the pre-fix allocator starved the same cursor — and it is
+why `first_seq` is raised, never lowered.
 
 The carrier is the durable #2943 pre-wipe sidecar (`event_meta` section),
 **not** the config registry above: this class has no identity property to key a
@@ -178,17 +181,22 @@ node-class entry on, and snapshotting it as configuration would restore a value
 as if it were authored configuration rather than a monotonic counter. **#4653**
 is the defect.
 
-**A rescue file can carry no watermark, and when the graph it rescues came back
-with no counter either, the allocator restarts at 1.** Two sidecar shapes do
-this: a file written before #4653 (version 1 or 2) has no `event_meta` section at
-all, and a current-version file can carry an EMPTY one. The loader accepts both
-on purpose (a legacy file is still the only record of the graph-only nodes it
-holds), and the rebuild raises an ERROR naming the reset rather than proceeding
-silently. The file records only its capture-time state, so it cannot say whether
-a counter ever existed — for a graph that never emitted, restarting at 1 is the
-correct behaviour, and for a graph whose counter a wipe destroyed it is a loss.
-Only if an app emitted after that wipe does the live counter survive, in which
-case the union carries it and neither the reset nor the ERROR occurs.
+**A rescue file can carry no watermark, and the outcome is reported rather than
+assumed.** Two sidecar shapes do this: a file written before #4653 (version 1 or
+2) has no `event_meta` section at all, and a current-version file can carry an
+EMPTY one. The loader accepts both on purpose (a legacy file is still the only
+record of the graph-only nodes it holds), and the rebuild then logs one of two
+ERRORs, neither of which claims a cause the file cannot record:
+
+- **no counter anywhere** — the allocator restarts at 1, so the next emit
+  re-issues `seq` values the pre-wipe graph already used;
+- **a counter is present but did not come from the file** — a state-UNKNOWN
+  signal, like `legacy_sidecar_no_config_record` (#2814): the value is either the
+  one the graph already had (the window between the sidecar write and the wipe is
+  real, so nothing was lost) or one re-created after that wipe (the pre-wipe
+  position is gone).
+
+Only when the file itself carried the mark is the outcome a success.
 
 **A rebuild still requires a QUIESCED graph.** An event emitted between the
 pre-wipe capture and the `DETACH DELETE` is destroyed with the node, and because

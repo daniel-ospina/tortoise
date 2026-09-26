@@ -5854,37 +5854,56 @@ class FalkorProjection(
         # than a reset allocator (see the #4305 note below).
         try:
             from tortoise.event_store import reestablish_watermark
+            # Whether the RESCUE FILE carried the mark decides what the outcome
+            # MEANS, because the merged carry can also come from the LIVE
+            # capture. Three cases, and the wording of each claims only what is
+            # knowable: (a) nothing to restore at all; (b) a value is restored but
+            # the file cannot say whether it is the pre-wipe mark or one
+            # re-created after the wipe; (c) the file carried the mark.
+            leftover_carry = (None if leftover is None else
+                              _event_meta_last_seq(leftover.get("event_meta")))
             restored = reestablish_watermark(
                 self, _event_meta_last_seq(event_meta_snapshot))
-            if restored is not None:
+            if restored is None:
+                if leftover is not None:
+                    logger.error(
+                        "rebuild: the event-log watermark could NOT be "
+                        "restored and the allocator restarts at 1 — the "
+                        "rescued pre-wipe snapshot (version %s) carries no "
+                        "usable `event_meta` mark, no replay pass recreates "
+                        "the counter (#4664), and the live graph holds none, "
+                        "so the next emit hands out seqs the pre-wipe graph "
+                        "already used and every subscriber parked above the "
+                        "restart silently under-counts. The graph itself is "
+                        "rebuilt; a rescue file written by the current version "
+                        "carries the mark (#4653)",
+                        leftover.get("version"))
+            elif leftover is not None and leftover_carry is None:
+                # A state-UNKNOWN signal, like `legacy_sidecar_no_config_record`
+                # (#2814): the counter now holds a value, and the file records
+                # only its capture-time state, so it cannot say whether that
+                # value is the one the graph already had (the window between the
+                # sidecar write and the wipe is real) or one re-created after
+                # that wipe (a lost pre-wipe position).
+                logger.error(
+                    "rebuild: the rescued pre-wipe snapshot (version %s) "
+                    "carries no usable `event_meta` mark, so the allocator "
+                    "position could NOT be recovered from it and CANNOT be "
+                    "determined: the counter holds %d, which is either the "
+                    "value it already had before this wipe+replay (nothing "
+                    "lost) or one re-created after that earlier wipe — in "
+                    "which case the next emit re-issues seqs the pre-wipe "
+                    "graph already used and every subscriber parked above the "
+                    "restart silently under-counts. The snapshot records only "
+                    "its capture-time state, so it cannot tell the two apart. "
+                    "The graph itself is rebuilt (#4653)",
+                    leftover.get("version"), int(restored))
+            else:
                 logger.info(
                     "rebuild: re-established the :GraphEventMeta watermark "
                     "at last_seq=%d — the next event seq continues above "
                     "every seq the graph has already handed out (#4653)",
                     restored)
-            elif leftover is not None:
-                # The rescued graph came back with no watermark, and that is NOT
-                # evidence the graph never emitted: a counter-free live graph is
-                # also the post-wipe state, and the sidecar records only its
-                # capture-time state, so neither it nor the live read can
-                # establish whether a counter ever existed. Restarting at 1 is
-                # correct for a graph that never emitted (`capture_watermark`'s
-                # contract) and a silent under-count when a counter was lost —
-                # so the case is reported, at the severity the `config_reset`
-                # leg gives a `legacy_sidecar_no_config_record`, with the sidecar
-                # version logged as a diagnostic rather than as the cause.
-                logger.error(
-                    "rebuild: the graph came back with NO event-log "
-                    "watermark — the live graph holds no counter, the rescued "
-                    "pre-wipe snapshot (version %s) carries no usable "
-                    "`event_meta` watermark, and no replay pass recreates one "
-                    "(#4664), so the allocator restarts at 1 and every "
-                    "subscriber parked above it will silently under-count. "
-                    "That is correct for a graph that never emitted and a loss "
-                    "if one was destroyed; the snapshot records only its "
-                    "capture-time state, so it cannot tell the two apart. The "
-                    "graph itself is rebuilt (#4653)",
-                    leftover.get("version"))
         except Exception as e:  # noqa: BLE001, RUF100
             logger.error(
                 "rebuild: could not re-establish the :GraphEventMeta "

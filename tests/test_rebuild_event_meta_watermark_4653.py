@@ -273,29 +273,42 @@ def test_rebuild_journal_only_engine_keeps_watermark(tmp_path):
 # ── 2. crash-safety: the mark is carried durably, not just in memory ─────────
 
 
-def test_rebuild_all_watermark_survives_interrupted_rebuild_retry(tmp_path):
+def test_rebuild_all_watermark_survives_interrupted_rebuild_retry(tmp_path, caplog):
     """A rebuild that died mid-replay must not lose the allocator on retry.
 
     FAILING VALUE: with the live graph already empty (the interrupted run's
     wipe landed) and a leftover sidecar carrying `last_seq = 7`, the retry
     restores 7 and the next seq is 8 — pre-fix the retry saw no counter and
-    restarted at 1 (the in-memory-only fix would do the same).
+    restarted at 1 (the in-memory-only fix would do the same). Because the file
+    CARRIED the mark, the outcome is the success path: the INFO must fire and no
+    ERROR may — an arm-3 message that claimed a loss here would be as wrong as
+    the reverse, so this pins the arm positively.
 
     REACHABLE IN THE FIXTURE: the sidecar is planted exactly as the interrupted
-    run would have written it (`_write_prewipe_snapshot`), and the live graph is
-    genuinely counter-free because nothing was ever emitted into it.
+    run would have written it (`_write_prewipe_snapshot`) and carries a REAL
+    `event_meta` entry (plus a batch entry, since a sidecar whose sections are
+    all empty is read as retired and never reaches this path), and the live
+    graph is genuinely counter-free because nothing was ever emitted into it.
     """
     sdk, events = _mk_sdk(tmp_path)
     assert _meta(sdk) is None, "the live graph must be the post-wipe, empty one"
     _plant(Path(_sidecar_path(events)),
-           _sidecar_payload(event_meta=[{"last_seq": 7}]))
+           _sidecar_payload(event_meta=[{"last_seq": 7}],
+                            batch_snapshot=[{"id": "b1"}]))
 
-    sdk._get_proj().rebuild_all(str(events))
+    with caplog.at_level(logging.INFO):
+        sdk._get_proj().rebuild_all(str(events))
 
     assert _meta(sdk) == (7, 8), (
         "#4653: the durable carrier is the only record of the allocator once "
         "the wipe lands — dropping it resets every subscriber's cursor")
     assert event_store.next_seq(sdk._get_proj()) == 8
+    assert any(r.levelno == logging.INFO
+               and "at last_seq=7" in r.getMessage()
+               for r in caplog.records), (
+        "the mark came from the file, so the run must say so at INFO")
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records), (
+        "nothing was lost — no ERROR may fire on the file-carried path")
 
 
 def test_rebuild_all_carries_the_watermark_in_the_prewipe_sidecar(
@@ -429,6 +442,54 @@ def test_v2_leftover_without_event_meta_is_readable(tmp_path):
     assert loaded is not None and loaded["version"] == 2
 
 
+def test_v2_leftover_with_a_live_reset_counter_reports_the_loss(
+        tmp_path, caplog):
+    """A live RESET counter must not be reported as a recovered watermark.
+
+    FAILING VALUE: the run logs an ERROR (not the success INFO) and the counter
+    is the post-wipe reset value — 1 here. Reporting success would claim "the
+    next event seq continues above every seq the graph has already handed out"
+    while the pre-wipe mark is gone: the only counter present was re-created
+    after the earlier wipe, which is the shape this section's own union comment
+    calls reachable.
+
+    REACHABLE: the sidecar is a genuine v2 file (no `event_meta` key), and the
+    live counter is a real post-wipe reset one — three emitted seqs whose
+    counter was then destroyed and re-created at 1, exactly what an interrupted
+    legacy rebuild leaves behind.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    for i in range(3):
+        sdk.create_point("statement", f"pre-wipe {i}")
+    assert _meta(sdk) == (3, 1)
+    path = Path(_sidecar_path(events))
+    payload = _sidecar_payload(version=2, batch_snapshot=[{"id": "b1"}])
+    payload.pop("event_meta")
+    _plant(path, payload)
+    # Simulate the earlier legacy run's wipe + one post-wipe emit: the counter
+    # survives at a value the pre-wipe graph had already passed.
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.g.query(
+        "MERGE (m:GraphEventMeta) ON CREATE SET m.last_seq = 1, "
+        "m.first_seq = 1")
+    assert _meta(sdk) == (1, 1)
+
+    with caplog.at_level(logging.ERROR):
+        proj.rebuild_all(str(events))
+
+    assert _meta(sdk) == (1, 2), (
+        "the reset counter is carried forward, not the lost pre-wipe mark")
+    assert any("CANNOT be determined" in r.getMessage()
+               for r in caplog.records), (
+        "a live reset counter is NOT a recovered watermark — the run must "
+        "report the ambiguity rather than log the success INFO")
+    assert not any(r.levelno == logging.INFO
+                   and "re-established" in r.getMessage()
+                   for r in caplog.records), (
+        "the success INFO must not fire when the carry came from a reset")
+
+
 def test_v2_leftover_rebuild_reports_the_lost_watermark(tmp_path, caplog):
     """A legacy rescue file cannot carry the mark — and the reset is SURFACED.
 
@@ -461,7 +522,7 @@ def test_v2_leftover_rebuild_reports_the_lost_watermark(tmp_path, caplog):
 
     assert _meta(sdk) is None, "a legacy sidecar cannot fabricate a counter"
     assert event_store.next_seq(sdk._get_proj()) == 1
-    assert any("NO event-log watermark" in r.getMessage()
+    assert any("restarts at 1" in r.getMessage()
                for r in caplog.records), (
         "the legacy-sidecar reset must be an ERROR naming its consequence — "
         "not a silent restart at 1")
