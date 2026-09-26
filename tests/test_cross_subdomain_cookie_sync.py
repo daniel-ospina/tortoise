@@ -121,6 +121,38 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _strip_js_comments(src: str) -> str:
+    """Blank out `//` and `/* */` comments so a text assertion below matches
+    CODE, not prose. A comment quoting the pre-#3930 destination must neither
+    red this test nor satisfy its positive pin (#3930 review).
+
+    A PARTIAL port of src/testSupport.js::stripComments, not a mirror: it keeps
+    that function's `:`-prefixed-`//` guard (so `https://` inside a string
+    survives) but has no quote/template awareness — a `//` inside a `'`/`"`/` `
+    literal IS treated as a comment here, where the JS original preserves it.
+    Verified byte-identical on today's main.jsx; do not reuse this for a file
+    where `//` appears inside a string.
+    """
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/" and not (out and out[-1] == ":"):
+            while i < n and src[i] != "\n":
+                i += 1
+        elif c == "/" and nxt == "*":
+            i += 2
+            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def _extract_helper(text: str, name: str) -> str:
     """Extract the full declaration source of a named helper from either
     adapter style: ES5 `var f = function () { ... };` (shared bridge) or ES6
@@ -343,11 +375,16 @@ def test_auth_bounce_preserves_search_params() -> None:
     OAuth-error banner reads ?error=... — plus the #1909 error fragment.
 
     #4054 retarget: the bridge's global `window.bounceToAuth` is gone; main.jsx
-    now owns a local same-origin bounce (`window.location.replace("/auth" +
-    search + hash)`), and installs no cross-origin fallback. The
-    param-preservation intent is unchanged, so it is asserted on the two call
+    now owns a local same-origin bounce, and installs no cross-origin fallback.
+    The param-preservation intent is unchanged, so it is asserted on the two call
     sites that carry it; the old degraded `https://tortoise.premiselabs.co/auth`
     fallback assertion is REMOVED because that path no longer exists.
+
+    #3930 retarget: the destination literal moved into the pure `authBounceTarget`
+    module (which also carries the requested PATHNAME as `/auth`'s `next`). The
+    target is still a same-origin `/auth` navigation; the assertion follows the
+    shape so a revert of either half reds this test. `authBounce.test.js` and
+    `test_admin_return_to.py` own the behaviour.
     """
     dash = _read(DASHBOARD)
     # Both bounce sites (the 401-provision path and the mount gate) pass the
@@ -357,10 +394,23 @@ def test_auth_bounce_preserves_search_params() -> None:
         "(both the 401-provision and the mount-gate bounce)"
     )
     # The bounce target is same-origin now — the cross-origin bridge hop (and its
-    # separate fallback) is gone.
-    assert 'window.location.replace("/auth" + search + hash)' in dash, (
+    # separate fallback) is gone. It is built by the pure module from THIS
+    # document's pathname, so the destination can never name another origin.
+    # Whitespace-tolerant: a prettier re-wrap of the call must not red this.
+    # Comments are stripped first: `_read` returns raw source, so an assertion
+    # on it can be satisfied (or reddened) by PROSE. Ported from
+    # src/testSupport.js::stripComments, same `:`-prefixed-`//` guard for URLs.
+    norm = _strip_js_comments(dash).replace('"', "'")
+    assert re.search(
+        r"authBounceTarget\(\{\s*pathname:\s*window\.location\.pathname,\s*search,\s*errorHash:\s*hash\s*\}\)",
+        norm,
+    ), (
         "the bounce must be the same-origin /auth navigation that consumes the "
-        "preserved search/hash"
+        "preserved search/hash (and, since #3930, the pathname)"
+    )
+    # The pre-#3930 destination, matched as CODE — see _strip_js_comments.
+    assert not re.search(r"location\.replace\(\s*['\"]/auth['\"]\s*\+", norm), (
+        "the pathname-dropping destination is back (#3930)"
     )
 
 
